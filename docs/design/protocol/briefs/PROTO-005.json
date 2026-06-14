@@ -1,0 +1,86 @@
+{
+  "id": "PROTO-005",
+  "cluster": "protocol",
+  "title": "Implement backpressure signal frames and per-stream pressure state",
+  "depends_on": ["PROTO-001", "PROTO-004"],
+  "blocked_by": [],
+  "checklist": ["C30", "C31", "C32"],
+  "stories": ["S7", "S13"],
+  "design_anchor": ["ADR-004", "ADR-008"],
+  "purpose": "Implements protocol-level backpressure as defined by ADR-004. Accept, Defer, and Reject are distinct frame types that travel on the same stream as the messages they regulate (P5). Per-stream pressure state tracks outstanding (unacknowledged) messages and transitions between normal, deferred, and rejecting states. Consumers declare their capacity (max-in-flight) during subscription, giving the bus the information it needs to mediate between producer rate and consumer capacity.",
+  "task": "Build the backpressure module. Define the Accept, Defer, and Reject frame payload fields (referenced message ID, stream ID enforcement on the same stream). Implement per-stream pressure state tracking: a state machine with states Normal, Deferred, Rejecting that transitions based on outstanding message count relative to the consumer's declared max_in_flight. Wire max_in_flight into the Subscribe frame so the bus knows consumer capacity. Scope boundary: this brief handles backpressure signal types and per-stream pressure tracking. It does not implement the bus-level policies that decide when to shed load or spawn consumers — those are bus-layer concerns above the protocol.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define Accept, Defer, and Reject frame payloads",
+      "spec": "Accept, Defer, and Reject frame payloads SHALL carry a referenced_message_id (a unique identifier for the message being acknowledged/deferred/rejected). These frames SHALL travel on the same stream as the original message (CN8) — the frame's stream_id in the header identifies which subscription the pressure signal applies to. Each frame type SHALL have a distinct FrameType discriminant (defined in PROTO-001). The payload SHALL also carry an optional reason string for Defer and Reject.",
+      "acceptance": [
+        "Accept payload has field: referenced_message_id.",
+        "Defer payload has fields: referenced_message_id, reason (Option<String>).",
+        "Reject payload has fields: referenced_message_id, reason (Option<String>).",
+        "All three frame types use their PROTO-001 FrameType discriminant.",
+        "All three frame types round-trip through the codec."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/backpressure.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C30"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R2",
+      "title": "Implement per-stream pressure state machine",
+      "spec": "PressureState enum SHALL have variants: Normal, Deferred, Rejecting. StreamPressure SHALL track: outstanding_count (messages delivered but not acknowledged), max_in_flight (from subscription), and current PressureState. WHEN outstanding_count reaches max_in_flight, THE SYSTEM SHALL transition to Deferred. WHEN outstanding_count exceeds max_in_flight plus the stream's buffer capacity, THE SYSTEM SHALL transition to Rejecting. WHEN outstanding_count drops below max_in_flight (via Accept), THE SYSTEM SHALL transition back to Normal.",
+      "acceptance": [
+        "PressureState has exactly 3 variants: Normal, Deferred, Rejecting.",
+        "StreamPressure with max_in_flight=10 transitions to Deferred when outstanding reaches 10.",
+        "StreamPressure transitions back to Normal when outstanding drops below max_in_flight after Accept.",
+        "StreamPressure tracks outstanding_count incrementing on delivery, decrementing on Accept.",
+        "StreamPressure implements Debug."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/backpressure.rs"],
+        "delete": []
+      },
+      "checklist": ["C31"],
+      "stories": ["S13"]
+    },
+    {
+      "id": "R3",
+      "title": "Wire max_in_flight into Subscribe frame",
+      "spec": "The Subscribe frame payload SHALL include a max_in_flight (u32) field declaring the consumer's processing capacity. This value SHALL be stored in the StreamPressure when the subscription becomes active. A max_in_flight of 0 SHALL be rejected with ProtocolError — every consumer must declare a capacity. The bus uses this value to determine when to send Defer/Reject signals.",
+      "acceptance": [
+        "Subscribe frame payload includes max_in_flight (u32).",
+        "Subscribe with max_in_flight=0 returns ProtocolError.",
+        "Subscribe with max_in_flight=100 creates a StreamPressure with that capacity.",
+        "Subscribe frame round-trips through the codec with max_in_flight preserved.",
+        "max_in_flight is accessible from the decoded Subscribe frame."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/backpressure.rs", "crates/liminal/src/protocol/frame.rs"],
+        "delete": []
+      },
+      "checklist": ["C32"],
+      "stories": ["S7"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement bus-level pressure policies (spawn consumers, shed load) — those are above the protocol.",
+    "SHALL NOT implement rate limiting or throttling — the protocol signals pressure, it does not enforce rates.",
+    "SHALL NOT define buffer capacity thresholds — those are configurable by the bus, not hardcoded in the protocol.",
+    "SHALL NOT modify backpressure signals to travel on a different stream than the messages they regulate (P5)."
+  ],
+  "verification": [
+    "cargo check compiles the backpressure module with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: Accept/Defer/Reject frames round-trip through codec.",
+    "Test: StreamPressure transitions Normal -> Deferred at max_in_flight.",
+    "Test: StreamPressure transitions Deferred -> Normal on Accept reducing outstanding below max_in_flight.",
+    "Test: Subscribe with max_in_flight=0 is rejected."
+  ]
+}

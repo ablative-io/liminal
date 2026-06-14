@@ -1,0 +1,48 @@
+{
+  "cluster": "server",
+  "sections": [
+    {
+      "name": "Crate Setup",
+      "items": [
+        {"id": "C1", "text": "liminal-server crate exists at crates/liminal-server/ with Cargo.toml declaring liminal as a dependency.", "done": false},
+        {"id": "C2", "text": "Binary entry point at crates/liminal-server/src/main.rs compiles and produces a runnable binary.", "done": false},
+        {"id": "C3", "text": "ServerError enum defined in crates/liminal-server/src/error.rs implementing std::error::Error and Debug.", "done": false}
+      ]
+    },
+    {
+      "name": "Configuration",
+      "items": [
+        {"id": "C4", "text": "ServerConfig type defined in crates/liminal-server/src/config/types.rs with fields for listen address, channel definitions, routing rules, persistence paths, and cluster config.", "done": false},
+        {"id": "C5", "text": "Configuration loads from a TOML file specified via --config CLI argument.", "done": false},
+        {"id": "C6", "text": "Configuration loads from environment variables with LIMINAL_ prefix.", "done": false},
+        {"id": "C7", "text": "Environment variables override file-based configuration when both specify the same field.", "done": false},
+        {"id": "C8", "text": "Configuration validation rejects invalid configs (missing required fields, invalid listen addresses, unknown channel types, unreachable persistence paths) with specific error messages before server startup.", "done": false}
+      ]
+    },
+    {
+      "name": "Server Lifecycle",
+      "items": [
+        {"id": "C9", "text": "Server binds to the configured listen address and accepts wire protocol connections.", "done": false},
+        {"id": "C10", "text": "Each accepted connection spawns a supervised beamr process for protocol handling.", "done": false},
+        {"id": "C11", "text": "Graceful shutdown stops accepting new connections and drains existing connections within a configurable timeout.", "done": false},
+        {"id": "C12", "text": "Graceful shutdown flushes all durable channel state to haematite before process exit.", "done": false},
+        {"id": "C13", "text": "Graceful shutdown notifies connected subscribers that the server is shutting down before closing connections.", "done": false}
+      ]
+    },
+    {
+      "name": "Clustering",
+      "items": [
+        {"id": "C14", "text": "Server discovers cluster peers via configured seed node addresses.", "done": false},
+        {"id": "C15", "text": "Cluster membership uses beamr distribution protocol for node joining, leaving, and failure detection.", "done": false},
+        {"id": "C16", "text": "Channel subscriptions span cluster nodes: a subscriber on node A receives messages published on node B.", "done": false}
+      ]
+    },
+    {
+      "name": "Health and Readiness",
+      "items": [
+        {"id": "C17", "text": "HTTP health endpoint at /health returns 200 when the server process is alive.", "done": false},
+        {"id": "C18", "text": "HTTP readiness endpoint at /ready returns 200 only when startup is complete: listener bound, config loaded, and cluster membership established (if configured).", "done": false}
+      ]
+    }
+  ]
+}

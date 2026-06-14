@@ -1,0 +1,300 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "OBS-004",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "OBS-004",
+    "cluster": "observability",
+    "title": "Implement pressure metrics for reject rate, defer rate, and capacity utilization",
+    "depends_on": [
+      "OBS-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C11",
+      "C12",
+      "C13"
+    ],
+    "stories": [
+      "S3",
+      "S4"
+    ],
+    "design_anchor": [
+      "ADR-004"
+    ],
+    "purpose": "Expose the backpressure signals defined by ADR-004 as quantitative metrics. The wire protocol's accept/defer/reject three-way handshake is a first-class concept, and these metrics make backpressure visible to operators. Reject rate and defer rate are counters per channel; capacity utilization is a gauge per consumer. Together they answer the question: is the system shedding load, and where?",
+    "task": "Create crates/liminal/src/metrics/pressure.rs containing the PressureMetrics struct that registers the three pressure metric families with the MetricsRegistry. Provide methods for the delivery subsystem to call when a message is accepted, deferred, or rejected, and for consumer capacity to be reported. All recording is non-blocking and keyed by channel name or consumer identity.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define PressureMetrics struct",
+        "spec": "PressureMetrics SHALL hold handles to the three metric families: reject_count (Counter per channel), defer_count (Counter per channel), capacity_utilization (Gauge per consumer). PressureMetrics SHALL be constructed from a MetricsRegistry reference. PressureMetrics SHALL implement Debug and Clone.",
+        "acceptance": [
+          "PressureMetrics struct exists in crates/liminal/src/metrics/pressure.rs",
+          "PressureMetrics has fields for all three metric handles",
+          "PressureMetrics::new(registry: &MetricsRegistry) registers all three families",
+          "PressureMetrics implements Debug and Clone"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/metrics/pressure.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C11",
+          "C12",
+          "C13"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Track reject rate as a counter per channel",
+        "spec": "PressureMetrics SHALL expose record_reject(channel_name) that increments the reject_count counter for the given channel. A reject indicates the consumer was overwhelmed and the message was shed (ADR-004). The counter SHALL be monotonically increasing and labelled by channel name.",
+        "acceptance": [
+          "record_reject(channel_name) increments the counter by 1",
+          "The counter label includes the channel name",
+          "Calling record_reject 5 times results in counter value 5",
+          "record_reject is infallible"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/pressure.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Track defer rate as a counter per channel",
+        "spec": "PressureMetrics SHALL expose record_defer(channel_name) that increments the defer_count counter for the given channel. A defer indicates the consumer buffered the message for later processing (ADR-004). The counter SHALL be monotonically increasing and labelled by channel name.",
+        "acceptance": [
+          "record_defer(channel_name) increments the counter by 1",
+          "The counter label includes the channel name",
+          "Calling record_defer 8 times results in counter value 8",
+          "record_defer is infallible"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/pressure.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C12"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Track capacity utilization as a gauge per consumer",
+        "spec": "PressureMetrics SHALL expose set_capacity_utilization(consumer_id, utilization) where utilization is a value from 0 to 100 representing the percentage of the consumer's declared capacity in use. The gauge SHALL be labelled by consumer identity. set_capacity_utilization SHALL NOT clamp or validate the value \u2014 the caller is authoritative.",
+        "acceptance": [
+          "set_capacity_utilization(consumer_id, 75) sets the gauge to 75",
+          "set_capacity_utilization(consumer_id, 0) sets the gauge to 0",
+          "The gauge label includes the consumer identity",
+          "set_capacity_utilization is infallible",
+          "Values above 100 are accepted without clamping"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/pressure.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C13"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Convenience method for delivery outcome recording",
+        "spec": "PressureMetrics SHALL expose record_delivery_outcome(channel_name, outcome: DeliveryOutcome) where DeliveryOutcome is an enum with Accepted, Deferred, and Rejected variants. Accepted is a no-op for pressure metrics (no counter to increment). Deferred calls record_defer. Rejected calls record_reject. This provides a single call site for the delivery subsystem.",
+        "acceptance": [
+          "DeliveryOutcome has exactly three variants: Accepted, Deferred, Rejected",
+          "record_delivery_outcome(name, Accepted) does not increment any counter",
+          "record_delivery_outcome(name, Deferred) increments defer_count",
+          "record_delivery_outcome(name, Rejected) increments reject_count",
+          "record_delivery_outcome is infallible"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/pressure.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11",
+          "C12"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Add pressure module to metrics mod.rs",
+        "spec": "crates/liminal/src/metrics/mod.rs SHALL declare pub mod pressure and re-export PressureMetrics and DeliveryOutcome.",
+        "acceptance": [
+          "metrics/mod.rs contains pub mod pressure",
+          "PressureMetrics is re-exported from the metrics module",
+          "DeliveryOutcome is re-exported from the metrics module",
+          "cargo check -p liminal passes"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R7",
+        "title": "Non-blocking recording guarantee",
+        "spec": "All PressureMetrics recording methods SHALL complete without acquiring any Mutex or RwLock. Recording SHALL NOT allocate heap memory on the hot path. These methods are called on the delivery hot path and SHALL NOT introduce latency into message routing. SHALL NOT perform any I/O during recording.",
+        "acceptance": [
+          "No Mutex::lock or RwLock::write appears in any recording method",
+          "No heap allocation appears in any recording method",
+          "No I/O operations appear in any recording method",
+          "Recording a metric completes in O(1) time"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/pressure.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11",
+          "C12",
+          "C13"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement channel-specific metrics (rate, subscribers, queue depth, latency) \u2014 that is OBS-002.",
+      "SHALL NOT implement conversation-specific metrics \u2014 that is OBS-003.",
+      "SHALL NOT implement Prometheus text rendering \u2014 that is OBS-005.",
+      "SHALL NOT implement the backpressure protocol itself \u2014 that is the core/protocol cluster. Pressure metrics only observe outcomes.",
+      "SHALL NOT clamp or validate capacity utilization values \u2014 the caller is authoritative.",
+      "SHALL NOT impose any rate limiting or sampling on metric recording."
+    ],
+    "verification": [
+      "cargo check -p liminal passes clean.",
+      "cargo clippy -p liminal -- -D warnings passes clean.",
+      "cargo fmt -p liminal --check passes clean.",
+      "All recording methods are infallible (no Result return type).",
+      "No Mutex or RwLock acquisition in any recording method.",
+      "DeliveryOutcome has exactly three variants matching ADR-004 signals.",
+      "PressureMetrics implements Debug and Clone."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C11",
+        "text": "Reject rate tracked as a counter per channel, incremented when a message is rejected due to consumer capacity."
+      },
+      {
+        "id": "C12",
+        "text": "Defer rate tracked as a counter per channel, incremented when a message is deferred into a buffer."
+      },
+      {
+        "id": "C13",
+        "text": "Capacity utilization tracked as a gauge per consumer, computed as in-flight messages divided by declared capacity."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S3",
+        "text": "As an Operator, I want to see reject and defer rates per channel so that I can identify channels experiencing backpressure and take corrective action."
+      },
+      {
+        "id": "S4",
+        "text": "As an Operator, I want to see capacity utilization per consumer so that I can identify overloaded consumers and scale them."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Metrics instrumentation points in channel and conversation actors must not block the actor's message processing. Recording a metric is a non-blocking operation."
+      },
+      {
+        "id": "CN6",
+        "text": "Trace context propagation is transparent to application code. No manual context passing required for intra-bus messages."
+      },
+      {
+        "id": "CN7",
+        "text": "Prometheus export renders a consistent snapshot. Metrics do not change mid-render -- the registry provides an atomic read."
+      },
+      {
+        "id": "CN8",
+        "text": "Structured log entries never contain free-form string messages. Every field is a typed key-value pair."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can see inside the running bus: which channels are hot, which consumers are under pressure, which conversations are stalling, and how messages flow across a multi-step exchange. The observability layer does not change how the bus works -- it makes the bus's existing behaviour visible.\n\nThe goal is operational confidence. An operator should be able to capacity-plan from metrics, diagnose delivery issues from traces, and correlate structured logs across conversation boundaries. An application developer should be able to trace a message through a conversation chain without instrumenting their own code.",
+    "design_path": "docs/design/observability",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can see inside the running bus: which channels are hot, which consumers are under pressure, which conversations are stalling, and how messages flow across a "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

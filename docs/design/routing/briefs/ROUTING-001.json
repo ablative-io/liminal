@@ -1,0 +1,120 @@
+{
+  "id": "ROUTING-001",
+  "cluster": "routing",
+  "title": "Define predicate types and routing module root",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C1", "C2", "C3", "C4", "C5"],
+  "stories": ["S1", "S2"],
+  "design_anchor": ["ADR-003"],
+  "purpose": "Establishes the predicate type system that forms the declarative tier of the two-tier routing model (ADR-003). These types are the building blocks for content-aware subscriptions: comparison operators, boolean combinators, range checks, and field-existence tests. The evaluation engine (ROUTING-002) and predicate compiler (ROUTING-003) consume these types; this brief defines them without implementing evaluation logic.",
+  "task": "Create the routing module root and the predicate type definitions. Define the Predicate enum with variants for comparison, boolean combination, range, and field-existence. Define supporting types: ComparisonOp (six relational operators), FieldValue (typed operand values), and FieldPath (dot-notation message field accessor). Establish the missing-field contract: predicates against absent fields evaluate to false without error. This brief defines types only — evaluation logic belongs to ROUTING-002, compilation to ROUTING-003.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define comparison operator enum and comparison predicate variant",
+      "spec": "The predicate module SHALL define a ComparisonOp enum with exactly six variants (Eq, Ne, Gt, Lt, Gte, Lte) and a Predicate::Comparison variant taking a FieldPath, ComparisonOp, and FieldValue. The ComparisonOp enum SHALL NOT include pattern-matching or regex operators.",
+      "acceptance": [
+        "ComparisonOp enum has exactly six variants: Eq, Ne, Gt, Lt, Gte, Lte.",
+        "Predicate::Comparison { field: FieldPath, op: ComparisonOp, value: FieldValue } constructs a valid predicate.",
+        "ComparisonOp implements Clone, Debug, PartialEq, and Eq.",
+        "All six ComparisonOp variants round-trip through Debug formatting."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/routing/predicate.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": ["S1"]
+    },
+    {
+      "id": "R2",
+      "title": "Define boolean combinator predicates for arbitrary composition",
+      "spec": "The Predicate enum SHALL include And, Or, and Not variants for composing predicates into arbitrarily nested expressions. And and Or SHALL accept a Vec<Predicate>. Not SHALL accept a Box<Predicate>. Composition depth SHALL NOT be artificially limited.",
+      "acceptance": [
+        "Predicate::And(vec![p1, p2]) composes two predicates with logical AND.",
+        "Predicate::Or(vec![p1, p2]) composes two predicates with logical OR.",
+        "Predicate::Not(Box::new(p)) negates a single predicate.",
+        "Nested composition Predicate::And(vec![Predicate::Comparison{..}, Predicate::Or(vec![..])]) constructs without error.",
+        "Empty And(vec![]) and Or(vec![]) are valid constructions."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/predicate.rs"],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": ["S2"]
+    },
+    {
+      "id": "R3",
+      "title": "Define range-check and field-existence predicate variants",
+      "spec": "The Predicate enum SHALL include a Range variant taking a FieldPath and two FieldValue bounds (lower inclusive, upper inclusive) for numeric and string field comparisons. The Predicate enum SHALL include an Exists variant taking a FieldPath for testing field presence. Range SHALL NOT support exclusive bounds in this brief.",
+      "acceptance": [
+        "Predicate::Range { field: FieldPath, lower: FieldValue, upper: FieldValue } constructs a range predicate.",
+        "Predicate::Exists { field: FieldPath } constructs a field-existence predicate.",
+        "Range with FieldValue::Integer(100) lower and FieldValue::Integer(200) upper compiles without error.",
+        "Range with FieldValue::Text(\"a\".into()) lower and FieldValue::Text(\"z\".into()) upper compiles without error."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/predicate.rs"],
+        "delete": []
+      },
+      "checklist": ["C3", "C4"],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Define FieldValue enum, FieldPath accessor, and missing-field contract",
+      "spec": "The predicate module SHALL define a FieldValue enum with variants for String, Integer (i64), Float (f64), Boolean, and Null. The module SHALL define a FieldPath type wrapping a dot-notation string with a segments accessor. Predicates evaluated against a message missing the referenced field SHALL evaluate to false without returning an error. The FieldValue type SHALL NOT carry binary or structured (nested object) values.",
+      "acceptance": [
+        "FieldValue has exactly five variants: Text(String), Integer(i64), Float(f64), Boolean(bool), Null.",
+        "FieldPath::new(\"user.address.city\") constructs a valid path.",
+        "FieldPath::segments() on \"user.address.city\" returns an iterator yielding [\"user\", \"address\", \"city\"].",
+        "FieldPath::new(\"name\") with no dots yields a single segment [\"name\"].",
+        "FieldValue implements Clone, Debug, and PartialEq."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/predicate.rs"],
+        "delete": []
+      },
+      "checklist": ["C5"],
+      "stories": ["S1"]
+    },
+    {
+      "id": "R5",
+      "title": "Wire routing module root with pub mod and re-exports",
+      "spec": "The routing module root SHALL contain only pub mod declarations and pub use re-exports per CN3. All public predicate types SHALL be re-exported from the routing module root.",
+      "acceptance": [
+        "routing/mod.rs contains pub mod predicate and no function or trait definitions.",
+        "Predicate, ComparisonOp, FieldValue, and FieldPath are accessible via use crate::routing::{Predicate, ComparisonOp, FieldValue, FieldPath}.",
+        "No logic (functions, trait impls, match arms) exists in mod.rs."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/routing/mod.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement predicate evaluation logic — evaluation belongs to ROUTING-002.",
+    "SHALL NOT implement predicate-to-function compilation — compilation belongs to ROUTING-003.",
+    "SHALL NOT define routing table or subscription types — those belong to ROUTING-002.",
+    "SHALL NOT define backpressure or capacity types — those belong to ROUTING-005.",
+    "SHALL NOT add serialization/deserialization derives unless required for type construction tests."
+  ],
+  "verification": [
+    "cargo clippy -p liminal --all-targets -- -D warnings passes clean.",
+    "cargo test -p liminal passes with all predicate type construction tests green.",
+    "cargo fmt --check passes clean.",
+    "routing/mod.rs contains only pub mod and pub use — no logic.",
+    "All public types implement Debug (CN4).",
+    "predicate.rs is under 500 lines including tests (CN1)."
+  ]
+}

@@ -1,0 +1,285 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "PROTO-002",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "PROTO-002",
+    "cluster": "protocol",
+    "title": "Define message envelope and causal context types",
+    "depends_on": [
+      "PROTO-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C13",
+      "C14",
+      "C15",
+      "C16",
+      "C17",
+      "C18"
+    ],
+    "stories": [
+      "S4"
+    ],
+    "design_anchor": [
+      "ADR-002",
+      "ADR-005",
+      "ADR-008"
+    ],
+    "purpose": "Defines the typed message envelope that wraps application payloads in the wire protocol, carrying schema identification and causal context alongside the payload bytes. Causal context is a first-class wire-level construct (P1) \u2014 the bus extracts ordering information from the frame without deserializing the application payload. Publish and ConversationMessage frames carry a MessageEnvelope, not raw bytes, ensuring that every message on the wire has type identity and causal ancestry.",
+    "task": "Define the MessageEnvelope type containing schema_id (content type hash), causal_context, and payload bytes. Define the CausalContext type with an optional parent message reference and vector clock entry. Ensure MessageEnvelope serializes deterministically \u2014 same fields always produce same bytes. Wire Publish and ConversationMessage frames to carry MessageEnvelope instead of raw payload bytes. Ensure CausalContext is extractable from a message-carrying frame at the frame level without deserializing the application payload. Scope boundary: this brief defines the envelope and causal types and their serialization. It does not implement schema negotiation (PROTO-006), causal ordering enforcement (a bus-level concern), or payload validation (PROTO-006 + bus layer).",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define CausalContext with parent reference and vector clock entry",
+        "spec": "CausalContext struct SHALL contain: parent_id (Option<MessageId> \u2014 a reference to the causally preceding message) and vector_clock_entry (Option<u64> \u2014 a logical timestamp for this message's position in the causal chain). CausalContext SHALL implement Debug, Clone, PartialEq, and Eq. An empty CausalContext (both fields None) represents a causally independent message.",
+        "acceptance": [
+          "CausalContext has fields: parent_id (Option<MessageId>), vector_clock_entry (Option<u64>).",
+          "CausalContext::independent() returns a context with both fields None.",
+          "CausalContext::with_parent(id) returns a context with parent_id set.",
+          "CausalContext implements Debug, Clone, PartialEq, Eq.",
+          "MessageId is a newtype wrapping a byte array or String (not a raw primitive)."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/causal.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Ensure CausalContext is extractable at frame level",
+        "spec": "CausalContext SHALL be serialized as part of the MessageEnvelope in a position that allows extraction without deserializing the application payload. The serialization format SHALL place causal_context bytes before the payload bytes within the envelope, with a fixed-size or length-prefixed causal context section. This allows the bus to read causal information by parsing only the envelope header, not the application data.",
+        "acceptance": [
+          "CausalContext is serialized before payload bytes in the envelope byte layout.",
+          "A function extract_causal_context(envelope_bytes) returns the CausalContext without parsing the payload portion.",
+          "extract_causal_context works on the raw envelope bytes from a Publish frame.",
+          "The causal context section has a known size or length prefix so the payload boundary is deterministic."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/causal.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C17",
+          "C18"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Define MessageEnvelope with schema ID, causal context, and payload",
+        "spec": "MessageEnvelope struct SHALL contain: schema_id (SchemaId \u2014 a content type hash identifying the payload's schema), causal_context (CausalContext), and payload (Vec<u8> \u2014 opaque application data). SchemaId SHALL be a newtype wrapping a fixed-size byte array (e.g. [u8; 32] for SHA-256 hash). MessageEnvelope SHALL implement Debug and Clone.",
+        "acceptance": [
+          "MessageEnvelope has fields: schema_id (SchemaId), causal_context (CausalContext), payload (Vec<u8>).",
+          "SchemaId is a newtype wrapping [u8; 32].",
+          "MessageEnvelope implements Debug and Clone.",
+          "MessageEnvelope::new(schema_id, causal_context, payload) constructs from all three fields."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/envelope.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C13"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Implement deterministic serialization for MessageEnvelope",
+        "spec": "MessageEnvelope serialization SHALL be deterministic: the same schema_id, causal_context, and payload SHALL always produce the same byte sequence. The byte layout SHALL be: schema_id (32 bytes) + causal_context_length (u32) + causal_context_bytes + payload_length (u32) + payload_bytes. All multi-byte integers SHALL use big-endian byte order. Deserialization SHALL reconstruct the envelope losslessly.",
+        "acceptance": [
+          "Two MessageEnvelopes with identical fields produce identical byte sequences.",
+          "Serialization followed by deserialization produces an equal MessageEnvelope.",
+          "The byte layout starts with the 32-byte schema_id.",
+          "Multi-byte integers use big-endian encoding.",
+          "An envelope with empty payload serializes and deserializes correctly."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/envelope.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C14"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Wire Publish and ConversationMessage frames to carry MessageEnvelope",
+        "spec": "Frame::Publish and Frame::ConversationMessage variants SHALL carry a MessageEnvelope as their payload, not raw Vec<u8>. The codec's encode path for these frames SHALL serialize the MessageEnvelope into the frame payload. The codec's decode path SHALL deserialize the payload bytes into a MessageEnvelope. Other frame types SHALL NOT carry a MessageEnvelope.",
+        "acceptance": [
+          "Frame::Publish has a field of type MessageEnvelope, not Vec<u8>.",
+          "Frame::ConversationMessage has a field of type MessageEnvelope, not Vec<u8>.",
+          "encode(Frame::Publish { envelope, .. }) serializes the envelope as the frame payload.",
+          "decode of a Publish frame returns Frame::Publish with a deserialized MessageEnvelope.",
+          "Frame::Ping, Frame::Subscribe, and other non-message frames do not contain MessageEnvelope."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/frame.rs",
+            "crates/liminal/src/protocol/codec.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C15"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement schema validation or schema negotiation \u2014 that is PROTO-006.",
+      "SHALL NOT implement causal ordering enforcement \u2014 that is a bus-level concern.",
+      "SHALL NOT define payload serialization format (protobuf, JSON) \u2014 payloads are opaque bytes.",
+      "SHALL NOT implement frame construction validation beyond what PROTO-001 establishes.",
+      "SHALL NOT add new frame types \u2014 use the types defined in PROTO-001."
+    ],
+    "verification": [
+      "cargo check compiles envelope and causal modules with no errors.",
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes.",
+      "Test: MessageEnvelope serialization is deterministic (two identical envelopes produce same bytes).",
+      "Test: CausalContext is extractable from raw envelope bytes without full deserialization.",
+      "Test: Publish and ConversationMessage frames round-trip with MessageEnvelope.",
+      "Test: SchemaId wraps exactly 32 bytes."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-002",
+        "title": "Typed channels with compile-time enforcement in Gleam and runtime validation for external producers",
+        "decision": "Every channel declares its message type. Gleam producers get compile-time enforcement. External producers (Python, TypeScript, HTTP) get runtime validation at publish time. The rejected alternative is the NATS model: channels carry opaque bytes and consumers handle deserialization failures.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-005",
+        "title": "Per-causal-chain ordering, not per-topic or per-partition",
+        "decision": "Messages carry causal context (explicit parent reference or vector clock). The bus enforces happened-before ordering where causality demands it. Independent messages to the same channel run in parallel. Conversations naturally define causal chains. The rejected alternative is per-partition ordering (Kafka model: forces total ordering within a partition, or gives up ordering across partitions).",
+        "quote": "",
+        "decided_by": "Bono, adopted by Frodo"
+      },
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C13",
+        "text": "MessageEnvelope contains schema_id (content type hash), causal_context, and payload bytes."
+      },
+      {
+        "id": "C14",
+        "text": "MessageEnvelope serializes deterministically: the same fields always produce the same byte sequence."
+      },
+      {
+        "id": "C15",
+        "text": "Publish and ConversationMessage frames carry a MessageEnvelope, not raw payload bytes."
+      },
+      {
+        "id": "C16",
+        "text": "CausalContext type represents an optional parent message reference and a vector clock entry."
+      },
+      {
+        "id": "C17",
+        "text": "CausalContext is extractable from a message-carrying frame without deserializing the application payload (P1)."
+      },
+      {
+        "id": "C18",
+        "text": "CausalContext serializes as part of the MessageEnvelope, not as a separate frame field."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S4",
+        "text": "As a client library author, I want causal context to be a structured field in the message envelope so that I can extract ordering information without parsing the application payload."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Frame header is fixed-size (type + flags + stream ID + payload length) so that any frame can be skipped without parsing its payload."
+      },
+      {
+        "id": "CN6",
+        "text": "Codec encode/decode is infallible for valid frames: a successfully constructed frame always encodes, and valid wire bytes always decode. Malformed wire bytes produce ProtocolError, never a panic."
+      },
+      {
+        "id": "CN7",
+        "text": "Stream 0 is reserved for connection-level control frames. Application streams use IDs >= 1."
+      },
+      {
+        "id": "CN8",
+        "text": "Backpressure signals (Accept/Defer/Reject) travel on the same stream as the messages they regulate (P5)."
+      },
+      {
+        "id": "CN9",
+        "text": "Unknown frame types are skipped by reading their length prefix and discarding the payload, not by disconnecting (P7)."
+      },
+      {
+        "id": "CN10",
+        "text": "Every error condition produces an explicit error frame with a numeric reason code. No silent drops (P3)."
+      }
+    ],
+    "intention": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that single connection with conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context flowing natively in the wire format. The protocol should feel inevitable -- every frame carries exactly the information the bus needs to make routing, ordering, and pressure decisions, and nothing else. A developer reading a packet capture should be able to reconstruct the full conversation lifecycle without consulting application logs.\n\nThe protocol is the contract between the bus and every client SDK. Getting this right means SDKs in any language can be written against a stable, versioned binary spec rather than chasing an internal API. Getting it wrong means every SDK becomes a moving target and the bus's differentiators (conversations, typed messages, causal ordering, protocol-level backpressure) are lost in translation.",
+    "design_path": "docs/design/protocol",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

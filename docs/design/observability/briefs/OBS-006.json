@@ -1,0 +1,194 @@
+{
+  "id": "OBS-006",
+  "cluster": "observability",
+  "title": "Implement trace context propagation and conversation span management",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C14", "C15"],
+  "stories": ["S7"],
+  "design_anchor": ["ADR-004"],
+  "purpose": "Establish the tracing foundation for liminal: a TraceContext type that carries trace_id and span_id through conversations and messages, and automatic span creation for conversations. Conversations auto-create spans at start, messages inherit their conversation's trace context, and child conversations reference their parent's span as a parent. Trace context propagation is transparent to application code — no manual instrumentation required.",
+  "task": "Create the tracing module at crates/liminal/src/tracing/ with mod.rs, context.rs, and span.rs. Define TraceContext as a lightweight carrier of trace_id (128-bit) and span_id (64-bit) following W3C Trace Context semantics. Implement SpanGuard for RAII-style span lifecycle. Wire conversation start to create a span and attach the trace context to all messages within that conversation. Child conversations link to their parent's span.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Create tracing module skeleton",
+      "spec": "crates/liminal/src/tracing/mod.rs SHALL declare pub mod for context and span. mod.rs SHALL contain only pub mod declarations and pub use re-exports. mod.rs SHALL NOT contain any function, struct, trait, or impl definitions.",
+      "acceptance": [
+        "crates/liminal/src/tracing/mod.rs exists",
+        "mod.rs declares pub mod context and pub mod span",
+        "mod.rs contains zero function definitions, zero struct definitions, zero trait definitions",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/tracing/mod.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Add pub mod tracing to lib.rs",
+      "spec": "crates/liminal/src/lib.rs SHALL declare pub mod tracing so the tracing subsystem is part of the public API surface. lib.rs SHALL re-export TraceContext from the tracing module.",
+      "acceptance": [
+        "lib.rs contains pub mod tracing declaration",
+        "TraceContext is re-exported from lib.rs",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/lib.rs"],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Define TraceContext with trace_id and span_id",
+      "spec": "TraceContext SHALL carry a trace_id (u128) and a span_id (u64) following W3C Trace Context semantics. TraceContext SHALL implement Clone, Copy, Debug, PartialEq, Eq. TraceContext SHALL provide new_root() that generates a fresh trace_id and span_id, and child() that creates a new span_id under the same trace_id. TraceContext SHALL NOT use any external tracing crate — IDs are self-generated.",
+      "acceptance": [
+        "TraceContext has fields trace_id: u128 and span_id: u64",
+        "TraceContext derives Clone, Copy, Debug, PartialEq, Eq",
+        "TraceContext::new_root() returns a TraceContext with non-zero trace_id and span_id",
+        "ctx.child() returns a TraceContext with the same trace_id but a different span_id",
+        "Two calls to new_root() produce different trace_ids"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/tracing/context.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R4",
+      "title": "Implement TraceContext ID generation",
+      "spec": "TraceContext SHALL generate trace_id and span_id using a deterministic-safe source. In production, IDs SHALL be generated from a thread-local random source. TraceContext SHALL provide from_ids(trace_id, span_id) for reconstructing a context from serialized data. SHALL NOT use std::time or wall clock for ID generation.",
+      "acceptance": [
+        "TraceContext::from_ids(trace_id, span_id) reconstructs the context",
+        "from_ids round-trips correctly: from_ids(ctx.trace_id(), ctx.span_id()) == ctx",
+        "No std::time or SystemTime usage in ID generation",
+        "IDs are non-zero in all generated contexts"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/tracing/context.rs"],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R5",
+      "title": "Implement TraceContext serialization to W3C traceparent format",
+      "spec": "TraceContext SHALL provide to_traceparent() -> String that renders the context as a W3C traceparent header value (version-trace_id-parent_id-flags format: 00-{32 hex}-{16 hex}-01). TraceContext SHALL provide from_traceparent(s: &str) -> Option<TraceContext> for parsing. SHALL NOT depend on any external serialization crate for this.",
+      "acceptance": [
+        "to_traceparent() produces a string matching 00-{32 hex chars}-{16 hex chars}-01",
+        "from_traceparent(ctx.to_traceparent()) == Some(ctx)",
+        "from_traceparent with invalid input returns None",
+        "from_traceparent with wrong version prefix returns None"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/tracing/context.rs"],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R6",
+      "title": "Define Span type for conversation lifecycle",
+      "spec": "Span SHALL represent an active trace span with a name, a TraceContext, an optional parent TraceContext, and a start timestamp. Span SHALL implement Debug. Span SHALL provide finish() that records the span duration. Span SHALL NOT send data anywhere — it is a local record. Exporters (future work) read finished spans.",
+      "acceptance": [
+        "Span has fields: name (String), context (TraceContext), parent (Option<TraceContext>), start (Instant)",
+        "Span implements Debug",
+        "Span::new(name, context, parent) creates a span with Instant::now() as start",
+        "span.finish() returns a FinishedSpan with the elapsed duration"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/tracing/span.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R7",
+      "title": "Implement FinishedSpan as an immutable record",
+      "spec": "FinishedSpan SHALL be an immutable record containing the span name, TraceContext, optional parent TraceContext, and duration. FinishedSpan SHALL implement Debug and Clone. FinishedSpan is the unit that span exporters (future work) will consume.",
+      "acceptance": [
+        "FinishedSpan has fields: name, context, parent, duration",
+        "FinishedSpan implements Debug and Clone",
+        "FinishedSpan is constructed only from Span::finish()",
+        "FinishedSpan duration matches the elapsed time between Span creation and finish"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/tracing/span.rs"],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R8",
+      "title": "Conversation span creation with automatic context propagation",
+      "spec": "When a conversation starts, a Span SHALL be created with the conversation ID as the span name. The span's TraceContext SHALL become the conversation's trace context. All messages within the conversation SHALL inherit this TraceContext. When a child conversation is spawned, its span SHALL reference the parent conversation's TraceContext as the parent span. This propagation SHALL be automatic — application code SHALL NOT need to pass trace contexts manually.",
+      "acceptance": [
+        "Starting a conversation creates a Span with a fresh TraceContext",
+        "The conversation's messages carry the conversation's TraceContext",
+        "A child conversation's Span has parent set to the parent conversation's TraceContext",
+        "No manual TraceContext passing is required by application code"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/tracing/span.rs"],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R9",
+      "title": "SpanCollector trait for finished span export",
+      "spec": "SpanCollector SHALL be a trait with a single method: on_span(span: FinishedSpan). This is the extension point for span exporters (e.g., Jaeger, OTLP — future work). A NoopCollector SHALL be provided that discards all spans. The active collector SHALL be set globally via an atomic pointer, matching the MetricsRegistry zero-overhead pattern. When no collector is installed, span finishing SHALL be a no-op.",
+      "acceptance": [
+        "SpanCollector trait has fn on_span(&self, span: FinishedSpan)",
+        "NoopCollector implements SpanCollector and discards spans",
+        "A global optional SpanCollector is set via atomic pointer",
+        "When no collector is installed, Span::finish() performs no work beyond computing duration"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/tracing/span.rs"],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement structured logging — that is OBS-007.",
+    "SHALL NOT implement any metrics collection — that is OBS-001 through OBS-005.",
+    "SHALL NOT implement span export to Jaeger, OTLP, or any external system — only the SpanCollector trait and NoopCollector.",
+    "SHALL NOT depend on the tracing crate or opentelemetry crate — trace context is self-contained.",
+    "SHALL NOT use wall-clock time for ID generation — only for span duration measurement.",
+    "SHALL NOT require application code to manually propagate trace contexts."
+  ],
+  "verification": [
+    "cargo check -p liminal passes clean.",
+    "cargo clippy -p liminal -- -D warnings passes clean.",
+    "cargo fmt -p liminal --check passes clean.",
+    "tracing/mod.rs contains only pub mod and pub use — no logic.",
+    "TraceContext is Copy + Clone + Debug + PartialEq + Eq.",
+    "to_traceparent/from_traceparent round-trips correctly.",
+    "Span finishing is a no-op when no SpanCollector is installed.",
+    "No external tracing or opentelemetry crate dependency."
+  ]
+}

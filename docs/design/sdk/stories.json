@@ -1,0 +1,51 @@
+{
+  "cluster": "sdk",
+  "personas": [
+    {
+      "name": "Rust Developer",
+      "role": "Embedding agora in an application",
+      "stories": [
+        {"id": "S1", "text": "As a Rust developer embedding agora, I want to publish typed messages to a channel through an in-process handle so that I get zero-hop messaging without network overhead."},
+        {"id": "S2", "text": "As a Rust developer embedding agora, I want to switch from embedded to remote mode by changing configuration rather than code so that I can scale to multi-process deployment without rewriting my application."}
+      ]
+    },
+    {
+      "name": "Rust Developer",
+      "role": "Connecting as a remote client",
+      "stories": [
+        {"id": "S3", "text": "As a Rust developer connecting remotely, I want the SDK to automatically reconnect and recover my subscriptions after a network disruption so that my application resumes without manual intervention."},
+        {"id": "S4", "text": "As a Rust developer connecting remotely, I want publish operations to return typed backpressure signals (accept, defer, reject) so that I can implement application-level flow control."}
+      ]
+    },
+    {
+      "name": "Gleam Developer",
+      "role": "Authoring message types and conversation handlers",
+      "stories": [
+        {"id": "S5", "text": "As a Gleam developer, I want to define message types as Gleam records and have the SDK enforce them at compile time so that type mismatches are caught before deployment."},
+        {"id": "S6", "text": "As a Gleam developer, I want to author conversation handlers as Gleam modules implementing a behaviour so that I can write request-reply and saga logic in a familiar OTP-style pattern."}
+      ]
+    },
+    {
+      "name": "TypeScript Developer",
+      "role": "Building a browser application",
+      "stories": [
+        {"id": "S7", "text": "As a TypeScript developer building a browser app, I want to connect to agora over WebSocket via WASM so that I can subscribe to channels without a server-side proxy."},
+        {"id": "S8", "text": "As a TypeScript developer, I want generated TypeScript interfaces for channel message types so that I get IDE autocompletion and type checking without writing type definitions manually."}
+      ]
+    },
+    {
+      "name": "TypeScript Developer",
+      "role": "Building a server application",
+      "stories": [
+        {"id": "S9", "text": "As a TypeScript developer building a server app, I want to use the same SDK API in Node.js as in the browser so that I can share message handling code between client and server."}
+      ]
+    },
+    {
+      "name": "Platform Operator",
+      "role": "Deploying SDK-based applications",
+      "stories": [
+        {"id": "S10", "text": "As a platform operator, I want SDK connection pools to be configurable with max connections, timeouts, and buffer sizes so that I can tune resource usage for my deployment environment."}
+      ]
+    }
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "id": "DUR-006",
+  "cluster": "durability",
+  "title": "Implement crash recovery for channels, cursors, and conversations",
+  "depends_on": ["DUR-001", "DUR-002", "DUR-003", "DUR-005"],
+  "blocked_by": [],
+  "checklist": ["C31", "C32", "C33", "C34"],
+  "stories": ["S13"],
+  "design_anchor": ["ADR-009"],
+  "purpose": "Implements crash recovery for all durable components: channels reconstruct partition sequence numbers, conversations replay their event logs and resume from the last completed step, and consumer cursors read their persisted offsets and replay from the checkpoint. Recovery is replay, not reconstruction (P4) — the normal read path is the recovery path. This brief orchestrates the recovery sequence that brings a crashed bus instance back to consistent state without manual intervention.",
+  "task": "Build the crash recovery module that coordinates recovery across durable channels, conversations, and consumer cursors. Channel recovery reads the haematite log for each partition to determine the current sequence number. Conversation recovery replays the event log (using DUR-005's replay logic) and resumes from the last completed step. Cursor recovery reads the persisted offset (using DUR-003's resume logic) and replays messages from that point. The recovery module must guarantee idempotent replay: replaying the same event log twice produces identical state. Scope boundary: this brief orchestrates recovery. The individual replay and resume operations are implemented in DUR-003 and DUR-005 — this brief calls them, not reimplements them.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Recover durable channel partition sequences from haematite",
+      "spec": "WHEN a durable channel recovers after crash, THE SYSTEM SHALL read each partition's log from haematite using DurableStore::read_from to determine the current sequence number. The recovered sequence number SHALL be set to the highest sequence number found in the partition log, or 0 if the log is empty. This reconstructed sequence SHALL be used as expected_seq for subsequent appends.",
+      "acceptance": [
+        "A channel with 3 partitions recovers each partition's sequence independently.",
+        "A partition with stored events 0..41 recovers with sequence 42 (next expected).",
+        "An empty partition recovers with sequence 0.",
+        "The recovered sequence matches what DUR-002's append path expects.",
+        "Recovery reads from haematite, not from any in-memory cache."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/recovery.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C31"],
+      "stories": ["S13"]
+    },
+    {
+      "id": "R2",
+      "title": "Recover durable conversations via event log replay",
+      "spec": "WHEN a durable conversation recovers after crash, THE SYSTEM SHALL replay its event log from haematite using DUR-005's replay logic. The replayed ConversationState SHALL determine: which messages are fully processed (skip on re-delivery), which are partially processed (resume from last step), and what the current expected_seq is for new appends. THE SYSTEM SHALL NOT use any state cache — replay from the event log is the sole recovery path.",
+      "acceptance": [
+        "A conversation with events [MessageReceived, ProcessingStarted, StepCompleted(0)] recovers with step 0 complete and processing resumable from step 1.",
+        "A conversation with ProcessingFinished for a message recovers with that message marked as fully processed.",
+        "Recovery delegates to DUR-005's replay logic, not a reimplementation.",
+        "The recovered conversation's expected_seq is set to last_event_sequence + 1.",
+        "No in-memory cache is consulted — only haematite."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/recovery.rs"],
+        "delete": []
+      },
+      "checklist": ["C32"],
+      "stories": ["S13"]
+    },
+    {
+      "id": "R3",
+      "title": "Recover consumer cursors from persisted offsets",
+      "spec": "WHEN a consumer cursor recovers after crash, THE SYSTEM SHALL read the persisted offset from haematite using DUR-003's resume logic. The consumer SHALL resume processing from the stored offset, replaying any messages between the cursor and the partition head. IF no persisted offset exists, THE SYSTEM SHALL start from offset 0.",
+      "acceptance": [
+        "A cursor with persisted offset 42 recovers and resumes from position 42.",
+        "A cursor with no persisted offset starts from position 0.",
+        "Recovery delegates to DUR-003's resume logic, not a reimplementation.",
+        "The recovered cursor is ready for checkpoint operations (cas will use the persisted offset as old_value)."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/recovery.rs"],
+        "delete": []
+      },
+      "checklist": ["C33"],
+      "stories": ["S13"]
+    },
+    {
+      "id": "R4",
+      "title": "Guarantee idempotent replay across all recovery paths",
+      "spec": "All recovery paths SHALL be idempotent: executing recovery twice on the same haematite state SHALL produce identical results. Channel sequence reconstruction SHALL be deterministic. Conversation state replay SHALL produce identical ConversationState. Cursor resume SHALL produce identical cursor position. Recovery SHALL NOT write to haematite — it is a read-only operation that reconstructs in-memory state.",
+      "acceptance": [
+        "Running channel recovery twice produces the same partition sequences.",
+        "Running conversation recovery twice produces the same ConversationState (asserted via PartialEq or field comparison).",
+        "Running cursor recovery twice produces the same cursor offset.",
+        "Recovery performs zero DurableStore::append or DurableStore::cas calls — read-only.",
+        "No side effects: recovery does not modify haematite state."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/recovery.rs"],
+        "delete": []
+      },
+      "checklist": ["C34"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT reimplement replay or resume logic — delegate to DUR-003 and DUR-005.",
+    "SHALL NOT write to haematite during recovery — recovery is read-only.",
+    "SHALL NOT implement dedup cache recovery — dedup entries are reconstructed from haematite on demand.",
+    "SHALL NOT add recovery-specific error types — use DurabilityError from DUR-001.",
+    "SHALL NOT implement cross-node recovery or replication — this is single-node recovery only."
+  ],
+  "verification": [
+    "cargo check compiles the recovery module with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: channel recovery from populated haematite produces correct sequence numbers.",
+    "Test: conversation recovery produces identical state on two runs (idempotency).",
+    "Test: cursor recovery with and without persisted offset.",
+    "grep -rn 'append\\|cas' recovery.rs returns no write calls (read-only verification)."
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "id": "PROTO-006",
+  "cluster": "protocol",
+  "title": "Implement schema negotiation in Subscribe/SubscribeAck exchange",
+  "depends_on": ["PROTO-001"],
+  "blocked_by": [],
+  "checklist": ["C33", "C34", "C35"],
+  "stories": ["S9"],
+  "design_anchor": ["ADR-002", "ADR-008"],
+  "purpose": "Implements schema negotiation as part of the subscription handshake. Subscribers declare which schemas they accept (by content type hash). The bus selects the appropriate schema version and confirms it in SubscribeAck. Schema mismatches (no overlap between subscriber and channel) produce SubscribeError with a schema-incompatible reason code. This ensures type compatibility is established at subscription time, not discovered at runtime when a publish fails — per ADR-002's principle that types are part of the channel definition.",
+  "task": "Build the schema negotiation module. Wire accepted schema IDs into the Subscribe frame payload. Wire the selected schema ID into the SubscribeAck frame payload. Implement schema matching: given the subscriber's accepted set and the channel's declared schema, select the compatible version or return SubscribeError. The schema module defines the negotiation protocol; it does not implement schema validation of message payloads — that is a bus-level concern. Scope boundary: this brief handles the Subscribe/SubscribeAck schema fields and the matching logic. It does not implement runtime payload validation against schemas.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Wire accepted schema IDs into Subscribe frame",
+      "spec": "The Subscribe frame payload SHALL include accepted_schemas: a Vec of SchemaId values (content type hashes from PROTO-002) that the subscriber can handle. An empty accepted_schemas array SHALL be valid — it indicates the subscriber accepts any schema (opt-out of schema enforcement). The schemas are declared during subscription so the bus can validate compatibility before message delivery begins.",
+      "acceptance": [
+        "Subscribe frame payload includes accepted_schemas (Vec<SchemaId>).",
+        "Subscribe with accepted_schemas = [hash_a, hash_b] round-trips through the codec with both hashes preserved.",
+        "Subscribe with accepted_schemas = [] is valid (no error).",
+        "SchemaId values use the [u8; 32] type from PROTO-002.",
+        "accepted_schemas is accessible from the decoded Subscribe frame."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/schema.rs"],
+        "modify": ["crates/liminal/src/protocol/frame.rs"],
+        "delete": []
+      },
+      "checklist": ["C33"],
+      "stories": ["S9"]
+    },
+    {
+      "id": "R2",
+      "title": "Wire selected schema ID into SubscribeAck frame",
+      "spec": "The SubscribeAck frame payload SHALL include selected_schema: a SchemaId that the bus will use for messages delivered on this subscription's stream. This is the result of schema negotiation — the bus picked the version that matches both the channel's declared type and the subscriber's accepted set.",
+      "acceptance": [
+        "SubscribeAck frame payload includes selected_schema (SchemaId).",
+        "SubscribeAck round-trips through the codec with selected_schema preserved.",
+        "The selected_schema is a single SchemaId, not an array.",
+        "selected_schema uses the same [u8; 32] type as the Subscribe accepted_schemas."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/schema.rs", "crates/liminal/src/protocol/frame.rs"],
+        "delete": []
+      },
+      "checklist": ["C34"],
+      "stories": ["S9"]
+    },
+    {
+      "id": "R3",
+      "title": "Implement schema matching with mismatch detection",
+      "spec": "negotiate_schema(channel_schema, accepted_schemas) SHALL find the channel's declared schema in the subscriber's accepted set. IF the channel's schema is found in accepted_schemas, THE SYSTEM SHALL return it as the selected schema. IF accepted_schemas is empty, THE SYSTEM SHALL return the channel's schema (opt-out of enforcement). IF the channel's schema is not in accepted_schemas and accepted_schemas is non-empty, THE SYSTEM SHALL return ProtocolError with a schema-incompatible reason code. The matching is by exact SchemaId equality (content hash comparison).",
+      "acceptance": [
+        "Channel schema hash_a with accepted [hash_a, hash_b] returns Ok(hash_a).",
+        "Channel schema hash_a with accepted [hash_b, hash_c] returns ProtocolError with schema-incompatible reason.",
+        "Channel schema hash_a with accepted [] returns Ok(hash_a) (opt-out).",
+        "Schema matching is exact equality — no partial matching or version compatibility.",
+        "The schema-incompatible reason code is distinct from other ProtocolError reason codes."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/schema.rs"],
+        "delete": []
+      },
+      "checklist": ["C35"],
+      "stories": ["S9"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement runtime payload validation against schemas — that is a bus-level concern.",
+    "SHALL NOT implement schema evolution or version compatibility — matching is exact hash equality.",
+    "SHALL NOT implement schema registry or storage — schemas are channel-level definitions.",
+    "SHALL NOT implement schema discovery or listing — the subscriber must know what schemas it accepts.",
+    "SHALL NOT define what a schema contains — SchemaId is an opaque content hash."
+  ],
+  "verification": [
+    "cargo check compiles the schema module with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: Subscribe frame round-trips with accepted_schemas preserved.",
+    "Test: SubscribeAck frame round-trips with selected_schema preserved.",
+    "Test: negotiate_schema matches channel schema in accepted set.",
+    "Test: negotiate_schema with disjoint sets returns schema-incompatible error.",
+    "Test: negotiate_schema with empty accepted set returns channel schema (opt-out)."
+  ]
+}

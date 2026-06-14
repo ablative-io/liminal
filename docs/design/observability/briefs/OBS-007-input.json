@@ -1,0 +1,311 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "OBS-007",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "OBS-007",
+    "cluster": "observability",
+    "title": "Implement structured logging with automatic trace context inclusion",
+    "depends_on": [
+      "OBS-006"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C16",
+      "C17"
+    ],
+    "stories": [
+      "S7",
+      "S8"
+    ],
+    "design_anchor": [
+      "ADR-004"
+    ],
+    "purpose": "Provide a structured logging facility that automatically includes the active trace context in every log entry. All log output is structured key-value pairs \u2014 never free-form strings. This enables operators to search logs by trace_id or span_id and correlate log entries with distributed traces. The logging layer reads the current TraceContext from OBS-006 and injects trace_id and span_id fields into every emitted record.",
+    "task": "Create crates/liminal/src/tracing/logging.rs containing the structured logging types and the LogEntry struct. Define LogLevel, LogEntry (with timestamp, level, message, trace context, and arbitrary key-value fields), and a LogEmitter trait for output sinks. Provide a global log function that captures the current trace context automatically. All entries are structured \u2014 no free-form string interpolation in the logging API.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define LogLevel enum",
+        "spec": "LogLevel SHALL have exactly five variants: Trace, Debug, Info, Warn, Error, ordered by increasing severity. LogLevel SHALL derive Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord. LogLevel SHALL NOT include Fatal or Off \u2014 those are not log levels.",
+        "acceptance": [
+          "LogLevel has exactly five variants: Trace, Debug, Info, Warn, Error",
+          "LogLevel derives Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord",
+          "LogLevel::Trace < LogLevel::Debug < LogLevel::Info < LogLevel::Warn < LogLevel::Error"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/tracing/logging.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Define LogEntry as a structured key-value record",
+        "spec": "LogEntry SHALL contain: timestamp (Instant), level (LogLevel), target (module path as &'static str), message (String), trace_context (Option<TraceContext>), and fields (Vec<(String, LogValue)>). LogEntry SHALL implement Debug. LogValue SHALL be an enum supporting String, i64, u64, f64, and bool variants. LogEntry SHALL NOT contain any unstructured text field beyond message \u2014 all additional data goes in fields.",
+        "acceptance": [
+          "LogEntry has fields: timestamp, level, target, message, trace_context, fields",
+          "LogEntry implements Debug",
+          "LogValue has variants: String, I64, U64, F64, Bool",
+          "No free-form text field exists beyond the message field"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/tracing/logging.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": [
+          "S8"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Automatic trace context inclusion in log entries",
+        "spec": "When a log entry is created within a conversation context, the active TraceContext SHALL be automatically captured and included in the LogEntry's trace_context field. The trace_id and span_id SHALL be available as searchable fields. When no trace context is active, trace_context SHALL be None. Trace context capture SHALL NOT require the caller to pass the context explicitly.",
+        "acceptance": [
+          "A log entry created within a conversation has trace_context == Some(ctx)",
+          "A log entry created outside a conversation has trace_context == None",
+          "trace_id and span_id from the trace context are accessible on the LogEntry",
+          "No explicit TraceContext parameter is required at the log call site"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/tracing/logging.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": [
+          "S7",
+          "S8"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Thread-local trace context storage for automatic capture",
+        "spec": "The current TraceContext SHALL be stored in a thread-local variable that is set when a conversation span begins and cleared when it ends. The log entry constructor SHALL read this thread-local to populate trace_context. This mechanism SHALL be transparent to application code. SHALL NOT use a global Mutex for context storage \u2014 thread-local is lock-free.",
+        "acceptance": [
+          "A thread-local TraceContext is set when entering a conversation span",
+          "The thread-local is cleared when leaving the conversation span",
+          "Log entries automatically read the thread-local for trace context",
+          "No Mutex or RwLock is used for context storage"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/tracing/logging.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": [
+          "S7"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Define LogEmitter trait for output sinks",
+        "spec": "LogEmitter SHALL be a trait with a single method: emit(entry: &LogEntry). This is the extension point for log output destinations (stderr, file, network). A NoopEmitter SHALL be provided that discards all entries. The active emitter SHALL be set globally via an atomic pointer. When no emitter is installed, logging SHALL be a no-op with zero overhead. LogEmitter SHALL require Send + Sync.",
+        "acceptance": [
+          "LogEmitter trait has fn emit(&self, entry: &LogEntry)",
+          "NoopEmitter implements LogEmitter and discards entries",
+          "A global optional LogEmitter is set via atomic pointer",
+          "When no emitter is installed, log calls perform no work",
+          "LogEmitter: Send + Sync is required"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/tracing/logging.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R6",
+        "title": "Provide structured log construction API",
+        "spec": "A LogEntryBuilder SHALL provide a fluent API for constructing log entries with typed key-value fields. The builder SHALL enforce that all entries are structured: field(key, value) adds a typed field. The builder SHALL automatically capture the current trace context. The builder SHALL NOT accept format strings or free-form interpolation \u2014 message is a static or pre-formatted string, additional data goes in fields.",
+        "acceptance": [
+          "LogEntryBuilder::new(level, target, message) creates a builder",
+          "builder.field(\"user_id\", LogValue::String(...)) adds a structured field",
+          "builder.build() returns a LogEntry with the current trace context",
+          "No format! or write! macro usage in the builder API"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/tracing/logging.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": [
+          "S8"
+        ]
+      },
+      {
+        "id": "R7",
+        "title": "Level-filtered emission",
+        "spec": "The global log configuration SHALL support a minimum LogLevel filter. Log entries below the minimum level SHALL be discarded before constructing the LogEntry, avoiding allocation. The filter check SHALL be a single atomic load. SHALL NOT impose a default minimum level \u2014 the filter is set explicitly by the caller.",
+        "acceptance": [
+          "Setting minimum level to Info causes Trace and Debug entries to be discarded",
+          "Discarded entries do not allocate a LogEntry or Vec<(String, LogValue)>",
+          "The level check is a single atomic load",
+          "No default minimum level is set \u2014 all levels are emitted until a filter is installed"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/tracing/logging.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R8",
+        "title": "Add logging module to tracing mod.rs",
+        "spec": "crates/liminal/src/tracing/mod.rs SHALL declare pub mod logging and re-export LogLevel, LogEntry, LogValue, LogEmitter, and LogEntryBuilder.",
+        "acceptance": [
+          "tracing/mod.rs contains pub mod logging",
+          "LogLevel, LogEntry, LogValue, LogEmitter, LogEntryBuilder are re-exported",
+          "cargo check -p liminal passes"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/tracing/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement any metrics collection \u2014 that is OBS-001 through OBS-005.",
+      "SHALL NOT implement trace context or span types \u2014 that is OBS-006. This brief only reads the trace context.",
+      "SHALL NOT implement log output formatting (JSON, logfmt) \u2014 those are LogEmitter implementations, not the logging core.",
+      "SHALL NOT use the log crate or tracing crate \u2014 the structured logging API is self-contained.",
+      "SHALL NOT allow free-form string interpolation in the logging API \u2014 all data must be structured fields.",
+      "SHALL NOT impose a default log level filter."
+    ],
+    "verification": [
+      "cargo check -p liminal passes clean.",
+      "cargo clippy -p liminal -- -D warnings passes clean.",
+      "cargo fmt -p liminal --check passes clean.",
+      "LogLevel ordering is Trace < Debug < Info < Warn < Error.",
+      "Log entries within a conversation automatically include trace_id and span_id.",
+      "Log entries outside a conversation have trace_context == None.",
+      "No Mutex or RwLock is used for trace context storage.",
+      "Logging is a no-op when no LogEmitter is installed."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C16",
+        "text": "Structured log entries include the active trace context (trace ID, span ID) when a trace context is available."
+      },
+      {
+        "id": "C17",
+        "text": "All log entries are structured key-value pairs, not free-form text strings."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S7",
+        "text": "As an Application Developer, I want trace context propagated automatically through conversations so that I can correlate log entries across all messages in a multi-step exchange without manual instrumentation."
+      },
+      {
+        "id": "S8",
+        "text": "As an Application Developer, I want structured log entries with trace IDs so that I can search logs by conversation and reconstruct the full message flow."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Metrics instrumentation points in channel and conversation actors must not block the actor's message processing. Recording a metric is a non-blocking operation."
+      },
+      {
+        "id": "CN6",
+        "text": "Trace context propagation is transparent to application code. No manual context passing required for intra-bus messages."
+      },
+      {
+        "id": "CN7",
+        "text": "Prometheus export renders a consistent snapshot. Metrics do not change mid-render -- the registry provides an atomic read."
+      },
+      {
+        "id": "CN8",
+        "text": "Structured log entries never contain free-form string messages. Every field is a typed key-value pair."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can see inside the running bus: which channels are hot, which consumers are under pressure, which conversations are stalling, and how messages flow across a multi-step exchange. The observability layer does not change how the bus works -- it makes the bus's existing behaviour visible.\n\nThe goal is operational confidence. An operator should be able to capacity-plan from metrics, diagnose delivery issues from traces, and correlate structured logs across conversation boundaries. An application developer should be able to trace a message through a conversation chain without instrumenting their own code.",
+    "design_path": "docs/design/observability",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can see inside the running bus: which channels are hot, which consumers are under pressure, which conversations are stalling, and how messages flow across a "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

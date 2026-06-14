@@ -1,0 +1,129 @@
+{
+  "id": "SRV-001",
+  "cluster": "server",
+  "title": "Establish liminal-server crate with binary entry point and error taxonomy",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C1", "C2", "C3"],
+  "stories": ["S1", "S9"],
+  "design_anchor": ["ADR-010"],
+  "purpose": "Bootstrap the liminal-server crate with Cargo.toml, a binary entry point at main.rs, a library root at lib.rs for testability, and the ServerError enum. This is the leaf dependency for every other server brief. The crate wraps the liminal library -- it adds deployment infrastructure (config, networking, clustering, health) but never messaging semantics. main.rs parses CLI arguments and delegates to lib.rs; lib.rs declares the module skeleton that SRV-002 through SRV-006 populate.",
+  "task": "Create the liminal-server crate from scratch. Set up the Cargo.toml with dependencies on liminal, beamr, clap, toml, and thiserror. Create main.rs as a thin binary entry point that parses the --config CLI argument and calls into the library. Create lib.rs with module declarations for config, server, cluster, health, and error -- all as skeleton modules that later briefs fill in. Define ServerError covering configuration, listener, cluster, shutdown, and health failure cases, implementing std::error::Error and Debug via thiserror. Register the crate as a workspace member.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Create crate manifest with liminal dependency",
+      "spec": "crates/liminal-server/Cargo.toml SHALL declare the liminal-server crate with liminal as a dependency. The crate SHALL use the workspace edition, rust-version, and lint settings. The crate SHALL depend on liminal, beamr, clap (with derive feature), toml, thiserror, and tracing. The crate SHALL NOT depend on aion, haematite, or any library that duplicates liminal's messaging primitives.",
+      "acceptance": [
+        "Cargo.toml exists at crates/liminal-server/Cargo.toml with [package] name = \"liminal-server\"",
+        "liminal appears in [dependencies] as a path dependency",
+        "beamr, clap, toml, thiserror, and tracing appear in [dependencies]",
+        "Workspace lints inherited via [lints] workspace = true",
+        "No dependency on aion, haematite, or any ORM/database library"
+      ],
+      "files": {
+        "create": ["crates/liminal-server/Cargo.toml"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": ["S9"]
+    },
+    {
+      "id": "R2",
+      "title": "Register crate as workspace member",
+      "spec": "The workspace Cargo.toml SHALL include crates/liminal-server in its members list. The crate SHALL compile as part of the workspace build.",
+      "acceptance": [
+        "Cargo.toml at workspace root lists \"crates/liminal-server\" in [workspace] members",
+        "cargo check --workspace includes liminal-server without error"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["Cargo.toml"],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Create binary entry point with CLI argument parsing",
+      "spec": "main.rs SHALL parse a --config <path> CLI argument via clap and call into the library crate to start the server. main.rs SHALL use anyhow for top-level error reporting. main.rs SHALL NOT contain business logic, configuration parsing, or server lifecycle code -- it delegates to lib.rs. IF --config is not provided, THEN main.rs SHALL exit with a usage error.",
+      "acceptance": [
+        "main.rs exists at crates/liminal-server/src/main.rs",
+        "Running the binary with --help prints usage including --config",
+        "Running without --config exits with a non-zero code and a usage message",
+        "main.rs contains fewer than 30 lines of logic (excluding use statements and comments)",
+        "cargo build -p liminal-server produces a single executable binary"
+      ],
+      "files": {
+        "create": ["crates/liminal-server/src/main.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": ["S1", "S9"]
+    },
+    {
+      "id": "R4",
+      "title": "Create library root with module declarations and re-exports",
+      "spec": "lib.rs SHALL declare pub mod for config, server, cluster, health, and error. lib.rs SHALL re-export ServerError and the primary public types from each module. lib.rs SHALL contain ONLY module declarations and re-exports -- no logic (CN3). Placeholder mod.rs files SHALL exist for config, server, cluster, and health modules so that cargo check passes.",
+      "acceptance": [
+        "lib.rs exists at crates/liminal-server/src/lib.rs",
+        "lib.rs declares pub mod config, server, cluster, health, error",
+        "lib.rs re-exports ServerError",
+        "lib.rs contains zero function definitions, zero trait definitions, zero struct definitions",
+        "Placeholder mod.rs files exist for config/, server/, cluster/, health/",
+        "cargo check -p liminal-server passes"
+      ],
+      "files": {
+        "create": [
+          "crates/liminal-server/src/lib.rs",
+          "crates/liminal-server/src/config/mod.rs",
+          "crates/liminal-server/src/server/mod.rs",
+          "crates/liminal-server/src/cluster/mod.rs",
+          "crates/liminal-server/src/health/mod.rs"
+        ],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Define ServerError enum with thiserror",
+      "spec": "ServerError SHALL cover: ConfigLoad (file read or parse failure), ConfigValidation (semantic validation failure), ListenerBind (address binding failure), ListenerAccept (connection accept failure), ClusterJoin (seed node connection failure), ClusterSync (state propagation failure), ShutdownTimeout (drain did not complete in time), ShutdownFlush (durable state flush failure), HealthEndpoint (HTTP health server failure). Each variant SHALL carry a descriptive message or source error. ServerError SHALL implement std::error::Error via thiserror and Debug. ServerError SHALL NOT use a catch-all variant -- every failure mode has a named variant.",
+      "acceptance": [
+        "ServerError is defined in crates/liminal-server/src/error.rs",
+        "All nine variants listed are present with appropriate fields",
+        "ServerError derives Debug and uses #[derive(thiserror::Error)]",
+        "ServerError is re-exported from lib.rs",
+        "No catch-all or Other variant exists"
+      ],
+      "files": {
+        "create": ["crates/liminal-server/src/error.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C3"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement configuration loading or parsing -- that is SRV-002.",
+    "SHALL NOT implement network listening or connection handling -- that is SRV-003.",
+    "SHALL NOT implement graceful shutdown logic -- that is SRV-004.",
+    "SHALL NOT implement clustering -- that is SRV-005.",
+    "SHALL NOT implement health endpoints -- that is SRV-006.",
+    "SHALL NOT add any messaging semantics -- the server delegates all publish, subscribe, and conversation logic to the liminal library crate (CN5)."
+  ],
+  "verification": [
+    "cargo check -p liminal-server passes clean.",
+    "cargo clippy -p liminal-server -- -D warnings passes clean.",
+    "cargo fmt -p liminal-server --check passes clean.",
+    "lib.rs contains only pub mod and pub use -- no logic.",
+    "ServerError implements std::error::Error and Debug.",
+    "Binary compiles to a single executable via cargo build -p liminal-server."
+  ]
+}

@@ -1,0 +1,86 @@
+{
+  "cluster": "durability",
+  "sections": [
+    {
+      "name": "Foundation",
+      "items": [
+        {"id": "C1", "text": "DurabilityError enum defined in crates/liminal/src/durability/error.rs with variants for haematite errors, sequence conflicts, cursor regression, dedup collisions, and configuration errors.", "done": false},
+        {"id": "C2", "text": "DurabilityError implements std::error::Error via thiserror with From conversions for all haematite error types.", "done": false},
+        {"id": "C3", "text": "DurabilityConfig struct defined in crates/liminal/src/durability/config.rs with fields for durability mode (ephemeral, durable, durable-dedup, durable-conversation), partition count, dedup TTL, and checkpoint policy.", "done": false},
+        {"id": "C4", "text": "DurableStore trait defined in crates/liminal/src/durability/store.rs with methods mapping to haematite's append, read_from, cas, and scan operations.", "done": false},
+        {"id": "C5", "text": "HaematiteStore struct implements DurableStore by delegating to haematite's EventStore API.", "done": false},
+        {"id": "C6", "text": "durability/mod.rs contains only pub mod declarations and pub use re-exports. No logic.", "done": false}
+      ]
+    },
+    {
+      "name": "Durable Channel Storage",
+      "items": [
+        {"id": "C7", "text": "Durable channel appends each published message to haematite via append(channel_id + partition, envelope, expected_seq) before acknowledging.", "done": false},
+        {"id": "C8", "text": "Message envelope contains payload, causal context, timestamp, publisher identity, and idempotency key (if provided).", "done": false},
+        {"id": "C9", "text": "Partition routing derives partition index from the channel's partition key function applied to the message.", "done": false},
+        {"id": "C10", "text": "Each partition maintains an independent monotonic sequence number tracked by the durable channel.", "done": false},
+        {"id": "C11", "text": "Sequence conflict on append (expected_seq mismatch) returns a DurabilityError::SequenceConflict, never retries silently.", "done": false}
+      ]
+    },
+    {
+      "name": "Consumer Cursors",
+      "items": [
+        {"id": "C12", "text": "Consumer cursor persists offset via cas(consumer_id + partition, old_offset, new_offset) to haematite.", "done": false},
+        {"id": "C13", "text": "cas failure (old_offset does not match stored value) returns DurabilityError::CursorRegression, never overwrites.", "done": false},
+        {"id": "C14", "text": "On consumer restart, cursor is read from haematite and processing resumes from the stored offset.", "done": false},
+        {"id": "C15", "text": "Checkpoint policy supports per-message, per-batch, and explicit-flush modes configured in DurabilityConfig.", "done": false}
+      ]
+    },
+    {
+      "name": "Message Replay",
+      "items": [
+        {"id": "C16", "text": "replay_from(partition, offset) returns an ordered iterator of messages from the given offset to the partition head.", "done": false},
+        {"id": "C17", "text": "Replay respects causal ordering within a partition: messages are returned in sequence number order.", "done": false},
+        {"id": "C18", "text": "Replay of an empty range (offset equals partition head) returns an empty iterator, not an error.", "done": false}
+      ]
+    },
+    {
+      "name": "Dedup Contract",
+      "items": [
+        {"id": "C19", "text": "Dedup cache stores idempotency key to processing receipt mapping in haematite via append(dedup_namespace + key_hash, receipt, expected_seq).", "done": false},
+        {"id": "C20", "text": "Duplicate publish with an existing idempotency key that has a receipt returns the stored receipt without re-delivering the message.", "done": false},
+        {"id": "C21", "text": "Duplicate publish with an existing idempotency key that has no receipt yet (processing in-flight) defers delivery per the channel's backpressure policy.", "done": false},
+        {"id": "C22", "text": "Background sweep removes dedup entries older than the configured TTL.", "done": false},
+        {"id": "C23", "text": "TTL expiry never removes an entry younger than the configured TTL, accounting for up to 1 second of clock skew.", "done": false}
+      ]
+    },
+    {
+      "name": "Processing Receipts",
+      "items": [
+        {"id": "C24", "text": "Processing receipt is an opaque bytes value provided by the consumer after successful processing.", "done": false},
+        {"id": "C25", "text": "Receipt is stored against the idempotency key in the dedup cache, making the entry complete.", "done": false}
+      ]
+    },
+    {
+      "name": "Durable Conversations",
+      "items": [
+        {"id": "C26", "text": "Durable conversation appends each state transition as an event via append(conversation_id, event, expected_seq) to haematite.", "done": false},
+        {"id": "C27", "text": "Event types include: message_received, processing_started, step_completed (with output), processing_finished, and error_occurred.", "done": false},
+        {"id": "C28", "text": "On restart, conversation actor replays its event log from haematite and reconstructs its processing state.", "done": false},
+        {"id": "C29", "text": "Re-delivery of an already-processed message is detected by checking the event log and results in a no-op skip.", "done": false},
+        {"id": "C30", "text": "Concurrent conversation instances are detected via expected_seq conflict on append; only one instance proceeds.", "done": false}
+      ]
+    },
+    {
+      "name": "Crash Recovery",
+      "items": [
+        {"id": "C31", "text": "Crash recovery for durable channels reconstructs partition sequence numbers from haematite's stored log.", "done": false},
+        {"id": "C32", "text": "Crash recovery for durable conversations replays the event log and resumes from the last completed step.", "done": false},
+        {"id": "C33", "text": "Crash recovery for consumer cursors reads the persisted offset and replays messages from that point.", "done": false},
+        {"id": "C34", "text": "Replaying the same event log twice produces identical conversation state (idempotent replay).", "done": false}
+      ]
+    },
+    {
+      "name": "Ephemeral Isolation",
+      "items": [
+        {"id": "C35", "text": "Ephemeral channels do not hold a DurableStore reference. The type system prevents accidental persistence calls.", "done": false},
+        {"id": "C36", "text": "Ephemeral channels perform zero haematite operations: no append, no read, no cas.", "done": false}
+      ]
+    }
+  ]
+}

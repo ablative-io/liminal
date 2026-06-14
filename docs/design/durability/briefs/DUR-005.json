@@ -1,0 +1,125 @@
+{
+  "id": "DUR-005",
+  "cluster": "durability",
+  "title": "Implement durable conversations with event-sourced state",
+  "depends_on": ["DUR-001"],
+  "blocked_by": [],
+  "checklist": ["C26", "C27", "C28", "C29", "C30"],
+  "stories": ["S8", "S10"],
+  "design_anchor": ["ADR-001", "ADR-006", "ADR-009"],
+  "purpose": "Implements the heavyweight exactly-once strategy from ADR-006: durable conversations whose processing state is event-sourced to haematite. Every state transition is recorded as an event. On crash and restart, the conversation replays its event log to reconstruct state. Re-delivery of an already-processed message is detected from the event history and results in a no-op. Exactly-once is emergent: make your processing resumable and idempotency is free. This complements DUR-004's lightweight dedup contract for complex multi-step consumers.",
+  "task": "Build the durable conversation module. Define the conversation event types (message_received, processing_started, step_completed, processing_finished, error_occurred). Implement event append with optimistic concurrency via expected_seq — concurrent conversation instances are detected by sequence conflict. Implement event log replay that reconstructs the conversation's processing state. Implement duplicate message detection: on re-delivery, check the event log for a matching message_received event and skip if already processed. Scope boundary: this brief handles conversation state and event sourcing. It does not handle crash recovery orchestration (DUR-006) or channel-level persistence (DUR-002).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define conversation event types",
+      "spec": "ConversationEvent enum SHALL include variants: MessageReceived { message_id: String, received_at: u64 }, ProcessingStarted { message_id: String }, StepCompleted { message_id: String, step_index: u32, output: Vec<u8> }, ProcessingFinished { message_id: String }, ErrorOccurred { message_id: String, error: String }. Each variant SHALL carry sufficient context to reconstruct the conversation state on replay. ConversationEvent SHALL implement Debug, Clone, and serialization to/from bytes.",
+      "acceptance": [
+        "ConversationEvent has exactly 5 variants: MessageReceived, ProcessingStarted, StepCompleted, ProcessingFinished, ErrorOccurred.",
+        "StepCompleted carries step_index (u32) and output (Vec<u8>).",
+        "All variants carry message_id for correlation.",
+        "ConversationEvent round-trips through serialize/deserialize.",
+        "ConversationEvent implements Debug and Clone."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/conversation.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C27"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Append state transitions with optimistic concurrency",
+      "spec": "WHEN a conversation transitions state, THE SYSTEM SHALL serialize the ConversationEvent and call DurableStore::append(conversation_id, event_bytes, expected_seq). The conversation SHALL track its current sequence number, advancing it after each successful append. IF append returns SequenceConflict, THE SYSTEM SHALL return DurabilityError::SequenceConflict — this indicates a concurrent conversation instance (split-brain during failover) and only one instance may proceed.",
+      "acceptance": [
+        "Each state transition calls DurableStore::append with the conversation's expected_seq.",
+        "A successful append advances the conversation's internal sequence counter.",
+        "A SequenceConflict is returned as DurabilityError::SequenceConflict, not retried.",
+        "The stream key for append is the conversation_id.",
+        "Two concurrent instances appending to the same conversation_id result in one succeeding and one getting SequenceConflict."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C26", "C30"],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Replay event log to reconstruct conversation state",
+      "spec": "WHEN a conversation is recovered (restarted after crash), THE SYSTEM SHALL read all events from DurableStore::read_from(conversation_id, 0, limit) and replay them in sequence order to reconstruct ConversationState. ConversationState SHALL track: which messages have been received, which are currently processing, which steps have completed (with outputs), and which messages have finished processing. Replaying the same event log twice SHALL produce identical state (idempotent replay).",
+      "acceptance": [
+        "Replay of [MessageReceived, ProcessingStarted, StepCompleted(0), StepCompleted(1), ProcessingFinished] produces state with message marked as fully processed with 2 step outputs.",
+        "Replay of the same log twice produces identical ConversationState.",
+        "ConversationState tracks processed_messages as a set of message_ids.",
+        "ConversationState tracks step outputs indexed by (message_id, step_index).",
+        "The replay sets the conversation's expected_seq to the last event's sequence + 1."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C28"],
+      "stories": ["S8", "S10"]
+    },
+    {
+      "id": "R4",
+      "title": "Detect and skip duplicate message re-delivery",
+      "spec": "WHEN a message is re-delivered to a durable conversation, THE SYSTEM SHALL check the ConversationState for a ProcessingFinished event with the same message_id. IF found, THE SYSTEM SHALL skip processing entirely (no-op). IF a MessageReceived event exists but ProcessingFinished does not, THE SYSTEM SHALL resume processing from the last completed step rather than restarting from scratch.",
+      "acceptance": [
+        "Re-delivery of a fully processed message (has ProcessingFinished) results in a no-op — no new events appended.",
+        "Re-delivery of a partially processed message (has StepCompleted but no ProcessingFinished) resumes from step_index = last_completed + 1.",
+        "Re-delivery of a never-seen message (no MessageReceived) proceeds with normal processing.",
+        "The duplicate check uses the ConversationState built from replay, not a separate cache."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C29"],
+      "stories": ["S8"]
+    },
+    {
+      "id": "R5",
+      "title": "Define ConversationState with message tracking and step outputs",
+      "spec": "ConversationState struct SHALL track the full processing state reconstructable from the event log. It SHALL contain: received_messages (set of message_ids that have MessageReceived events), in_progress (set of message_ids with ProcessingStarted but no terminal event), completed_steps (map from (message_id, step_index) to output bytes), finished_messages (set of message_ids with ProcessingFinished), and errored_messages (map from message_id to error string). ConversationState SHALL implement Debug.",
+      "acceptance": [
+        "ConversationState has fields: received_messages, in_progress, completed_steps, finished_messages, errored_messages.",
+        "is_fully_processed(message_id) returns true iff message_id is in finished_messages.",
+        "last_completed_step(message_id) returns the highest step_index in completed_steps for that message, or None.",
+        "ConversationState::default() returns an empty state with all collections empty.",
+        "ConversationState implements Debug."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C28", "C29"],
+      "stories": ["S8", "S10"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement durable channel storage — that is DUR-002.",
+    "SHALL NOT implement consumer cursor checkpointing — that is DUR-003.",
+    "SHALL NOT implement dedup key caching — that is DUR-004.",
+    "SHALL NOT implement crash recovery orchestration — that is DUR-006.",
+    "SHALL NOT retry on SequenceConflict — the conflict signals a concurrent instance, not a transient failure.",
+    "SHALL NOT implement conversation timeout or expiry — that is a future operations concern."
+  ],
+  "verification": [
+    "cargo check compiles the conversation module with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: replay of event log is idempotent (two replays produce equal ConversationState).",
+    "Test: re-delivery of processed message appends no new events.",
+    "Test: concurrent append detects SequenceConflict.",
+    "Test: partial processing resumes from last completed step."
+  ]
+}

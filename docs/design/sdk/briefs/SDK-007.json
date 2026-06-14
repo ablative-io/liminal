@@ -1,0 +1,105 @@
+{
+  "id": "SDK-007",
+  "cluster": "sdk",
+  "title": "Scaffold TypeScript SDK with Channel<T> interface and WASM bridge",
+  "depends_on": ["SDK-002"],
+  "blocked_by": [],
+  "checklist": ["C3", "C17", "C18"],
+  "stories": ["S7", "S9"],
+  "design_anchor": ["ADR-002", "ADR-008"],
+  "purpose": "Bootstrap the TypeScript SDK with package.json (ESM+CJS dual output), the Channel<T> generic interface with runtime type validation via JSON Schema (ADR-002), and the WASM bridge that compiles the Rust protocol layer for browser runtime (ADR-008). After this brief, TypeScript developers can import the SDK in both browser and Node.js environments using the same API (constraint CN8) and subscribe to typed channels.",
+  "task": "Create the sdks/agora-ts/ package with package.json, src/index.ts (public exports), src/channel.ts (Channel<T> interface and implementation), and src/wasm.ts (WASM bridge for browser runtime). Channel<T> is a generic interface where T provides runtime type validation via JSON Schema. The WASM bridge compiles the Rust protocol layer to WebAssembly and exposes it to TypeScript. The package builds to both ESM and CJS formats. IN SCOPE: package manifest, Channel<T> interface, runtime type validation, WASM bridge, dual ESM/CJS build. OUT OF SCOPE: conversations (SDK-008), backpressure types (SDK-008), connection management (SDK-008), type generator (SDK-008).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Create package.json with ESM and CJS build configuration",
+      "spec": "The TypeScript SDK package manifest SHALL declare the package name, version, and build configuration supporting both ESM and CJS output formats. The package SHALL declare TypeScript as a dev dependency and configure type declaration generation. The package SHALL NOT require different import paths for ESM vs CJS consumers.",
+      "acceptance": [
+        "package.json exists at sdks/agora-ts/package.json",
+        "Package exports field supports both ESM (import) and CJS (require) entry points",
+        "TypeScript declaration files (.d.ts) are generated alongside JavaScript output",
+        "npm install in sdks/agora-ts/ succeeds without errors",
+        "Package name is @agora/sdk or agora-sdk"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/package.json"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C3"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Define Channel<T> interface with runtime type validation",
+      "spec": "WHEN a TypeScript developer creates a Channel<T>, THE SYSTEM SHALL associate a JSON Schema with the type parameter T. WHEN a message is published, THE SYSTEM SHALL validate the message against the JSON Schema at runtime and reject messages that do not conform. WHEN a message is received via subscribe, THE SYSTEM SHALL validate the incoming payload against the schema before delivering it as type T. THE SYSTEM SHALL NOT accept messages that fail schema validation.",
+      "acceptance": [
+        "Channel<T> is a generic interface in channel.ts",
+        "Channel.publish(message: T) validates message against the associated JSON Schema",
+        "Channel.subscribe() returns an AsyncIterable<T> or Observable<T> of validated messages",
+        "Publishing a message that fails JSON Schema validation throws a typed error",
+        "Channel.requestReply<Req, Resp>(message: Req) sends and awaits a typed response",
+        "The JSON Schema is provided at channel creation time, not derived from T at runtime"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/src/channel.ts"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C17"],
+      "stories": ["S7", "S9"]
+    },
+    {
+      "id": "R3",
+      "title": "Implement WASM bridge compiling protocol from Rust",
+      "spec": "THE SYSTEM SHALL compile the agora wire protocol implementation from Rust to WebAssembly. THE SYSTEM SHALL expose WASM functions for connecting, sending, and receiving through the protocol layer. WHEN running in a browser environment, THE SYSTEM SHALL use the WASM bridge for protocol handling. WHEN running in Node.js, THE SYSTEM SHALL use either WASM or a native addon. THE SYSTEM SHALL NOT require conditional imports in application code between browser and Node.js (constraint CN8).",
+      "acceptance": [
+        "wasm.ts provides functions for protocol operations (connect, send, receive, close)",
+        "The WASM module is loadable in both browser and Node.js environments",
+        "Application code imports from the same path regardless of runtime environment",
+        "The WASM bridge handles protocol framing internally and exposes typed message payloads",
+        "No conditional import (if browser/if node) is required in application code"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/src/wasm.ts"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C18"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R4",
+      "title": "Define public API exports in index.ts",
+      "spec": "THE SYSTEM SHALL export all public types and interfaces from src/index.ts as the package entry point. THE SYSTEM SHALL re-export Channel, ChannelConfig, and error types. THE SYSTEM SHALL NOT export internal implementation details or WASM bridge internals.",
+      "acceptance": [
+        "index.ts re-exports Channel, ChannelConfig, and SdkError types",
+        "index.ts does not export WASM loader internals or protocol frame types",
+        "import { Channel } from '@agora/sdk' resolves successfully in both ESM and CJS",
+        "TypeScript declarations are available for all exported types"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/src/index.ts"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": ["S9"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement Conversation<T> interface (deferred to SDK-008).",
+    "SHALL NOT implement backpressure discriminated unions (deferred to SDK-008).",
+    "SHALL NOT implement connection lifecycle management (deferred to SDK-008).",
+    "SHALL NOT implement the type generator / codegen (deferred to SDK-008).",
+    "SHALL NOT require conditional imports between browser and server environments."
+  ],
+  "verification": [
+    "TypeScript compilation (tsc --noEmit) succeeds with no errors",
+    "ESM build produces valid .mjs output with .d.ts declarations",
+    "CJS build produces valid .cjs output with .d.ts declarations",
+    "Channel<T>.publish validates against JSON Schema and rejects invalid messages",
+    "WASM module loads in a Node.js test harness",
+    "No file exceeds 500 lines of code"
+  ]
+}

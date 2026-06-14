@@ -1,0 +1,80 @@
+{
+  "cluster": "core",
+  "sections": [
+    {
+      "name": "Crate Setup",
+      "items": [
+        {"id": "C1", "text": "crates/liminal/Cargo.toml exists with beamr as a dependency.", "done": false},
+        {"id": "C2", "text": "crates/liminal/src/lib.rs re-exports channel, conversation, envelope, and error modules.", "done": false}
+      ]
+    },
+    {
+      "name": "Channel Types",
+      "items": [
+        {"id": "C3", "text": "ChannelMode enum has Ephemeral and Durable variants.", "done": false},
+        {"id": "C4", "text": "ChannelConfig requires name, schema, and mode — no silent defaults.", "done": false},
+        {"id": "C5", "text": "ChannelHandle provides publish, subscribe, and close operations.", "done": false}
+      ]
+    },
+    {
+      "name": "Channel Actor",
+      "items": [
+        {"id": "C6", "text": "Channel actor is a beamr process owning its subscriber list, schema, and lifecycle state.", "done": false},
+        {"id": "C7", "text": "Channel actor delivers published messages to all matching subscribers.", "done": false},
+        {"id": "C8", "text": "Channel actor is supervised — crash restarts the individual channel without affecting others.", "done": false},
+        {"id": "C9", "text": "Ephemeral channel has zero persistence overhead — no haematite calls.", "done": false}
+      ]
+    },
+    {
+      "name": "Subscriptions",
+      "items": [
+        {"id": "C10", "text": "Subscription handle allows unsubscribe.", "done": false},
+        {"id": "C11", "text": "Subscriber removal on process death is automatic via beamr linking.", "done": false},
+        {"id": "C12", "text": "Subscription supports optional predicate filter on message content.", "done": false}
+      ]
+    },
+    {
+      "name": "Schema Validation",
+      "items": [
+        {"id": "C13", "text": "Schema type defines the expected message structure for a channel.", "done": false},
+        {"id": "C14", "text": "Publish rejects messages that do not match the channel's declared schema.", "done": false},
+        {"id": "C15", "text": "Schema validation happens at publish time, before any subscriber sees the message.", "done": false},
+        {"id": "C16", "text": "Schema evolution (add field with default) is supported without subscriber redeployment.", "done": false}
+      ]
+    },
+    {
+      "name": "Message Envelope",
+      "items": [
+        {"id": "C17", "text": "Envelope carries payload, causal context, schema identifier, publisher identity, and timestamp.", "done": false},
+        {"id": "C18", "text": "Causal context contains optional parent message reference for ordering.", "done": false},
+        {"id": "C19", "text": "Envelope is the unit of routing, persistence, and delivery throughout the system.", "done": false}
+      ]
+    },
+    {
+      "name": "Conversation Lifecycle",
+      "items": [
+        {"id": "C20", "text": "Conversation actor is a supervised beamr process.", "done": false},
+        {"id": "C21", "text": "Conversation actor is linked to its participants via beamr process links.", "done": false},
+        {"id": "C22", "text": "Participant crash is detected immediately via process linking — no heartbeat.", "done": false},
+        {"id": "C23", "text": "ConversationConfig specifies participants, timeout, and durability mode.", "done": false},
+        {"id": "C24", "text": "ConversationHandle exposes send, receive, and close operations.", "done": false},
+        {"id": "C25", "text": "Conversation state machine tracks current phase and accumulated context.", "done": false}
+      ]
+    },
+    {
+      "name": "Conversation Patterns",
+      "items": [
+        {"id": "C26", "text": "Request-reply pattern: send request, receive response, conversation closes.", "done": false},
+        {"id": "C27", "text": "Streaming pattern: one party sends a sequence, backpressure mediated by conversation.", "done": false},
+        {"id": "C28", "text": "Dispatch pattern: select a consumer, link, observe completion, route to another on crash.", "done": false}
+      ]
+    },
+    {
+      "name": "Error Types",
+      "items": [
+        {"id": "C29", "text": "LiminalError enum covers channel, conversation, schema, and delivery failure cases.", "done": false},
+        {"id": "C30", "text": "LiminalError implements std::error::Error and Debug.", "done": false}
+      ]
+    }
+  ]
+}

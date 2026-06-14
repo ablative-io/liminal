@@ -1,0 +1,283 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "ROUTING-002",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "ROUTING-002",
+    "cluster": "routing",
+    "title": "Implement predicate evaluation engine and routing table",
+    "depends_on": [
+      "ROUTING-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C6",
+      "C7",
+      "C16",
+      "C17",
+      "C18"
+    ],
+    "stories": [
+      "S1",
+      "S2"
+    ],
+    "design_anchor": [
+      "ADR-003"
+    ],
+    "purpose": "Implements the predicate evaluation engine and the routing table \u2014 the runtime machinery that makes predicate subscriptions work. The evaluation engine matches predicates against borrowed message fields with zero per-message allocation. The routing table maps channels to active subscriptions and supports concurrent updates without blocking evaluation. Together, these deliver the common-case routing path described in ADR-003.",
+    "task": "Create the evaluation engine in routing/evaluate.rs and the routing table in routing/table.rs. The evaluator takes a Predicate and a borrowed field accessor, returning a bool. It must short-circuit AND at first false and OR at first true, and must not allocate on the evaluation hot path. The routing table maps channel identifiers to subscription sets. Subscription registration and removal must be concurrent-safe (readers proceed while writers update). Publishing to a channel with no subscriptions completes without error. This brief does not implement predicate compilation or routing functions \u2014 those belong to ROUTING-003.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement zero-allocation predicate evaluation against borrowed fields",
+        "spec": "WHEN a Predicate is evaluated against a message field accessor, THE SYSTEM SHALL match comparison operators against field values by borrowing message fields without heap allocation on the hot path. WHEN a referenced field is missing from the message, THE SYSTEM SHALL return false without error. THE SYSTEM SHALL NOT allocate heap memory during predicate evaluation for any predicate variant.",
+        "acceptance": [
+          "evaluate(Predicate::Comparison { field: \"amount\", op: Gt, value: Integer(1000) }, accessor) returns true when accessor yields Integer(1500) for \"amount\".",
+          "evaluate(Predicate::Comparison { field: \"amount\", op: Gt, value: Integer(1000) }, accessor) returns false when accessor yields Integer(500) for \"amount\".",
+          "evaluate(Predicate::Exists { field: \"region\" }, accessor) returns true when accessor yields a value for \"region\".",
+          "evaluate(Predicate::Exists { field: \"missing\" }, accessor) returns false when accessor yields None for \"missing\".",
+          "evaluate(Predicate::Comparison { field: \"missing\", op: Eq, value: Text(\"x\") }, accessor) returns false without error when field is absent.",
+          "The evaluate function signature takes references only: fn evaluate(predicate: &Predicate, accessor: &dyn FieldAccessor) -> bool."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/routing/evaluate.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C6"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement short-circuit evaluation for boolean combinators",
+        "spec": "WHEN evaluating a Predicate::And, THE SYSTEM SHALL stop at the first predicate that evaluates to false and return false immediately. WHEN evaluating a Predicate::Or, THE SYSTEM SHALL stop at the first predicate that evaluates to true and return true immediately. WHEN evaluating a Predicate::Not, THE SYSTEM SHALL return the logical negation. Empty And SHALL evaluate to true (vacuous truth). Empty Or SHALL evaluate to false.",
+        "acceptance": [
+          "And([true_pred, false_pred, never_evaluated_pred]) returns false and does not evaluate the third predicate.",
+          "Or([false_pred, true_pred, never_evaluated_pred]) returns true and does not evaluate the third predicate.",
+          "Not(true_pred) returns false; Not(false_pred) returns true.",
+          "And([]) returns true (vacuous truth).",
+          "Or([]) returns false.",
+          "Short-circuit behavior is verifiable via a counting field accessor that tracks access count."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/evaluate.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C7"
+        ],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement range predicate evaluation",
+        "spec": "WHEN evaluating a Predicate::Range, THE SYSTEM SHALL return true if the field value is greater than or equal to the lower bound AND less than or equal to the upper bound (inclusive on both ends). WHEN the field is missing, THE SYSTEM SHALL return false. THE SYSTEM SHALL NOT return an error for type-mismatched range comparisons; they evaluate to false.",
+        "acceptance": [
+          "Range { field: \"amount\", lower: Integer(100), upper: Integer(200) } returns true for Integer(150).",
+          "Range { field: \"amount\", lower: Integer(100), upper: Integer(200) } returns true for Integer(100) (lower inclusive).",
+          "Range { field: \"amount\", lower: Integer(100), upper: Integer(200) } returns true for Integer(200) (upper inclusive).",
+          "Range { field: \"amount\", lower: Integer(100), upper: Integer(200) } returns false for Integer(50).",
+          "Range against a missing field returns false."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/evaluate.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Define routing table mapping channels to subscription sets",
+        "spec": "The routing module SHALL define a RoutingTable that maps channel identifiers to sets of active subscriptions. Each subscription SHALL associate a subscriber identity with a Predicate. The RoutingTable SHALL support resolving all matching subscriptions for a given channel and message. THE SYSTEM SHALL NOT impose a hard limit on subscriptions per channel.",
+        "acceptance": [
+          "RoutingTable::new() creates an empty table.",
+          "After registering a subscription with a predicate on channel \"orders\", resolve(\"orders\", message) returns the subscription when the predicate matches.",
+          "resolve(\"orders\", message) returns an empty set when no subscriptions match.",
+          "Multiple subscriptions on the same channel are independently evaluated."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/routing/table.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Implement concurrent-safe subscription management",
+        "spec": "WHEN a subscription is registered or removed, THE SYSTEM SHALL NOT block concurrent routing evaluations on the same table. THE SYSTEM SHALL use a read-write synchronization strategy that allows multiple concurrent readers during subscription updates.",
+        "acceptance": [
+          "Subscription registration returns without blocking a concurrent resolve call on a different thread.",
+          "Subscription removal returns without blocking a concurrent resolve call.",
+          "The RoutingTable is Send + Sync.",
+          "Registering a subscription during an active resolve does not corrupt the table state."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/table.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R6",
+        "title": "Handle publish to channels with no matching subscriptions",
+        "spec": "WHEN a message is published to a channel with no registered subscriptions, THE SYSTEM SHALL complete the resolve operation without error, returning an empty match set. WHEN a channel has subscriptions but none match the message, THE SYSTEM SHALL return an empty match set without error.",
+        "acceptance": [
+          "resolve(\"nonexistent-channel\", message) returns Ok with an empty set.",
+          "resolve(\"orders\", message) returns Ok with an empty set when all subscription predicates evaluate to false.",
+          "No error type is produced for zero-match scenarios."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/table.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement predicate-to-function compilation \u2014 that belongs to ROUTING-003.",
+      "SHALL NOT implement routing function loading or execution \u2014 that belongs to ROUTING-003.",
+      "SHALL NOT implement dispatch conversation logic \u2014 that belongs to ROUTING-004.",
+      "SHALL NOT define backpressure signals or capacity types \u2014 those belong to ROUTING-005.",
+      "SHALL NOT persist routing table state \u2014 table is reconstructed from consumer re-registration per design non-goals."
+    ],
+    "verification": [
+      "cargo clippy -p liminal --all-targets -- -D warnings passes clean.",
+      "cargo test -p liminal passes with all evaluation and routing table tests green.",
+      "cargo fmt --check passes clean.",
+      "evaluate.rs and table.rs are each under 500 lines including tests (CN1).",
+      "No heap allocation in evaluate() hot path \u2014 verify no Vec::new(), Box::new(), String::from() in evaluation code paths.",
+      "RoutingTable is Send + Sync \u2014 verified by static assertion or test."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-003",
+        "title": "Two-tier routing: predicates for the common case, functions for the flexible case",
+        "decision": "Two routing tiers: declarative predicates (WHERE clauses, indexable, optimizable by the bus) for the 90% case, and imperative routing functions (Gleam code running in beamr, hot-deployable, supervised) for the 10% case. Predicates compile to functions internally \u2014 one runtime model. The rejected alternative is predicates-only (insufficiently flexible for load-aware and state-dependent routing) or functions-only (not analyzable or optimizable).",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C6",
+        "text": "Predicate evaluation matches against borrowed message fields without per-message heap allocation."
+      },
+      {
+        "id": "C7",
+        "text": "Short-circuit evaluation: AND stops at first false, OR stops at first true."
+      },
+      {
+        "id": "C16",
+        "text": "The routing table maps channels to active subscriptions (predicate or function)."
+      },
+      {
+        "id": "C17",
+        "text": "Subscription registration and removal do not block concurrent routing evaluations."
+      },
+      {
+        "id": "C18",
+        "text": "Publishing to a channel with no matching subscriptions completes without error."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As an application developer, I want to subscribe to a channel with a predicate (WHERE amount > 1000 AND region = 'eu') so that my consumer only receives messages matching my criteria without filtering in application code."
+      },
+      {
+        "id": "S2",
+        "text": "As an application developer, I want to compose predicates with AND, OR, and NOT so that I can express complex routing rules declaratively without writing a routing function."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Predicate evaluation must not allocate per-message. Predicates evaluate against borrowed message fields with no heap allocation on the hot path."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure signals must be delivered to producers within the same publish round-trip. No asynchronous notification after the fact."
+      },
+      {
+        "id": "CN7",
+        "text": "Consumer crash detection via process link must trigger re-routing within one millisecond. No polling or heartbeat-based detection."
+      },
+      {
+        "id": "CN8",
+        "text": "Routing function execution is supervised and isolated. A panic or infinite loop in one routing function must not block evaluation for other channels."
+      },
+      {
+        "id": "CN9",
+        "text": "Adding or removing a consumer from a group must not pause, block, or restart dispatch for other consumers in the same group."
+      }
+    ],
+    "intention": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. Backpressure is not an afterthought bolted onto the consumer; it is a protocol primitive that producers see and react to in real time. Consumer groups do not rebalance. A dispatch conversation selects a consumer, links to it, observes completion, and re-routes on failure -- per message, with sub-millisecond crash detection via beamr process links. The experience should feel like the bus is an intelligent intermediary that understands both what messages mean and how much work consumers can absorb, rather than a dumb pipe that delivers bytes and hopes for the best.",
+    "design_path": "docs/design/routing",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

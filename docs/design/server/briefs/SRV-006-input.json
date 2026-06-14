@@ -1,0 +1,269 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SRV-006",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SRV-006",
+    "cluster": "server",
+    "title": "Implement HTTP health and readiness endpoints",
+    "depends_on": [
+      "SRV-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C17",
+      "C18"
+    ],
+    "stories": [
+      "S6",
+      "S8"
+    ],
+    "design_anchor": [
+      "ADR-010"
+    ],
+    "purpose": "Implement the HTTP health and readiness endpoints that container orchestrators and monitoring systems use to determine server status. /health returns 200 when the server process is alive -- it is a liveness probe. /ready returns 200 only when startup is fully complete: listener bound, config loaded, and cluster membership established (if configured). These are separate concerns: a process can be alive but not ready to serve traffic. This distinction is critical for Kubernetes deployments where routing traffic to an unready pod causes client errors. The health module is intentionally minimal -- metrics and observability are a separate cluster.",
+    "task": "Create the health module with three files. checks.rs implements the health and readiness check logic: health is always true when the process is running, readiness requires checking that the listener is bound, config is loaded, and cluster membership (if configured) is established. endpoint.rs runs a lightweight HTTP server on a separate port (configurable) that serves /health and /ready endpoints. mod.rs declares sub-modules and re-exports the public API.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement liveness health check",
+        "spec": "A health_check function SHALL return a HealthStatus indicating the server process is alive. The health check SHALL always return healthy when the process is running -- it is a liveness probe, not a readiness probe. HealthStatus SHALL be a struct with a status field (Healthy or Unhealthy) and an optional message. HealthStatus SHALL derive Debug and Clone.",
+        "acceptance": [
+          "health_check() exists in crates/liminal-server/src/health/checks.rs",
+          "health_check() returns HealthStatus::Healthy when the process is running",
+          "HealthStatus has status and optional message fields",
+          "HealthStatus derives Debug and Clone"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/health/checks.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": [
+          "S6"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement readiness check with startup gate conditions",
+        "spec": "A readiness_check function SHALL evaluate whether the server is fully ready to serve traffic. The check SHALL verify: (1) configuration is loaded and validated, (2) the network listener is bound and accepting connections, (3) IF cluster config is present, THEN cluster membership is established. IF any condition is not met, THEN the check SHALL return ReadinessStatus with not-ready and a list of unmet conditions. ReadinessStatus SHALL NOT report ready until all conditions are satisfied.",
+        "acceptance": [
+          "readiness_check() exists in crates/liminal-server/src/health/checks.rs",
+          "Returns not-ready if config is not yet loaded",
+          "Returns not-ready if listener is not yet bound",
+          "Returns not-ready if cluster config exists but membership is not established",
+          "Returns ready only when all applicable conditions are met",
+          "Unmet conditions are listed in the response"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/health/checks.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S8"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement HTTP server for health endpoints",
+        "spec": "A lightweight HTTP server SHALL serve the /health and /ready endpoints on a configurable port. The health HTTP server SHALL run on a separate port from the main wire protocol listener to avoid coupling health probes with application traffic. The HTTP server SHALL NOT depend on the main listener being bound -- it starts independently so that pre-startup readiness queries return not-ready rather than connection-refused.",
+        "acceptance": [
+          "HTTP server binds to a configurable health port",
+          "Health port is separate from the main wire protocol listen port",
+          "HTTP server starts before the main listener binds",
+          "HTTP server responds to requests even when the main listener is not yet bound"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/health/endpoint.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C17",
+          "C18"
+        ],
+        "stories": [
+          "S6",
+          "S8"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Wire /health endpoint returning 200 when alive",
+        "spec": "The HTTP server SHALL serve GET /health. WHEN the server process is alive, THEN /health SHALL return HTTP 200 with a JSON body containing the HealthStatus. The /health endpoint SHALL NOT check readiness conditions -- it is strictly a liveness probe. The response SHALL include a Content-Type: application/json header.",
+        "acceptance": [
+          "GET /health returns HTTP 200 when the process is running",
+          "Response body is JSON with a status field",
+          "Response includes Content-Type: application/json",
+          "/health does not evaluate readiness conditions"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/health/endpoint.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": [
+          "S6"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Wire /ready endpoint returning 200 only after full startup",
+        "spec": "The HTTP server SHALL serve GET /ready. WHEN all readiness conditions are met, THEN /ready SHALL return HTTP 200 with a JSON body containing the ReadinessStatus. WHEN any readiness condition is unmet, THEN /ready SHALL return HTTP 503 with a JSON body listing the unmet conditions. The /ready endpoint SHALL NOT return 200 before the listener is bound and config is loaded (P4).",
+        "acceptance": [
+          "GET /ready returns HTTP 200 after full startup",
+          "GET /ready returns HTTP 503 before full startup",
+          "503 response body lists unmet readiness conditions as JSON",
+          "200 response body is JSON with ready status",
+          "Test: query /ready before listener binds -- returns 503"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/health/endpoint.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S8"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Create health module structure with re-exports",
+        "spec": "health/mod.rs SHALL declare pub mod for checks and endpoint. health/mod.rs SHALL re-export HealthStatus, ReadinessStatus, and the health server start function. health/mod.rs SHALL contain ONLY module declarations and re-exports -- no logic (CN3).",
+        "acceptance": [
+          "health/mod.rs declares pub mod checks, endpoint",
+          "health/mod.rs re-exports HealthStatus, ReadinessStatus",
+          "health/mod.rs contains zero function definitions or struct definitions"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/health/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement metrics, tracing, or observability endpoints -- that is the observability cluster.",
+      "SHALL NOT serve any endpoint other than /health and /ready.",
+      "SHALL NOT add messaging semantics or expose channel state through health endpoints (CN5).",
+      "SHALL NOT implement authentication or authorization on health endpoints.",
+      "SHALL NOT couple the health HTTP server lifecycle to the main wire protocol listener."
+    ],
+    "verification": [
+      "cargo test -p liminal-server passes clean.",
+      "cargo clippy -p liminal-server -- -D warnings passes clean.",
+      "cargo fmt -p liminal-server --check passes clean.",
+      "/health returns 200 when the process is alive regardless of readiness state (P4).",
+      "/ready returns 200 only after full startup -- not before listener binds.",
+      "Health HTTP server runs on a separate port from the main listener.",
+      "HealthStatus and ReadinessStatus implement Debug."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C17",
+        "text": "HTTP health endpoint at /health returns 200 when the server process is alive."
+      },
+      {
+        "id": "C18",
+        "text": "HTTP readiness endpoint at /ready returns 200 only when startup is complete: listener bound, config loaded, and cluster membership established (if configured)."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S6",
+        "text": "As an Operator, I want to check server health via HTTP so that I can integrate with monitoring systems and alerting pipelines."
+      },
+      {
+        "id": "S8",
+        "text": "As a DevOps Engineer, I want a readiness probe endpoint that reports ready only after full startup so that Kubernetes does not route traffic to a server that cannot yet accept connections."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The server binary adds no messaging semantics. All publish, subscribe, and conversation logic delegates to the liminal library crate."
+      },
+      {
+        "id": "CN6",
+        "text": "Config validation runs to completion before any listener binds. An invalid config never results in a partially started server."
+      },
+      {
+        "id": "CN7",
+        "text": "Graceful shutdown completes durable state flush before process exit. Data loss on clean shutdown is a bug."
+      },
+      {
+        "id": "CN8",
+        "text": "Cluster membership uses beamr distribution exclusively. No custom consensus protocol, no gossip layer, no Raft implementation."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should feel like deploying any production-grade message broker: start, configure, cluster, monitor, and shut down gracefully. The server is a thin deployment wrapper, not a fork of the library -- every message still flows through the same channel and conversation primitives that embedded users get.\n\nFor teams that want the bus without embedding it, the server is the entry point. For teams that embed it, the server is how they run a remote node in a cluster topology. Both stories use the same binary.",
+    "design_path": "docs/design/server",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should f"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

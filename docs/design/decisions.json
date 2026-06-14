@@ -1,0 +1,197 @@
+{
+  "project": "agora",
+  "updated": "2026-06-14",
+  "decisions": [
+    {
+      "id": "ADR-001",
+      "scope": "project",
+      "status": "decided",
+      "title": "Conversations as the fundamental messaging unit, not messages",
+      "context": "Every existing messaging system (NATS, Kafka, RabbitMQ, Pulsar, Redis Streams) models communication as one-way delivery of opaque blobs. Request-reply, sagas, and streaming sessions are patterns assembled from one-way deliveries. This creates: correlation complexity, timeout management sprawl, orphaned replies, and the universal 'make your consumers idempotent' requirement.",
+      "decision": "The fundamental unit is the conversation \u2014 a supervised beamr process owning a structured exchange between parties \u2014 over the message. A conversation mediates lifecycle, failure handling, and (optionally) durability. Exchange patterns (request-reply, streaming, saga) are conversation types with different lifecycle rules, not special-case bolt-ons. The rejected alternative is the NATS/Kafka model: messages as the primitive, patterns assembled from messages.",
+      "quote": "",
+      "decided_by": "Frodo + Bono alignment",
+      "date": "2026-06-13",
+      "consequences": [
+        "The bus internally spawns a beamr process per active conversation",
+        "Request-reply is a first-class primitive, not a pattern",
+        "Consumer crash during processing is detected immediately via process links, not heartbeat timeouts",
+        "The wire protocol must carry conversation lifecycle frames (open, message, close, error), not just message delivery",
+        "Client SDKs expose conversation handles, not just publish/subscribe"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-002",
+      "scope": "project",
+      "status": "decided",
+      "title": "Typed channels with compile-time enforcement in Gleam and runtime validation for external producers",
+      "context": "Kafka's Schema Registry is a sidecar service. NATS has no schema support. RabbitMQ validates nothing. Pulsar has optional schema enforcement. In all cases, schema is either absent or bolted on after the fact, and validation happens at consume time (too late) rather than publish time.",
+      "decision": "Every channel declares its message type. Gleam producers get compile-time enforcement. External producers (Python, TypeScript, HTTP) get runtime validation at publish time. The rejected alternative is the NATS model: channels carry opaque bytes and consumers handle deserialization failures.",
+      "quote": "",
+      "decided_by": "Frodo + Bono alignment",
+      "date": "2026-06-13",
+      "consequences": [
+        "Channel creation requires a type definition (Gleam type or JSON Schema)",
+        "Publish rejects messages that don't match the channel's declared type",
+        "Schema evolution is a channel-level operation, not a sidecar concern",
+        "No separate schema registry service \u2014 types are part of the channel definition"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-003",
+      "scope": "project",
+      "status": "decided",
+      "title": "Two-tier routing: predicates for the common case, functions for the flexible case",
+      "context": "NATS uses subject wildcards. Kafka uses partition keys. RabbitMQ has exchange types (direct, fanout, topic, headers). All are static bindings declared at subscription time. Content-aware routing, load-aware routing, and affinity routing require application code outside the bus.",
+      "decision": "Two routing tiers: declarative predicates (WHERE clauses, indexable, optimizable by the bus) for the 90% case, and imperative routing functions (Gleam code running in beamr, hot-deployable, supervised) for the 10% case. Predicates compile to functions internally \u2014 one runtime model. The rejected alternative is predicates-only (insufficiently flexible for load-aware and state-dependent routing) or functions-only (not analyzable or optimizable).",
+      "quote": "",
+      "decided_by": "Frodo + Bono alignment",
+      "date": "2026-06-13",
+      "consequences": [
+        "The routing engine supports both declarative predicates and arbitrary Gleam functions",
+        "Predicate evaluation can be optimized (indexing, short-circuiting) by the bus",
+        "Routing functions run as supervised beamr processes with fault isolation",
+        "Routing logic is hot-deployable via content-hash module loading"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-004",
+      "scope": "project",
+      "status": "decided",
+      "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+      "context": "NATS has no backpressure (slow consumers drop messages). Kafka pushes backpressure to consumer lag monitoring (application-level). RabbitMQ has per-consumer prefetch (coarse). No existing bus makes backpressure part of the wire protocol as a typed signal producers can react to.",
+      "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+      "quote": "",
+      "decided_by": "Bono + Frodo alignment",
+      "date": "2026-06-13",
+      "consequences": [
+        "The wire protocol includes backpressure frames alongside message frames",
+        "Producers receive explicit feedback on delivery outcome",
+        "Consumers declare max-in-flight and buffer capacity at subscription time",
+        "Per-channel pressure policies govern automatic responses (spawn consumers, shed load, signal producers)"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-005",
+      "scope": "project",
+      "status": "decided",
+      "title": "Per-causal-chain ordering, not per-topic or per-partition",
+      "context": "Kafka orders per-partition (total ordering requires single partition, killing throughput). NATS orders per-subject. Both force a trade-off between ordering and parallelism. Two independent producers to the same topic should run in parallel; two causally dependent messages must be ordered.",
+      "decision": "Messages carry causal context (explicit parent reference or vector clock). The bus enforces happened-before ordering where causality demands it. Independent messages to the same channel run in parallel. Conversations naturally define causal chains. The rejected alternative is per-partition ordering (Kafka model: forces total ordering within a partition, or gives up ordering across partitions).",
+      "quote": "",
+      "decided_by": "Bono, adopted by Frodo",
+      "date": "2026-06-13",
+      "consequences": [
+        "Messages carry a causal_context field in their envelope",
+        "The bus maintains per-chain ordering without global ordering overhead",
+        "Independent producers to the same channel achieve full parallelism",
+        "Conversation ordering is a special case of causal ordering"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-006",
+      "scope": "project",
+      "status": "decided",
+      "title": "Two exactly-once strategies: lightweight dedup contract and heavyweight durable conversations",
+      "context": "Every messaging system either claims exactly-once with caveats (Kafka transactions, NATS JetStream double-ack) or says 'be idempotent.' Neither is honest. Simple consumers don't need event-sourced processing. Complex consumers shouldn't re-execute from scratch on every redelivery.",
+      "decision": "Two complementary strategies available per-channel. Lightweight: three-party dedup contract (producer idempotency key with TTL, bus deduplicates, consumer provides processing receipt). Heavyweight: durable conversations (consumer processing state is event-sourced, re-delivery triggers resume not re-execution \u2014 idempotency is emergent from resumable processing). The rejected alternative is a single exactly-once strategy (either too heavy for simple consumers or insufficient for complex ones).",
+      "quote": "",
+      "decided_by": "Bono + Frodo synthesis",
+      "date": "2026-06-13",
+      "consequences": [
+        "Channels declare their exactly-once strategy (none, dedup, durable)",
+        "Dedup channels maintain an idempotency key cache with configurable TTL",
+        "Durable conversation channels use the Aion event-sourcing model for processing state",
+        "The 'make your consumers idempotent' requirement is eliminated for durable conversation channels"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-007",
+      "scope": "project",
+      "status": "decided",
+      "title": "Conversation-mediated dispatch instead of Kafka-style consumer group rebalancing",
+      "context": "Kafka consumer group rebalancing is operationally disruptive: adding or removing a consumer triggers a stop-the-world partition reassignment that pauses all consumers in the group. NATS queue groups are simpler but still lack per-message routing control.",
+      "decision": "Consumer groups are modeled as routing conversations: a dispatch conversation selects a consumer from the group via the routing function, links to it, and observes completion. Consumer crash is detected immediately via the link and the message is routed to another consumer. No global rebalance, no stop-the-world. The rejected alternative is Kafka-style consumer group rebalancing (partition reassignment on membership changes).",
+      "quote": "",
+      "decided_by": "Frodo, confirmed by Bono",
+      "date": "2026-06-13",
+      "consequences": [
+        "No consumer group rebalancing protocol exists in the bus",
+        "Adding or removing consumers is seamless \u2014 routing functions adapt immediately",
+        "Per-message consumer selection enables affinity routing and load-aware dispatch",
+        "Worker failure detection is sub-millisecond (process link), not heartbeat-interval"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-008",
+      "scope": "project",
+      "status": "decided",
+      "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+      "context": "NATS-compatible protocol would give ecosystem tooling reuse but doesn't map to our conversation primitive (NATS has no concept of conversations, typed messages, or backpressure signals). gRPC adds per-message overhead unsuitable for high-throughput messaging.",
+      "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+      "quote": "",
+      "decided_by": "Frodo, confirmed by Bono",
+      "date": "2026-06-13",
+      "consequences": [
+        "Client libraries implement the custom protocol (no off-the-shelf NATS/gRPC client reuse)",
+        "The protocol is designed for the conversation model from the ground up",
+        "A NATS-compatible gateway can be built later if ecosystem reach is needed",
+        "Protocol versioning must be designed in from the start"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-009",
+      "scope": "project",
+      "status": "decided",
+      "title": "Haematite (prolly tree) as the storage backend, not a general-purpose database",
+      "context": "The messaging bus needs persistence for durable channels and conversations. The options are: use an existing embedded database (SQLite, RocksDB, sled), build on haematite (the beamr-native storage engine being designed in parallel), or support pluggable backends.",
+      "decision": "Haematite is the sole storage backend. Content-addressed prolly tree with WAL buffer gives us branchable state, structural merge, hash-based sync, and actor-per-shard write parallelism \u2014 all properties that directly benefit the bus (conversation state branching, multi-node sync, zero-contention writes). The rejected alternative is pluggable backends (splits testing surface, dilutes the branchable-state differentiator, and adds abstraction overhead for a benefit that doesn't exist yet).",
+      "quote": "",
+      "decided_by": "Bono + Frodo + Sir Patrick Stewart convergence",
+      "date": "2026-06-13",
+      "consequences": [
+        "Haematite is a build dependency for durable agora features",
+        "The bus's durability API maps directly to haematite's append/read/cas operations",
+        "Branchable conversation state is available from day one (not a future upgrade)",
+        "Ephemeral channels bypass haematite entirely \u2014 pure mailbox delivery"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    },
+    {
+      "id": "ADR-010",
+      "scope": "project",
+      "status": "decided",
+      "title": "Embedded-first architecture with standalone mode as a deployment option",
+      "context": "NATS is standalone-first. Kafka is standalone-only. Redis is standalone-only. The value proposition of building on beamr is zero-hop messaging between co-located producers and consumers \u2014 embedding the bus in the application process eliminates the network boundary entirely.",
+      "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+      "quote": "",
+      "decided_by": "Frodo, confirmed by Bono",
+      "date": "2026-06-13",
+      "consequences": [
+        "The core bus is a Rust crate with no network dependency",
+        "Embedded use requires only adding the crate as a dependency",
+        "The standalone binary wraps the crate with a network listener and configuration",
+        "Aion integration is zero-hop: workflows publish/subscribe through in-process channels"
+      ],
+      "supersedes": [],
+      "superseded_by": ""
+    }
+  ]
+}

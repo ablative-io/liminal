@@ -1,0 +1,278 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "AION-005",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "AION-005",
+    "cluster": "aion",
+    "title": "Implement worker registration via channel subscription",
+    "depends_on": [
+      "AION-001",
+      "AION-002"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C19",
+      "C20",
+      "C21",
+      "C22"
+    ],
+    "stories": [
+      "S6",
+      "S7",
+      "S12",
+      "S14"
+    ],
+    "design_anchor": [
+      "ADR-004",
+      "ADR-007"
+    ],
+    "purpose": "Workers register by subscribing to task queue channels with capacity metadata, replacing configuration-driven worker pools. Health is determined by subscription liveness -- a worker that crashes drops its subscription and the channel immediately stops routing to it. No heartbeat protocol, no health check endpoint, no registration service. Capacity declarations (max concurrent activities, activity type filter) are available to the routing function for load-aware dispatch (ADR-007). Scaling is additive: start a worker process, it subscribes to the task queue channel, the routing function begins including it. Scaling down is equally simple: the worker closes its subscription or crashes, and routing adapts immediately. This eliminates the operational surface of consumer group rebalancing (ADR-004 backpressure primitives carry capacity signals).",
+    "task": "Create worker.rs in crates/liminal/src/aion/. This module handles worker registration via channel subscription with capacity metadata, health-by-liveness tracking (subscription presence equals healthy), capacity declaration accessibility for the routing function, and automatic deregistration on subscription close or process crash. Workers subscribe to task queue channels (aion.dispatch.{namespace}.{task_queue}) using the channel naming from AION-001 channels.rs. The routing function in AION-002 dispatch.rs uses the capacity metadata from this module to make dispatch decisions. This brief does NOT implement a heartbeat or health-check protocol, a central worker registry service, or the routing function itself (that lives in the channel/dispatch layer).",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Worker registration via channel subscription",
+        "spec": "WHEN a worker process wants to receive activities, THE SYSTEM SHALL register the worker by subscribing to the task queue channel with WorkerCapacity metadata (max_concurrent, activity_types filter from AION-001 types.rs). The subscription SHALL use the dispatch_channel(namespace, task_queue) naming from channels.rs. WHEN the subscription succeeds, THE SYSTEM SHALL make the worker available to the routing function for dispatch. THE SYSTEM SHALL NOT require any configuration change, registry update, or coordination protocol to register a worker.",
+        "acceptance": [
+          "Calling register_worker(namespace, task_queue, capacity) subscribes to aion.dispatch.{namespace}.{task_queue} with WorkerCapacity metadata",
+          "After registration, the worker appears in the channel's subscriber pool and is eligible for routing",
+          "Registration requires no configuration file change and no call to a registry service",
+          "Multiple workers can register on the same task queue channel concurrently"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/aion/worker.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C19"
+        ],
+        "stories": [
+          "S6"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Health by subscription liveness",
+        "spec": "Worker health SHALL be determined exclusively by subscription liveness. WHILE a worker's subscription to the task queue channel is active, THE SYSTEM SHALL consider the worker healthy and eligible for dispatch. WHEN a worker's subscription drops (process crash, explicit close, network partition on distributed nodes), THE SYSTEM SHALL immediately consider the worker unhealthy and stop routing to it. THE SYSTEM SHALL NOT implement a heartbeat timer, health-check endpoint, or polling-based liveness check (constraint CN8).",
+        "acceptance": [
+          "A worker with an active subscription is returned by the routing function as dispatch-eligible",
+          "A worker whose subscription has dropped is not returned by the routing function",
+          "grep -rn 'heartbeat\\|health.check\\|health_check\\|keepalive\\|poll.*liveness' worker.rs returns no matches",
+          "Worker health transitions from healthy to unhealthy within the process link notification latency (no timer delay)",
+          "No background task periodically checks worker health"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/worker.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C20"
+        ],
+        "stories": [
+          "S12"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Capacity declarations accessible to routing",
+        "spec": "WHEN a worker registers with WorkerCapacity metadata, THE SYSTEM SHALL make that metadata accessible to the channel's routing function. The routing function SHALL be able to query each subscriber's max_concurrent and activity_types to make load-aware dispatch decisions. WHEN a worker's in-flight activity count reaches max_concurrent, THE SYSTEM SHALL signal this to the routing function so it can prefer workers with available capacity. THE SYSTEM SHALL NOT enforce capacity limits itself -- it provides the data, the routing function makes the decision.",
+        "acceptance": [
+          "The routing function can read a worker's WorkerCapacity (max_concurrent, activity_types) from subscription metadata",
+          "The routing function can query the current in-flight activity count for each worker",
+          "A worker at max_concurrent capacity is still visible to the routing function (not hidden), but its capacity state is queryable",
+          "The worker module does not enforce capacity limits -- it does not reject dispatch to a full worker"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/worker.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C21"
+        ],
+        "stories": [
+          "S7",
+          "S14"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Automatic deregistration on close or crash",
+        "spec": "WHEN a worker process closes its subscription to the task queue channel (graceful shutdown), THE SYSTEM SHALL remove the worker from the subscriber pool immediately. WHEN a worker process crashes, THE SYSTEM SHALL detect the crash via subscription liveness (process link) and remove the worker from the subscriber pool. In both cases, THE SYSTEM SHALL NOT route new activities to the deregistered worker. In-flight activities dispatched to a crashed worker are handled by AION-002's re-dispatch mechanism, not by this module.",
+        "acceptance": [
+          "A worker that calls unregister or closes its subscription is removed from the subscriber pool within the current dispatch cycle",
+          "A worker that crashes is removed from the subscriber pool via process link notification",
+          "No new dispatch conversations select a deregistered worker",
+          "Deregistration does not affect other workers' subscriptions or in-flight activities",
+          "In-flight activity handling for crashed workers is delegated to AION-002 (not handled in worker.rs)"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/worker.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C22"
+        ],
+        "stories": [
+          "S12"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Additive scaling without coordination",
+        "spec": "WHEN a new worker process starts and subscribes to a task queue channel, THE SYSTEM SHALL begin routing activities to it without any coordination with existing workers or dispatch conversations. WHEN an existing worker unsubscribes or crashes, THE SYSTEM SHALL stop routing to it without any coordination with remaining workers. THE SYSTEM SHALL NOT trigger consumer group rebalancing, partition reassignment, or stop-the-world membership changes on any subscriber pool change.",
+        "acceptance": [
+          "Starting a new worker and subscribing it to a task queue increases the pool size by 1 and the routing function includes it in the next dispatch",
+          "Stopping a worker decreases the pool size by 1 and the routing function excludes it from the next dispatch",
+          "No existing dispatch conversations are paused, interrupted, or restarted when a worker joins or leaves",
+          "grep -rn 'rebalanc\\|reassign\\|stop.the.world' worker.rs returns no matches",
+          "Scaling from 1 to N workers requires N-1 register_worker calls and zero coordination calls"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/worker.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S6",
+          "S12"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement a heartbeat or health-check protocol (constraint CN8).",
+      "SHALL NOT implement a central worker registry service -- registration is channel subscription.",
+      "SHALL NOT implement the routing function itself -- that lives in the channel/dispatch layer (AION-002).",
+      "SHALL NOT enforce capacity limits -- the worker module provides capacity data, the routing function decides.",
+      "SHALL NOT handle in-flight activity re-dispatch for crashed workers -- that is AION-002.",
+      "SHALL NOT implement consumer group rebalancing or partition reassignment."
+    ],
+    "verification": [
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes clean.",
+      "cargo test for the worker module passes (unit tests for registration, deregistration, crash detection, capacity metadata access).",
+      "No file in crates/liminal/src/aion/ exceeds 500 lines.",
+      "grep -rn 'heartbeat\\|health.check\\|health_check\\|keepalive\\|rebalanc' crates/liminal/src/aion/worker.rs returns no matches.",
+      "A worker that crashes is removed from the routing pool within process link notification latency (verified by test that kills a worker process and asserts it is no longer dispatch-eligible).",
+      "Scaling from 0 to 3 workers requires only 3 register_worker calls with no coordination or configuration (verified by integration test)."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      },
+      {
+        "id": "ADR-007",
+        "title": "Conversation-mediated dispatch instead of Kafka-style consumer group rebalancing",
+        "decision": "Consumer groups are modeled as routing conversations: a dispatch conversation selects a consumer from the group via the routing function, links to it, and observes completion. Consumer crash is detected immediately via the link and the message is routed to another consumer. No global rebalance, no stop-the-world. The rejected alternative is Kafka-style consumer group rebalancing (partition reassignment on membership changes).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C19",
+        "text": "Workers register by subscribing to task queue channels with capacity metadata (max concurrent activities, activity type filter)."
+      },
+      {
+        "id": "C20",
+        "text": "Worker health is determined by subscription liveness; no heartbeat protocol or health-check endpoint exists."
+      },
+      {
+        "id": "C21",
+        "text": "Worker capacity declarations are available to the routing function for load-aware dispatch."
+      },
+      {
+        "id": "C22",
+        "text": "Worker deregistration is automatic on subscription close or process crash."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S6",
+        "text": "As an Aion Worker, I want to register for activity dispatch by subscribing to a task queue channel so that I receive work through the same channel primitives the bus uses for all consumers."
+      },
+      {
+        "id": "S7",
+        "text": "As an Aion Worker, I want to declare my processing capacity at subscription time so that the routing function respects my concurrency limits when selecting me for dispatch."
+      },
+      {
+        "id": "S12",
+        "text": "As an Operator, I want to scale the worker pool by starting or stopping worker processes so that I can adjust capacity without configuration changes or rebalancing downtime."
+      },
+      {
+        "id": "S14",
+        "text": "As an Operator, I want worker pool health observable through channel subscription metrics so that I can detect capacity shortfalls before they stall workflow execution."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file exceeds 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains only pub mod declarations and pub use re-exports. No logic, no type definitions, no function bodies."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Activity dispatch must complete through a liminal conversation, never by direct function call to a worker. The conversation mediates lifecycle, failure, and recording."
+      },
+      {
+        "id": "CN6",
+        "text": "All non-deterministic channel operations must be recorder-compatible: the recorder can capture them and the resolver can replay them without re-executing the actual dispatch."
+      },
+      {
+        "id": "CN7",
+        "text": "Channel names follow the aion.{kind}.{namespace}.{id} convention enforced by the channels module. No ad-hoc string construction of channel names outside that module."
+      },
+      {
+        "id": "CN8",
+        "text": "Worker failure detection uses beamr process links exclusively. No heartbeat timers, no health-check polling, no gRPC keepalive."
+      }
+    ],
+    "intention": "When this cluster is complete, Aion dispatches activities, delivers signals, and streams workflow history entirely through liminal conversations and channels. The gRPC worker dispatch layer is gone. A workflow author writes schedule_activity and the bus handles routing, failure detection, and re-dispatch. An operator scales the worker pool by starting or stopping worker processes -- no rebalancing, no configuration changes, no downtime. The zero-hop embedded path means a beamr instance running both Aion and liminal dispatches activities without crossing a network boundary, and the same code path works identically when workers run on remote nodes connected via beamr distribution.\n\nThis is the cluster that proves the layer cake: haematite stores durable state, liminal mediates communication, Aion orchestrates workflows. If this integration surface is clean, every future consumer of liminal (the messaging product, the real-time channels product) inherits the same patterns.",
+    "design_path": "docs/design/aion",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, Aion dispatches activities, delivers signals, and streams workflow history entirely through liminal conversations and channels. The gRPC worker dispatch layer is gone. A"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

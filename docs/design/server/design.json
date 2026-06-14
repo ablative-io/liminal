@@ -1,0 +1,208 @@
+{
+  "cluster": "server",
+  "title": "Standalone Server",
+  "intention": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should feel like deploying any production-grade message broker: start, configure, cluster, monitor, and shut down gracefully. The server is a thin deployment wrapper, not a fork of the library -- every message still flows through the same channel and conversation primitives that embedded users get.\n\nFor teams that want the bus without embedding it, the server is the entry point. For teams that embed it, the server is how they run a remote node in a cluster topology. Both stories use the same binary.",
+  "problem": "Liminal is a Rust library crate (ADR-010). Embedding it requires writing a Rust binary, compiling it, and managing the beamr runtime directly. This is the right default for Aion and other Rust-native consumers, but it creates a barrier for three deployment scenarios:\n\n1. Teams that want liminal as infrastructure (like NATS or Kafka) without embedding it in their application. They need a standalone binary they can deploy, configure, and operate.\n\n2. Cluster topologies where some nodes are dedicated message brokers. The embedded library has no network listener -- it cannot accept connections from remote clients.\n\n3. Container-based deployments where the operator needs health endpoints, environment-based configuration, and graceful shutdown for orchestrator integration.\n\nWithout a standalone server, every deployment is bespoke.",
+  "solution": "The server cluster introduces a liminal-server crate that wraps the liminal library with four layers: configuration, network listening, clustering, and operational endpoints.\n\nConfiguration\n\nThe server reads its topology from a TOML config file (--config flag) or environment variables (LIMINAL_ prefix). Config defines: listen address, channels (name, schema, durability mode), routing rules, persistence paths, and cluster seed nodes. Environment variables override file values for the same field, enabling container-friendly deployment where the base config ships in the image and per-environment overrides come from the orchestrator.\n\nConfig validation runs at startup before any listener binds. Invalid configs (unknown channel types, unreachable persistence paths, malformed addresses) produce specific error messages and exit non-zero. The server never starts in a half-configured state.\n\nNetwork Listener\n\nThe server binds to the configured address and accepts wire protocol connections (the protocol itself is defined by the protocol cluster, RM-004). Each accepted connection spawns a beamr process that handles protocol framing, authentication, and channel routing. The connection process is supervised -- its crash does not affect other connections or the server itself.\n\nThe listener delegates all messaging logic to the liminal library crate. It translates wire protocol frames into channel operations (publish, subscribe, conversation lifecycle) and delivers responses back over the wire. The server adds no messaging semantics beyond what the library provides.\n\nClustering\n\nMultiple liminal-server instances form a cluster via beamr distribution. Cluster formation uses seed-node discovery: each server is configured with the addresses of one or more seed nodes. On startup, the server connects to its seeds via the beamr distribution protocol, which handles node authentication, connection maintenance, and failure detection.\n\nOnce clustered, channel subscriptions span nodes: a subscriber on node A receives messages published on node B. The liminal library's channel actors communicate across nodes via beamr's transparent remote messaging. No custom consensus protocol -- cluster membership and state propagation use beamr distribution primitives.\n\nGraceful Shutdown\n\nOn SIGTERM or SIGINT, the server enters a shutdown sequence: stop accepting new connections, drain existing connections (allow in-flight conversations to complete within a configurable timeout), flush all durable channel state to haematite, notify connected subscribers that the server is shutting down, and exit. If the drain timeout expires, remaining connections are closed forcefully.\n\nOperational Endpoints\n\nAn HTTP endpoint serves health and readiness probes. /health returns 200 when the server process is alive. /ready returns 200 only when startup is complete: the listener is bound, config is loaded, and cluster membership (if configured) is established. These separate concerns let orchestrators distinguish between a process that exists and a process that can serve traffic.",
+  "principles": [
+    {
+      "id": "P1",
+      "text": "The server is a thin wrapper. All messaging logic lives in the liminal library crate. The server adds configuration, network listening, and operational endpoints -- never messaging semantics."
+    },
+    {
+      "id": "P2",
+      "text": "Configuration is declarative and validated before startup. The server never enters a half-configured state or fails with a cryptic runtime error that config validation could have caught."
+    },
+    {
+      "id": "P3",
+      "text": "Shutdown is graceful by default. Connections drain, durable state flushes, subscribers are notified. Forceful termination is the timeout fallback, not the first response."
+    },
+    {
+      "id": "P4",
+      "text": "Health reflects reality. Endpoints report actual system state -- a server that cannot accept connections does not report ready, regardless of process liveness."
+    },
+    {
+      "id": "P5",
+      "text": "Clustering is beamr distribution. No custom consensus, no gossip protocol, no Raft. Beamr's distribution layer handles node discovery, failure detection, and transparent remote messaging."
+    },
+    {
+      "id": "P6",
+      "text": "Environment overrides file. Container deployments set env vars; bare-metal deployments use config files. Both work, env wins on conflict."
+    }
+  ],
+  "decisions": [
+    "ADR-010"
+  ],
+  "goals": [
+    "A liminal-server binary starts, loads a TOML config, binds to the configured address, and accepts wire protocol connections.",
+    "Configuration validation rejects invalid configs at startup with specific error messages -- the server never starts half-configured.",
+    "Environment variables with LIMINAL_ prefix override file-based config values for the same field.",
+    "Graceful shutdown drains connections, flushes durable state, and notifies subscribers before exiting.",
+    "Two or more liminal-server instances form a cluster via seed-node discovery and beamr distribution, with channel subscriptions spanning nodes.",
+    "HTTP /health and /ready endpoints return accurate status for container orchestration integration."
+  ],
+  "non_goals": [
+    {
+      "text": "Custom admin API for runtime channel creation",
+      "reason": "Channels are defined in config. Runtime channel management is a future cluster if demand materializes."
+    },
+    {
+      "text": "Multi-tenancy and namespace isolation",
+      "reason": "Scoped to a dedicated cluster if needed. The server operates as a single-tenant deployment."
+    },
+    {
+      "text": "TLS termination in the server process",
+      "reason": "Standard practice is TLS termination at the load balancer or sidecar proxy. The server accepts plaintext connections."
+    },
+    {
+      "text": "Authentication and authorization",
+      "reason": "Security is a cross-cutting concern that spans the wire protocol and SDK clusters. The server trusts connections it accepts."
+    },
+    {
+      "text": "Metrics and observability endpoints",
+      "reason": "Covered by the observability cluster (RM-008). The server exposes only health and readiness."
+    }
+  ],
+  "structure": [
+    {
+      "path": "Cargo.toml",
+      "note": "Workspace Cargo.toml \u2014 pre-existing",
+      "brief": ""
+    },
+    {
+      "path": "crates/liminal-server/Cargo.toml",
+      "note": "Crate manifest with liminal, beamr, toml, and clap dependencies",
+      "brief": "SRV-001"
+    },
+    {
+      "path": "crates/liminal-server/src/main.rs",
+      "note": "Binary entry point: CLI parsing, config loading, server start",
+      "brief": "SRV-001"
+    },
+    {
+      "path": "crates/liminal-server/src/lib.rs",
+      "note": "Library root for testability, public API re-exports",
+      "brief": "SRV-001"
+    },
+    {
+      "path": "crates/liminal-server/src/error.rs",
+      "note": "ServerError enum covering config, listener, cluster, and shutdown failures",
+      "brief": "SRV-001"
+    },
+    {
+      "path": "crates/liminal-server/src/config/mod.rs",
+      "note": "Config module root: pub mod and pub use only",
+      "brief": "SRV-002"
+    },
+    {
+      "path": "crates/liminal-server/src/config/types.rs",
+      "note": "ServerConfig, ChannelDef, RoutingRuleDef, ClusterConfig types",
+      "brief": "SRV-002"
+    },
+    {
+      "path": "crates/liminal-server/src/config/file.rs",
+      "note": "TOML file parsing into ServerConfig",
+      "brief": "SRV-002"
+    },
+    {
+      "path": "crates/liminal-server/src/config/env.rs",
+      "note": "Environment variable overlay with LIMINAL_ prefix",
+      "brief": "SRV-002"
+    },
+    {
+      "path": "crates/liminal-server/src/config/validation.rs",
+      "note": "Config validation: completeness, type correctness, reachability checks",
+      "brief": "SRV-002"
+    },
+    {
+      "path": "crates/liminal-server/src/server/mod.rs",
+      "note": "Server module root: pub mod and pub use only",
+      "brief": "SRV-003"
+    },
+    {
+      "path": "crates/liminal-server/src/server/listener.rs",
+      "note": "TCP listener bind, accept loop, connection spawning",
+      "brief": "SRV-003"
+    },
+    {
+      "path": "crates/liminal-server/src/server/connection.rs",
+      "note": "Per-connection beamr process: protocol framing delegation to liminal",
+      "brief": "SRV-003"
+    },
+    {
+      "path": "crates/liminal-server/src/server/shutdown.rs",
+      "note": "Graceful shutdown: drain, flush, notify, timeout",
+      "brief": "SRV-004"
+    },
+    {
+      "path": "crates/liminal-server/src/cluster/mod.rs",
+      "note": "Cluster module root: pub mod and pub use only",
+      "brief": "SRV-005"
+    },
+    {
+      "path": "crates/liminal-server/src/cluster/discovery.rs",
+      "note": "Seed-node discovery: connect to configured seeds via beamr distribution",
+      "brief": "SRV-005"
+    },
+    {
+      "path": "crates/liminal-server/src/cluster/membership.rs",
+      "note": "Cluster membership tracking: join, leave, failure detection",
+      "brief": "SRV-005"
+    },
+    {
+      "path": "crates/liminal-server/src/cluster/sync.rs",
+      "note": "Channel subscription and state propagation across cluster nodes",
+      "brief": "SRV-005"
+    },
+    {
+      "path": "crates/liminal-server/src/health/mod.rs",
+      "note": "Health module root: pub mod and pub use only",
+      "brief": "SRV-006"
+    },
+    {
+      "path": "crates/liminal-server/src/health/checks.rs",
+      "note": "Health and readiness check implementations",
+      "brief": "SRV-006"
+    },
+    {
+      "path": "crates/liminal-server/src/health/endpoint.rs",
+      "note": "HTTP server for /health and /ready endpoints",
+      "brief": "SRV-006"
+    }
+  ],
+  "inventory": [],
+  "constraints": [
+    {
+      "id": "CN1",
+      "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+    },
+    {
+      "id": "CN2",
+      "text": "No panics in production code. .unwrap() and .expect() only in tests."
+    },
+    {
+      "id": "CN3",
+      "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+    },
+    {
+      "id": "CN4",
+      "text": "All public types implement Debug. All error types implement std::error::Error."
+    },
+    {
+      "id": "CN5",
+      "text": "The server binary adds no messaging semantics. All publish, subscribe, and conversation logic delegates to the liminal library crate."
+    },
+    {
+      "id": "CN6",
+      "text": "Config validation runs to completion before any listener binds. An invalid config never results in a partially started server."
+    },
+    {
+      "id": "CN7",
+      "text": "Graceful shutdown completes durable state flush before process exit. Data loss on clean shutdown is a bug."
+    },
+    {
+      "id": "CN8",
+      "text": "Cluster membership uses beamr distribution exclusively. No custom consensus protocol, no gossip layer, no Raft implementation."
+    }
+  ]
+}

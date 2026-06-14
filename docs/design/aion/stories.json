@@ -1,0 +1,43 @@
+{
+  "cluster": "aion",
+  "personas": [
+    {
+      "name": "Aion Engine",
+      "role": "Dispatching activities and managing workflow lifecycle",
+      "stories": [
+        {"id": "S1", "text": "As the Aion Engine, I want to dispatch an activity to an available worker via a liminal conversation so that I can replace gRPC infrastructure with the same process-level primitives I already use for workflow supervision."},
+        {"id": "S2", "text": "As the Aion Engine, I want immediate notification when a worker crashes during activity execution so that I can re-dispatch the activity to another worker without waiting for a heartbeat timeout."},
+        {"id": "S3", "text": "As the Aion Engine, I want to deliver signals to running workflows through typed liminal channels so that signal delivery is validated and integrated with the same channel infrastructure used for activity dispatch."},
+        {"id": "S4", "text": "As the Aion Engine, I want to publish workflow history events to a durable channel so that consumers can stream history without coupling to the event store API."},
+        {"id": "S5", "text": "As the Aion Engine, I want all channel operations in the integration surface to be capturable by the recorder so that workflow recovery replays dispatch and signal operations deterministically."}
+      ]
+    },
+    {
+      "name": "Aion Worker",
+      "role": "Executing activities and reporting results",
+      "stories": [
+        {"id": "S6", "text": "As an Aion Worker, I want to register for activity dispatch by subscribing to a task queue channel so that I receive work through the same channel primitives the bus uses for all consumers."},
+        {"id": "S7", "text": "As an Aion Worker, I want to declare my processing capacity at subscription time so that the routing function respects my concurrency limits when selecting me for dispatch."},
+        {"id": "S8", "text": "As an Aion Worker, I want to report activity completion, failure, or heartbeat through the dispatch conversation handle so that the engine tracks my progress through a single communication path."}
+      ]
+    },
+    {
+      "name": "Workflow Author",
+      "role": "Writing workflow definitions in Gleam",
+      "stories": [
+        {"id": "S9", "text": "As a Workflow Author, I want activity dispatch to be transparent so that my workflow code uses the same schedule_activity API regardless of whether dispatch routes through liminal or a local call."},
+        {"id": "S10", "text": "As a Workflow Author, I want typed activity inputs and outputs validated at dispatch time so that schema mismatches are caught before the worker begins execution."},
+        {"id": "S11", "text": "As a Workflow Author, I want signals delivered reliably to my workflow so that I can react to external events with confidence that validated signals arrive in order."}
+      ]
+    },
+    {
+      "name": "Operator",
+      "role": "Running and monitoring Aion deployments",
+      "stories": [
+        {"id": "S12", "text": "As an Operator, I want to scale the worker pool by starting or stopping worker processes so that I can adjust capacity without configuration changes or rebalancing downtime."},
+        {"id": "S13", "text": "As an Operator, I want to stream workflow history from a channel so that I can build monitoring dashboards and debugging tools without querying the event store directly."},
+        {"id": "S14", "text": "As an Operator, I want worker pool health observable through channel subscription metrics so that I can detect capacity shortfalls before they stall workflow execution."}
+      ]
+    }
+  ]
+}

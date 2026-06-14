@@ -1,0 +1,279 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "OBS-005",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "OBS-005",
+    "cluster": "observability",
+    "title": "Implement Prometheus exposition format renderer from registry snapshots",
+    "depends_on": [
+      "OBS-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C18"
+    ],
+    "stories": [
+      "S5"
+    ],
+    "design_anchor": [
+      "ADR-004"
+    ],
+    "purpose": "Render the MetricsSnapshot from the registry into Prometheus text exposition format so that standard Prometheus scrapers can ingest liminal metrics. The renderer is a pure function from snapshot to string \u2014 it does not own an HTTP endpoint (that is the server cluster's responsibility). Rendering from a snapshot guarantees a consistent view across all metric families.",
+    "task": "Create crates/liminal/src/metrics/export.rs containing the Prometheus text exposition renderer. The renderer takes a MetricsSnapshot and produces a String in Prometheus 0.0.4 text format. It must handle counters, gauges, and histograms with labels, TYPE and HELP lines, and proper escaping. The renderer is a library function \u2014 HTTP serving is out of scope.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement render function from MetricsSnapshot to Prometheus text",
+        "spec": "export::render(snapshot: &MetricsSnapshot) -> String SHALL produce valid Prometheus 0.0.4 text exposition format. Each metric family SHALL have a # TYPE line and a # HELP line. Counters SHALL have type counter, gauges SHALL have type gauge, histograms SHALL have type histogram. The output SHALL be a single UTF-8 string with newline-separated lines. render SHALL NOT perform any I/O.",
+        "acceptance": [
+          "render(&snapshot) returns a String",
+          "Output contains # TYPE lines with correct metric types",
+          "Output contains # HELP lines for each metric family",
+          "Output ends with a newline",
+          "render is a pure function with no side effects"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/metrics/export.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Render counter metrics",
+        "spec": "Counter metrics SHALL be rendered as metric_name{labels} value where value is the counter's current u64 value. The metric name SHALL be sanitised to contain only [a-zA-Z0-9_:] characters. The # TYPE line SHALL declare the metric as counter.",
+        "acceptance": [
+          "A counter named 'channel_message_rate' with label channel='orders' and value 42 renders as channel_message_rate{channel=\"orders\"} 42",
+          "The # TYPE line reads # TYPE channel_message_rate counter",
+          "Invalid characters in metric names are replaced with underscores"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/export.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Render gauge metrics",
+        "spec": "Gauge metrics SHALL be rendered as metric_name{labels} value where value is the gauge's current i64 value. The # TYPE line SHALL declare the metric as gauge.",
+        "acceptance": [
+          "A gauge named 'active_conversations' with value 7 renders as active_conversations 7",
+          "A gauge with value -3 renders correctly with the negative sign",
+          "The # TYPE line reads # TYPE active_conversations gauge"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/export.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Render histogram metrics with buckets, sum, and count",
+        "spec": "Histogram metrics SHALL be rendered with _bucket{le=\"bound\"} lines for each bucket boundary, plus a _bucket{le=\"+Inf\"} line, a _sum line with the sum of all observations, and a _count line with the total number of observations. The # TYPE line SHALL declare the metric as histogram.",
+        "acceptance": [
+          "A histogram with buckets [0.01, 0.1, 1.0] renders _bucket lines for le=0.01, le=0.1, le=1.0, and le=+Inf",
+          "The _sum line contains the sum of all observed values",
+          "The _count line contains the total observation count",
+          "The # TYPE line reads # TYPE metric_name histogram"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/export.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Handle label escaping in Prometheus format",
+        "spec": "Label values SHALL be enclosed in double quotes. Backslashes, double quotes, and newlines within label values SHALL be escaped as \\\\, \\\", and \\n respectively (Prometheus escaping rules). Label names SHALL contain only [a-zA-Z0-9_] characters. Label names SHALL NOT start with __.",
+        "acceptance": [
+          "A label value containing a double quote is escaped as \\\"",
+          "A label value containing a backslash is escaped as \\\\",
+          "A label value containing a newline is escaped as \\n",
+          "Label names with invalid characters are sanitised"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/export.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Consistent snapshot rendering",
+        "spec": "The render function SHALL accept a MetricsSnapshot (an owned, point-in-time copy from OBS-001 R6). Because the snapshot is already a consistent copy, the renderer does not need additional synchronisation. The renderer SHALL NOT access the live MetricsRegistry directly. This guarantees that the rendered output reflects a single consistent moment.",
+        "acceptance": [
+          "render takes &MetricsSnapshot, not &MetricsRegistry",
+          "No reference to MetricsRegistry appears in export.rs",
+          "The same snapshot rendered twice produces identical output"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/export.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R7",
+        "title": "Add export module to metrics mod.rs",
+        "spec": "crates/liminal/src/metrics/mod.rs SHALL declare pub mod export and re-export the render function.",
+        "acceptance": [
+          "metrics/mod.rs contains pub mod export",
+          "The render function is re-exported from the metrics module",
+          "cargo check -p liminal passes"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/metrics/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement an HTTP endpoint or server \u2014 that is the server cluster's responsibility.",
+      "SHALL NOT define metric types or the registry \u2014 that is OBS-001.",
+      "SHALL NOT collect or record metrics \u2014 the renderer only reads snapshots.",
+      "SHALL NOT add a dependency on the prometheus crate \u2014 the renderer is hand-rolled.",
+      "SHALL NOT implement OpenMetrics format \u2014 only Prometheus 0.0.4 text exposition.",
+      "SHALL NOT buffer or cache rendered output \u2014 each call produces a fresh render."
+    ],
+    "verification": [
+      "cargo check -p liminal passes clean.",
+      "cargo clippy -p liminal -- -D warnings passes clean.",
+      "cargo fmt -p liminal --check passes clean.",
+      "render is a pure function taking &MetricsSnapshot and returning String.",
+      "Output parses as valid Prometheus 0.0.4 text exposition format.",
+      "Label escaping handles backslashes, double quotes, and newlines.",
+      "The same snapshot rendered twice produces byte-identical output."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C18",
+        "text": "Prometheus-compatible renderer in crates/liminal/src/metrics/export.rs produces text exposition format from a registry snapshot."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S5",
+        "text": "As an Operator, I want to scrape metrics via a Prometheus-compatible endpoint so that I can integrate with my existing monitoring infrastructure."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Metrics instrumentation points in channel and conversation actors must not block the actor's message processing. Recording a metric is a non-blocking operation."
+      },
+      {
+        "id": "CN6",
+        "text": "Trace context propagation is transparent to application code. No manual context passing required for intra-bus messages."
+      },
+      {
+        "id": "CN7",
+        "text": "Prometheus export renders a consistent snapshot. Metrics do not change mid-render -- the registry provides an atomic read."
+      },
+      {
+        "id": "CN8",
+        "text": "Structured log entries never contain free-form string messages. Every field is a typed key-value pair."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can see inside the running bus: which channels are hot, which consumers are under pressure, which conversations are stalling, and how messages flow across a multi-step exchange. The observability layer does not change how the bus works -- it makes the bus's existing behaviour visible.\n\nThe goal is operational confidence. An operator should be able to capacity-plan from metrics, diagnose delivery issues from traces, and correlate structured logs across conversation boundaries. An application developer should be able to trace a message through a conversation chain without instrumenting their own code.",
+    "design_path": "docs/design/observability",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can see inside the running bus: which channels are hot, which consumers are under pressure, which conversations are stalling, and how messages flow across a "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

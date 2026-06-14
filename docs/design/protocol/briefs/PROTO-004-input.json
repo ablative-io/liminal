@@ -1,0 +1,215 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "PROTO-004",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "PROTO-004",
+    "cluster": "protocol",
+    "title": "Implement stream multiplexing with stream table and allocation",
+    "depends_on": [
+      "PROTO-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C27",
+      "C28",
+      "C29"
+    ],
+    "stories": [
+      "S5",
+      "S6"
+    ],
+    "design_anchor": [
+      "ADR-008"
+    ],
+    "purpose": "Implements stream-based multiplexing that allows multiple conversations and subscriptions to share a single TCP connection. Each conversation or subscription gets a unique stream ID carried in the frame header. Stream 0 is reserved for connection-level control. Client-initiated streams use odd IDs; server-initiated streams (incoming conversation offers) use even IDs. The stream table tracks active streams and their lifecycle state.",
+    "task": "Build the multiplexing module. Define StreamId as a validated newtype with stream 0 reservation enforced. Implement StreamTable that tracks active streams per connection with their state (subscribing, active, closing). Implement stream ID allocation: clients allocate odd IDs starting from 1, servers allocate even IDs starting from 2. The allocator must be monotonic \u2014 IDs are never reused within a connection lifetime. Scope boundary: this brief handles stream identity, allocation, and tracking. It does not implement the frames that open/close streams (those are Subscribe, ConversationOpen, etc. from PROTO-001) or backpressure per stream (PROTO-005).",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define StreamId newtype with stream 0 reservation",
+        "spec": "StreamId SHALL be a newtype wrapping u32. Stream 0 SHALL be reserved for connection-level control frames (CN7). StreamId SHALL provide is_control() returning true for stream 0 and is_application() returning true for stream >= 1. StreamId SHALL implement Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord.",
+        "acceptance": [
+          "StreamId(0).is_control() returns true.",
+          "StreamId(0).is_application() returns false.",
+          "StreamId(1).is_application() returns true.",
+          "StreamId(1).is_control() returns false.",
+          "StreamId implements Debug, Clone, Copy, PartialEq, Eq, Hash."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/multiplex.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C27"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement StreamTable tracking active streams and their state",
+        "spec": "StreamTable SHALL maintain a map from StreamId to StreamState for all active streams on a connection. StreamState enum SHALL have variants: Subscribing, Active, Closing. StreamTable SHALL support: insert(stream_id, state), transition(stream_id, new_state), remove(stream_id), get(stream_id), and active_count(). WHEN transitioning a stream that does not exist, THE SYSTEM SHALL return ProtocolError. StreamTable SHALL implement Debug.",
+        "acceptance": [
+          "StreamState has exactly 3 variants: Subscribing, Active, Closing.",
+          "insert adds a new stream; inserting a duplicate returns ProtocolError.",
+          "transition updates an existing stream's state.",
+          "transition on a non-existent stream returns ProtocolError.",
+          "remove deletes a stream from the table.",
+          "active_count() returns the number of streams in the table."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/multiplex.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C28"
+        ],
+        "stories": [
+          "S6"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement client/server stream ID allocation",
+        "spec": "StreamAllocator SHALL allocate monotonically increasing stream IDs. Client-side allocator SHALL produce odd IDs: 1, 3, 5, 7, ... Server-side allocator SHALL produce even IDs: 2, 4, 6, 8, ... IDs SHALL never be reused within a connection lifetime. StreamAllocator SHALL be constructable as client-mode or server-mode. WHEN the u32 ID space is exhausted, THE SYSTEM SHALL return ProtocolError.",
+        "acceptance": [
+          "Client allocator produces IDs: 1, 3, 5, 7 in sequence.",
+          "Server allocator produces IDs: 2, 4, 6, 8 in sequence.",
+          "Calling next() after allocating ID u32::MAX - 1 (for the applicable parity) returns ProtocolError.",
+          "StreamAllocator::client() and StreamAllocator::server() are the two constructors.",
+          "IDs are never recycled \u2014 next() always advances."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/multiplex.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C29"
+        ],
+        "stories": [
+          "S5",
+          "S6"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement frame routing to streams \u2014 the stream ID is carried in the frame header (PROTO-001), this brief tracks state only.",
+      "SHALL NOT implement backpressure per stream \u2014 that is PROTO-005.",
+      "SHALL NOT implement stream-level error handling beyond allocation/tracking errors.",
+      "SHALL NOT reuse stream IDs within a connection lifetime.",
+      "SHALL NOT hardcode the maximum number of concurrent streams \u2014 the table grows as needed."
+    ],
+    "verification": [
+      "cargo check compiles the multiplex module with no errors.",
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes.",
+      "Test: client allocator produces odd IDs, server allocator produces even IDs.",
+      "Test: stream table rejects duplicate insert.",
+      "Test: stream table transition on missing stream returns error.",
+      "Test: StreamId(0).is_control() and StreamId(1).is_application()."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C27",
+        "text": "StreamId is a u32 carried in the frame header, with 0 reserved for connection control (CN7)."
+      },
+      {
+        "id": "C28",
+        "text": "StreamTable tracks active streams per connection with their state (subscribing, active, closing)."
+      },
+      {
+        "id": "C29",
+        "text": "Client-initiated streams use odd IDs; server-initiated streams (incoming conversation offers) use even IDs."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S5",
+        "text": "As a client library author, I want stream IDs in the frame header so that I can demultiplex frames to the correct conversation or subscription handler without inspecting the payload."
+      },
+      {
+        "id": "S6",
+        "text": "As an application developer, I want to open multiple subscriptions over a single connection so that I do not need to manage a connection pool for different channels."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Frame header is fixed-size (type + flags + stream ID + payload length) so that any frame can be skipped without parsing its payload."
+      },
+      {
+        "id": "CN6",
+        "text": "Codec encode/decode is infallible for valid frames: a successfully constructed frame always encodes, and valid wire bytes always decode. Malformed wire bytes produce ProtocolError, never a panic."
+      },
+      {
+        "id": "CN7",
+        "text": "Stream 0 is reserved for connection-level control frames. Application streams use IDs >= 1."
+      },
+      {
+        "id": "CN8",
+        "text": "Backpressure signals (Accept/Defer/Reject) travel on the same stream as the messages they regulate (P5)."
+      },
+      {
+        "id": "CN9",
+        "text": "Unknown frame types are skipped by reading their length prefix and discarding the payload, not by disconnecting (P7)."
+      },
+      {
+        "id": "CN10",
+        "text": "Every error condition produces an explicit error frame with a numeric reason code. No silent drops (P3)."
+      }
+    ],
+    "intention": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that single connection with conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context flowing natively in the wire format. The protocol should feel inevitable -- every frame carries exactly the information the bus needs to make routing, ordering, and pressure decisions, and nothing else. A developer reading a packet capture should be able to reconstruct the full conversation lifecycle without consulting application logs.\n\nThe protocol is the contract between the bus and every client SDK. Getting this right means SDKs in any language can be written against a stable, versioned binary spec rather than chasing an internal API. Getting it wrong means every SDK becomes a moving target and the bus's differentiators (conversations, typed messages, causal ordering, protocol-level backpressure) are lost in translation.",
+    "design_path": "docs/design/protocol",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

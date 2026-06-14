@@ -1,0 +1,257 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "ROUTING-001",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "ROUTING-001",
+    "cluster": "routing",
+    "title": "Define predicate types and routing module root",
+    "depends_on": [],
+    "blocked_by": [],
+    "checklist": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5"
+    ],
+    "stories": [
+      "S1",
+      "S2"
+    ],
+    "design_anchor": [
+      "ADR-003"
+    ],
+    "purpose": "Establishes the predicate type system that forms the declarative tier of the two-tier routing model (ADR-003). These types are the building blocks for content-aware subscriptions: comparison operators, boolean combinators, range checks, and field-existence tests. The evaluation engine (ROUTING-002) and predicate compiler (ROUTING-003) consume these types; this brief defines them without implementing evaluation logic.",
+    "task": "Create the routing module root and the predicate type definitions. Define the Predicate enum with variants for comparison, boolean combination, range, and field-existence. Define supporting types: ComparisonOp (six relational operators), FieldValue (typed operand values), and FieldPath (dot-notation message field accessor). Establish the missing-field contract: predicates against absent fields evaluate to false without error. This brief defines types only \u2014 evaluation logic belongs to ROUTING-002, compilation to ROUTING-003.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define comparison operator enum and comparison predicate variant",
+        "spec": "The predicate module SHALL define a ComparisonOp enum with exactly six variants (Eq, Ne, Gt, Lt, Gte, Lte) and a Predicate::Comparison variant taking a FieldPath, ComparisonOp, and FieldValue. The ComparisonOp enum SHALL NOT include pattern-matching or regex operators.",
+        "acceptance": [
+          "ComparisonOp enum has exactly six variants: Eq, Ne, Gt, Lt, Gte, Lte.",
+          "Predicate::Comparison { field: FieldPath, op: ComparisonOp, value: FieldValue } constructs a valid predicate.",
+          "ComparisonOp implements Clone, Debug, PartialEq, and Eq.",
+          "All six ComparisonOp variants round-trip through Debug formatting."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/routing/predicate.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C1"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Define boolean combinator predicates for arbitrary composition",
+        "spec": "The Predicate enum SHALL include And, Or, and Not variants for composing predicates into arbitrarily nested expressions. And and Or SHALL accept a Vec<Predicate>. Not SHALL accept a Box<Predicate>. Composition depth SHALL NOT be artificially limited.",
+        "acceptance": [
+          "Predicate::And(vec![p1, p2]) composes two predicates with logical AND.",
+          "Predicate::Or(vec![p1, p2]) composes two predicates with logical OR.",
+          "Predicate::Not(Box::new(p)) negates a single predicate.",
+          "Nested composition Predicate::And(vec![Predicate::Comparison{..}, Predicate::Or(vec![..])]) constructs without error.",
+          "Empty And(vec![]) and Or(vec![]) are valid constructions."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/predicate.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C2"
+        ],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Define range-check and field-existence predicate variants",
+        "spec": "The Predicate enum SHALL include a Range variant taking a FieldPath and two FieldValue bounds (lower inclusive, upper inclusive) for numeric and string field comparisons. The Predicate enum SHALL include an Exists variant taking a FieldPath for testing field presence. Range SHALL NOT support exclusive bounds in this brief.",
+        "acceptance": [
+          "Predicate::Range { field: FieldPath, lower: FieldValue, upper: FieldValue } constructs a range predicate.",
+          "Predicate::Exists { field: FieldPath } constructs a field-existence predicate.",
+          "Range with FieldValue::Integer(100) lower and FieldValue::Integer(200) upper compiles without error.",
+          "Range with FieldValue::Text(\"a\".into()) lower and FieldValue::Text(\"z\".into()) upper compiles without error."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/predicate.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C3",
+          "C4"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Define FieldValue enum, FieldPath accessor, and missing-field contract",
+        "spec": "The predicate module SHALL define a FieldValue enum with variants for String, Integer (i64), Float (f64), Boolean, and Null. The module SHALL define a FieldPath type wrapping a dot-notation string with a segments accessor. Predicates evaluated against a message missing the referenced field SHALL evaluate to false without returning an error. The FieldValue type SHALL NOT carry binary or structured (nested object) values.",
+        "acceptance": [
+          "FieldValue has exactly five variants: Text(String), Integer(i64), Float(f64), Boolean(bool), Null.",
+          "FieldPath::new(\"user.address.city\") constructs a valid path.",
+          "FieldPath::segments() on \"user.address.city\" returns an iterator yielding [\"user\", \"address\", \"city\"].",
+          "FieldPath::new(\"name\") with no dots yields a single segment [\"name\"].",
+          "FieldValue implements Clone, Debug, and PartialEq."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/predicate.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C5"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Wire routing module root with pub mod and re-exports",
+        "spec": "The routing module root SHALL contain only pub mod declarations and pub use re-exports per CN3. All public predicate types SHALL be re-exported from the routing module root.",
+        "acceptance": [
+          "routing/mod.rs contains pub mod predicate and no function or trait definitions.",
+          "Predicate, ComparisonOp, FieldValue, and FieldPath are accessible via use crate::routing::{Predicate, ComparisonOp, FieldValue, FieldPath}.",
+          "No logic (functions, trait impls, match arms) exists in mod.rs."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/routing/mod.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement predicate evaluation logic \u2014 evaluation belongs to ROUTING-002.",
+      "SHALL NOT implement predicate-to-function compilation \u2014 compilation belongs to ROUTING-003.",
+      "SHALL NOT define routing table or subscription types \u2014 those belong to ROUTING-002.",
+      "SHALL NOT define backpressure or capacity types \u2014 those belong to ROUTING-005.",
+      "SHALL NOT add serialization/deserialization derives unless required for type construction tests."
+    ],
+    "verification": [
+      "cargo clippy -p liminal --all-targets -- -D warnings passes clean.",
+      "cargo test -p liminal passes with all predicate type construction tests green.",
+      "cargo fmt --check passes clean.",
+      "routing/mod.rs contains only pub mod and pub use \u2014 no logic.",
+      "All public types implement Debug (CN4).",
+      "predicate.rs is under 500 lines including tests (CN1)."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-003",
+        "title": "Two-tier routing: predicates for the common case, functions for the flexible case",
+        "decision": "Two routing tiers: declarative predicates (WHERE clauses, indexable, optimizable by the bus) for the 90% case, and imperative routing functions (Gleam code running in beamr, hot-deployable, supervised) for the 10% case. Predicates compile to functions internally \u2014 one runtime model. The rejected alternative is predicates-only (insufficiently flexible for load-aware and state-dependent routing) or functions-only (not analyzable or optimizable).",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C1",
+        "text": "Comparison operators (eq, ne, gt, lt, gte, lte) defined as predicate types in routing::predicate."
+      },
+      {
+        "id": "C2",
+        "text": "Boolean combinators (AND, OR, NOT) defined for composing predicates into arbitrarily nested expressions."
+      },
+      {
+        "id": "C3",
+        "text": "Range check predicates (field BETWEEN lower AND upper) supported for numeric and string fields."
+      },
+      {
+        "id": "C4",
+        "text": "Field-existence predicate (HAS field) defined for optional message fields."
+      },
+      {
+        "id": "C5",
+        "text": "Predicates against missing message fields evaluate to false without error."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As an application developer, I want to subscribe to a channel with a predicate (WHERE amount > 1000 AND region = 'eu') so that my consumer only receives messages matching my criteria without filtering in application code."
+      },
+      {
+        "id": "S2",
+        "text": "As an application developer, I want to compose predicates with AND, OR, and NOT so that I can express complex routing rules declaratively without writing a routing function."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Predicate evaluation must not allocate per-message. Predicates evaluate against borrowed message fields with no heap allocation on the hot path."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure signals must be delivered to producers within the same publish round-trip. No asynchronous notification after the fact."
+      },
+      {
+        "id": "CN7",
+        "text": "Consumer crash detection via process link must trigger re-routing within one millisecond. No polling or heartbeat-based detection."
+      },
+      {
+        "id": "CN8",
+        "text": "Routing function execution is supervised and isolated. A panic or infinite loop in one routing function must not block evaluation for other channels."
+      },
+      {
+        "id": "CN9",
+        "text": "Adding or removing a consumer from a group must not pause, block, or restart dispatch for other consumers in the same group."
+      }
+    ],
+    "intention": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. Backpressure is not an afterthought bolted onto the consumer; it is a protocol primitive that producers see and react to in real time. Consumer groups do not rebalance. A dispatch conversation selects a consumer, links to it, observes completion, and re-routes on failure -- per message, with sub-millisecond crash detection via beamr process links. The experience should feel like the bus is an intelligent intermediary that understands both what messages mean and how much work consumers can absorb, rather than a dumb pipe that delivers bytes and hopes for the best.",
+    "design_path": "docs/design/routing",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

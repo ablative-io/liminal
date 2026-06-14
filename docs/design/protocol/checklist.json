@@ -1,0 +1,90 @@
+{
+  "cluster": "protocol",
+  "sections": [
+    {
+      "name": "Crate Setup",
+      "items": [
+        {"id": "C1", "text": "crates/liminal/src/protocol/mod.rs exists with pub mod declarations for all protocol submodules and no logic (CN3).", "done": false},
+        {"id": "C2", "text": "crates/liminal/src/protocol/error.rs defines ProtocolError with variants for every error condition and numeric reason codes.", "done": false}
+      ]
+    },
+    {
+      "name": "Frame Format",
+      "items": [
+        {"id": "C3", "text": "Frame header is a fixed-size binary prefix containing frame type (u8), flags (u8), stream ID (u32), and payload length (u32).", "done": false},
+        {"id": "C4", "text": "FrameType enum covers all frame categories: Connect, ConnectAck, ConnectError, Disconnect, Subscribe, SubscribeAck, SubscribeError, Unsubscribe, Publish, PublishAck, PublishError, ConversationOpen, ConversationMessage, ConversationClose, ConversationError, Accept, Defer, Reject, Ping, Pong.", "done": false},
+        {"id": "C5", "text": "Each Frame variant holds typed fields matching its frame category, not raw bytes.", "done": false},
+        {"id": "C6", "text": "All Frame variants and FrameType implement Debug (CN4).", "done": false},
+        {"id": "C7", "text": "Frame construction validates invariants: stream 0 for control frames, stream >= 1 for application frames (CN7).", "done": false}
+      ]
+    },
+    {
+      "name": "Codec",
+      "items": [
+        {"id": "C8", "text": "encode() writes a frame to a byte buffer as header + payload with correct length prefix.", "done": false},
+        {"id": "C9", "text": "decode() reads a frame from a byte buffer, returning the frame and the number of bytes consumed.", "done": false},
+        {"id": "C10", "text": "decode() returns ProtocolError for malformed input, never panics (CN6).", "done": false},
+        {"id": "C11", "text": "Round-trip property holds: decode(encode(frame)) == frame for every frame type.", "done": false},
+        {"id": "C12", "text": "decode() skips unknown frame types by reading the length prefix and discarding the payload (CN9).", "done": false}
+      ]
+    },
+    {
+      "name": "Message Envelope",
+      "items": [
+        {"id": "C13", "text": "MessageEnvelope contains schema_id (content type hash), causal_context, and payload bytes.", "done": false},
+        {"id": "C14", "text": "MessageEnvelope serializes deterministically: the same fields always produce the same byte sequence.", "done": false},
+        {"id": "C15", "text": "Publish and ConversationMessage frames carry a MessageEnvelope, not raw payload bytes.", "done": false}
+      ]
+    },
+    {
+      "name": "Causal Context",
+      "items": [
+        {"id": "C16", "text": "CausalContext type represents an optional parent message reference and a vector clock entry.", "done": false},
+        {"id": "C17", "text": "CausalContext is extractable from a message-carrying frame without deserializing the application payload (P1).", "done": false},
+        {"id": "C18", "text": "CausalContext serializes as part of the MessageEnvelope, not as a separate frame field.", "done": false}
+      ]
+    },
+    {
+      "name": "Connection Lifecycle",
+      "items": [
+        {"id": "C19", "text": "ConnectionState enum defines states: Connecting, Authenticating, Active, Closing, Closed.", "done": false},
+        {"id": "C20", "text": "State machine rejects frames invalid for the current state and returns ProtocolError with the appropriate reason code.", "done": false},
+        {"id": "C21", "text": "Connect frame carries the client's supported protocol version range and an opaque auth token.", "done": false},
+        {"id": "C22", "text": "ConnectAck frame carries the selected protocol version and server capabilities.", "done": false},
+        {"id": "C23", "text": "Ping/Pong frames are valid only in the Active state and travel on stream 0.", "done": false}
+      ]
+    },
+    {
+      "name": "Protocol Versioning",
+      "items": [
+        {"id": "C24", "text": "ProtocolVersion type defines major and minor version components.", "done": false},
+        {"id": "C25", "text": "Version negotiation selects the highest mutually supported version from the client's range and the server's supported set.", "done": false},
+        {"id": "C26", "text": "Incompatible version ranges produce ConnectError with a version-mismatch reason code.", "done": false}
+      ]
+    },
+    {
+      "name": "Multiplexing",
+      "items": [
+        {"id": "C27", "text": "StreamId is a u32 carried in the frame header, with 0 reserved for connection control (CN7).", "done": false},
+        {"id": "C28", "text": "StreamTable tracks active streams per connection with their state (subscribing, active, closing).", "done": false},
+        {"id": "C29", "text": "Client-initiated streams use odd IDs; server-initiated streams (incoming conversation offers) use even IDs.", "done": false}
+      ]
+    },
+    {
+      "name": "Backpressure Signals",
+      "items": [
+        {"id": "C30", "text": "Accept, Defer, and Reject are distinct frame types carrying the referenced message ID on the same stream as the original publish (CN8).", "done": false},
+        {"id": "C31", "text": "Per-stream pressure state tracks outstanding (unacknowledged) messages and transitions between normal, deferred, and rejecting.", "done": false},
+        {"id": "C32", "text": "Subscribe frame includes max_in_flight declaration so the bus knows consumer capacity.", "done": false}
+      ]
+    },
+    {
+      "name": "Schema Negotiation",
+      "items": [
+        {"id": "C33", "text": "Subscribe frame includes an array of accepted schema IDs (content type hashes) the subscriber can handle.", "done": false},
+        {"id": "C34", "text": "SubscribeAck frame includes the selected schema ID the bus will use for messages on that subscription.", "done": false},
+        {"id": "C35", "text": "Schema mismatch (no overlap between subscriber's accepted schemas and channel's declared schema) produces SubscribeError with a schema-incompatible reason code.", "done": false}
+      ]
+    }
+  ]
+}

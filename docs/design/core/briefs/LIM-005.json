@@ -1,0 +1,119 @@
+{
+  "id": "LIM-005",
+  "cluster": "core",
+  "title": "Implement conversation patterns: request-reply, streaming, and dispatch",
+  "depends_on": [
+    "LIM-004"
+  ],
+  "blocked_by": [],
+  "checklist": [
+    "C26",
+    "C27",
+    "C28"
+  ],
+  "stories": [
+    "S4",
+    "S8",
+    "S9",
+    "S10"
+  ],
+  "design_anchor": [
+    "ADR-001",
+    "ADR-007"
+  ],
+  "purpose": "Implement the three core conversation patterns as helpers built on the conversation actor from LIM-004. Request-reply replaces the NATS inbox kludge (ADR-001). Streaming mediates backpressure through the conversation process. Dispatch selects a consumer, links, observes completion, and routes to another on crash (ADR-007).",
+  "task": "Build pattern helpers in conversation/patterns.rs that create and configure conversation actors for each exchange pattern. Request-reply: one request \u2192 one response \u2192 conversation closes automatically. Streaming: one party sends a sequence, conversation mediates backpressure by controlling delivery rate. Dispatch: conversation selects a consumer from a pool (round-robin for now \u2014 the routing cluster adds intelligent selection), links, observes completion, routes to another consumer if the selected one crashes.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Implement request-reply pattern",
+      "spec": "WHEN a caller initiates a request-reply conversation, the system SHALL spawn a conversation actor linking the caller and the handler. The caller SHALL send one request message. The handler SHALL send one response message. WHEN the response is delivered to the caller, the conversation SHALL close automatically. IF the handler crashes before responding, THEN the conversation SHALL detect it immediately and return LiminalError::ParticipantCrashed to the caller. IF the conversation times out, THEN it SHALL return LiminalError::ConversationTimeout.",
+      "acceptance": [
+        "ask(channel, request) -> Result<Response, LiminalError> creates a conversation, sends request, waits for response, closes",
+        "Handler crash before response returns ParticipantCrashed (not a timeout)",
+        "Timeout returns ConversationTimeout",
+        "Conversation process is cleaned up after completion (no leak)",
+        "Test: successful request-reply; handler crash; timeout \u2014 all three paths"
+      ],
+      "files": {
+        "create": [
+          "crates/liminal/src/conversation/patterns.rs"
+        ],
+        "modify": [
+          "crates/liminal/src/conversation/mod.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [
+        "C26"
+      ],
+      "stories": [
+        "S4",
+        "S8",
+        "S10"
+      ]
+    },
+    {
+      "id": "R2",
+      "title": "Implement streaming pattern",
+      "spec": "WHEN a streaming conversation is created, one party (producer) sends a sequence of messages through the conversation actor. The conversation actor SHALL mediate delivery to the consumer, applying backpressure by deferring delivery when the consumer's mailbox exceeds a configurable depth. WHEN the producer signals end-of-stream, the conversation SHALL close.",
+      "acceptance": [
+        "stream(producer, consumer, config) creates a streaming conversation",
+        "Producer sends messages via conversation handle; consumer receives via mailbox",
+        "Conversation defers delivery when consumer mailbox depth exceeds threshold",
+        "End-of-stream signal from producer closes the conversation",
+        "Test: producer sends 100 messages to a slow consumer \u2014 conversation mediates delivery"
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal/src/conversation/patterns.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [
+        "C27"
+      ],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Implement dispatch pattern with crash rerouting",
+      "spec": "WHEN work arrives for dispatch, the conversation SHALL select a consumer from a pool (round-robin in this brief \u2014 the routing cluster upgrades to intelligent selection). The conversation SHALL link to the selected consumer and observe completion. IF the selected consumer crashes, THEN the conversation SHALL detect it immediately via the process link and route the work to another consumer from the pool. IF no consumers remain, THEN the conversation SHALL fail with LiminalError::DeliveryFailed.",
+      "acceptance": [
+        "dispatch(pool, work) creates a dispatch conversation",
+        "Conversation selects a consumer from the pool (round-robin)",
+        "Conversation links to the selected consumer",
+        "Consumer crash \u2192 conversation detects via EXIT \u2192 selects another consumer",
+        "No consumers remaining \u2192 DeliveryFailed error",
+        "Test: dispatch to 3-consumer pool; crash first consumer \u2192 reroute to second; crash all \u2192 DeliveryFailed"
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal/src/conversation/patterns.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [
+        "C28"
+      ],
+      "stories": [
+        "S9"
+      ]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement intelligent routing (load-aware, affinity) \u2014 that is the routing cluster. Dispatch uses round-robin only.",
+    "SHALL NOT implement saga or compensation patterns \u2014 those are a future extension.",
+    "SHALL NOT implement durable conversation persistence \u2014 that is the durability cluster.",
+    "SHALL NOT implement backpressure protocol signals (accept/defer/reject) \u2014 that is the routing cluster. Streaming uses simple mailbox depth checking."
+  ],
+  "verification": [
+    "cargo test -p liminal passes clean.",
+    "cargo clippy -p liminal -- -D warnings passes clean.",
+    "Request-reply completes in a single call from the caller's perspective.",
+    "Dispatch crash detection is via process link, not timeout.",
+    "All conversation processes are cleaned up after pattern completion."
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "id": "SDK-006",
+  "cluster": "sdk",
+  "title": "Implement Gleam conversation handlers and schema derivation",
+  "depends_on": ["SDK-005"],
+  "blocked_by": [],
+  "checklist": ["C15"],
+  "stories": ["S6"],
+  "design_anchor": ["ADR-001"],
+  "purpose": "Deliver the Gleam conversation handler behaviour (init, handle_message, handle_timeout, terminate) per ADR-001's conversation-as-fundamental-unit model, and the compile-time schema derivation module that extracts schema definitions from Gleam record types. Conversation handlers let Gleam developers author request-reply and saga logic in an OTP-style callback pattern running in beamr.",
+  "task": "Create conversation.gleam and schema.gleam in sdks/agora-gleam/src/agora/. The conversation module defines a behaviour with four callbacks: init (returns initial state), handle_message (processes incoming message, returns updated state and optional reply), handle_timeout (handles inactivity), and terminate (cleanup). The schema module provides compile-time schema derivation from Gleam record types, producing schema metadata compatible with agora's channel type definitions. IN SCOPE: behaviour definition, callback signatures, schema derivation. OUT OF SCOPE: transport (handled by FFI from SDK-005), channel logic (SDK-005).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define conversation handler behaviour",
+      "spec": "THE SYSTEM SHALL define a conversation handler behaviour in conversation.gleam that Gleam modules implement to participate in agora conversations. The behaviour SHALL define a state type parameter that the handler manages across callback invocations.",
+      "acceptance": [
+        "A Gleam module can declare that it implements the conversation handler behaviour",
+        "The behaviour is parameterised over a state type S and message types",
+        "The behaviour is importable from agora/conversation"
+      ],
+      "files": {
+        "create": ["sdks/agora-gleam/src/agora/conversation.gleam"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R2",
+      "title": "Implement init, handle_message, handle_timeout, and terminate callbacks",
+      "spec": "WHEN a conversation is opened, THE SYSTEM SHALL invoke the handler's init callback to produce initial state. WHEN a message arrives, THE SYSTEM SHALL invoke handle_message with the current state and message, returning updated state and an optional reply. WHEN a conversation times out, THE SYSTEM SHALL invoke handle_timeout with the current state. WHEN a conversation is closing, THE SYSTEM SHALL invoke terminate with the final state for cleanup. THE SYSTEM SHALL NOT allow a handler to skip any of the four callbacks.",
+      "acceptance": [
+        "init(config) returns Result(state, SdkError)",
+        "handle_message(state, message) returns Result(#(state, Option(reply)), SdkError)",
+        "handle_timeout(state) returns Result(TimeoutAction, SdkError) where TimeoutAction is Continue or Close",
+        "terminate(state, reason) returns Nil and is guaranteed to be called on conversation end",
+        "A module missing any of the four callbacks produces a compile-time error"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["sdks/agora-gleam/src/agora/conversation.gleam"],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R3",
+      "title": "Implement compile-time schema derivation from Gleam types",
+      "spec": "THE SYSTEM SHALL provide a schema module that derives schema definitions from Gleam record types at compile time. WHEN a Gleam record type is annotated or used as a channel message type, THE SYSTEM SHALL produce schema metadata containing field names, field types, and structural constraints. THE SYSTEM SHALL NOT require external schema definition files for Gleam-native types.",
+      "acceptance": [
+        "schema.gleam exports a derive_schema function or type-class approach for Gleam records",
+        "Schema derivation produces field names and their Gleam types as metadata",
+        "A record with fields name: String, age: Int produces schema with two fields of corresponding types",
+        "The derived schema is compatible with the SchemaMetadata format from the Rust SDK",
+        "No external .json or .yaml schema file is required for Gleam-defined types"
+      ],
+      "files": {
+        "create": ["sdks/agora-gleam/src/agora/schema.gleam"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": ["S6"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement transport or connection logic.",
+    "SHALL NOT modify channel publish/subscribe logic from SDK-005.",
+    "SHALL NOT re-implement FFI bindings -- uses existing bindings from SDK-005.",
+    "SHALL NOT add new dependencies on the Rust SDK beyond what SDK-005 established."
+  ],
+  "verification": [
+    "gleam check in sdks/agora-gleam/ succeeds with conversation and schema modules",
+    "gleam format --check in sdks/agora-gleam/ reports no formatting issues",
+    "A test module implementing the conversation handler behaviour compiles successfully",
+    "A test module missing one callback produces a compile error",
+    "Schema derivation from a test record produces expected field metadata",
+    "No file exceeds 500 lines of code"
+  ]
+}

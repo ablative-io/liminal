@@ -1,0 +1,53 @@
+{
+  "cluster": "observability",
+  "sections": [
+    {
+      "name": "Metrics Infrastructure",
+      "items": [
+        {"id": "C1", "text": "Metrics module at crates/liminal/src/metrics/mod.rs contains only pub mod and pub use declarations.", "done": false},
+        {"id": "C2", "text": "MetricsRegistry defined in crates/liminal/src/metrics/registry.rs holds all metric collectors and supports atomic snapshot reads.", "done": false}
+      ]
+    },
+    {
+      "name": "Channel Metrics",
+      "items": [
+        {"id": "C3", "text": "Channel message rate tracked as a counter per channel, incremented on each successful publish.", "done": false},
+        {"id": "C4", "text": "Channel subscriber count tracked as a gauge per channel, reflecting current live subscribers.", "done": false},
+        {"id": "C5", "text": "Durable channel queue depth tracked as a gauge per channel, reflecting messages awaiting acknowledgement.", "done": false},
+        {"id": "C6", "text": "Channel delivery latency tracked as a histogram per channel, measuring time from publish call to subscriber delivery.", "done": false}
+      ]
+    },
+    {
+      "name": "Conversation Metrics",
+      "items": [
+        {"id": "C7", "text": "Active conversation count tracked as a gauge, reflecting currently open conversations across all channels.", "done": false},
+        {"id": "C8", "text": "Conversation completion rate tracked as a counter, incremented when a conversation reaches terminal state.", "done": false},
+        {"id": "C9", "text": "Conversation duration tracked as a histogram, measuring time from conversation open to close.", "done": false},
+        {"id": "C10", "text": "Conversation error rate tracked as a counter, incremented when a conversation terminates with an error.", "done": false}
+      ]
+    },
+    {
+      "name": "Pressure Metrics",
+      "items": [
+        {"id": "C11", "text": "Reject rate tracked as a counter per channel, incremented when a message is rejected due to consumer capacity.", "done": false},
+        {"id": "C12", "text": "Defer rate tracked as a counter per channel, incremented when a message is deferred into a buffer.", "done": false},
+        {"id": "C13", "text": "Capacity utilization tracked as a gauge per consumer, computed as in-flight messages divided by declared capacity.", "done": false}
+      ]
+    },
+    {
+      "name": "Tracing and Logging",
+      "items": [
+        {"id": "C14", "text": "TraceContext type defined in crates/liminal/src/tracing/context.rs carrying a trace ID and span ID.", "done": false},
+        {"id": "C15", "text": "Every conversation spawns a trace span that propagates to all messages within the conversation.", "done": false},
+        {"id": "C16", "text": "Structured log entries include the active trace context (trace ID, span ID) when a trace context is available.", "done": false},
+        {"id": "C17", "text": "All log entries are structured key-value pairs, not free-form text strings.", "done": false}
+      ]
+    },
+    {
+      "name": "Metrics Export",
+      "items": [
+        {"id": "C18", "text": "Prometheus-compatible renderer in crates/liminal/src/metrics/export.rs produces text exposition format from a registry snapshot.", "done": false}
+      ]
+    }
+  ]
+}

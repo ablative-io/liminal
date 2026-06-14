@@ -1,0 +1,333 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "LIM-002",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "LIM-002",
+    "cluster": "core",
+    "title": "Implement channel actor with subscriber management and message delivery",
+    "depends_on": [
+      "LIM-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C11",
+      "C12"
+    ],
+    "stories": [
+      "S3",
+      "S6",
+      "S7",
+      "S12",
+      "S14",
+      "S5"
+    ],
+    "design_anchor": [
+      "ADR-001",
+      "ADR-010"
+    ],
+    "purpose": "Implement the channel actor \u2014 the beamr process that owns a channel's subscriber list, delivers published messages to all matching subscribers, and handles graceful shutdown. This is the runtime heart of the channel primitive. Ephemeral channels only \u2014 no persistence (C9).",
+    "task": "Build the channel actor as a beamr process. The actor owns its subscriber list, accepts publish/subscribe/unsubscribe/close commands via its mailbox, and fans out published messages to all active subscribers. Subscribers are added via process linking \u2014 when a subscriber process dies, the link notification automatically removes it from the list (C11). The actor is supervised (C8) so a crash restarts the individual channel without affecting others. Predicate-filtered subscriptions (C12) evaluate the predicate at delivery time and skip non-matching subscribers. Ephemeral channels have zero persistence overhead (C9). Also implement the channel registry \u2014 a process that maps channel names to actor PIDs and provides create/lookup/list/close operations.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement channel actor process",
+        "spec": "The channel actor SHALL be a beamr process that receives commands (Publish, Subscribe, Unsubscribe, Close, ListSubscribers) via its mailbox. The actor SHALL own its subscriber list as an in-memory data structure. WHEN the actor receives a Publish command, it SHALL deliver the message to all active subscribers. WHEN the actor receives a Close command, it SHALL notify all subscribers and terminate normally.",
+        "acceptance": [
+          "Channel actor is spawned as a beamr process via Scheduler::spawn",
+          "Actor handles Publish, Subscribe, Unsubscribe, Close, and ListSubscribers commands",
+          "Publish fans out the message to all active subscribers",
+          "Close sends a channel-closed notification to all subscribers before terminating",
+          "Actor mailbox processing uses selective receive"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/channel/actor.rs"
+          ],
+          "modify": [
+            "crates/liminal/src/channel/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C6",
+          "C7"
+        ],
+        "stories": [
+          "S6",
+          "S7"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement subscriber management with process linking",
+        "spec": "WHEN a subscriber process subscribes to a channel, the channel actor SHALL link to the subscriber process. IF the subscriber process dies, THEN the channel actor SHALL automatically remove it from the subscriber list via the EXIT signal. Unsubscribe SHALL unlink and remove the subscriber.",
+        "acceptance": [
+          "Subscribe links the channel actor to the subscriber PID via Scheduler::spawn_link or equivalent",
+          "Subscriber process death triggers EXIT signal in the channel actor",
+          "EXIT signal handler removes the dead subscriber from the list",
+          "Unsubscribe unlinks and removes the subscriber",
+          "Test: subscriber process dies \u2192 channel actor continues delivering to remaining subscribers"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/channel/actor.rs",
+            "crates/liminal/src/channel/subscription.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C10",
+          "C11"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement predicate-filtered subscriptions",
+        "spec": "WHEN a subscriber subscribes with a predicate filter, the channel actor SHALL evaluate the predicate against each published message. The actor SHALL only deliver messages where the predicate returns true. IF no predicate is provided, the subscriber SHALL receive all messages.",
+        "acceptance": [
+          "SubscriptionConfig accepts an optional predicate (a closure or function reference)",
+          "Channel actor evaluates the predicate per-message per-subscriber at delivery time",
+          "Messages not matching the predicate are not delivered to that subscriber",
+          "Subscribers without a predicate receive all messages",
+          "Test: two subscribers \u2014 one filtered, one unfiltered \u2014 different delivery sets"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/channel/actor.rs",
+            "crates/liminal/src/channel/subscription.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C12"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Implement channel supervision",
+        "spec": "Channel actors SHALL be supervised. IF a channel actor crashes, THEN the supervisor SHALL restart it without affecting other channel actors. The supervision tree SHALL be configurable (restart strategy, max restarts).",
+        "acceptance": [
+          "Channel actors are spawned under a supervisor process",
+          "A crashed channel actor is restarted by the supervisor",
+          "Other channel actors are unaffected by the crash",
+          "Test: crash one channel actor \u2192 verify other channels continue delivering"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/channel/supervisor.rs"
+          ],
+          "modify": [
+            "crates/liminal/src/channel/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C8"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R5",
+        "title": "Enforce zero persistence overhead for ephemeral channels",
+        "spec": "Ephemeral channels SHALL NOT invoke any persistence, serialisation, or disk I/O operations. Message delivery SHALL be pure in-memory message passing through beamr mailboxes. WHILE a channel is in Ephemeral mode, it SHALL NOT reference or import haematite types.",
+        "acceptance": [
+          "Ephemeral channel actor code path has no haematite imports or calls",
+          "No serialisation of messages in the ephemeral delivery path",
+          "No disk I/O or async runtime interaction in the ephemeral delivery path",
+          "Test: publish-subscribe round trip on ephemeral channel completes without any persistence artifact"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/channel/actor.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C9"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R6",
+        "title": "Implement channel registry",
+        "spec": "A channel registry SHALL map channel names to actor PIDs. The registry SHALL support create (spawn a new channel actor), lookup (find by name), list (all active channels with subscriber counts), and close (signal a channel to shut down). The registry SHALL reject duplicate channel names.",
+        "acceptance": [
+          "Registry provides create(config) -> Result<ChannelHandle, LiminalError>",
+          "Registry provides lookup(name) -> Option<ChannelHandle>",
+          "Registry provides list() -> Vec<ChannelInfo> with name and subscriber count",
+          "Registry provides close(name) -> Result<(), LiminalError>",
+          "Duplicate channel name returns LiminalError::ChannelAlreadyExists or equivalent",
+          "Test: create \u2192 lookup \u2192 list \u2192 close lifecycle"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/channel/registry.rs"
+          ],
+          "modify": [
+            "crates/liminal/src/channel/mod.rs",
+            "crates/liminal/src/lib.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S12",
+          "S14"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement schema validation \u2014 that is LIM-003.",
+      "SHALL NOT implement the conversation actor \u2014 that is LIM-004.",
+      "SHALL NOT add any persistence or haematite integration.",
+      "SHALL NOT implement routing logic \u2014 that is the routing cluster.",
+      "SHALL NOT implement the wire protocol \u2014 that is the protocol cluster."
+    ],
+    "verification": [
+      "cargo test -p liminal passes clean.",
+      "cargo clippy -p liminal -- -D warnings passes clean.",
+      "cargo fmt -p liminal --check passes clean.",
+      "Channel actor is a beamr process, not a Rust struct with methods.",
+      "Subscriber death automatically removes from the subscriber list.",
+      "Ephemeral channel delivery path has no persistence calls."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-001",
+        "title": "Conversations as the fundamental messaging unit, not messages",
+        "decision": "The fundamental unit is the conversation \u2014 a supervised beamr process owning a structured exchange between parties \u2014 over the message. A conversation mediates lifecycle, failure handling, and (optionally) durability. Exchange patterns (request-reply, streaming, saga) are conversation types with different lifecycle rules, not special-case bolt-ons. The rejected alternative is the NATS/Kafka model: messages as the primitive, patterns assembled from messages.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C6",
+        "text": "Channel actor is a beamr process owning its subscriber list, schema, and lifecycle state."
+      },
+      {
+        "id": "C7",
+        "text": "Channel actor delivers published messages to all matching subscribers."
+      },
+      {
+        "id": "C8",
+        "text": "Channel actor is supervised \u2014 crash restarts the individual channel without affecting others."
+      },
+      {
+        "id": "C9",
+        "text": "Ephemeral channel has zero persistence overhead \u2014 no haematite calls."
+      },
+      {
+        "id": "C10",
+        "text": "Subscription handle allows unsubscribe."
+      },
+      {
+        "id": "C11",
+        "text": "Subscriber removal on process death is automatic via beamr linking."
+      },
+      {
+        "id": "C12",
+        "text": "Subscription supports optional predicate filter on message content."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S3",
+        "text": "As an application developer, I want to subscribe to a channel with an optional predicate filter so that I only receive messages I care about."
+      },
+      {
+        "id": "S5",
+        "text": "As an application developer, I want conversations to detect participant crashes immediately so that I can route to another participant without waiting for a timeout."
+      },
+      {
+        "id": "S6",
+        "text": "As an AI agent, I want to publish a message to a named channel so that other agents subscribed to that channel receive it."
+      },
+      {
+        "id": "S7",
+        "text": "As an AI agent, I want to subscribe to a channel and receive messages in my beamr mailbox so that I can process them with selective receive."
+      },
+      {
+        "id": "S12",
+        "text": "As an operator, I want to list active channels and their subscriber counts so that I can monitor system utilisation."
+      },
+      {
+        "id": "S14",
+        "text": "As an operator, I want to close a channel gracefully so that all subscribers are notified before the channel shuts down."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Schema validation rejects invalid messages at publish time \u2014 a subscriber never receives a message that does not match its declared schema."
+      },
+      {
+        "id": "CN6",
+        "text": "Participant crash detection is via beamr process linking \u2014 no heartbeat polling, no timeout-based detection."
+      },
+      {
+        "id": "CN7",
+        "text": "Ephemeral channels have zero persistence overhead \u2014 no haematite calls, no disk I/O, no serialisation beyond message delivery."
+      },
+      {
+        "id": "CN8",
+        "text": "Channel and conversation actors are supervised. Crash restarts the individual actor without affecting other channels or conversations."
+      }
+    ],
+    "intention": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema validation at publish time, subscribe with pattern matching, and initiate supervised conversations that own the state of a structured exchange. The bus participates in processing \u2014 it knows when consumers crash, mediates backpressure, and can resume durable conversations from where they left off. The experience should feel like writing function calls between processes, not configuring infrastructure.",
+    "design_path": "docs/design/core",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema va"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

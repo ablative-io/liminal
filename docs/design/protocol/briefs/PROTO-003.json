@@ -1,0 +1,145 @@
+{
+  "id": "PROTO-003",
+  "cluster": "protocol",
+  "title": "Implement connection lifecycle state machine and protocol versioning",
+  "depends_on": ["PROTO-001"],
+  "blocked_by": [],
+  "checklist": ["C19", "C20", "C21", "C22", "C23", "C24", "C25", "C26"],
+  "stories": ["S8", "S10", "S12", "S14"],
+  "design_anchor": ["ADR-001", "ADR-008"],
+  "purpose": "Implements the connection lifecycle state machine that enforces valid frame sequences and the protocol version negotiation that happens during the Connect/ConnectAck handshake. The state machine prevents out-of-sequence frames (no Publish before authentication, no Subscribe before Connect) and the version negotiation selects the highest mutually supported version or rejects incompatible connections. This is what turns a raw TCP byte stream into a protocol-aware connection.",
+  "task": "Build the connection lifecycle state machine, the handshake exchange, and protocol versioning. Define ConnectionState (Connecting, Authenticating, Active, Closing, Closed) with valid frame transitions per state. Define ProtocolVersion with major/minor components and version range negotiation. Implement the Connect/ConnectAck exchange: client sends supported version range and auth token, server selects the highest mutually supported version and responds with capabilities. Enforce Ping/Pong only in Active state on stream 0. Reject frames invalid for the current state with ProtocolError carrying the appropriate reason code. Scope boundary: this brief handles connection-level state and versioning. It does not implement multiplexing (PROTO-004), backpressure state (PROTO-005), or schema negotiation (PROTO-006).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define ProtocolVersion with major and minor components",
+      "spec": "ProtocolVersion struct SHALL contain major (u16) and minor (u16) version fields. ProtocolVersion SHALL implement Debug, Clone, Copy, PartialEq, Eq, PartialOrd, and Ord (ordered by major then minor). ProtocolVersion SHALL serialize to 4 bytes (big-endian u16 + u16) for wire transport.",
+      "acceptance": [
+        "ProtocolVersion has fields: major (u16), minor (u16).",
+        "ProtocolVersion(1, 0) < ProtocolVersion(1, 1) < ProtocolVersion(2, 0).",
+        "ProtocolVersion serializes to exactly 4 bytes.",
+        "ProtocolVersion round-trips through serialize/deserialize.",
+        "ProtocolVersion implements Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/version.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C24"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Implement version negotiation selecting highest mutual version",
+      "spec": "WHEN the client sends a Connect frame with a version range (min_version, max_version), THE SYSTEM SHALL select the highest version from the server's supported set that falls within the client's range. IF no version in the server's set falls within the client's range, THE SYSTEM SHALL return a ConnectError frame with a version-mismatch reason code. The server's supported versions SHALL be configurable, not hardcoded.",
+      "acceptance": [
+        "Client range [1.0, 2.0] with server supporting {1.0, 1.1, 2.0, 3.0} selects 2.0.",
+        "Client range [1.0, 1.5] with server supporting {2.0, 3.0} returns ConnectError with version-mismatch.",
+        "Client range [1.0, 1.0] with server supporting {1.0} selects 1.0.",
+        "The server's supported version set is passed as a parameter, not hardcoded.",
+        "negotiate_version returns Result<ProtocolVersion, ProtocolError>."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/version.rs"],
+        "delete": []
+      },
+      "checklist": ["C25", "C26"],
+      "stories": ["S8"]
+    },
+    {
+      "id": "R3",
+      "title": "Define ConnectionState enum and state transition rules",
+      "spec": "ConnectionState enum SHALL have variants: Connecting, Authenticating, Active, Closing, Closed. The state machine SHALL enforce valid frame sequences per state. WHEN a frame is received that is invalid for the current state, THE SYSTEM SHALL return ProtocolError::InvalidStateTransition with the current state and the received frame type. State transitions: Connecting accepts Connect only; Authenticating accepts ConnectAck/ConnectError only; Active accepts all application frames plus Ping/Pong/Disconnect; Closing accepts Disconnect acknowledgement only; Closed accepts nothing.",
+      "acceptance": [
+        "ConnectionState has exactly 5 variants: Connecting, Authenticating, Active, Closing, Closed.",
+        "Receiving Publish in Connecting state returns ProtocolError::InvalidStateTransition.",
+        "Receiving Subscribe in Active state is valid (no error).",
+        "Receiving Ping in Connecting state returns ProtocolError::InvalidStateTransition.",
+        "The error carries both the current state and the rejected frame type."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/lifecycle.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C19", "C20"],
+      "stories": ["S10", "S12"]
+    },
+    {
+      "id": "R4",
+      "title": "Implement Connect frame with version range and auth token",
+      "spec": "The Connect frame payload SHALL carry: min_version (ProtocolVersion), max_version (ProtocolVersion), and auth_token (Vec<u8> — opaque, per P6). The handshake module SHALL provide a function to construct a Connect frame on stream 0. The auth token is opaque — the protocol carries it without interpretation.",
+      "acceptance": [
+        "Connect frame carries min_version, max_version, and auth_token fields.",
+        "Connect frame is always on stream 0.",
+        "auth_token is stored as opaque bytes — no validation or interpretation.",
+        "Connect frame round-trips through the PROTO-001 codec.",
+        "Constructing a Connect frame with stream_id != 0 returns an error."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/handshake.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C21"],
+      "stories": ["S8"]
+    },
+    {
+      "id": "R5",
+      "title": "Implement ConnectAck frame with selected version and capabilities",
+      "spec": "The ConnectAck frame payload SHALL carry: selected_version (ProtocolVersion) and capabilities (a bitfield u32 representing server feature flags). The handshake module SHALL provide a function to construct a ConnectAck frame on stream 0 after successful version negotiation and authentication.",
+      "acceptance": [
+        "ConnectAck frame carries selected_version and capabilities fields.",
+        "ConnectAck frame is always on stream 0.",
+        "capabilities is a u32 bitfield (individual flag meanings are defined by the server, not this brief).",
+        "ConnectAck round-trips through the PROTO-001 codec.",
+        "Receiving ConnectAck transitions the connection state from Authenticating to Active."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/handshake.rs"],
+        "delete": []
+      },
+      "checklist": ["C22"],
+      "stories": ["S8"]
+    },
+    {
+      "id": "R6",
+      "title": "Enforce Ping/Pong constraints",
+      "spec": "Ping and Pong frames SHALL be valid only in the Active state. They SHALL travel on stream 0 only. WHEN a Ping is received in Active state on stream 0, THE SYSTEM SHALL respond with a Pong on stream 0. WHEN a Ping is received on a non-zero stream or in a non-Active state, THE SYSTEM SHALL return ProtocolError.",
+      "acceptance": [
+        "Ping on stream 0 in Active state is valid.",
+        "Ping on stream 1 in Active state returns ProtocolError::InvalidStream.",
+        "Ping in Connecting state returns ProtocolError::InvalidStateTransition.",
+        "Receiving Ping generates a Pong response on stream 0.",
+        "Pong frames carry no payload."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/lifecycle.rs"],
+        "delete": []
+      },
+      "checklist": ["C23"],
+      "stories": ["S14"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement authentication mechanism validation — the protocol carries tokens, not validates them (P6).",
+    "SHALL NOT implement stream multiplexing logic — that is PROTO-004.",
+    "SHALL NOT implement backpressure state — that is PROTO-005.",
+    "SHALL NOT implement schema negotiation — that is PROTO-006.",
+    "SHALL NOT define specific capability flag meanings — capabilities is a raw bitfield for the bus to populate.",
+    "SHALL NOT hardcode the server's supported protocol versions."
+  ],
+  "verification": [
+    "cargo check compiles lifecycle, handshake, and version modules with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: version negotiation selects highest mutual version.",
+    "Test: incompatible version range returns ConnectError.",
+    "Test: state machine rejects Publish before Active state.",
+    "Test: Ping/Pong only valid on stream 0 in Active state."
+  ]
+}

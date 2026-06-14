@@ -1,0 +1,45 @@
+{
+  "cluster": "routing",
+  "personas": [
+    {
+      "name": "Application Developer",
+      "role": "Configuring Routing and Backpressure",
+      "stories": [
+        {"id": "S1", "text": "As an application developer, I want to subscribe to a channel with a predicate (WHERE amount > 1000 AND region = 'eu') so that my consumer only receives messages matching my criteria without filtering in application code."},
+        {"id": "S2", "text": "As an application developer, I want to compose predicates with AND, OR, and NOT so that I can express complex routing rules declaratively without writing a routing function."},
+        {"id": "S3", "text": "As an application developer, I want to deploy a custom routing function in Gleam so that I can implement load-aware or state-dependent routing logic that predicates cannot express."},
+        {"id": "S4", "text": "As an application developer, I want to hot-deploy an updated routing function so that I can change routing logic in production without restarting the bus or dropping connections."},
+        {"id": "S5", "text": "As an application developer, I want to configure a pressure policy on my channel so that the bus automatically handles overload without my consumers needing custom backpressure code."},
+        {"id": "S6", "text": "As an application developer, I want to receive typed backpressure signals (accept, defer, reject) on every publish so that my producer can adapt its rate based on real-time consumer capacity."}
+      ]
+    },
+    {
+      "name": "AI Agent",
+      "role": "Declaring Capacity and Processing Messages",
+      "stories": [
+        {"id": "S7", "text": "As an AI agent, I want to declare my max in-flight message count at subscription time so that the bus never sends me more concurrent work than I can handle."},
+        {"id": "S8", "text": "As an AI agent, I want to receive a defer signal when the bus buffers a message for me so that I know my capacity limits are being respected and work is queued, not dropped."},
+        {"id": "S9", "text": "As an AI agent, I want to join a consumer group and receive work via dispatch conversations so that I share load with other agents without manual coordination or partition assignment."},
+        {"id": "S10", "text": "As an AI agent, I want my crash during message processing to automatically re-route the message to another agent so that no work is lost due to my failure."}
+      ]
+    },
+    {
+      "name": "Aion Engine",
+      "role": "Worker Dispatch via Channels",
+      "stories": [
+        {"id": "S11", "text": "As the Aion engine, I want to dispatch activity tasks to workers via channel routing so that worker selection uses the bus's load-aware routing instead of round-robin gRPC dispatch."},
+        {"id": "S12", "text": "As the Aion engine, I want dispatch conversations to detect worker crashes via process links so that failed activities are re-routed within milliseconds, not heartbeat intervals."},
+        {"id": "S13", "text": "As the Aion engine, I want to add or remove worker consumers without triggering a rebalance so that scaling workers does not pause in-progress activities."}
+      ]
+    },
+    {
+      "name": "Operator",
+      "role": "Monitoring Pressure and Routing Health",
+      "stories": [
+        {"id": "S14", "text": "As an operator, I want to observe per-channel pressure metrics (in-flight count, buffer depth, reject rate) so that I can identify overloaded channels before they degrade service quality."},
+        {"id": "S15", "text": "As an operator, I want to see which pressure policy actions have triggered and when so that I can verify the bus is responding to overload as configured."},
+        {"id": "S16", "text": "As an operator, I want to receive scale-consumer signals from the bus so that I can trigger auto-scaling in my orchestrator when consumer capacity is exhausted."}
+      ]
+    }
+  ]
+}

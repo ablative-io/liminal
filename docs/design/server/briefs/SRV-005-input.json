@@ -1,0 +1,289 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SRV-005",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SRV-005",
+    "cluster": "server",
+    "title": "Implement clustering via beamr distribution with seed-node discovery",
+    "depends_on": [
+      "SRV-003"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C14",
+      "C15",
+      "C16"
+    ],
+    "stories": [
+      "S5"
+    ],
+    "design_anchor": [
+      "ADR-010"
+    ],
+    "purpose": "Implement cluster formation and cross-node messaging so multiple liminal-server instances operate as a single logical message bus. Clustering uses beamr distribution exclusively -- no custom consensus protocol, no gossip layer, no Raft (P5, CN8). Nodes discover each other via configured seed node addresses, join the cluster through beamr's distribution protocol, and propagate channel subscriptions so a subscriber on node A receives messages published on node B. This is what makes liminal horizontally scalable: add nodes, configure seeds, and the bus expands without application changes.",
+    "task": "Create the cluster module with four files. discovery.rs connects to configured seed nodes via beamr distribution on startup. membership.rs tracks cluster membership: node joins, leaves, and failures detected through beamr's distribution monitoring. sync.rs propagates channel subscription state across nodes so that cross-node pub/sub works transparently. mod.rs declares sub-modules and re-exports the public API. All clustering behaviour delegates to beamr distribution primitives -- this module is a thin coordinator, not a consensus implementation.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Connect to seed nodes via beamr distribution",
+        "spec": "WHEN the server starts with a non-empty ClusterConfig.seed_nodes, THEN it SHALL attempt to connect to each seed node via beamr's distribution protocol. IF a seed node is unreachable at startup, THEN the server SHALL log a warning and continue with reachable seeds. IF no seed nodes are reachable, THEN the server SHALL return ServerError::ClusterJoin. The server SHALL NOT implement its own discovery protocol -- it uses beamr distribution connect (CN8).",
+        "acceptance": [
+          "Server connects to each configured seed node via beamr distribution",
+          "Unreachable seed nodes at startup are logged at warn level, not fatal",
+          "If all seed nodes are unreachable, returns ServerError::ClusterJoin",
+          "No custom discovery protocol -- uses beamr distribution exclusively"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/cluster/discovery.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C14"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Establish cluster membership on successful connection",
+        "spec": "WHEN a seed node connection succeeds, THEN the server SHALL join the cluster via beamr's node joining mechanism. The local node SHALL be registered with its node_name from ClusterConfig. WHEN the node joins successfully, THEN it SHALL log the cluster membership at info level including the list of known peers.",
+        "acceptance": [
+          "Successful seed connection results in cluster join via beamr distribution",
+          "Node is registered with the configured node_name",
+          "Cluster join is logged at info level with peer list",
+          "Test: two nodes with cross-seed config both appear in each other's peer list"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/cluster/membership.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C15"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Track node joins and departures",
+        "spec": "The membership module SHALL track nodes joining and leaving the cluster. WHEN a new node joins the cluster, THEN it SHALL be added to the local peer list and logged at info level. WHEN a node leaves gracefully, THEN it SHALL be removed from the local peer list and logged at info level. The membership module SHALL NOT implement its own heartbeat or failure detection for graceful departures -- beamr distribution signals are used (CN8).",
+        "acceptance": [
+          "New node joins are reflected in the local peer list",
+          "Graceful node departures remove the node from the local peer list",
+          "Joins and departures are logged at info level",
+          "No custom heartbeat protocol -- uses beamr distribution signals"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/cluster/membership.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C15"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Detect and handle node failures",
+        "spec": "WHEN a cluster peer becomes unreachable, THEN beamr's distribution layer SHALL detect the failure and deliver a node-down signal. WHEN a node-down signal is received, THEN the membership module SHALL remove the failed node from the peer list, log the failure at warn level, and notify the subscription sync module. The membership module SHALL NOT implement its own failure detector -- it consumes beamr distribution's node monitoring (CN8).",
+        "acceptance": [
+          "Node failures are detected via beamr distribution node-down signals",
+          "Failed nodes are removed from the peer list",
+          "Node failures are logged at warn level",
+          "Subscription sync module is notified of node failures",
+          "No custom failure detection -- uses beamr distribution monitoring"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/cluster/membership.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C15"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Propagate channel subscriptions across cluster nodes",
+        "spec": "WHEN a subscriber on the local node subscribes to a channel, THEN the sync module SHALL propagate the subscription to all cluster peers so that messages published on any node reach local subscribers. WHEN a node joins the cluster, THEN existing subscriptions SHALL be exchanged. The sync module SHALL use beamr's transparent remote messaging to forward published messages to remote subscribers. The sync module SHALL NOT implement a custom replication protocol.",
+        "acceptance": [
+          "Local subscription is propagated to all cluster peers",
+          "New node joining receives existing subscription state from peers",
+          "Messages published on node A are delivered to subscribers on node B",
+          "Subscription propagation uses beamr remote messaging, not a custom protocol",
+          "Test: subscribe on node A, publish on node B -- subscriber on A receives the message"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/cluster/sync.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Handle subscription cleanup on node departure",
+        "spec": "WHEN a cluster peer departs (gracefully or via failure), THEN the sync module SHALL remove all remote subscriptions associated with that peer. Subscribers on the remaining nodes SHALL NOT receive errors for the departed node's subscriptions -- the subscriptions are silently cleaned up. The sync module SHALL log cleaned-up subscription counts at info level.",
+        "acceptance": [
+          "Remote subscriptions from a departed node are removed",
+          "Remaining subscribers are not affected by the cleanup",
+          "Cleaned-up subscription count is logged at info level",
+          "Test: node A subscribes, node A departs -- node B's subscription state no longer references node A"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/cluster/sync.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R7",
+        "title": "Create cluster module structure with re-exports",
+        "spec": "cluster/mod.rs SHALL declare pub mod for discovery, membership, and sync. cluster/mod.rs SHALL re-export the primary public types. cluster/mod.rs SHALL contain ONLY module declarations and re-exports -- no logic (CN3).",
+        "acceptance": [
+          "cluster/mod.rs declares pub mod discovery, membership, sync",
+          "cluster/mod.rs re-exports primary cluster types",
+          "cluster/mod.rs contains zero function definitions or struct definitions"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/cluster/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement custom consensus, gossip, or Raft protocols -- clustering uses beamr distribution exclusively (P5, CN8).",
+      "SHALL NOT implement custom failure detection or heartbeat mechanisms -- consumes beamr distribution's node monitoring.",
+      "SHALL NOT add messaging semantics -- channel publish/subscribe logic is in the liminal library crate (CN5).",
+      "SHALL NOT implement the wire protocol -- that is the protocol cluster.",
+      "SHALL NOT implement cluster-wide coordinated shutdown -- each node shuts down independently via SRV-004."
+    ],
+    "verification": [
+      "cargo test -p liminal-server passes clean.",
+      "cargo clippy -p liminal-server -- -D warnings passes clean.",
+      "cargo fmt -p liminal-server --check passes clean.",
+      "No custom consensus or gossip protocol exists -- all clustering delegates to beamr distribution (CN8).",
+      "Channel subscriptions span cluster nodes -- subscriber on node A receives messages published on node B.",
+      "Node failure triggers automatic cleanup of remote subscriptions."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C14",
+        "text": "Server discovers cluster peers via configured seed node addresses."
+      },
+      {
+        "id": "C15",
+        "text": "Cluster membership uses beamr distribution protocol for node joining, leaving, and failure detection."
+      },
+      {
+        "id": "C16",
+        "text": "Channel subscriptions span cluster nodes: a subscriber on node A receives messages published on node B."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S5",
+        "text": "As an Operator, I want to form a cluster of liminal servers via seed nodes so that I can scale horizontally and survive individual node failures."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The server binary adds no messaging semantics. All publish, subscribe, and conversation logic delegates to the liminal library crate."
+      },
+      {
+        "id": "CN6",
+        "text": "Config validation runs to completion before any listener binds. An invalid config never results in a partially started server."
+      },
+      {
+        "id": "CN7",
+        "text": "Graceful shutdown completes durable state flush before process exit. Data loss on clean shutdown is a bug."
+      },
+      {
+        "id": "CN8",
+        "text": "Cluster membership uses beamr distribution exclusively. No custom consensus protocol, no gossip layer, no Raft implementation."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should feel like deploying any production-grade message broker: start, configure, cluster, monitor, and shut down gracefully. The server is a thin deployment wrapper, not a fork of the library -- every message still flows through the same channel and conversation primitives that embedded users get.\n\nFor teams that want the bus without embedding it, the server is the entry point. For teams that embed it, the server is how they run a remote node in a cluster topology. Both stories use the same binary.",
+    "design_path": "docs/design/server",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should f"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

@@ -1,0 +1,141 @@
+{
+  "id": "DUR-004",
+  "cluster": "durability",
+  "title": "Implement dedup contract and processing receipts",
+  "depends_on": ["DUR-001"],
+  "blocked_by": [],
+  "checklist": ["C19", "C20", "C21", "C22", "C23", "C24", "C25"],
+  "stories": ["S4", "S7", "S14"],
+  "design_anchor": ["ADR-006", "ADR-009"],
+  "purpose": "Implements the lightweight exactly-once strategy from ADR-006: a three-party dedup contract between producer (provides idempotency key), bus (maintains dedup cache), and consumer (provides processing receipt). The dedup cache maps idempotency keys to processing receipts in haematite with configurable TTL. This gives simple consumers exactly-once semantics without event-sourced processing — the complement to DUR-005's heavyweight durable conversations.",
+  "task": "Build the dedup cache and processing receipt system. The cache stores idempotency-key-to-receipt mappings in haematite. On publish, check the cache: if the key exists with a receipt, return the receipt without re-delivering; if the key exists without a receipt (in-flight), defer delivery; if the key is new, deliver and cache the key. After processing, the consumer provides a receipt that completes the cache entry. A background sweep removes entries older than the configured TTL, with a 1-second clock-skew safety margin. Scope boundary: this brief handles dedup and receipts only. It does not handle durable channel storage (DUR-002), cursors (DUR-003), or conversations (DUR-005).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Implement dedup cache with haematite-backed key storage",
+      "spec": "DedupCache struct SHALL store idempotency key to receipt mappings in haematite via DurableStore::append(dedup_namespace + key_hash, entry_bytes, expected_seq). The cache key SHALL be derived by hashing the idempotency key. Each cache entry SHALL store: the original idempotency key, an optional processing receipt (None until consumer provides one), and the entry timestamp (epoch millis). DedupCache SHALL hold a reference to DurableStore and the dedup namespace prefix.",
+      "acceptance": [
+        "DedupCache::new(store, namespace) constructs a cache with the given store and namespace.",
+        "Cache entries are stored in haematite with stream key formatted as \"{namespace}:{key_hash}\".",
+        "Entry serialization includes: idempotency_key, receipt (Option<Vec<u8>>), timestamp_millis.",
+        "The key hash is deterministic: same idempotency key always produces same hash."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/dedup.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C19"],
+      "stories": ["S4"]
+    },
+    {
+      "id": "R2",
+      "title": "Return stored receipt for duplicate publish with completed entry",
+      "spec": "WHEN a message is published with an idempotency key that already exists in the dedup cache AND the cache entry has a processing receipt, THE SYSTEM SHALL return the stored receipt to the publisher without re-delivering the message. THE SYSTEM SHALL NOT append the message to the durable channel. THE SYSTEM SHALL NOT modify the existing cache entry.",
+      "acceptance": [
+        "Publishing with a key that has a receipt returns Ok with the stored receipt bytes.",
+        "The message is not appended to the channel (no DurableStore::append call for the message).",
+        "The existing cache entry is not modified.",
+        "The returned receipt bytes are identical to what the consumer originally provided."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/dedup.rs"],
+        "delete": []
+      },
+      "checklist": ["C20"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R3",
+      "title": "Defer delivery for duplicate publish with in-flight entry",
+      "spec": "WHEN a message is published with an idempotency key that already exists in the dedup cache AND the cache entry has no processing receipt yet (processing is in-flight), THE SYSTEM SHALL defer delivery by returning a DedupInFlight status. THE SYSTEM SHALL NOT re-deliver the message. THE SYSTEM SHALL NOT modify the existing cache entry.",
+      "acceptance": [
+        "Publishing with a key that exists but has receipt=None returns DedupInFlight status.",
+        "The message is not re-delivered to any consumer.",
+        "The existing cache entry timestamp is not updated.",
+        "The publisher receives a clear indication that the message is already being processed."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/dedup.rs"],
+        "delete": []
+      },
+      "checklist": ["C21"],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Implement background TTL sweep with clock-skew safety",
+      "spec": "DedupSweeper SHALL periodically scan the dedup cache and remove entries whose timestamp is older than the configured TTL. The sweep SHALL subtract 1 second from the TTL threshold to account for clock skew — an entry at exactly TTL age SHALL NOT be removed. WHEN sweeping, THE SYSTEM SHALL use DurableStore::scan to enumerate entries and check timestamps. The sweep interval SHALL be configurable. TTL expiry SHALL NEVER remove an entry younger than (configured_ttl - 1 second).",
+      "acceptance": [
+        "An entry with timestamp 1000ms and TTL 60000ms is not removed at time 60999ms (within TTL + 1s skew margin).",
+        "An entry with timestamp 1000ms and TTL 60000ms is removed at time 62001ms (past TTL + 1s skew margin).",
+        "Sweep does not remove entries with receipt=None (in-flight) that are within TTL.",
+        "Sweep interval is configurable, not hardcoded.",
+        "Sweep uses DurableStore::scan to enumerate, not a separate index."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/dedup.rs"],
+        "delete": []
+      },
+      "checklist": ["C22", "C23"],
+      "stories": ["S4", "S14"]
+    },
+    {
+      "id": "R5",
+      "title": "Define ProcessingReceipt as opaque bytes",
+      "spec": "ProcessingReceipt SHALL be a newtype wrapping Vec<u8> representing the opaque processing outcome provided by the consumer. ProcessingReceipt SHALL implement Debug (displaying byte length, not contents), Clone, and PartialEq. The receipt content is consumer-defined — the bus stores and returns it without interpretation.",
+      "acceptance": [
+        "ProcessingReceipt wraps Vec<u8>.",
+        "ProcessingReceipt::new(bytes) constructs from a byte vector.",
+        "ProcessingReceipt::as_bytes() returns a &[u8] reference.",
+        "Debug output shows byte length, not raw bytes (e.g. \"ProcessingReceipt(42 bytes)\").",
+        "Two receipts with identical bytes compare as equal."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/receipt.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C24"],
+      "stories": []
+    },
+    {
+      "id": "R6",
+      "title": "Store receipt against idempotency key to complete cache entry",
+      "spec": "WHEN a consumer provides a ProcessingReceipt for a message with an idempotency key, THE SYSTEM SHALL update the corresponding dedup cache entry to include the receipt. The update SHALL use DurableStore::append to store the receipt against the existing cache entry's stream key. IF the idempotency key does not exist in the cache, THE SYSTEM SHALL return DurabilityError::DedupCollision. The receipt completes the dedup cycle: future duplicate publishes with this key will receive the stored receipt.",
+      "acceptance": [
+        "complete_receipt(key, receipt) stores the receipt in the cache entry.",
+        "After completion, a duplicate publish with the same key returns the stored receipt.",
+        "Completing a receipt for a non-existent key returns DurabilityError::DedupCollision.",
+        "The receipt is stored via DurableStore::append, not by mutating the original entry."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/receipt.rs"],
+        "delete": []
+      },
+      "checklist": ["C25"],
+      "stories": ["S7"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement durable channel append logic — that is DUR-002.",
+    "SHALL NOT implement consumer cursor tracking — that is DUR-003.",
+    "SHALL NOT implement conversation event sourcing — that is DUR-005.",
+    "SHALL NOT implement crash recovery orchestration — that is DUR-006.",
+    "SHALL NOT interpret receipt contents — receipts are opaque bytes stored and returned verbatim.",
+    "SHALL NOT hardcode the dedup TTL or sweep interval — both are caller-configured."
+  ],
+  "verification": [
+    "cargo check compiles dedup and receipt modules with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: duplicate key with receipt returns stored receipt without re-delivery.",
+    "Test: duplicate key without receipt returns DedupInFlight.",
+    "Test: sweep respects 1-second clock-skew margin (entry at TTL boundary is not removed).",
+    "Test: ProcessingReceipt round-trips through store and compare-equals."
+  ]
+}

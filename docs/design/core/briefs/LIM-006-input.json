@@ -1,0 +1,148 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "LIM-006",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "LIM-006",
+    "cluster": "core",
+    "title": "Implement causal context and per-chain ordering primitives",
+    "depends_on": [
+      "LIM-003"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C18"
+    ],
+    "stories": [],
+    "design_anchor": [
+      "ADR-005"
+    ],
+    "purpose": "Implement the causal ordering primitives that enable per-causal-chain message ordering without requiring global ordering (ADR-005). Messages carry a causal context with an optional parent reference. The ordering enforcement is a channel-level concern \u2014 this brief provides the data model and the ordering check functions that the channel actor and routing engine use.",
+    "task": "Flesh out the CausalContext type from LIM-003 R5 with ordering utilities. Implement: MessageId generation (UUID-based), happened-before relationship detection from parent chains, and a CausalOrderer that buffers and delivers messages in causal order (children after parents) while allowing independent messages to flow in parallel. The orderer is used by the channel actor's delivery path when causal ordering is enabled on a channel.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement MessageId and causal chain tracking",
+        "spec": "MessageId SHALL be a UUID-based unique identifier assigned to each message on publish. CausalContext SHALL track the full parent chain as a linked list of MessageIds (parent \u2192 grandparent \u2192 ...). A helper SHALL determine whether message A happened-before message B by checking if B's chain includes A's MessageId.",
+        "acceptance": [
+          "MessageId is a newtype over Uuid",
+          "MessageId::new() generates a unique ID",
+          "CausalContext::happened_before(ancestor_id) returns true if ancestor_id is in the parent chain",
+          "Test: A \u2192 B \u2192 C chain; C.happened_before(A) == true; A.happened_before(C) == false; independent D.happened_before(A) == false"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/causal.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Implement CausalOrderer for buffered in-order delivery",
+        "spec": "CausalOrderer SHALL accept incoming messages and emit them in causal order: a child message is held until its parent has been emitted. Independent messages (no parent or parent already emitted) are emitted immediately. The orderer SHALL detect orphaned messages (parent never arrives) via a configurable timeout and emit them with a warning.",
+        "acceptance": [
+          "CausalOrderer::submit(envelope) either emits immediately (independent or parent already seen) or buffers (parent pending)",
+          "Buffered messages are emitted when their parent is submitted and emitted",
+          "Independent messages pass through without buffering",
+          "Orphan timeout: messages whose parent hasn't arrived within the timeout are emitted with a warning flag",
+          "Test: submit B (parent=A), submit A \u2192 emits A then B; submit C (no parent) \u2192 emits immediately"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/causal/orderer.rs"
+          ],
+          "modify": [
+            "crates/liminal/src/causal.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement global ordering \u2014 causal ordering only.",
+      "SHALL NOT implement the routing engine's use of causal ordering \u2014 that is the routing cluster.",
+      "SHALL NOT add persistence of causal chains \u2014 that is the durability cluster."
+    ],
+    "verification": [
+      "cargo test -p liminal passes clean.",
+      "cargo clippy -p liminal -- -D warnings passes clean.",
+      "CausalOrderer delivers parent before child, independent messages in parallel.",
+      "happened_before correctly traverses the parent chain."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-005",
+        "title": "Per-causal-chain ordering, not per-topic or per-partition",
+        "decision": "Messages carry causal context (explicit parent reference or vector clock). The bus enforces happened-before ordering where causality demands it. Independent messages to the same channel run in parallel. Conversations naturally define causal chains. The rejected alternative is per-partition ordering (Kafka model: forces total ordering within a partition, or gives up ordering across partitions).",
+        "quote": "",
+        "decided_by": "Bono, adopted by Frodo"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C18",
+        "text": "Causal context contains optional parent message reference for ordering."
+      }
+    ],
+    "stories": [],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Schema validation rejects invalid messages at publish time \u2014 a subscriber never receives a message that does not match its declared schema."
+      },
+      {
+        "id": "CN6",
+        "text": "Participant crash detection is via beamr process linking \u2014 no heartbeat polling, no timeout-based detection."
+      },
+      {
+        "id": "CN7",
+        "text": "Ephemeral channels have zero persistence overhead \u2014 no haematite calls, no disk I/O, no serialisation beyond message delivery."
+      },
+      {
+        "id": "CN8",
+        "text": "Channel and conversation actors are supervised. Crash restarts the individual actor without affecting other channels or conversations."
+      }
+    ],
+    "intention": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema validation at publish time, subscribe with pattern matching, and initiate supervised conversations that own the state of a structured exchange. The bus participates in processing \u2014 it knows when consumers crash, mediates backpressure, and can resume durable conversations from where they left off. The experience should feel like writing function calls between processes, not configuring infrastructure.",
+    "design_path": "docs/design/core",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema va"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

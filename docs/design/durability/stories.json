@@ -1,0 +1,43 @@
+{
+  "cluster": "durability",
+  "personas": [
+    {
+      "name": "Application Developer",
+      "role": "Choosing Durability Level",
+      "stories": [
+        {"id": "S1", "text": "As an application developer, I want to declare a channel as durable at creation time so that all messages published to it survive process restarts without changing my publish code."},
+        {"id": "S2", "text": "As an application developer, I want to declare a channel as ephemeral so that I get zero-overhead message delivery with no persistence cost for transient data."},
+        {"id": "S3", "text": "As an application developer, I want to choose between dedup and durable-conversation exactly-once strategies per channel so that simple consumers use the lightweight approach and complex consumers use the heavyweight one."},
+        {"id": "S4", "text": "As an application developer, I want to configure the dedup TTL per channel so that idempotency key storage matches my expected retry window without unbounded growth."}
+      ]
+    },
+    {
+      "name": "Application Developer",
+      "role": "Processing Messages Durably",
+      "stories": [
+        {"id": "S5", "text": "As an application developer, I want to checkpoint my consumer cursor after processing a batch so that a crash only replays messages from the last checkpoint, not from the beginning."},
+        {"id": "S6", "text": "As an application developer, I want to replay messages from a specific offset so that I can reprocess a range of messages without resetting my entire consumer state."},
+        {"id": "S7", "text": "As an application developer, I want to provide a processing receipt after handling a dedup-protected message so that duplicate deliveries return my original result instead of re-executing."},
+        {"id": "S8", "text": "As an application developer, I want my durable conversation to resume from the last completed step after a crash so that side effects from completed steps are never re-executed."}
+      ]
+    },
+    {
+      "name": "Aion Engine",
+      "role": "Durable Worker Dispatch",
+      "stories": [
+        {"id": "S9", "text": "As the Aion engine, I want to dispatch workflow activities through durable channels so that activity assignments survive worker crashes and are retried without duplicate execution."},
+        {"id": "S10", "text": "As the Aion engine, I want activity processing to use durable conversations so that multi-step activities resume from their last checkpoint on re-delivery rather than re-executing from scratch."},
+        {"id": "S11", "text": "As the Aion engine, I want the durability layer to use haematite's append/cas API directly so that workflow state and channel state share the same storage engine without an additional dependency."}
+      ]
+    },
+    {
+      "name": "Operator",
+      "role": "Monitoring and Recovery",
+      "stories": [
+        {"id": "S12", "text": "As an operator, I want to inspect a consumer's persisted cursor offset so that I can determine how far behind a consumer is relative to the partition head."},
+        {"id": "S13", "text": "As an operator, I want crash recovery to be automatic on process restart so that durable channels, cursors, and conversations resume without manual intervention."},
+        {"id": "S14", "text": "As an operator, I want to see the dedup cache size and TTL expiry rate so that I can tune the dedup window to balance memory usage against duplicate protection."}
+      ]
+    }
+  ]
+}

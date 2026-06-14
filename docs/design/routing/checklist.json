@@ -1,0 +1,87 @@
+{
+  "cluster": "routing",
+  "sections": [
+    {
+      "name": "Predicate Types",
+      "items": [
+        {"id": "C1", "text": "Comparison operators (eq, ne, gt, lt, gte, lte) defined as predicate types in routing::predicate.", "done": false},
+        {"id": "C2", "text": "Boolean combinators (AND, OR, NOT) defined for composing predicates into arbitrarily nested expressions.", "done": false},
+        {"id": "C3", "text": "Range check predicates (field BETWEEN lower AND upper) supported for numeric and string fields.", "done": false},
+        {"id": "C4", "text": "Field-existence predicate (HAS field) defined for optional message fields.", "done": false},
+        {"id": "C5", "text": "Predicates against missing message fields evaluate to false without error.", "done": false}
+      ]
+    },
+    {
+      "name": "Predicate Evaluation",
+      "items": [
+        {"id": "C6", "text": "Predicate evaluation matches against borrowed message fields without per-message heap allocation.", "done": false},
+        {"id": "C7", "text": "Short-circuit evaluation: AND stops at first false, OR stops at first true.", "done": false},
+        {"id": "C8", "text": "Predicates compile to routing functions via routing::compiler.", "done": false},
+        {"id": "C9", "text": "Compiled predicate functions produce identical routing decisions to direct predicate evaluation for all input combinations.", "done": false},
+        {"id": "C10", "text": "The compiler applies index-aware optimizations: field extraction ordering and short-circuit layout.", "done": false}
+      ]
+    },
+    {
+      "name": "Routing Functions",
+      "items": [
+        {"id": "C11", "text": "Routing functions are Gleam modules loaded into beamr via content-hash module loading.", "done": false},
+        {"id": "C12", "text": "Each routing function executes in a supervised beamr process with fault isolation.", "done": false},
+        {"id": "C13", "text": "A routing function receives the message and a consumer state view containing capacity and affinity tags.", "done": false},
+        {"id": "C14", "text": "Routing function crash does not affect routing evaluations for other channels.", "done": false},
+        {"id": "C15", "text": "Routing functions are hot-deployable: a new version replaces the old without dropping connections or pausing dispatch.", "done": false}
+      ]
+    },
+    {
+      "name": "Routing Table",
+      "items": [
+        {"id": "C16", "text": "The routing table maps channels to active subscriptions (predicate or function).", "done": false},
+        {"id": "C17", "text": "Subscription registration and removal do not block concurrent routing evaluations.", "done": false},
+        {"id": "C18", "text": "Publishing to a channel with no matching subscriptions completes without error.", "done": false}
+      ]
+    },
+    {
+      "name": "Backpressure Signals",
+      "items": [
+        {"id": "C19", "text": "Three signal types defined in pressure::signal: accept, defer, reject.", "done": false},
+        {"id": "C20", "text": "Accept signal indicates message delivered and processing begun by consumer.", "done": false},
+        {"id": "C21", "text": "Defer signal indicates message buffered; delivery will occur when consumer capacity frees.", "done": false},
+        {"id": "C22", "text": "Reject signal indicates consumer overwhelmed; message shed per policy.", "done": false},
+        {"id": "C23", "text": "Backpressure signals are delivered to producers within the publish round-trip response, not asynchronously.", "done": false}
+      ]
+    },
+    {
+      "name": "Consumer Capacity",
+      "items": [
+        {"id": "C24", "text": "Consumers declare max in-flight messages at subscription time.", "done": false},
+        {"id": "C25", "text": "Consumers declare max buffer depth at subscription time.", "done": false},
+        {"id": "C26", "text": "Pressure monitor tracks current in-flight count and buffer depth per consumer.", "done": false},
+        {"id": "C27", "text": "Messages to a consumer at max in-flight receive defer or reject per the channel's pressure policy.", "done": false}
+      ]
+    },
+    {
+      "name": "Pressure Policies",
+      "items": [
+        {"id": "C28", "text": "Four policy actions defined: slow-producer, shed-load, scale-consumer, alert.", "done": false},
+        {"id": "C29", "text": "Policies are configured per-channel with escalation thresholds.", "done": false},
+        {"id": "C30", "text": "Policies compose: escalating pressure triggers actions in configured sequence.", "done": false},
+        {"id": "C31", "text": "Policy enforcement evaluates automatically against monitor state without application code.", "done": false}
+      ]
+    },
+    {
+      "name": "Conversation-Mediated Dispatch",
+      "items": [
+        {"id": "C32", "text": "Dispatch conversation selects a consumer by evaluating the group's routing function.", "done": false},
+        {"id": "C33", "text": "Dispatch conversation links to the selected consumer process via beamr process link.", "done": false},
+        {"id": "C34", "text": "Consumer crash detected via process link triggers re-routing to another consumer within one millisecond.", "done": false}
+      ]
+    },
+    {
+      "name": "Consumer Group Model",
+      "items": [
+        {"id": "C35", "text": "Consumer groups are modeled as a routing function over a mutable consumer set.", "done": false},
+        {"id": "C36", "text": "Adding a consumer to a group takes effect on the next dispatch without pausing other consumers.", "done": false},
+        {"id": "C37", "text": "Removing a consumer from a group takes effect on the next dispatch without triggering a rebalance.", "done": false}
+      ]
+    }
+  ]
+}

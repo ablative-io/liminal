@@ -1,0 +1,117 @@
+{
+  "id": "LIM-003",
+  "cluster": "core",
+  "title": "Implement schema validation and message envelope",
+  "depends_on": ["LIM-001"],
+  "blocked_by": [],
+  "checklist": ["C13", "C14", "C15", "C16", "C17", "C18", "C19"],
+  "stories": ["S2"],
+  "design_anchor": ["ADR-002"],
+  "purpose": "Implement the schema type system and message envelope. Schemas define the expected message structure for a channel. Publish-time validation rejects non-conforming messages before any subscriber sees them (ADR-002). The envelope carries payload, causal context, schema identifier, publisher identity, and timestamp as the system-wide unit of routing, persistence, and delivery.",
+  "task": "Replace the SchemaRef placeholder from LIM-001 with a real schema definition supporting JSON Schema validation. Implement publish-time validation in the channel actor's publish path. Define the message envelope with all required fields. Implement schema evolution (add field with default) without requiring subscriber redeployment. The schema is owned by the channel — no external schema registry.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define Schema type for channel message validation",
+      "spec": "A Schema type SHALL define the expected message structure for a channel. It SHALL support JSON Schema as the validation format. Schema SHALL be Clone + Send + Sync for sharing across the system.",
+      "acceptance": [
+        "Schema type defined in crates/liminal/src/channel/schema.rs",
+        "Schema wraps a JSON Schema definition (serde_json::Value or a parsed representation)",
+        "Schema provides a validate(payload) -> Result<(), SchemaValidationError> method",
+        "Schema is Clone + Send + Sync"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/channel/schema.rs"],
+        "modify": ["crates/liminal/src/channel/mod.rs", "crates/liminal/src/channel/types.rs"],
+        "delete": []
+      },
+      "checklist": ["C13"],
+      "stories": ["S2"]
+    },
+    {
+      "id": "R2",
+      "title": "Implement publish-time schema validation",
+      "spec": "WHEN a message is published to a channel, the channel actor SHALL validate the message payload against the channel's declared schema BEFORE delivering to any subscriber. IF validation fails, THEN the publish SHALL return LiminalError::SchemaMismatch and SHALL NOT deliver the message to any subscriber.",
+      "acceptance": [
+        "Channel actor calls schema.validate(payload) before fan-out",
+        "SchemaMismatch error is returned to the publisher on validation failure",
+        "No subscriber receives a message that failed validation",
+        "Test: publish valid message → delivered; publish invalid message → SchemaMismatch, no delivery"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/channel/actor.rs"],
+        "delete": []
+      },
+      "checklist": ["C14", "C15"],
+      "stories": ["S2"]
+    },
+    {
+      "id": "R3",
+      "title": "Implement schema evolution support",
+      "spec": "Schema evolution (adding a field with a default value) SHALL be supported without subscriber redeployment. WHEN a schema is evolved, new messages validate against the new schema. Existing subscribers continue receiving messages — the new field appears with its default for consumers that don't know about it.",
+      "acceptance": [
+        "Schema supports an evolve operation that adds a field with a default",
+        "Messages published after evolution include the new field",
+        "Existing subscribers are not disconnected or disrupted by evolution",
+        "Test: evolve schema → publish with new field → old subscriber still receives"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/channel/schema.rs"],
+        "delete": []
+      },
+      "checklist": ["C16"],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Define message envelope",
+      "spec": "Every message SHALL travel in an Envelope containing: payload (bytes), causal_context (optional parent reference), schema_id (which schema validated this message), publisher_id (identity of the publisher), and timestamp (when the message was published). The Envelope SHALL be the unit of routing, persistence, and delivery throughout the system.",
+      "acceptance": [
+        "Envelope struct defined in crates/liminal/src/envelope.rs",
+        "Envelope has fields: payload (Bytes or Vec<u8>), causal_context (Option<CausalContext>), schema_id (SchemaId), publisher_id (PublisherId), timestamp (DateTime<Utc>)",
+        "Envelope derives Clone, Debug",
+        "Envelope is used as the delivery unit in the channel actor (replacing raw payload)"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/envelope.rs", "crates/liminal/src/channel/actor.rs"],
+        "delete": []
+      },
+      "checklist": ["C17", "C19"],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Define causal context for per-chain ordering",
+      "spec": "CausalContext SHALL contain an optional parent message reference (MessageId) enabling per-causal-chain ordering (ADR-005). Messages with a parent reference are ordered after their parent. Independent messages (no parent) can be delivered in parallel.",
+      "acceptance": [
+        "CausalContext struct defined in crates/liminal/src/causal.rs",
+        "CausalContext has parent: Option<MessageId> field",
+        "MessageId is a unique identifier (UUID or equivalent)",
+        "CausalContext derives Clone, Debug, PartialEq, Eq"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/causal.rs"],
+        "delete": []
+      },
+      "checklist": ["C18"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement the routing engine — that is the routing cluster.",
+    "SHALL NOT implement persistence of envelopes — that is the durability cluster.",
+    "SHALL NOT implement wire serialisation of envelopes — that is the protocol cluster.",
+    "SHALL NOT implement causal ordering enforcement — that is a routing concern. This brief defines the data model only."
+  ],
+  "verification": [
+    "cargo test -p liminal passes clean.",
+    "cargo clippy -p liminal -- -D warnings passes clean.",
+    "Publishing an invalid message returns SchemaMismatch and delivers nothing.",
+    "Envelope is used as the delivery unit throughout the channel actor.",
+    "CausalContext is present in the envelope with optional parent reference."
+  ]
+}

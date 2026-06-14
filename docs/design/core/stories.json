@@ -1,0 +1,43 @@
+{
+  "cluster": "core",
+  "personas": [
+    {
+      "name": "Application Developer",
+      "role": "Embedding liminal for inter-process messaging",
+      "stories": [
+        {"id": "S1", "text": "As an application developer, I want to create a typed channel with a single function call so that I can start publishing and subscribing without configuring infrastructure."},
+        {"id": "S2", "text": "As an application developer, I want schema validation at publish time so that subscribers never receive messages that do not match the channel's contract."},
+        {"id": "S3", "text": "As an application developer, I want to subscribe to a channel with an optional predicate filter so that I only receive messages I care about."},
+        {"id": "S4", "text": "As an application developer, I want to initiate a request-reply conversation with a single call so that I do not need to manage inbox subjects or correlation IDs."},
+        {"id": "S5", "text": "As an application developer, I want conversations to detect participant crashes immediately so that I can route to another participant without waiting for a timeout."}
+      ]
+    },
+    {
+      "name": "AI Agent",
+      "role": "Sending and receiving messages between agents",
+      "stories": [
+        {"id": "S6", "text": "As an AI agent, I want to publish a message to a named channel so that other agents subscribed to that channel receive it."},
+        {"id": "S7", "text": "As an AI agent, I want to subscribe to a channel and receive messages in my beamr mailbox so that I can process them with selective receive."},
+        {"id": "S8", "text": "As an AI agent, I want to send a request to another agent via a conversation and receive the reply in the same call so that inter-agent communication is synchronous when needed."}
+      ]
+    },
+    {
+      "name": "Aion Engine",
+      "role": "Using liminal for worker dispatch and signals",
+      "stories": [
+        {"id": "S9", "text": "As the Aion engine, I want to dispatch work to a worker via a conversation so that worker crash is detected immediately and the work is routed to another worker."},
+        {"id": "S10", "text": "As the Aion engine, I want to send signals to a running workflow via a channel so that external events can influence workflow execution."},
+        {"id": "S11", "text": "As the Aion engine, I want durable conversations so that in-flight activity dispatch survives server restart without re-executing completed steps."}
+      ]
+    },
+    {
+      "name": "Operator",
+      "role": "Monitoring and managing messaging infrastructure",
+      "stories": [
+        {"id": "S12", "text": "As an operator, I want to list active channels and their subscriber counts so that I can monitor system utilisation."},
+        {"id": "S13", "text": "As an operator, I want to list active conversations and their states so that I can diagnose stuck or failed exchanges."},
+        {"id": "S14", "text": "As an operator, I want to close a channel gracefully so that all subscribers are notified before the channel shuts down."}
+      ]
+    }
+  ]
+}

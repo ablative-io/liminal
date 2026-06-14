@@ -1,0 +1,152 @@
+{
+  "id": "ROUTING-003",
+  "cluster": "routing",
+  "title": "Implement predicate compiler and routing function execution",
+  "depends_on": ["ROUTING-001"],
+  "blocked_by": [],
+  "checklist": ["C8", "C9", "C10", "C11", "C12", "C13", "C14", "C15"],
+  "stories": ["S3", "S4"],
+  "design_anchor": ["ADR-003"],
+  "purpose": "Delivers the unification layer of the two-tier routing model (ADR-003): predicates compile to routing functions, and the engine always executes functions. This brief builds the compiler that transforms Predicate types into optimized routing functions, and the execution harness that loads and runs Gleam routing functions in supervised beamr processes with fault isolation and hot deployment.",
+  "task": "Create routing/compiler.rs with the predicate-to-function compiler, and routing/function.rs with the routing function execution harness. The compiler transforms Predicate types into routing functions, applying index-aware optimizations (field extraction ordering, short-circuit layout). Compiled functions must produce identical results to direct predicate evaluation. The function execution harness loads Gleam routing functions via content-hash module loading into beamr, runs them as supervised processes, and supports hot deployment. A routing function receives the message and a consumer state view (capacity, affinity tags). A crashing routing function must not affect other channels. This brief does not implement the dispatch conversation or consumer group model — those belong to ROUTING-004.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Implement predicate-to-routing-function compiler",
+      "spec": "WHEN a Predicate is submitted to the compiler, THE SYSTEM SHALL produce a compiled routing function representation that encodes the predicate logic. The compiled form SHALL be executable by the routing function harness. THE SYSTEM SHALL NOT modify the original Predicate during compilation.",
+      "acceptance": [
+        "compile(Predicate::Comparison { field: \"amount\", op: Gt, value: Integer(1000) }) produces a CompiledFunction.",
+        "compile(Predicate::And([p1, p2])) produces a CompiledFunction encoding the conjunction.",
+        "compile(Predicate::Not(Box::new(p))) produces a CompiledFunction encoding the negation.",
+        "The original Predicate is unchanged after compilation (borrow, not consume)."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/routing/compiler.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C8"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Ensure compiled predicates produce identical routing decisions",
+      "spec": "WHEN a compiled predicate function is executed against a message, THE SYSTEM SHALL produce the identical routing decision as direct predicate evaluation for all input combinations. THE SYSTEM SHALL NOT exhibit behavioral divergence between compiled and interpreted paths.",
+      "acceptance": [
+        "For 100 randomized predicate + message combinations, compiled execution and direct evaluation produce identical boolean results.",
+        "Edge cases — empty And/Or, deeply nested Not, missing fields, type mismatches — produce identical results in both paths.",
+        "A property-based or exhaustive comparison test covers all predicate variants."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/compiler.rs"],
+        "delete": []
+      },
+      "checklist": ["C9"],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Apply index-aware optimizations in the compiler",
+      "spec": "WHEN compiling a predicate with multiple field references, THE SYSTEM SHALL order field extraction to minimize redundant access (fields used in more clauses are extracted first). WHEN compiling boolean combinators, THE SYSTEM SHALL arrange clauses for optimal short-circuit behavior (cheapest or most selective first where determinable). THE SYSTEM SHALL NOT reorder clauses in a way that changes observable evaluation semantics.",
+      "acceptance": [
+        "A compiled And predicate with an Exists check and a Comparison extracts the Exists field first when it is cheaper to evaluate.",
+        "The compiler reorders And clauses to place field-existence checks before value comparisons.",
+        "Reordering does not change the boolean result for any input — verified by the R2 equivalence tests."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/compiler.rs"],
+        "delete": []
+      },
+      "checklist": ["C10"],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Define routing function loading via content-hash modules",
+      "spec": "The routing function module SHALL define a RoutingFunction trait or type representing executable routing logic loaded from a Gleam module. WHEN a routing function module is loaded, THE SYSTEM SHALL load it via content-hash module loading into beamr. THE SYSTEM SHALL NOT load modules by mutable path references.",
+      "acceptance": [
+        "RoutingFunction type wraps a reference to a loaded beamr module.",
+        "Loading a routing function module by content hash succeeds and produces an executable RoutingFunction.",
+        "Loading the same content hash twice returns the already-loaded module without duplication."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/routing/function.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C11"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R5",
+      "title": "Execute routing functions in supervised beamr processes",
+      "spec": "WHEN a routing function is invoked, THE SYSTEM SHALL execute it in a supervised beamr process. The function SHALL receive the message and a ConsumerStateView containing per-consumer capacity and affinity tags. THE SYSTEM SHALL return the routing decision produced by the function. THE SYSTEM SHALL NOT execute routing functions on the calling thread.",
+      "acceptance": [
+        "Routing function execution spawns a beamr process.",
+        "The spawned process receives a ConsumerStateView with capacity and affinity fields.",
+        "The function's routing decision (selected consumer) is returned to the caller.",
+        "ConsumerStateView implements Debug and contains current_in_flight, max_in_flight, buffer_depth, and affinity_tags fields."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/function.rs"],
+        "delete": []
+      },
+      "checklist": ["C12", "C13"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R6",
+      "title": "Implement fault isolation for routing function execution",
+      "spec": "IF a routing function panics or enters an infinite loop, THEN THE SYSTEM SHALL terminate the offending process without affecting routing evaluations for other channels. THE SYSTEM SHALL NOT propagate a routing function crash to the calling channel's evaluation pipeline. THE SYSTEM SHALL return an error to the caller indicating the function failed.",
+      "acceptance": [
+        "A routing function that panics is caught by the supervisor; the caller receives an error result.",
+        "After a routing function crash on channel A, routing evaluation on channel B proceeds normally.",
+        "A routing function exceeding a supervision timeout is terminated and returns an error."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/function.rs"],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": []
+    },
+    {
+      "id": "R7",
+      "title": "Implement hot deployment for routing functions",
+      "spec": "WHEN a new version of a routing function is deployed, THE SYSTEM SHALL load the new module via content-hash loading and replace the active function reference. In-flight evaluations using the previous version SHALL complete normally. THE SYSTEM SHALL NOT drop connections or pause dispatch during hot deployment.",
+      "acceptance": [
+        "Deploying a new routing function version while the old version is in use does not interrupt in-flight evaluations.",
+        "After deployment, the next routing evaluation uses the new function version.",
+        "The old module version remains loaded until all in-flight references are released.",
+        "No connections are dropped during the deployment transition."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/routing/function.rs"],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S4"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement the dispatch conversation — that belongs to ROUTING-004.",
+    "SHALL NOT implement consumer group logic — that belongs to ROUTING-004.",
+    "SHALL NOT define backpressure signals or capacity tracking — those belong to ROUTING-005.",
+    "SHALL NOT implement pressure policy enforcement — that belongs to ROUTING-006.",
+    "SHALL NOT expose beamr types in the routing function public API — the boundary module wraps beamr."
+  ],
+  "verification": [
+    "cargo clippy -p liminal --all-targets -- -D warnings passes clean.",
+    "cargo test -p liminal passes with all compiler and function execution tests green.",
+    "cargo fmt --check passes clean.",
+    "compiler.rs and function.rs are each under 500 lines including tests (CN1).",
+    "Compiled predicate equivalence test covers all Predicate variants.",
+    "All public types implement Debug (CN4).",
+    "No .unwrap() or .expect() in library code (CN2)."
+  ]
+}

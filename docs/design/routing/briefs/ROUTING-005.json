@@ -1,0 +1,141 @@
+{
+  "id": "ROUTING-005",
+  "cluster": "routing",
+  "title": "Define backpressure signal types and consumer capacity tracking",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C19", "C20", "C21", "C22", "C23", "C24", "C25", "C26", "C27"],
+  "stories": ["S6", "S7", "S8"],
+  "design_anchor": ["ADR-004"],
+  "purpose": "Establishes backpressure as a wire protocol primitive (ADR-004) by defining the three pressure signal types (accept, defer, reject), consumer capacity declarations, and per-consumer capacity tracking. These types and tracking mechanisms are consumed by the pressure policy engine (ROUTING-006) and the dispatch conversation (ROUTING-004). Backpressure signals are delivered to producers within the publish round-trip — not asynchronously after the fact.",
+  "task": "Create the pressure module root (pressure/mod.rs), signal types (pressure/signal.rs), and capacity tracking (pressure/capacity.rs). Define the PressureSignal enum with Accept, Defer, and Reject variants, each with defined semantics. Define ConsumerCapacity as the declaration a consumer makes at subscription time (max in-flight, max buffer depth). Implement CapacityTracker to track current in-flight count and buffer depth per consumer, and to determine whether the next message should be accepted, deferred, or rejected based on the consumer's declared limits. Signals must be produced synchronously within the publish path. This brief does not implement pressure policies, monitoring, or enforcement — those belong to ROUTING-006.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define PressureSignal enum with accept, defer, and reject variants",
+      "spec": "The pressure module SHALL define a PressureSignal enum with exactly three variants: Accept (message delivered and processing begun), Defer (message buffered, will deliver when capacity frees), and Reject (consumer overwhelmed, message shed). Each variant SHALL carry metadata relevant to the signal. THE SYSTEM SHALL NOT define additional signal variants beyond these three.",
+      "acceptance": [
+        "PressureSignal enum has exactly three variants: Accept, Defer, Reject.",
+        "PressureSignal::Accept indicates message delivered and processing started.",
+        "PressureSignal::Defer indicates message buffered pending consumer capacity.",
+        "PressureSignal::Reject indicates consumer overwhelmed and message shed.",
+        "PressureSignal implements Clone, Debug, PartialEq, and Eq."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/pressure/signal.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C19", "C20", "C21", "C22"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R2",
+      "title": "Deliver backpressure signals within the publish round-trip",
+      "spec": "WHEN a message is published and delivered to a consumer, THE SYSTEM SHALL produce a PressureSignal synchronously as part of the delivery result. The signal SHALL be available to the producer before the publish call returns. THE SYSTEM SHALL NOT deliver backpressure signals asynchronously after the publish round-trip completes.",
+      "acceptance": [
+        "The delivery result type includes a PressureSignal field.",
+        "A publish that delivers to a consumer at normal capacity returns PressureSignal::Accept.",
+        "A publish that buffers a message for a consumer at max in-flight returns PressureSignal::Defer.",
+        "A publish that sheds a message for an overwhelmed consumer returns PressureSignal::Reject.",
+        "The signal is part of the return value, not a callback or async notification."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/pressure/signal.rs"],
+        "delete": []
+      },
+      "checklist": ["C23"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R3",
+      "title": "Define consumer capacity declaration",
+      "spec": "The pressure module SHALL define a ConsumerCapacity struct with max_in_flight (maximum concurrent messages being processed) and max_buffer_depth (maximum messages queued waiting for capacity). Both fields SHALL be positive integers. THE SYSTEM SHALL NOT impose default values for capacity — consumers must declare explicitly.",
+      "acceptance": [
+        "ConsumerCapacity { max_in_flight: 10, max_buffer_depth: 50 } constructs a valid declaration.",
+        "ConsumerCapacity fields are publicly readable.",
+        "ConsumerCapacity implements Clone, Debug, PartialEq, and Eq.",
+        "No Default implementation — capacity must be explicitly declared."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/pressure/capacity.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C24", "C25"],
+      "stories": ["S7"]
+    },
+    {
+      "id": "R4",
+      "title": "Implement per-consumer capacity tracking",
+      "spec": "The pressure module SHALL define a CapacityTracker that tracks the current in-flight count and buffer depth for a consumer. WHEN a message is delivered, THE SYSTEM SHALL increment in-flight count. WHEN processing completes, THE SYSTEM SHALL decrement in-flight count. WHEN a message is buffered, THE SYSTEM SHALL increment buffer depth. THE SYSTEM SHALL NOT allow in-flight or buffer counts to go negative.",
+      "acceptance": [
+        "CapacityTracker::new(ConsumerCapacity) creates a tracker with zero in-flight and zero buffered.",
+        "After recording a delivery, current_in_flight() returns 1.",
+        "After recording a completion, current_in_flight() returns 0.",
+        "After recording a buffer addition, current_buffer_depth() returns 1.",
+        "Attempting to decrement below zero returns an error, not a negative count."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/pressure/capacity.rs"],
+        "delete": []
+      },
+      "checklist": ["C26"],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Determine pressure signal based on capacity state",
+      "spec": "WHEN a message is to be delivered to a consumer, THE SYSTEM SHALL consult the CapacityTracker to determine the appropriate PressureSignal. IF current in-flight is below max_in_flight, THE SYSTEM SHALL return Accept. IF current in-flight equals max_in_flight but buffer depth is below max_buffer_depth, THE SYSTEM SHALL return Defer. IF both limits are reached, THE SYSTEM SHALL return Reject.",
+      "acceptance": [
+        "A consumer with max_in_flight=2, current_in_flight=1 receives Accept.",
+        "A consumer with max_in_flight=2, current_in_flight=2, max_buffer_depth=5, current_buffer=3 receives Defer.",
+        "A consumer with max_in_flight=2, current_in_flight=2, max_buffer_depth=5, current_buffer=5 receives Reject.",
+        "A consumer with max_in_flight=1, current_in_flight=0 receives Accept regardless of buffer state.",
+        "The signal determination does not mutate tracker state — it is a pure query."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/pressure/capacity.rs"],
+        "delete": []
+      },
+      "checklist": ["C27"],
+      "stories": ["S8"]
+    },
+    {
+      "id": "R6",
+      "title": "Wire pressure module root with re-exports",
+      "spec": "The pressure module root SHALL contain only pub mod declarations and pub use re-exports per CN3. All public pressure types SHALL be re-exported from the pressure module root.",
+      "acceptance": [
+        "pressure/mod.rs contains pub mod signal, pub mod capacity, and no function or trait definitions.",
+        "PressureSignal, ConsumerCapacity, and CapacityTracker are accessible via use crate::pressure::{PressureSignal, ConsumerCapacity, CapacityTracker}.",
+        "No logic (functions, trait impls, match arms) exists in pressure/mod.rs."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/pressure/mod.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement pressure policies or policy configuration — those belong to ROUTING-006.",
+    "SHALL NOT implement pressure monitoring or metric aggregation — those belong to ROUTING-006.",
+    "SHALL NOT implement policy enforcement or automatic overload responses — those belong to ROUTING-006.",
+    "SHALL NOT define routing predicates or the routing table — those belong to ROUTING-001 and ROUTING-002.",
+    "SHALL NOT impose default capacity values — consumers must declare capacity explicitly."
+  ],
+  "verification": [
+    "cargo clippy -p liminal --all-targets -- -D warnings passes clean.",
+    "cargo test -p liminal passes with all pressure signal and capacity tracking tests green.",
+    "cargo fmt --check passes clean.",
+    "signal.rs and capacity.rs are each under 500 lines including tests (CN1).",
+    "pressure/mod.rs contains only pub mod and pub use — no logic.",
+    "All public types implement Debug (CN4).",
+    "No .unwrap() or .expect() in library code (CN2)."
+  ]
+}

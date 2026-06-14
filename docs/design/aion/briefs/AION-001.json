@@ -1,0 +1,127 @@
+{
+  "id": "AION-001",
+  "cluster": "aion",
+  "title": "Establish module foundation and shared types",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C1", "C2", "C3", "C4", "C25"],
+  "stories": ["S9"],
+  "design_anchor": ["ADR-002", "ADR-007"],
+  "purpose": "Foundation module for the Aion integration surface -- shared types (ActivityRequest, ActivityResult, SignalPayload, WorkerCapacity, HistoryEvent), channel naming convention constructors, and the AionSurfaceError taxonomy. Every other brief in the cluster imports from this module. The types defined here are the vocabulary for dispatch conversations (ADR-007), typed channel validation (ADR-002), and the signal/history/worker subsystems. Nothing in this brief dispatches, delivers, streams, or registers -- it provides the shared language that those briefs build on.",
+  "task": "Create the four foundation files for the Aion integration surface at crates/liminal/src/aion/. mod.rs is the module root with only pub mod declarations and pub use re-exports (no logic, no type definitions, no function bodies -- constraint CN3). types.rs defines the shared types used across the cluster: ActivityRequest, ActivityResult, SignalPayload, WorkerCapacity, and HistoryEvent envelope. channels.rs provides deterministic channel naming constructors that enforce the aion.{kind}.{namespace}.{id} convention (constraint CN7) and reject malformed inputs. error.rs defines AionSurfaceError with variants for dispatch, signal, streaming, and channel naming failures, implemented via thiserror. All public types implement Debug (constraint CN4). No file exceeds 500 lines (constraint CN1). This brief does NOT implement dispatch, signal delivery, history streaming, or worker registration -- those are AION-002 through AION-005.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Module root with pub mod declarations only",
+      "spec": "crates/liminal/src/aion/mod.rs SHALL contain only pub mod declarations for types, channels, error, dispatch, codec, signal, history, and worker submodules, plus pub use re-exports of key types. mod.rs SHALL NOT contain any function bodies, struct definitions, enum definitions, trait definitions, or impl blocks.",
+      "acceptance": [
+        "mod.rs compiles and contains pub mod declarations for all submodules defined in design.json structure",
+        "grep -E '(fn |struct |enum |trait |impl )' mod.rs returns no matches",
+        "pub use re-exports make AionSurfaceError, ActivityRequest, ActivityResult, SignalPayload, WorkerCapacity, and HistoryEvent available as crate::aion::*"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/aion/mod.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Shared types for the integration surface",
+      "spec": "types.rs SHALL define ActivityRequest (activity type, input payload, task queue name, timeout configuration), ActivityResult (output payload, error variant), SignalPayload (signal name, typed payload bytes, content-type tag), WorkerCapacity (max concurrent activities, activity type filter), and HistoryEvent (workflow event envelope with sequence number, event type, timestamp, and opaque payload). All types SHALL implement Debug and Clone. ActivityRequest and ActivityResult SHALL use the type-erased Payload model (bytes + content-type) consistent with Aion's opaque payload approach. The types SHALL NOT carry generic type parameters.",
+      "acceptance": [
+        "ActivityRequest has fields: activity_type (String), input (Payload), task_queue (String), schedule_to_close_timeout (Option<Duration>), start_to_close_timeout (Option<Duration>)",
+        "ActivityResult is an enum with Completed { output: Payload } and Failed { error: AionSurfaceError } variants",
+        "SignalPayload has fields: signal_name (String), payload (Payload)",
+        "WorkerCapacity has fields: max_concurrent (usize), activity_types (Vec<String>)",
+        "HistoryEvent has fields: sequence (u64), event_type (String), timestamp (SystemTime or equivalent), payload (Payload)",
+        "All five types derive Debug and Clone",
+        "No type uses a generic parameter <T>"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/aion/types.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C3", "C25"],
+      "stories": ["S9"]
+    },
+    {
+      "id": "R3",
+      "title": "Channel naming convention constructors",
+      "spec": "channels.rs SHALL provide constructor functions that produce deterministic channel names following the aion.{kind}.{namespace}.{id} convention: dispatch_channel(namespace, task_queue) returning aion.dispatch.{namespace}.{task_queue}, signal_channel(namespace, workflow_id) returning aion.signal.{namespace}.{workflow_id}, and history_channel(namespace, workflow_id) returning aion.history.{namespace}.{workflow_id}. WHEN a namespace or id argument contains a dot (.) or is empty, THE SYSTEM SHALL return Err(AionSurfaceError::InvalidChannelName) with a message identifying the invalid input. THE SYSTEM SHALL NOT allow ad-hoc string construction of channel names outside this module.",
+      "acceptance": [
+        "dispatch_channel(\"default\", \"email-queue\") returns Ok(\"aion.dispatch.default.email-queue\")",
+        "signal_channel(\"prod\", \"wf-123\") returns Ok(\"aion.signal.prod.wf-123\")",
+        "history_channel(\"prod\", \"wf-123\") returns Ok(\"aion.history.prod.wf-123\")",
+        "dispatch_channel(\"bad.ns\", \"q\") returns Err(AionSurfaceError::InvalidChannelName { .. })",
+        "signal_channel(\"\", \"wf-1\") returns Err(AionSurfaceError::InvalidChannelName { .. })",
+        "history_channel(\"ns\", \"\") returns Err(AionSurfaceError::InvalidChannelName { .. })",
+        "The return type is a newtype (e.g., ChannelName) that prevents construction outside channels.rs"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/aion/channels.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C4"],
+      "stories": ["S9"]
+    },
+    {
+      "id": "R4",
+      "title": "AionSurfaceError taxonomy",
+      "spec": "error.rs SHALL define AionSurfaceError as a thiserror enum with at minimum the following variants: DispatchFailed (worker selection or conversation failure), WorkerCrashed (process link exit detected), SignalDeliveryFailed (publish to signal channel failed), SignalValidationFailed (payload does not match declared type), StreamingFailed (history channel publish or subscribe failure), InvalidChannelName (malformed namespace or id input), and ChannelLifecycleError (creation or teardown failure). Each variant SHALL carry enough context (source error, channel name, workflow id) to diagnose the failure without additional logging. AionSurfaceError SHALL implement std::error::Error via thiserror and Debug.",
+      "acceptance": [
+        "AionSurfaceError has at least 7 variants: DispatchFailed, WorkerCrashed, SignalDeliveryFailed, SignalValidationFailed, StreamingFailed, InvalidChannelName, ChannelLifecycleError",
+        "Each variant's Display output includes the channel name or workflow id relevant to the failure",
+        "AionSurfaceError implements std::error::Error (verified by std::error::Error trait bound compilation)",
+        "AionSurfaceError implements Debug",
+        "No variant uses #[from] on a generic or boxed error -- source errors are typed"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/aion/error.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C2", "C3"],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Payload type for type-erased data",
+      "spec": "types.rs SHALL define a Payload struct carrying raw bytes (Vec<u8>) and a content-type tag (String) for type-erased data exchange. Payload SHALL implement Debug, Clone, and Default. The Default implementation SHALL produce an empty payload with an empty content-type. Payload is the single data-carrying type used by ActivityRequest, ActivityResult, SignalPayload, and HistoryEvent -- no type uses a separate bytes field.",
+      "acceptance": [
+        "Payload has fields: data (Vec<u8>), content_type (String)",
+        "Payload::default() returns Payload { data: vec![], content_type: String::new() }",
+        "ActivityRequest.input, ActivityResult::Completed.output, SignalPayload.payload, and HistoryEvent.payload all use the Payload type",
+        "Payload derives Debug and Clone"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/types.rs"],
+        "delete": []
+      },
+      "checklist": ["C3"],
+      "stories": ["S9"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement activity dispatch logic -- that is AION-002.",
+    "SHALL NOT implement signal delivery or validation logic -- that is AION-003.",
+    "SHALL NOT implement history event streaming -- that is AION-004.",
+    "SHALL NOT implement worker registration or capacity tracking -- that is AION-005.",
+    "SHALL NOT import from Aion engine internals (aion crate) -- the integration surface is a consumer of public APIs only (principle P1).",
+    "SHALL NOT import from liminal core internals -- consume the public channel and conversation APIs only.",
+    "SHALL NOT define any behavior or side effects -- this brief provides types, constructors, and errors only."
+  ],
+  "verification": [
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean with the new files.",
+    "cargo fmt --check passes clean.",
+    "cargo test for the aion module passes (unit tests for channel naming validation and error Display output).",
+    "No file in crates/liminal/src/aion/ exceeds 500 lines (wc -l).",
+    "grep -rn 'use aion::' crates/liminal/src/aion/ returns no references to Aion engine internals.",
+    "All public types implement Debug (verified by #[derive(Debug)] or manual impl presence)."
+  ]
+}

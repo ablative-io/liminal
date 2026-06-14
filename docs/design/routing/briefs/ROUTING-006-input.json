@@ -1,0 +1,290 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "ROUTING-006",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "ROUTING-006",
+    "cluster": "routing",
+    "title": "Implement pressure policies, monitoring, and enforcement",
+    "depends_on": [
+      "ROUTING-005"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C28",
+      "C29",
+      "C30",
+      "C31"
+    ],
+    "stories": [
+      "S5",
+      "S14",
+      "S15",
+      "S16"
+    ],
+    "design_anchor": [
+      "ADR-004"
+    ],
+    "purpose": "Completes the backpressure subsystem (ADR-004) by adding policy configuration, pressure monitoring, and automatic enforcement. Pressure policies are per-channel declarations that govern how the bus responds to overload \u2014 slowing producers, shedding load, emitting scaling signals, or alerting. The monitor aggregates per-consumer capacity metrics into per-channel pressure scores. The enforcer evaluates policies against monitor state and triggers actions automatically, without application code.",
+    "task": "Create pressure/policy.rs with policy configuration types, pressure/monitor.rs with the pressure monitor, and pressure/enforce.rs with policy enforcement. Define four policy actions: SlowProducer, ShedLoad, ScaleConsumer, Alert. Policies are configured per-channel with escalation thresholds \u2014 pressure rising through threshold levels triggers actions in configured sequence. The monitor tracks per-consumer metrics (in-flight count, buffer depth, accept/defer/reject rates) and derives a per-channel pressure score. The enforcer evaluates policies against monitor state and triggers the appropriate action. This brief does not implement routing or dispatch \u2014 it operates purely on the pressure subsystem types defined in ROUTING-005.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define pressure policy action enum",
+        "spec": "The pressure module SHALL define a PolicyAction enum with exactly four variants: SlowProducer (signal producer to reduce rate), ShedLoad (reject lowest-priority messages), ScaleConsumer (emit scaling signal for external orchestration), and Alert (emit pressure event for observability). Each variant SHALL carry action-specific configuration. THE SYSTEM SHALL NOT define additional action types.",
+        "acceptance": [
+          "PolicyAction enum has exactly four variants: SlowProducer, ShedLoad, ScaleConsumer, Alert.",
+          "PolicyAction::SlowProducer carries a rate reduction factor.",
+          "PolicyAction::ShedLoad carries a priority threshold below which messages are rejected.",
+          "PolicyAction::ScaleConsumer carries no configuration (the signal is the action).",
+          "PolicyAction::Alert carries a severity level.",
+          "PolicyAction implements Clone, Debug, and PartialEq."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/pressure/policy.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C28"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Configure per-channel pressure policies with escalation thresholds",
+        "spec": "The pressure module SHALL define a PressurePolicy struct associating a pressure threshold (0.0 to 1.0) with a PolicyAction. The module SHALL define a ChannelPolicyConfig that holds an ordered list of PressurePolicys for a channel. WHEN multiple policies are configured, THE SYSTEM SHALL evaluate them in threshold order from lowest to highest. THE SYSTEM SHALL NOT impose a hard limit on the number of policies per channel.",
+        "acceptance": [
+          "PressurePolicy { threshold: 0.7, action: PolicyAction::SlowProducer { .. } } constructs a valid policy.",
+          "ChannelPolicyConfig::new(vec![policy_a, policy_b]) creates a config with two escalation levels.",
+          "Policies are stored in ascending threshold order.",
+          "ChannelPolicyConfig implements Debug."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/pressure/policy.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C29"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement composable policy escalation",
+        "spec": "WHILE channel pressure rises through configured thresholds, THE SYSTEM SHALL trigger policy actions in escalation sequence. WHEN pressure exceeds a threshold, THE SYSTEM SHALL trigger that threshold's action AND all lower-threshold actions already triggered. WHEN pressure drops below a threshold, THE SYSTEM SHALL deactivate that threshold's action. THE SYSTEM SHALL NOT skip intermediate thresholds.",
+        "acceptance": [
+          "With thresholds at 0.5 (SlowProducer) and 0.8 (ShedLoad), pressure at 0.6 triggers only SlowProducer.",
+          "Pressure rising from 0.6 to 0.9 triggers both SlowProducer and ShedLoad.",
+          "Pressure dropping from 0.9 to 0.6 deactivates ShedLoad but keeps SlowProducer active.",
+          "Pressure dropping from 0.6 to 0.3 deactivates all policy actions.",
+          "No intermediate threshold is ever skipped."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/pressure/policy.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C30"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Implement pressure monitor with per-consumer and per-channel metrics",
+        "spec": "The pressure module SHALL define a PressureMonitor that tracks per-consumer metrics: current in-flight count, buffer depth, and accept/defer/reject rates. The monitor SHALL derive a per-channel pressure score (0.0 to 1.0) from the aggregate of its consumers' metrics. THE SYSTEM SHALL NOT impose a fixed aggregation strategy \u2014 the scoring function is configurable.",
+        "acceptance": [
+          "PressureMonitor::new() creates a monitor with no tracked consumers.",
+          "After recording metrics for consumer A (in-flight: 8, max: 10), the monitor reports A's utilization as 0.8.",
+          "Per-channel pressure score aggregates across all consumers on the channel.",
+          "The monitor tracks accept, defer, and reject counts per consumer.",
+          "Pressure score is clamped to [0.0, 1.0]."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/pressure/monitor.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S14",
+          "S15"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Implement automatic policy enforcement against monitor state",
+        "spec": "WHEN the pressure monitor reports a channel pressure score, THE SYSTEM SHALL evaluate the channel's policy config against that score and trigger the appropriate actions automatically. Enforcement SHALL NOT require application code. THE SYSTEM SHALL emit triggered actions as typed events consumable by the routing and dispatch subsystems.",
+        "acceptance": [
+          "When channel pressure crosses 0.7 with a SlowProducer policy at 0.7, the enforcer emits a SlowProducer action.",
+          "Enforcement runs automatically on each monitor update without explicit caller invocation.",
+          "Triggered actions are returned as a Vec<PolicyAction> for the calling subsystem to apply.",
+          "No policy actions are emitted when pressure is below all configured thresholds."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/pressure/enforce.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C31"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R6",
+        "title": "Emit scale-consumer signals for external orchestration",
+        "spec": "WHEN a ScaleConsumer policy action is triggered, THE SYSTEM SHALL emit a typed scaling signal that external orchestrators (Aion, Kubernetes) can observe. The signal SHALL include the channel identifier and the current consumer count. THE SYSTEM SHALL NOT spawn consumers directly \u2014 scaling is delegated to external systems.",
+        "acceptance": [
+          "A triggered ScaleConsumer action produces a ScaleSignal with channel_id and current_consumer_count.",
+          "ScaleSignal implements Clone, Debug, and PartialEq.",
+          "The bus does not spawn or manage consumers in response to a ScaleConsumer action.",
+          "The signal is emittable via the same typed event mechanism as other policy actions."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/pressure/enforce.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S16"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT define or modify PressureSignal or ConsumerCapacity types \u2014 those belong to ROUTING-005.",
+      "SHALL NOT implement routing predicates, evaluation, or the routing table \u2014 those belong to ROUTING-001 and ROUTING-002.",
+      "SHALL NOT implement dispatch conversation or consumer group logic \u2014 those belong to ROUTING-004.",
+      "SHALL NOT spawn consumers directly \u2014 ScaleConsumer emits a signal for external orchestration only.",
+      "SHALL NOT implement message priority queuing \u2014 pressure-based shedding by priority class is the extent of priority support per design non-goals."
+    ],
+    "verification": [
+      "cargo clippy -p liminal --all-targets -- -D warnings passes clean.",
+      "cargo test -p liminal passes with all policy, monitor, and enforcement tests green.",
+      "cargo fmt --check passes clean.",
+      "policy.rs, monitor.rs, and enforce.rs are each under 500 lines including tests (CN1).",
+      "Policy escalation test covers rising and falling pressure across multiple thresholds.",
+      "All public types implement Debug (CN4).",
+      "No .unwrap() or .expect() in library code (CN2)."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C28",
+        "text": "Four policy actions defined: slow-producer, shed-load, scale-consumer, alert."
+      },
+      {
+        "id": "C29",
+        "text": "Policies are configured per-channel with escalation thresholds."
+      },
+      {
+        "id": "C30",
+        "text": "Policies compose: escalating pressure triggers actions in configured sequence."
+      },
+      {
+        "id": "C31",
+        "text": "Policy enforcement evaluates automatically against monitor state without application code."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S5",
+        "text": "As an application developer, I want to configure a pressure policy on my channel so that the bus automatically handles overload without my consumers needing custom backpressure code."
+      },
+      {
+        "id": "S14",
+        "text": "As an operator, I want to observe per-channel pressure metrics (in-flight count, buffer depth, reject rate) so that I can identify overloaded channels before they degrade service quality."
+      },
+      {
+        "id": "S15",
+        "text": "As an operator, I want to see which pressure policy actions have triggered and when so that I can verify the bus is responding to overload as configured."
+      },
+      {
+        "id": "S16",
+        "text": "As an operator, I want to receive scale-consumer signals from the bus so that I can trigger auto-scaling in my orchestrator when consumer capacity is exhausted."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Predicate evaluation must not allocate per-message. Predicates evaluate against borrowed message fields with no heap allocation on the hot path."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure signals must be delivered to producers within the same publish round-trip. No asynchronous notification after the fact."
+      },
+      {
+        "id": "CN7",
+        "text": "Consumer crash detection via process link must trigger re-routing within one millisecond. No polling or heartbeat-based detection."
+      },
+      {
+        "id": "CN8",
+        "text": "Routing function execution is supervised and isolated. A panic or infinite loop in one routing function must not block evaluation for other channels."
+      },
+      {
+        "id": "CN9",
+        "text": "Adding or removing a consumer from a group must not pause, block, or restart dispatch for other consumers in the same group."
+      }
+    ],
+    "intention": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. Backpressure is not an afterthought bolted onto the consumer; it is a protocol primitive that producers see and react to in real time. Consumer groups do not rebalance. A dispatch conversation selects a consumer, links to it, observes completion, and re-routes on failure -- per message, with sub-millisecond crash detection via beamr process links. The experience should feel like the bus is an intelligent intermediary that understands both what messages mean and how much work consumers can absorb, rather than a dumb pipe that delivers bytes and hopes for the best.",
+    "design_path": "docs/design/routing",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

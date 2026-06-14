@@ -1,0 +1,175 @@
+{
+  "id": "OBS-001",
+  "cluster": "observability",
+  "title": "Establish metrics registry infrastructure with atomic snapshot support",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C1", "C2"],
+  "stories": ["S5"],
+  "design_anchor": ["ADR-004"],
+  "purpose": "Bootstrap the metrics subsystem with the module skeleton and the MetricsRegistry type that all metric collectors register into. The registry must support atomic snapshot reads so that Prometheus scrapes see a consistent view across all metric families. This is the leaf dependency for every other metrics brief (OBS-002 through OBS-005).",
+  "task": "Create the metrics module at crates/liminal/src/metrics/ with a mod.rs that contains only pub mod and pub use declarations. Implement MetricsRegistry in registry.rs as the central coordination point for metric collectors. The registry must support registration of counters, gauges, and histograms by name, and provide an atomic snapshot method that returns a consistent read of all registered metrics. Add pub mod metrics to lib.rs. The registry must be Send + Sync, Clone (handle-style), and impose zero overhead when no exporter is attached.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Create metrics module skeleton",
+      "spec": "crates/liminal/src/metrics/mod.rs SHALL declare pub mod for registry (and future sub-modules channel, conversation, pressure, export). mod.rs SHALL contain only pub mod declarations and pub use re-exports. mod.rs SHALL NOT contain any function, struct, trait, or impl definitions.",
+      "acceptance": [
+        "crates/liminal/src/metrics/mod.rs exists",
+        "mod.rs declares pub mod registry",
+        "mod.rs contains zero function definitions, zero struct definitions, zero trait definitions",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/metrics/mod.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Add pub mod metrics to lib.rs",
+      "spec": "crates/liminal/src/lib.rs SHALL declare pub mod metrics so the metrics subsystem is part of the public API surface. lib.rs SHALL re-export MetricsRegistry from the metrics module.",
+      "acceptance": [
+        "lib.rs contains pub mod metrics declaration",
+        "MetricsRegistry is re-exported from lib.rs",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/lib.rs"],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Define MetricKind enum for counter, gauge, and histogram",
+      "spec": "MetricKind SHALL have exactly three variants: Counter, Gauge, and Histogram. Counter is a monotonically increasing u64. Gauge is a signed i64 that can go up or down. Histogram records individual observations into configurable buckets. MetricKind SHALL derive Debug, Clone.",
+      "acceptance": [
+        "MetricKind::Counter, MetricKind::Gauge, and MetricKind::Histogram are the only variants",
+        "MetricKind derives Debug and Clone",
+        "MetricKind is defined in crates/liminal/src/metrics/registry.rs"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/metrics/registry.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Define MetricValue types with atomic backing",
+      "spec": "Counter SHALL be backed by AtomicU64. Gauge SHALL be backed by AtomicI64. Histogram SHALL store observations in a thread-safe structure with configurable bucket boundaries. All metric values SHALL be readable without locking the writer path. Recording a metric value SHALL NOT block the caller — all updates are atomic or lock-free.",
+      "acceptance": [
+        "Counter uses AtomicU64 with Relaxed ordering for increments",
+        "Gauge uses AtomicI64 with Relaxed ordering for set/increment/decrement",
+        "Histogram stores observations in a thread-safe bucketed structure",
+        "No Mutex or RwLock is held during metric recording"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/registry.rs"],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Implement MetricsRegistry with registration and lookup",
+      "spec": "MetricsRegistry SHALL allow registering named metrics with labels. Registration SHALL return a handle to the metric for recording. MetricsRegistry SHALL be Clone (Arc-wrapped inner), Send + Sync. Duplicate registration of the same name with incompatible MetricKind SHALL return an error. MetricsRegistry SHALL NOT impose any limit on the number of registered metrics.",
+      "acceptance": [
+        "MetricsRegistry::new() creates an empty registry",
+        "register_counter(name, labels) returns a CounterHandle",
+        "register_gauge(name, labels) returns a GaugeHandle",
+        "register_histogram(name, labels, buckets) returns a HistogramHandle",
+        "MetricsRegistry is Clone + Send + Sync",
+        "Registering the same name with a different MetricKind returns Err"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/registry.rs"],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": ["S5"]
+    },
+    {
+      "id": "R6",
+      "title": "Implement atomic snapshot reads",
+      "spec": "MetricsRegistry::snapshot() SHALL return a MetricsSnapshot containing a consistent point-in-time view of all registered metrics and their current values. The snapshot SHALL read all metrics atomically so that no partial update is visible. MetricsSnapshot SHALL implement Debug. The snapshot SHALL NOT hold references to the live registry — it is a fully owned copy.",
+      "acceptance": [
+        "MetricsRegistry::snapshot() returns MetricsSnapshot",
+        "MetricsSnapshot contains name, labels, kind, and value for every registered metric",
+        "MetricsSnapshot implements Debug",
+        "MetricsSnapshot is fully owned (no lifetime parameters)",
+        "Concurrent writes during snapshot do not cause data races or panics"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/registry.rs"],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": ["S5"]
+    },
+    {
+      "id": "R7",
+      "title": "Zero overhead when no exporter is attached",
+      "spec": "When no MetricsRegistry is installed, all metric recording operations SHALL compile to no-ops or return immediately without performing any work. The system SHALL support a global optional registry that metric sites check before recording. The check SHALL be a single atomic load, not a lock acquisition.",
+      "acceptance": [
+        "A global Option<MetricsRegistry> or AtomicPtr is provided for metric sites",
+        "When the global registry is None, recording is a no-op (returns immediately)",
+        "The check is a single atomic load, not a Mutex::lock",
+        "No allocation occurs when metrics are disabled"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/registry.rs"],
+        "delete": []
+      },
+      "checklist": ["C2"],
+      "stories": []
+    },
+    {
+      "id": "R8",
+      "title": "Add metrics dependencies to Cargo.toml",
+      "spec": "crates/liminal/Cargo.toml SHALL NOT add any external metrics library (no prometheus crate, no metrics crate). The metrics types are hand-rolled using std::sync::atomic. Cargo.toml SHALL NOT add any new dependencies for this brief — std atomics are sufficient.",
+      "acceptance": [
+        "No new dependencies added to Cargo.toml for metrics primitives",
+        "AtomicU64 and AtomicI64 from std::sync::atomic are used directly",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/Cargo.toml"],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement channel-specific metrics — that is OBS-002.",
+    "SHALL NOT implement conversation-specific metrics — that is OBS-003.",
+    "SHALL NOT implement pressure-specific metrics — that is OBS-004.",
+    "SHALL NOT implement Prometheus text rendering — that is OBS-005.",
+    "SHALL NOT add any external metrics or telemetry crate dependency.",
+    "SHALL NOT implement trace context or structured logging — those are OBS-006 and OBS-007."
+  ],
+  "verification": [
+    "cargo check -p liminal passes clean.",
+    "cargo clippy -p liminal -- -D warnings passes clean.",
+    "cargo fmt -p liminal --check passes clean.",
+    "metrics/mod.rs contains only pub mod and pub use — no logic.",
+    "MetricsRegistry is Clone + Send + Sync.",
+    "Metric recording does not acquire any Mutex or RwLock.",
+    "MetricsSnapshot is fully owned with no lifetime parameters."
+  ]
+}

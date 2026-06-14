@@ -1,0 +1,37 @@
+{
+  "cluster": "protocol",
+  "personas": [
+    {
+      "name": "Client Library Author",
+      "role": "Implementing an SDK against the wire protocol",
+      "stories": [
+        {"id": "S1", "text": "As a client library author, I want a fixed-size frame header so that I can read exactly N bytes to determine the frame type and payload length without buffering variable-length prefixes."},
+        {"id": "S2", "text": "As a client library author, I want unknown frame types to be safely skippable by reading the length prefix so that my SDK works against newer server versions without crashing."},
+        {"id": "S3", "text": "As a client library author, I want the codec to round-trip every frame type deterministically so that I can write encode/decode tests that compare byte sequences across SDK languages."},
+        {"id": "S4", "text": "As a client library author, I want causal context to be a structured field in the message envelope so that I can extract ordering information without parsing the application payload."},
+        {"id": "S5", "text": "As a client library author, I want stream IDs in the frame header so that I can demultiplex frames to the correct conversation or subscription handler without inspecting the payload."}
+      ]
+    },
+    {
+      "name": "Application Developer",
+      "role": "Building messaging applications using a Liminal client SDK",
+      "stories": [
+        {"id": "S6", "text": "As an application developer, I want to open multiple subscriptions over a single connection so that I do not need to manage a connection pool for different channels."},
+        {"id": "S7", "text": "As an application developer, I want to receive explicit Accept, Defer, or Reject signals for my published messages so that I can adapt my publish rate without guessing whether the consumer is keeping up."},
+        {"id": "S8", "text": "As an application developer, I want the connection handshake to negotiate the protocol version automatically so that I do not need to configure version compatibility manually."},
+        {"id": "S9", "text": "As an application developer, I want schema negotiation to happen during subscription so that I learn about type mismatches before publishing, not after."},
+        {"id": "S10", "text": "As an application developer, I want conversation lifecycle frames (open, message, close, error) so that I can track multi-step exchanges without building correlation logic in my application code."}
+      ]
+    },
+    {
+      "name": "Operator",
+      "role": "Managing and monitoring Liminal deployments",
+      "stories": [
+        {"id": "S11", "text": "As an operator, I want every protocol error to produce an explicit error frame with a numeric reason code so that I can monitor error rates and categorize failures without parsing log messages."},
+        {"id": "S12", "text": "As an operator, I want the connection state machine to reject out-of-sequence frames so that misbehaving clients are detected and disconnected rather than silently corrupting bus state."},
+        {"id": "S13", "text": "As an operator, I want per-stream backpressure state so that I can identify which specific subscriptions are under pressure without aggregating across the entire connection."},
+        {"id": "S14", "text": "As an operator, I want Ping/Pong keepalive frames so that dead connections are detected within a configurable timeout rather than lingering until the OS TCP timeout fires."}
+      ]
+    }
+  ]
+}

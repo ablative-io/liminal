@@ -1,0 +1,83 @@
+{
+  "id": "SDK-001",
+  "cluster": "sdk",
+  "title": "Scaffold Rust SDK crate with error taxonomy and public API re-exports",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C1"],
+  "stories": [],
+  "design_anchor": ["ADR-010"],
+  "purpose": "Bootstrap the agora-sdk Rust crate with its Cargo.toml, public module structure, and error taxonomy. This is the foundation crate for the embedded-first SDK (ADR-010) that all subsequent Rust SDK briefs build on. The error type (SdkError) establishes the vocabulary every SDK operation uses to report failures.",
+  "task": "Create the crates/agora-sdk crate scaffold. Cargo.toml declares dependencies on agora core and protocol crates. lib.rs defines the public module tree and re-exports the key types. error.rs defines the SdkError enum using thiserror with variants covering connection, protocol, serialisation, type validation, backpressure, and conversation errors. IN SCOPE: crate manifest, module structure, error taxonomy, re-exports. OUT OF SCOPE: channel logic, conversation logic, connection management, transport implementation.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Create Cargo.toml with workspace and dependency declarations",
+      "spec": "The agora-sdk crate manifest SHALL declare edition 2021, SHALL depend on agora-core and agora-protocol as workspace dependencies, SHALL depend on thiserror for error derivation, serde for serialisation traits, and bytes for zero-copy buffer handling. The crate SHALL be added to the workspace members list.",
+      "acceptance": [
+        "cargo check -p agora-sdk succeeds with no errors",
+        "Cargo.toml [dependencies] includes agora-core, agora-protocol, thiserror, serde, and bytes",
+        "Cargo.toml [package] declares edition = \"2021\" and name = \"agora-sdk\"",
+        "The workspace root Cargo.toml lists agora-sdk in its members array"
+      ],
+      "files": {
+        "create": ["crates/agora-sdk/Cargo.toml"],
+        "modify": ["Cargo.toml"],
+        "delete": []
+      },
+      "checklist": ["C1"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Define lib.rs with public module structure and re-exports",
+      "spec": "lib.rs SHALL declare pub mod for channel, conversation, types, pressure, connection, error, embedded, and remote modules. lib.rs SHALL re-export SdkError as the crate-level error type. lib.rs SHALL contain only module declarations and pub use re-exports, no logic (constraint CN3).",
+      "acceptance": [
+        "lib.rs contains pub mod declarations for all planned SDK modules",
+        "pub use error::SdkError is present at crate root",
+        "lib.rs contains zero function definitions and zero impl blocks",
+        "Downstream crates can reference agora_sdk::SdkError"
+      ],
+      "files": {
+        "create": ["crates/agora-sdk/src/lib.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Define SdkError enum with thiserror derivation",
+      "spec": "error.rs SHALL define an SdkError enum deriving thiserror::Error and Debug. The enum SHALL include variants: Connection (with source from connection errors), Protocol (with source from protocol errors), Serialization (with source from serde errors), TypeValidation (with description string), Backpressure (with reason string), Conversation (with conversation id and description), and Store (with source from storage errors). Each variant SHALL carry enough context for the caller to distinguish failure modes without downcasting.",
+      "acceptance": [
+        "SdkError derives thiserror::Error and Debug",
+        "SdkError has at least 7 variants: Connection, Protocol, Serialization, TypeValidation, Backpressure, Conversation, Store",
+        "Each variant's Display output includes the variant-specific context (e.g. conversation id for Conversation)",
+        "SdkError implements std::error::Error via thiserror derivation",
+        "No variant uses String as its sole payload without a distinguishing field name"
+      ],
+      "files": {
+        "create": ["crates/agora-sdk/src/error.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement channel publish, subscribe, or request-reply logic.",
+    "SHALL NOT implement conversation send, receive, or lifecycle logic.",
+    "SHALL NOT add any network transport or connection management.",
+    "SHALL NOT define the SchemaValidate trait (deferred to SDK-002).",
+    "SHALL NOT implement backpressure response types (deferred to SDK-003)."
+  ],
+  "verification": [
+    "cargo check -p agora-sdk compiles cleanly",
+    "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
+    "cargo fmt -p agora-sdk --check reports no formatting issues",
+    "cargo doc -p agora-sdk --no-deps generates documentation without warnings",
+    "No file exceeds 500 lines of code (excluding comments and whitespace)"
+  ]
+}

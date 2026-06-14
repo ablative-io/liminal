@@ -1,0 +1,88 @@
+{
+  "id": "PROTO-004",
+  "cluster": "protocol",
+  "title": "Implement stream multiplexing with stream table and allocation",
+  "depends_on": ["PROTO-001"],
+  "blocked_by": [],
+  "checklist": ["C27", "C28", "C29"],
+  "stories": ["S5", "S6"],
+  "design_anchor": ["ADR-008"],
+  "purpose": "Implements stream-based multiplexing that allows multiple conversations and subscriptions to share a single TCP connection. Each conversation or subscription gets a unique stream ID carried in the frame header. Stream 0 is reserved for connection-level control. Client-initiated streams use odd IDs; server-initiated streams (incoming conversation offers) use even IDs. The stream table tracks active streams and their lifecycle state.",
+  "task": "Build the multiplexing module. Define StreamId as a validated newtype with stream 0 reservation enforced. Implement StreamTable that tracks active streams per connection with their state (subscribing, active, closing). Implement stream ID allocation: clients allocate odd IDs starting from 1, servers allocate even IDs starting from 2. The allocator must be monotonic — IDs are never reused within a connection lifetime. Scope boundary: this brief handles stream identity, allocation, and tracking. It does not implement the frames that open/close streams (those are Subscribe, ConversationOpen, etc. from PROTO-001) or backpressure per stream (PROTO-005).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define StreamId newtype with stream 0 reservation",
+      "spec": "StreamId SHALL be a newtype wrapping u32. Stream 0 SHALL be reserved for connection-level control frames (CN7). StreamId SHALL provide is_control() returning true for stream 0 and is_application() returning true for stream >= 1. StreamId SHALL implement Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord.",
+      "acceptance": [
+        "StreamId(0).is_control() returns true.",
+        "StreamId(0).is_application() returns false.",
+        "StreamId(1).is_application() returns true.",
+        "StreamId(1).is_control() returns false.",
+        "StreamId implements Debug, Clone, Copy, PartialEq, Eq, Hash."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/multiplex.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C27"],
+      "stories": ["S5"]
+    },
+    {
+      "id": "R2",
+      "title": "Implement StreamTable tracking active streams and their state",
+      "spec": "StreamTable SHALL maintain a map from StreamId to StreamState for all active streams on a connection. StreamState enum SHALL have variants: Subscribing, Active, Closing. StreamTable SHALL support: insert(stream_id, state), transition(stream_id, new_state), remove(stream_id), get(stream_id), and active_count(). WHEN transitioning a stream that does not exist, THE SYSTEM SHALL return ProtocolError. StreamTable SHALL implement Debug.",
+      "acceptance": [
+        "StreamState has exactly 3 variants: Subscribing, Active, Closing.",
+        "insert adds a new stream; inserting a duplicate returns ProtocolError.",
+        "transition updates an existing stream's state.",
+        "transition on a non-existent stream returns ProtocolError.",
+        "remove deletes a stream from the table.",
+        "active_count() returns the number of streams in the table."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/multiplex.rs"],
+        "delete": []
+      },
+      "checklist": ["C28"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R3",
+      "title": "Implement client/server stream ID allocation",
+      "spec": "StreamAllocator SHALL allocate monotonically increasing stream IDs. Client-side allocator SHALL produce odd IDs: 1, 3, 5, 7, ... Server-side allocator SHALL produce even IDs: 2, 4, 6, 8, ... IDs SHALL never be reused within a connection lifetime. StreamAllocator SHALL be constructable as client-mode or server-mode. WHEN the u32 ID space is exhausted, THE SYSTEM SHALL return ProtocolError.",
+      "acceptance": [
+        "Client allocator produces IDs: 1, 3, 5, 7 in sequence.",
+        "Server allocator produces IDs: 2, 4, 6, 8 in sequence.",
+        "Calling next() after allocating ID u32::MAX - 1 (for the applicable parity) returns ProtocolError.",
+        "StreamAllocator::client() and StreamAllocator::server() are the two constructors.",
+        "IDs are never recycled — next() always advances."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/multiplex.rs"],
+        "delete": []
+      },
+      "checklist": ["C29"],
+      "stories": ["S5", "S6"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement frame routing to streams — the stream ID is carried in the frame header (PROTO-001), this brief tracks state only.",
+    "SHALL NOT implement backpressure per stream — that is PROTO-005.",
+    "SHALL NOT implement stream-level error handling beyond allocation/tracking errors.",
+    "SHALL NOT reuse stream IDs within a connection lifetime.",
+    "SHALL NOT hardcode the maximum number of concurrent streams — the table grows as needed."
+  ],
+  "verification": [
+    "cargo check compiles the multiplex module with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: client allocator produces odd IDs, server allocator produces even IDs.",
+    "Test: stream table rejects duplicate insert.",
+    "Test: stream table transition on missing stream returns error.",
+    "Test: StreamId(0).is_control() and StreamId(1).is_application()."
+  ]
+}

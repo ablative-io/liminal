@@ -1,0 +1,219 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "PROTO-006",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "PROTO-006",
+    "cluster": "protocol",
+    "title": "Implement schema negotiation in Subscribe/SubscribeAck exchange",
+    "depends_on": [
+      "PROTO-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C33",
+      "C34",
+      "C35"
+    ],
+    "stories": [
+      "S9"
+    ],
+    "design_anchor": [
+      "ADR-002",
+      "ADR-008"
+    ],
+    "purpose": "Implements schema negotiation as part of the subscription handshake. Subscribers declare which schemas they accept (by content type hash). The bus selects the appropriate schema version and confirms it in SubscribeAck. Schema mismatches (no overlap between subscriber and channel) produce SubscribeError with a schema-incompatible reason code. This ensures type compatibility is established at subscription time, not discovered at runtime when a publish fails \u2014 per ADR-002's principle that types are part of the channel definition.",
+    "task": "Build the schema negotiation module. Wire accepted schema IDs into the Subscribe frame payload. Wire the selected schema ID into the SubscribeAck frame payload. Implement schema matching: given the subscriber's accepted set and the channel's declared schema, select the compatible version or return SubscribeError. The schema module defines the negotiation protocol; it does not implement schema validation of message payloads \u2014 that is a bus-level concern. Scope boundary: this brief handles the Subscribe/SubscribeAck schema fields and the matching logic. It does not implement runtime payload validation against schemas.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Wire accepted schema IDs into Subscribe frame",
+        "spec": "The Subscribe frame payload SHALL include accepted_schemas: a Vec of SchemaId values (content type hashes from PROTO-002) that the subscriber can handle. An empty accepted_schemas array SHALL be valid \u2014 it indicates the subscriber accepts any schema (opt-out of schema enforcement). The schemas are declared during subscription so the bus can validate compatibility before message delivery begins.",
+        "acceptance": [
+          "Subscribe frame payload includes accepted_schemas (Vec<SchemaId>).",
+          "Subscribe with accepted_schemas = [hash_a, hash_b] round-trips through the codec with both hashes preserved.",
+          "Subscribe with accepted_schemas = [] is valid (no error).",
+          "SchemaId values use the [u8; 32] type from PROTO-002.",
+          "accepted_schemas is accessible from the decoded Subscribe frame."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/schema.rs"
+          ],
+          "modify": [
+            "crates/liminal/src/protocol/frame.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C33"
+        ],
+        "stories": [
+          "S9"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Wire selected schema ID into SubscribeAck frame",
+        "spec": "The SubscribeAck frame payload SHALL include selected_schema: a SchemaId that the bus will use for messages delivered on this subscription's stream. This is the result of schema negotiation \u2014 the bus picked the version that matches both the channel's declared type and the subscriber's accepted set.",
+        "acceptance": [
+          "SubscribeAck frame payload includes selected_schema (SchemaId).",
+          "SubscribeAck round-trips through the codec with selected_schema preserved.",
+          "The selected_schema is a single SchemaId, not an array.",
+          "selected_schema uses the same [u8; 32] type as the Subscribe accepted_schemas."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/schema.rs",
+            "crates/liminal/src/protocol/frame.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C34"
+        ],
+        "stories": [
+          "S9"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement schema matching with mismatch detection",
+        "spec": "negotiate_schema(channel_schema, accepted_schemas) SHALL find the channel's declared schema in the subscriber's accepted set. IF the channel's schema is found in accepted_schemas, THE SYSTEM SHALL return it as the selected schema. IF accepted_schemas is empty, THE SYSTEM SHALL return the channel's schema (opt-out of enforcement). IF the channel's schema is not in accepted_schemas and accepted_schemas is non-empty, THE SYSTEM SHALL return ProtocolError with a schema-incompatible reason code. The matching is by exact SchemaId equality (content hash comparison).",
+        "acceptance": [
+          "Channel schema hash_a with accepted [hash_a, hash_b] returns Ok(hash_a).",
+          "Channel schema hash_a with accepted [hash_b, hash_c] returns ProtocolError with schema-incompatible reason.",
+          "Channel schema hash_a with accepted [] returns Ok(hash_a) (opt-out).",
+          "Schema matching is exact equality \u2014 no partial matching or version compatibility.",
+          "The schema-incompatible reason code is distinct from other ProtocolError reason codes."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/schema.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C35"
+        ],
+        "stories": [
+          "S9"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement runtime payload validation against schemas \u2014 that is a bus-level concern.",
+      "SHALL NOT implement schema evolution or version compatibility \u2014 matching is exact hash equality.",
+      "SHALL NOT implement schema registry or storage \u2014 schemas are channel-level definitions.",
+      "SHALL NOT implement schema discovery or listing \u2014 the subscriber must know what schemas it accepts.",
+      "SHALL NOT define what a schema contains \u2014 SchemaId is an opaque content hash."
+    ],
+    "verification": [
+      "cargo check compiles the schema module with no errors.",
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes.",
+      "Test: Subscribe frame round-trips with accepted_schemas preserved.",
+      "Test: SubscribeAck frame round-trips with selected_schema preserved.",
+      "Test: negotiate_schema matches channel schema in accepted set.",
+      "Test: negotiate_schema with disjoint sets returns schema-incompatible error.",
+      "Test: negotiate_schema with empty accepted set returns channel schema (opt-out)."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-002",
+        "title": "Typed channels with compile-time enforcement in Gleam and runtime validation for external producers",
+        "decision": "Every channel declares its message type. Gleam producers get compile-time enforcement. External producers (Python, TypeScript, HTTP) get runtime validation at publish time. The rejected alternative is the NATS model: channels carry opaque bytes and consumers handle deserialization failures.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C33",
+        "text": "Subscribe frame includes an array of accepted schema IDs (content type hashes) the subscriber can handle."
+      },
+      {
+        "id": "C34",
+        "text": "SubscribeAck frame includes the selected schema ID the bus will use for messages on that subscription."
+      },
+      {
+        "id": "C35",
+        "text": "Schema mismatch (no overlap between subscriber's accepted schemas and channel's declared schema) produces SubscribeError with a schema-incompatible reason code."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S9",
+        "text": "As an application developer, I want schema negotiation to happen during subscription so that I learn about type mismatches before publishing, not after."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Frame header is fixed-size (type + flags + stream ID + payload length) so that any frame can be skipped without parsing its payload."
+      },
+      {
+        "id": "CN6",
+        "text": "Codec encode/decode is infallible for valid frames: a successfully constructed frame always encodes, and valid wire bytes always decode. Malformed wire bytes produce ProtocolError, never a panic."
+      },
+      {
+        "id": "CN7",
+        "text": "Stream 0 is reserved for connection-level control frames. Application streams use IDs >= 1."
+      },
+      {
+        "id": "CN8",
+        "text": "Backpressure signals (Accept/Defer/Reject) travel on the same stream as the messages they regulate (P5)."
+      },
+      {
+        "id": "CN9",
+        "text": "Unknown frame types are skipped by reading their length prefix and discarding the payload, not by disconnecting (P7)."
+      },
+      {
+        "id": "CN10",
+        "text": "Every error condition produces an explicit error frame with a numeric reason code. No silent drops (P3)."
+      }
+    ],
+    "intention": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that single connection with conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context flowing natively in the wire format. The protocol should feel inevitable -- every frame carries exactly the information the bus needs to make routing, ordering, and pressure decisions, and nothing else. A developer reading a packet capture should be able to reconstruct the full conversation lifecycle without consulting application logs.\n\nThe protocol is the contract between the bus and every client SDK. Getting this right means SDKs in any language can be written against a stable, versioned binary spec rather than chasing an internal API. Getting it wrong means every SDK becomes a moving target and the bus's differentiators (conversations, typed messages, causal ordering, protocol-level backpressure) are lost in translation.",
+    "design_path": "docs/design/protocol",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

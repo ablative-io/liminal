@@ -1,0 +1,22 @@
+[workspace]
+members = ["crates/liminal", "crates/liminal-server"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/tomWhiting/liminal"
+authors = [
+    "Tom Whiting <tom@ablative.com.au>",
+]
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"

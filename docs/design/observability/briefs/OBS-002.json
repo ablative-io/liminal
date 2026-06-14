@@ -1,0 +1,155 @@
+{
+  "id": "OBS-002",
+  "cluster": "observability",
+  "title": "Implement channel metrics for rate, subscribers, queue depth, and latency",
+  "depends_on": ["OBS-001"],
+  "blocked_by": [],
+  "checklist": ["C3", "C4", "C5", "C6"],
+  "stories": ["S1", "S2", "S10"],
+  "design_anchor": ["ADR-004"],
+  "purpose": "Instrument the channel subsystem with the four bus-native metrics that operators need to monitor channel health: message rate (counter per channel), subscriber count (gauge per channel), durable queue depth (gauge), and delivery latency (histogram). These metrics register into the MetricsRegistry from OBS-001 and are recorded non-blockingly on the hot path.",
+  "task": "Create crates/liminal/src/metrics/channel.rs containing the ChannelMetrics struct that registers the four channel metric families with the MetricsRegistry. Provide methods for the channel actor to call on publish, subscribe/unsubscribe, enqueue (durable), and delivery-complete events. Each metric is keyed by channel name as a label. Recording must never block the channel actor's message loop.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define ChannelMetrics struct",
+      "spec": "ChannelMetrics SHALL hold handles to the four metric families: message_rate (Counter), subscriber_count (Gauge), queue_depth (Gauge), delivery_latency (Histogram). ChannelMetrics SHALL be constructed from a MetricsRegistry reference. ChannelMetrics SHALL implement Debug and Clone. ChannelMetrics SHALL NOT store any per-channel state — labels are passed at recording time.",
+      "acceptance": [
+        "ChannelMetrics struct exists in crates/liminal/src/metrics/channel.rs",
+        "ChannelMetrics has fields for all four metric handles",
+        "ChannelMetrics::new(registry: &MetricsRegistry) registers all four families",
+        "ChannelMetrics implements Debug and Clone"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/metrics/channel.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C3", "C4", "C5", "C6"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Track message rate as a counter per channel",
+      "spec": "ChannelMetrics SHALL expose record_publish(channel_name) that increments the message_rate counter for the given channel. The counter SHALL be monotonically increasing and labelled by channel name. The increment SHALL be a single atomic operation. record_publish SHALL NOT return an error — it is fire-and-forget.",
+      "acceptance": [
+        "record_publish(channel_name) increments the counter by 1",
+        "The counter label includes the channel name",
+        "Calling record_publish 100 times results in counter value 100",
+        "record_publish does not return Result — it is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C3"],
+      "stories": ["S1"]
+    },
+    {
+      "id": "R3",
+      "title": "Track subscriber count as a gauge per channel",
+      "spec": "ChannelMetrics SHALL expose record_subscribe(channel_name) and record_unsubscribe(channel_name) that increment and decrement the subscriber_count gauge. The gauge SHALL reflect the current number of active subscribers for each channel. Both operations SHALL be atomic.",
+      "acceptance": [
+        "record_subscribe increments the gauge by 1",
+        "record_unsubscribe decrements the gauge by 1",
+        "After 3 subscribes and 1 unsubscribe, gauge value is 2",
+        "Both methods are infallible (no Result return)"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C4"],
+      "stories": ["S1"]
+    },
+    {
+      "id": "R4",
+      "title": "Track durable channel queue depth as a gauge",
+      "spec": "ChannelMetrics SHALL expose set_queue_depth(channel_name, depth) that sets the queue_depth gauge to the given absolute value. Queue depth applies only to durable channels — ephemeral channels have unbounded fan-out and no queue. The gauge SHALL be labelled by channel name.",
+      "acceptance": [
+        "set_queue_depth(name, 42) sets the gauge to 42",
+        "Calling set_queue_depth(name, 0) sets the gauge to 0",
+        "The gauge label includes the channel name",
+        "set_queue_depth is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C5"],
+      "stories": ["S10"]
+    },
+    {
+      "id": "R5",
+      "title": "Track delivery latency as a histogram per channel",
+      "spec": "ChannelMetrics SHALL expose record_delivery_latency(channel_name, duration) that observes the given Duration into the delivery_latency histogram. The histogram SHALL use configurable bucket boundaries provided at construction time. The histogram SHALL be labelled by channel name. SHALL NOT impose default bucket values — buckets are a required parameter to ChannelMetrics::new.",
+      "acceptance": [
+        "record_delivery_latency(name, Duration::from_millis(50)) records an observation",
+        "The histogram is labelled by channel name",
+        "Bucket boundaries are passed at construction time, not hardcoded",
+        "record_delivery_latency is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C6"],
+      "stories": ["S2"]
+    },
+    {
+      "id": "R6",
+      "title": "Add channel module to metrics mod.rs",
+      "spec": "crates/liminal/src/metrics/mod.rs SHALL declare pub mod channel and re-export ChannelMetrics.",
+      "acceptance": [
+        "metrics/mod.rs contains pub mod channel",
+        "ChannelMetrics is re-exported from the metrics module",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/mod.rs"],
+        "delete": []
+      },
+      "checklist": ["C3"],
+      "stories": []
+    },
+    {
+      "id": "R7",
+      "title": "Non-blocking recording guarantee",
+      "spec": "All ChannelMetrics recording methods SHALL complete without acquiring any Mutex or RwLock. Recording SHALL NOT allocate heap memory on the hot path. Recording SHALL NOT block on I/O. These methods are called inside the channel actor's message loop and SHALL NOT introduce latency into message delivery.",
+      "acceptance": [
+        "No Mutex::lock or RwLock::write appears in any recording method",
+        "No Box::new, Vec::push, or String allocation appears in any recording method",
+        "No I/O operations appear in any recording method",
+        "Recording a metric completes in O(1) time"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C3", "C4", "C5", "C6"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement the Prometheus text rendering — that is OBS-005.",
+    "SHALL NOT implement pressure-related metrics (reject, defer) — that is OBS-004.",
+    "SHALL NOT modify the channel actor itself — metrics are recorded by calling ChannelMetrics methods from the actor, not by changing actor internals.",
+    "SHALL NOT impose default histogram bucket boundaries — they are caller-supplied.",
+    "SHALL NOT add persistence or durability logic — queue depth is reported, not managed."
+  ],
+  "verification": [
+    "cargo check -p liminal passes clean.",
+    "cargo clippy -p liminal -- -D warnings passes clean.",
+    "cargo fmt -p liminal --check passes clean.",
+    "All recording methods are infallible (no Result return type).",
+    "No Mutex or RwLock acquisition in any recording method.",
+    "Every metric is labelled by channel name.",
+    "ChannelMetrics implements Debug and Clone."
+  ]
+}

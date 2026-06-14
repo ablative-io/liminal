@@ -1,0 +1,297 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "LIM-004",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "LIM-004",
+    "cluster": "core",
+    "title": "Implement conversation actor with participant linking and lifecycle",
+    "depends_on": [
+      "LIM-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C20",
+      "C21",
+      "C22",
+      "C23",
+      "C24",
+      "C25"
+    ],
+    "stories": [
+      "S4",
+      "S5",
+      "S8",
+      "S9",
+      "S11",
+      "S13"
+    ],
+    "design_anchor": [
+      "ADR-001",
+      "ADR-006"
+    ],
+    "purpose": "Implement the conversation actor \u2014 the supervised beamr process that mediates a structured exchange between parties. The conversation owns the exchange state (current phase, accumulated context, deadlines), links to participants via process links for immediate crash detection, and provides the ConversationHandle API for send/receive/close.",
+    "task": "Build the conversation actor as a beamr process. The actor links to all participants and detects crashes immediately via EXIT signals (P3). Implement ConversationConfig (participants, timeout, durability mode) and ConversationHandle (send, receive, close). Implement the state machine tracking current phase and accumulated context. The conversation actor is supervised (C20). This brief covers the core lifecycle \u2014 conversation patterns (request-reply, streaming, dispatch) are LIM-005.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement conversation actor as a supervised beamr process",
+        "spec": "The conversation actor SHALL be a beamr process spawned under a supervisor. The actor SHALL receive commands (Send, Receive, Close, QueryState) via its mailbox. IF the conversation actor crashes, THEN the supervisor SHALL restart it. The actor SHALL maintain its own state machine (phase, context).",
+        "acceptance": [
+          "Conversation actor is spawned as a beamr process",
+          "Actor is supervised \u2014 crash triggers restart without affecting other conversations",
+          "Actor handles Send, Receive, Close, and QueryState commands",
+          "Actor maintains ConversationState with current_phase and accumulated context"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/conversation/actor.rs"
+          ],
+          "modify": [
+            "crates/liminal/src/conversation/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C20",
+          "C25"
+        ],
+        "stories": [
+          "S13"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement participant linking for immediate crash detection",
+        "spec": "WHEN a conversation is created, the conversation actor SHALL link to all participant processes. IF a participant process dies, THEN the conversation actor SHALL receive an EXIT signal on the same scheduler tick. The conversation actor SHALL handle the crash according to its configured policy (propagate failure, route to another participant, or compensate).",
+        "acceptance": [
+          "Conversation actor links to each participant PID at creation time",
+          "Participant death triggers EXIT signal in the conversation actor",
+          "EXIT handler is invoked immediately (same scheduler tick, not after a timeout)",
+          "Test: participant process dies \u2192 conversation actor receives EXIT and handles it"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/conversation/actor.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C21",
+          "C22"
+        ],
+        "stories": [
+          "S5",
+          "S9"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Define ConversationConfig",
+        "spec": "ConversationConfig SHALL specify: participant PIDs or handles, timeout (optional duration after which the conversation fails), durability mode (Ephemeral or Durable), and an on_participant_crash policy. ConversationConfig SHALL NOT have defaults for participants or policy \u2014 both are required.",
+        "acceptance": [
+          "ConversationConfig defined in crates/liminal/src/conversation/types.rs",
+          "Fields: participants, timeout (Option<Duration>), mode (ChannelMode), on_crash (CrashPolicy)",
+          "CrashPolicy enum: Fail, RouteToNext, Compensate",
+          "ConversationConfig does not implement Default"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/conversation/types.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C23"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Define ConversationHandle with send, receive, and close",
+        "spec": "ConversationHandle SHALL expose send (deliver a message to the conversation), receive (wait for a message from the conversation via selective receive), and close (terminate the conversation normally). ConversationHandle SHALL be Clone + Send + Sync.",
+        "acceptance": [
+          "ConversationHandle has send(&self, message) -> Result<(), LiminalError>",
+          "ConversationHandle has receive(&self) -> Result<Envelope, LiminalError> (or equivalent async)",
+          "ConversationHandle has close(&self) -> Result<(), LiminalError>",
+          "ConversationHandle is Clone + Send + Sync",
+          "ConversationHandle is re-exported from lib.rs"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/conversation/types.rs",
+            "crates/liminal/src/lib.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C24"
+        ],
+        "stories": [
+          "S4",
+          "S8"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Implement conversation state machine",
+        "spec": "The conversation actor SHALL track its state as a ConversationState containing: current phase (Created, Active, Completing, Closed, Failed), accumulated context (Vec of exchanged messages or references), deadline (optional Instant), and participant status (alive/dead per participant).",
+        "acceptance": [
+          "ConversationState tracks phase, context, deadline, and participant status",
+          "Phase transitions are explicit: Created \u2192 Active \u2192 Completing \u2192 Closed; any state \u2192 Failed",
+          "State is queryable via QueryState command",
+          "Test: conversation progresses through Created \u2192 Active \u2192 Closed lifecycle"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/conversation/actor.rs",
+            "crates/liminal/src/conversation/types.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C25"
+        ],
+        "stories": [
+          "S11"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement specific conversation patterns (request-reply, streaming, dispatch) \u2014 those are LIM-005.",
+      "SHALL NOT implement durable conversation persistence \u2014 that is the durability cluster.",
+      "SHALL NOT implement conversation routing \u2014 that is the routing cluster.",
+      "SHALL NOT implement the wire protocol for remote conversations \u2014 that is the protocol cluster."
+    ],
+    "verification": [
+      "cargo test -p liminal passes clean.",
+      "cargo clippy -p liminal -- -D warnings passes clean.",
+      "Conversation actor is a beamr process, not a Rust struct.",
+      "Participant crash detection is via process linking, not heartbeat or timeout.",
+      "ConversationConfig does not implement Default."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-001",
+        "title": "Conversations as the fundamental messaging unit, not messages",
+        "decision": "The fundamental unit is the conversation \u2014 a supervised beamr process owning a structured exchange between parties \u2014 over the message. A conversation mediates lifecycle, failure handling, and (optionally) durability. Exchange patterns (request-reply, streaming, saga) are conversation types with different lifecycle rules, not special-case bolt-ons. The rejected alternative is the NATS/Kafka model: messages as the primitive, patterns assembled from messages.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-006",
+        "title": "Two exactly-once strategies: lightweight dedup contract and heavyweight durable conversations",
+        "decision": "Two complementary strategies available per-channel. Lightweight: three-party dedup contract (producer idempotency key with TTL, bus deduplicates, consumer provides processing receipt). Heavyweight: durable conversations (consumer processing state is event-sourced, re-delivery triggers resume not re-execution \u2014 idempotency is emergent from resumable processing). The rejected alternative is a single exactly-once strategy (either too heavy for simple consumers or insufficient for complex ones).",
+        "quote": "",
+        "decided_by": "Bono + Frodo synthesis"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C20",
+        "text": "Conversation actor is a supervised beamr process."
+      },
+      {
+        "id": "C21",
+        "text": "Conversation actor is linked to its participants via beamr process links."
+      },
+      {
+        "id": "C22",
+        "text": "Participant crash is detected immediately via process linking \u2014 no heartbeat."
+      },
+      {
+        "id": "C23",
+        "text": "ConversationConfig specifies participants, timeout, and durability mode."
+      },
+      {
+        "id": "C24",
+        "text": "ConversationHandle exposes send, receive, and close operations."
+      },
+      {
+        "id": "C25",
+        "text": "Conversation state machine tracks current phase and accumulated context."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S4",
+        "text": "As an application developer, I want to initiate a request-reply conversation with a single call so that I do not need to manage inbox subjects or correlation IDs."
+      },
+      {
+        "id": "S5",
+        "text": "As an application developer, I want conversations to detect participant crashes immediately so that I can route to another participant without waiting for a timeout."
+      },
+      {
+        "id": "S8",
+        "text": "As an AI agent, I want to send a request to another agent via a conversation and receive the reply in the same call so that inter-agent communication is synchronous when needed."
+      },
+      {
+        "id": "S9",
+        "text": "As the Aion engine, I want to dispatch work to a worker via a conversation so that worker crash is detected immediately and the work is routed to another worker."
+      },
+      {
+        "id": "S11",
+        "text": "As the Aion engine, I want durable conversations so that in-flight activity dispatch survives server restart without re-executing completed steps."
+      },
+      {
+        "id": "S13",
+        "text": "As an operator, I want to list active conversations and their states so that I can diagnose stuck or failed exchanges."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Schema validation rejects invalid messages at publish time \u2014 a subscriber never receives a message that does not match its declared schema."
+      },
+      {
+        "id": "CN6",
+        "text": "Participant crash detection is via beamr process linking \u2014 no heartbeat polling, no timeout-based detection."
+      },
+      {
+        "id": "CN7",
+        "text": "Ephemeral channels have zero persistence overhead \u2014 no haematite calls, no disk I/O, no serialisation beyond message delivery."
+      },
+      {
+        "id": "CN8",
+        "text": "Channel and conversation actors are supervised. Crash restarts the individual actor without affecting other channels or conversations."
+      }
+    ],
+    "intention": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema validation at publish time, subscribe with pattern matching, and initiate supervised conversations that own the state of a structured exchange. The bus participates in processing \u2014 it knows when consumers crash, mediates backpressure, and can resume durable conversations from where they left off. The experience should feel like writing function calls between processes, not configuring infrastructure.",
+    "design_path": "docs/design/core",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema va"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

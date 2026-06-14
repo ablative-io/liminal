@@ -1,0 +1,159 @@
+{
+  "id": "OBS-004",
+  "cluster": "observability",
+  "title": "Implement pressure metrics for reject rate, defer rate, and capacity utilization",
+  "depends_on": ["OBS-001"],
+  "blocked_by": [],
+  "checklist": ["C11", "C12", "C13"],
+  "stories": ["S3", "S4"],
+  "design_anchor": ["ADR-004"],
+  "purpose": "Expose the backpressure signals defined by ADR-004 as quantitative metrics. The wire protocol's accept/defer/reject three-way handshake is a first-class concept, and these metrics make backpressure visible to operators. Reject rate and defer rate are counters per channel; capacity utilization is a gauge per consumer. Together they answer the question: is the system shedding load, and where?",
+  "task": "Create crates/liminal/src/metrics/pressure.rs containing the PressureMetrics struct that registers the three pressure metric families with the MetricsRegistry. Provide methods for the delivery subsystem to call when a message is accepted, deferred, or rejected, and for consumer capacity to be reported. All recording is non-blocking and keyed by channel name or consumer identity.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define PressureMetrics struct",
+      "spec": "PressureMetrics SHALL hold handles to the three metric families: reject_count (Counter per channel), defer_count (Counter per channel), capacity_utilization (Gauge per consumer). PressureMetrics SHALL be constructed from a MetricsRegistry reference. PressureMetrics SHALL implement Debug and Clone.",
+      "acceptance": [
+        "PressureMetrics struct exists in crates/liminal/src/metrics/pressure.rs",
+        "PressureMetrics has fields for all three metric handles",
+        "PressureMetrics::new(registry: &MetricsRegistry) registers all three families",
+        "PressureMetrics implements Debug and Clone"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/metrics/pressure.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C11", "C12", "C13"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Track reject rate as a counter per channel",
+      "spec": "PressureMetrics SHALL expose record_reject(channel_name) that increments the reject_count counter for the given channel. A reject indicates the consumer was overwhelmed and the message was shed (ADR-004). The counter SHALL be monotonically increasing and labelled by channel name.",
+      "acceptance": [
+        "record_reject(channel_name) increments the counter by 1",
+        "The counter label includes the channel name",
+        "Calling record_reject 5 times results in counter value 5",
+        "record_reject is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/pressure.rs"],
+        "delete": []
+      },
+      "checklist": ["C11"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R3",
+      "title": "Track defer rate as a counter per channel",
+      "spec": "PressureMetrics SHALL expose record_defer(channel_name) that increments the defer_count counter for the given channel. A defer indicates the consumer buffered the message for later processing (ADR-004). The counter SHALL be monotonically increasing and labelled by channel name.",
+      "acceptance": [
+        "record_defer(channel_name) increments the counter by 1",
+        "The counter label includes the channel name",
+        "Calling record_defer 8 times results in counter value 8",
+        "record_defer is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/pressure.rs"],
+        "delete": []
+      },
+      "checklist": ["C12"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R4",
+      "title": "Track capacity utilization as a gauge per consumer",
+      "spec": "PressureMetrics SHALL expose set_capacity_utilization(consumer_id, utilization) where utilization is a value from 0 to 100 representing the percentage of the consumer's declared capacity in use. The gauge SHALL be labelled by consumer identity. set_capacity_utilization SHALL NOT clamp or validate the value — the caller is authoritative.",
+      "acceptance": [
+        "set_capacity_utilization(consumer_id, 75) sets the gauge to 75",
+        "set_capacity_utilization(consumer_id, 0) sets the gauge to 0",
+        "The gauge label includes the consumer identity",
+        "set_capacity_utilization is infallible",
+        "Values above 100 are accepted without clamping"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/pressure.rs"],
+        "delete": []
+      },
+      "checklist": ["C13"],
+      "stories": ["S4"]
+    },
+    {
+      "id": "R5",
+      "title": "Convenience method for delivery outcome recording",
+      "spec": "PressureMetrics SHALL expose record_delivery_outcome(channel_name, outcome: DeliveryOutcome) where DeliveryOutcome is an enum with Accepted, Deferred, and Rejected variants. Accepted is a no-op for pressure metrics (no counter to increment). Deferred calls record_defer. Rejected calls record_reject. This provides a single call site for the delivery subsystem.",
+      "acceptance": [
+        "DeliveryOutcome has exactly three variants: Accepted, Deferred, Rejected",
+        "record_delivery_outcome(name, Accepted) does not increment any counter",
+        "record_delivery_outcome(name, Deferred) increments defer_count",
+        "record_delivery_outcome(name, Rejected) increments reject_count",
+        "record_delivery_outcome is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/pressure.rs"],
+        "delete": []
+      },
+      "checklist": ["C11", "C12"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R6",
+      "title": "Add pressure module to metrics mod.rs",
+      "spec": "crates/liminal/src/metrics/mod.rs SHALL declare pub mod pressure and re-export PressureMetrics and DeliveryOutcome.",
+      "acceptance": [
+        "metrics/mod.rs contains pub mod pressure",
+        "PressureMetrics is re-exported from the metrics module",
+        "DeliveryOutcome is re-exported from the metrics module",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/mod.rs"],
+        "delete": []
+      },
+      "checklist": ["C11"],
+      "stories": []
+    },
+    {
+      "id": "R7",
+      "title": "Non-blocking recording guarantee",
+      "spec": "All PressureMetrics recording methods SHALL complete without acquiring any Mutex or RwLock. Recording SHALL NOT allocate heap memory on the hot path. These methods are called on the delivery hot path and SHALL NOT introduce latency into message routing. SHALL NOT perform any I/O during recording.",
+      "acceptance": [
+        "No Mutex::lock or RwLock::write appears in any recording method",
+        "No heap allocation appears in any recording method",
+        "No I/O operations appear in any recording method",
+        "Recording a metric completes in O(1) time"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/pressure.rs"],
+        "delete": []
+      },
+      "checklist": ["C11", "C12", "C13"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement channel-specific metrics (rate, subscribers, queue depth, latency) — that is OBS-002.",
+    "SHALL NOT implement conversation-specific metrics — that is OBS-003.",
+    "SHALL NOT implement Prometheus text rendering — that is OBS-005.",
+    "SHALL NOT implement the backpressure protocol itself — that is the core/protocol cluster. Pressure metrics only observe outcomes.",
+    "SHALL NOT clamp or validate capacity utilization values — the caller is authoritative.",
+    "SHALL NOT impose any rate limiting or sampling on metric recording."
+  ],
+  "verification": [
+    "cargo check -p liminal passes clean.",
+    "cargo clippy -p liminal -- -D warnings passes clean.",
+    "cargo fmt -p liminal --check passes clean.",
+    "All recording methods are infallible (no Result return type).",
+    "No Mutex or RwLock acquisition in any recording method.",
+    "DeliveryOutcome has exactly three variants matching ADR-004 signals.",
+    "PressureMetrics implements Debug and Clone."
+  ]
+}

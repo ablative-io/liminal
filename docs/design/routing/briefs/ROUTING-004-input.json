@@ -1,0 +1,319 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "ROUTING-004",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "ROUTING-004",
+    "cluster": "routing",
+    "title": "Implement conversation-mediated dispatch and consumer groups",
+    "depends_on": [
+      "ROUTING-003",
+      "ROUTING-005"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C32",
+      "C33",
+      "C34",
+      "C35",
+      "C36",
+      "C37"
+    ],
+    "stories": [
+      "S9",
+      "S10",
+      "S11",
+      "S12",
+      "S13"
+    ],
+    "design_anchor": [
+      "ADR-003",
+      "ADR-007"
+    ],
+    "purpose": "Delivers conversation-mediated dispatch (ADR-007) \u2014 the mechanism that replaces Kafka-style consumer group rebalancing with per-message, fault-aware consumer selection. A dispatch conversation is a beamr process that selects a consumer via the group's routing function, links to it, observes completion, and re-routes on crash. Consumer groups are modeled as a routing function over a mutable consumer set; adding or removing a consumer takes effect immediately without pausing other consumers.",
+    "task": "Create routing/dispatch.rs with the dispatch conversation implementation, and routing/group.rs with the consumer group model. The dispatch conversation receives a message, evaluates the group's routing function to select a consumer, links to the selected consumer process, forwards the message, and observes completion. If the consumer crashes, the link fires immediately (sub-millisecond via beamr process links) and the conversation re-routes to another consumer. Consumer groups are a routing function over a consumer set \u2014 a mutable collection of active consumers. Adding or removing a consumer updates the set atomically; the next dispatch conversation sees the change. No stop-the-world rebalance, no partition reassignment. This brief does not implement pressure policies or monitoring \u2014 those belong to ROUTING-006.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement dispatch conversation consumer selection",
+        "spec": "WHEN a message is dispatched to a consumer group, THE SYSTEM SHALL spawn a dispatch conversation process that evaluates the group's routing function to select a target consumer. The routing function SHALL receive the message and the current consumer state view. THE SYSTEM SHALL NOT select consumers randomly \u2014 selection is always via the routing function.",
+        "acceptance": [
+          "Dispatching a message to a group with three consumers invokes the group's routing function.",
+          "The routing function receives the message and a ConsumerStateView for each available consumer.",
+          "The selected consumer is the one returned by the routing function.",
+          "The dispatch conversation is a beamr process, not a synchronous function call."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/routing/dispatch.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C32"
+        ],
+        "stories": [
+          "S9",
+          "S11"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Link dispatch conversation to selected consumer via process link",
+        "spec": "WHEN a dispatch conversation selects a consumer, THE SYSTEM SHALL establish a beamr process link between the dispatch conversation process and the selected consumer process. The link SHALL provide immediate notification of consumer termination. THE SYSTEM SHALL NOT use polling or heartbeat-based liveness detection.",
+        "acceptance": [
+          "After consumer selection, a beamr process link exists between the dispatch conversation and the consumer.",
+          "The link is established before the message is forwarded to the consumer.",
+          "Link establishment does not require consumer cooperation \u2014 it is unilateral from the dispatch process."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/dispatch.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C33"
+        ],
+        "stories": [
+          "S12"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement crash detection and re-routing within one millisecond",
+        "spec": "IF the linked consumer process crashes during message processing, THEN THE SYSTEM SHALL detect the crash via the process link and re-route the message to another available consumer. Crash detection and re-routing initiation SHALL occur within one millisecond of consumer termination. THE SYSTEM SHALL NOT re-route to the crashed consumer.",
+        "acceptance": [
+          "When a consumer crashes mid-processing, the dispatch conversation receives a link-down notification.",
+          "The dispatch conversation re-evaluates the routing function excluding the crashed consumer.",
+          "Re-routing selects a different consumer from the group.",
+          "The elapsed time between consumer crash and re-route initiation is under one millisecond (verified by timestamp comparison in test).",
+          "If no other consumers are available, the dispatch conversation returns an error."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/dispatch.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C34"
+        ],
+        "stories": [
+          "S10",
+          "S12"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Define consumer group as routing function over consumer set",
+        "spec": "The routing module SHALL define a ConsumerGroup type that associates a routing function with a mutable set of active consumers. The ConsumerGroup SHALL expose the routing function and the current consumer set to the dispatch conversation. THE SYSTEM SHALL NOT use partition assignment or static consumer-to-partition mapping.",
+        "acceptance": [
+          "ConsumerGroup::new(routing_function) creates a group with an empty consumer set.",
+          "ConsumerGroup exposes its routing function and current consumer set.",
+          "The consumer set is an ordered, deduplicated collection of consumer identifiers.",
+          "ConsumerGroup implements Debug."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/routing/group.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C35"
+        ],
+        "stories": [
+          "S9"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Implement seamless consumer addition to groups",
+        "spec": "WHEN a consumer is added to a group, THE SYSTEM SHALL update the consumer set such that the next dispatch conversation sees the new consumer. Adding a consumer SHALL NOT pause, block, or restart dispatch for other consumers in the same group. THE SYSTEM SHALL NOT trigger a rebalance protocol.",
+        "acceptance": [
+          "Adding consumer C to a group with consumers [A, B] results in the set [A, B, C].",
+          "A dispatch conversation started after the addition can select consumer C.",
+          "A dispatch conversation already in progress (started before the addition) completes normally without seeing C.",
+          "Adding a consumer during active dispatch does not block or error."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/group.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C36"
+        ],
+        "stories": [
+          "S13"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Implement seamless consumer removal from groups",
+        "spec": "WHEN a consumer is removed from a group, THE SYSTEM SHALL update the consumer set such that the next dispatch conversation excludes the removed consumer. Removing a consumer SHALL NOT trigger a rebalance or pause other consumers. THE SYSTEM SHALL NOT remove a consumer that is processing a message until the dispatch conversation completes or detects failure.",
+        "acceptance": [
+          "Removing consumer B from a group with consumers [A, B, C] results in the set [A, C].",
+          "A dispatch conversation started after the removal does not select consumer B.",
+          "An in-flight dispatch conversation linked to consumer B continues normally until completion or failure.",
+          "Removing a consumer during active dispatch to other consumers does not block or error."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/routing/group.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C37"
+        ],
+        "stories": [
+          "S13"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement pressure policy enforcement or monitoring \u2014 those belong to ROUTING-006.",
+      "SHALL NOT define predicate types or evaluation logic \u2014 those belong to ROUTING-001 and ROUTING-002.",
+      "SHALL NOT implement routing function loading or compilation \u2014 those belong to ROUTING-003.",
+      "SHALL NOT implement consumer group persistence \u2014 routing state is reconstructed from re-registration per design non-goals.",
+      "SHALL NOT implement multi-node dispatch or cross-node consumer groups \u2014 single-node only per design non-goals."
+    ],
+    "verification": [
+      "cargo clippy -p liminal --all-targets -- -D warnings passes clean.",
+      "cargo test -p liminal passes with all dispatch and consumer group tests green.",
+      "cargo fmt --check passes clean.",
+      "dispatch.rs and group.rs are each under 500 lines including tests (CN1).",
+      "No .unwrap() or .expect() in library code (CN2).",
+      "All public types implement Debug (CN4).",
+      "Crash re-routing test verifies sub-millisecond detection (CN7)."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-003",
+        "title": "Two-tier routing: predicates for the common case, functions for the flexible case",
+        "decision": "Two routing tiers: declarative predicates (WHERE clauses, indexable, optimizable by the bus) for the 90% case, and imperative routing functions (Gleam code running in beamr, hot-deployable, supervised) for the 10% case. Predicates compile to functions internally \u2014 one runtime model. The rejected alternative is predicates-only (insufficiently flexible for load-aware and state-dependent routing) or functions-only (not analyzable or optimizable).",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-007",
+        "title": "Conversation-mediated dispatch instead of Kafka-style consumer group rebalancing",
+        "decision": "Consumer groups are modeled as routing conversations: a dispatch conversation selects a consumer from the group via the routing function, links to it, and observes completion. Consumer crash is detected immediately via the link and the message is routed to another consumer. No global rebalance, no stop-the-world. The rejected alternative is Kafka-style consumer group rebalancing (partition reassignment on membership changes).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C32",
+        "text": "Dispatch conversation selects a consumer by evaluating the group's routing function."
+      },
+      {
+        "id": "C33",
+        "text": "Dispatch conversation links to the selected consumer process via beamr process link."
+      },
+      {
+        "id": "C34",
+        "text": "Consumer crash detected via process link triggers re-routing to another consumer within one millisecond."
+      },
+      {
+        "id": "C35",
+        "text": "Consumer groups are modeled as a routing function over a mutable consumer set."
+      },
+      {
+        "id": "C36",
+        "text": "Adding a consumer to a group takes effect on the next dispatch without pausing other consumers."
+      },
+      {
+        "id": "C37",
+        "text": "Removing a consumer from a group takes effect on the next dispatch without triggering a rebalance."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S9",
+        "text": "As an AI agent, I want to join a consumer group and receive work via dispatch conversations so that I share load with other agents without manual coordination or partition assignment."
+      },
+      {
+        "id": "S10",
+        "text": "As an AI agent, I want my crash during message processing to automatically re-route the message to another agent so that no work is lost due to my failure."
+      },
+      {
+        "id": "S11",
+        "text": "As the Aion engine, I want to dispatch activity tasks to workers via channel routing so that worker selection uses the bus's load-aware routing instead of round-robin gRPC dispatch."
+      },
+      {
+        "id": "S12",
+        "text": "As the Aion engine, I want dispatch conversations to detect worker crashes via process links so that failed activities are re-routed within milliseconds, not heartbeat intervals."
+      },
+      {
+        "id": "S13",
+        "text": "As the Aion engine, I want to add or remove worker consumers without triggering a rebalance so that scaling workers does not pause in-progress activities."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Predicate evaluation must not allocate per-message. Predicates evaluate against borrowed message fields with no heap allocation on the hot path."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure signals must be delivered to producers within the same publish round-trip. No asynchronous notification after the fact."
+      },
+      {
+        "id": "CN7",
+        "text": "Consumer crash detection via process link must trigger re-routing within one millisecond. No polling or heartbeat-based detection."
+      },
+      {
+        "id": "CN8",
+        "text": "Routing function execution is supervised and isolated. A panic or infinite loop in one routing function must not block evaluation for other channels."
+      },
+      {
+        "id": "CN9",
+        "text": "Adding or removing a consumer from a group must not pause, block, or restart dispatch for other consumers in the same group."
+      }
+    ],
+    "intention": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. Backpressure is not an afterthought bolted onto the consumer; it is a protocol primitive that producers see and react to in real time. Consumer groups do not rebalance. A dispatch conversation selects a consumer, links to it, observes completion, and re-routes on failure -- per message, with sub-millisecond crash detection via beamr process links. The experience should feel like the bus is an intelligent intermediary that understands both what messages mean and how much work consumers can absorb, rather than a dumb pipe that delivers bytes and hopes for the best.",
+    "design_path": "docs/design/routing",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a developer configures routing as a declaration -- predicate subscriptions for the common case, routing functions for the flexible case -- and the bus handles the rest. "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

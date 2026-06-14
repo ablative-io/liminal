@@ -1,0 +1,122 @@
+{
+  "id": "DUR-002",
+  "cluster": "durability",
+  "title": "Implement durable channel storage and ephemeral isolation",
+  "depends_on": ["DUR-001"],
+  "blocked_by": [],
+  "checklist": ["C7", "C8", "C9", "C10", "C11", "C35", "C36"],
+  "stories": ["S1", "S2", "S9"],
+  "design_anchor": ["ADR-006", "ADR-009"],
+  "purpose": "Implements the core durable channel storage path: messages published to a durable channel are persisted to haematite via append before acknowledgement. This brief also enforces the ephemeral isolation guarantee — ephemeral channels hold no DurableStore reference and perform zero haematite operations. The durable/ephemeral split is a channel property set at creation time, immutable for the channel's lifetime (P1).",
+  "task": "Build the durable channel storage module. Define the message envelope type carrying payload, causal context, timestamp, publisher identity, and optional idempotency key. Implement partition routing that derives a partition index from the channel's partition key function. Implement the durable append path: append(channel_id + partition, envelope, expected_seq) with per-partition monotonic sequence tracking. Enforce that ephemeral channels never hold a DurableStore reference — use the type system (separate types or an enum with no store field on the ephemeral variant) to prevent accidental persistence calls. Scope boundary: this brief handles message persistence and partitioning. It does not implement consumer cursors (DUR-003), dedup (DUR-004), or conversations (DUR-005).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define MessageEnvelope with all required fields",
+      "spec": "MessageEnvelope struct SHALL contain: payload (Vec<u8>), causal_context (Option<CausalContext> — a parent reference or vector clock entry), timestamp (u64, epoch millis), publisher_id (String), and idempotency_key (Option<String>). MessageEnvelope SHALL serialize to bytes deterministically for storage and SHALL deserialize from stored bytes losslessly. MessageEnvelope SHALL implement Debug and Clone. CausalContext SHALL be a separate type carrying an optional parent message ID and an optional vector clock entry.",
+      "acceptance": [
+        "MessageEnvelope has fields: payload (Vec<u8>), causal_context (Option<CausalContext>), timestamp (u64), publisher_id (String), idempotency_key (Option<String>).",
+        "CausalContext has fields: parent_id (Option<String>), vector_clock_entry (Option<u64>).",
+        "MessageEnvelope round-trips through serialize/deserialize with byte-identical output.",
+        "Both types implement Debug and Clone."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/channel.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C8"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Implement partition routing from partition key function",
+      "spec": "WHEN a message is published to a partitioned durable channel, THE SYSTEM SHALL apply the channel's partition key function to the message to derive a partition index. The partition index SHALL be in the range [0, partition_count). WHEN no partition key function is configured (single-partition default), THE SYSTEM SHALL route all messages to partition 0. The partition key function SHALL be a caller-provided closure `Fn(&MessageEnvelope) -> u64` whose output is mapped to the partition range via modulo.",
+      "acceptance": [
+        "A channel with partition_count=4 and key function returning 7 routes to partition 3 (7 % 4).",
+        "A channel with partition_count=1 always routes to partition 0 regardless of key function output.",
+        "A channel with no key function configured routes all messages to partition 0.",
+        "Partition index is always < partition_count for any key function output."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C9"],
+      "stories": ["S1"]
+    },
+    {
+      "id": "R3",
+      "title": "Track per-partition monotonic sequence numbers",
+      "spec": "WHILE a durable channel is active, THE SYSTEM SHALL maintain a monotonic sequence counter per partition. The sequence counter SHALL be initialized from the last stored sequence number on channel recovery (or 0 for a new channel). Each successful append SHALL advance the counter by 1. The counter SHALL be used as expected_seq on the next append call to haematite.",
+      "acceptance": [
+        "A new durable channel starts with sequence 0 for all partitions.",
+        "After appending 3 messages to partition 0, the next expected_seq is 3.",
+        "Sequence counters for different partitions are independent.",
+        "The sequence counter value matches the return value from DurableStore::append."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C10"],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Implement durable append with sequence conflict detection",
+      "spec": "WHEN a message is published to a durable channel, THE SYSTEM SHALL serialize the MessageEnvelope, compute the partition index, and call DurableStore::append(channel_id + partition, envelope_bytes, expected_seq). THE SYSTEM SHALL NOT acknowledge the publish until append succeeds. IF DurableStore::append returns SequenceConflict, THE SYSTEM SHALL propagate the error to the publisher as DurabilityError::SequenceConflict — it SHALL NOT retry silently. The stream key for append SHALL be formatted as \"{channel_id}:{partition_index}\".",
+      "acceptance": [
+        "A successful publish calls DurableStore::append before returning Ok.",
+        "The stream key passed to append is formatted as \"channel_id:partition_index\".",
+        "A SequenceConflict from DurableStore::append propagates as DurabilityError::SequenceConflict to the caller.",
+        "No retry logic exists in the append path.",
+        "The envelope is serialized to bytes before being passed to append."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C7", "C11"],
+      "stories": ["S1", "S9"]
+    },
+    {
+      "id": "R5",
+      "title": "Enforce ephemeral channel isolation via the type system",
+      "spec": "Ephemeral channels SHALL NOT hold a reference to DurableStore. The type system SHALL prevent accidental persistence calls on ephemeral channels — either through separate types (DurableChannel vs EphemeralChannel) or an enum where the Ephemeral variant carries no store field. WHEN a channel is configured with DurabilityMode::Ephemeral, THE SYSTEM SHALL construct the ephemeral variant with zero haematite interaction. Ephemeral channels SHALL perform zero append, read, cas, or scan operations.",
+      "acceptance": [
+        "An ephemeral channel type/variant has no DurableStore field — this is statically enforced, not a runtime check.",
+        "Constructing an ephemeral channel does not require a DurableStore reference.",
+        "There is no code path from an ephemeral channel to any DurableStore method.",
+        "A durable channel requires a DurableStore reference at construction.",
+        "EphemeralChannel (or equivalent) implements Debug."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/channel.rs"],
+        "delete": []
+      },
+      "checklist": ["C35", "C36"],
+      "stories": ["S2"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement consumer cursor tracking or checkpointing — that is DUR-003.",
+    "SHALL NOT implement message replay or read-from-offset — that is DUR-003.",
+    "SHALL NOT implement dedup key caching or receipt storage — that is DUR-004.",
+    "SHALL NOT implement conversation event sourcing — that is DUR-005.",
+    "SHALL NOT implement crash recovery beyond initializing sequence counters — that is DUR-006.",
+    "SHALL NOT add retry logic to the append path — SequenceConflict is a caller-visible error."
+  ],
+  "verification": [
+    "cargo check compiles the channel module with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "grep -rn 'DurableStore' on the ephemeral channel type/variant returns no hits.",
+    "All public types implement Debug.",
+    "MessageEnvelope round-trip test passes (serialize then deserialize produces equal value)."
+  ]
+}

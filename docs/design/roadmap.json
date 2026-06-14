@@ -1,0 +1,337 @@
+{
+  "project": "agora",
+  "updated": "2026-06-14",
+  "items": [
+    {
+      "id": "RM-001",
+      "title": "Design the channel and conversation core",
+      "status": "idea",
+      "kind": "design",
+      "summary": "The foundational design cluster defining channels (typed, named conduits), conversations (supervised exchange processes), message lifecycle, and the channel registry. Everything else builds on these primitives.",
+      "provenance": {
+        "requested_by": "Frodo + Bono",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "Converged design alignment between Frodo's conversation thesis and Bono's bus architecture"
+      },
+      "links": {
+        "cluster": "core",
+        "decisions": [
+          "ADR-001",
+          "ADR-002"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [],
+      "notes": "First cluster. Channels and conversations are the two primitives everything else references."
+    },
+    {
+      "id": "RM-002",
+      "title": "Design the routing and backpressure engine",
+      "status": "idea",
+      "kind": "design",
+      "summary": "Routing (predicates + functions, two-tier) and backpressure (protocol-level accept/defer/reject, pressure policies). Tightly coupled: routing decisions depend on consumer pressure, and pressure policies can trigger routing changes.",
+      "provenance": {
+        "requested_by": "Bono + Frodo",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "Bono proposed content-aware routing with predicates; Frodo proposed routing functions. Synthesis: both tiers, predicates compile to functions."
+      },
+      "links": {
+        "cluster": "routing",
+        "decisions": [
+          "ADR-003",
+          "ADR-004",
+          "ADR-005"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001"
+      ],
+      "notes": "Depends on channel core for the channel/conversation types routing operates on."
+    },
+    {
+      "id": "RM-003",
+      "title": "Design the durability layer (haematite integration)",
+      "status": "idea",
+      "kind": "design",
+      "summary": "Durable channels (stream semantics, replay from offset), durable conversations (event-sourced processing state), and the exactly-once strategies (dedup contract + durable processing). Integration with haematite's append/read/cas API.",
+      "provenance": {
+        "requested_by": "Frodo + Bono",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "Layer cake architecture: haematite storage \u2192 agora messaging \u2192 Aion workflows"
+      },
+      "links": {
+        "cluster": "durability",
+        "decisions": [
+          "ADR-006",
+          "ADR-009"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001"
+      ],
+      "notes": "Depends on channel core. Also depends on haematite being sufficiently designed for the API contract. Coordinate with Bono."
+    },
+    {
+      "id": "RM-004",
+      "title": "Design the wire protocol",
+      "status": "idea",
+      "kind": "design",
+      "summary": "Custom binary protocol carrying conversation lifecycle frames (open, message, close, error), typed message envelopes, backpressure signals (accept/defer/reject), and causal context. Protocol versioning.",
+      "provenance": {
+        "requested_by": "Frodo",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "ADR-008: custom binary protocol, not NATS-compatible or gRPC"
+      },
+      "links": {
+        "cluster": "protocol",
+        "decisions": [
+          "ADR-008"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001",
+        "RM-002"
+      ],
+      "notes": "Depends on core (what frames exist) and routing/backpressure (what signals the protocol carries)."
+    },
+    {
+      "id": "RM-005",
+      "title": "Design the Aion integration surface",
+      "status": "idea",
+      "kind": "design",
+      "summary": "How agora replaces Aion's gRPC worker dispatch with channel-based activity routing. How workflows publish to and subscribe from channels as recorded operations. How agora's conversation model maps to Aion's signal, query, and child workflow primitives. Zero-hop embedded story.",
+      "provenance": {
+        "requested_by": "Frodo",
+        "date": "2026-06-12",
+        "quote": "",
+        "context": "Frodo's research doc: 'Workers consume from channels instead of direct gRPC dispatch \u2014 this IS the task queue that the roadmap wants.'"
+      },
+      "links": {
+        "cluster": "aion",
+        "decisions": [
+          "ADR-010"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001",
+        "RM-002",
+        "RM-003"
+      ],
+      "notes": "Depends on core, routing, and durability. This is the cluster that proves the layer cake works."
+    },
+    {
+      "id": "RM-006",
+      "title": "Design client SDKs",
+      "status": "idea",
+      "kind": "design",
+      "summary": "Client libraries for Rust (embedded + remote), Gleam (authoring), TypeScript (browser WASM + server), and Python. Conversation handles, typed publish/subscribe, backpressure response. Consistent API surface across languages.",
+      "provenance": {
+        "requested_by": "Frodo + Bono",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "Open question from design alignment: Rust + Gleam first, TS second, Python third"
+      },
+      "links": {
+        "cluster": "sdk",
+        "decisions": [
+          "ADR-001",
+          "ADR-002",
+          "ADR-008"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001",
+        "RM-004"
+      ],
+      "notes": "Depends on core (what the SDK exposes) and wire protocol (how remote clients communicate)."
+    },
+    {
+      "id": "RM-007",
+      "title": "Design the standalone server",
+      "status": "idea",
+      "kind": "design",
+      "summary": "Standalone binary wrapping the bus crate with a network listener, configuration, multi-tenancy (namespace isolation at the bus level), health endpoints, and admin API. Same pattern as Aion's unified binary.",
+      "provenance": {
+        "requested_by": "Frodo",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "ADR-010: embedded-first, standalone as deployment option"
+      },
+      "links": {
+        "cluster": "server",
+        "decisions": [
+          "ADR-010"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001",
+        "RM-004"
+      ],
+      "notes": "Depends on core and wire protocol."
+    },
+    {
+      "id": "RM-008",
+      "title": "Design observability",
+      "status": "idea",
+      "kind": "design",
+      "summary": "Metrics (pressure per channel, conversation count, routing latency, delivery rates), tracing (per-conversation trace spans), and dashboard hooks. Observable pressure as a queryable real-time primitive.",
+      "provenance": {
+        "requested_by": "Frodo",
+        "date": "2026-06-12",
+        "quote": "",
+        "context": "Frodo's research doc: pressure is observable, typed, actionable"
+      },
+      "links": {
+        "cluster": "observability",
+        "decisions": [
+          "ADR-004"
+        ],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001",
+        "RM-002"
+      ],
+      "notes": "Depends on core and routing/backpressure."
+    },
+    {
+      "id": "RM-009",
+      "title": "Build the channel and conversation core",
+      "status": "idea",
+      "kind": "feature",
+      "summary": "Implement the foundational primitives: channel creation/lifecycle, conversation spawning/supervision, typed message validation, channel registry. Ephemeral channels only (no persistence). The prove-the-model milestone.",
+      "provenance": {
+        "requested_by": "Bono",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "Sequencing: ephemeral channels first to prove the conversation model on beamr"
+      },
+      "links": {
+        "cluster": "",
+        "decisions": [],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-001"
+      ],
+      "notes": "First implementation. Ephemeral only \u2014 no haematite dependency."
+    },
+    {
+      "id": "RM-010",
+      "title": "Build the routing and backpressure engine",
+      "status": "idea",
+      "kind": "feature",
+      "summary": "Implement predicate evaluation, routing function execution, pressure metrics, backpressure policy enforcement, conversation-mediated consumer dispatch.",
+      "provenance": {
+        "requested_by": "Bono + Frodo",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "Sequencing follows design"
+      },
+      "links": {
+        "cluster": "",
+        "decisions": [],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-002",
+        "RM-009"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "RM-011",
+      "title": "Build durable channels and conversations",
+      "status": "idea",
+      "kind": "feature",
+      "summary": "Wire haematite storage into channels for message persistence, stream semantics, and replay. Implement durable conversations with event-sourced processing state. The Aion crossover milestone.",
+      "provenance": {
+        "requested_by": "Frodo",
+        "date": "2026-06-13",
+        "quote": "make your processing resumable and idempotency is free",
+        "context": "The single most powerful sentence in the design \u2014 from Bono's assessment of Frodo's research"
+      },
+      "links": {
+        "cluster": "",
+        "decisions": [],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-003",
+        "RM-009"
+      ],
+      "notes": "Blocked on haematite having a working storage API."
+    },
+    {
+      "id": "RM-012",
+      "title": "Build the wire protocol and client SDKs",
+      "status": "idea",
+      "kind": "feature",
+      "summary": "Implement the binary wire protocol and client libraries (Rust + Gleam first, TypeScript second).",
+      "provenance": {
+        "requested_by": "Bono + Frodo",
+        "date": "2026-06-13",
+        "quote": "",
+        "context": "Sequencing follows design"
+      },
+      "links": {
+        "cluster": "",
+        "decisions": [],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-004",
+        "RM-006",
+        "RM-009"
+      ],
+      "notes": ""
+    },
+    {
+      "id": "RM-013",
+      "title": "Build the Aion integration",
+      "status": "idea",
+      "kind": "feature",
+      "summary": "Replace Aion's gRPC worker dispatch with agora channels. Wire workflow publish/subscribe as recorded operations. Prove the zero-hop embedded story end-to-end.",
+      "provenance": {
+        "requested_by": "Frodo",
+        "date": "2026-06-12",
+        "quote": "",
+        "context": "The layer cake: haematite \u2192 agora \u2192 Aion"
+      },
+      "links": {
+        "cluster": "",
+        "decisions": [],
+        "briefs": [],
+        "commits": []
+      },
+      "depends_on": [
+        "RM-005",
+        "RM-010",
+        "RM-011"
+      ],
+      "notes": "The milestone that proves the architecture. Aion's worker dispatch, signals, and event streaming all route through agora."
+    }
+  ]
+}

@@ -1,0 +1,379 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "AION-002",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "AION-002",
+    "cluster": "aion",
+    "title": "Implement activity dispatch via conversation",
+    "depends_on": [
+      "AION-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C23",
+      "C24"
+    ],
+    "stories": [
+      "S1",
+      "S2",
+      "S5",
+      "S8",
+      "S10"
+    ],
+    "design_anchor": [
+      "ADR-001",
+      "ADR-002",
+      "ADR-004",
+      "ADR-007",
+      "ADR-010"
+    ],
+    "purpose": "Activity dispatch through liminal conversations instead of gRPC. This is the core integration: when a workflow calls schedule_activity, the integration layer opens a dispatch conversation on the task queue channel (ADR-007), selects a worker via the routing function, links to the selected worker process (ADR-001), and maps conversation lifecycle to Aion activity states. Worker crash is detected via process link, not heartbeat (sub-millisecond vs seconds). All channel operations are recorded by the Aion recorder for deterministic replay during workflow recovery. The zero-hop embedded path (ADR-010) ensures co-located dispatch incurs no serialization or network boundary.",
+    "task": "Create dispatch.rs and codec.rs in crates/liminal/src/aion/. dispatch.rs implements the dispatch conversation lifecycle: open a conversation on the task queue channel, select a worker using the channel's routing function, link to the worker process, send the ActivityRequest, wait for the ActivityResult, and handle worker crash via process link exit signal. codec.rs defines the typed channel message types for dispatch (DispatchRequest, DispatchResponse, DispatchAck) with validation per ADR-002. The dispatch conversation maps its lifecycle states to Aion's activity state machine (opened->Scheduled, selected->Started, response->Completed, link failure->Failed). All channel operations must be recorder-compatible (constraint CN6). The zero-hop path must work for in-process dispatch (constraint CN5 still requires conversation mediation -- no direct function calls to workers). This brief does NOT implement retry policy (Aion owns that), worker registration (AION-005), or modifications to Aion engine internals.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Dispatch conversation lifecycle",
+        "spec": "WHEN a workflow calls schedule_activity, THE SYSTEM SHALL open a dispatch conversation on the task queue channel named by dispatch_channel(namespace, task_queue). The conversation SHALL select a worker from the channel's subscriber pool via the routing function, link to the selected worker process, send the ActivityRequest, and wait for an ActivityResult. WHEN the worker responds with ActivityResult::Completed, THE SYSTEM SHALL close the conversation and return the result. WHEN the worker responds with ActivityResult::Failed, THE SYSTEM SHALL close the conversation and propagate the error. THE SYSTEM SHALL NOT call worker functions directly -- all dispatch goes through a conversation (constraint CN5).",
+        "acceptance": [
+          "Calling dispatch_activity(namespace, task_queue, request) opens a conversation on the channel aion.dispatch.{namespace}.{task_queue}",
+          "The conversation selects a worker via the routing function (not random, not round-robin hardcoded -- uses the channel's configured routing)",
+          "The conversation links to the selected worker process before sending the request",
+          "A successful activity returns Ok(ActivityResult::Completed { output }) to the caller",
+          "A failed activity returns Err(AionSurfaceError::DispatchFailed { .. }) with the worker's error context",
+          "No code path calls a worker function directly -- all paths go through conversation open/send/receive/close"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/aion/dispatch.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C6"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Worker crash detection and re-dispatch",
+        "spec": "WHILE a dispatch conversation is waiting for an ActivityResult, IF the linked worker process terminates (crash or abnormal exit), THE SYSTEM SHALL detect the termination via the process link exit signal, select another available worker via the routing function, and re-dispatch the ActivityRequest. WHEN no workers are available for re-dispatch, THE SYSTEM SHALL return Err(AionSurfaceError::DispatchFailed) with a NoWorkersAvailable cause. THE SYSTEM SHALL NOT use heartbeat timers, health-check polling, or gRPC keepalive for failure detection (constraint CN8).",
+        "acceptance": [
+          "When a linked worker process crashes during activity execution, the dispatch conversation receives the exit signal and selects a new worker within the same conversation",
+          "The re-dispatched activity uses the same ActivityRequest (same input, same activity type)",
+          "When no workers remain in the subscriber pool after a crash, the dispatch returns Err(AionSurfaceError::DispatchFailed) with cause indicating no available workers",
+          "grep -rn 'heartbeat\\|health.check\\|keepalive' dispatch.rs returns no matches",
+          "Worker crash detection latency is bounded by process link notification (no timer delay)"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/dispatch.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C7"
+        ],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Activity state mapping",
+        "spec": "The dispatch conversation SHALL map its lifecycle states to Aion activity states: conversation opened maps to ActivityScheduled, worker selected and linked maps to ActivityStarted, response received maps to ActivityCompleted or ActivityFailed, process link failure maps to ActivityFailed with retry eligibility. Each state transition SHALL be observable as a channel operation that the recorder can capture.",
+        "acceptance": [
+          "Opening the dispatch conversation emits a state corresponding to ActivityScheduled",
+          "Selecting and linking to a worker emits a state corresponding to ActivityStarted",
+          "Receiving ActivityResult::Completed emits a state corresponding to ActivityCompleted",
+          "Receiving ActivityResult::Failed emits a state corresponding to ActivityFailed",
+          "Process link failure emits a state corresponding to ActivityFailed with a retry-eligible flag",
+          "Each state transition is a distinct channel operation (not a single batch)"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/dispatch.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C8"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Typed dispatch message codec",
+        "spec": "codec.rs SHALL define typed message structures for the dispatch conversation: DispatchRequest (wraps ActivityRequest with conversation correlation), DispatchResponse (wraps ActivityResult with worker identity), and DispatchAck (delivery acknowledgement). Each message type SHALL implement the channel's type validation per ADR-002. codec.rs SHALL also define the content-type constants used for dispatch message serialization.",
+        "acceptance": [
+          "DispatchRequest contains an ActivityRequest and a conversation_id field",
+          "DispatchResponse contains an ActivityResult and a worker_id field",
+          "DispatchAck contains a conversation_id and acknowledgement status",
+          "All three types implement Debug and Clone",
+          "All three types carry a content_type constant for typed channel validation",
+          "Publishing a DispatchRequest with mismatched content_type to a typed dispatch channel is rejected at publish time"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/aion/codec.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C5",
+          "C9"
+        ],
+        "stories": [
+          "S10"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Recorder compatibility for channel operations",
+        "spec": "All channel operations in dispatch.rs (conversation open, worker selection, message send, message receive, conversation close) SHALL be structured as recorded operations. WHEN the Aion recorder is capturing, THE SYSTEM SHALL record each channel operation as an event in the workflow's event log. WHEN the resolver is replaying, THE SYSTEM SHALL return the recorded channel responses without re-executing the actual dispatch. THE SYSTEM SHALL NOT introduce a new replay mechanism -- it uses Aion's existing record-replay pattern.",
+        "acceptance": [
+          "Each channel operation in dispatch.rs is wrapped in a recorder-compatible operation boundary",
+          "During replay, dispatch_activity returns the recorded result without opening an actual conversation",
+          "During replay, worker crash re-dispatch returns the recorded outcome without actual re-dispatch",
+          "The recorded events include enough state (conversation_id, worker_id, result) to reconstruct the dispatch outcome deterministically"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/dispatch.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C23"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Zero-hop in-process dispatch path",
+        "spec": "WHEN the Aion engine and liminal are embedded in the same beamr instance, THE SYSTEM SHALL dispatch activities through in-process channels with no serialization boundary and no network hop. The dispatch conversation still mediates lifecycle (constraint CN5) -- the zero-hop optimization eliminates network transport, not the conversation. THE SYSTEM SHALL NOT require configuration changes to switch between embedded and distributed dispatch -- the same code path works in both modes via beamr's channel abstraction.",
+        "acceptance": [
+          "dispatch_activity called in an embedded beamr instance completes without any network I/O (no TCP, no loopback)",
+          "The dispatch conversation is still created and its lifecycle is still tracked (conversation open/select/link/close all occur)",
+          "The same dispatch_activity function signature works for both embedded and distributed modes",
+          "No configuration flag distinguishes embedded from distributed dispatch -- beamr's channel layer handles routing"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/dispatch.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C24"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R7",
+        "title": "No consumer group rebalancing in dispatch",
+        "spec": "THE SYSTEM SHALL NOT implement global consumer group rebalancing in the dispatch path. WHEN a worker subscribes or unsubscribes from a task queue channel, THE SYSTEM SHALL adapt routing decisions immediately via the routing function without pausing or reassigning other workers. Adding a worker is subscription; removing a worker is unsubscription or crash -- no coordination protocol.",
+        "acceptance": [
+          "Adding a worker to a task queue channel does not trigger any pause or rebalance of existing dispatch conversations",
+          "Removing a worker from a task queue channel does not trigger any pause or rebalance of other workers' in-flight activities",
+          "grep -rn 'rebalanc' dispatch.rs returns no matches",
+          "The routing function is called per-dispatch, not per-membership-change"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/aion/dispatch.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C10"
+        ],
+        "stories": [
+          "S8"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement retry policy -- retry decisions are Aion's responsibility via its retry configuration (principle P6).",
+      "SHALL NOT implement worker registration or capacity tracking -- that is AION-005.",
+      "SHALL NOT modify Aion engine internals -- the integration surface consumes Aion's public API (principle P1).",
+      "SHALL NOT modify liminal core channel or conversation primitives.",
+      "SHALL NOT implement a heartbeat or health-check protocol for worker liveness (constraint CN8).",
+      "SHALL NOT implement activity timeout enforcement -- Aion's existing timeout mechanism is unchanged."
+    ],
+    "verification": [
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes clean.",
+      "cargo test for dispatch and codec modules passes (unit tests for lifecycle mapping, crash re-dispatch, codec validation).",
+      "No file in crates/liminal/src/aion/ exceeds 500 lines.",
+      "grep -rn 'heartbeat\\|health.check\\|keepalive\\|rebalanc' crates/liminal/src/aion/dispatch.rs returns no matches.",
+      "All channel operations in dispatch.rs are recorder-compatible (verified by replay test that returns recorded results without network I/O).",
+      "dispatch_activity compiles and is callable with identical signatures in embedded and distributed configurations."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-001",
+        "title": "Conversations as the fundamental messaging unit, not messages",
+        "decision": "The fundamental unit is the conversation \u2014 a supervised beamr process owning a structured exchange between parties \u2014 over the message. A conversation mediates lifecycle, failure handling, and (optionally) durability. Exchange patterns (request-reply, streaming, saga) are conversation types with different lifecycle rules, not special-case bolt-ons. The rejected alternative is the NATS/Kafka model: messages as the primitive, patterns assembled from messages.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-002",
+        "title": "Typed channels with compile-time enforcement in Gleam and runtime validation for external producers",
+        "decision": "Every channel declares its message type. Gleam producers get compile-time enforcement. External producers (Python, TypeScript, HTTP) get runtime validation at publish time. The rejected alternative is the NATS model: channels carry opaque bytes and consumers handle deserialization failures.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      },
+      {
+        "id": "ADR-007",
+        "title": "Conversation-mediated dispatch instead of Kafka-style consumer group rebalancing",
+        "decision": "Consumer groups are modeled as routing conversations: a dispatch conversation selects a consumer from the group via the routing function, links to it, and observes completion. Consumer crash is detected immediately via the link and the message is routed to another consumer. No global rebalance, no stop-the-world. The rejected alternative is Kafka-style consumer group rebalancing (partition reassignment on membership changes).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      },
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C5",
+        "text": "ActivityRequest and ActivityResult types defined in types.rs with activity type, input payload, task queue, and timeout fields."
+      },
+      {
+        "id": "C6",
+        "text": "dispatch.rs opens a conversation on the task queue channel, selects a worker via the routing function, and links to the selected worker process."
+      },
+      {
+        "id": "C7",
+        "text": "Worker crash during activity execution is detected via process link exit signal and triggers re-dispatch to another available worker."
+      },
+      {
+        "id": "C8",
+        "text": "Dispatch conversation lifecycle maps to Aion activity states: opened to ActivityScheduled, worker selected to ActivityStarted, response to ActivityCompleted, link failure to ActivityFailed."
+      },
+      {
+        "id": "C9",
+        "text": "Activity message types defined in codec.rs with typed channel validation per ADR-002."
+      },
+      {
+        "id": "C10",
+        "text": "No global consumer group rebalancing exists in the dispatch path; adding or removing workers is handled by the routing function adapting to subscription changes."
+      },
+      {
+        "id": "C23",
+        "text": "All channel operations in the integration surface are recorded by the Aion recorder and replayable by the resolver."
+      },
+      {
+        "id": "C24",
+        "text": "Zero-hop dispatch: embedded Aion and liminal in the same beamr instance dispatch activities through in-process channels with no serialization boundary."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As the Aion Engine, I want to dispatch an activity to an available worker via a liminal conversation so that I can replace gRPC infrastructure with the same process-level primitives I already use for workflow supervision."
+      },
+      {
+        "id": "S2",
+        "text": "As the Aion Engine, I want immediate notification when a worker crashes during activity execution so that I can re-dispatch the activity to another worker without waiting for a heartbeat timeout."
+      },
+      {
+        "id": "S5",
+        "text": "As the Aion Engine, I want all channel operations in the integration surface to be capturable by the recorder so that workflow recovery replays dispatch and signal operations deterministically."
+      },
+      {
+        "id": "S8",
+        "text": "As an Aion Worker, I want to report activity completion, failure, or heartbeat through the dispatch conversation handle so that the engine tracks my progress through a single communication path."
+      },
+      {
+        "id": "S10",
+        "text": "As a Workflow Author, I want typed activity inputs and outputs validated at dispatch time so that schema mismatches are caught before the worker begins execution."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file exceeds 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains only pub mod declarations and pub use re-exports. No logic, no type definitions, no function bodies."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Activity dispatch must complete through a liminal conversation, never by direct function call to a worker. The conversation mediates lifecycle, failure, and recording."
+      },
+      {
+        "id": "CN6",
+        "text": "All non-deterministic channel operations must be recorder-compatible: the recorder can capture them and the resolver can replay them without re-executing the actual dispatch."
+      },
+      {
+        "id": "CN7",
+        "text": "Channel names follow the aion.{kind}.{namespace}.{id} convention enforced by the channels module. No ad-hoc string construction of channel names outside that module."
+      },
+      {
+        "id": "CN8",
+        "text": "Worker failure detection uses beamr process links exclusively. No heartbeat timers, no health-check polling, no gRPC keepalive."
+      }
+    ],
+    "intention": "When this cluster is complete, Aion dispatches activities, delivers signals, and streams workflow history entirely through liminal conversations and channels. The gRPC worker dispatch layer is gone. A workflow author writes schedule_activity and the bus handles routing, failure detection, and re-dispatch. An operator scales the worker pool by starting or stopping worker processes -- no rebalancing, no configuration changes, no downtime. The zero-hop embedded path means a beamr instance running both Aion and liminal dispatches activities without crossing a network boundary, and the same code path works identically when workers run on remote nodes connected via beamr distribution.\n\nThis is the cluster that proves the layer cake: haematite stores durable state, liminal mediates communication, Aion orchestrates workflows. If this integration surface is clean, every future consumer of liminal (the messaging product, the real-time channels product) inherits the same patterns.",
+    "design_path": "docs/design/aion",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, Aion dispatches activities, delivers signals, and streams workflow history entirely through liminal conversations and channels. The gRPC worker dispatch layer is gone. A"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

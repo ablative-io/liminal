@@ -1,0 +1,108 @@
+{
+  "id": "SDK-008",
+  "cluster": "sdk",
+  "title": "Implement TypeScript conversations, backpressure, connection, and codegen",
+  "depends_on": ["SDK-007"],
+  "blocked_by": [],
+  "checklist": ["C19"],
+  "stories": ["S8"],
+  "design_anchor": ["ADR-001", "ADR-004"],
+  "purpose": "Complete the TypeScript SDK with Conversation<T> lifecycle management (ADR-001), backpressure as discriminated unions (ADR-004), connection lifecycle and reconnection, and a type generator that produces TypeScript interfaces from agora channel definitions. After this brief, TypeScript developers get IDE autocompletion and type checking for channel messages without writing type definitions manually (story S8).",
+  "task": "Create conversation.ts, pressure.ts, connection.ts, and codegen.ts in sdks/agora-ts/src/. Conversation<T> mirrors the Rust ConversationHandle with lifecycle events as a TypeScript-idiomatic interface. PressureResponse is a discriminated union matching the Rust enum. The connection module implements the same state machine as SDK-003 (connecting, connected, reconnecting, disconnected) with exponential backoff. The codegen module reads agora channel type definitions and generates TypeScript interfaces. IN SCOPE: conversations, backpressure unions, connection lifecycle, type generation. OUT OF SCOPE: channel logic (SDK-007), WASM bridge changes (SDK-007).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define Conversation<T> interface with lifecycle events",
+      "spec": "WHEN a TypeScript developer opens a Conversation<T>, THE SYSTEM SHALL return a handle with send, receive, and close methods. THE SYSTEM SHALL emit lifecycle events (opened, message, closing, closed, error) as an observable stream. WHEN the conversation errors, THE SYSTEM SHALL emit an error event with a typed reason before transitioning to closed. THE SYSTEM SHALL NOT silently drop lifecycle transitions.",
+      "acceptance": [
+        "Conversation<T> interface has send(message: T): Promise<void> method",
+        "Conversation<T> interface has receive(): AsyncIterable<T> method",
+        "Conversation<T> interface has close(): Promise<void> method",
+        "Conversation<T>.lifecycle returns an AsyncIterable<ConversationEvent> or EventEmitter",
+        "ConversationEvent is a discriminated union with kind: 'opened' | 'message' | 'closing' | 'closed' | 'error'",
+        "Error events carry a typed reason field"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/src/conversation.ts"],
+        "modify": ["sdks/agora-ts/src/index.ts"],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Define backpressure discriminated unions",
+      "spec": "THE SYSTEM SHALL define a PressureResponse discriminated union with three variants: { kind: 'accept' }, { kind: 'defer', delay: number } (delay in milliseconds), and { kind: 'reject', reason: string }. WHEN Channel.publish returns a PressureResponse, THE SYSTEM SHALL preserve the variant without flattening or converting. THE SYSTEM SHALL NOT silently convert 'defer' or 'reject' to 'accept'.",
+      "acceptance": [
+        "PressureResponse is a discriminated union type with kind as the discriminant",
+        "Accept variant: { kind: 'accept' }",
+        "Defer variant: { kind: 'defer', delay: number } where delay is in milliseconds",
+        "Reject variant: { kind: 'reject', reason: string }",
+        "Channel.publish return type is Promise<PressureResponse>",
+        "TypeScript narrowing works: if (response.kind === 'defer') { response.delay } compiles"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/src/pressure.ts"],
+        "modify": ["sdks/agora-ts/src/index.ts"],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Implement connection lifecycle and reconnection",
+      "spec": "WHEN the SDK connects to an agora server, THE SYSTEM SHALL manage the connection through states: connecting, connected, reconnecting, disconnected. WHEN the connection drops, THE SYSTEM SHALL automatically reconnect using exponential backoff with jitter. WHEN reconnection succeeds, THE SYSTEM SHALL recover subscriptions from their last acknowledged sequence. THE SYSTEM SHALL emit connection state change events for observability. THE SYSTEM SHALL NOT use fixed-interval retry.",
+      "acceptance": [
+        "ConnectionState is a discriminated union: 'connecting' | 'connected' | 'reconnecting' | 'disconnected'",
+        "Connection emits state change events observable via onStateChange callback or EventEmitter",
+        "Reconnection delay follows exponential backoff: min(baseDelay * 2^attempt, maxDelay) + jitter",
+        "After reconnection, subscriptions resume from their last acknowledged sequence",
+        "No fixed-interval retry code path exists",
+        "baseDelay and maxDelay are configurable via ConnectionConfig"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/src/connection.ts"],
+        "modify": ["sdks/agora-ts/src/index.ts"],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Implement type generator from channel definitions",
+      "spec": "WHEN a developer runs the type generator against agora channel type definitions, THE SYSTEM SHALL produce TypeScript interface files matching each channel's message schema. THE SYSTEM SHALL generate interfaces with proper field names, types, and JSDoc comments. THE SYSTEM SHALL NOT require manual type definition for channels that have agora-registered schemas.",
+      "acceptance": [
+        "codegen.ts exports a generate function that accepts channel type definitions and outputs TypeScript source",
+        "Generated interfaces match channel message schemas with correct field names and TypeScript types",
+        "Generated files include JSDoc comments with the source channel name and schema version",
+        "A channel with fields { name: string, count: integer } produces interface { name: string; count: number; }",
+        "The generator is usable as a CLI tool or programmatic API"
+      ],
+      "files": {
+        "create": ["sdks/agora-ts/src/codegen.ts"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C19"],
+      "stories": ["S8"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT duplicate channel publish/subscribe logic from SDK-007.",
+    "SHALL NOT modify the WASM bridge from SDK-007.",
+    "SHALL NOT silently consume backpressure signals.",
+    "SHALL NOT use fixed-interval retry for reconnection."
+  ],
+  "verification": [
+    "TypeScript compilation (tsc --noEmit) succeeds with no errors",
+    "Conversation lifecycle events emit in correct order: opened -> message* -> closing -> closed",
+    "PressureResponse discriminated union narrows correctly in TypeScript",
+    "Connection reconnection uses exponential backoff verified by unit test",
+    "Type generator produces valid TypeScript from a test channel definition",
+    "Generated TypeScript interfaces compile without errors",
+    "No file exceeds 500 lines of code"
+  ]
+}

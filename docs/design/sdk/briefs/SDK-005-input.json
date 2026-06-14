@@ -1,0 +1,214 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SDK-005",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SDK-005",
+    "cluster": "sdk",
+    "title": "Scaffold Gleam SDK with typed channels and FFI bindings",
+    "depends_on": [
+      "SDK-002"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C2",
+      "C14",
+      "C16"
+    ],
+    "stories": [
+      "S5"
+    ],
+    "design_anchor": [
+      "ADR-002"
+    ],
+    "purpose": "Bootstrap the Gleam SDK package with typed channel operations and FFI bindings to the Rust SDK transport layer. Gleam developers define message types as records and get compile-time schema enforcement at publish and subscribe time (ADR-002). The Gleam SDK delegates all transport to the Rust SDK via FFI -- it does not re-implement protocol logic.",
+    "task": "Create the sdks/agora-gleam/ package with gleam.toml, agora.gleam (public API), channel.gleam (typed publish/subscribe), and ffi.gleam (FFI bindings to Rust SDK). The channel module provides publish and subscribe functions that are generic over Gleam record types with compile-time enforcement. The FFI module wraps Rust SDK transport calls. IN SCOPE: package manifest, typed channel API, FFI bindings, compile-time schema enforcement from Gleam types. OUT OF SCOPE: conversation handlers (SDK-006), schema derivation module (SDK-006), transport implementation.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Create gleam.toml package manifest",
+        "spec": "The Gleam SDK package manifest SHALL declare the package name as agora, SHALL declare the FFI dependency on the agora-sdk Rust crate, and SHALL configure the build for BEAM target output compatible with beamr module loading.",
+        "acceptance": [
+          "gleam.toml exists at sdks/agora-gleam/gleam.toml",
+          "Package name is declared as \"agora\"",
+          "FFI dependency on agora-sdk is declared",
+          "Target is configured for Erlang/BEAM output"
+        ],
+        "files": {
+          "create": [
+            "sdks/agora-gleam/gleam.toml"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C2"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Implement typed channel publish and subscribe in channel.gleam",
+        "spec": "WHEN a Gleam developer calls channel.publish with a typed record, THE SYSTEM SHALL enforce at compile time that the record type matches the channel's declared message type. WHEN a Gleam developer calls channel.subscribe, THE SYSTEM SHALL return a typed stream of the channel's message type. THE SYSTEM SHALL NOT accept untyped or dynamically-typed messages for publish.",
+        "acceptance": [
+          "channel.publish accepts a channel handle and a typed message, returning Result(PressureResponse, SdkError)",
+          "channel.subscribe accepts a channel handle and returns a typed message stream",
+          "Publishing a message of the wrong type produces a compile-time error in Gleam",
+          "Channel handle carries the message type parameter at the type level"
+        ],
+        "files": {
+          "create": [
+            "sdks/agora-gleam/src/agora/channel.gleam"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C14"
+        ],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement compile-time schema enforcement from Gleam records",
+        "spec": "WHEN a Gleam record is used as a channel message type, THE SYSTEM SHALL derive schema metadata from the record's field names and types at compile time. THE SYSTEM SHALL NOT require developers to write schema definitions separately from their Gleam record types.",
+        "acceptance": [
+          "A Gleam record type used with channel.publish automatically provides schema metadata",
+          "No separate schema definition file is required for Gleam-defined message types",
+          "Schema metadata includes field names, field types, and the record name",
+          "Type mismatches between record fields and channel schema are caught at compile time"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "sdks/agora-gleam/src/agora/channel.gleam"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S5"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Implement FFI bindings delegating transport to Rust SDK",
+        "spec": "THE SYSTEM SHALL define FFI functions in ffi.gleam that call the Rust SDK's transport layer for connection management, message sending, and message receiving. THE SYSTEM SHALL NOT re-implement protocol framing, connection lifecycle, or backpressure handling in Gleam. The public API module (agora.gleam) SHALL re-export channel functions and types.",
+        "acceptance": [
+          "ffi.gleam contains @external(erlang, ...) declarations for Rust SDK NIF functions",
+          "Transport operations (connect, send, receive) delegate to Rust SDK via FFI",
+          "No protocol framing or wire format logic exists in Gleam code",
+          "agora.gleam re-exports the public API from channel.gleam and ffi.gleam"
+        ],
+        "files": {
+          "create": [
+            "sdks/agora-gleam/src/agora/ffi.gleam",
+            "sdks/agora-gleam/src/agora.gleam"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C16"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT re-implement protocol logic that exists in the Rust SDK.",
+      "SHALL NOT implement conversation handlers (deferred to SDK-006).",
+      "SHALL NOT implement schema derivation as a separate module (deferred to SDK-006).",
+      "SHALL NOT add transport or connection management logic in Gleam."
+    ],
+    "verification": [
+      "gleam check in sdks/agora-gleam/ succeeds",
+      "gleam format --check in sdks/agora-gleam/ reports no formatting issues",
+      "A test Gleam module can import agora/channel and call publish with a typed record",
+      "Publishing a record with wrong field types produces a compile error",
+      "FFI bindings reference valid Rust SDK NIF function names",
+      "No file exceeds 500 lines of code"
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-002",
+        "title": "Typed channels with compile-time enforcement in Gleam and runtime validation for external producers",
+        "decision": "Every channel declares its message type. Gleam producers get compile-time enforcement. External producers (Python, TypeScript, HTTP) get runtime validation at publish time. The rejected alternative is the NATS model: channels carry opaque bytes and consumers handle deserialization failures.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C2",
+        "text": "agora-gleam package exists at sdks/agora-gleam/ with gleam.toml declaring FFI dependency on agora-sdk."
+      },
+      {
+        "id": "C14",
+        "text": "Gleam channel module provides typed publish and subscribe functions with compile-time schema enforcement."
+      },
+      {
+        "id": "C16",
+        "text": "FFI bindings delegate transport operations to the Rust SDK without re-implementing protocol logic."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S5",
+        "text": "As a Gleam developer, I want to define message types as Gleam records and have the SDK enforce them at compile time so that type mismatches are caught before deployment."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The Rust SDK must compile with no_std + alloc for WASM targets."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure responses must never be silently consumed by the SDK. Every pressure signal reaches the application."
+      },
+      {
+        "id": "CN7",
+        "text": "Reconnection attempts use exponential backoff with jitter. No fixed-interval retry loops."
+      },
+      {
+        "id": "CN8",
+        "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
+      }
+    ],
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "design_path": "docs/design/sdk",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

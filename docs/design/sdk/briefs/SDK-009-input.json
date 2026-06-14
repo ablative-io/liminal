@@ -1,0 +1,210 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SDK-009",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SDK-009",
+    "cluster": "sdk",
+    "title": "Implement cross-SDK behavioural conformance test suite",
+    "depends_on": [
+      "SDK-004",
+      "SDK-006",
+      "SDK-008"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C20"
+    ],
+    "stories": [],
+    "design_anchor": [],
+    "purpose": "Deliver the shared behavioural test suite that verifies all three SDKs (Rust, Gleam, TypeScript) produce identical observable outcomes for connection lifecycle, subscription recovery, backpressure handling, and conversation state transitions. This enforces design principle P6 (cross-SDK behavioural parity) and ensures no SDK silently diverges from the shared contract.",
+    "task": "Create test harnesses in each SDK directory that execute a common set of behavioural test scenarios. The scenarios are defined declaratively (scenario name, sequence of operations, expected observable outcomes) and each SDK harness translates them into SDK-specific test code. Results are compared across SDKs to verify parity. IN SCOPE: conformance test scenarios, per-SDK harnesses, cross-SDK result comparison. OUT OF SCOPE: implementation internals testing, performance benchmarks, fuzz testing.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define conformance test scenarios",
+        "spec": "THE SYSTEM SHALL define a set of behavioural test scenarios covering: connection lifecycle state transitions (connecting -> connected -> reconnecting -> connected, connecting -> disconnected), subscription recovery (subscribe, disconnect, reconnect, verify resume from last acknowledged sequence), backpressure vocabulary (publish under pressure returns Accept/Defer/Reject with correct payloads), and conversation lifecycle (open, send, receive, close, verify event sequence). THE SYSTEM SHALL NOT test implementation internals -- only observable behaviour at the SDK's public API.",
+        "acceptance": [
+          "At least 4 scenario categories exist: connection lifecycle, subscription recovery, backpressure, conversation lifecycle",
+          "Each scenario specifies: a sequence of SDK operations, expected state transitions or return values",
+          "Connection lifecycle scenarios cover normal connect, reconnect after drop, and clean disconnect",
+          "Subscription recovery scenario verifies messages resume from last acknowledged sequence, not from zero",
+          "Backpressure scenario verifies all three response variants (Accept, Defer, Reject) are correctly typed",
+          "Conversation scenario verifies event sequence: opened -> message -> closing -> closed"
+        ],
+        "files": {
+          "create": [
+            "tests/conformance/scenarios.json"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C20"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Implement Rust SDK conformance harness",
+        "spec": "WHEN the conformance suite runs against the Rust SDK, THE SYSTEM SHALL execute each scenario using the Rust SDK's public API and record the observable outcomes (state transitions, return values, event sequences). THE SYSTEM SHALL output results in a format comparable across SDKs.",
+        "acceptance": [
+          "Rust harness exists at crates/liminal-sdk/tests/conformance.rs or tests/conformance/",
+          "Each scenario from scenarios.json is exercised against the Rust SDK public API",
+          "Results are output as JSON with scenario name, pass/fail, and observed values",
+          "Harness uses the embedded mode for deterministic testing without network dependencies"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-sdk/tests/conformance.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C20"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R3",
+        "title": "Implement Gleam SDK conformance harness",
+        "spec": "WHEN the conformance suite runs against the Gleam SDK, THE SYSTEM SHALL execute each scenario using the Gleam SDK's public API and record the observable outcomes. THE SYSTEM SHALL output results in the same comparable format as the Rust harness.",
+        "acceptance": [
+          "Gleam harness exists at sdks/liminal-gleam/test/conformance_test.gleam or equivalent",
+          "Each scenario from scenarios.json is exercised against the Gleam SDK public API",
+          "Results are output as JSON with scenario name, pass/fail, and observed values",
+          "Observed values match the format produced by the Rust harness for cross-SDK comparison"
+        ],
+        "files": {
+          "create": [
+            "sdks/liminal-gleam/test/conformance_test.gleam"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C20"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Implement TypeScript SDK conformance harness",
+        "spec": "WHEN the conformance suite runs against the TypeScript SDK, THE SYSTEM SHALL execute each scenario using the TypeScript SDK's public API and record the observable outcomes. THE SYSTEM SHALL output results in the same comparable format as the Rust and Gleam harnesses.",
+        "acceptance": [
+          "TypeScript harness exists at sdks/liminal-ts/tests/conformance.test.ts or equivalent",
+          "Each scenario from scenarios.json is exercised against the TypeScript SDK public API",
+          "Results are output as JSON with scenario name, pass/fail, and observed values",
+          "Observed values match the format produced by the Rust and Gleam harnesses"
+        ],
+        "files": {
+          "create": [
+            "sdks/liminal-ts/tests/conformance.test.ts"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C20"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R5",
+        "title": "Implement cross-SDK result comparison",
+        "spec": "WHEN all three SDK harnesses have produced their results, THE SYSTEM SHALL compare the results across SDKs and report any divergences. THE SYSTEM SHALL fail if any scenario produces different observable outcomes across SDKs. THE SYSTEM SHALL report which SDK diverged, on which scenario, and with what observed vs expected values.",
+        "acceptance": [
+          "A comparison script or test reads results from all three SDK harnesses",
+          "Divergences are reported with: SDK name, scenario name, expected value, observed value",
+          "The comparison fails (non-zero exit) if any scenario diverges across SDKs",
+          "Passing comparison confirms all three SDKs produce identical observable outcomes"
+        ],
+        "files": {
+          "create": [
+            "tests/conformance/compare.py"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C20"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT test implementation internals -- only observable behaviour at each SDK's public API.",
+      "SHALL NOT test performance characteristics or throughput.",
+      "SHALL NOT modify any SDK implementation code -- this brief is test-only.",
+      "SHALL NOT add new public API surface to any SDK."
+    ],
+    "verification": [
+      "All conformance scenarios pass against the Rust SDK",
+      "All conformance scenarios pass against the Gleam SDK",
+      "All conformance scenarios pass against the TypeScript SDK",
+      "Cross-SDK comparison reports zero divergences",
+      "Each harness produces machine-readable JSON results",
+      "No test file exceeds 500 lines of code"
+    ]
+  },
+  "resolved_context": {
+    "adrs": [],
+    "checklist": [
+      {
+        "id": "C20",
+        "text": "Behavioural conformance tests for connection lifecycle, subscription recovery, and backpressure handling pass against all three SDKs."
+      }
+    ],
+    "stories": [],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The Rust SDK must compile with no_std + alloc for WASM targets."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure responses must never be silently consumed by the SDK. Every pressure signal reaches the application."
+      },
+      {
+        "id": "CN7",
+        "text": "Reconnection attempts use exponential backoff with jitter. No fixed-interval retry loops."
+      },
+      {
+        "id": "CN8",
+        "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
+      }
+    ],
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "design_path": "docs/design/sdk",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

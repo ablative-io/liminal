@@ -1,0 +1,368 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "PROTO-001",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "PROTO-001",
+    "cluster": "protocol",
+    "title": "Define frame types, frame format, error taxonomy, and codec",
+    "depends_on": [],
+    "blocked_by": [],
+    "checklist": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8",
+      "C9",
+      "C10",
+      "C11",
+      "C12"
+    ],
+    "stories": [
+      "S1",
+      "S2",
+      "S3",
+      "S11"
+    ],
+    "design_anchor": [
+      "ADR-008"
+    ],
+    "purpose": "Establishes the protocol foundation: the frame type enumeration covering all bus primitives, the fixed-size binary header format, typed frame body variants, the error taxonomy with numeric reason codes, and the synchronous zero-copy codec for encoding and decoding frames. This is the single most critical brief in the protocol cluster \u2014 every other brief builds frame types and codec extensions on this foundation.",
+    "task": "Create the protocol module skeleton and its four foundational files. Define FrameType with all 20 variants covering lifecycle, conversation, subscription, publish, backpressure, and keepalive categories. Define the fixed-size frame header (type u8, flags u8, stream_id u32, payload_length u32 \u2014 10 bytes total). Define typed Frame body variants with fields matching their category. Enforce stream 0 for control frames and stream >= 1 for application frames at construction time. Define ProtocolError with numeric reason codes for every error condition. Implement the codec: encode writes frames to byte buffers as header + payload; decode reads frames from byte buffers returning the frame and bytes consumed; decode returns ProtocolError for malformed input; decode skips unknown frame types by reading their length prefix. Verify the round-trip property: decode(encode(frame)) == frame for every frame type. Scope boundary: this brief defines the format and codec. It does not implement envelope semantics (PROTO-002), connection lifecycle (PROTO-003), multiplexing logic (PROTO-004), backpressure state (PROTO-005), or schema negotiation (PROTO-006).",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Wire protocol module with pub mod declarations only",
+        "spec": "protocol/mod.rs SHALL contain only pub mod declarations for frame, codec, error, and future submodules (envelope, causal, handshake, lifecycle, version, multiplex, backpressure, schema), plus pub use re-exports for core public types. mod.rs SHALL NOT contain any logic, type definitions, or function bodies.",
+        "acceptance": [
+          "mod.rs contains pub mod declarations for all protocol submodules.",
+          "mod.rs contains pub use re-exports for FrameType, Frame, FrameHeader, ProtocolError, and codec functions.",
+          "mod.rs contains zero function bodies, zero struct/enum definitions.",
+          "The module compiles with `use crate::protocol::{Frame, FrameType, ProtocolError};`."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/mod.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C1"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Define ProtocolError with numeric reason codes",
+        "spec": "ProtocolError enum SHALL include variants for: malformed frame (incomplete header, truncated payload), unknown frame type (for logging, not disconnection), invalid stream (control frame on non-zero stream, application frame on stream 0), invalid state transition, authentication failure, version mismatch, schema incompatible, and codec errors. Each variant SHALL carry a numeric reason code (u16) and an optional human-readable message. ProtocolError SHALL implement std::error::Error via thiserror.",
+        "acceptance": [
+          "ProtocolError has variants covering all error conditions listed in CN10.",
+          "Each variant carries or maps to a unique numeric reason code (u16).",
+          "ProtocolError::reason_code() returns the u16 code.",
+          "ProtocolError::message() returns an optional human-readable string.",
+          "ProtocolError implements std::error::Error and Debug."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/error.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C2"
+        ],
+        "stories": [
+          "S11"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Define FrameType enum with all 20 variants",
+        "spec": "FrameType enum SHALL have variants: Connect, ConnectAck, ConnectError, Disconnect, Subscribe, SubscribeAck, SubscribeError, Unsubscribe, Publish, PublishAck, PublishError, ConversationOpen, ConversationMessage, ConversationClose, ConversationError, Accept, Defer, Reject, Ping, Pong. Each variant SHALL map to a unique u8 discriminant. FrameType SHALL implement Debug, Clone, Copy, PartialEq, Eq, and conversion to/from u8. Unknown u8 values SHALL map to a FrameType::Unknown(u8) variant for forward compatibility.",
+        "acceptance": [
+          "FrameType has exactly 20 named variants plus Unknown(u8).",
+          "Each named variant has a unique u8 discriminant.",
+          "FrameType::from(u8) returns the correct variant for known values and Unknown(n) for unknown values.",
+          "u8::from(FrameType) returns the discriminant.",
+          "FrameType implements Debug, Clone, Copy, PartialEq, Eq."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/frame.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C4",
+          "C6"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Define frame header and typed frame body variants",
+        "spec": "FrameHeader struct SHALL contain: frame_type (FrameType), flags (u8), stream_id (u32), payload_length (u32). The header is fixed at 10 bytes on the wire. Frame enum SHALL have one variant per FrameType, each carrying typed fields appropriate to that frame category (not raw bytes). WHEN constructing a frame, THE SYSTEM SHALL validate stream ID: control frames (Connect, ConnectAck, ConnectError, Disconnect, Ping, Pong) SHALL require stream_id == 0; application frames SHALL require stream_id >= 1. Construction with an invalid stream ID SHALL return ProtocolError::InvalidStream.",
+        "acceptance": [
+          "FrameHeader is exactly 10 bytes when serialized (1 + 1 + 4 + 4).",
+          "Frame has one variant per FrameType with typed fields.",
+          "Frame::new_ping(stream_id=1) returns Err(ProtocolError::InvalidStream).",
+          "Frame::new_ping(stream_id=0) returns Ok(Frame::Ping).",
+          "Frame::new_publish(stream_id=0, ..) returns Err(ProtocolError::InvalidStream).",
+          "All Frame variants and FrameHeader implement Debug."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/frame.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C3",
+          "C5",
+          "C7"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Implement codec encode writing frame to byte buffer",
+        "spec": "encode(frame, buffer) SHALL write the frame to a mutable byte buffer as: 10-byte header followed by the serialized payload. The payload_length field in the header SHALL match the actual serialized payload length. encode SHALL operate synchronously on byte slices (P4). encode SHALL be infallible for valid frames \u2014 a successfully constructed Frame always encodes (CN6).",
+        "acceptance": [
+          "encode writes exactly header_size + payload_length bytes.",
+          "The first byte is the frame type discriminant.",
+          "Bytes 1 is flags, 2..6 is stream_id (big-endian u32), 6..10 is payload_length (big-endian u32).",
+          "encode returns the number of bytes written.",
+          "encode does not allocate \u2014 it writes to the provided buffer."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/codec.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C8"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Implement codec decode with error handling and unknown-type skip",
+        "spec": "decode(buffer) SHALL read a frame from a byte buffer, returning the decoded Frame and the number of bytes consumed, or a ProtocolError. WHEN the buffer contains fewer than 10 bytes, THE SYSTEM SHALL return ProtocolError::IncompleteHeader. WHEN the buffer contains a complete header but insufficient payload bytes, THE SYSTEM SHALL return ProtocolError::TruncatedPayload. WHEN the frame type is unknown, THE SYSTEM SHALL skip the frame by reading payload_length bytes and returning a Frame::Unknown { type_id, payload } variant \u2014 it SHALL NOT disconnect or error (CN9). decode SHALL NEVER panic (CN6).",
+        "acceptance": [
+          "decode of a valid encoded frame returns Ok((frame, bytes_consumed)).",
+          "decode of a buffer shorter than 10 bytes returns ProtocolError with IncompleteHeader.",
+          "decode of a buffer with complete header but truncated payload returns ProtocolError with TruncatedPayload.",
+          "decode of an unknown frame type returns Frame::Unknown with the raw payload, consuming header + payload bytes.",
+          "decode never panics for any input (fuzz-safe)."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/codec.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C9",
+          "C10",
+          "C12"
+        ],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R7",
+        "title": "Verify round-trip property for all frame types",
+        "spec": "FOR every named FrameType variant, decode(encode(frame)) SHALL produce the original frame with byte-identical payloads. This property SHALL be verified by tests covering every frame type. The round-trip guarantee ensures SDK interoperability across languages.",
+        "acceptance": [
+          "A round-trip test exists for every named FrameType variant (20 tests or parameterized).",
+          "Each test constructs a frame, encodes to bytes, decodes from bytes, and asserts equality.",
+          "Frame variants with payload fields (Publish, ConversationMessage) round-trip with byte-identical payloads.",
+          "Frame variants with no payload (Ping, Pong, Disconnect) round-trip correctly."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/codec.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": [
+          "S3"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement MessageEnvelope or CausalContext semantics \u2014 that is PROTO-002.",
+      "SHALL NOT implement connection state machine or handshake logic \u2014 that is PROTO-003.",
+      "SHALL NOT implement stream table or allocation logic \u2014 that is PROTO-004.",
+      "SHALL NOT implement backpressure state machine \u2014 that is PROTO-005.",
+      "SHALL NOT implement schema negotiation logic \u2014 that is PROTO-006.",
+      "SHALL NOT implement async I/O \u2014 the codec is synchronous on byte slices (P4).",
+      "SHALL NOT disconnect on unknown frame types \u2014 skip them (CN9)."
+    ],
+    "verification": [
+      "cargo check compiles the protocol module with no errors.",
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes.",
+      "grep -r 'fn ' crates/liminal/src/protocol/mod.rs returns no function definitions.",
+      "All 20 FrameType variants have round-trip tests.",
+      "FrameHeader serializes to exactly 10 bytes.",
+      "decode never panics for zero-length, partial-header, or garbage input."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C1",
+        "text": "crates/liminal/src/protocol/mod.rs exists with pub mod declarations for all protocol submodules and no logic (CN3)."
+      },
+      {
+        "id": "C2",
+        "text": "crates/liminal/src/protocol/error.rs defines ProtocolError with variants for every error condition and numeric reason codes."
+      },
+      {
+        "id": "C3",
+        "text": "Frame header is a fixed-size binary prefix containing frame type (u8), flags (u8), stream ID (u32), and payload length (u32)."
+      },
+      {
+        "id": "C4",
+        "text": "FrameType enum covers all frame categories: Connect, ConnectAck, ConnectError, Disconnect, Subscribe, SubscribeAck, SubscribeError, Unsubscribe, Publish, PublishAck, PublishError, ConversationOpen, ConversationMessage, ConversationClose, ConversationError, Accept, Defer, Reject, Ping, Pong."
+      },
+      {
+        "id": "C5",
+        "text": "Each Frame variant holds typed fields matching its frame category, not raw bytes."
+      },
+      {
+        "id": "C6",
+        "text": "All Frame variants and FrameType implement Debug (CN4)."
+      },
+      {
+        "id": "C7",
+        "text": "Frame construction validates invariants: stream 0 for control frames, stream >= 1 for application frames (CN7)."
+      },
+      {
+        "id": "C8",
+        "text": "encode() writes a frame to a byte buffer as header + payload with correct length prefix."
+      },
+      {
+        "id": "C9",
+        "text": "decode() reads a frame from a byte buffer, returning the frame and the number of bytes consumed."
+      },
+      {
+        "id": "C10",
+        "text": "decode() returns ProtocolError for malformed input, never panics (CN6)."
+      },
+      {
+        "id": "C11",
+        "text": "Round-trip property holds: decode(encode(frame)) == frame for every frame type."
+      },
+      {
+        "id": "C12",
+        "text": "decode() skips unknown frame types by reading the length prefix and discarding the payload (CN9)."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As a client library author, I want a fixed-size frame header so that I can read exactly N bytes to determine the frame type and payload length without buffering variable-length prefixes."
+      },
+      {
+        "id": "S2",
+        "text": "As a client library author, I want unknown frame types to be safely skippable by reading the length prefix so that my SDK works against newer server versions without crashing."
+      },
+      {
+        "id": "S3",
+        "text": "As a client library author, I want the codec to round-trip every frame type deterministically so that I can write encode/decode tests that compare byte sequences across SDK languages."
+      },
+      {
+        "id": "S11",
+        "text": "As an operator, I want every protocol error to produce an explicit error frame with a numeric reason code so that I can monitor error rates and categorize failures without parsing log messages."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Frame header is fixed-size (type + flags + stream ID + payload length) so that any frame can be skipped without parsing its payload."
+      },
+      {
+        "id": "CN6",
+        "text": "Codec encode/decode is infallible for valid frames: a successfully constructed frame always encodes, and valid wire bytes always decode. Malformed wire bytes produce ProtocolError, never a panic."
+      },
+      {
+        "id": "CN7",
+        "text": "Stream 0 is reserved for connection-level control frames. Application streams use IDs >= 1."
+      },
+      {
+        "id": "CN8",
+        "text": "Backpressure signals (Accept/Defer/Reject) travel on the same stream as the messages they regulate (P5)."
+      },
+      {
+        "id": "CN9",
+        "text": "Unknown frame types are skipped by reading their length prefix and discarding the payload, not by disconnecting (P7)."
+      },
+      {
+        "id": "CN10",
+        "text": "Every error condition produces an explicit error frame with a numeric reason code. No silent drops (P3)."
+      }
+    ],
+    "intention": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that single connection with conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context flowing natively in the wire format. The protocol should feel inevitable -- every frame carries exactly the information the bus needs to make routing, ordering, and pressure decisions, and nothing else. A developer reading a packet capture should be able to reconstruct the full conversation lifecycle without consulting application logs.\n\nThe protocol is the contract between the bus and every client SDK. Getting this right means SDKs in any language can be written against a stable, versioned binary spec rather than chasing an internal API. Getting it wrong means every SDK becomes a moving target and the bus's differentiators (conversations, typed messages, causal ordering, protocol-level backpressure) are lost in translation.",
+    "design_path": "docs/design/protocol",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

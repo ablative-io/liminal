@@ -1,0 +1,297 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "LIM-001",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "LIM-001",
+    "cluster": "core",
+    "title": "Establish liminal crate with foundation types and error taxonomy",
+    "depends_on": [],
+    "blocked_by": [],
+    "checklist": [
+      "C1",
+      "C2",
+      "C3",
+      "C4",
+      "C5",
+      "C29",
+      "C30"
+    ],
+    "stories": [
+      "S1"
+    ],
+    "design_anchor": [
+      "ADR-001",
+      "ADR-010"
+    ],
+    "purpose": "Bootstrap the liminal crate with Cargo.toml, the public API surface in lib.rs, the foundational channel types (ChannelMode, ChannelConfig, ChannelHandle), and the error taxonomy. This is the leaf dependency for every other brief in the cluster.",
+    "task": "Create the liminal crate from scratch. Define the core types that everything else depends on: ChannelMode (Ephemeral/Durable), ChannelConfig (name, schema, mode \u2014 no silent defaults per P6), ChannelHandle (the caller-facing handle for publish/subscribe/close). Define LiminalError covering channel, conversation, schema, and delivery failure cases, implementing std::error::Error and Debug. Set up lib.rs to re-export the channel, conversation, envelope, and error modules. This brief creates the skeleton \u2014 channel actor behaviour (LIM-002), schema validation (LIM-003), and conversation actor (LIM-004) build on it.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Create crate manifest with beamr dependency",
+        "spec": "crates/liminal/Cargo.toml SHALL declare the liminal crate with beamr as a dependency. The crate SHALL use the workspace edition, rust-version, and lint settings. The crate SHALL NOT depend on haematite, aion, or any network library \u2014 those are separate clusters.",
+        "acceptance": [
+          "Cargo.toml exists at crates/liminal/Cargo.toml with [package] name = \"liminal\"",
+          "beamr appears in [dependencies] with features = [\"json\"]",
+          "Workspace lints inherited via [lints] workspace = true",
+          "No dependency on haematite, aion, tokio, axum, or tonic"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/Cargo.toml"
+          ],
+          "modify": [
+            "Cargo.toml"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C1"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Define ChannelMode enum",
+        "spec": "ChannelMode SHALL have exactly two variants: Ephemeral (in-memory only, no persistence) and Durable (backed by haematite, survives restart). The enum SHALL derive Clone, Copy, Debug, PartialEq, Eq.",
+        "acceptance": [
+          "ChannelMode::Ephemeral and ChannelMode::Durable are the only variants",
+          "ChannelMode derives Clone, Copy, Debug, PartialEq, Eq",
+          "ChannelMode is re-exported from lib.rs"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/channel/types.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C3"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R3",
+        "title": "Define ChannelConfig requiring explicit name, schema, and mode",
+        "spec": "ChannelConfig SHALL require a channel name (String), a schema definition (SchemaRef \u2014 opaque reference, defined fully in LIM-003), and a ChannelMode. ChannelConfig SHALL NOT implement Default \u2014 every field is required, no silent defaults (P6). A builder pattern MAY be used if it enforces all-fields-required.",
+        "acceptance": [
+          "ChannelConfig has fields: name (String), schema (SchemaRef), mode (ChannelMode)",
+          "ChannelConfig does NOT implement Default",
+          "ChannelConfig::new(name, schema, mode) constructor requires all three arguments",
+          "SchemaRef is a placeholder type (unit struct or newtype) \u2014 LIM-003 fills in the real definition"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/channel/types.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C4"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Define ChannelHandle with publish, subscribe, and close",
+        "spec": "ChannelHandle SHALL expose publish, subscribe, and close methods as the public API for interacting with a channel. publish SHALL accept a message payload and return a Result. subscribe SHALL return a SubscriptionHandle. close SHALL signal the channel actor to shut down gracefully. ChannelHandle SHALL be Clone and Send + Sync (it is a handle to a process, not the process itself).",
+        "acceptance": [
+          "ChannelHandle has publish(&self, payload) -> Result<(), LiminalError> method signature",
+          "ChannelHandle has subscribe(&self) -> Result<SubscriptionHandle, LiminalError> method signature",
+          "ChannelHandle has close(&self) -> Result<(), LiminalError> method signature",
+          "ChannelHandle is Clone + Send + Sync",
+          "SubscriptionHandle is defined as a stub type in channel/subscription.rs"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/channel/subscription.rs"
+          ],
+          "modify": [
+            "crates/liminal/src/channel/types.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C5"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Define LiminalError enum with thiserror",
+        "spec": "LiminalError SHALL cover: ChannelNotFound, ChannelClosed, SchemaMismatch, PublishFailed, SubscriptionFailed, ConversationFailed, ConversationTimeout, ParticipantCrashed, DeliveryFailed. Each variant SHALL carry a descriptive message string. LiminalError SHALL implement std::error::Error via thiserror and Debug.",
+        "acceptance": [
+          "LiminalError is defined in crates/liminal/src/error.rs",
+          "All nine variants listed are present with message fields",
+          "LiminalError derives Debug and uses #[derive(thiserror::Error)]",
+          "LiminalError is re-exported from lib.rs"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/error.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C29",
+          "C30"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R6",
+        "title": "Set up lib.rs with module declarations and re-exports",
+        "spec": "lib.rs SHALL declare pub mod for channel, conversation, envelope, error, and causal modules. lib.rs SHALL re-export the primary public types: ChannelMode, ChannelConfig, ChannelHandle, LiminalError. lib.rs SHALL contain ONLY module declarations and re-exports \u2014 no logic (CN3).",
+        "acceptance": [
+          "lib.rs declares pub mod channel, conversation, envelope, error, causal",
+          "lib.rs re-exports ChannelMode, ChannelConfig, ChannelHandle, LiminalError",
+          "lib.rs contains zero function definitions, zero trait definitions, zero struct definitions",
+          "crates/liminal/src/channel/mod.rs exists with pub mod types, subscription",
+          "crates/liminal/src/conversation/mod.rs exists as a placeholder (populated by LIM-004)",
+          "cargo check -p liminal passes"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/lib.rs",
+            "crates/liminal/src/channel/mod.rs",
+            "crates/liminal/src/conversation/mod.rs",
+            "crates/liminal/src/envelope.rs",
+            "crates/liminal/src/causal.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C2"
+        ],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement channel actor behaviour \u2014 that is LIM-002.",
+      "SHALL NOT implement schema validation logic \u2014 that is LIM-003.",
+      "SHALL NOT implement conversation actor \u2014 that is LIM-004.",
+      "SHALL NOT add any persistence or haematite integration \u2014 those are durability cluster briefs.",
+      "SHALL NOT add any network or wire protocol code \u2014 that is the protocol cluster."
+    ],
+    "verification": [
+      "cargo check -p liminal passes clean.",
+      "cargo clippy -p liminal -- -D warnings passes clean.",
+      "cargo fmt -p liminal --check passes clean.",
+      "lib.rs contains only pub mod and pub use \u2014 no logic.",
+      "ChannelConfig does not implement Default.",
+      "LiminalError implements std::error::Error and Debug."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-001",
+        "title": "Conversations as the fundamental messaging unit, not messages",
+        "decision": "The fundamental unit is the conversation \u2014 a supervised beamr process owning a structured exchange between parties \u2014 over the message. A conversation mediates lifecycle, failure handling, and (optionally) durability. Exchange patterns (request-reply, streaming, saga) are conversation types with different lifecycle rules, not special-case bolt-ons. The rejected alternative is the NATS/Kafka model: messages as the primitive, patterns assembled from messages.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C1",
+        "text": "crates/liminal/Cargo.toml exists with beamr as a dependency."
+      },
+      {
+        "id": "C2",
+        "text": "crates/liminal/src/lib.rs re-exports channel, conversation, envelope, and error modules."
+      },
+      {
+        "id": "C3",
+        "text": "ChannelMode enum has Ephemeral and Durable variants."
+      },
+      {
+        "id": "C4",
+        "text": "ChannelConfig requires name, schema, and mode \u2014 no silent defaults."
+      },
+      {
+        "id": "C5",
+        "text": "ChannelHandle provides publish, subscribe, and close operations."
+      },
+      {
+        "id": "C29",
+        "text": "LiminalError enum covers channel, conversation, schema, and delivery failure cases."
+      },
+      {
+        "id": "C30",
+        "text": "LiminalError implements std::error::Error and Debug."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As an application developer, I want to create a typed channel with a single function call so that I can start publishing and subscribing without configuring infrastructure."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "Schema validation rejects invalid messages at publish time \u2014 a subscriber never receives a message that does not match its declared schema."
+      },
+      {
+        "id": "CN6",
+        "text": "Participant crash detection is via beamr process linking \u2014 no heartbeat polling, no timeout-based detection."
+      },
+      {
+        "id": "CN7",
+        "text": "Ephemeral channels have zero persistence overhead \u2014 no haematite calls, no disk I/O, no serialisation beyond message delivery."
+      },
+      {
+        "id": "CN8",
+        "text": "Channel and conversation actors are supervised. Crash restarts the individual actor without affecting other channels or conversations."
+      }
+    ],
+    "intention": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema validation at publish time, subscribe with pattern matching, and initiate supervised conversations that own the state of a structured exchange. The bus participates in processing \u2014 it knows when consumers crash, mediates backpressure, and can resume durable conversations from where they left off. The experience should feel like writing function calls between processes, not configuring infrastructure.",
+    "design_path": "docs/design/core",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema va"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

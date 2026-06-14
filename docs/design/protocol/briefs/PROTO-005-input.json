@@ -1,0 +1,222 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "PROTO-005",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "PROTO-005",
+    "cluster": "protocol",
+    "title": "Implement backpressure signal frames and per-stream pressure state",
+    "depends_on": [
+      "PROTO-001",
+      "PROTO-004"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C30",
+      "C31",
+      "C32"
+    ],
+    "stories": [
+      "S7",
+      "S13"
+    ],
+    "design_anchor": [
+      "ADR-004",
+      "ADR-008"
+    ],
+    "purpose": "Implements protocol-level backpressure as defined by ADR-004. Accept, Defer, and Reject are distinct frame types that travel on the same stream as the messages they regulate (P5). Per-stream pressure state tracks outstanding (unacknowledged) messages and transitions between normal, deferred, and rejecting states. Consumers declare their capacity (max-in-flight) during subscription, giving the bus the information it needs to mediate between producer rate and consumer capacity.",
+    "task": "Build the backpressure module. Define the Accept, Defer, and Reject frame payload fields (referenced message ID, stream ID enforcement on the same stream). Implement per-stream pressure state tracking: a state machine with states Normal, Deferred, Rejecting that transitions based on outstanding message count relative to the consumer's declared max_in_flight. Wire max_in_flight into the Subscribe frame so the bus knows consumer capacity. Scope boundary: this brief handles backpressure signal types and per-stream pressure tracking. It does not implement the bus-level policies that decide when to shed load or spawn consumers \u2014 those are bus-layer concerns above the protocol.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define Accept, Defer, and Reject frame payloads",
+        "spec": "Accept, Defer, and Reject frame payloads SHALL carry a referenced_message_id (a unique identifier for the message being acknowledged/deferred/rejected). These frames SHALL travel on the same stream as the original message (CN8) \u2014 the frame's stream_id in the header identifies which subscription the pressure signal applies to. Each frame type SHALL have a distinct FrameType discriminant (defined in PROTO-001). The payload SHALL also carry an optional reason string for Defer and Reject.",
+        "acceptance": [
+          "Accept payload has field: referenced_message_id.",
+          "Defer payload has fields: referenced_message_id, reason (Option<String>).",
+          "Reject payload has fields: referenced_message_id, reason (Option<String>).",
+          "All three frame types use their PROTO-001 FrameType discriminant.",
+          "All three frame types round-trip through the codec."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/backpressure.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C30"
+        ],
+        "stories": [
+          "S7"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement per-stream pressure state machine",
+        "spec": "PressureState enum SHALL have variants: Normal, Deferred, Rejecting. StreamPressure SHALL track: outstanding_count (messages delivered but not acknowledged), max_in_flight (from subscription), and current PressureState. WHEN outstanding_count reaches max_in_flight, THE SYSTEM SHALL transition to Deferred. WHEN outstanding_count exceeds max_in_flight plus the stream's buffer capacity, THE SYSTEM SHALL transition to Rejecting. WHEN outstanding_count drops below max_in_flight (via Accept), THE SYSTEM SHALL transition back to Normal.",
+        "acceptance": [
+          "PressureState has exactly 3 variants: Normal, Deferred, Rejecting.",
+          "StreamPressure with max_in_flight=10 transitions to Deferred when outstanding reaches 10.",
+          "StreamPressure transitions back to Normal when outstanding drops below max_in_flight after Accept.",
+          "StreamPressure tracks outstanding_count incrementing on delivery, decrementing on Accept.",
+          "StreamPressure implements Debug."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/backpressure.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C31"
+        ],
+        "stories": [
+          "S13"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Wire max_in_flight into Subscribe frame",
+        "spec": "The Subscribe frame payload SHALL include a max_in_flight (u32) field declaring the consumer's processing capacity. This value SHALL be stored in the StreamPressure when the subscription becomes active. A max_in_flight of 0 SHALL be rejected with ProtocolError \u2014 every consumer must declare a capacity. The bus uses this value to determine when to send Defer/Reject signals.",
+        "acceptance": [
+          "Subscribe frame payload includes max_in_flight (u32).",
+          "Subscribe with max_in_flight=0 returns ProtocolError.",
+          "Subscribe with max_in_flight=100 creates a StreamPressure with that capacity.",
+          "Subscribe frame round-trips through the codec with max_in_flight preserved.",
+          "max_in_flight is accessible from the decoded Subscribe frame."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/backpressure.rs",
+            "crates/liminal/src/protocol/frame.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C32"
+        ],
+        "stories": [
+          "S7"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement bus-level pressure policies (spawn consumers, shed load) \u2014 those are above the protocol.",
+      "SHALL NOT implement rate limiting or throttling \u2014 the protocol signals pressure, it does not enforce rates.",
+      "SHALL NOT define buffer capacity thresholds \u2014 those are configurable by the bus, not hardcoded in the protocol.",
+      "SHALL NOT modify backpressure signals to travel on a different stream than the messages they regulate (P5)."
+    ],
+    "verification": [
+      "cargo check compiles the backpressure module with no errors.",
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes.",
+      "Test: Accept/Defer/Reject frames round-trip through codec.",
+      "Test: StreamPressure transitions Normal -> Deferred at max_in_flight.",
+      "Test: StreamPressure transitions Deferred -> Normal on Accept reducing outstanding below max_in_flight.",
+      "Test: Subscribe with max_in_flight=0 is rejected."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      },
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C30",
+        "text": "Accept, Defer, and Reject are distinct frame types carrying the referenced message ID on the same stream as the original publish (CN8)."
+      },
+      {
+        "id": "C31",
+        "text": "Per-stream pressure state tracks outstanding (unacknowledged) messages and transitions between normal, deferred, and rejecting."
+      },
+      {
+        "id": "C32",
+        "text": "Subscribe frame includes max_in_flight declaration so the bus knows consumer capacity."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S7",
+        "text": "As an application developer, I want to receive explicit Accept, Defer, or Reject signals for my published messages so that I can adapt my publish rate without guessing whether the consumer is keeping up."
+      },
+      {
+        "id": "S13",
+        "text": "As an operator, I want per-stream backpressure state so that I can identify which specific subscriptions are under pressure without aggregating across the entire connection."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Frame header is fixed-size (type + flags + stream ID + payload length) so that any frame can be skipped without parsing its payload."
+      },
+      {
+        "id": "CN6",
+        "text": "Codec encode/decode is infallible for valid frames: a successfully constructed frame always encodes, and valid wire bytes always decode. Malformed wire bytes produce ProtocolError, never a panic."
+      },
+      {
+        "id": "CN7",
+        "text": "Stream 0 is reserved for connection-level control frames. Application streams use IDs >= 1."
+      },
+      {
+        "id": "CN8",
+        "text": "Backpressure signals (Accept/Defer/Reject) travel on the same stream as the messages they regulate (P5)."
+      },
+      {
+        "id": "CN9",
+        "text": "Unknown frame types are skipped by reading their length prefix and discarding the payload, not by disconnecting (P7)."
+      },
+      {
+        "id": "CN10",
+        "text": "Every error condition produces an explicit error frame with a numeric reason code. No silent drops (P3)."
+      }
+    ],
+    "intention": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that single connection with conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context flowing natively in the wire format. The protocol should feel inevitable -- every frame carries exactly the information the bus needs to make routing, ordering, and pressure decisions, and nothing else. A developer reading a packet capture should be able to reconstruct the full conversation lifecycle without consulting application logs.\n\nThe protocol is the contract between the bus and every client SDK. Getting this right means SDKs in any language can be written against a stable, versioned binary spec rather than chasing an internal API. Getting it wrong means every SDK becomes a moving target and the bus's differentiators (conversations, typed messages, causal ordering, protocol-level backpressure) are lost in translation.",
+    "design_path": "docs/design/protocol",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

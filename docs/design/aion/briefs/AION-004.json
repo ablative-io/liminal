@@ -1,0 +1,106 @@
+{
+  "id": "AION-004",
+  "cluster": "aion",
+  "title": "Implement workflow history event streaming",
+  "depends_on": ["AION-001"],
+  "blocked_by": [],
+  "checklist": ["C15", "C16", "C17", "C18"],
+  "stories": ["S4", "S13"],
+  "design_anchor": ["ADR-001", "ADR-010"],
+  "purpose": "Workflow history events published to per-workflow channels for live streaming and cursor-based replay. This decouples history consumers (monitoring dashboards, debugging tools, operators) from the event store API. The recorder publishes each event to the workflow's history channel after writing to the event store -- the event store remains the source of truth for recovery, the history channel is the read path for observation. Consumers subscribe to channels instead of querying the store directly, eliminating read contention under load and removing coupling to the storage layer's API.",
+  "task": "Create history.rs in crates/liminal/src/aion/. This module handles per-workflow history channel lifecycle (create when workflow starts, populated as events occur), recorder integration (publish events to channel after event store write), cursor-based replay from the durable channel stream, and consumer subscription. Use the channel naming from AION-001 channels.rs (history_channel constructor). The history channel is a read-only projection of the event store -- it does NOT replace the event store as the source of truth for recovery. This brief does NOT implement history compaction, retention policies, or event store modifications.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Per-workflow history channel creation",
+      "spec": "WHEN a workflow starts, THE SYSTEM SHALL create a durable history channel named by history_channel(namespace, workflow_id) from channels.rs. The channel SHALL persist events as a stream that supports cursor-based reads. WHEN the channel already exists (workflow restart/recovery), THE SYSTEM SHALL reuse the existing channel and its accumulated history.",
+      "acceptance": [
+        "Starting a workflow creates a durable channel named aion.history.{namespace}.{workflow_id}",
+        "The channel is configured as durable (events persist across subscriber disconnections)",
+        "Restarting a workflow that already has a history channel reuses the existing channel with all prior events intact",
+        "The channel supports multiple concurrent subscribers"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/aion/history.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S4"]
+    },
+    {
+      "id": "R2",
+      "title": "Recorder publishes events to history channel",
+      "spec": "WHEN the Aion recorder writes an event to the event store, THE SYSTEM SHALL publish a HistoryEvent to the workflow's history channel after the event store write succeeds. The HistoryEvent SHALL include the sequence number, event type, timestamp, and payload. IF the history channel publish fails, THE SYSTEM SHALL log the failure but SHALL NOT fail the event store write -- the event store is the source of truth, the channel is a projection. THE SYSTEM SHALL NOT publish to the history channel before the event store write succeeds.",
+      "acceptance": [
+        "Each event written to the event store is followed by a HistoryEvent published to the history channel",
+        "The HistoryEvent sequence number matches the event store sequence number",
+        "The HistoryEvent event_type and payload match the event store record",
+        "A history channel publish failure does not cause the event store write to fail or roll back",
+        "A history channel publish failure is logged with enough context to diagnose (workflow_id, sequence, error)",
+        "No HistoryEvent is published before its corresponding event store write succeeds"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/history.rs"],
+        "delete": []
+      },
+      "checklist": ["C16"],
+      "stories": ["S4"]
+    },
+    {
+      "id": "R3",
+      "title": "Cursor-based replay from durable channel",
+      "spec": "WHEN a consumer subscribes to a workflow's history channel with a cursor position, THE SYSTEM SHALL deliver all events from that cursor position forward. WHEN a consumer subscribes with no cursor (or cursor 0), THE SYSTEM SHALL deliver the complete event history from the beginning. The cursor SHALL be the HistoryEvent sequence number. WHEN a consumer is caught up to the latest event, THE SYSTEM SHALL deliver new events in real time as they are published.",
+      "acceptance": [
+        "Subscribing with cursor=5 to a channel with events 1..10 delivers events 6..10",
+        "Subscribing with no cursor delivers all events from sequence 1",
+        "Subscribing with cursor=0 delivers all events from sequence 1",
+        "After catching up to the latest event, new events published by the recorder are delivered in real time",
+        "Multiple consumers with different cursor positions each receive the correct event subset"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/history.rs"],
+        "delete": []
+      },
+      "checklist": ["C17"],
+      "stories": ["S13"]
+    },
+    {
+      "id": "R4",
+      "title": "Consumer decoupling from event store",
+      "spec": "History consumers SHALL read workflow events exclusively through channel subscription. THE SYSTEM SHALL NOT expose the event store API to history consumers. THE SYSTEM SHALL provide a subscribe function that takes a workflow's namespace and workflow_id, resolves the history channel name, and returns a subscription handle with cursor support. The subscription handle SHALL deliver HistoryEvent values, not raw event store records.",
+      "acceptance": [
+        "The subscribe_history(namespace, workflow_id, cursor) function returns a subscription handle",
+        "The subscription handle yields HistoryEvent values (the types from AION-001 types.rs)",
+        "No event store types (EventStore, StoreError) appear in the history module's public API",
+        "A consumer can stream a workflow's complete history using only the subscription handle -- no event store import required"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/history.rs"],
+        "delete": []
+      },
+      "checklist": ["C18"],
+      "stories": ["S13"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT replace the event store as the source of truth for workflow recovery -- the history channel is a read projection.",
+    "SHALL NOT implement history compaction or retention policies.",
+    "SHALL NOT implement event store modifications -- the recorder integration is additive (publish after write).",
+    "SHALL NOT implement activity dispatch -- that is AION-002.",
+    "SHALL NOT implement signal delivery -- that is AION-003.",
+    "SHALL NOT expose event store types in the history module's public API."
+  ],
+  "verification": [
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes clean.",
+    "cargo test for the history module passes (unit tests for channel creation, recorder publish, cursor replay, consumer subscription).",
+    "No file in crates/liminal/src/aion/ exceeds 500 lines.",
+    "grep -rn 'EventStore\\|StoreError' crates/liminal/src/aion/history.rs returns no matches in the public API (internal wiring may reference recorder).",
+    "A history channel publish failure does not fail the event store write (verified by test that forces channel error and asserts event store write succeeds).",
+    "Cursor-based replay delivers the correct event subset for arbitrary cursor positions (verified by parameterized test)."
+  ]
+}

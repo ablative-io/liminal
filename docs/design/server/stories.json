@@ -1,0 +1,27 @@
+{
+  "cluster": "server",
+  "personas": [
+    {
+      "name": "Operator",
+      "role": "Deploying and Managing a Liminal Server",
+      "stories": [
+        {"id": "S1", "text": "As an Operator, I want to start a liminal server with a single config file so that I can deploy the messaging bus without writing Rust code."},
+        {"id": "S2", "text": "As an Operator, I want to define channels, routing rules, and persistence paths in the config file so that I can set up the bus topology declaratively."},
+        {"id": "S3", "text": "As an Operator, I want the server to validate my configuration at startup and report specific errors so that I can fix misconfigurations before the server accepts traffic."},
+        {"id": "S4", "text": "As an Operator, I want to shut down the server gracefully so that in-flight conversations complete and durable state is persisted before the process exits."},
+        {"id": "S5", "text": "As an Operator, I want to form a cluster of liminal servers via seed nodes so that I can scale horizontally and survive individual node failures."},
+        {"id": "S6", "text": "As an Operator, I want to check server health via HTTP so that I can integrate with monitoring systems and alerting pipelines."}
+      ]
+    },
+    {
+      "name": "DevOps Engineer",
+      "role": "Containerizing and Orchestrating Liminal Deployments",
+      "stories": [
+        {"id": "S7", "text": "As a DevOps Engineer, I want to configure the server via environment variables so that I can deploy with container orchestration tools that inject config through the environment."},
+        {"id": "S8", "text": "As a DevOps Engineer, I want a readiness probe endpoint that reports ready only after full startup so that Kubernetes does not route traffic to a server that cannot yet accept connections."},
+        {"id": "S9", "text": "As a DevOps Engineer, I want the server to run as a single static binary so that container images are minimal and deployment artifacts are straightforward to distribute."},
+        {"id": "S10", "text": "As a DevOps Engineer, I want environment variables to override file-based config values so that I can ship a base config in the container image and apply per-environment overrides from the orchestrator."}
+      ]
+    }
+  ]
+}

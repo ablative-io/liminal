@@ -1,0 +1,173 @@
+{
+  "id": "OBS-003",
+  "cluster": "observability",
+  "title": "Implement conversation metrics for activity, completion, duration, and errors",
+  "depends_on": ["OBS-001"],
+  "blocked_by": [],
+  "checklist": ["C7", "C8", "C9", "C10"],
+  "stories": ["S6", "S9"],
+  "design_anchor": ["ADR-004"],
+  "purpose": "Instrument the conversation subsystem with the four metrics that operators need to monitor conversation health: active count (gauge), completion rate (counter), duration (histogram), and error rate (counter). These metrics surface conversation lifecycle events — start, complete, fail — as quantitative signals for capacity planning and failure detection.",
+  "task": "Create crates/liminal/src/metrics/conversation.rs containing the ConversationMetrics struct that registers the four conversation metric families with the MetricsRegistry. Provide methods for the conversation actor to call on conversation start, completion, failure, and timeout events. Duration is recorded at completion time as the elapsed wall-clock time from conversation start. All recording is non-blocking.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define ConversationMetrics struct",
+      "spec": "ConversationMetrics SHALL hold handles to the four metric families: active_count (Gauge), completion_count (Counter), duration (Histogram), error_count (Counter). ConversationMetrics SHALL be constructed from a MetricsRegistry reference. ConversationMetrics SHALL implement Debug and Clone.",
+      "acceptance": [
+        "ConversationMetrics struct exists in crates/liminal/src/metrics/conversation.rs",
+        "ConversationMetrics has fields for all four metric handles",
+        "ConversationMetrics::new(registry: &MetricsRegistry) registers all four families",
+        "ConversationMetrics implements Debug and Clone"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/metrics/conversation.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C7", "C8", "C9", "C10"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Track active conversation count as a gauge",
+      "spec": "ConversationMetrics SHALL expose record_start() that increments the active_count gauge by 1, and record_end() that decrements it by 1. The gauge SHALL reflect the current number of in-flight conversations across all channels. Both operations SHALL be atomic.",
+      "acceptance": [
+        "record_start() increments active_count by 1",
+        "record_end() decrements active_count by 1",
+        "After 5 starts and 2 ends, gauge value is 3",
+        "Both methods are infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C7"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R3",
+      "title": "Track conversation completion rate as a counter",
+      "spec": "ConversationMetrics SHALL expose record_completion() that increments the completion_count counter by 1. This is called when a conversation reaches a terminal success state. The counter SHALL be monotonically increasing.",
+      "acceptance": [
+        "record_completion() increments completion_count by 1",
+        "Calling record_completion 10 times results in counter value 10",
+        "record_completion is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C8"],
+      "stories": ["S9"]
+    },
+    {
+      "id": "R4",
+      "title": "Track conversation duration as a histogram",
+      "spec": "ConversationMetrics SHALL expose record_duration(duration: Duration) that observes the given Duration into the duration histogram. Duration is the elapsed time from conversation start to terminal state (completion, failure, or timeout). The histogram SHALL use configurable bucket boundaries provided at construction time. SHALL NOT impose default bucket values.",
+      "acceptance": [
+        "record_duration(Duration::from_secs(5)) records an observation of 5 seconds",
+        "Bucket boundaries are passed at construction time, not hardcoded",
+        "record_duration is infallible",
+        "Duration is recorded in seconds as f64 for histogram observation"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C9"],
+      "stories": ["S9"]
+    },
+    {
+      "id": "R5",
+      "title": "Track conversation error rate as a counter",
+      "spec": "ConversationMetrics SHALL expose record_error() that increments the error_count counter by 1. This is called when a conversation reaches a terminal failure state (participant crash, timeout, explicit failure). The counter SHALL be monotonically increasing.",
+      "acceptance": [
+        "record_error() increments error_count by 1",
+        "Calling record_error 3 times results in counter value 3",
+        "record_error is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C10"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R6",
+      "title": "Convenience method for terminal conversation events",
+      "spec": "ConversationMetrics SHALL expose record_terminal(outcome: ConversationOutcome, duration: Duration) that atomically records the completion or error counter, the duration, and decrements the active count. ConversationOutcome SHALL be an enum with Completed, Failed, and TimedOut variants. This avoids callers forgetting to call record_end after recording a terminal event.",
+      "acceptance": [
+        "ConversationOutcome has exactly three variants: Completed, Failed, TimedOut",
+        "record_terminal(Completed, dur) calls record_completion, record_duration, and record_end",
+        "record_terminal(Failed, dur) calls record_error, record_duration, and record_end",
+        "record_terminal(TimedOut, dur) calls record_error, record_duration, and record_end",
+        "record_terminal is infallible"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C7", "C8", "C9", "C10"],
+      "stories": ["S6", "S9"]
+    },
+    {
+      "id": "R7",
+      "title": "Add conversation module to metrics mod.rs",
+      "spec": "crates/liminal/src/metrics/mod.rs SHALL declare pub mod conversation and re-export ConversationMetrics and ConversationOutcome.",
+      "acceptance": [
+        "metrics/mod.rs contains pub mod conversation",
+        "ConversationMetrics is re-exported from the metrics module",
+        "ConversationOutcome is re-exported from the metrics module",
+        "cargo check -p liminal passes"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/mod.rs"],
+        "delete": []
+      },
+      "checklist": ["C7"],
+      "stories": []
+    },
+    {
+      "id": "R8",
+      "title": "Non-blocking recording guarantee",
+      "spec": "All ConversationMetrics recording methods SHALL complete without acquiring any Mutex or RwLock. Recording SHALL NOT allocate heap memory on the hot path. These methods are called inside the conversation actor's message loop and SHALL NOT introduce latency into conversation processing.",
+      "acceptance": [
+        "No Mutex::lock or RwLock::write appears in any recording method",
+        "No heap allocation appears in any recording method",
+        "Recording a metric completes in O(1) time"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/metrics/conversation.rs"],
+        "delete": []
+      },
+      "checklist": ["C7", "C8", "C9", "C10"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement channel-specific metrics — that is OBS-002.",
+    "SHALL NOT implement pressure-related metrics — that is OBS-004.",
+    "SHALL NOT implement Prometheus text rendering — that is OBS-005.",
+    "SHALL NOT manage conversation lifecycle or actor behaviour — metrics are recorded by calling ConversationMetrics methods from the actor.",
+    "SHALL NOT impose default histogram bucket boundaries — they are caller-supplied.",
+    "SHALL NOT track per-channel conversation breakdowns — conversations are cross-cutting and counted globally."
+  ],
+  "verification": [
+    "cargo check -p liminal passes clean.",
+    "cargo clippy -p liminal -- -D warnings passes clean.",
+    "cargo fmt -p liminal --check passes clean.",
+    "All recording methods are infallible (no Result return type).",
+    "No Mutex or RwLock acquisition in any recording method.",
+    "ConversationOutcome has exactly three variants.",
+    "ConversationMetrics implements Debug and Clone."
+  ]
+}

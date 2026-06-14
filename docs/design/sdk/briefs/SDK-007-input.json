@@ -1,0 +1,234 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SDK-007",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SDK-007",
+    "cluster": "sdk",
+    "title": "Scaffold TypeScript SDK with Channel<T> interface and WASM bridge",
+    "depends_on": [
+      "SDK-002"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C3",
+      "C17",
+      "C18"
+    ],
+    "stories": [
+      "S7",
+      "S9"
+    ],
+    "design_anchor": [
+      "ADR-002",
+      "ADR-008"
+    ],
+    "purpose": "Bootstrap the TypeScript SDK with package.json (ESM+CJS dual output), the Channel<T> generic interface with runtime type validation via JSON Schema (ADR-002), and the WASM bridge that compiles the Rust protocol layer for browser runtime (ADR-008). After this brief, TypeScript developers can import the SDK in both browser and Node.js environments using the same API (constraint CN8) and subscribe to typed channels.",
+    "task": "Create the sdks/agora-ts/ package with package.json, src/index.ts (public exports), src/channel.ts (Channel<T> interface and implementation), and src/wasm.ts (WASM bridge for browser runtime). Channel<T> is a generic interface where T provides runtime type validation via JSON Schema. The WASM bridge compiles the Rust protocol layer to WebAssembly and exposes it to TypeScript. The package builds to both ESM and CJS formats. IN SCOPE: package manifest, Channel<T> interface, runtime type validation, WASM bridge, dual ESM/CJS build. OUT OF SCOPE: conversations (SDK-008), backpressure types (SDK-008), connection management (SDK-008), type generator (SDK-008).",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Create package.json with ESM and CJS build configuration",
+        "spec": "The TypeScript SDK package manifest SHALL declare the package name, version, and build configuration supporting both ESM and CJS output formats. The package SHALL declare TypeScript as a dev dependency and configure type declaration generation. The package SHALL NOT require different import paths for ESM vs CJS consumers.",
+        "acceptance": [
+          "package.json exists at sdks/agora-ts/package.json",
+          "Package exports field supports both ESM (import) and CJS (require) entry points",
+          "TypeScript declaration files (.d.ts) are generated alongside JavaScript output",
+          "npm install in sdks/agora-ts/ succeeds without errors",
+          "Package name is @agora/sdk or agora-sdk"
+        ],
+        "files": {
+          "create": [
+            "sdks/agora-ts/package.json"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C3"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Define Channel<T> interface with runtime type validation",
+        "spec": "WHEN a TypeScript developer creates a Channel<T>, THE SYSTEM SHALL associate a JSON Schema with the type parameter T. WHEN a message is published, THE SYSTEM SHALL validate the message against the JSON Schema at runtime and reject messages that do not conform. WHEN a message is received via subscribe, THE SYSTEM SHALL validate the incoming payload against the schema before delivering it as type T. THE SYSTEM SHALL NOT accept messages that fail schema validation.",
+        "acceptance": [
+          "Channel<T> is a generic interface in channel.ts",
+          "Channel.publish(message: T) validates message against the associated JSON Schema",
+          "Channel.subscribe() returns an AsyncIterable<T> or Observable<T> of validated messages",
+          "Publishing a message that fails JSON Schema validation throws a typed error",
+          "Channel.requestReply<Req, Resp>(message: Req) sends and awaits a typed response",
+          "The JSON Schema is provided at channel creation time, not derived from T at runtime"
+        ],
+        "files": {
+          "create": [
+            "sdks/agora-ts/src/channel.ts"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C17"
+        ],
+        "stories": [
+          "S7",
+          "S9"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement WASM bridge compiling protocol from Rust",
+        "spec": "THE SYSTEM SHALL compile the agora wire protocol implementation from Rust to WebAssembly. THE SYSTEM SHALL expose WASM functions for connecting, sending, and receiving through the protocol layer. WHEN running in a browser environment, THE SYSTEM SHALL use the WASM bridge for protocol handling. WHEN running in Node.js, THE SYSTEM SHALL use either WASM or a native addon. THE SYSTEM SHALL NOT require conditional imports in application code between browser and Node.js (constraint CN8).",
+        "acceptance": [
+          "wasm.ts provides functions for protocol operations (connect, send, receive, close)",
+          "The WASM module is loadable in both browser and Node.js environments",
+          "Application code imports from the same path regardless of runtime environment",
+          "The WASM bridge handles protocol framing internally and exposes typed message payloads",
+          "No conditional import (if browser/if node) is required in application code"
+        ],
+        "files": {
+          "create": [
+            "sdks/agora-ts/src/wasm.ts"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C18"
+        ],
+        "stories": [
+          "S7"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Define public API exports in index.ts",
+        "spec": "THE SYSTEM SHALL export all public types and interfaces from src/index.ts as the package entry point. THE SYSTEM SHALL re-export Channel, ChannelConfig, and error types. THE SYSTEM SHALL NOT export internal implementation details or WASM bridge internals.",
+        "acceptance": [
+          "index.ts re-exports Channel, ChannelConfig, and SdkError types",
+          "index.ts does not export WASM loader internals or protocol frame types",
+          "import { Channel } from '@agora/sdk' resolves successfully in both ESM and CJS",
+          "TypeScript declarations are available for all exported types"
+        ],
+        "files": {
+          "create": [
+            "sdks/agora-ts/src/index.ts"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S9"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement Conversation<T> interface (deferred to SDK-008).",
+      "SHALL NOT implement backpressure discriminated unions (deferred to SDK-008).",
+      "SHALL NOT implement connection lifecycle management (deferred to SDK-008).",
+      "SHALL NOT implement the type generator / codegen (deferred to SDK-008).",
+      "SHALL NOT require conditional imports between browser and server environments."
+    ],
+    "verification": [
+      "TypeScript compilation (tsc --noEmit) succeeds with no errors",
+      "ESM build produces valid .mjs output with .d.ts declarations",
+      "CJS build produces valid .cjs output with .d.ts declarations",
+      "Channel<T>.publish validates against JSON Schema and rejects invalid messages",
+      "WASM module loads in a Node.js test harness",
+      "No file exceeds 500 lines of code"
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-002",
+        "title": "Typed channels with compile-time enforcement in Gleam and runtime validation for external producers",
+        "decision": "Every channel declares its message type. Gleam producers get compile-time enforcement. External producers (Python, TypeScript, HTTP) get runtime validation at publish time. The rejected alternative is the NATS model: channels carry opaque bytes and consumers handle deserialization failures.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C3",
+        "text": "agora-ts package exists at sdks/agora-ts/ with package.json and TypeScript build configuration."
+      },
+      {
+        "id": "C17",
+        "text": "Channel<T> and Conversation<T> generic interfaces defined with runtime type validation via JSON Schema."
+      },
+      {
+        "id": "C18",
+        "text": "WASM bridge compiles protocol layer from Rust and exposes it to browser TypeScript."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S7",
+        "text": "As a TypeScript developer building a browser app, I want to connect to agora over WebSocket via WASM so that I can subscribe to channels without a server-side proxy."
+      },
+      {
+        "id": "S9",
+        "text": "As a TypeScript developer building a server app, I want to use the same SDK API in Node.js as in the browser so that I can share message handling code between client and server."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The Rust SDK must compile with no_std + alloc for WASM targets."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure responses must never be silently consumed by the SDK. Every pressure signal reaches the application."
+      },
+      {
+        "id": "CN7",
+        "text": "Reconnection attempts use exponential backoff with jitter. No fixed-interval retry loops."
+      },
+      {
+        "id": "CN8",
+        "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
+      }
+    ],
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "design_path": "docs/design/sdk",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

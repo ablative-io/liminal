@@ -1,0 +1,333 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "PROTO-003",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "PROTO-003",
+    "cluster": "protocol",
+    "title": "Implement connection lifecycle state machine and protocol versioning",
+    "depends_on": [
+      "PROTO-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C19",
+      "C20",
+      "C21",
+      "C22",
+      "C23",
+      "C24",
+      "C25",
+      "C26"
+    ],
+    "stories": [
+      "S8",
+      "S10",
+      "S12",
+      "S14"
+    ],
+    "design_anchor": [
+      "ADR-001",
+      "ADR-008"
+    ],
+    "purpose": "Implements the connection lifecycle state machine that enforces valid frame sequences and the protocol version negotiation that happens during the Connect/ConnectAck handshake. The state machine prevents out-of-sequence frames (no Publish before authentication, no Subscribe before Connect) and the version negotiation selects the highest mutually supported version or rejects incompatible connections. This is what turns a raw TCP byte stream into a protocol-aware connection.",
+    "task": "Build the connection lifecycle state machine, the handshake exchange, and protocol versioning. Define ConnectionState (Connecting, Authenticating, Active, Closing, Closed) with valid frame transitions per state. Define ProtocolVersion with major/minor components and version range negotiation. Implement the Connect/ConnectAck exchange: client sends supported version range and auth token, server selects the highest mutually supported version and responds with capabilities. Enforce Ping/Pong only in Active state on stream 0. Reject frames invalid for the current state with ProtocolError carrying the appropriate reason code. Scope boundary: this brief handles connection-level state and versioning. It does not implement multiplexing (PROTO-004), backpressure state (PROTO-005), or schema negotiation (PROTO-006).",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define ProtocolVersion with major and minor components",
+        "spec": "ProtocolVersion struct SHALL contain major (u16) and minor (u16) version fields. ProtocolVersion SHALL implement Debug, Clone, Copy, PartialEq, Eq, PartialOrd, and Ord (ordered by major then minor). ProtocolVersion SHALL serialize to 4 bytes (big-endian u16 + u16) for wire transport.",
+        "acceptance": [
+          "ProtocolVersion has fields: major (u16), minor (u16).",
+          "ProtocolVersion(1, 0) < ProtocolVersion(1, 1) < ProtocolVersion(2, 0).",
+          "ProtocolVersion serializes to exactly 4 bytes.",
+          "ProtocolVersion round-trips through serialize/deserialize.",
+          "ProtocolVersion implements Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/version.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C24"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Implement version negotiation selecting highest mutual version",
+        "spec": "WHEN the client sends a Connect frame with a version range (min_version, max_version), THE SYSTEM SHALL select the highest version from the server's supported set that falls within the client's range. IF no version in the server's set falls within the client's range, THE SYSTEM SHALL return a ConnectError frame with a version-mismatch reason code. The server's supported versions SHALL be configurable, not hardcoded.",
+        "acceptance": [
+          "Client range [1.0, 2.0] with server supporting {1.0, 1.1, 2.0, 3.0} selects 2.0.",
+          "Client range [1.0, 1.5] with server supporting {2.0, 3.0} returns ConnectError with version-mismatch.",
+          "Client range [1.0, 1.0] with server supporting {1.0} selects 1.0.",
+          "The server's supported version set is passed as a parameter, not hardcoded.",
+          "negotiate_version returns Result<ProtocolVersion, ProtocolError>."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/version.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C25",
+          "C26"
+        ],
+        "stories": [
+          "S8"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Define ConnectionState enum and state transition rules",
+        "spec": "ConnectionState enum SHALL have variants: Connecting, Authenticating, Active, Closing, Closed. The state machine SHALL enforce valid frame sequences per state. WHEN a frame is received that is invalid for the current state, THE SYSTEM SHALL return ProtocolError::InvalidStateTransition with the current state and the received frame type. State transitions: Connecting accepts Connect only; Authenticating accepts ConnectAck/ConnectError only; Active accepts all application frames plus Ping/Pong/Disconnect; Closing accepts Disconnect acknowledgement only; Closed accepts nothing.",
+        "acceptance": [
+          "ConnectionState has exactly 5 variants: Connecting, Authenticating, Active, Closing, Closed.",
+          "Receiving Publish in Connecting state returns ProtocolError::InvalidStateTransition.",
+          "Receiving Subscribe in Active state is valid (no error).",
+          "Receiving Ping in Connecting state returns ProtocolError::InvalidStateTransition.",
+          "The error carries both the current state and the rejected frame type."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/lifecycle.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C19",
+          "C20"
+        ],
+        "stories": [
+          "S10",
+          "S12"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Implement Connect frame with version range and auth token",
+        "spec": "The Connect frame payload SHALL carry: min_version (ProtocolVersion), max_version (ProtocolVersion), and auth_token (Vec<u8> \u2014 opaque, per P6). The handshake module SHALL provide a function to construct a Connect frame on stream 0. The auth token is opaque \u2014 the protocol carries it without interpretation.",
+        "acceptance": [
+          "Connect frame carries min_version, max_version, and auth_token fields.",
+          "Connect frame is always on stream 0.",
+          "auth_token is stored as opaque bytes \u2014 no validation or interpretation.",
+          "Connect frame round-trips through the PROTO-001 codec.",
+          "Constructing a Connect frame with stream_id != 0 returns an error."
+        ],
+        "files": {
+          "create": [
+            "crates/liminal/src/protocol/handshake.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C21"
+        ],
+        "stories": [
+          "S8"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Implement ConnectAck frame with selected version and capabilities",
+        "spec": "The ConnectAck frame payload SHALL carry: selected_version (ProtocolVersion) and capabilities (a bitfield u32 representing server feature flags). The handshake module SHALL provide a function to construct a ConnectAck frame on stream 0 after successful version negotiation and authentication.",
+        "acceptance": [
+          "ConnectAck frame carries selected_version and capabilities fields.",
+          "ConnectAck frame is always on stream 0.",
+          "capabilities is a u32 bitfield (individual flag meanings are defined by the server, not this brief).",
+          "ConnectAck round-trips through the PROTO-001 codec.",
+          "Receiving ConnectAck transitions the connection state from Authenticating to Active."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/handshake.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C22"
+        ],
+        "stories": [
+          "S8"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Enforce Ping/Pong constraints",
+        "spec": "Ping and Pong frames SHALL be valid only in the Active state. They SHALL travel on stream 0 only. WHEN a Ping is received in Active state on stream 0, THE SYSTEM SHALL respond with a Pong on stream 0. WHEN a Ping is received on a non-zero stream or in a non-Active state, THE SYSTEM SHALL return ProtocolError.",
+        "acceptance": [
+          "Ping on stream 0 in Active state is valid.",
+          "Ping on stream 1 in Active state returns ProtocolError::InvalidStream.",
+          "Ping in Connecting state returns ProtocolError::InvalidStateTransition.",
+          "Receiving Ping generates a Pong response on stream 0.",
+          "Pong frames carry no payload."
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal/src/protocol/lifecycle.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C23"
+        ],
+        "stories": [
+          "S14"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement authentication mechanism validation \u2014 the protocol carries tokens, not validates them (P6).",
+      "SHALL NOT implement stream multiplexing logic \u2014 that is PROTO-004.",
+      "SHALL NOT implement backpressure state \u2014 that is PROTO-005.",
+      "SHALL NOT implement schema negotiation \u2014 that is PROTO-006.",
+      "SHALL NOT define specific capability flag meanings \u2014 capabilities is a raw bitfield for the bus to populate.",
+      "SHALL NOT hardcode the server's supported protocol versions."
+    ],
+    "verification": [
+      "cargo check compiles lifecycle, handshake, and version modules with no errors.",
+      "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+      "cargo fmt --check passes.",
+      "Test: version negotiation selects highest mutual version.",
+      "Test: incompatible version range returns ConnectError.",
+      "Test: state machine rejects Publish before Active state.",
+      "Test: Ping/Pong only valid on stream 0 in Active state."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-001",
+        "title": "Conversations as the fundamental messaging unit, not messages",
+        "decision": "The fundamental unit is the conversation \u2014 a supervised beamr process owning a structured exchange between parties \u2014 over the message. A conversation mediates lifecycle, failure handling, and (optionally) durability. Exchange patterns (request-reply, streaming, saga) are conversation types with different lifecycle rules, not special-case bolt-ons. The rejected alternative is the NATS/Kafka model: messages as the primitive, patterns assembled from messages.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C19",
+        "text": "ConnectionState enum defines states: Connecting, Authenticating, Active, Closing, Closed."
+      },
+      {
+        "id": "C20",
+        "text": "State machine rejects frames invalid for the current state and returns ProtocolError with the appropriate reason code."
+      },
+      {
+        "id": "C21",
+        "text": "Connect frame carries the client's supported protocol version range and an opaque auth token."
+      },
+      {
+        "id": "C22",
+        "text": "ConnectAck frame carries the selected protocol version and server capabilities."
+      },
+      {
+        "id": "C23",
+        "text": "Ping/Pong frames are valid only in the Active state and travel on stream 0."
+      },
+      {
+        "id": "C24",
+        "text": "ProtocolVersion type defines major and minor version components."
+      },
+      {
+        "id": "C25",
+        "text": "Version negotiation selects the highest mutually supported version from the client's range and the server's supported set."
+      },
+      {
+        "id": "C26",
+        "text": "Incompatible version ranges produce ConnectError with a version-mismatch reason code."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S8",
+        "text": "As an application developer, I want the connection handshake to negotiate the protocol version automatically so that I do not need to configure version compatibility manually."
+      },
+      {
+        "id": "S10",
+        "text": "As an application developer, I want conversation lifecycle frames (open, message, close, error) so that I can track multi-step exchanges without building correlation logic in my application code."
+      },
+      {
+        "id": "S12",
+        "text": "As an operator, I want the connection state machine to reject out-of-sequence frames so that misbehaving clients are detected and disconnected rather than silently corrupting bus state."
+      },
+      {
+        "id": "S14",
+        "text": "As an operator, I want Ping/Pong keepalive frames so that dead connections are detected within a configurable timeout rather than lingering until the OS TCP timeout fires."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error via thiserror."
+      },
+      {
+        "id": "CN5",
+        "text": "Frame header is fixed-size (type + flags + stream ID + payload length) so that any frame can be skipped without parsing its payload."
+      },
+      {
+        "id": "CN6",
+        "text": "Codec encode/decode is infallible for valid frames: a successfully constructed frame always encodes, and valid wire bytes always decode. Malformed wire bytes produce ProtocolError, never a panic."
+      },
+      {
+        "id": "CN7",
+        "text": "Stream 0 is reserved for connection-level control frames. Application streams use IDs >= 1."
+      },
+      {
+        "id": "CN8",
+        "text": "Backpressure signals (Accept/Defer/Reject) travel on the same stream as the messages they regulate (P5)."
+      },
+      {
+        "id": "CN9",
+        "text": "Unknown frame types are skipped by reading their length prefix and discarding the payload, not by disconnecting (P7)."
+      },
+      {
+        "id": "CN10",
+        "text": "Every error condition produces an explicit error frame with a numeric reason code. No silent drops (P3)."
+      }
+    ],
+    "intention": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that single connection with conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context flowing natively in the wire format. The protocol should feel inevitable -- every frame carries exactly the information the bus needs to make routing, ordering, and pressure decisions, and nothing else. A developer reading a packet capture should be able to reconstruct the full conversation lifecycle without consulting application logs.\n\nThe protocol is the contract between the bus and every client SDK. Getting this right means SDKs in any language can be written against a stable, versioned binary spec rather than chasing an internal API. Getting it wrong means every SDK becomes a moving target and the bus's differentiators (conversations, typed messages, causal ordering, protocol-level backpressure) are lost in translation.",
+    "design_path": "docs/design/protocol",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, a client library author can open a TCP connection to a Liminal node, negotiate a protocol version, authenticate, and then multiplex channels and conversations over that "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

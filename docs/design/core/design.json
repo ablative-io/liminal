@@ -1,0 +1,202 @@
+{
+  "cluster": "core",
+  "title": "Channel and Conversation Primitives",
+  "intention": "Liminal's core is a messaging system where conversations replace messages as the fundamental unit. When this cluster is complete, a developer can create typed channels, publish messages with schema validation at publish time, subscribe with pattern matching, and initiate supervised conversations that own the state of a structured exchange. The bus participates in processing \u2014 it knows when consumers crash, mediates backpressure, and can resume durable conversations from where they left off. The experience should feel like writing function calls between processes, not configuring infrastructure.",
+  "problem": "Every messaging system (NATS, Kafka, RabbitMQ, Redis Streams) treats a message as an opaque blob moving from A to B. The bus does not understand what is inside, does not care what happens after delivery, and does not participate in processing. Request-reply is a kludge (NATS random inbox), failure recovery is the application's problem (retry logic, idempotent consumers), and schema validation happens at consume time when it is too late.\n\nAion needs a messaging primitive for worker dispatch that detects worker crashes immediately (not after a heartbeat timeout), routes to another worker without global rebalancing, and resumes durable processing state on crash. The general case needs typed channels where schema mismatches are caught before delivery, conversations that own exchange state, and backpressure that is a protocol signal rather than an afterthought.",
+  "solution": "The core cluster delivers four primitives built on beamr processes:\n\n1. Channels\n\nA channel is a named, typed conduit for messages. Each channel is a beamr process (actor) that owns its subscriber list, schema definition, and lifecycle state.\n\nTwo flavours: ephemeral channels (in-memory only, message delivery while subscribers are connected, no persistence overhead) and durable channels (backed by haematite, messages persist until consumed and acknowledged, stream semantics with replay from offset). The channel type is chosen at creation time and cannot change.\n\nChannel operations: create (with name, message schema, durability mode), subscribe (with optional predicate filter), publish (validated against schema before delivery), close (graceful shutdown with subscriber notification).\n\n2. Conversations\n\nA conversation is a supervised beamr process mediating a structured exchange between parties. The conversation owns the state of the exchange \u2014 current phase, accumulated context, deadlines, participant links.\n\nEvery exchange pattern emerges from the conversation primitive: request-reply (two messages, conversation closes), streaming (one party sends a sequence, backpressure mediated by the conversation), saga (multi-step with compensations), dispatch (select a consumer, link, observe completion).\n\nThe conversation process is linked to its participants via beamr process links. Participant crash is detected immediately (same scheduler tick, not after a heartbeat). The conversation decides what to do: route to another participant, compensate, or propagate the failure.\n\nConversations can be ephemeral (in-memory, lost on crash) or durable (event-sourced in haematite, resume from history on crash). Durable conversations are what eliminate the idempotent-consumer requirement: re-delivery does not mean re-execution because the conversation resumes from its last committed state.\n\n3. Typed Messages\n\nMessages carry a schema identifier. Publishers declare their output schema. Subscribers declare what they accept. The channel validates at publish time \u2014 a schema mismatch is rejected before any subscriber sees it.\n\nFor Gleam producers, schema enforcement is compile-time: the message type is a Gleam type that the channel knows. For external producers (via the wire protocol), enforcement is runtime: the channel validates the message against the declared schema.\n\nSchema evolution is a channel-level operation: add a field with a default, and every consumer sees it immediately without redeployment. The channel holds the schema registry for its own messages \u2014 no external schema service.\n\n4. Message Envelope\n\nEvery message travels in an envelope containing: the payload, a causal context (parent message reference for ordering), a schema identifier, a publisher identity, and a timestamp. The envelope is the unit of routing, persistence, and delivery. The causal context enables per-causal-chain ordering (ADR-005) without requiring global ordering.",
+  "principles": [
+    {
+      "id": "P1",
+      "text": "Conversations, not messages, are the fundamental unit. The bus participates in processing through the conversation process, not just delivery."
+    },
+    {
+      "id": "P2",
+      "text": "Schema validation happens at publish time, not consume time. A consumer never receives a message that does not match its declared schema."
+    },
+    {
+      "id": "P3",
+      "text": "Failure detection is immediate. Process links detect participant crash on the same scheduler tick \u2014 no heartbeat timeout, no polling."
+    },
+    {
+      "id": "P4",
+      "text": "Ephemeral is the default, durable is opt-in. Channels and conversations start ephemeral. Durability adds haematite persistence at a cost the developer explicitly accepts."
+    },
+    {
+      "id": "P5",
+      "text": "The channel actor is the single authority for its messages. Subscriber list, schema, lifecycle \u2014 all owned by one process. No shared state, no coordination protocol."
+    },
+    {
+      "id": "P6",
+      "text": "No silent defaults. Channel creation requires explicit name, schema, and durability mode. An unconfigured channel is an error."
+    }
+  ],
+  "decisions": [
+    "ADR-001",
+    "ADR-002",
+    "ADR-005",
+    "ADR-006",
+    "ADR-009",
+    "ADR-010"
+  ],
+  "goals": [
+    "An ephemeral channel can be created, subscribed to, published on, and closed \u2014 with messages delivered to all subscribers.",
+    "A typed channel rejects messages that do not match its declared schema at publish time, before any subscriber sees them.",
+    "A conversation process detects participant crash immediately via process linking and can route to another participant.",
+    "A durable conversation resumes from its last committed state after crash \u2014 no re-processing of already-committed work.",
+    "Message envelopes carry causal context that enables per-causal-chain ordering without global ordering.",
+    "The core primitives compile and pass tests without requiring haematite, the wire protocol, or the routing engine \u2014 those are separate clusters."
+  ],
+  "non_goals": [
+    {
+      "text": "Routing and backpressure",
+      "reason": "Covered by the routing cluster (RM-002). The core cluster provides the channel and conversation primitives that routing operates on."
+    },
+    {
+      "text": "Persistence layer implementation",
+      "reason": "Covered by the durability cluster (RM-003). The core cluster defines the durable channel/conversation interfaces but does not implement haematite integration."
+    },
+    {
+      "text": "Wire protocol",
+      "reason": "Covered by the protocol cluster (RM-004). The core cluster operates via direct beamr message passing."
+    },
+    {
+      "text": "Aion-specific integration",
+      "reason": "Covered by the aion cluster (RM-005). The core cluster provides general-purpose primitives."
+    },
+    {
+      "text": "Client SDKs",
+      "reason": "Covered by the sdk cluster (RM-006)."
+    },
+    {
+      "text": "Standalone server mode",
+      "reason": "Covered by the server cluster (RM-007). The core cluster is embedded-first (ADR-010)."
+    }
+  ],
+  "structure": [
+    {
+      "path": "crates/liminal/Cargo.toml",
+      "note": "Crate manifest with beamr dependency",
+      "brief": "LIM-001"
+    },
+    {
+      "path": "crates/liminal/src/lib.rs",
+      "note": "Crate root, public API re-exports",
+      "brief": "LIM-001"
+    },
+    {
+      "path": "crates/liminal/src/channel/mod.rs",
+      "note": "Channel module root",
+      "brief": "LIM-001"
+    },
+    {
+      "path": "crates/liminal/src/channel/actor.rs",
+      "note": "Channel actor: owns subscriber list, schema, lifecycle",
+      "brief": "LIM-002"
+    },
+    {
+      "path": "crates/liminal/src/channel/types.rs",
+      "note": "ChannelConfig, ChannelMode (Ephemeral/Durable), ChannelHandle",
+      "brief": "LIM-001"
+    },
+    {
+      "path": "crates/liminal/src/channel/schema.rs",
+      "note": "Schema definition, validation, evolution",
+      "brief": "LIM-003"
+    },
+    {
+      "path": "crates/liminal/src/channel/subscription.rs",
+      "note": "Subscription handle, subscriber management",
+      "brief": "LIM-002"
+    },
+    {
+      "path": "crates/liminal/src/conversation/mod.rs",
+      "note": "Conversation module root",
+      "brief": "LIM-004"
+    },
+    {
+      "path": "crates/liminal/src/conversation/actor.rs",
+      "note": "Conversation actor: state machine, participant links, lifecycle",
+      "brief": "LIM-004"
+    },
+    {
+      "path": "crates/liminal/src/conversation/types.rs",
+      "note": "ConversationConfig, ConversationState, ConversationHandle",
+      "brief": "LIM-004"
+    },
+    {
+      "path": "crates/liminal/src/conversation/patterns.rs",
+      "note": "Request-reply, streaming, saga pattern helpers",
+      "brief": "LIM-005"
+    },
+    {
+      "path": "crates/liminal/src/envelope.rs",
+      "note": "Message envelope: payload, causal context, schema id, publisher, timestamp",
+      "brief": "LIM-003"
+    },
+    {
+      "path": "crates/liminal/src/error.rs",
+      "note": "LiminalError enum covering channel, conversation, schema, and delivery failures",
+      "brief": "LIM-001"
+    },
+    {
+      "path": "crates/liminal/src/causal.rs",
+      "note": "Causal context: parent reference, ordering primitives",
+      "brief": "LIM-006"
+    },
+    {
+      "path": "Cargo.toml",
+      "note": "Workspace Cargo.toml \u2014 modified to add liminal crate",
+      "brief": ""
+    },
+    {
+      "path": "crates/liminal/src/channel/supervisor.rs",
+      "note": "Channel supervisor for lifecycle management",
+      "brief": "LIM-002"
+    },
+    {
+      "path": "crates/liminal/src/channel/registry.rs",
+      "note": "Channel registry for name-to-actor lookup",
+      "brief": "LIM-002"
+    },
+    {
+      "path": "crates/liminal/src/causal/orderer.rs",
+      "note": "Causal ordering engine for message delivery",
+      "brief": "LIM-006"
+    }
+  ],
+  "inventory": [],
+  "constraints": [
+    {
+      "id": "CN1",
+      "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+    },
+    {
+      "id": "CN2",
+      "text": "No panics in production code. .unwrap() and .expect() only in tests."
+    },
+    {
+      "id": "CN3",
+      "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+    },
+    {
+      "id": "CN4",
+      "text": "All public types implement Debug. All error types implement std::error::Error."
+    },
+    {
+      "id": "CN5",
+      "text": "Schema validation rejects invalid messages at publish time \u2014 a subscriber never receives a message that does not match its declared schema."
+    },
+    {
+      "id": "CN6",
+      "text": "Participant crash detection is via beamr process linking \u2014 no heartbeat polling, no timeout-based detection."
+    },
+    {
+      "id": "CN7",
+      "text": "Ephemeral channels have zero persistence overhead \u2014 no haematite calls, no disk I/O, no serialisation beyond message delivery."
+    },
+    {
+      "id": "CN8",
+      "text": "Channel and conversation actors are supervised. Crash restarts the individual actor without affecting other channels or conversations."
+    }
+  ]
+}

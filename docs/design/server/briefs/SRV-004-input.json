@@ -1,0 +1,289 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SRV-004",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SRV-004",
+    "cluster": "server",
+    "title": "Implement graceful shutdown with connection draining and durable state flush",
+    "depends_on": [
+      "SRV-003"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C11",
+      "C12",
+      "C13"
+    ],
+    "stories": [
+      "S4"
+    ],
+    "design_anchor": [
+      "ADR-010"
+    ],
+    "purpose": "Implement the graceful shutdown sequence: on SIGTERM or SIGINT, the server stops accepting new connections, drains existing connections within a configurable timeout, flushes all durable channel state to haematite, notifies connected subscribers that the server is shutting down, and exits. Data loss on clean shutdown is a bug (CN7). The shutdown module owns the ordering of these steps -- stop, drain, flush, notify, exit -- and the timeout-based fallback to forceful termination. This is what makes liminal safe to deploy in container orchestration environments where SIGTERM is the standard shutdown signal.",
+    "task": "Create server/shutdown.rs with the full shutdown pipeline. Register signal handlers for SIGTERM and SIGINT. On signal receipt, transition to shutdown state: the listener stops accepting new connections, existing connections are allowed to complete in-flight work within a configurable drain timeout, all durable channel state is flushed to haematite, connected subscribers receive a shutdown notification, and the process exits cleanly. If the drain timeout expires before all connections close, remaining connections are closed forcefully. The shutdown sequence must be idempotent -- multiple signals do not restart or double-flush.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Register signal handlers for SIGTERM and SIGINT",
+        "spec": "The server SHALL register handlers for SIGTERM and SIGINT signals. WHEN either signal is received, THEN the server SHALL initiate the shutdown sequence. The signal handler SHALL be registered once at server startup. Receiving a second signal during shutdown SHALL NOT restart the sequence or cause undefined behaviour -- the shutdown is idempotent.",
+        "acceptance": [
+          "SIGTERM triggers the shutdown sequence",
+          "SIGINT triggers the shutdown sequence",
+          "A second signal during shutdown does not restart or double-trigger the sequence",
+          "Signal handlers are registered at server startup"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/server/shutdown.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Stop accepting new connections on shutdown",
+        "spec": "WHEN the shutdown sequence begins, the listener SHALL immediately stop accepting new connections. Clients attempting to connect after shutdown begins SHALL have their connections refused. The listener SHALL NOT accept any new connection between shutdown initiation and process exit.",
+        "acceptance": [
+          "No new connections are accepted after shutdown signal",
+          "Connection attempts after shutdown receive a connection-refused error",
+          "Test: send shutdown signal, then attempt connection -- connection is refused"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/shutdown.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Drain existing connections within configurable timeout",
+        "spec": "WHEN shutdown begins, existing connections SHALL be allowed to complete in-flight work (conversations, pending publishes) within a configurable drain timeout. The drain timeout SHALL be sourced from ServerConfig -- not hardcoded. WHILE connections are draining, the server SHALL track the count of active connections and log progress. IF all connections close before the timeout expires, THEN the server SHALL proceed immediately to the flush phase without waiting.",
+        "acceptance": [
+          "Drain timeout is configurable via ServerConfig, not hardcoded",
+          "In-flight work on existing connections is allowed to complete during the drain period",
+          "Active connection count is tracked and logged during drain",
+          "Early completion (all connections closed) skips remaining drain wait"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/shutdown.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Forceful termination on drain timeout expiry",
+        "spec": "IF the drain timeout expires and connections remain open, THEN the server SHALL close remaining connections forcefully. Forceful close SHALL send a shutdown notification to the connection before dropping the TCP stream. The server SHALL log each forcefully closed connection at warn level. Forceful termination SHALL NOT skip the durable state flush -- flush still runs after forceful close.",
+        "acceptance": [
+          "Connections still open after drain timeout are closed forcefully",
+          "Each forcefully closed connection receives a shutdown notification before close",
+          "Forcefully closed connections are logged at warn level",
+          "Durable state flush still runs after forceful connection close"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/shutdown.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Flush all durable channel state to haematite",
+        "spec": "WHEN connections have drained (or been forcefully closed), the server SHALL flush all durable channel state to haematite. The flush SHALL ensure all buffered writes are persisted before the process exits. IF the flush fails, THEN the server SHALL return ServerError::ShutdownFlush and log the failure at error level. The server SHALL NOT exit before the flush completes or fails -- data loss on clean shutdown is a bug (CN7).",
+        "acceptance": [
+          "Durable channel state is flushed to haematite after connection drain",
+          "Flush failure returns ServerError::ShutdownFlush",
+          "Flush failure is logged at error level",
+          "Process does not exit until flush completes or fails",
+          "Test: shutdown with durable channels verifies state is persisted"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/shutdown.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C12"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Notify connected subscribers of shutdown",
+        "spec": "WHEN the shutdown sequence begins, the server SHALL send a shutdown notification to all connected subscribers. The notification SHALL be sent before the connection is closed, giving clients the opportunity to handle the disconnection gracefully. The notification SHALL NOT block the drain timer -- it is sent asynchronously. IF a subscriber is unreachable, THEN the notification failure SHALL be logged and skipped, not retried.",
+        "acceptance": [
+          "Connected subscribers receive a shutdown notification before their connection closes",
+          "Notification is sent before connection close, not after",
+          "Unreachable subscribers are logged and skipped, not retried",
+          "Notification does not block or extend the drain timeout"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/shutdown.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C13"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R7",
+        "title": "Wire shutdown module into server module",
+        "spec": "server/mod.rs SHALL declare pub mod shutdown. The shutdown sequence SHALL be callable from the server start function and triggered by the signal handler. The shutdown module SHALL export a ShutdownHandle that the server start function holds and the signal handler activates.",
+        "acceptance": [
+          "server/mod.rs declares pub mod shutdown",
+          "ShutdownHandle is exported from the shutdown module",
+          "Server start function holds a ShutdownHandle",
+          "Signal handler activates the ShutdownHandle"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement connection handling or the accept loop -- that is SRV-003.",
+      "SHALL NOT implement cluster-wide coordinated shutdown -- SRV-005 handles cluster membership; each node shuts down independently.",
+      "SHALL NOT implement the wire protocol framing for shutdown notifications -- uses the protocol cluster's frame types.",
+      "SHALL NOT hardcode the drain timeout -- it comes from ServerConfig.",
+      "SHALL NOT skip the durable state flush under any shutdown path -- data loss on clean shutdown is a bug (CN7)."
+    ],
+    "verification": [
+      "cargo test -p liminal-server passes clean.",
+      "cargo clippy -p liminal-server -- -D warnings passes clean.",
+      "cargo fmt -p liminal-server --check passes clean.",
+      "Durable state is flushed before process exit on clean shutdown (CN7).",
+      "Subscribers are notified before their connections are closed.",
+      "Forceful termination is the timeout fallback, not the first response (P3).",
+      "Drain timeout is configurable, not hardcoded."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C11",
+        "text": "Graceful shutdown stops accepting new connections and drains existing connections within a configurable timeout."
+      },
+      {
+        "id": "C12",
+        "text": "Graceful shutdown flushes all durable channel state to haematite before process exit."
+      },
+      {
+        "id": "C13",
+        "text": "Graceful shutdown notifies connected subscribers that the server is shutting down before closing connections."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S4",
+        "text": "As an Operator, I want to shut down the server gracefully so that in-flight conversations complete and durable state is persisted before the process exits."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The server binary adds no messaging semantics. All publish, subscribe, and conversation logic delegates to the liminal library crate."
+      },
+      {
+        "id": "CN6",
+        "text": "Config validation runs to completion before any listener binds. An invalid config never results in a partially started server."
+      },
+      {
+        "id": "CN7",
+        "text": "Graceful shutdown completes durable state flush before process exit. Data loss on clean shutdown is a bug."
+      },
+      {
+        "id": "CN8",
+        "text": "Cluster membership uses beamr distribution exclusively. No custom consensus protocol, no gossip layer, no Raft implementation."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should feel like deploying any production-grade message broker: start, configure, cluster, monitor, and shut down gracefully. The server is a thin deployment wrapper, not a fork of the library -- every message still flows through the same channel and conversation primitives that embedded users get.\n\nFor teams that want the bus without embedding it, the server is the entry point. For teams that embed it, the server is how they run a remote node in a cluster topology. Both stories use the same binary.",
+    "design_path": "docs/design/server",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should f"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

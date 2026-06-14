@@ -1,0 +1,27 @@
+{
+  "cluster": "observability",
+  "personas": [
+    {
+      "name": "Operator",
+      "role": "Monitoring and Capacity Planning a Liminal Deployment",
+      "stories": [
+        {"id": "S1", "text": "As an Operator, I want to see per-channel message rates so that I can identify hot channels and plan capacity accordingly."},
+        {"id": "S2", "text": "As an Operator, I want to see per-channel delivery latency so that I can detect degradation before it impacts consumers."},
+        {"id": "S3", "text": "As an Operator, I want to see reject and defer rates per channel so that I can identify channels experiencing backpressure and take corrective action."},
+        {"id": "S4", "text": "As an Operator, I want to see capacity utilization per consumer so that I can identify overloaded consumers and scale them."},
+        {"id": "S5", "text": "As an Operator, I want to scrape metrics via a Prometheus-compatible endpoint so that I can integrate with my existing monitoring infrastructure."},
+        {"id": "S6", "text": "As an Operator, I want to see active conversation count and error rate so that I can detect conversation failures and investigate root causes."}
+      ]
+    },
+    {
+      "name": "Application Developer",
+      "role": "Debugging and Tracing Message Flows",
+      "stories": [
+        {"id": "S7", "text": "As an Application Developer, I want trace context propagated automatically through conversations so that I can correlate log entries across all messages in a multi-step exchange without manual instrumentation."},
+        {"id": "S8", "text": "As an Application Developer, I want structured log entries with trace IDs so that I can search logs by conversation and reconstruct the full message flow."},
+        {"id": "S9", "text": "As an Application Developer, I want to see conversation completion rates and durations so that I can identify performance bottlenecks in my exchange patterns."},
+        {"id": "S10", "text": "As an Application Developer, I want durable channel queue depth visible as a metric so that I can monitor consumer lag and tune my processing capacity."}
+      ]
+    }
+  ]
+}

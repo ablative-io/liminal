@@ -1,0 +1,127 @@
+{
+  "id": "DUR-001",
+  "cluster": "durability",
+  "title": "Define durability foundation: error types, configuration, and store trait",
+  "depends_on": [],
+  "blocked_by": [],
+  "checklist": ["C1", "C2", "C3", "C4", "C5", "C6"],
+  "stories": ["S3", "S11"],
+  "design_anchor": ["ADR-006", "ADR-009"],
+  "purpose": "Establishes the foundational types that every other durability brief builds on: the error taxonomy for haematite-backed persistence, the per-channel durability configuration (mode selection, partition count, dedup TTL, checkpoint policy), the DurableStore trait that maps directly to haematite's append/read/cas/scan API, and the concrete HaematiteStore implementation. Without these, no durable channel, cursor, dedup, or conversation brief can proceed.",
+  "task": "Create the durability module skeleton and its four foundational files. The error type must cover every failure mode across the durability cluster (haematite errors, sequence conflicts, cursor regression, dedup collisions, configuration errors). The config type must model the four durability modes (ephemeral, durable, durable-dedup, durable-conversation) and their per-channel parameters. The store trait must map 1:1 to haematite's operations — no query builder, no ORM, no abstraction that hides what haematite does (P2). The HaematiteStore implementation delegates directly to haematite's EventStore. Scope boundary: this brief defines types and traits only. It does not implement channel storage, cursor logic, dedup caching, or conversation state — those are DUR-002 through DUR-006.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define DurabilityError enum with From conversions",
+      "spec": "DurabilityError enum SHALL include variants for haematite store errors, sequence conflicts, cursor regression, dedup key collisions, configuration validation errors, and envelope serialization errors. Each variant SHALL carry the context needed for diagnosis (e.g. expected vs actual sequence number for SequenceConflict). The enum SHALL implement std::error::Error via thiserror and SHALL provide From conversions for all haematite error types. DurabilityError SHALL NOT include variants for errors that belong to other clusters (protocol, routing).",
+      "acceptance": [
+        "DurabilityError has at least 6 variants: StoreError, SequenceConflict, CursorRegression, DedupCollision, ConfigError, EnvelopeError.",
+        "DurabilityError implements std::error::Error (compiles with `fn foo() -> Result<(), Box<dyn std::error::Error>> { Err(DurabilityError::ConfigError(\"test\".into()))? }`).",
+        "From<haematite_store_error_type> for DurabilityError compiles and maps to StoreError variant.",
+        "SequenceConflict variant carries `expected: u64` and `actual: u64` fields.",
+        "CursorRegression variant carries `stored: u64` and `attempted: u64` fields."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/error.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C1", "C2"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Define DurabilityConfig with mode, partition, and policy fields",
+      "spec": "DurabilityConfig struct SHALL include a DurabilityMode enum (Ephemeral, Durable, DurableDedup, DurableConversation), partition count, dedup TTL (as Duration), and checkpoint policy (PerMessage, PerBatch(usize), ExplicitFlush). All fields SHALL be validated at construction: partition count must be >= 1, dedup TTL must be > Duration::ZERO for DurableDedup mode. DurabilityConfig SHALL NOT include default values for configurable fields — the caller provides all values.",
+      "acceptance": [
+        "DurabilityMode enum has exactly four variants: Ephemeral, Durable, DurableDedup, DurableConversation.",
+        "CheckpointPolicy enum has exactly three variants: PerMessage, PerBatch(usize), ExplicitFlush.",
+        "DurabilityConfig::new() with partition_count=0 returns Err(DurabilityError::ConfigError).",
+        "DurabilityConfig::new() with mode=DurableDedup and dedup_ttl=Duration::ZERO returns Err(DurabilityError::ConfigError).",
+        "DurabilityConfig::new() with valid params returns Ok(config) with all fields accessible."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/config.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C3"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R3",
+      "title": "Define DurableStore trait mapping to haematite's API",
+      "spec": "DurableStore trait SHALL define four async methods mapping directly to haematite's operations: append(stream_key, payload, expected_seq) -> Result<u64, DurabilityError>, read_from(stream_key, offset, limit) -> Result<Vec<StoredEntry>, DurabilityError>, cas(key, old_value, new_value) -> Result<(), DurabilityError>, and scan(prefix) -> Result<Vec<StoredEntry>, DurabilityError>. The trait SHALL NOT add convenience methods, query builders, or any abstraction beyond what haematite provides. StoredEntry SHALL carry the stored payload bytes, sequence number, and timestamp.",
+      "acceptance": [
+        "DurableStore trait has exactly four methods: append, read_from, cas, scan.",
+        "append returns the assigned sequence number on success as Result<u64, DurabilityError>.",
+        "read_from takes stream_key, offset (u64), and limit (usize) parameters.",
+        "cas takes key, old_value (u64), and new_value (u64) parameters.",
+        "StoredEntry struct has fields: payload (Vec<u8>), sequence (u64), timestamp (u64).",
+        "DurableStore is object-safe (compiles as `dyn DurableStore`)."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/store.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C4"],
+      "stories": ["S11"]
+    },
+    {
+      "id": "R4",
+      "title": "Implement HaematiteStore bridging to haematite's EventStore",
+      "spec": "HaematiteStore struct SHALL hold a reference to haematite's EventStore and SHALL implement DurableStore by delegating each method directly to the corresponding haematite operation. WHEN append is called with an expected_seq that does not match the stream's current sequence, THE SYSTEM SHALL return DurabilityError::SequenceConflict with the expected and actual values. WHEN cas is called with an old_value that does not match the stored value, THE SYSTEM SHALL return DurabilityError::CursorRegression. HaematiteStore SHALL NOT retry, buffer, or transform haematite responses beyond error mapping.",
+      "acceptance": [
+        "HaematiteStore::new() takes an Arc<haematite::EventStore> (or equivalent handle type) and returns HaematiteStore.",
+        "HaematiteStore implements DurableStore.",
+        "append delegates to haematite's append and maps SequenceConflict errors.",
+        "cas delegates to haematite's cas and maps comparison failures to CursorRegression.",
+        "read_from delegates to haematite's read and maps I/O errors to StoreError.",
+        "No retry logic, no buffering, no response transformation beyond error mapping."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/store.rs"],
+        "delete": []
+      },
+      "checklist": ["C5"],
+      "stories": ["S11"]
+    },
+    {
+      "id": "R5",
+      "title": "Wire durability module with pub mod declarations only",
+      "spec": "durability/mod.rs SHALL contain only pub mod declarations for error, config, and store submodules, plus pub use re-exports for DurabilityError, DurabilityConfig, DurabilityMode, CheckpointPolicy, DurableStore, HaematiteStore, and StoredEntry. mod.rs SHALL NOT contain any logic, type definitions, trait definitions, or function bodies.",
+      "acceptance": [
+        "mod.rs contains `pub mod error;`, `pub mod config;`, `pub mod store;`.",
+        "mod.rs contains pub use re-exports for all public types from submodules.",
+        "mod.rs contains zero function bodies, zero struct/enum definitions, zero trait definitions.",
+        "The module compiles with `use crate::durability::{DurabilityError, DurabilityConfig, DurableStore, HaematiteStore};`."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/mod.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C6"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement durable channel storage logic — that is DUR-002.",
+    "SHALL NOT implement consumer cursor or replay logic — that is DUR-003.",
+    "SHALL NOT implement dedup caching or receipt handling — that is DUR-004.",
+    "SHALL NOT implement conversation event sourcing — that is DUR-005.",
+    "SHALL NOT implement crash recovery orchestration — that is DUR-006.",
+    "SHALL NOT add convenience methods or query builders to DurableStore beyond haematite's four operations.",
+    "SHALL NOT provide Default implementations for DurabilityConfig — all values are caller-supplied."
+  ],
+  "verification": [
+    "cargo check compiles the durability module with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "grep -r 'fn ' crates/liminal/src/durability/mod.rs returns no function definitions.",
+    "All public types implement Debug (grep for #[derive(Debug)] or manual Debug impl).",
+    "DurabilityError variants cover all error conditions referenced in C1."
+  ]
+}

@@ -1,0 +1,272 @@
+{
+  "cluster": "sdk",
+  "title": "Client SDKs for Rust, Gleam, and TypeScript",
+  "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+  "problem": "Agora's core is a Rust crate with an internal API designed for the bus implementation, not for application developers. The wire protocol (ADR-008) is a custom binary format \u2014 no off-the-shelf client libraries exist. Without purpose-built SDKs, every consumer must implement protocol framing, connection lifecycle, typed message serialisation, conversation state machines, and backpressure response handling from scratch.\n\nThe Gleam story is worse: Gleam authors need to define message types and conversation handlers that compile to BEAM bytecode running inside beamr, but there is no toolchain bridge between a Gleam project and beamr module loading. TypeScript developers have no path at all \u2014 the WASM compilation target for the protocol layer does not exist yet.\n\nWithout SDKs, the bus is an internal implementation detail of agora, not a product developers can adopt.",
+  "solution": "Three SDKs sharing a common design but diverging where language idioms demand it.\n\nRust SDK (crates/agora-sdk)\n\nThe Rust SDK has two modes: embedded and remote. In embedded mode, the application links against the agora crate directly and interacts through in-process channel handles \u2014 no serialisation, no network, no protocol overhead. This is the Aion integration path and the zero-hop story from ADR-010. In remote mode, the SDK connects over the wire protocol to a standalone agora server, with the protocol implementation internal to the SDK.\n\nBoth modes present the same trait-based API surface. A ChannelHandle supports publish, subscribe, and request-reply. A ConversationHandle supports send, receive, and lifecycle observation. Type enforcement uses Rust's type system \u2014 publish takes a type parameter constrained by Serialize and SchemaValidate, subscribe yields a type constrained by Deserialize. The mode difference is invisible at the application layer.\n\nConnection management in remote mode: exponential backoff reconnection with jitter, subscription state recovery on reconnect (the server replays from the client's last acknowledged sequence), and configurable connection pools for multi-channel workloads.\n\nBackpressure is surfaced as typed responses on publish: Accept, Defer with an estimated delay, and Reject with a reason. The SDK does not silently buffer or retry \u2014 the application decides how to respond to pressure signals per ADR-004.\n\nGleam SDK (sdks/agora-gleam)\n\nThe Gleam SDK is the authoring layer. Message types defined as Gleam records get compile-time schema enforcement for both publish and subscribe. Conversation handlers are authored as Gleam modules implementing a behaviour (init, handle_message, handle_timeout, terminate). The SDK includes a build plugin that compiles Gleam modules to BEAM bytecode and packages them for beamr module loading.\n\nThe Gleam SDK depends on the Rust SDK for the transport layer \u2014 it calls through FFI for connection management and protocol handling. Gleam's role is type safety and developer ergonomics, not transport.\n\nTypeScript SDK (sdks/agora-ts)\n\nThe TypeScript SDK targets two runtimes: browser via WASM and server via native Node.js addon or WASM. The protocol implementation is compiled from Rust to WASM for browser use. For server use, a native addon wraps the Rust SDK directly.\n\nThe TypeScript API mirrors the Rust SDK's trait-based design using TypeScript interfaces. Channel and Conversation are generic over a type parameter T, with T providing runtime type validation via JSON Schema derived from the channel's declared type per ADR-002. The SDK includes TypeScript type generators that produce interfaces from agora channel type definitions.\n\nConnection management, reconnection, and subscription recovery follow the same contract as the Rust SDK. The backpressure response types (Accept, Defer, Reject) are exposed as discriminated unions.\n\nCross-SDK Consistency\n\nAll three SDKs share: the same connection lifecycle state machine (connecting, connected, reconnecting, disconnected), the same backpressure response vocabulary, the same conversation lifecycle events (opened, message, closing, closed, error), and the same subscription recovery protocol. Behavioural tests are written once and run against all three SDKs to verify consistency.",
+  "principles": [
+    {
+      "id": "P1",
+      "text": "The application sees conversations and messages, never frames or bytes. Protocol details are internal to the SDK \u2014 no leaky abstractions."
+    },
+    {
+      "id": "P2",
+      "text": "Embedded and remote modes share the same application-facing API. Switching deployment mode does not require code changes."
+    },
+    {
+      "id": "P3",
+      "text": "Backpressure is explicit, never silent. The SDK surfaces pressure signals to the application \u2014 it does not buffer, retry, or drop messages on the application's behalf."
+    },
+    {
+      "id": "P4",
+      "text": "Type safety is the default. Gleam gets compile-time enforcement. Rust gets generic type parameters. TypeScript gets runtime validation with generated type definitions."
+    },
+    {
+      "id": "P5",
+      "text": "Reconnection is automatic, recovery is transparent. The SDK re-establishes connections and recovers subscription state without application intervention."
+    },
+    {
+      "id": "P6",
+      "text": "Cross-SDK behavioural parity. The same sequence of operations produces the same observable outcomes in all three SDKs, verified by shared test suites."
+    }
+  ],
+  "decisions": [
+    "ADR-001",
+    "ADR-002",
+    "ADR-004",
+    "ADR-008",
+    "ADR-010"
+  ],
+  "goals": [
+    "A Rust application can embed agora and publish typed messages to a channel with zero network overhead in under 10 lines of setup code.",
+    "A Rust remote client can connect to a standalone agora server, subscribe to a channel, disconnect, reconnect, and resume from its last acknowledged position without application logic.",
+    "A Gleam module defining a message type and a conversation handler compiles to beamr-loadable bytecode via the SDK build plugin.",
+    "A TypeScript application in the browser can connect to agora over WebSocket, subscribe to a typed channel, and receive messages with TypeScript type safety.",
+    "All three SDKs handle the full backpressure vocabulary (accept, defer, reject) and surface it to the application as typed responses.",
+    "Behavioural conformance tests covering connection lifecycle, subscription recovery, and conversation state transitions pass against all three SDKs."
+  ],
+  "non_goals": [
+    {
+      "text": "Python SDK",
+      "reason": "Sequenced after TypeScript per the design notes. Python is third priority and will be a separate cluster."
+    },
+    {
+      "text": "Go SDK",
+      "reason": "Explicitly deprioritised in design alignment \u2014 Go developers are well-served by NATS."
+    },
+    {
+      "text": "NATS-compatible gateway client",
+      "reason": "The gateway itself is a separate concern per ADR-008. SDK clients speak the native agora protocol."
+    },
+    {
+      "text": "SDK-level message persistence or caching",
+      "reason": "Durability is a server-side concern (RM-003). SDKs are stateless beyond connection and subscription state."
+    },
+    {
+      "text": "Admin API bindings in the SDKs",
+      "reason": "Admin operations (channel creation, schema evolution) are server-side concerns for the standalone server cluster (RM-007)."
+    }
+  ],
+  "structure": [
+    {
+      "path": "crates/agora-sdk/Cargo.toml",
+      "note": "Rust SDK crate manifest",
+      "brief": "SDK-001"
+    },
+    {
+      "path": "crates/agora-sdk/src/lib.rs",
+      "note": "Crate root, public API re-exports",
+      "brief": "SDK-001"
+    },
+    {
+      "path": "crates/agora-sdk/src/error.rs",
+      "note": "SDK error types and conversions",
+      "brief": "SDK-001"
+    },
+    {
+      "path": "crates/agora-sdk/src/channel.rs",
+      "note": "ChannelHandle: publish, subscribe, request-reply",
+      "brief": "SDK-002"
+    },
+    {
+      "path": "crates/agora-sdk/src/conversation.rs",
+      "note": "ConversationHandle: send, receive, lifecycle observation",
+      "brief": "SDK-002"
+    },
+    {
+      "path": "crates/agora-sdk/src/types.rs",
+      "note": "Message type traits: SchemaValidate, type registry",
+      "brief": "SDK-002"
+    },
+    {
+      "path": "crates/agora-sdk/src/pressure.rs",
+      "note": "Backpressure response types: Accept, Defer, Reject",
+      "brief": "SDK-003"
+    },
+    {
+      "path": "crates/agora-sdk/src/connection/mod.rs",
+      "note": "Connection module root",
+      "brief": "SDK-003"
+    },
+    {
+      "path": "crates/agora-sdk/src/connection/lifecycle.rs",
+      "note": "Connection state machine: connecting, connected, reconnecting, disconnected",
+      "brief": "SDK-003"
+    },
+    {
+      "path": "crates/agora-sdk/src/connection/recovery.rs",
+      "note": "Subscription state recovery on reconnect",
+      "brief": "SDK-003"
+    },
+    {
+      "path": "crates/agora-sdk/src/connection/pool.rs",
+      "note": "Connection pooling for multi-channel workloads",
+      "brief": "SDK-004"
+    },
+    {
+      "path": "crates/agora-sdk/src/embedded.rs",
+      "note": "Embedded mode: direct in-process channel handles",
+      "brief": "SDK-004"
+    },
+    {
+      "path": "crates/agora-sdk/src/remote.rs",
+      "note": "Remote mode: wire protocol client transport",
+      "brief": "SDK-004"
+    },
+    {
+      "path": "sdks/agora-gleam/gleam.toml",
+      "note": "Gleam SDK package manifest",
+      "brief": "SDK-005"
+    },
+    {
+      "path": "sdks/agora-gleam/src/agora.gleam",
+      "note": "Public API: channel, conversation, types",
+      "brief": "SDK-005"
+    },
+    {
+      "path": "sdks/agora-gleam/src/agora/channel.gleam",
+      "note": "Typed channel publish and subscribe",
+      "brief": "SDK-005"
+    },
+    {
+      "path": "sdks/agora-gleam/src/agora/conversation.gleam",
+      "note": "Conversation handler behaviour",
+      "brief": "SDK-006"
+    },
+    {
+      "path": "sdks/agora-gleam/src/agora/schema.gleam",
+      "note": "Compile-time schema derivation from Gleam types",
+      "brief": "SDK-006"
+    },
+    {
+      "path": "sdks/agora-gleam/src/agora/ffi.gleam",
+      "note": "FFI bindings to Rust SDK transport layer",
+      "brief": "SDK-005"
+    },
+    {
+      "path": "sdks/agora-ts/package.json",
+      "note": "TypeScript SDK package manifest",
+      "brief": "SDK-007"
+    },
+    {
+      "path": "sdks/agora-ts/src/index.ts",
+      "note": "Public API exports",
+      "brief": "SDK-007"
+    },
+    {
+      "path": "sdks/agora-ts/src/channel.ts",
+      "note": "Channel<T> interface and implementation",
+      "brief": "SDK-007"
+    },
+    {
+      "path": "sdks/agora-ts/src/conversation.ts",
+      "note": "Conversation<T> interface and lifecycle",
+      "brief": "SDK-008"
+    },
+    {
+      "path": "sdks/agora-ts/src/pressure.ts",
+      "note": "Backpressure response discriminated unions",
+      "brief": "SDK-008"
+    },
+    {
+      "path": "sdks/agora-ts/src/connection.ts",
+      "note": "Connection lifecycle, reconnection, recovery",
+      "brief": "SDK-008"
+    },
+    {
+      "path": "sdks/agora-ts/src/wasm.ts",
+      "note": "WASM bridge for browser runtime",
+      "brief": "SDK-007"
+    },
+    {
+      "path": "sdks/agora-ts/src/codegen.ts",
+      "note": "TypeScript type generator from channel type definitions",
+      "brief": "SDK-008"
+    },
+    {
+      "path": "Cargo.toml",
+      "note": "Workspace Cargo.toml \u2014 pre-existing",
+      "brief": ""
+    },
+    {
+      "path": "tests/conformance/scenarios.json",
+      "note": "Cross-SDK conformance test scenarios",
+      "brief": "SDK-009"
+    },
+    {
+      "path": "crates/liminal-sdk/tests/conformance.rs",
+      "note": "Rust SDK conformance test runner",
+      "brief": "SDK-009"
+    },
+    {
+      "path": "sdks/liminal-gleam/test/conformance_test.gleam",
+      "note": "Gleam SDK conformance tests",
+      "brief": "SDK-009"
+    },
+    {
+      "path": "sdks/liminal-ts/tests/conformance.test.ts",
+      "note": "TypeScript SDK conformance tests",
+      "brief": "SDK-009"
+    },
+    {
+      "path": "tests/conformance/compare.py",
+      "note": "Conformance result comparison script",
+      "brief": "SDK-009"
+    }
+  ],
+  "inventory": [],
+  "constraints": [
+    {
+      "id": "CN1",
+      "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+    },
+    {
+      "id": "CN2",
+      "text": "No panics in production code. .unwrap() and .expect() only in tests."
+    },
+    {
+      "id": "CN3",
+      "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+    },
+    {
+      "id": "CN4",
+      "text": "All public types implement Debug. All error types implement std::error::Error."
+    },
+    {
+      "id": "CN5",
+      "text": "The Rust SDK must compile with no_std + alloc for WASM targets."
+    },
+    {
+      "id": "CN6",
+      "text": "Backpressure responses must never be silently consumed by the SDK. Every pressure signal reaches the application."
+    },
+    {
+      "id": "CN7",
+      "text": "Reconnection attempts use exponential backoff with jitter. No fixed-interval retry loops."
+    },
+    {
+      "id": "CN8",
+      "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
+    }
+  ]
+}

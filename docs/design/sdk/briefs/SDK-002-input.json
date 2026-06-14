@@ -1,0 +1,230 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SDK-002",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SDK-002",
+    "cluster": "sdk",
+    "title": "Implement Rust SDK core API: channels, conversations, and type enforcement",
+    "depends_on": [
+      "SDK-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C4",
+      "C5",
+      "C6"
+    ],
+    "stories": [
+      "S1",
+      "S4"
+    ],
+    "design_anchor": [
+      "ADR-001",
+      "ADR-002"
+    ],
+    "purpose": "Deliver the core application-facing API surface of the Rust SDK: ChannelHandle for typed publish/subscribe/request-reply (ADR-002), ConversationHandle for supervised message exchange (ADR-001), and the SchemaValidate trait for compile-time type enforcement. These types define the contract every deployment mode (embedded, remote) must satisfy.",
+    "task": "Create channel.rs, conversation.rs, and types.rs in crates/agora-sdk/src/. ChannelHandle is a trait with generic methods constrained by Serialize+SchemaValidate (publish) and Deserialize (subscribe). ConversationHandle is a trait with send/receive/lifecycle observation. SchemaValidate is a trait that message types implement to provide schema metadata for publish-time validation. All types are trait definitions at this stage -- concrete implementations come in SDK-004 (embedded/remote modes). IN SCOPE: trait definitions, type constraints, associated types, error integration with SdkError. OUT OF SCOPE: concrete implementations, connection management, backpressure types, embedded/remote distinction.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define ChannelHandle trait with typed publish, subscribe, and request-reply",
+        "spec": "WHEN a caller invokes publish on a ChannelHandle, THE SYSTEM SHALL require the message type to implement Serialize + SchemaValidate. WHEN a caller invokes subscribe, THE SYSTEM SHALL return a stream of messages whose type implements Deserialize. WHEN a caller invokes request_reply, THE SYSTEM SHALL send a message and return a future resolving to the reply. THE SYSTEM SHALL NOT expose protocol framing or wire details through the ChannelHandle interface.",
+        "acceptance": [
+          "ChannelHandle::publish<M: Serialize + SchemaValidate> compiles and accepts a typed message",
+          "ChannelHandle::subscribe returns an impl Stream<Item = Result<M, SdkError>> where M: Deserialize",
+          "ChannelHandle::request_reply<Req, Resp> sends Req and returns Future<Output = Result<Resp, SdkError>>",
+          "Attempting to publish a type not implementing SchemaValidate produces a compile-time error",
+          "ChannelHandle is object-safe or documents why it is not and provides an alternative"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/channel.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C4"
+        ],
+        "stories": [
+          "S1",
+          "S4"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Define ConversationHandle trait with send, receive, and lifecycle observation",
+        "spec": "WHEN a caller invokes send on a ConversationHandle, THE SYSTEM SHALL transmit a typed message within the conversation context. WHEN a caller invokes receive, THE SYSTEM SHALL return the next message in the conversation. THE SYSTEM SHALL provide lifecycle observation (opened, message, closing, closed, error) as a stream of ConversationEvent variants. THE SYSTEM SHALL NOT require callers to manage conversation process identifiers directly.",
+        "acceptance": [
+          "ConversationHandle::send<M: Serialize> accepts a typed message and returns Result<(), SdkError>",
+          "ConversationHandle::receive<M: Deserialize> returns Future<Output = Result<M, SdkError>>",
+          "ConversationHandle::lifecycle returns an impl Stream<Item = ConversationEvent>",
+          "ConversationEvent enum has variants: Opened, Message, Closing, Closed, Error",
+          "Each ConversationEvent variant carries a conversation identifier"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/conversation.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C5"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R3",
+        "title": "Define SchemaValidate trait for compile-time type enforcement",
+        "spec": "THE SYSTEM SHALL define a SchemaValidate trait that message types implement to declare their schema. The trait SHALL provide a method returning schema metadata (name, version, and schema bytes). THE SYSTEM SHALL NOT perform runtime schema validation in this trait -- it provides the metadata that the bus uses for publish-time validation per ADR-002.",
+        "acceptance": [
+          "SchemaValidate trait is defined in types.rs with a schema_metadata() method",
+          "schema_metadata() returns a struct containing schema name, version, and schema bytes",
+          "The trait has a blanket or derive-macro path documented for user types",
+          "SchemaValidate is re-exported from the crate root"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/types.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C6"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Enforce type parameter constraints on publish and subscribe",
+        "spec": "WHEN a publish method is called, THE SYSTEM SHALL require the type parameter to satisfy both Serialize and SchemaValidate bounds. WHEN a subscribe method is called, THE SYSTEM SHALL require the type parameter to satisfy DeserializeOwned. THE SYSTEM SHALL NOT allow untyped publish or subscribe operations.",
+        "acceptance": [
+          "A struct implementing Serialize + SchemaValidate can be published without additional ceremony",
+          "A struct implementing only Serialize (not SchemaValidate) cannot be passed to publish -- compile error",
+          "Subscribe's type parameter requires DeserializeOwned, not Deserialize<'a> with a lifetime",
+          "No method on ChannelHandle accepts raw bytes or untyped payloads"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/agora-sdk/src/channel.rs",
+            "crates/agora-sdk/src/types.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S1"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement concrete channel or conversation types -- only trait definitions.",
+      "SHALL NOT implement connection management or transport logic.",
+      "SHALL NOT implement backpressure response types (deferred to SDK-003).",
+      "SHALL NOT implement embedded or remote mode distinction (deferred to SDK-004).",
+      "SHALL NOT add network dependencies to the crate."
+    ],
+    "verification": [
+      "cargo check -p agora-sdk compiles cleanly with trait definitions",
+      "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
+      "cargo fmt -p agora-sdk --check reports no formatting issues",
+      "All public traits and types have documentation comments",
+      "No file exceeds 500 lines of code"
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-001",
+        "title": "Conversations as the fundamental messaging unit, not messages",
+        "decision": "The fundamental unit is the conversation \u2014 a supervised beamr process owning a structured exchange between parties \u2014 over the message. A conversation mediates lifecycle, failure handling, and (optionally) durability. Exchange patterns (request-reply, streaming, saga) are conversation types with different lifecycle rules, not special-case bolt-ons. The rejected alternative is the NATS/Kafka model: messages as the primitive, patterns assembled from messages.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      },
+      {
+        "id": "ADR-002",
+        "title": "Typed channels with compile-time enforcement in Gleam and runtime validation for external producers",
+        "decision": "Every channel declares its message type. Gleam producers get compile-time enforcement. External producers (Python, TypeScript, HTTP) get runtime validation at publish time. The rejected alternative is the NATS model: channels carry opaque bytes and consumers handle deserialization failures.",
+        "quote": "",
+        "decided_by": "Frodo + Bono alignment"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C4",
+        "text": "ChannelHandle defined in agora_sdk::channel with publish, subscribe, and request_reply methods."
+      },
+      {
+        "id": "C5",
+        "text": "ConversationHandle defined in agora_sdk::conversation with send, receive, and lifecycle observation methods."
+      },
+      {
+        "id": "C6",
+        "text": "SchemaValidate trait defined in agora_sdk::types for compile-time type enforcement on publish and subscribe."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As a Rust developer embedding agora, I want to publish typed messages to a channel through an in-process handle so that I get zero-hop messaging without network overhead."
+      },
+      {
+        "id": "S4",
+        "text": "As a Rust developer connecting remotely, I want publish operations to return typed backpressure signals (accept, defer, reject) so that I can implement application-level flow control."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The Rust SDK must compile with no_std + alloc for WASM targets."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure responses must never be silently consumed by the SDK. Every pressure signal reaches the application."
+      },
+      {
+        "id": "CN7",
+        "text": "Reconnection attempts use exponential backoff with jitter. No fixed-interval retry loops."
+      },
+      {
+        "id": "CN8",
+        "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
+      }
+    ],
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "design_path": "docs/design/sdk",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

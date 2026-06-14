@@ -1,0 +1,238 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SDK-004",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SDK-004",
+    "cluster": "sdk",
+    "title": "Implement connection pool and embedded/remote deployment modes",
+    "depends_on": [
+      "SDK-002",
+      "SDK-003"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C8",
+      "C9",
+      "C13"
+    ],
+    "stories": [
+      "S1",
+      "S2",
+      "S10"
+    ],
+    "design_anchor": [
+      "ADR-010"
+    ],
+    "purpose": "Deliver the two deployment modes of the Rust SDK -- embedded (zero-hop, in-process) and remote (wire protocol) -- behind the same trait API, per ADR-010's embedded-first architecture. Also deliver configurable connection pooling for remote mode multi-channel workloads. After this brief lands, a Rust developer can switch between embedded and remote by changing configuration, not code (story S2).",
+    "task": "Create embedded.rs, remote.rs, and connection/pool.rs. The embedded module provides concrete ChannelHandle and ConversationHandle implementations that delegate directly to in-process agora channel handles with no serialisation or network overhead. The remote module provides implementations that use the wire protocol transport with the connection lifecycle and recovery from SDK-003. Both modules implement the same traits defined in SDK-002. The connection pool manages multiple connections for remote mode workloads. IN SCOPE: embedded mode, remote mode, connection pooling, same-trait API for both modes. OUT OF SCOPE: Gleam SDK, TypeScript SDK, cross-SDK conformance.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Implement embedded mode with direct in-process channel handles",
+        "spec": "WHEN the SDK is configured in embedded mode, THE SYSTEM SHALL provide ChannelHandle and ConversationHandle implementations that interact with agora channels through direct in-process handles. THE SYSTEM SHALL NOT perform serialisation, protocol framing, or network I/O in embedded mode. THE SYSTEM SHALL NOT require a running agora server for embedded operation.",
+        "acceptance": [
+          "EmbeddedChannelHandle implements the ChannelHandle trait from SDK-002",
+          "EmbeddedConversationHandle implements the ConversationHandle trait from SDK-002",
+          "Publish in embedded mode does not invoke any serialisation (message is passed by reference or move)",
+          "No network socket is opened in embedded mode",
+          "Embedded mode can be instantiated with only an agora crate reference, no server address"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/embedded.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C8"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement remote mode with wire protocol transport",
+        "spec": "WHEN the SDK is configured in remote mode, THE SYSTEM SHALL provide ChannelHandle and ConversationHandle implementations that communicate over the agora wire protocol (ADR-008). THE SYSTEM SHALL use the connection lifecycle state machine from SDK-003 for connection management. THE SYSTEM SHALL use subscription recovery from SDK-003 on reconnect. THE SYSTEM SHALL NOT expose protocol frames or wire format details to the application.",
+        "acceptance": [
+          "RemoteChannelHandle implements the ChannelHandle trait from SDK-002",
+          "RemoteConversationHandle implements the ConversationHandle trait from SDK-002",
+          "Remote mode requires a server address in its configuration",
+          "Remote mode uses ConnectionState from SDK-003 for lifecycle management",
+          "Remote mode uses SubscriptionRecovery from SDK-003 on reconnect",
+          "No wire protocol types appear in the public API of RemoteChannelHandle or RemoteConversationHandle"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/remote.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C9"
+        ],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Ensure same API trait for both embedded and remote modes",
+        "spec": "WHEN application code is written against the ChannelHandle and ConversationHandle traits, THE SYSTEM SHALL allow switching between embedded and remote mode without changing application code. THE SYSTEM SHALL provide a builder or configuration struct that selects the mode and returns the appropriate concrete type behind the trait.",
+        "acceptance": [
+          "A single function or builder constructs either embedded or remote handles based on configuration",
+          "Application code using dyn ChannelHandle or impl ChannelHandle works with both modes",
+          "Switching from embedded to remote requires only changing the SdkConfig, not the application code",
+          "The builder returns Result<impl ChannelHandle, SdkError> regardless of mode"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/agora-sdk/src/lib.rs",
+            "crates/agora-sdk/src/embedded.rs",
+            "crates/agora-sdk/src/remote.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Implement configurable connection pool for remote mode",
+        "spec": "WHEN the SDK operates in remote mode with multiple channel subscriptions, THE SYSTEM SHALL provide a connection pool managing a configurable number of connections. THE SYSTEM SHALL accept pool size configuration from the caller. THE SYSTEM SHALL NOT impose a hardcoded default pool size -- the default is deferred to the builder or runtime.",
+        "acceptance": [
+          "ConnectionPool struct manages a configurable number of connections",
+          "Pool size is set via ConnectionPoolConfig with a max_connections field",
+          "No hardcoded default pool size exists in the source code",
+          "Multiple channel subscriptions can share pooled connections",
+          "Pool distributes subscriptions across available connections"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/connection/pool.rs"
+          ],
+          "modify": [
+            "crates/agora-sdk/src/connection/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C13"
+        ],
+        "stories": [
+          "S10"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT expose deployment mode differences to application code beyond the configuration step.",
+      "SHALL NOT implement Gleam or TypeScript SDK logic.",
+      "SHALL NOT impose hardcoded connection pool limits or default sizes.",
+      "SHALL NOT modify the ChannelHandle or ConversationHandle trait signatures from SDK-002."
+    ],
+    "verification": [
+      "cargo check -p agora-sdk compiles cleanly",
+      "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
+      "cargo fmt -p agora-sdk --check reports no formatting issues",
+      "Unit tests verify embedded mode publish/subscribe without network",
+      "Unit tests verify remote mode uses the connection lifecycle state machine",
+      "Unit tests verify connection pool distributes subscriptions across connections",
+      "Integration test demonstrates switching from embedded to remote by changing config only",
+      "No file exceeds 500 lines of code"
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C8",
+        "text": "Embedded mode provides in-process channel handles without serialisation or network overhead."
+      },
+      {
+        "id": "C9",
+        "text": "Remote mode connects over the wire protocol with the protocol implementation fully internal to the SDK."
+      },
+      {
+        "id": "C13",
+        "text": "Connection pool supports multiple concurrent channel subscriptions over configurable connection count."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As a Rust developer embedding agora, I want to publish typed messages to a channel through an in-process handle so that I get zero-hop messaging without network overhead."
+      },
+      {
+        "id": "S2",
+        "text": "As a Rust developer embedding agora, I want to switch from embedded to remote mode by changing configuration rather than code so that I can scale to multi-process deployment without rewriting my application."
+      },
+      {
+        "id": "S10",
+        "text": "As a platform operator, I want SDK connection pools to be configurable with max connections, timeouts, and buffer sizes so that I can tune resource usage for my deployment environment."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The Rust SDK must compile with no_std + alloc for WASM targets."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure responses must never be silently consumed by the SDK. Every pressure signal reaches the application."
+      },
+      {
+        "id": "CN7",
+        "text": "Reconnection attempts use exponential backoff with jitter. No fixed-interval retry loops."
+      },
+      {
+        "id": "CN8",
+        "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
+      }
+    ],
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "design_path": "docs/design/sdk",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

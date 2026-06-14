@@ -1,0 +1,325 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SRV-002",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SRV-002",
+    "cluster": "server",
+    "title": "Implement configuration loading from TOML file and environment with validation",
+    "depends_on": [
+      "SRV-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C4",
+      "C5",
+      "C6",
+      "C7",
+      "C8"
+    ],
+    "stories": [
+      "S1",
+      "S2",
+      "S3",
+      "S7",
+      "S10"
+    ],
+    "design_anchor": [
+      "ADR-010"
+    ],
+    "purpose": "Implement the full configuration pipeline: define the ServerConfig type tree, parse TOML config files, overlay environment variables, and validate the merged result before the server starts. Configuration is the first thing the server does -- if it fails, the process exits with specific error messages. No listener binds, no cluster forms, no health endpoint starts until config validation passes. This is the declarative control plane: operators describe their topology in a config file, DevOps engineers override per-environment values via LIMINAL_ env vars, and the server rejects anything invalid before accepting a single connection.",
+    "task": "Create the config module with four files. types.rs defines ServerConfig (listen address, channel definitions, routing rules, persistence paths, cluster config), ChannelDef (name, schema reference, durability mode), RoutingRuleDef, and ClusterConfig (seed nodes, node name). file.rs parses a TOML file path into a ServerConfig. env.rs scans for LIMINAL_ prefixed environment variables and overlays them onto a ServerConfig. validation.rs checks the merged config for completeness, type correctness, and reachability (e.g., persistence paths exist, listen addresses are parseable, channel names are unique). mod.rs declares sub-modules and re-exports the public API.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define ServerConfig struct with all required fields",
+        "spec": "ServerConfig SHALL contain fields for: listen_address (SocketAddr), channels (Vec<ChannelDef>), routing_rules (Vec<RoutingRuleDef>), persistence_path (Option<PathBuf>), and cluster (Option<ClusterConfig>). ServerConfig SHALL derive Debug and Clone. ServerConfig SHALL NOT implement Default -- every field is either required or explicitly Optional, with no silent defaults (P6). All fields SHALL be documented with their purpose.",
+        "acceptance": [
+          "ServerConfig struct exists in crates/liminal-server/src/config/types.rs",
+          "ServerConfig has fields: listen_address, channels, routing_rules, persistence_path, cluster",
+          "ServerConfig derives Debug and Clone",
+          "ServerConfig does NOT implement Default",
+          "All fields have doc comments"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/config/types.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C4"
+        ],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Define ChannelDef, RoutingRuleDef, and ClusterConfig sub-types",
+        "spec": "ChannelDef SHALL contain: name (String), schema_ref (String), durable (bool). RoutingRuleDef SHALL contain: source_channel (String), target_channel (String), predicate (Option<String>). ClusterConfig SHALL contain: node_name (String), seed_nodes (Vec<SocketAddr>). All sub-types SHALL derive Debug, Clone, and serde::Deserialize for TOML parsing. Sub-types SHALL NOT implement Default.",
+        "acceptance": [
+          "ChannelDef, RoutingRuleDef, and ClusterConfig structs exist in config/types.rs",
+          "All three derive Debug, Clone, and serde::Deserialize",
+          "None of the three implement Default",
+          "ChannelDef has name, schema_ref, and durable fields",
+          "ClusterConfig has node_name and seed_nodes fields"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/config/types.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C4"
+        ],
+        "stories": [
+          "S2"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement TOML file parser",
+        "spec": "A load_from_file function SHALL accept a file path and return Result<ServerConfig, ServerError>. WHEN the file does not exist or is unreadable, THEN it SHALL return ServerError::ConfigLoad with the underlying IO error. WHEN the TOML is malformed or has unknown fields, THEN it SHALL return ServerError::ConfigLoad with the parse error details. The parser SHALL NOT silently ignore unknown fields -- strict deserialization is required.",
+        "acceptance": [
+          "load_from_file(path) exists in crates/liminal-server/src/config/file.rs",
+          "Valid TOML parses into a ServerConfig",
+          "Missing file returns ServerError::ConfigLoad",
+          "Malformed TOML returns ServerError::ConfigLoad with parse details",
+          "Unknown fields in TOML cause a parse error, not silent ignoring"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/config/file.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C5"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Implement environment variable overlay with LIMINAL_ prefix",
+        "spec": "An apply_env_overrides function SHALL scan for environment variables with the LIMINAL_ prefix and apply matching values to a ServerConfig. LIMINAL_LISTEN_ADDRESS SHALL override listen_address. LIMINAL_PERSISTENCE_PATH SHALL override persistence_path. LIMINAL_CLUSTER_NODE_NAME and LIMINAL_CLUSTER_SEED_NODES SHALL override the corresponding ClusterConfig fields. The function SHALL NOT fail on absent environment variables -- only present variables trigger overrides.",
+        "acceptance": [
+          "apply_env_overrides(config) exists in crates/liminal-server/src/config/env.rs",
+          "LIMINAL_LISTEN_ADDRESS overrides config.listen_address",
+          "LIMINAL_PERSISTENCE_PATH overrides config.persistence_path",
+          "LIMINAL_CLUSTER_NODE_NAME overrides config.cluster.node_name",
+          "Absent environment variables leave config fields unchanged"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/config/env.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C6"
+        ],
+        "stories": [
+          "S7"
+        ]
+      },
+      {
+        "id": "R5",
+        "title": "Enforce environment override precedence over file values",
+        "spec": "WHEN both a TOML file and an environment variable specify the same configuration field, THEN the environment variable value SHALL take precedence (P6). The config loading pipeline SHALL be: load from file, then apply env overrides, then validate. The pipeline SHALL NOT reorder these steps or skip the overlay phase.",
+        "acceptance": [
+          "Config pipeline calls load_from_file then apply_env_overrides in that order",
+          "A TOML file sets listen_address to 127.0.0.1:8080 and LIMINAL_LISTEN_ADDRESS is set to 0.0.0.0:9090 -- the result is 0.0.0.0:9090",
+          "Env override applies after file load but before validation",
+          "Test: file value plus env override produces env value in final config"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/config/env.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C7"
+        ],
+        "stories": [
+          "S10"
+        ]
+      },
+      {
+        "id": "R6",
+        "title": "Implement configuration validation with specific error messages",
+        "spec": "A validate function SHALL accept a ServerConfig reference and return Result<(), ServerError>. IF listen_address is not a valid socket address, THEN it SHALL return ServerError::ConfigValidation with the field name and reason. IF any channel name is empty or duplicated, THEN it SHALL return ServerError::ConfigValidation. IF persistence_path is Some but the path does not exist or is not writable, THEN it SHALL return ServerError::ConfigValidation. IF cluster seed_nodes is non-empty but contains unparseable addresses, THEN it SHALL return ServerError::ConfigValidation. Validation SHALL collect all errors and report them together, not fail on the first one. Validation SHALL NOT start any I/O beyond filesystem stat checks.",
+        "acceptance": [
+          "validate(config) exists in crates/liminal-server/src/config/validation.rs",
+          "Invalid listen_address returns ConfigValidation with field name",
+          "Duplicate channel names return ConfigValidation listing the duplicates",
+          "Unreachable persistence_path returns ConfigValidation with the path",
+          "Multiple validation errors are collected and reported together",
+          "Validation performs no network I/O"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/config/validation.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C8"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R7",
+        "title": "Create config module structure with re-exports",
+        "spec": "config/mod.rs SHALL declare pub mod for types, file, env, and validation. config/mod.rs SHALL re-export ServerConfig, ChannelDef, RoutingRuleDef, ClusterConfig, load_from_file, apply_env_overrides, and validate. config/mod.rs SHALL contain ONLY module declarations and re-exports -- no logic (CN3).",
+        "acceptance": [
+          "config/mod.rs declares pub mod types, file, env, validation",
+          "config/mod.rs re-exports ServerConfig and the config loading/validation functions",
+          "config/mod.rs contains zero function definitions or struct definitions"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/config/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT start the network listener or bind to any port -- that is SRV-003.",
+      "SHALL NOT implement runtime channel creation or modification -- channels are defined in config.",
+      "SHALL NOT add messaging semantics or channel lifecycle logic -- delegates to liminal library (CN5).",
+      "SHALL NOT add silent defaults for required fields -- all config is explicit (P6).",
+      "SHALL NOT implement cluster formation or peer discovery -- SRV-005 handles runtime cluster behaviour.",
+      "SHALL NOT perform network I/O during validation -- only filesystem stat checks are permitted."
+    ],
+    "verification": [
+      "cargo test -p liminal-server passes clean.",
+      "cargo clippy -p liminal-server -- -D warnings passes clean.",
+      "cargo fmt -p liminal-server --check passes clean.",
+      "ServerConfig does not implement Default.",
+      "Config validation rejects invalid configs before any listener binds (CN6).",
+      "Environment variables override file-based config values for the same field.",
+      "Multiple validation errors are collected and reported together."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C4",
+        "text": "ServerConfig type defined in crates/liminal-server/src/config/types.rs with fields for listen address, channel definitions, routing rules, persistence paths, and cluster config."
+      },
+      {
+        "id": "C5",
+        "text": "Configuration loads from a TOML file specified via --config CLI argument."
+      },
+      {
+        "id": "C6",
+        "text": "Configuration loads from environment variables with LIMINAL_ prefix."
+      },
+      {
+        "id": "C7",
+        "text": "Environment variables override file-based configuration when both specify the same field."
+      },
+      {
+        "id": "C8",
+        "text": "Configuration validation rejects invalid configs (missing required fields, invalid listen addresses, unknown channel types, unreachable persistence paths) with specific error messages before server startup."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As an Operator, I want to start a liminal server with a single config file so that I can deploy the messaging bus without writing Rust code."
+      },
+      {
+        "id": "S2",
+        "text": "As an Operator, I want to define channels, routing rules, and persistence paths in the config file so that I can set up the bus topology declaratively."
+      },
+      {
+        "id": "S3",
+        "text": "As an Operator, I want the server to validate my configuration at startup and report specific errors so that I can fix misconfigurations before the server accepts traffic."
+      },
+      {
+        "id": "S7",
+        "text": "As a DevOps Engineer, I want to configure the server via environment variables so that I can deploy with container orchestration tools that inject config through the environment."
+      },
+      {
+        "id": "S10",
+        "text": "As a DevOps Engineer, I want environment variables to override file-based config values so that I can ship a base config in the container image and apply per-environment overrides from the orchestrator."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The server binary adds no messaging semantics. All publish, subscribe, and conversation logic delegates to the liminal library crate."
+      },
+      {
+        "id": "CN6",
+        "text": "Config validation runs to completion before any listener binds. An invalid config never results in a partially started server."
+      },
+      {
+        "id": "CN7",
+        "text": "Graceful shutdown completes durable state flush before process exit. Data loss on clean shutdown is a bug."
+      },
+      {
+        "id": "CN8",
+        "text": "Cluster membership uses beamr distribution exclusively. No custom consensus protocol, no gossip layer, no Raft implementation."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should feel like deploying any production-grade message broker: start, configure, cluster, monitor, and shut down gracefully. The server is a thin deployment wrapper, not a fork of the library -- every message still flows through the same channel and conversation primitives that embedded users get.\n\nFor teams that want the bus without embedding it, the server is the entry point. For teams that embed it, the server is how they run a remote node in a cluster topology. Both stories use the same binary.",
+    "design_path": "docs/design/server",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should f"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

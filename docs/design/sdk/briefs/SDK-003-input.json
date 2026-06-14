@@ -1,0 +1,244 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SDK-003",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SDK-003",
+    "cluster": "sdk",
+    "title": "Implement backpressure responses and connection lifecycle state machine",
+    "depends_on": [
+      "SDK-001"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C7",
+      "C10",
+      "C11",
+      "C12"
+    ],
+    "stories": [
+      "S3",
+      "S4"
+    ],
+    "design_anchor": [
+      "ADR-004",
+      "ADR-008"
+    ],
+    "purpose": "Deliver the backpressure response vocabulary (Accept, Defer, Reject) per ADR-004 and the connection lifecycle state machine (connecting, connected, reconnecting, disconnected) per ADR-008. Backpressure is surfaced as typed responses on every publish operation -- the SDK never silently consumes pressure signals (constraint CN6). The connection state machine provides the foundation for automatic reconnection with exponential backoff and jitter (constraint CN7), and subscription state recovery from the last acknowledged sequence.",
+    "task": "Create pressure.rs for backpressure types, and the connection/ module with mod.rs, lifecycle.rs, and recovery.rs. PressureResponse is an enum returned from publish operations. The connection state machine is a typed state enum with defined transitions. Recovery tracks per-subscription sequence numbers for replay on reconnect. IN SCOPE: backpressure types, connection state machine, reconnection strategy, subscription recovery. OUT OF SCOPE: connection pooling (SDK-004), concrete transport (SDK-004), channel/conversation logic (SDK-002).",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Define PressureResponse enum with Accept, Defer, and Reject variants",
+        "spec": "THE SYSTEM SHALL define a PressureResponse enum with three variants: Accept (message delivered), Defer { delay: Duration } (message buffered, estimated delay provided), and Reject { reason: String } (consumer overwhelmed, message shed). WHEN a publish operation completes, THE SYSTEM SHALL return a PressureResponse alongside the result. THE SYSTEM SHALL NOT silently convert Defer or Reject to Accept.",
+        "acceptance": [
+          "PressureResponse enum exists with exactly three variants: Accept, Defer, Reject",
+          "Defer carries a Duration field indicating estimated delay",
+          "Reject carries a reason String describing why the message was shed",
+          "PressureResponse derives Debug, Clone, and PartialEq",
+          "PressureResponse is re-exported from the crate root"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/pressure.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C7"
+        ],
+        "stories": [
+          "S4"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement connection lifecycle state machine with observable transitions",
+        "spec": "THE SYSTEM SHALL define a ConnectionState enum with four states: Connecting, Connected, Reconnecting { attempt: u32 }, and Disconnected { reason: DisconnectReason }. WHEN a state transition occurs, THE SYSTEM SHALL emit a ConnectionEvent to all registered observers. THE SYSTEM SHALL NOT allow invalid transitions (e.g. Disconnected to Connected without passing through Connecting). THE SYSTEM SHALL NOT expose the state machine's internal transition logic to callers.",
+        "acceptance": [
+          "ConnectionState enum has exactly four variants: Connecting, Connected, Reconnecting, Disconnected",
+          "Reconnecting carries an attempt counter",
+          "Disconnected carries a DisconnectReason enum (Normal, Error, Timeout)",
+          "A ConnectionEvents stream is available for observing state transitions",
+          "Transition from Disconnected directly to Connected is rejected at compile time or returns an error"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/connection/mod.rs",
+            "crates/agora-sdk/src/connection/lifecycle.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C10"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Implement exponential backoff with jitter for reconnection",
+        "spec": "WHEN the connection transitions to Reconnecting, THE SYSTEM SHALL compute the next retry delay as min(base_delay * 2^attempt, max_delay) plus a random jitter factor. THE SYSTEM SHALL NOT use fixed-interval retry (constraint CN7). THE SYSTEM SHALL accept configurable base_delay and max_delay parameters. THE SYSTEM SHALL reset the attempt counter to zero when a connection is successfully established.",
+        "acceptance": [
+          "Reconnection delay for attempt N equals min(base_delay * 2^N, max_delay) + jitter",
+          "Jitter is a random value between 0 and 50% of the computed delay",
+          "base_delay and max_delay are configurable via a ReconnectConfig struct",
+          "After successful connection, the next reconnection attempt starts at attempt 0",
+          "No code path uses a fixed retry interval"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/agora-sdk/src/connection/lifecycle.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C11"
+        ],
+        "stories": [
+          "S3"
+        ]
+      },
+      {
+        "id": "R4",
+        "title": "Implement subscription state recovery from last acknowledged sequence",
+        "spec": "WHEN the connection transitions from Reconnecting to Connected, THE SYSTEM SHALL replay each active subscription from its last acknowledged sequence number. THE SYSTEM SHALL track per-subscription sequence numbers as messages are acknowledged. THE SYSTEM SHALL NOT request full replay from sequence zero if a prior acknowledged position exists.",
+        "acceptance": [
+          "SubscriptionRecovery struct tracks a map of subscription_id to last_acknowledged_sequence",
+          "On reconnect, each subscription's resume request includes its last acknowledged sequence",
+          "A subscription with no prior acknowledgement starts from sequence zero",
+          "A subscription with acknowledged sequence N resumes from sequence N+1",
+          "Recovery state is cleared when a subscription is explicitly unsubscribed"
+        ],
+        "files": {
+          "create": [
+            "crates/agora-sdk/src/connection/recovery.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C12"
+        ],
+        "stories": [
+          "S3"
+        ]
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement connection pooling (deferred to SDK-004).",
+      "SHALL NOT implement concrete wire protocol transport.",
+      "SHALL NOT implement channel or conversation logic.",
+      "SHALL NOT silently consume, buffer, or retry on backpressure signals.",
+      "SHALL NOT use fixed-interval retry for reconnection."
+    ],
+    "verification": [
+      "cargo check -p agora-sdk compiles cleanly",
+      "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
+      "cargo fmt -p agora-sdk --check reports no formatting issues",
+      "Unit tests cover all four connection state transitions",
+      "Unit tests verify exponential backoff delay computation for attempts 0 through 10",
+      "Unit tests verify subscription recovery sequence tracking",
+      "No file exceeds 500 lines of code"
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-004",
+        "title": "Backpressure as a wire protocol primitive with accept/defer/reject signals",
+        "decision": "Backpressure is part of the wire protocol with three signals: accept (delivered), defer (buffered, will deliver when capacity frees), reject (consumer overwhelmed, message shed). Consumers declare capacity. The bus mediates between producer rate and consumer capacity. The rejected alternative is Kafka-style consumer-lag-only backpressure (not actionable by producers in real time).",
+        "quote": "",
+        "decided_by": "Bono + Frodo alignment"
+      },
+      {
+        "id": "ADR-008",
+        "title": "Custom binary wire protocol, not NATS-compatible or gRPC",
+        "decision": "Custom binary wire protocol carrying conversation lifecycle frames, typed message envelopes, backpressure signals, and causal context natively. The rejected alternatives are NATS-compatible protocol (doesn't accommodate conversations or backpressure) and gRPC (too heavyweight for messaging throughput).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C7",
+        "text": "Backpressure response enum (Accept, Defer, Reject) defined in agora_sdk::pressure and returned from all publish operations."
+      },
+      {
+        "id": "C10",
+        "text": "Connection lifecycle state machine (connecting, connected, reconnecting, disconnected) implemented with observable state transitions."
+      },
+      {
+        "id": "C11",
+        "text": "Reconnection uses exponential backoff with jitter, configurable base delay and max delay."
+      },
+      {
+        "id": "C12",
+        "text": "Subscription state recovery replays from the client's last acknowledged sequence number on reconnect."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S3",
+        "text": "As a Rust developer connecting remotely, I want the SDK to automatically reconnect and recover my subscriptions after a network disruption so that my application resumes without manual intervention."
+      },
+      {
+        "id": "S4",
+        "text": "As a Rust developer connecting remotely, I want publish operations to return typed backpressure signals (accept, defer, reject) so that I can implement application-level flow control."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. If a module approaches this limit, extract into submodules."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The Rust SDK must compile with no_std + alloc for WASM targets."
+      },
+      {
+        "id": "CN6",
+        "text": "Backpressure responses must never be silently consumed by the SDK. Every pressure signal reaches the application."
+      },
+      {
+        "id": "CN7",
+        "text": "Reconnection attempts use exponential backoff with jitter. No fixed-interval retry loops."
+      },
+      {
+        "id": "CN8",
+        "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
+      }
+    ],
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "design_path": "docs/design/sdk",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

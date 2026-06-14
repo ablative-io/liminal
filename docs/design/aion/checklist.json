@@ -1,0 +1,60 @@
+{
+  "cluster": "aion",
+  "sections": [
+    {
+      "name": "Module Foundation",
+      "items": [
+        {"id": "C1", "text": "crates/liminal/src/aion/mod.rs contains only pub mod declarations and pub use re-exports.", "done": false},
+        {"id": "C2", "text": "AionSurfaceError defined in crates/liminal/src/aion/error.rs with variants for dispatch, signal, and streaming failures.", "done": false},
+        {"id": "C3", "text": "All public types in the aion module implement Debug; AionSurfaceError implements std::error::Error via thiserror.", "done": false},
+        {"id": "C4", "text": "Channel naming constructors in channels.rs enforce the aion.{kind}.{namespace}.{id} convention and reject malformed inputs.", "done": false}
+      ]
+    },
+    {
+      "name": "Activity Dispatch",
+      "items": [
+        {"id": "C5", "text": "ActivityRequest and ActivityResult types defined in types.rs with activity type, input payload, task queue, and timeout fields.", "done": false},
+        {"id": "C6", "text": "dispatch.rs opens a conversation on the task queue channel, selects a worker via the routing function, and links to the selected worker process.", "done": false},
+        {"id": "C7", "text": "Worker crash during activity execution is detected via process link exit signal and triggers re-dispatch to another available worker.", "done": false},
+        {"id": "C8", "text": "Dispatch conversation lifecycle maps to Aion activity states: opened to ActivityScheduled, worker selected to ActivityStarted, response to ActivityCompleted, link failure to ActivityFailed.", "done": false},
+        {"id": "C9", "text": "Activity message types defined in codec.rs with typed channel validation per ADR-002.", "done": false},
+        {"id": "C10", "text": "No global consumer group rebalancing exists in the dispatch path; adding or removing workers is handled by the routing function adapting to subscription changes.", "done": false}
+      ]
+    },
+    {
+      "name": "Signal Delivery",
+      "items": [
+        {"id": "C11", "text": "Per-workflow signal channel created on workflow start via channels.rs naming convention aion.signal.{namespace}.{workflow_id}.", "done": false},
+        {"id": "C12", "text": "Signal payloads validated against the workflow's declared signal types at publish time, not consume time.", "done": false},
+        {"id": "C13", "text": "Workflow process receives signals as standard BEAM messages through its signal channel subscription.", "done": false},
+        {"id": "C14", "text": "Signal channel torn down when workflow completes or is terminated.", "done": false}
+      ]
+    },
+    {
+      "name": "Event Streaming",
+      "items": [
+        {"id": "C15", "text": "Per-workflow history channel created with naming convention aion.history.{namespace}.{workflow_id}.", "done": false},
+        {"id": "C16", "text": "Recorder publishes each workflow event to the history channel after writing to the event store.", "done": false},
+        {"id": "C17", "text": "History subscribers can read from an arbitrary cursor position for replay from the durable channel.", "done": false},
+        {"id": "C18", "text": "History consumers are decoupled from the event store API; they read exclusively through channel subscription.", "done": false}
+      ]
+    },
+    {
+      "name": "Worker Registration",
+      "items": [
+        {"id": "C19", "text": "Workers register by subscribing to task queue channels with capacity metadata (max concurrent activities, activity type filter).", "done": false},
+        {"id": "C20", "text": "Worker health is determined by subscription liveness; no heartbeat protocol or health-check endpoint exists.", "done": false},
+        {"id": "C21", "text": "Worker capacity declarations are available to the routing function for load-aware dispatch.", "done": false},
+        {"id": "C22", "text": "Worker deregistration is automatic on subscription close or process crash.", "done": false}
+      ]
+    },
+    {
+      "name": "Cross-Cutting",
+      "items": [
+        {"id": "C23", "text": "All channel operations in the integration surface are recorded by the Aion recorder and replayable by the resolver.", "done": false},
+        {"id": "C24", "text": "Zero-hop dispatch: embedded Aion and liminal in the same beamr instance dispatch activities through in-process channels with no serialization boundary.", "done": false},
+        {"id": "C25", "text": "No file in crates/liminal/src/aion/ exceeds 500 lines.", "done": false}
+      ]
+    }
+  ]
+}

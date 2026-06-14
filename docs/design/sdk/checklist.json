@@ -1,0 +1,55 @@
+{
+  "cluster": "sdk",
+  "sections": [
+    {
+      "name": "Crate and Package Setup",
+      "items": [
+        {"id": "C1", "text": "agora-sdk crate exists at crates/agora-sdk/ with Cargo.toml declaring dependencies on agora core and protocol crates.", "done": false},
+        {"id": "C2", "text": "agora-gleam package exists at sdks/agora-gleam/ with gleam.toml declaring FFI dependency on agora-sdk.", "done": false},
+        {"id": "C3", "text": "agora-ts package exists at sdks/agora-ts/ with package.json and TypeScript build configuration.", "done": false}
+      ]
+    },
+    {
+      "name": "Rust SDK Core API",
+      "items": [
+        {"id": "C4", "text": "ChannelHandle defined in agora_sdk::channel with publish, subscribe, and request_reply methods.", "done": false},
+        {"id": "C5", "text": "ConversationHandle defined in agora_sdk::conversation with send, receive, and lifecycle observation methods.", "done": false},
+        {"id": "C6", "text": "SchemaValidate trait defined in agora_sdk::types for compile-time type enforcement on publish and subscribe.", "done": false},
+        {"id": "C7", "text": "Backpressure response enum (Accept, Defer, Reject) defined in agora_sdk::pressure and returned from all publish operations.", "done": false},
+        {"id": "C8", "text": "Embedded mode provides in-process channel handles without serialisation or network overhead.", "done": false},
+        {"id": "C9", "text": "Remote mode connects over the wire protocol with the protocol implementation fully internal to the SDK.", "done": false}
+      ]
+    },
+    {
+      "name": "Connection Management",
+      "items": [
+        {"id": "C10", "text": "Connection lifecycle state machine (connecting, connected, reconnecting, disconnected) implemented with observable state transitions.", "done": false},
+        {"id": "C11", "text": "Reconnection uses exponential backoff with jitter, configurable base delay and max delay.", "done": false},
+        {"id": "C12", "text": "Subscription state recovery replays from the client's last acknowledged sequence number on reconnect.", "done": false},
+        {"id": "C13", "text": "Connection pool supports multiple concurrent channel subscriptions over configurable connection count.", "done": false}
+      ]
+    },
+    {
+      "name": "Gleam SDK",
+      "items": [
+        {"id": "C14", "text": "Gleam channel module provides typed publish and subscribe functions with compile-time schema enforcement.", "done": false},
+        {"id": "C15", "text": "Conversation handler behaviour (init, handle_message, handle_timeout, terminate) defined as a Gleam behaviour.", "done": false},
+        {"id": "C16", "text": "FFI bindings delegate transport operations to the Rust SDK without re-implementing protocol logic.", "done": false}
+      ]
+    },
+    {
+      "name": "TypeScript SDK",
+      "items": [
+        {"id": "C17", "text": "Channel<T> and Conversation<T> generic interfaces defined with runtime type validation via JSON Schema.", "done": false},
+        {"id": "C18", "text": "WASM bridge compiles protocol layer from Rust and exposes it to browser TypeScript.", "done": false},
+        {"id": "C19", "text": "Type generator produces TypeScript interfaces from agora channel type definitions.", "done": false}
+      ]
+    },
+    {
+      "name": "Cross-SDK Conformance",
+      "items": [
+        {"id": "C20", "text": "Behavioural conformance tests for connection lifecycle, subscription recovery, and backpressure handling pass against all three SDKs.", "done": false}
+      ]
+    }
+  ]
+}

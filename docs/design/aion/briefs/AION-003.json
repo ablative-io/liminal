@@ -1,0 +1,120 @@
+{
+  "id": "AION-003",
+  "cluster": "aion",
+  "title": "Implement signal delivery via typed channels",
+  "depends_on": ["AION-001"],
+  "blocked_by": [],
+  "checklist": ["C11", "C12", "C13", "C14"],
+  "stories": ["S3", "S11"],
+  "design_anchor": ["ADR-001", "ADR-002"],
+  "purpose": "Signal delivery to running workflows through typed liminal channels. Each running workflow gets a dedicated signal channel (ADR-002 typed channels) created at workflow start and torn down at completion. External clients and other workflows deliver signals by publishing to the workflow's signal channel. Payloads are validated against declared signal types at publish time (not consume time), catching schema mismatches before they reach the workflow. The workflow process receives signals as standard BEAM messages, integrating with Aion's existing selective-receive signal handling without modification. Signal channels are ephemeral by default; for workflows that need signal replay during recovery, the channel can be configured as durable with recorder capture.",
+  "task": "Create signal.rs in crates/liminal/src/aion/. This module handles signal channel lifecycle (create on workflow start, teardown on completion/termination), publish-time payload validation against declared signal types, delivery to the workflow process as BEAM messages, and optional durable mode for signal replay during recovery. Use the channel naming from AION-001 channels.rs (signal_channel constructor). Signal delivery integrates with Aion's existing selective-receive signal handling -- this module does NOT modify that handling, it feeds signals into it through the channel. This brief does NOT implement signal routing across namespaces or signal type declaration (those are Aion-side concerns).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Per-workflow signal channel creation",
+      "spec": "WHEN a workflow starts, THE SYSTEM SHALL create a signal channel named by signal_channel(namespace, workflow_id) from channels.rs. The channel SHALL be typed with the workflow's declared signal types per ADR-002. WHEN the channel already exists (workflow restart/recovery), THE SYSTEM SHALL reuse the existing channel. THE SYSTEM SHALL NOT create signal channels for workflows that declare no signal handlers.",
+      "acceptance": [
+        "Starting a workflow with signal handlers creates a channel named aion.signal.{namespace}.{workflow_id}",
+        "Starting a workflow without signal handlers does not create a signal channel",
+        "Restarting a workflow that already has a signal channel reuses the existing channel (no duplicate, no error)",
+        "The created channel is typed with the workflow's declared signal type set"
+      ],
+      "files": {
+        "create": ["crates/liminal/src/aion/signal.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C11"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R2",
+      "title": "Publish-time payload validation",
+      "spec": "WHEN an external client or another workflow publishes a signal to a workflow's signal channel, THE SYSTEM SHALL validate the signal payload against the workflow's declared signal types before accepting the publish. IF the payload does not match any declared signal type, THE SYSTEM SHALL reject the publish with Err(AionSurfaceError::SignalValidationFailed) containing the signal name, expected types, and actual content-type. THE SYSTEM SHALL NOT defer validation to consume time -- invalid signals never enter the channel.",
+      "acceptance": [
+        "Publishing a SignalPayload with signal_name matching a declared type and valid payload bytes succeeds",
+        "Publishing a SignalPayload with signal_name not in the declared type set returns Err(AionSurfaceError::SignalValidationFailed)",
+        "Publishing a SignalPayload with correct signal_name but wrong content_type returns Err(AionSurfaceError::SignalValidationFailed)",
+        "The error includes the signal_name, the expected content_type, and the actual content_type",
+        "An invalid signal never appears in the channel's message stream"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/signal.rs"],
+        "delete": []
+      },
+      "checklist": ["C12"],
+      "stories": ["S11"]
+    },
+    {
+      "id": "R3",
+      "title": "Delivery as BEAM messages",
+      "spec": "WHEN a valid signal is published to a workflow's signal channel, THE SYSTEM SHALL deliver the signal to the workflow process as a standard BEAM message. The delivery SHALL integrate with Aion's existing selective-receive signal handling -- the workflow process receives signals through its normal mailbox, not a separate callback. THE SYSTEM SHALL NOT modify Aion's selective-receive signal handling mechanism.",
+      "acceptance": [
+        "A published signal arrives in the workflow process's mailbox as a BEAM message",
+        "The delivered message contains the signal_name and payload from the original SignalPayload",
+        "The workflow's existing selective-receive code can pattern-match on the delivered signal without modification",
+        "grep -rn 'selective.receive' signal.rs returns no matches that modify the existing mechanism (read-only references allowed for documentation)"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/signal.rs"],
+        "delete": []
+      },
+      "checklist": ["C13"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R4",
+      "title": "Channel teardown on workflow completion",
+      "spec": "WHEN a workflow completes (Completed, Failed, Cancelled, or TimedOut status), THE SYSTEM SHALL tear down the workflow's signal channel. WHEN a signal is published to a torn-down channel, THE SYSTEM SHALL return Err(AionSurfaceError::SignalDeliveryFailed) indicating the workflow is no longer running. THE SYSTEM SHALL NOT leave orphaned signal channels for terminated workflows.",
+      "acceptance": [
+        "After a workflow completes with any terminal status, its signal channel no longer exists",
+        "Publishing to a signal channel after workflow completion returns Err(AionSurfaceError::SignalDeliveryFailed)",
+        "The error message includes the workflow_id and indicates the workflow is terminated",
+        "No signal channels remain for workflows in terminal states after teardown (no orphans)"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/signal.rs"],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": ["S3"]
+    },
+    {
+      "id": "R5",
+      "title": "Optional durable mode for signal replay",
+      "spec": "WHEN a signal channel is configured as durable, THE SYSTEM SHALL capture signal deliveries as recorded events in the workflow's event log via the recorder. WHEN the resolver replays a workflow, THE SYSTEM SHALL return the recorded signal deliveries without re-executing the actual channel publish. WHEN a signal channel is ephemeral (default), THE SYSTEM SHALL NOT record signal deliveries -- signals are delivered live only.",
+      "acceptance": [
+        "A durable signal channel records each signal delivery as an event in the workflow's event log",
+        "During replay of a workflow with durable signals, the resolver returns recorded signals without channel interaction",
+        "An ephemeral signal channel (default) does not write signal events to the recorder",
+        "The durable/ephemeral choice is per-workflow configuration, not global"
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/aion/signal.rs"],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": ["S11"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT modify Aion's existing selective-receive signal handling -- signals are fed into it, not replacing it.",
+    "SHALL NOT implement signal routing across namespaces -- namespace isolation is preserved.",
+    "SHALL NOT implement signal type declaration -- the workflow's declared types come from Aion's workflow definition.",
+    "SHALL NOT implement signal ordering guarantees beyond per-causal-chain ordering provided by liminal channels (ADR-005).",
+    "SHALL NOT implement activity dispatch -- that is AION-002."
+  ],
+  "verification": [
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes clean.",
+    "cargo test for the signal module passes (unit tests for channel creation, validation rejection, teardown, durable replay).",
+    "No file in crates/liminal/src/aion/ exceeds 500 lines.",
+    "Publishing an invalid signal payload is rejected at publish time with a descriptive error (not silently dropped, not deferred to consume time).",
+    "No orphaned signal channels remain after workflow termination (verified by test that terminates a workflow and asserts channel does not exist)."
+  ]
+}

@@ -1,0 +1,138 @@
+{
+  "id": "DUR-003",
+  "cluster": "durability",
+  "title": "Implement consumer cursors and message replay",
+  "depends_on": ["DUR-001", "DUR-002"],
+  "blocked_by": [],
+  "checklist": ["C12", "C13", "C14", "C15", "C16", "C17", "C18"],
+  "stories": ["S5", "S6", "S12"],
+  "design_anchor": ["ADR-009"],
+  "purpose": "Implements consumer cursor tracking and message replay for durable channels. Cursors track each consumer's read position per partition using haematite's cas operation, ensuring that checkpoint updates never regress. On restart, a consumer reads its persisted cursor and replays missed messages in sequence order. This is the mechanism that turns durable storage into recoverable consumption — without cursors and replay, persistence is write-only.",
+  "task": "Build consumer cursor persistence (cas-based checkpointing) and the message replay path (read-from-offset iteration). The cursor must support three checkpoint policies: per-message, per-batch, and explicit flush. Cursor checkpoint uses cas(consumer_id + partition, old_offset, new_offset) — a stale checkpoint must fail with CursorRegression, never silently overwrite. The replay path reads from a given offset to the partition head, returning messages in sequence order. An empty range (offset equals head) returns an empty iterator, not an error. Scope boundary: this brief handles cursor state and replay only. It does not handle dedup (DUR-004), conversation state (DUR-005), or crash recovery orchestration (DUR-006).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define consumer cursor with partition-specific offset state",
+      "spec": "ConsumerCursor struct SHALL track a consumer's read offset for a specific partition. It SHALL hold consumer_id (String), partition_key (String formatted as \"{channel_id}:{partition_index}\"), and current_offset (u64). ConsumerCursor SHALL be constructable from a fresh state (offset 0) or from a persisted offset read from haematite. ConsumerCursor SHALL implement Debug and Clone.",
+      "acceptance": [
+        "ConsumerCursor has fields: consumer_id, partition_key, current_offset.",
+        "ConsumerCursor::new(consumer_id, partition_key) initializes with offset 0.",
+        "ConsumerCursor::from_persisted(consumer_id, partition_key, offset) initializes with the given offset.",
+        "ConsumerCursor implements Debug and Clone."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/cursor.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C12"],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Implement CAS-based cursor checkpoint",
+      "spec": "WHEN a consumer checkpoints its cursor, THE SYSTEM SHALL call DurableStore::cas(consumer_id + partition, old_offset, new_offset) where old_offset is the cursor's current stored value. IF cas fails (old_offset does not match stored value), THE SYSTEM SHALL return DurabilityError::CursorRegression with stored and attempted offsets. THE SYSTEM SHALL NOT overwrite a cursor unconditionally — cas is the only checkpoint path. WHEN checkpoint succeeds, THE SYSTEM SHALL update the cursor's current_offset to new_offset.",
+      "acceptance": [
+        "checkpoint() calls DurableStore::cas with the cursor's current_offset as old_value.",
+        "A successful checkpoint updates the cursor's current_offset field.",
+        "A cas failure returns DurabilityError::CursorRegression.",
+        "There is no unconditional write path for cursor updates — only cas.",
+        "The cas key is formatted as \"{consumer_id}:{partition_key}\"."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/cursor.rs"],
+        "delete": []
+      },
+      "checklist": ["C13"],
+      "stories": ["S5"]
+    },
+    {
+      "id": "R3",
+      "title": "Resume cursor from persisted offset on restart",
+      "spec": "WHEN a consumer restarts, THE SYSTEM SHALL read the consumer's persisted cursor offset from haematite using DurableStore::read_from or a dedicated cursor-read operation. IF a persisted offset exists, THE SYSTEM SHALL construct a ConsumerCursor at that offset and resume processing from that point. IF no persisted offset exists, THE SYSTEM SHALL construct a cursor at offset 0 (beginning of the partition).",
+      "acceptance": [
+        "A consumer with a persisted offset at position 42 restarts with cursor at 42.",
+        "A consumer with no persisted offset restarts with cursor at 0.",
+        "The resume path uses the same cas key format as the checkpoint path.",
+        "Resume does not modify the stored cursor — it only reads."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/cursor.rs"],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": ["S12"]
+    },
+    {
+      "id": "R4",
+      "title": "Support per-message, per-batch, and explicit-flush checkpoint policies",
+      "spec": "CheckpointDriver SHALL implement the three checkpoint policies from DurabilityConfig. WHILE policy is PerMessage, THE SYSTEM SHALL checkpoint after every message processed. WHILE policy is PerBatch(n), THE SYSTEM SHALL checkpoint after every n messages processed. WHILE policy is ExplicitFlush, THE SYSTEM SHALL checkpoint only when explicitly requested by the consumer. The driver SHALL track messages-since-last-checkpoint to implement batch counting.",
+      "acceptance": [
+        "PerMessage policy triggers checkpoint after processing 1 message.",
+        "PerBatch(10) policy triggers checkpoint after processing 10 messages, not before.",
+        "ExplicitFlush policy only checkpoints when flush() is called.",
+        "The checkpoint driver does not hold its own DurableStore — it calls through the cursor's checkpoint method.",
+        "Messages-since-last-checkpoint counter resets to 0 after each checkpoint."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/cursor.rs"],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": ["S5"]
+    },
+    {
+      "id": "R5",
+      "title": "Implement replay_from returning ordered message iterator",
+      "spec": "replay_from(store, partition_key, offset) SHALL call DurableStore::read_from(partition_key, offset, limit) and return an ordered sequence of deserialized MessageEnvelopes. Messages SHALL be returned in sequence number order within the partition. The replay function SHALL handle pagination internally if the store returns partial results, fetching subsequent pages until the partition head is reached.",
+      "acceptance": [
+        "replay_from returns messages in ascending sequence number order.",
+        "Messages are deserialized from StoredEntry bytes back to MessageEnvelope.",
+        "The partition_key passed to read_from matches DUR-002's \"{channel_id}:{partition_index}\" format.",
+        "Replay fetches all messages from offset to partition head, handling pagination."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/durability/replay.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C16", "C17"],
+      "stories": ["S6"]
+    },
+    {
+      "id": "R6",
+      "title": "Handle empty replay range gracefully",
+      "spec": "WHEN replay_from is called with an offset equal to the partition head (no new messages), THE SYSTEM SHALL return an empty iterator. THE SYSTEM SHALL NOT return an error for an empty range — this is a normal condition after a consumer has caught up.",
+      "acceptance": [
+        "replay_from with offset == partition head returns an empty Vec (or iterator yielding zero items).",
+        "replay_from with offset == partition head does not return Err.",
+        "replay_from with offset == 0 on an empty partition returns an empty result."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/durability/replay.rs"],
+        "delete": []
+      },
+      "checklist": ["C18"],
+      "stories": ["S6"]
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement dedup logic or idempotency key checking — that is DUR-004.",
+    "SHALL NOT implement conversation state or event sourcing — that is DUR-005.",
+    "SHALL NOT implement crash recovery orchestration — that is DUR-006.",
+    "SHALL NOT modify the DurableStore trait or DurabilityConfig — those are DUR-001.",
+    "SHALL NOT implement unconditional cursor writes — cas is the only checkpoint mechanism."
+  ],
+  "verification": [
+    "cargo check compiles cursor and replay modules with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "grep -rn 'fn checkpoint' cursor.rs uses cas, not unconditional write.",
+    "Test: checkpoint with stale offset returns CursorRegression.",
+    "Test: replay_from with offset == head returns empty result, not error."
+  ]
+}

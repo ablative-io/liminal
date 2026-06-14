@@ -1,0 +1,253 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "brief_id": "SRV-003",
+  "reviewers": [
+    "Danger Mouse"
+  ],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "brief_document": {
+    "id": "SRV-003",
+    "cluster": "server",
+    "title": "Implement network listener with per-connection beamr processes",
+    "depends_on": [
+      "SRV-001",
+      "SRV-002"
+    ],
+    "blocked_by": [],
+    "checklist": [
+      "C9",
+      "C10"
+    ],
+    "stories": [
+      "S1"
+    ],
+    "design_anchor": [
+      "ADR-010"
+    ],
+    "purpose": "Implement the network listener that binds to the configured address and accepts wire protocol connections. Each accepted connection spawns a supervised beamr process that handles protocol framing and delegates all messaging operations to the liminal library crate. The listener is the boundary between the network and the actor system -- it translates TCP connections into beamr processes and beamr messages into wire protocol responses. The server adds no messaging semantics at this layer; it is a transport adapter.",
+    "task": "Create the server module with three files. listener.rs implements the TCP listener: bind to the configured address, enter an accept loop, and spawn a beamr process for each accepted connection. connection.rs implements the per-connection beamr process: receive wire protocol frames, translate them into liminal library operations (publish, subscribe, conversation lifecycle), and send responses back over the wire. The connection process is supervised -- its crash does not affect other connections or the listener. mod.rs declares sub-modules and re-exports the public API.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Bind TCP listener to configured address",
+        "spec": "The listener SHALL bind to the listen_address from ServerConfig. WHEN the address is already in use or otherwise unbindable, THEN it SHALL return ServerError::ListenerBind with the address and underlying OS error. The listener SHALL NOT bind before configuration validation completes (CN6). WHEN binding succeeds, THEN the listener SHALL log the bound address at info level via tracing.",
+        "acceptance": [
+          "Listener binds to the address from ServerConfig.listen_address",
+          "Binding to an in-use port returns ServerError::ListenerBind",
+          "Binding does not occur until after config validation passes",
+          "Successful bind logs the address at info level"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/server/listener.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C9"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R2",
+        "title": "Implement connection accept loop",
+        "spec": "WHILE the listener is active, it SHALL accept incoming TCP connections in a loop. WHEN a connection is accepted, THEN it SHALL spawn a connection handler process and continue accepting. WHEN an accept call fails transiently (e.g., EMFILE, ENFILE), THEN it SHALL log the error and continue the loop. The accept loop SHALL NOT block on a single connection -- acceptance and handling are decoupled.",
+        "acceptance": [
+          "Accept loop runs continuously while the listener is active",
+          "Each accepted connection spawns a handler without blocking the loop",
+          "Transient accept errors are logged and do not crash the listener",
+          "Test: multiple simultaneous connections are all accepted"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/listener.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C9"
+        ],
+        "stories": [
+          "S1"
+        ]
+      },
+      {
+        "id": "R3",
+        "title": "Spawn per-connection beamr process",
+        "spec": "WHEN a connection is accepted, the listener SHALL spawn a beamr process to handle the connection. The connection process SHALL own the TCP stream and process wire protocol frames in its mailbox loop. Each connection SHALL be a separate beamr process with its own mailbox. The connection process SHALL NOT share mutable state with other connection processes.",
+        "acceptance": [
+          "Each accepted connection results in a new beamr process via Scheduler::spawn",
+          "The connection process owns its TCP stream",
+          "Connection processes are independent -- no shared mutable state",
+          "Test: crashing one connection process does not affect others"
+        ],
+        "files": {
+          "create": [
+            "crates/liminal-server/src/server/connection.rs"
+          ],
+          "modify": [],
+          "delete": []
+        },
+        "checklist": [
+          "C10"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R4",
+        "title": "Supervise connection processes",
+        "spec": "Connection processes SHALL be supervised. IF a connection process crashes, THEN the supervisor SHALL clean up the failed connection without restarting it -- crashed connections are not retried, the client must reconnect. The crash of one connection process SHALL NOT affect other connection processes or the listener. The supervisor SHALL log the crash reason at warn level.",
+        "acceptance": [
+          "Connection processes are spawned under a supervisor",
+          "A crashed connection is cleaned up, not restarted",
+          "Other connections continue unaffected when one crashes",
+          "Connection crashes are logged at warn level with the crash reason"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/connection.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C10"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R5",
+        "title": "Delegate messaging operations to liminal library",
+        "spec": "The connection process SHALL translate wire protocol frames into liminal library operations: publish, subscribe, unsubscribe, and conversation lifecycle calls. The connection process SHALL NOT implement any messaging logic itself -- all publish/subscribe/conversation semantics are provided by the liminal library crate (CN5). Responses from the liminal library SHALL be translated back into wire protocol frames and sent to the client.",
+        "acceptance": [
+          "Connection process calls liminal library methods for publish, subscribe, unsubscribe",
+          "No messaging logic (fan-out, filtering, conversation state) exists in the connection module",
+          "Liminal library responses are translated to wire protocol frames",
+          "Test: a publish through the connection results in a liminal library publish call"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/connection.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [
+          "C9"
+        ],
+        "stories": []
+      },
+      {
+        "id": "R6",
+        "title": "Create server module structure with re-exports",
+        "spec": "server/mod.rs SHALL declare pub mod for listener and connection. server/mod.rs SHALL re-export the primary public types needed by the binary entry point. server/mod.rs SHALL contain ONLY module declarations and re-exports -- no logic (CN3).",
+        "acceptance": [
+          "server/mod.rs declares pub mod listener, connection",
+          "server/mod.rs re-exports the server start function",
+          "server/mod.rs contains zero function definitions or struct definitions"
+        ],
+        "files": {
+          "create": [],
+          "modify": [
+            "crates/liminal-server/src/server/mod.rs"
+          ],
+          "delete": []
+        },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL NOT implement the wire protocol framing or codec -- that is the protocol cluster.",
+      "SHALL NOT implement graceful shutdown or connection draining -- that is SRV-004.",
+      "SHALL NOT implement cluster-aware routing or cross-node message forwarding -- that is SRV-005.",
+      "SHALL NOT add any messaging semantics -- all publish, subscribe, and conversation logic delegates to the liminal library crate (CN5).",
+      "SHALL NOT implement TLS termination -- TLS is handled at the load balancer or sidecar proxy."
+    ],
+    "verification": [
+      "cargo test -p liminal-server passes clean.",
+      "cargo clippy -p liminal-server -- -D warnings passes clean.",
+      "cargo fmt -p liminal-server --check passes clean.",
+      "Each connection is a supervised beamr process, not a Rust task or thread.",
+      "Server adds no messaging semantics -- connection module contains no fan-out or filtering logic.",
+      "Listener does not bind before configuration validation completes."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [
+      {
+        "id": "ADR-010",
+        "title": "Embedded-first architecture with standalone mode as a deployment option",
+        "decision": "The bus is a Rust library (crate) first, a standalone binary second. The embedded story (Aion workflows and bus channels in the same beamr instance) is the primary use case. Standalone mode is the same code with a network listener. The rejected alternative is standalone-first (adds a deployment dependency and network hop for every message, negating the beamr advantage).",
+        "quote": "",
+        "decided_by": "Frodo, confirmed by Bono"
+      }
+    ],
+    "checklist": [
+      {
+        "id": "C9",
+        "text": "Server binds to the configured listen address and accepts wire protocol connections."
+      },
+      {
+        "id": "C10",
+        "text": "Each accepted connection spawns a supervised beamr process for protocol handling."
+      }
+    ],
+    "stories": [
+      {
+        "id": "S1",
+        "text": "As an Operator, I want to start a liminal server with a single config file so that I can deploy the messaging bus without writing Rust code."
+      }
+    ],
+    "constraints": [
+      {
+        "id": "CN1",
+        "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+      },
+      {
+        "id": "CN2",
+        "text": "No panics in production code. .unwrap() and .expect() only in tests."
+      },
+      {
+        "id": "CN3",
+        "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+      },
+      {
+        "id": "CN4",
+        "text": "All public types implement Debug. All error types implement std::error::Error."
+      },
+      {
+        "id": "CN5",
+        "text": "The server binary adds no messaging semantics. All publish, subscribe, and conversation logic delegates to the liminal library crate."
+      },
+      {
+        "id": "CN6",
+        "text": "Config validation runs to completion before any listener binds. An invalid config never results in a partially started server."
+      },
+      {
+        "id": "CN7",
+        "text": "Graceful shutdown completes durable state flush before process exit. Data loss on clean shutdown is a bug."
+      },
+      {
+        "id": "CN8",
+        "text": "Cluster membership uses beamr distribution exclusively. No custom consensus protocol, no gossip layer, no Raft implementation."
+      }
+    ],
+    "intention": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should feel like deploying any production-grade message broker: start, configure, cluster, monitor, and shut down gracefully. The server is a thin deployment wrapper, not a fork of the library -- every message still flows through the same channel and conversation primitives that embedded users get.\n\nFor teams that want the bus without embedding it, the server is the entry point. For teams that embed it, the server is how they run a remote node in a cluster topology. Both stories use the same binary.",
+    "design_path": "docs/design/server",
+    "provenance": {
+      "requested_by": "Tom",
+      "quote": "When this cluster is complete, an operator can deploy liminal as standalone infrastructure without writing Rust code. A single binary, a config file, and a container is enough. The experience should f"
+    }
+  },
+  "verify_fix_cap": 3,
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "review_deadline_ms": 300000
+}

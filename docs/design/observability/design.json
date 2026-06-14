@@ -1,0 +1,172 @@
+{
+  "cluster": "observability",
+  "title": "Observability",
+  "intention": "When this cluster is complete, an operator can see inside the running bus: which channels are hot, which consumers are under pressure, which conversations are stalling, and how messages flow across a multi-step exchange. The observability layer does not change how the bus works -- it makes the bus's existing behaviour visible.\n\nThe goal is operational confidence. An operator should be able to capacity-plan from metrics, diagnose delivery issues from traces, and correlate structured logs across conversation boundaries. An application developer should be able to trace a message through a conversation chain without instrumenting their own code.",
+  "problem": "Without observability, liminal is a black box. Operators cannot answer basic operational questions: Which channels are receiving the most traffic? Are any consumers falling behind? How long do conversations take? Why did a message fail to deliver?\n\nThe bus has three categories of runtime state that existing generic monitoring cannot capture without deep integration:\n\n1. Channel metrics -- message throughput, subscriber counts, and queue depth for durable channels. These are bus-native concepts with no generic equivalent.\n\n2. Conversation metrics -- active counts, completion rates, durations, and error rates. Conversations are supervised processes with lifecycle state that only the bus understands.\n\n3. Pressure metrics -- reject rates, defer rates, and capacity utilization per consumer. Backpressure is a wire protocol primitive (ADR-004), and pressure state is first-class data the bus already tracks internally but does not yet expose.\n\nAdditionally, correlating log entries across a multi-message conversation requires trace context propagation that the bus must provide -- application-level tracing cannot see inside the conversation process.",
+  "solution": "The observability cluster adds two subsystems to the liminal library crate: metrics collection and trace context propagation. Both are embedded in the library, not in the server -- embedded deployments get the same observability as standalone ones.\n\nMetrics\n\nA MetricsRegistry holds all metric collectors. Channel actors, conversation actors, and the routing engine record events into the registry as they process messages. The registry supports atomic snapshot reads for export.\n\nThree metric categories, each in its own module:\n\nChannel metrics (metrics/channel.rs): message rate (counter per channel -- total messages published), subscriber count (gauge per channel -- current live subscribers), queue depth (gauge per durable channel -- messages awaiting acknowledgement), delivery latency (histogram per channel -- time from publish call to subscriber delivery).\n\nConversation metrics (metrics/conversation.rs): active count (gauge -- currently open conversations), completion rate (counter -- conversations reaching terminal state), mean duration (histogram -- open to close), error rate (counter -- conversations terminating with error).\n\nPressure metrics (metrics/pressure.rs): reject rate (counter per channel -- messages rejected by backpressure), defer rate (counter per channel -- messages deferred into buffer), capacity utilization (gauge per consumer -- in-flight messages divided by declared capacity).\n\nMetrics export (metrics/export.rs): a Prometheus-compatible renderer that reads a registry snapshot and produces Prometheus text exposition format. The server cluster exposes this via an HTTP endpoint; embedded deployments call the renderer directly.\n\nTracing\n\nA TraceContext type carries a trace ID and span ID. When a conversation spawns, it creates a trace span. Every message sent within that conversation inherits the conversation's trace context. If a conversation spawns a child conversation, the child's trace context references the parent's span as its parent -- forming a trace tree.\n\nTrace context propagation is automatic for intra-bus messaging. For messages arriving from or leaving via the wire protocol, the trace context is serialized in the message envelope (the protocol cluster handles the wire encoding).\n\nStructured Logging\n\nLog entries are structured key-value pairs, not free-form strings. When a trace context is active, log entries automatically include the trace ID and span ID. This enables log correlation: given a trace ID, an operator can find every log entry from every component that participated in that conversation chain.\n\nThe logging module provides a thin layer over Rust's tracing ecosystem, configuring structured output and injecting liminal-specific context (channel name, conversation ID, participant identity) into the span.",
+  "principles": [
+    {
+      "id": "P1",
+      "text": "Observability is embedded, not bolted on. Metrics and tracing live in the liminal library crate, not in the server. Embedded deployments get the same visibility as standalone ones."
+    },
+    {
+      "id": "P2",
+      "text": "Metrics are bus-native. Channel metrics, conversation metrics, and pressure metrics reflect concepts the bus owns -- not generic counters an APM tool could synthesize."
+    },
+    {
+      "id": "P3",
+      "text": "Trace context propagates automatically. Application code does not need to pass trace IDs -- the conversation process injects context into every message it mediates."
+    },
+    {
+      "id": "P4",
+      "text": "Zero overhead when unused. If no metrics exporter is registered and no trace subscriber is attached, instrumentation points compile to no-ops or are gated behind atomic checks."
+    },
+    {
+      "id": "P5",
+      "text": "Prometheus is the export format, not the runtime model. Internally, metrics are bus-native types. Prometheus formatting is a rendering step, not a storage constraint."
+    },
+    {
+      "id": "P6",
+      "text": "Structured logs are the only logs. Free-form string messages are not emitted. Every log entry is a set of typed key-value fields."
+    }
+  ],
+  "decisions": [
+    "ADR-004"
+  ],
+  "goals": [
+    "Per-channel message rate, subscriber count, queue depth, and delivery latency are collected and exportable as Prometheus metrics.",
+    "Active conversation count, completion rate, mean duration, and error rate are collected and exportable as Prometheus metrics.",
+    "Per-channel reject rate, defer rate, and per-consumer capacity utilization are collected and exportable as Prometheus metrics.",
+    "Conversations automatically create trace spans, and all messages within a conversation carry the conversation's trace context.",
+    "Structured log entries include trace ID and span ID when a trace context is active, enabling cross-conversation log correlation.",
+    "A Prometheus-compatible renderer produces text exposition format from a metrics registry snapshot."
+  ],
+  "non_goals": [
+    {
+      "text": "Distributed tracing export (Jaeger, Zipkin, OTLP)",
+      "reason": "Trace context propagation is in scope. Exporting traces to external systems is a future integration -- the trace data is available for any exporter to consume."
+    },
+    {
+      "text": "Dashboards or visualization",
+      "reason": "The bus exposes metrics and traces. Dashboard creation is an operator concern, not a bus concern."
+    },
+    {
+      "text": "Alerting rules or thresholds",
+      "reason": "Prometheus and alerting systems own alert evaluation. The bus provides the data."
+    },
+    {
+      "text": "Metrics persistence or historical queries",
+      "reason": "Prometheus or a compatible TSDB handles storage. The bus provides the scrape endpoint."
+    },
+    {
+      "text": "Application-level metrics instrumentation API",
+      "reason": "The bus instruments its own internals. Application code uses its own metrics library."
+    }
+  ],
+  "structure": [
+    {
+      "path": "crates/liminal/Cargo.toml",
+      "note": "Crate manifest \u2014 pre-existing, modified for metrics deps",
+      "brief": ""
+    },
+    {
+      "path": "crates/liminal/src/lib.rs",
+      "note": "Crate root \u2014 pre-existing, modified to export metrics/tracing",
+      "brief": ""
+    },
+    {
+      "path": "crates/liminal/src/metrics/mod.rs",
+      "note": "Metrics module root: pub mod and pub use only",
+      "brief": "OBS-001"
+    },
+    {
+      "path": "crates/liminal/src/metrics/registry.rs",
+      "note": "MetricsRegistry: holds all collectors, supports atomic snapshot reads",
+      "brief": "OBS-001"
+    },
+    {
+      "path": "crates/liminal/src/metrics/channel.rs",
+      "note": "Channel metrics: message rate, subscriber count, queue depth, delivery latency",
+      "brief": "OBS-002"
+    },
+    {
+      "path": "crates/liminal/src/metrics/conversation.rs",
+      "note": "Conversation metrics: active count, completion rate, mean duration, error rate",
+      "brief": "OBS-003"
+    },
+    {
+      "path": "crates/liminal/src/metrics/pressure.rs",
+      "note": "Pressure metrics: reject rate, defer rate, capacity utilization",
+      "brief": "OBS-004"
+    },
+    {
+      "path": "crates/liminal/src/metrics/export.rs",
+      "note": "Prometheus text exposition format renderer",
+      "brief": "OBS-005"
+    },
+    {
+      "path": "crates/liminal/src/tracing/mod.rs",
+      "note": "Tracing module root: pub mod and pub use only",
+      "brief": "OBS-006"
+    },
+    {
+      "path": "crates/liminal/src/tracing/context.rs",
+      "note": "TraceContext type: trace ID, span ID, parent span reference",
+      "brief": "OBS-006"
+    },
+    {
+      "path": "crates/liminal/src/tracing/span.rs",
+      "note": "Conversation trace spans: creation, propagation, child linking",
+      "brief": "OBS-006"
+    },
+    {
+      "path": "crates/liminal/src/tracing/logging.rs",
+      "note": "Structured logging: key-value entries, trace context injection, output formatting",
+      "brief": "OBS-007"
+    }
+  ],
+  "inventory": [
+    {
+      "path": "crates/liminal/Cargo.toml",
+      "note": "Exists from core cluster. Will need additional dependencies for metrics types."
+    },
+    {
+      "path": "crates/liminal/src/lib.rs",
+      "note": "Exists from core cluster. Will need pub mod declarations for metrics and tracing modules."
+    }
+  ],
+  "constraints": [
+    {
+      "id": "CN1",
+      "text": "No file over 500 lines. Extract into submodules if approaching the limit."
+    },
+    {
+      "id": "CN2",
+      "text": "No panics in production code. .unwrap() and .expect() only in tests."
+    },
+    {
+      "id": "CN3",
+      "text": "mod.rs contains ONLY pub mod declarations and pub use re-exports. No logic."
+    },
+    {
+      "id": "CN4",
+      "text": "All public types implement Debug. All error types implement std::error::Error."
+    },
+    {
+      "id": "CN5",
+      "text": "Metrics instrumentation points in channel and conversation actors must not block the actor's message processing. Recording a metric is a non-blocking operation."
+    },
+    {
+      "id": "CN6",
+      "text": "Trace context propagation is transparent to application code. No manual context passing required for intra-bus messages."
+    },
+    {
+      "id": "CN7",
+      "text": "Prometheus export renders a consistent snapshot. Metrics do not change mid-render -- the registry provides an atomic read."
+    },
+    {
+      "id": "CN8",
+      "text": "Structured log entries never contain free-form string messages. Every field is a typed key-value pair."
+    }
+  ]
+}

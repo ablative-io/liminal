@@ -1,0 +1,123 @@
+{
+  "id": "PROTO-002",
+  "cluster": "protocol",
+  "title": "Define message envelope and causal context types",
+  "depends_on": ["PROTO-001"],
+  "blocked_by": [],
+  "checklist": ["C13", "C14", "C15", "C16", "C17", "C18"],
+  "stories": ["S4"],
+  "design_anchor": ["ADR-002", "ADR-005", "ADR-008"],
+  "purpose": "Defines the typed message envelope that wraps application payloads in the wire protocol, carrying schema identification and causal context alongside the payload bytes. Causal context is a first-class wire-level construct (P1) — the bus extracts ordering information from the frame without deserializing the application payload. Publish and ConversationMessage frames carry a MessageEnvelope, not raw bytes, ensuring that every message on the wire has type identity and causal ancestry.",
+  "task": "Define the MessageEnvelope type containing schema_id (content type hash), causal_context, and payload bytes. Define the CausalContext type with an optional parent message reference and vector clock entry. Ensure MessageEnvelope serializes deterministically — same fields always produce same bytes. Wire Publish and ConversationMessage frames to carry MessageEnvelope instead of raw payload bytes. Ensure CausalContext is extractable from a message-carrying frame at the frame level without deserializing the application payload. Scope boundary: this brief defines the envelope and causal types and their serialization. It does not implement schema negotiation (PROTO-006), causal ordering enforcement (a bus-level concern), or payload validation (PROTO-006 + bus layer).",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Define CausalContext with parent reference and vector clock entry",
+      "spec": "CausalContext struct SHALL contain: parent_id (Option<MessageId> — a reference to the causally preceding message) and vector_clock_entry (Option<u64> — a logical timestamp for this message's position in the causal chain). CausalContext SHALL implement Debug, Clone, PartialEq, and Eq. An empty CausalContext (both fields None) represents a causally independent message.",
+      "acceptance": [
+        "CausalContext has fields: parent_id (Option<MessageId>), vector_clock_entry (Option<u64>).",
+        "CausalContext::independent() returns a context with both fields None.",
+        "CausalContext::with_parent(id) returns a context with parent_id set.",
+        "CausalContext implements Debug, Clone, PartialEq, Eq.",
+        "MessageId is a newtype wrapping a byte array or String (not a raw primitive)."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/causal.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C16"],
+      "stories": ["S4"]
+    },
+    {
+      "id": "R2",
+      "title": "Ensure CausalContext is extractable at frame level",
+      "spec": "CausalContext SHALL be serialized as part of the MessageEnvelope in a position that allows extraction without deserializing the application payload. The serialization format SHALL place causal_context bytes before the payload bytes within the envelope, with a fixed-size or length-prefixed causal context section. This allows the bus to read causal information by parsing only the envelope header, not the application data.",
+      "acceptance": [
+        "CausalContext is serialized before payload bytes in the envelope byte layout.",
+        "A function extract_causal_context(envelope_bytes) returns the CausalContext without parsing the payload portion.",
+        "extract_causal_context works on the raw envelope bytes from a Publish frame.",
+        "The causal context section has a known size or length prefix so the payload boundary is deterministic."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/causal.rs"],
+        "delete": []
+      },
+      "checklist": ["C17", "C18"],
+      "stories": ["S4"]
+    },
+    {
+      "id": "R3",
+      "title": "Define MessageEnvelope with schema ID, causal context, and payload",
+      "spec": "MessageEnvelope struct SHALL contain: schema_id (SchemaId — a content type hash identifying the payload's schema), causal_context (CausalContext), and payload (Vec<u8> — opaque application data). SchemaId SHALL be a newtype wrapping a fixed-size byte array (e.g. [u8; 32] for SHA-256 hash). MessageEnvelope SHALL implement Debug and Clone.",
+      "acceptance": [
+        "MessageEnvelope has fields: schema_id (SchemaId), causal_context (CausalContext), payload (Vec<u8>).",
+        "SchemaId is a newtype wrapping [u8; 32].",
+        "MessageEnvelope implements Debug and Clone.",
+        "MessageEnvelope::new(schema_id, causal_context, payload) constructs from all three fields."
+      ],
+      "files": {
+        "create": ["crates/liminal/src/protocol/envelope.rs"],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": ["C13"],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Implement deterministic serialization for MessageEnvelope",
+      "spec": "MessageEnvelope serialization SHALL be deterministic: the same schema_id, causal_context, and payload SHALL always produce the same byte sequence. The byte layout SHALL be: schema_id (32 bytes) + causal_context_length (u32) + causal_context_bytes + payload_length (u32) + payload_bytes. All multi-byte integers SHALL use big-endian byte order. Deserialization SHALL reconstruct the envelope losslessly.",
+      "acceptance": [
+        "Two MessageEnvelopes with identical fields produce identical byte sequences.",
+        "Serialization followed by deserialization produces an equal MessageEnvelope.",
+        "The byte layout starts with the 32-byte schema_id.",
+        "Multi-byte integers use big-endian encoding.",
+        "An envelope with empty payload serializes and deserializes correctly."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/envelope.rs"],
+        "delete": []
+      },
+      "checklist": ["C14"],
+      "stories": ["S4"]
+    },
+    {
+      "id": "R5",
+      "title": "Wire Publish and ConversationMessage frames to carry MessageEnvelope",
+      "spec": "Frame::Publish and Frame::ConversationMessage variants SHALL carry a MessageEnvelope as their payload, not raw Vec<u8>. The codec's encode path for these frames SHALL serialize the MessageEnvelope into the frame payload. The codec's decode path SHALL deserialize the payload bytes into a MessageEnvelope. Other frame types SHALL NOT carry a MessageEnvelope.",
+      "acceptance": [
+        "Frame::Publish has a field of type MessageEnvelope, not Vec<u8>.",
+        "Frame::ConversationMessage has a field of type MessageEnvelope, not Vec<u8>.",
+        "encode(Frame::Publish { envelope, .. }) serializes the envelope as the frame payload.",
+        "decode of a Publish frame returns Frame::Publish with a deserialized MessageEnvelope.",
+        "Frame::Ping, Frame::Subscribe, and other non-message frames do not contain MessageEnvelope."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["crates/liminal/src/protocol/frame.rs", "crates/liminal/src/protocol/codec.rs"],
+        "delete": []
+      },
+      "checklist": ["C15"],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT implement schema validation or schema negotiation — that is PROTO-006.",
+    "SHALL NOT implement causal ordering enforcement — that is a bus-level concern.",
+    "SHALL NOT define payload serialization format (protobuf, JSON) — payloads are opaque bytes.",
+    "SHALL NOT implement frame construction validation beyond what PROTO-001 establishes.",
+    "SHALL NOT add new frame types — use the types defined in PROTO-001."
+  ],
+  "verification": [
+    "cargo check compiles envelope and causal modules with no errors.",
+    "cargo clippy --workspace --all-targets -- -D warnings passes clean.",
+    "cargo fmt --check passes.",
+    "Test: MessageEnvelope serialization is deterministic (two identical envelopes produce same bytes).",
+    "Test: CausalContext is extractable from raw envelope bytes without full deserialization.",
+    "Test: Publish and ConversationMessage frames round-trip with MessageEnvelope.",
+    "Test: SchemaId wraps exactly 32 bytes."
+  ]
+}
