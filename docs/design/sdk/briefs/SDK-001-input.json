@@ -20,22 +20,22 @@
     "design_anchor": [
       "ADR-010"
     ],
-    "purpose": "Bootstrap the agora-sdk Rust crate with its Cargo.toml, public module structure, and error taxonomy. This is the foundation crate for the embedded-first SDK (ADR-010) that all subsequent Rust SDK briefs build on. The error type (SdkError) establishes the vocabulary every SDK operation uses to report failures.",
-    "task": "Create the crates/agora-sdk crate scaffold. Cargo.toml declares dependencies on agora core and protocol crates. lib.rs defines the public module tree and re-exports the key types. error.rs defines the SdkError enum using thiserror with variants covering connection, protocol, serialisation, type validation, backpressure, and conversation errors. IN SCOPE: crate manifest, module structure, error taxonomy, re-exports. OUT OF SCOPE: channel logic, conversation logic, connection management, transport implementation.",
+    "purpose": "Bootstrap the liminal-sdk Rust crate with its Cargo.toml, public module structure, and error taxonomy. This is the foundation crate for the embedded-first SDK (ADR-010) that all subsequent Rust SDK briefs build on. The error type (SdkError) establishes the vocabulary every SDK operation uses to report failures.",
+    "task": "Create the crates/liminal-sdk crate scaffold. Cargo.toml declares dependencies on liminal core and protocol crates. lib.rs defines the public module tree and re-exports the key types. error.rs defines the SdkError enum using thiserror with variants covering connection, protocol, serialisation, type validation, backpressure, and conversation errors. IN SCOPE: crate manifest, module structure, error taxonomy, re-exports. OUT OF SCOPE: channel logic, conversation logic, connection management, transport implementation.",
     "requirements": [
       {
         "id": "R1",
         "title": "Create Cargo.toml with workspace and dependency declarations",
-        "spec": "The agora-sdk crate manifest SHALL declare edition 2021, SHALL depend on agora-core and agora-protocol as workspace dependencies, SHALL depend on thiserror for error derivation, serde for serialisation traits, and bytes for zero-copy buffer handling. The crate SHALL be added to the workspace members list.",
+        "spec": "The liminal-sdk crate manifest SHALL declare edition 2021, SHALL depend on liminal-core and liminal-protocol as workspace dependencies, SHALL depend on thiserror for error derivation, serde for serialisation traits, and bytes for zero-copy buffer handling. The crate SHALL be added to the workspace members list.",
         "acceptance": [
-          "cargo check -p agora-sdk succeeds with no errors",
-          "Cargo.toml [dependencies] includes agora-core, agora-protocol, thiserror, serde, and bytes",
-          "Cargo.toml [package] declares edition = \"2021\" and name = \"agora-sdk\"",
-          "The workspace root Cargo.toml lists agora-sdk in its members array"
+          "cargo check -p liminal-sdk succeeds with no errors",
+          "Cargo.toml [dependencies] includes liminal-core, liminal-protocol, thiserror, serde, and bytes",
+          "Cargo.toml [package] declares edition = \"2021\" and name = \"liminal-sdk\"",
+          "The workspace root Cargo.toml lists liminal-sdk in its members array"
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/Cargo.toml"
+            "crates/liminal-sdk/Cargo.toml"
           ],
           "modify": [
             "Cargo.toml"
@@ -55,11 +55,11 @@
           "lib.rs contains pub mod declarations for all planned SDK modules",
           "pub use error::SdkError is present at crate root",
           "lib.rs contains zero function definitions and zero impl blocks",
-          "Downstream crates can reference agora_sdk::SdkError"
+          "Downstream crates can reference liminal_sdk::SdkError"
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/lib.rs"
+            "crates/liminal-sdk/src/lib.rs"
           ],
           "modify": [],
           "delete": []
@@ -80,7 +80,7 @@
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/error.rs"
+            "crates/liminal-sdk/src/error.rs"
           ],
           "modify": [],
           "delete": []
@@ -97,10 +97,10 @@
       "SHALL NOT implement backpressure response types (deferred to SDK-003)."
     ],
     "verification": [
-      "cargo check -p agora-sdk compiles cleanly",
-      "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
-      "cargo fmt -p agora-sdk --check reports no formatting issues",
-      "cargo doc -p agora-sdk --no-deps generates documentation without warnings",
+      "cargo check -p liminal-sdk compiles cleanly",
+      "cargo clippy -p liminal-sdk -- -D warnings passes with no diagnostics",
+      "cargo fmt -p liminal-sdk --check reports no formatting issues",
+      "cargo doc -p liminal-sdk --no-deps generates documentation without warnings",
       "No file exceeds 500 lines of code (excluding comments and whitespace)"
     ]
   },
@@ -117,7 +117,7 @@
     "checklist": [
       {
         "id": "C1",
-        "text": "agora-sdk crate exists at crates/agora-sdk/ with Cargo.toml declaring dependencies on agora core and protocol crates."
+        "text": "liminal-sdk crate exists at crates/liminal-sdk/ with Cargo.toml declaring dependencies on liminal core and protocol crates."
       }
     ],
     "stories": [],
@@ -155,11 +155,11 @@
         "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
       }
     ],
-    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing liminal to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
     "design_path": "docs/design/sdk",
     "provenance": {
       "requested_by": "Tom",
-      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
     }
   },
   "verify_fix_cap": 3,

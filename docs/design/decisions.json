@@ -1,5 +1,5 @@
 {
-  "project": "agora",
+  "project": "liminal",
   "updated": "2026-06-14",
   "decisions": [
     {
@@ -166,7 +166,7 @@
       "decided_by": "Bono + Frodo + Sir Patrick Stewart convergence",
       "date": "2026-06-13",
       "consequences": [
-        "Haematite is a build dependency for durable agora features",
+        "Haematite is a build dependency for durable liminal features",
         "The bus's durability API maps directly to haematite's append/read/cas operations",
         "Branchable conversation state is available from day one (not a future upgrade)",
         "Ephemeral channels bypass haematite entirely \u2014 pure mailbox delivery"

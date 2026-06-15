@@ -7,21 +7,21 @@
   "checklist": ["C1"],
   "stories": [],
   "design_anchor": ["ADR-010"],
-  "purpose": "Bootstrap the agora-sdk Rust crate with its Cargo.toml, public module structure, and error taxonomy. This is the foundation crate for the embedded-first SDK (ADR-010) that all subsequent Rust SDK briefs build on. The error type (SdkError) establishes the vocabulary every SDK operation uses to report failures.",
-  "task": "Create the crates/agora-sdk crate scaffold. Cargo.toml declares dependencies on agora core and protocol crates. lib.rs defines the public module tree and re-exports the key types. error.rs defines the SdkError enum using thiserror with variants covering connection, protocol, serialisation, type validation, backpressure, and conversation errors. IN SCOPE: crate manifest, module structure, error taxonomy, re-exports. OUT OF SCOPE: channel logic, conversation logic, connection management, transport implementation.",
+  "purpose": "Bootstrap the liminal-sdk Rust crate with its Cargo.toml, public module structure, and error taxonomy. This is the foundation crate for the embedded-first SDK (ADR-010) that all subsequent Rust SDK briefs build on. The error type (SdkError) establishes the vocabulary every SDK operation uses to report failures.",
+  "task": "Create the crates/liminal-sdk crate scaffold. Cargo.toml declares dependencies on liminal core and protocol crates. lib.rs defines the public module tree and re-exports the key types. error.rs defines the SdkError enum using thiserror with variants covering connection, protocol, serialisation, type validation, backpressure, and conversation errors. IN SCOPE: crate manifest, module structure, error taxonomy, re-exports. OUT OF SCOPE: channel logic, conversation logic, connection management, transport implementation.",
   "requirements": [
     {
       "id": "R1",
       "title": "Create Cargo.toml with workspace and dependency declarations",
-      "spec": "The agora-sdk crate manifest SHALL declare edition 2021, SHALL depend on agora-core and agora-protocol as workspace dependencies, SHALL depend on thiserror for error derivation, serde for serialisation traits, and bytes for zero-copy buffer handling. The crate SHALL be added to the workspace members list.",
+      "spec": "The liminal-sdk crate manifest SHALL declare edition 2021, SHALL depend on liminal-core and liminal-protocol as workspace dependencies, SHALL depend on thiserror for error derivation, serde for serialisation traits, and bytes for zero-copy buffer handling. The crate SHALL be added to the workspace members list.",
       "acceptance": [
-        "cargo check -p agora-sdk succeeds with no errors",
-        "Cargo.toml [dependencies] includes agora-core, agora-protocol, thiserror, serde, and bytes",
-        "Cargo.toml [package] declares edition = \"2021\" and name = \"agora-sdk\"",
-        "The workspace root Cargo.toml lists agora-sdk in its members array"
+        "cargo check -p liminal-sdk succeeds with no errors",
+        "Cargo.toml [dependencies] includes liminal-core, liminal-protocol, thiserror, serde, and bytes",
+        "Cargo.toml [package] declares edition = \"2021\" and name = \"liminal-sdk\"",
+        "The workspace root Cargo.toml lists liminal-sdk in its members array"
       ],
       "files": {
-        "create": ["crates/agora-sdk/Cargo.toml"],
+        "create": ["crates/liminal-sdk/Cargo.toml"],
         "modify": ["Cargo.toml"],
         "delete": []
       },
@@ -36,10 +36,10 @@
         "lib.rs contains pub mod declarations for all planned SDK modules",
         "pub use error::SdkError is present at crate root",
         "lib.rs contains zero function definitions and zero impl blocks",
-        "Downstream crates can reference agora_sdk::SdkError"
+        "Downstream crates can reference liminal_sdk::SdkError"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/lib.rs"],
+        "create": ["crates/liminal-sdk/src/lib.rs"],
         "modify": [],
         "delete": []
       },
@@ -58,7 +58,7 @@
         "No variant uses String as its sole payload without a distinguishing field name"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/error.rs"],
+        "create": ["crates/liminal-sdk/src/error.rs"],
         "modify": [],
         "delete": []
       },
@@ -74,10 +74,10 @@
     "SHALL NOT implement backpressure response types (deferred to SDK-003)."
   ],
   "verification": [
-    "cargo check -p agora-sdk compiles cleanly",
-    "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
-    "cargo fmt -p agora-sdk --check reports no formatting issues",
-    "cargo doc -p agora-sdk --no-deps generates documentation without warnings",
+    "cargo check -p liminal-sdk compiles cleanly",
+    "cargo clippy -p liminal-sdk -- -D warnings passes with no diagnostics",
+    "cargo fmt -p liminal-sdk --check reports no formatting issues",
+    "cargo doc -p liminal-sdk --no-deps generates documentation without warnings",
     "No file exceeds 500 lines of code (excluding comments and whitespace)"
   ]
 }

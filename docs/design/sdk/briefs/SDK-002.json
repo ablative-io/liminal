@@ -8,7 +8,7 @@
   "stories": ["S1", "S4"],
   "design_anchor": ["ADR-001", "ADR-002"],
   "purpose": "Deliver the core application-facing API surface of the Rust SDK: ChannelHandle for typed publish/subscribe/request-reply (ADR-002), ConversationHandle for supervised message exchange (ADR-001), and the SchemaValidate trait for compile-time type enforcement. These types define the contract every deployment mode (embedded, remote) must satisfy.",
-  "task": "Create channel.rs, conversation.rs, and types.rs in crates/agora-sdk/src/. ChannelHandle is a trait with generic methods constrained by Serialize+SchemaValidate (publish) and Deserialize (subscribe). ConversationHandle is a trait with send/receive/lifecycle observation. SchemaValidate is a trait that message types implement to provide schema metadata for publish-time validation. All types are trait definitions at this stage -- concrete implementations come in SDK-004 (embedded/remote modes). IN SCOPE: trait definitions, type constraints, associated types, error integration with SdkError. OUT OF SCOPE: concrete implementations, connection management, backpressure types, embedded/remote distinction.",
+  "task": "Create channel.rs, conversation.rs, and types.rs in crates/liminal-sdk/src/. ChannelHandle is a trait with generic methods constrained by Serialize+SchemaValidate (publish) and Deserialize (subscribe). ConversationHandle is a trait with send/receive/lifecycle observation. SchemaValidate is a trait that message types implement to provide schema metadata for publish-time validation. All types are trait definitions at this stage -- concrete implementations come in SDK-004 (embedded/remote modes). IN SCOPE: trait definitions, type constraints, associated types, error integration with SdkError. OUT OF SCOPE: concrete implementations, connection management, backpressure types, embedded/remote distinction.",
   "requirements": [
     {
       "id": "R1",
@@ -22,7 +22,7 @@
         "ChannelHandle is object-safe or documents why it is not and provides an alternative"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/channel.rs"],
+        "create": ["crates/liminal-sdk/src/channel.rs"],
         "modify": [],
         "delete": []
       },
@@ -41,7 +41,7 @@
         "Each ConversationEvent variant carries a conversation identifier"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/conversation.rs"],
+        "create": ["crates/liminal-sdk/src/conversation.rs"],
         "modify": [],
         "delete": []
       },
@@ -59,7 +59,7 @@
         "SchemaValidate is re-exported from the crate root"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/types.rs"],
+        "create": ["crates/liminal-sdk/src/types.rs"],
         "modify": [],
         "delete": []
       },
@@ -78,7 +78,7 @@
       ],
       "files": {
         "create": [],
-        "modify": ["crates/agora-sdk/src/channel.rs", "crates/agora-sdk/src/types.rs"],
+        "modify": ["crates/liminal-sdk/src/channel.rs", "crates/liminal-sdk/src/types.rs"],
         "delete": []
       },
       "checklist": [],
@@ -93,9 +93,9 @@
     "SHALL NOT add network dependencies to the crate."
   ],
   "verification": [
-    "cargo check -p agora-sdk compiles cleanly with trait definitions",
-    "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
-    "cargo fmt -p agora-sdk --check reports no formatting issues",
+    "cargo check -p liminal-sdk compiles cleanly with trait definitions",
+    "cargo clippy -p liminal-sdk -- -D warnings passes with no diagnostics",
+    "cargo fmt -p liminal-sdk --check reports no formatting issues",
     "All public traits and types have documentation comments",
     "No file exceeds 500 lines of code"
   ]

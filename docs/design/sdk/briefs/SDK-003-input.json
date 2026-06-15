@@ -45,7 +45,7 @@
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/pressure.rs"
+            "crates/liminal-sdk/src/pressure.rs"
           ],
           "modify": [],
           "delete": []
@@ -70,8 +70,8 @@
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/connection/mod.rs",
-            "crates/agora-sdk/src/connection/lifecycle.rs"
+            "crates/liminal-sdk/src/connection/mod.rs",
+            "crates/liminal-sdk/src/connection/lifecycle.rs"
           ],
           "modify": [],
           "delete": []
@@ -97,7 +97,7 @@
         "files": {
           "create": [],
           "modify": [
-            "crates/agora-sdk/src/connection/lifecycle.rs"
+            "crates/liminal-sdk/src/connection/lifecycle.rs"
           ],
           "delete": []
         },
@@ -121,7 +121,7 @@
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/connection/recovery.rs"
+            "crates/liminal-sdk/src/connection/recovery.rs"
           ],
           "modify": [],
           "delete": []
@@ -142,9 +142,9 @@
       "SHALL NOT use fixed-interval retry for reconnection."
     ],
     "verification": [
-      "cargo check -p agora-sdk compiles cleanly",
-      "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
-      "cargo fmt -p agora-sdk --check reports no formatting issues",
+      "cargo check -p liminal-sdk compiles cleanly",
+      "cargo clippy -p liminal-sdk -- -D warnings passes with no diagnostics",
+      "cargo fmt -p liminal-sdk --check reports no formatting issues",
       "Unit tests cover all four connection state transitions",
       "Unit tests verify exponential backoff delay computation for attempts 0 through 10",
       "Unit tests verify subscription recovery sequence tracking",
@@ -171,7 +171,7 @@
     "checklist": [
       {
         "id": "C7",
-        "text": "Backpressure response enum (Accept, Defer, Reject) defined in agora_sdk::pressure and returned from all publish operations."
+        "text": "Backpressure response enum (Accept, Defer, Reject) defined in liminal_sdk::pressure and returned from all publish operations."
       },
       {
         "id": "C10",
@@ -230,11 +230,11 @@
         "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
       }
     ],
-    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing liminal to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
     "design_path": "docs/design/sdk",
     "provenance": {
       "requested_by": "Tom",
-      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
     }
   },
   "verify_fix_cap": 3,

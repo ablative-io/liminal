@@ -7,8 +7,8 @@
   "checklist": ["C19"],
   "stories": ["S8"],
   "design_anchor": ["ADR-001", "ADR-004"],
-  "purpose": "Complete the TypeScript SDK with Conversation<T> lifecycle management (ADR-001), backpressure as discriminated unions (ADR-004), connection lifecycle and reconnection, and a type generator that produces TypeScript interfaces from agora channel definitions. After this brief, TypeScript developers get IDE autocompletion and type checking for channel messages without writing type definitions manually (story S8).",
-  "task": "Create conversation.ts, pressure.ts, connection.ts, and codegen.ts in sdks/agora-ts/src/. Conversation<T> mirrors the Rust ConversationHandle with lifecycle events as a TypeScript-idiomatic interface. PressureResponse is a discriminated union matching the Rust enum. The connection module implements the same state machine as SDK-003 (connecting, connected, reconnecting, disconnected) with exponential backoff. The codegen module reads agora channel type definitions and generates TypeScript interfaces. IN SCOPE: conversations, backpressure unions, connection lifecycle, type generation. OUT OF SCOPE: channel logic (SDK-007), WASM bridge changes (SDK-007).",
+  "purpose": "Complete the TypeScript SDK with Conversation<T> lifecycle management (ADR-001), backpressure as discriminated unions (ADR-004), connection lifecycle and reconnection, and a type generator that produces TypeScript interfaces from liminal channel definitions. After this brief, TypeScript developers get IDE autocompletion and type checking for channel messages without writing type definitions manually (story S8).",
+  "task": "Create conversation.ts, pressure.ts, connection.ts, and codegen.ts in sdks/liminal-ts/src/. Conversation<T> mirrors the Rust ConversationHandle with lifecycle events as a TypeScript-idiomatic interface. PressureResponse is a discriminated union matching the Rust enum. The connection module implements the same state machine as SDK-003 (connecting, connected, reconnecting, disconnected) with exponential backoff. The codegen module reads liminal channel type definitions and generates TypeScript interfaces. IN SCOPE: conversations, backpressure unions, connection lifecycle, type generation. OUT OF SCOPE: channel logic (SDK-007), WASM bridge changes (SDK-007).",
   "requirements": [
     {
       "id": "R1",
@@ -23,8 +23,8 @@
         "Error events carry a typed reason field"
       ],
       "files": {
-        "create": ["sdks/agora-ts/src/conversation.ts"],
-        "modify": ["sdks/agora-ts/src/index.ts"],
+        "create": ["sdks/liminal-ts/src/conversation.ts"],
+        "modify": ["sdks/liminal-ts/src/index.ts"],
         "delete": []
       },
       "checklist": [],
@@ -43,8 +43,8 @@
         "TypeScript narrowing works: if (response.kind === 'defer') { response.delay } compiles"
       ],
       "files": {
-        "create": ["sdks/agora-ts/src/pressure.ts"],
-        "modify": ["sdks/agora-ts/src/index.ts"],
+        "create": ["sdks/liminal-ts/src/pressure.ts"],
+        "modify": ["sdks/liminal-ts/src/index.ts"],
         "delete": []
       },
       "checklist": [],
@@ -53,7 +53,7 @@
     {
       "id": "R3",
       "title": "Implement connection lifecycle and reconnection",
-      "spec": "WHEN the SDK connects to an agora server, THE SYSTEM SHALL manage the connection through states: connecting, connected, reconnecting, disconnected. WHEN the connection drops, THE SYSTEM SHALL automatically reconnect using exponential backoff with jitter. WHEN reconnection succeeds, THE SYSTEM SHALL recover subscriptions from their last acknowledged sequence. THE SYSTEM SHALL emit connection state change events for observability. THE SYSTEM SHALL NOT use fixed-interval retry.",
+      "spec": "WHEN the SDK connects to an liminal server, THE SYSTEM SHALL manage the connection through states: connecting, connected, reconnecting, disconnected. WHEN the connection drops, THE SYSTEM SHALL automatically reconnect using exponential backoff with jitter. WHEN reconnection succeeds, THE SYSTEM SHALL recover subscriptions from their last acknowledged sequence. THE SYSTEM SHALL emit connection state change events for observability. THE SYSTEM SHALL NOT use fixed-interval retry.",
       "acceptance": [
         "ConnectionState is a discriminated union: 'connecting' | 'connected' | 'reconnecting' | 'disconnected'",
         "Connection emits state change events observable via onStateChange callback or EventEmitter",
@@ -63,8 +63,8 @@
         "baseDelay and maxDelay are configurable via ConnectionConfig"
       ],
       "files": {
-        "create": ["sdks/agora-ts/src/connection.ts"],
-        "modify": ["sdks/agora-ts/src/index.ts"],
+        "create": ["sdks/liminal-ts/src/connection.ts"],
+        "modify": ["sdks/liminal-ts/src/index.ts"],
         "delete": []
       },
       "checklist": [],
@@ -73,7 +73,7 @@
     {
       "id": "R4",
       "title": "Implement type generator from channel definitions",
-      "spec": "WHEN a developer runs the type generator against agora channel type definitions, THE SYSTEM SHALL produce TypeScript interface files matching each channel's message schema. THE SYSTEM SHALL generate interfaces with proper field names, types, and JSDoc comments. THE SYSTEM SHALL NOT require manual type definition for channels that have agora-registered schemas.",
+      "spec": "WHEN a developer runs the type generator against liminal channel type definitions, THE SYSTEM SHALL produce TypeScript interface files matching each channel's message schema. THE SYSTEM SHALL generate interfaces with proper field names, types, and JSDoc comments. THE SYSTEM SHALL NOT require manual type definition for channels that have liminal-registered schemas.",
       "acceptance": [
         "codegen.ts exports a generate function that accepts channel type definitions and outputs TypeScript source",
         "Generated interfaces match channel message schemas with correct field names and TypeScript types",
@@ -82,7 +82,7 @@
         "The generator is usable as a CLI tool or programmatic API"
       ],
       "files": {
-        "create": ["sdks/agora-ts/src/codegen.ts"],
+        "create": ["sdks/liminal-ts/src/codegen.ts"],
         "modify": [],
         "delete": []
       },

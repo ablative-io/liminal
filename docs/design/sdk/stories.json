@@ -3,10 +3,10 @@
   "personas": [
     {
       "name": "Rust Developer",
-      "role": "Embedding agora in an application",
+      "role": "Embedding liminal in an application",
       "stories": [
-        {"id": "S1", "text": "As a Rust developer embedding agora, I want to publish typed messages to a channel through an in-process handle so that I get zero-hop messaging without network overhead."},
-        {"id": "S2", "text": "As a Rust developer embedding agora, I want to switch from embedded to remote mode by changing configuration rather than code so that I can scale to multi-process deployment without rewriting my application."}
+        {"id": "S1", "text": "As a Rust developer embedding liminal, I want to publish typed messages to a channel through an in-process handle so that I get zero-hop messaging without network overhead."},
+        {"id": "S2", "text": "As a Rust developer embedding liminal, I want to switch from embedded to remote mode by changing configuration rather than code so that I can scale to multi-process deployment without rewriting my application."}
       ]
     },
     {
@@ -29,7 +29,7 @@
       "name": "TypeScript Developer",
       "role": "Building a browser application",
       "stories": [
-        {"id": "S7", "text": "As a TypeScript developer building a browser app, I want to connect to agora over WebSocket via WASM so that I can subscribe to channels without a server-side proxy."},
+        {"id": "S7", "text": "As a TypeScript developer building a browser app, I want to connect to liminal over WebSocket via WASM so that I can subscribe to channels without a server-side proxy."},
         {"id": "S8", "text": "As a TypeScript developer, I want generated TypeScript interfaces for channel message types so that I get IDE autocompletion and type checking without writing type definitions manually."}
       ]
     },

@@ -25,20 +25,20 @@
       "ADR-001"
     ],
     "purpose": "Deliver the Gleam conversation handler behaviour (init, handle_message, handle_timeout, terminate) per ADR-001's conversation-as-fundamental-unit model, and the compile-time schema derivation module that extracts schema definitions from Gleam record types. Conversation handlers let Gleam developers author request-reply and saga logic in an OTP-style callback pattern running in beamr.",
-    "task": "Create conversation.gleam and schema.gleam in sdks/agora-gleam/src/agora/. The conversation module defines a behaviour with four callbacks: init (returns initial state), handle_message (processes incoming message, returns updated state and optional reply), handle_timeout (handles inactivity), and terminate (cleanup). The schema module provides compile-time schema derivation from Gleam record types, producing schema metadata compatible with agora's channel type definitions. IN SCOPE: behaviour definition, callback signatures, schema derivation. OUT OF SCOPE: transport (handled by FFI from SDK-005), channel logic (SDK-005).",
+    "task": "Create conversation.gleam and schema.gleam in sdks/liminal-gleam/src/liminal/. The conversation module defines a behaviour with four callbacks: init (returns initial state), handle_message (processes incoming message, returns updated state and optional reply), handle_timeout (handles inactivity), and terminate (cleanup). The schema module provides compile-time schema derivation from Gleam record types, producing schema metadata compatible with liminal's channel type definitions. IN SCOPE: behaviour definition, callback signatures, schema derivation. OUT OF SCOPE: transport (handled by FFI from SDK-005), channel logic (SDK-005).",
     "requirements": [
       {
         "id": "R1",
         "title": "Define conversation handler behaviour",
-        "spec": "THE SYSTEM SHALL define a conversation handler behaviour in conversation.gleam that Gleam modules implement to participate in agora conversations. The behaviour SHALL define a state type parameter that the handler manages across callback invocations.",
+        "spec": "THE SYSTEM SHALL define a conversation handler behaviour in conversation.gleam that Gleam modules implement to participate in liminal conversations. The behaviour SHALL define a state type parameter that the handler manages across callback invocations.",
         "acceptance": [
           "A Gleam module can declare that it implements the conversation handler behaviour",
           "The behaviour is parameterised over a state type S and message types",
-          "The behaviour is importable from agora/conversation"
+          "The behaviour is importable from liminal/conversation"
         ],
         "files": {
           "create": [
-            "sdks/agora-gleam/src/agora/conversation.gleam"
+            "sdks/liminal-gleam/src/liminal/conversation.gleam"
           ],
           "modify": [],
           "delete": []
@@ -64,7 +64,7 @@
         "files": {
           "create": [],
           "modify": [
-            "sdks/agora-gleam/src/agora/conversation.gleam"
+            "sdks/liminal-gleam/src/liminal/conversation.gleam"
           ],
           "delete": []
         },
@@ -88,7 +88,7 @@
         ],
         "files": {
           "create": [
-            "sdks/agora-gleam/src/agora/schema.gleam"
+            "sdks/liminal-gleam/src/liminal/schema.gleam"
           ],
           "modify": [],
           "delete": []
@@ -106,8 +106,8 @@
       "SHALL NOT add new dependencies on the Rust SDK beyond what SDK-005 established."
     ],
     "verification": [
-      "gleam check in sdks/agora-gleam/ succeeds with conversation and schema modules",
-      "gleam format --check in sdks/agora-gleam/ reports no formatting issues",
+      "gleam check in sdks/liminal-gleam/ succeeds with conversation and schema modules",
+      "gleam format --check in sdks/liminal-gleam/ reports no formatting issues",
       "A test module implementing the conversation handler behaviour compiles successfully",
       "A test module missing one callback produces a compile error",
       "Schema derivation from a test record produces expected field metadata",
@@ -170,11 +170,11 @@
         "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
       }
     ],
-    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing liminal to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
     "design_path": "docs/design/sdk",
     "provenance": {
       "requested_by": "Tom",
-      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
     }
   },
   "verify_fix_cap": 3,

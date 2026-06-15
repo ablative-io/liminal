@@ -1,5 +1,5 @@
 {
-  "project": "agora",
+  "project": "liminal",
   "updated": "2026-06-14",
   "repo_url": "https://github.com/ablative-io/liminal.git",
   "items": [
@@ -64,7 +64,7 @@
         "requested_by": "Frodo + Bono",
         "date": "2026-06-13",
         "quote": "",
-        "context": "Layer cake architecture: haematite storage \u2192 agora messaging \u2192 Aion workflows"
+        "context": "Layer cake architecture: haematite storage \u2192 liminal messaging \u2192 Aion workflows"
       },
       "links": {
         "cluster": "durability",
@@ -111,7 +111,7 @@
       "title": "Design the Aion integration surface",
       "status": "idea",
       "kind": "design",
-      "summary": "How agora replaces Aion's gRPC worker dispatch with channel-based activity routing. How workflows publish to and subscribe from channels as recorded operations. How agora's conversation model maps to Aion's signal, query, and child workflow primitives. Zero-hop embedded story.",
+      "summary": "How liminal replaces Aion's gRPC worker dispatch with channel-based activity routing. How workflows publish to and subscribe from channels as recorded operations. How liminal's conversation model maps to Aion's signal, query, and child workflow primitives. Zero-hop embedded story.",
       "provenance": {
         "requested_by": "Frodo",
         "date": "2026-06-12",
@@ -314,12 +314,12 @@
       "title": "Build the Aion integration",
       "status": "idea",
       "kind": "feature",
-      "summary": "Replace Aion's gRPC worker dispatch with agora channels. Wire workflow publish/subscribe as recorded operations. Prove the zero-hop embedded story end-to-end.",
+      "summary": "Replace Aion's gRPC worker dispatch with liminal channels. Wire workflow publish/subscribe as recorded operations. Prove the zero-hop embedded story end-to-end.",
       "provenance": {
         "requested_by": "Frodo",
         "date": "2026-06-12",
         "quote": "",
-        "context": "The layer cake: haematite \u2192 agora \u2192 Aion"
+        "context": "The layer cake: haematite \u2192 liminal \u2192 Aion"
       },
       "links": {
         "cluster": "",
@@ -332,7 +332,7 @@
         "RM-010",
         "RM-011"
       ],
-      "notes": "The milestone that proves the architecture. Aion's worker dispatch, signals, and event streaming all route through agora."
+      "notes": "The milestone that proves the architecture. Aion's worker dispatch, signals, and event streaming all route through liminal."
     }
   ]
 }

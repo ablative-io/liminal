@@ -4,18 +4,18 @@
     {
       "name": "Crate and Package Setup",
       "items": [
-        {"id": "C1", "text": "agora-sdk crate exists at crates/agora-sdk/ with Cargo.toml declaring dependencies on agora core and protocol crates.", "done": false},
-        {"id": "C2", "text": "agora-gleam package exists at sdks/agora-gleam/ with gleam.toml declaring FFI dependency on agora-sdk.", "done": false},
-        {"id": "C3", "text": "agora-ts package exists at sdks/agora-ts/ with package.json and TypeScript build configuration.", "done": false}
+        {"id": "C1", "text": "liminal-sdk crate exists at crates/liminal-sdk/ with Cargo.toml declaring dependencies on liminal core and protocol crates.", "done": false},
+        {"id": "C2", "text": "liminal-gleam package exists at sdks/liminal-gleam/ with gleam.toml declaring FFI dependency on liminal-sdk.", "done": false},
+        {"id": "C3", "text": "liminal-ts package exists at sdks/liminal-ts/ with package.json and TypeScript build configuration.", "done": false}
       ]
     },
     {
       "name": "Rust SDK Core API",
       "items": [
-        {"id": "C4", "text": "ChannelHandle defined in agora_sdk::channel with publish, subscribe, and request_reply methods.", "done": false},
-        {"id": "C5", "text": "ConversationHandle defined in agora_sdk::conversation with send, receive, and lifecycle observation methods.", "done": false},
-        {"id": "C6", "text": "SchemaValidate trait defined in agora_sdk::types for compile-time type enforcement on publish and subscribe.", "done": false},
-        {"id": "C7", "text": "Backpressure response enum (Accept, Defer, Reject) defined in agora_sdk::pressure and returned from all publish operations.", "done": false},
+        {"id": "C4", "text": "ChannelHandle defined in liminal_sdk::channel with publish, subscribe, and request_reply methods.", "done": false},
+        {"id": "C5", "text": "ConversationHandle defined in liminal_sdk::conversation with send, receive, and lifecycle observation methods.", "done": false},
+        {"id": "C6", "text": "SchemaValidate trait defined in liminal_sdk::types for compile-time type enforcement on publish and subscribe.", "done": false},
+        {"id": "C7", "text": "Backpressure response enum (Accept, Defer, Reject) defined in liminal_sdk::pressure and returned from all publish operations.", "done": false},
         {"id": "C8", "text": "Embedded mode provides in-process channel handles without serialisation or network overhead.", "done": false},
         {"id": "C9", "text": "Remote mode connects over the wire protocol with the protocol implementation fully internal to the SDK.", "done": false}
       ]
@@ -42,7 +42,7 @@
       "items": [
         {"id": "C17", "text": "Channel<T> and Conversation<T> generic interfaces defined with runtime type validation via JSON Schema.", "done": false},
         {"id": "C18", "text": "WASM bridge compiles protocol layer from Rust and exposes it to browser TypeScript.", "done": false},
-        {"id": "C19", "text": "Type generator produces TypeScript interfaces from agora channel type definitions.", "done": false}
+        {"id": "C19", "text": "Type generator produces TypeScript interfaces from liminal channel type definitions.", "done": false}
       ]
     },
     {

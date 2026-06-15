@@ -22,7 +22,7 @@
         "PressureResponse is re-exported from the crate root"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/pressure.rs"],
+        "create": ["crates/liminal-sdk/src/pressure.rs"],
         "modify": [],
         "delete": []
       },
@@ -41,7 +41,7 @@
         "Transition from Disconnected directly to Connected is rejected at compile time or returns an error"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/connection/mod.rs", "crates/agora-sdk/src/connection/lifecycle.rs"],
+        "create": ["crates/liminal-sdk/src/connection/mod.rs", "crates/liminal-sdk/src/connection/lifecycle.rs"],
         "modify": [],
         "delete": []
       },
@@ -61,7 +61,7 @@
       ],
       "files": {
         "create": [],
-        "modify": ["crates/agora-sdk/src/connection/lifecycle.rs"],
+        "modify": ["crates/liminal-sdk/src/connection/lifecycle.rs"],
         "delete": []
       },
       "checklist": ["C11"],
@@ -79,7 +79,7 @@
         "Recovery state is cleared when a subscription is explicitly unsubscribed"
       ],
       "files": {
-        "create": ["crates/agora-sdk/src/connection/recovery.rs"],
+        "create": ["crates/liminal-sdk/src/connection/recovery.rs"],
         "modify": [],
         "delete": []
       },
@@ -95,9 +95,9 @@
     "SHALL NOT use fixed-interval retry for reconnection."
   ],
   "verification": [
-    "cargo check -p agora-sdk compiles cleanly",
-    "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
-    "cargo fmt -p agora-sdk --check reports no formatting issues",
+    "cargo check -p liminal-sdk compiles cleanly",
+    "cargo clippy -p liminal-sdk -- -D warnings passes with no diagnostics",
+    "cargo fmt -p liminal-sdk --check reports no formatting issues",
     "Unit tests cover all four connection state transitions",
     "Unit tests verify exponential backoff delay computation for attempts 0 through 10",
     "Unit tests verify subscription recovery sequence tracking",

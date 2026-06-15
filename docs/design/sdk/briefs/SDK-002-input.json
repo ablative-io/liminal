@@ -29,7 +29,7 @@
       "ADR-002"
     ],
     "purpose": "Deliver the core application-facing API surface of the Rust SDK: ChannelHandle for typed publish/subscribe/request-reply (ADR-002), ConversationHandle for supervised message exchange (ADR-001), and the SchemaValidate trait for compile-time type enforcement. These types define the contract every deployment mode (embedded, remote) must satisfy.",
-    "task": "Create channel.rs, conversation.rs, and types.rs in crates/agora-sdk/src/. ChannelHandle is a trait with generic methods constrained by Serialize+SchemaValidate (publish) and Deserialize (subscribe). ConversationHandle is a trait with send/receive/lifecycle observation. SchemaValidate is a trait that message types implement to provide schema metadata for publish-time validation. All types are trait definitions at this stage -- concrete implementations come in SDK-004 (embedded/remote modes). IN SCOPE: trait definitions, type constraints, associated types, error integration with SdkError. OUT OF SCOPE: concrete implementations, connection management, backpressure types, embedded/remote distinction.",
+    "task": "Create channel.rs, conversation.rs, and types.rs in crates/liminal-sdk/src/. ChannelHandle is a trait with generic methods constrained by Serialize+SchemaValidate (publish) and Deserialize (subscribe). ConversationHandle is a trait with send/receive/lifecycle observation. SchemaValidate is a trait that message types implement to provide schema metadata for publish-time validation. All types are trait definitions at this stage -- concrete implementations come in SDK-004 (embedded/remote modes). IN SCOPE: trait definitions, type constraints, associated types, error integration with SdkError. OUT OF SCOPE: concrete implementations, connection management, backpressure types, embedded/remote distinction.",
     "requirements": [
       {
         "id": "R1",
@@ -44,7 +44,7 @@
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/channel.rs"
+            "crates/liminal-sdk/src/channel.rs"
           ],
           "modify": [],
           "delete": []
@@ -70,7 +70,7 @@
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/conversation.rs"
+            "crates/liminal-sdk/src/conversation.rs"
           ],
           "modify": [],
           "delete": []
@@ -92,7 +92,7 @@
         ],
         "files": {
           "create": [
-            "crates/agora-sdk/src/types.rs"
+            "crates/liminal-sdk/src/types.rs"
           ],
           "modify": [],
           "delete": []
@@ -115,8 +115,8 @@
         "files": {
           "create": [],
           "modify": [
-            "crates/agora-sdk/src/channel.rs",
-            "crates/agora-sdk/src/types.rs"
+            "crates/liminal-sdk/src/channel.rs",
+            "crates/liminal-sdk/src/types.rs"
           ],
           "delete": []
         },
@@ -134,9 +134,9 @@
       "SHALL NOT add network dependencies to the crate."
     ],
     "verification": [
-      "cargo check -p agora-sdk compiles cleanly with trait definitions",
-      "cargo clippy -p agora-sdk -- -D warnings passes with no diagnostics",
-      "cargo fmt -p agora-sdk --check reports no formatting issues",
+      "cargo check -p liminal-sdk compiles cleanly with trait definitions",
+      "cargo clippy -p liminal-sdk -- -D warnings passes with no diagnostics",
+      "cargo fmt -p liminal-sdk --check reports no formatting issues",
       "All public traits and types have documentation comments",
       "No file exceeds 500 lines of code"
     ]
@@ -161,21 +161,21 @@
     "checklist": [
       {
         "id": "C4",
-        "text": "ChannelHandle defined in agora_sdk::channel with publish, subscribe, and request_reply methods."
+        "text": "ChannelHandle defined in liminal_sdk::channel with publish, subscribe, and request_reply methods."
       },
       {
         "id": "C5",
-        "text": "ConversationHandle defined in agora_sdk::conversation with send, receive, and lifecycle observation methods."
+        "text": "ConversationHandle defined in liminal_sdk::conversation with send, receive, and lifecycle observation methods."
       },
       {
         "id": "C6",
-        "text": "SchemaValidate trait defined in agora_sdk::types for compile-time type enforcement on publish and subscribe."
+        "text": "SchemaValidate trait defined in liminal_sdk::types for compile-time type enforcement on publish and subscribe."
       }
     ],
     "stories": [
       {
         "id": "S1",
-        "text": "As a Rust developer embedding agora, I want to publish typed messages to a channel through an in-process handle so that I get zero-hop messaging without network overhead."
+        "text": "As a Rust developer embedding liminal, I want to publish typed messages to a channel through an in-process handle so that I get zero-hop messaging without network overhead."
       },
       {
         "id": "S4",
@@ -216,11 +216,11 @@
         "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
       }
     ],
-    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing liminal to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
     "design_path": "docs/design/sdk",
     "provenance": {
       "requested_by": "Tom",
-      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
     }
   },
   "verify_fix_cap": 3,

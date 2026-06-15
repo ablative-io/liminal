@@ -8,20 +8,20 @@
   "stories": ["S5"],
   "design_anchor": ["ADR-002"],
   "purpose": "Bootstrap the Gleam SDK package with typed channel operations and FFI bindings to the Rust SDK transport layer. Gleam developers define message types as records and get compile-time schema enforcement at publish and subscribe time (ADR-002). The Gleam SDK delegates all transport to the Rust SDK via FFI -- it does not re-implement protocol logic.",
-  "task": "Create the sdks/agora-gleam/ package with gleam.toml, agora.gleam (public API), channel.gleam (typed publish/subscribe), and ffi.gleam (FFI bindings to Rust SDK). The channel module provides publish and subscribe functions that are generic over Gleam record types with compile-time enforcement. The FFI module wraps Rust SDK transport calls. IN SCOPE: package manifest, typed channel API, FFI bindings, compile-time schema enforcement from Gleam types. OUT OF SCOPE: conversation handlers (SDK-006), schema derivation module (SDK-006), transport implementation.",
+  "task": "Create the sdks/liminal-gleam/ package with gleam.toml, liminal.gleam (public API), channel.gleam (typed publish/subscribe), and ffi.gleam (FFI bindings to Rust SDK). The channel module provides publish and subscribe functions that are generic over Gleam record types with compile-time enforcement. The FFI module wraps Rust SDK transport calls. IN SCOPE: package manifest, typed channel API, FFI bindings, compile-time schema enforcement from Gleam types. OUT OF SCOPE: conversation handlers (SDK-006), schema derivation module (SDK-006), transport implementation.",
   "requirements": [
     {
       "id": "R1",
       "title": "Create gleam.toml package manifest",
-      "spec": "The Gleam SDK package manifest SHALL declare the package name as agora, SHALL declare the FFI dependency on the agora-sdk Rust crate, and SHALL configure the build for BEAM target output compatible with beamr module loading.",
+      "spec": "The Gleam SDK package manifest SHALL declare the package name as liminal, SHALL declare the FFI dependency on the liminal-sdk Rust crate, and SHALL configure the build for BEAM target output compatible with beamr module loading.",
       "acceptance": [
-        "gleam.toml exists at sdks/agora-gleam/gleam.toml",
-        "Package name is declared as \"agora\"",
-        "FFI dependency on agora-sdk is declared",
+        "gleam.toml exists at sdks/liminal-gleam/gleam.toml",
+        "Package name is declared as \"liminal\"",
+        "FFI dependency on liminal-sdk is declared",
         "Target is configured for Erlang/BEAM output"
       ],
       "files": {
-        "create": ["sdks/agora-gleam/gleam.toml"],
+        "create": ["sdks/liminal-gleam/gleam.toml"],
         "modify": [],
         "delete": []
       },
@@ -39,7 +39,7 @@
         "Channel handle carries the message type parameter at the type level"
       ],
       "files": {
-        "create": ["sdks/agora-gleam/src/agora/channel.gleam"],
+        "create": ["sdks/liminal-gleam/src/liminal/channel.gleam"],
         "modify": [],
         "delete": []
       },
@@ -58,7 +58,7 @@
       ],
       "files": {
         "create": [],
-        "modify": ["sdks/agora-gleam/src/agora/channel.gleam"],
+        "modify": ["sdks/liminal-gleam/src/liminal/channel.gleam"],
         "delete": []
       },
       "checklist": [],
@@ -67,15 +67,15 @@
     {
       "id": "R4",
       "title": "Implement FFI bindings delegating transport to Rust SDK",
-      "spec": "THE SYSTEM SHALL define FFI functions in ffi.gleam that call the Rust SDK's transport layer for connection management, message sending, and message receiving. THE SYSTEM SHALL NOT re-implement protocol framing, connection lifecycle, or backpressure handling in Gleam. The public API module (agora.gleam) SHALL re-export channel functions and types.",
+      "spec": "THE SYSTEM SHALL define FFI functions in ffi.gleam that call the Rust SDK's transport layer for connection management, message sending, and message receiving. THE SYSTEM SHALL NOT re-implement protocol framing, connection lifecycle, or backpressure handling in Gleam. The public API module (liminal.gleam) SHALL re-export channel functions and types.",
       "acceptance": [
         "ffi.gleam contains @external(erlang, ...) declarations for Rust SDK NIF functions",
         "Transport operations (connect, send, receive) delegate to Rust SDK via FFI",
         "No protocol framing or wire format logic exists in Gleam code",
-        "agora.gleam re-exports the public API from channel.gleam and ffi.gleam"
+        "liminal.gleam re-exports the public API from channel.gleam and ffi.gleam"
       ],
       "files": {
-        "create": ["sdks/agora-gleam/src/agora/ffi.gleam", "sdks/agora-gleam/src/agora.gleam"],
+        "create": ["sdks/liminal-gleam/src/liminal/ffi.gleam", "sdks/liminal-gleam/src/liminal.gleam"],
         "modify": [],
         "delete": []
       },
@@ -90,9 +90,9 @@
     "SHALL NOT add transport or connection management logic in Gleam."
   ],
   "verification": [
-    "gleam check in sdks/agora-gleam/ succeeds",
-    "gleam format --check in sdks/agora-gleam/ reports no formatting issues",
-    "A test Gleam module can import agora/channel and call publish with a typed record",
+    "gleam check in sdks/liminal-gleam/ succeeds",
+    "gleam format --check in sdks/liminal-gleam/ reports no formatting issues",
+    "A test Gleam module can import liminal/channel and call publish with a typed record",
     "Publishing a record with wrong field types produces a compile error",
     "FFI bindings reference valid Rust SDK NIF function names",
     "No file exceeds 500 lines of code"

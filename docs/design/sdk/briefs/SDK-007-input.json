@@ -29,22 +29,22 @@
       "ADR-008"
     ],
     "purpose": "Bootstrap the TypeScript SDK with package.json (ESM+CJS dual output), the Channel<T> generic interface with runtime type validation via JSON Schema (ADR-002), and the WASM bridge that compiles the Rust protocol layer for browser runtime (ADR-008). After this brief, TypeScript developers can import the SDK in both browser and Node.js environments using the same API (constraint CN8) and subscribe to typed channels.",
-    "task": "Create the sdks/agora-ts/ package with package.json, src/index.ts (public exports), src/channel.ts (Channel<T> interface and implementation), and src/wasm.ts (WASM bridge for browser runtime). Channel<T> is a generic interface where T provides runtime type validation via JSON Schema. The WASM bridge compiles the Rust protocol layer to WebAssembly and exposes it to TypeScript. The package builds to both ESM and CJS formats. IN SCOPE: package manifest, Channel<T> interface, runtime type validation, WASM bridge, dual ESM/CJS build. OUT OF SCOPE: conversations (SDK-008), backpressure types (SDK-008), connection management (SDK-008), type generator (SDK-008).",
+    "task": "Create the sdks/liminal-ts/ package with package.json, src/index.ts (public exports), src/channel.ts (Channel<T> interface and implementation), and src/wasm.ts (WASM bridge for browser runtime). Channel<T> is a generic interface where T provides runtime type validation via JSON Schema. The WASM bridge compiles the Rust protocol layer to WebAssembly and exposes it to TypeScript. The package builds to both ESM and CJS formats. IN SCOPE: package manifest, Channel<T> interface, runtime type validation, WASM bridge, dual ESM/CJS build. OUT OF SCOPE: conversations (SDK-008), backpressure types (SDK-008), connection management (SDK-008), type generator (SDK-008).",
     "requirements": [
       {
         "id": "R1",
         "title": "Create package.json with ESM and CJS build configuration",
         "spec": "The TypeScript SDK package manifest SHALL declare the package name, version, and build configuration supporting both ESM and CJS output formats. The package SHALL declare TypeScript as a dev dependency and configure type declaration generation. The package SHALL NOT require different import paths for ESM vs CJS consumers.",
         "acceptance": [
-          "package.json exists at sdks/agora-ts/package.json",
+          "package.json exists at sdks/liminal-ts/package.json",
           "Package exports field supports both ESM (import) and CJS (require) entry points",
           "TypeScript declaration files (.d.ts) are generated alongside JavaScript output",
-          "npm install in sdks/agora-ts/ succeeds without errors",
-          "Package name is @agora/sdk or agora-sdk"
+          "npm install in sdks/liminal-ts/ succeeds without errors",
+          "Package name is @liminal/sdk or liminal-sdk"
         ],
         "files": {
           "create": [
-            "sdks/agora-ts/package.json"
+            "sdks/liminal-ts/package.json"
           ],
           "modify": [],
           "delete": []
@@ -68,7 +68,7 @@
         ],
         "files": {
           "create": [
-            "sdks/agora-ts/src/channel.ts"
+            "sdks/liminal-ts/src/channel.ts"
           ],
           "modify": [],
           "delete": []
@@ -84,7 +84,7 @@
       {
         "id": "R3",
         "title": "Implement WASM bridge compiling protocol from Rust",
-        "spec": "THE SYSTEM SHALL compile the agora wire protocol implementation from Rust to WebAssembly. THE SYSTEM SHALL expose WASM functions for connecting, sending, and receiving through the protocol layer. WHEN running in a browser environment, THE SYSTEM SHALL use the WASM bridge for protocol handling. WHEN running in Node.js, THE SYSTEM SHALL use either WASM or a native addon. THE SYSTEM SHALL NOT require conditional imports in application code between browser and Node.js (constraint CN8).",
+        "spec": "THE SYSTEM SHALL compile the liminal wire protocol implementation from Rust to WebAssembly. THE SYSTEM SHALL expose WASM functions for connecting, sending, and receiving through the protocol layer. WHEN running in a browser environment, THE SYSTEM SHALL use the WASM bridge for protocol handling. WHEN running in Node.js, THE SYSTEM SHALL use either WASM or a native addon. THE SYSTEM SHALL NOT require conditional imports in application code between browser and Node.js (constraint CN8).",
         "acceptance": [
           "wasm.ts provides functions for protocol operations (connect, send, receive, close)",
           "The WASM module is loadable in both browser and Node.js environments",
@@ -94,7 +94,7 @@
         ],
         "files": {
           "create": [
-            "sdks/agora-ts/src/wasm.ts"
+            "sdks/liminal-ts/src/wasm.ts"
           ],
           "modify": [],
           "delete": []
@@ -113,12 +113,12 @@
         "acceptance": [
           "index.ts re-exports Channel, ChannelConfig, and SdkError types",
           "index.ts does not export WASM loader internals or protocol frame types",
-          "import { Channel } from '@agora/sdk' resolves successfully in both ESM and CJS",
+          "import { Channel } from '@liminal/sdk' resolves successfully in both ESM and CJS",
           "TypeScript declarations are available for all exported types"
         ],
         "files": {
           "create": [
-            "sdks/agora-ts/src/index.ts"
+            "sdks/liminal-ts/src/index.ts"
           ],
           "modify": [],
           "delete": []
@@ -165,7 +165,7 @@
     "checklist": [
       {
         "id": "C3",
-        "text": "agora-ts package exists at sdks/agora-ts/ with package.json and TypeScript build configuration."
+        "text": "liminal-ts package exists at sdks/liminal-ts/ with package.json and TypeScript build configuration."
       },
       {
         "id": "C17",
@@ -179,7 +179,7 @@
     "stories": [
       {
         "id": "S7",
-        "text": "As a TypeScript developer building a browser app, I want to connect to agora over WebSocket via WASM so that I can subscribe to channels without a server-side proxy."
+        "text": "As a TypeScript developer building a browser app, I want to connect to liminal over WebSocket via WASM so that I can subscribe to channels without a server-side proxy."
       },
       {
         "id": "S9",
@@ -220,11 +220,11 @@
         "text": "The TypeScript SDK must work in both browser (WASM) and server (Node.js) environments without conditional imports in application code."
       }
     ],
-    "intention": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing agora to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
+    "intention": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to each language. The Rust SDK is the primary interface for embedded use: Aion workflows, co-located services, and any Rust application that wants zero-hop messaging. The Gleam SDK is the authoring convenience layer: message types defined in Gleam get compile-time enforcement, and conversation handlers are authored as Gleam modules running in beamr. The TypeScript SDK serves browser WASM and server-side Node.js, bringing liminal to web applications and the JavaScript ecosystem.\n\nThe experience should be: import the SDK, connect (or embed), and start conversing. Connection management, reconnection, subscription state recovery, and backpressure handling are SDK responsibilities \u2014 application code deals with messages and conversations, not transport.",
     "design_path": "docs/design/sdk",
     "provenance": {
       "requested_by": "Tom",
-      "quote": "When this cluster is complete, developers in three ecosystems can connect to agora and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
+      "quote": "When this cluster is complete, developers in three ecosystems can connect to liminal and use its full feature set \u2014 channels, conversations, typed messages, backpressure \u2014 with APIs that feel native to "
     }
   },
   "verify_fix_cap": 3,
