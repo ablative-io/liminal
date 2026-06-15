@@ -3,6 +3,7 @@ pub mod channel;
 pub mod conversation;
 pub mod envelope;
 pub mod error;
+pub mod routing;
 
 pub use channel::{ChannelConfig, ChannelHandle, ChannelMode};
 pub use error::LiminalError;
