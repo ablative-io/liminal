@@ -8,7 +8,7 @@ authors.workspace = true
 description = "A conversation-based messaging bus built on beamr"
 
 [dependencies]
-beamr = "0.6.1"
+beamr = { version = "0.6.3", features = ["json"] }
 
 [lints]
 workspace = true

@@ -27,11 +27,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 
 [[package]]
-name = "beamr"
-version = "0.6.1"
+name = "base64"
+version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ede66a58b4d551fdcfb576141d08439e2390e179cc075b6655839b6eab0a3958"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "beamr"
+version = "0.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33539d0d3410e55db53d307132800ba404341dcdc065f5c61e0794b0e9b65d5e"
 dependencies = [
+ "base64",
  "cranelift-codegen",
  "cranelift-frontend",
  "cranelift-jit",
@@ -49,6 +56,7 @@ dependencies = [
  "num_cpus",
  "rand",
  "rustix",
+ "serde_json",
  "tokio",
  "unicode-segmentation",
  "zstd",
