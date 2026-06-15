@@ -1,6 +1,7 @@
 {
   "project": "agora",
   "updated": "2026-06-14",
+  "repo_url": "https://github.com/ablative-io/liminal.git",
   "items": [
     {
       "id": "RM-001",
