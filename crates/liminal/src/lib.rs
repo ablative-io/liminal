@@ -1,5 +1,8 @@
+pub mod causal;
 pub mod channel;
 pub mod conversation;
 pub mod envelope;
-pub mod causal;
 pub mod error;
+
+pub use channel::{ChannelConfig, ChannelHandle, ChannelMode};
+pub use error::LiminalError;

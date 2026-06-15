@@ -2,6 +2,7 @@
 name = "liminal"
 version = "0.1.0"
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -9,6 +10,7 @@ description = "A conversation-based messaging bus built on beamr"
 
 [dependencies]
 beamr = { version = "0.6.3", features = ["json"] }
+thiserror = "2"
 
 [lints]
 workspace = true
