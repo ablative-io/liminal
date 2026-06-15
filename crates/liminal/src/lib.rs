@@ -4,6 +4,7 @@ pub mod conversation;
 pub mod envelope;
 pub mod error;
 pub mod metrics;
+pub mod protocol;
 pub mod routing;
 
 pub use channel::{ChannelConfig, ChannelHandle, ChannelMode};
