@@ -9,7 +9,7 @@ authors.workspace = true
 description = "A conversation-based messaging bus built on beamr"
 
 [dependencies]
-beamr = { version = "0.6.3", features = ["json"] }
+beamr = { version = "0.6.4", features = ["json"] }
 thiserror = "2"
 
 [lints]
