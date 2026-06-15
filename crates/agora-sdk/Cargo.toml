@@ -1,0 +1,28 @@
+[package]
+name = "agora-sdk"
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Rust SDK for embedded and remote agora messaging clients"
+
+[features]
+default = ["std"]
+std = [
+    "dep:agora-core",
+    "bytes/std",
+    "serde/std",
+    "thiserror/std",
+]
+
+[dependencies]
+agora-core = { workspace = true, optional = true }
+agora-protocol = { workspace = true, default-features = false }
+bytes = { version = "1", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc"] }
+thiserror = { version = "2", default-features = false }
+
+[lints]
+workspace = true

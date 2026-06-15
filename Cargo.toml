@@ -1,6 +1,15 @@
 [workspace]
-members = ["crates/liminal", "crates/liminal-server"]
+members = [
+    "crates/agora-protocol",
+    "crates/agora-sdk",
+    "crates/liminal",
+    "crates/liminal-server",
+]
 resolver = "2"
+
+[workspace.dependencies]
+agora-core = { package = "liminal", path = "crates/liminal" }
+agora-protocol = { path = "crates/agora-protocol", default-features = false }
 
 [workspace.package]
 edition = "2024"
