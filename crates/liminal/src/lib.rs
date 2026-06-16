@@ -2,6 +2,7 @@ pub mod aion;
 pub mod causal;
 pub mod channel;
 pub mod conversation;
+pub mod durability;
 pub mod envelope;
 pub mod error;
 pub mod metrics;
