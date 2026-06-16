@@ -12,4 +12,5 @@ pub mod version;
 
 pub use codec::{decode, encode, encoded_len};
 pub use error::ProtocolError;
-pub use frame::{Frame, FrameHeader, FrameType};
+pub use frame::{Frame, FrameHeader, FrameType, validate_stream};
+pub use version::{ProtocolVersion, negotiate_version};

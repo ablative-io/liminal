@@ -3,6 +3,7 @@ mod payload;
 
 use super::error::ProtocolError;
 use super::frame::{Frame, FrameType, HEADER_LEN, validate_stream};
+use super::version::ProtocolVersion;
 use known::decode_known_payload;
 use payload::{
     PayloadReader, PayloadWriter, U16_LEN, U32_LEN, U64_LEN, bytes_field_len, checked_u32_len,
@@ -133,10 +134,12 @@ fn write_header(
 
 fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
     match frame {
-        Frame::Connect { auth_token, .. } => {
-            sum_lengths(&[U16_LEN, U16_LEN, bytes_field_len(auth_token)?])
-        }
-        Frame::ConnectAck { .. } => Ok(U16_LEN),
+        Frame::Connect { auth_token, .. } => sum_lengths(&[
+            ProtocolVersion::WIRE_LEN,
+            ProtocolVersion::WIRE_LEN,
+            bytes_field_len(auth_token)?,
+        ]),
+        Frame::ConnectAck { .. } => sum_lengths(&[ProtocolVersion::WIRE_LEN, U32_LEN]),
         Frame::ConnectError { message, .. }
         | Frame::SubscribeError { message, .. }
         | Frame::PublishError { message, .. }
@@ -179,8 +182,10 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
     }
 }
 
-fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> {
-    let mut writer = PayloadWriter::new(buffer);
+fn write_handshake_payload(
+    frame: &Frame,
+    writer: &mut PayloadWriter<'_>,
+) -> Result<(), ProtocolError> {
     match frame {
         Frame::Connect {
             min_version,
@@ -188,11 +193,28 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
             auth_token,
             ..
         } => {
-            writer.write_u16(*min_version)?;
-            writer.write_u16(*max_version)?;
-            writer.write_bytes_field(auth_token)?;
+            writer.write_slice(&min_version.to_wire_bytes())?;
+            writer.write_slice(&max_version.to_wire_bytes())?;
+            writer.write_bytes_field(auth_token)
         }
-        Frame::ConnectAck { version, .. } => writer.write_u16(*version)?,
+        Frame::ConnectAck {
+            selected_version,
+            capabilities,
+            ..
+        } => {
+            writer.write_slice(&selected_version.to_wire_bytes())?;
+            writer.write_u32(*capabilities)
+        }
+        _ => Err(ProtocolError::codec("frame type was not a handshake frame")),
+    }
+}
+
+fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> {
+    let mut writer = PayloadWriter::new(buffer);
+    match frame {
+        Frame::Connect { .. } | Frame::ConnectAck { .. } => {
+            write_handshake_payload(frame, &mut writer)?;
+        }
         Frame::ConnectError {
             reason_code,
             message,
