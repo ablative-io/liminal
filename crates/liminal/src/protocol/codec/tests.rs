@@ -1,5 +1,5 @@
 use super::{decode, encode, encoded_len};
-use crate::protocol::{Frame, FrameType, ProtocolError};
+use crate::protocol::{Frame, FrameType, ProtocolError, ProtocolVersion};
 
 #[test]
 fn round_trips_all_named_frame_types() -> Result<(), ProtocolError> {
@@ -169,7 +169,19 @@ fn decode_handles_garbage_inputs_without_panicking() {
         &[],
         &[0xFF],
         &[0xFF; 9],
-        &[u8::from(FrameType::ConnectAck), 0, 0, 0, 0, 0, 0, 0, 0, 1],
+        &[
+            u8::from(FrameType::ConnectAck),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            7,
+            0,
+        ],
         &[u8::from(FrameType::Subscribe), 0, 0, 0, 0, 1, 0, 0, 0, 0],
         &[u8::from(FrameType::Ping), 0, 0, 0, 0, 0, 0, 0, 0, 2, 1, 2],
     ];
@@ -204,13 +216,14 @@ fn control_frames() -> [Frame; 6] {
     [
         Frame::Connect {
             flags: 0,
-            min_version: 1,
-            max_version: 3,
+            min_version: ProtocolVersion::new(1, 0),
+            max_version: ProtocolVersion::new(3, 0),
             auth_token: vec![1, 2, 3, 4],
         },
         Frame::ConnectAck {
             flags: 1,
-            version: 3,
+            selected_version: ProtocolVersion::new(3, 0),
+            capabilities: 0x0000_0005,
         },
         Frame::ConnectError {
             flags: 2,

@@ -1,4 +1,4 @@
-use crate::protocol::{Frame, FrameType, ProtocolError};
+use crate::protocol::{Frame, FrameType, ProtocolError, ProtocolVersion};
 
 use super::payload::PayloadReader;
 
@@ -45,6 +45,10 @@ pub(super) fn decode_known_payload(
     Ok(frame)
 }
 
+fn read_protocol_version(reader: &mut PayloadReader<'_>) -> Result<ProtocolVersion, ProtocolError> {
+    Ok(ProtocolVersion::new(reader.read_u16()?, reader.read_u16()?))
+}
+
 fn decode_control_payload(
     frame_type: FrameType,
     flags: u8,
@@ -53,13 +57,14 @@ fn decode_control_payload(
     match frame_type {
         FrameType::Connect => Ok(Frame::Connect {
             flags,
-            min_version: reader.read_u16()?,
-            max_version: reader.read_u16()?,
+            min_version: read_protocol_version(reader)?,
+            max_version: read_protocol_version(reader)?,
             auth_token: reader.read_bytes_field()?,
         }),
         FrameType::ConnectAck => Ok(Frame::ConnectAck {
             flags,
-            version: reader.read_u16()?,
+            selected_version: read_protocol_version(reader)?,
+            capabilities: reader.read_u32()?,
         }),
         FrameType::ConnectError => Ok(Frame::ConnectError {
             flags,

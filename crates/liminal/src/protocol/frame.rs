@@ -1,4 +1,4 @@
-use super::error::ProtocolError;
+use super::{error::ProtocolError, version::ProtocolVersion};
 
 /// Number of bytes in every serialized frame header.
 pub const HEADER_LEN: usize = 10;
@@ -146,12 +146,16 @@ pub enum Frame {
     /// Connection request carrying a supported version range and opaque auth token.
     Connect {
         flags: u8,
-        min_version: u16,
-        max_version: u16,
+        min_version: ProtocolVersion,
+        max_version: ProtocolVersion,
         auth_token: Vec<u8>,
     },
-    /// Connection success carrying the negotiated protocol version.
-    ConnectAck { flags: u8, version: u16 },
+    /// Connection success carrying the negotiated protocol version and server capabilities.
+    ConnectAck {
+        flags: u8,
+        selected_version: ProtocolVersion,
+        capabilities: u32,
+    },
     /// Connection failure carrying a numeric reason and optional message.
     ConnectError {
         flags: u8,

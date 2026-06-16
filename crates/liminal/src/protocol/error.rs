@@ -1,4 +1,4 @@
-use super::FrameType;
+use super::{FrameType, lifecycle::ConnectionState};
 
 /// Protocol-level failures with stable numeric reason codes for error frames and metrics.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -27,8 +27,12 @@ pub enum ProtocolError {
     },
 
     /// A frame would move the protocol connection through an invalid state transition.
-    #[error("invalid protocol state transition")]
-    InvalidStateTransition { message: Option<String> },
+    #[error("invalid protocol state transition from {current_state:?} with {frame_type:?}")]
+    InvalidStateTransition {
+        current_state: ConnectionState,
+        frame_type: FrameType,
+        message: Option<String>,
+    },
 
     /// Authentication failed during connection setup.
     #[error("authentication failure")]
@@ -91,7 +95,7 @@ impl ProtocolError {
             | Self::TruncatedPayload { message }
             | Self::UnknownFrameType { message, .. }
             | Self::InvalidStream { message, .. }
-            | Self::InvalidStateTransition { message }
+            | Self::InvalidStateTransition { message, .. }
             | Self::AuthenticationFailure { message }
             | Self::VersionMismatch { message }
             | Self::SchemaIncompatible { message }
@@ -105,6 +109,18 @@ impl ProtocolError {
             frame_type,
             stream_id,
             message: Some("stream id violates frame type invariants".to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn invalid_state_transition(
+        current_state: ConnectionState,
+        frame_type: FrameType,
+    ) -> Self {
+        Self::InvalidStateTransition {
+            current_state,
+            frame_type,
+            message: Some("frame is invalid for the current connection state".to_owned()),
         }
     }
 
