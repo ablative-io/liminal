@@ -356,10 +356,7 @@ fn route_partition(
         return 0;
     };
     let routed = partition_key.apply(envelope) % partition_count_u64;
-    match usize::try_from(routed) {
-        Ok(partition) => partition,
-        Err(_) => partition_count.saturating_sub(1),
-    }
+    usize::try_from(routed).unwrap_or_else(|_| partition_count.saturating_sub(1))
 }
 
 fn validate_partition_count(partition_count: usize) -> Result<(), DurabilityError> {
