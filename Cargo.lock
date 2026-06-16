@@ -1052,6 +1052,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "liminal-sdk"
+version = "0.1.0"
+dependencies = [
+ "futures-core",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "liminal-server"
 version = "0.1.0"
 dependencies = [

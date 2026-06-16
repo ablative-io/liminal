@@ -1,0 +1,21 @@
+[package]
+name = "liminal-sdk"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Application-facing SDK traits for liminal messaging clients"
+
+[features]
+default = ["std"]
+std = ["thiserror/std", "serde/std"]
+
+[dependencies]
+futures-core = { version = "0.3", default-features = false }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+thiserror = { version = "2", default-features = false }
+
+[lints]
+workspace = true
