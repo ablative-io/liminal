@@ -40,7 +40,7 @@ impl Default for PublisherId {
 }
 
 /// Message envelope used as the delivery unit inside the core bus.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Envelope {
     /// Validated payload bytes, normalized by the schema when defaults are applied.
     pub payload: Vec<u8>,

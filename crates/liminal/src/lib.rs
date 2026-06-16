@@ -12,6 +12,8 @@ pub mod routing;
 pub mod tracing;
 
 pub use channel::{ChannelConfig, ChannelHandle, ChannelMode};
+pub use conversation::{ConversationConfig, ConversationHandle, ConversationState};
+pub use envelope::Envelope;
 pub use error::LiminalError;
 pub use metrics::MetricsRegistry;
 pub use tracing::TraceContext;
