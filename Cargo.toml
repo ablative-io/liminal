@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/haematite", "crates/liminal", "crates/liminal-server"]
+members = [
+    "crates/haematite",
+    "crates/liminal",
+    "crates/liminal-sdk",
+    "crates/liminal-server",
+]
 resolver = "2"
 
 [workspace.package]
