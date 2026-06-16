@@ -1,3 +1,4 @@
+pub mod aion;
 pub mod causal;
 pub mod channel;
 pub mod conversation;
