@@ -1,4 +1,4 @@
-use super::{error::ProtocolError, version::ProtocolVersion};
+use super::{envelope::MessageEnvelope, error::ProtocolError, version::ProtocolVersion};
 
 /// Number of bytes in every serialized frame header.
 pub const HEADER_LEN: usize = 10;
@@ -190,12 +190,12 @@ pub enum Frame {
         stream_id: u32,
         subscription_id: u64,
     },
-    /// Publish request carrying a channel and opaque application payload bytes.
+    /// Publish request carrying a channel and typed message envelope.
     Publish {
         flags: u8,
         stream_id: u32,
         channel: String,
-        payload: Vec<u8>,
+        envelope: MessageEnvelope,
     },
     /// Publish success carrying the accepted message id.
     PublishAck {
@@ -217,12 +217,12 @@ pub enum Frame {
         conversation_id: u64,
         subject: String,
     },
-    /// Conversation message carrying a conversation id and opaque payload bytes.
+    /// Conversation message carrying a conversation id and typed message envelope.
     ConversationMessage {
         flags: u8,
         stream_id: u32,
         conversation_id: u64,
-        payload: Vec<u8>,
+        envelope: MessageEnvelope,
     },
     /// Conversation close carrying a conversation id and optional reason.
     ConversationClose {
@@ -291,14 +291,14 @@ impl Frame {
     pub fn new_publish(
         stream_id: u32,
         channel: impl Into<String>,
-        payload: impl Into<Vec<u8>>,
+        envelope: MessageEnvelope,
     ) -> Result<Self, ProtocolError> {
         validate_stream(FrameType::Publish, stream_id)?;
         Ok(Self::Publish {
             flags: 0,
             stream_id,
             channel: channel.into(),
-            payload: payload.into(),
+            envelope,
         })
     }
 
@@ -417,55 +417,4 @@ pub fn validate_stream(frame_type: FrameType, stream_id: u32) -> Result<(), Prot
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{Frame, FrameType, validate_stream};
-    use crate::protocol::ProtocolError;
-
-    #[test]
-    fn frame_type_discriminants_round_trip() {
-        let values = [
-            (0x01, FrameType::Connect),
-            (0x02, FrameType::ConnectAck),
-            (0x03, FrameType::ConnectError),
-            (0x04, FrameType::Disconnect),
-            (0x05, FrameType::Subscribe),
-            (0x06, FrameType::SubscribeAck),
-            (0x07, FrameType::SubscribeError),
-            (0x08, FrameType::Unsubscribe),
-            (0x09, FrameType::Publish),
-            (0x0A, FrameType::PublishAck),
-            (0x0B, FrameType::PublishError),
-            (0x0C, FrameType::ConversationOpen),
-            (0x0D, FrameType::ConversationMessage),
-            (0x0E, FrameType::ConversationClose),
-            (0x0F, FrameType::ConversationError),
-            (0x10, FrameType::Accept),
-            (0x11, FrameType::Defer),
-            (0x12, FrameType::Reject),
-            (0x13, FrameType::Ping),
-            (0x14, FrameType::Pong),
-        ];
-
-        for (wire, frame_type) in values {
-            assert_eq!(FrameType::from(wire), frame_type);
-            assert_eq!(u8::from(frame_type), wire);
-        }
-        assert_eq!(FrameType::from(0x80), FrameType::Unknown(0x80));
-        assert_eq!(u8::from(FrameType::Unknown(0x80)), 0x80);
-    }
-
-    #[test]
-    fn constructors_validate_streams() {
-        assert!(Frame::new_ping(0).is_ok());
-        assert!(matches!(
-            Frame::new_ping(1),
-            Err(ProtocolError::InvalidStream { .. })
-        ));
-        assert!(Frame::new_publish(1, "orders", [1_u8, 2, 3]).is_ok());
-        assert!(matches!(
-            Frame::new_publish(0, "orders", [1_u8, 2, 3]),
-            Err(ProtocolError::InvalidStream { .. })
-        ));
-        assert!(validate_stream(FrameType::Accept, 2).is_ok());
-    }
-}
+mod tests;

@@ -1,5 +1,8 @@
 use super::{decode, encode, encoded_len};
-use crate::protocol::{Frame, FrameType, ProtocolError, ProtocolVersion};
+use crate::protocol::{
+    CausalContext, Frame, FrameType, MessageEnvelope, MessageId, ProtocolError, ProtocolVersion,
+    SchemaId, extract_causal_context,
+};
 
 #[test]
 fn round_trips_all_named_frame_types() -> Result<(), ProtocolError> {
@@ -26,7 +29,7 @@ fn encode_writes_header_fields_in_wire_order() -> Result<(), ProtocolError> {
         flags: 0xA5,
         stream_id: 0x0102_0304,
         channel: "orders".to_owned(),
-        payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        envelope: sample_envelope(vec![0xDE, 0xAD, 0xBE, 0xEF]),
     };
     let mut buffer = vec![0_u8; encoded_len(&frame)?];
     let written = encode(&frame, &mut buffer)?;
@@ -43,32 +46,57 @@ fn encode_writes_header_fields_in_wire_order() -> Result<(), ProtocolError> {
 }
 
 #[test]
-fn payload_bearing_frames_preserve_payload_bytes() -> Result<(), ProtocolError> {
-    let publish_payload = vec![0, 1, 2, 3, 255];
+fn message_frames_preserve_envelope_payload_bytes() -> Result<(), ProtocolError> {
+    let publish_envelope = sample_envelope(vec![0, 1, 2, 3, 255]);
     let publish = Frame::Publish {
         flags: 0,
         stream_id: 7,
         channel: "payloads".to_owned(),
-        payload: publish_payload.clone(),
+        envelope: publish_envelope.clone(),
     };
     let decoded_publish = round_trip(&publish)?;
     assert!(matches!(
         decoded_publish,
-        Frame::Publish { payload, .. } if payload == publish_payload
+        Frame::Publish { envelope, .. } if envelope == publish_envelope
     ));
 
-    let conversation_payload = vec![9, 8, 7, 6, 5];
+    let conversation_envelope = sample_envelope(vec![9, 8, 7, 6, 5]);
     let conversation = Frame::ConversationMessage {
         flags: 1,
         stream_id: 8,
         conversation_id: 42,
-        payload: conversation_payload.clone(),
+        envelope: conversation_envelope.clone(),
     };
     let decoded_conversation = round_trip(&conversation)?;
     assert!(matches!(
         decoded_conversation,
-        Frame::ConversationMessage { payload, .. } if payload == conversation_payload
+        Frame::ConversationMessage { envelope, .. } if envelope == conversation_envelope
     ));
+    Ok(())
+}
+
+#[test]
+fn causal_context_extracts_from_publish_frame_envelope_bytes() -> Result<(), ProtocolError> {
+    let causal_context = CausalContext {
+        parent_id: Some(MessageId::from("publish-parent")),
+        vector_clock_entry: Some(77),
+    };
+    let envelope = MessageEnvelope::new(
+        SchemaId::new([0x33; 32]),
+        causal_context.clone(),
+        vec![0xCA, 0xFE, 0xBA, 0xBE],
+    );
+    let frame = Frame::Publish {
+        flags: 0,
+        stream_id: 7,
+        channel: "payloads".to_owned(),
+        envelope,
+    };
+    let mut buffer = vec![0_u8; encoded_len(&frame)?];
+    let written = encode(&frame, &mut buffer)?;
+    let envelope_bytes = publish_envelope_bytes(&buffer[..written], "payloads")?;
+
+    assert_eq!(extract_causal_context(envelope_bytes)?, causal_context);
     Ok(())
 }
 
@@ -269,7 +297,7 @@ fn publish_frames() -> [Frame; 3] {
             flags: 8,
             stream_id: 2,
             channel: "orders".to_owned(),
-            payload: vec![0x10, 0x20, 0x30],
+            envelope: sample_envelope(vec![0x10, 0x20, 0x30]),
         },
         Frame::PublishAck {
             flags: 9,
@@ -297,7 +325,7 @@ fn conversation_frames() -> [Frame; 4] {
             flags: 12,
             stream_id: 3,
             conversation_id: 303,
-            payload: vec![0xAB, 0xCD],
+            envelope: sample_envelope(vec![0xAB, 0xCD]),
         },
         Frame::ConversationClose {
             flags: 13,
@@ -335,4 +363,64 @@ fn pressure_frames() -> [Frame; 3] {
             message: Some("over capacity".to_owned()),
         },
     ]
+}
+
+fn sample_envelope(payload: Vec<u8>) -> MessageEnvelope {
+    MessageEnvelope::new(
+        SchemaId::new([0x11; 32]),
+        CausalContext {
+            parent_id: Some(MessageId::from("parent-1")),
+            vector_clock_entry: Some(99),
+        },
+        payload,
+    )
+}
+
+fn publish_envelope_bytes<'a>(
+    encoded_frame: &'a [u8],
+    expected_channel: &str,
+) -> Result<&'a [u8], ProtocolError> {
+    let payload = read_slice(encoded_frame, 10, encoded_frame.len() - 10, "frame payload")?;
+    let mut offset = 0;
+    let channel_len = read_u32_as_usize(payload, &mut offset, "channel length")?;
+    let channel_bytes = read_slice(payload, offset, channel_len, "channel bytes")?;
+    offset = offset
+        .checked_add(channel_len)
+        .ok_or_else(|| ProtocolError::codec("test channel offset overflowed usize"))?;
+    if channel_bytes != expected_channel.as_bytes() {
+        return Err(ProtocolError::codec("test channel bytes did not match"));
+    }
+
+    let envelope_len = read_u32_as_usize(payload, &mut offset, "envelope length")?;
+    read_slice(payload, offset, envelope_len, "envelope bytes")
+}
+
+fn read_u32_as_usize(
+    bytes: &[u8],
+    offset: &mut usize,
+    field: &str,
+) -> Result<usize, ProtocolError> {
+    let bytes = read_slice(bytes, *offset, 4, field)?;
+    *offset = offset
+        .checked_add(4)
+        .ok_or_else(|| ProtocolError::codec("test u32 offset overflowed usize"))?;
+    let [b0, b1, b2, b3] = bytes else {
+        return Err(ProtocolError::codec("test u32 field was truncated"));
+    };
+    usize::try_from(u32::from_be_bytes([*b0, *b1, *b2, *b3]))
+        .map_err(|_| ProtocolError::codec(format!("{field} cannot fit usize")))
+}
+
+fn read_slice<'a>(
+    bytes: &'a [u8],
+    offset: usize,
+    len: usize,
+    field: &str,
+) -> Result<&'a [u8], ProtocolError> {
+    let end = offset
+        .checked_add(len)
+        .ok_or_else(|| ProtocolError::codec(format!("{field} offset overflowed usize")))?;
+    bytes
+        .get(offset..end)
+        .ok_or_else(|| ProtocolError::codec(format!("{field} exceeded available bytes")))
 }

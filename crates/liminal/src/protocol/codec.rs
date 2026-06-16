@@ -157,13 +157,16 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
             Ok(U64_LEN)
         }
         Frame::Publish {
-            channel, payload, ..
-        } => sum_lengths(&[string_field_len(channel)?, bytes_field_len(payload)?]),
+            channel, envelope, ..
+        } => sum_lengths(&[
+            string_field_len(channel)?,
+            envelope_bytes_field_len(envelope.encoded_len()?)?,
+        ]),
         Frame::ConversationOpen { subject, .. } => {
             sum_lengths(&[U64_LEN, string_field_len(subject)?])
         }
-        Frame::ConversationMessage { payload, .. } => {
-            sum_lengths(&[U64_LEN, bytes_field_len(payload)?])
+        Frame::ConversationMessage { envelope, .. } => {
+            sum_lengths(&[U64_LEN, envelope_bytes_field_len(envelope.encoded_len()?)?])
         }
         Frame::ConversationClose {
             reason_code,
@@ -180,6 +183,11 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         Frame::Accept { .. } | Frame::Defer { .. } => Ok(U32_LEN),
         Frame::Unknown { payload, .. } => checked_u32_len(payload.len()).map(|()| payload.len()),
     }
+}
+
+fn envelope_bytes_field_len(envelope_len: usize) -> Result<usize, ProtocolError> {
+    checked_u32_len(envelope_len)?;
+    sum_lengths(&[U32_LEN, envelope_len])
 }
 
 fn write_handshake_payload(
@@ -252,10 +260,10 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
             subscription_id, ..
         } => writer.write_u64(*subscription_id)?,
         Frame::Publish {
-            channel, payload, ..
+            channel, envelope, ..
         } => {
             writer.write_string_field(channel)?;
-            writer.write_bytes_field(payload)?;
+            writer.write_bytes_field(&envelope.serialize()?)?;
         }
         Frame::PublishAck { message_id, .. } => writer.write_u64(*message_id)?,
         Frame::ConversationOpen {
@@ -268,11 +276,11 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
         }
         Frame::ConversationMessage {
             conversation_id,
-            payload,
+            envelope,
             ..
         } => {
             writer.write_u64(*conversation_id)?;
-            writer.write_bytes_field(payload)?;
+            writer.write_bytes_field(&envelope.serialize()?)?;
         }
         Frame::ConversationClose {
             conversation_id,

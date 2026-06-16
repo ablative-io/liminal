@@ -1,4 +1,4 @@
-use crate::protocol::{Frame, FrameType, ProtocolError, ProtocolVersion};
+use crate::protocol::{Frame, FrameType, MessageEnvelope, ProtocolError, ProtocolVersion};
 
 use super::payload::PayloadReader;
 
@@ -124,7 +124,7 @@ fn decode_publish_payload(
             flags,
             stream_id,
             channel: reader.read_string_field()?,
-            payload: reader.read_bytes_field()?,
+            envelope: MessageEnvelope::deserialize(&reader.read_bytes_field()?)?,
         }),
         FrameType::PublishAck => Ok(Frame::PublishAck {
             flags,
@@ -159,7 +159,7 @@ fn decode_conversation_payload(
             flags,
             stream_id,
             conversation_id,
-            payload: reader.read_bytes_field()?,
+            envelope: MessageEnvelope::deserialize(&reader.read_bytes_field()?)?,
         }),
         FrameType::ConversationClose => Ok(Frame::ConversationClose {
             flags,
