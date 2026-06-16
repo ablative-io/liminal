@@ -7,6 +7,16 @@ use crate::channel::ChannelMode;
 use crate::conversation::types::{
     ConversationConfig, ConversationPhase, CrashPolicy, ParticipantHealth, ParticipantPid,
 };
+use crate::envelope::Envelope;
+
+fn test_envelope(payload: &[u8]) -> Envelope {
+    Envelope::new(
+        payload.to_vec(),
+        None,
+        crate::channel::SchemaId::new(),
+        crate::envelope::PublisherId::default(),
+    )
+}
 
 #[test]
 fn actor_is_spawned_linked_and_queryable() -> Result<(), Box<dyn Error>> {
@@ -44,12 +54,12 @@ fn handle_progresses_created_active_closed_lifecycle() -> Result<(), Box<dyn Err
         handle.query_state()?.current_phase,
         ConversationPhase::Created
     );
-    handle.send("hello")?;
+    handle.send(test_envelope(b"hello"))?;
     assert_eq!(
         handle.query_state()?.current_phase,
         ConversationPhase::Active
     );
-    assert_eq!(handle.receive()?.payload(), "hello");
+    assert_eq!(handle.receive()?.payload, b"hello");
     handle.close()?;
     assert_eq!(
         handle.query_state()?.current_phase,
