@@ -45,7 +45,11 @@ pub fn evaluate(predicate: &Predicate, accessor: &dyn FieldAccessor) -> bool {
     }
 }
 
-fn compare_values(field_value: FieldValueRef<'_>, op: ComparisonOp, literal: &FieldValue) -> bool {
+pub(crate) fn compare_values(
+    field_value: FieldValueRef<'_>,
+    op: ComparisonOp,
+    literal: &FieldValue,
+) -> bool {
     match (field_value, literal) {
         (FieldValueRef::Text(left), FieldValue::Text(right)) => {
             compare_ordering(left.cmp(right.as_str()), op)
