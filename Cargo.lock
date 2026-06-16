@@ -580,6 +580,7 @@ name = "liminal"
 version = "0.1.0"
 dependencies = [
  "beamr",
+ "rand",
  "thiserror",
 ]
 
