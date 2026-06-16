@@ -8,7 +8,9 @@ pub mod metrics;
 pub mod pressure;
 pub mod protocol;
 pub mod routing;
+pub mod tracing;
 
 pub use channel::{ChannelConfig, ChannelHandle, ChannelMode};
 pub use error::LiminalError;
 pub use metrics::MetricsRegistry;
+pub use tracing::TraceContext;

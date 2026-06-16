@@ -10,6 +10,7 @@ description = "A conversation-based messaging bus built on beamr"
 
 [dependencies]
 beamr = { version = "0.6.4", features = ["json"] }
+rand = "0.10.1"
 thiserror = "2"
 
 [lints]
