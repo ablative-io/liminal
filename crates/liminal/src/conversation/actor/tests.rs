@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::time::{Duration, Instant};
 
 use beamr::process::ExitReason;
 
@@ -16,6 +17,21 @@ fn test_envelope(payload: &[u8]) -> Envelope {
         crate::channel::SchemaId::new(),
         crate::envelope::PublisherId::default(),
     )
+}
+
+fn wait_until_trapped_exit_message(
+    scheduler: &beamr::scheduler::Scheduler,
+    actor_pid: ParticipantPid,
+    participant: ParticipantPid,
+) -> Option<bool> {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        let observed = scheduler.has_trapped_exit_message(actor_pid.get(), participant.get());
+        if observed == Some(true) || Instant::now() >= deadline {
+            return observed;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 #[test]
@@ -85,7 +101,7 @@ fn participant_death_arrives_as_trapped_exit_without_timeout() -> Result<(), Box
     scheduler.terminate_process(participant.get(), ExitReason::Error);
 
     assert_eq!(
-        scheduler.has_trapped_exit_message(actor_pid.get(), participant.get()),
+        wait_until_trapped_exit_message(scheduler.as_ref(), actor_pid, participant),
         Some(true)
     );
     let state = actor.state()?;
