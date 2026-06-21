@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Content-addressed, branchable, actor-native storage engine API"
+description = "In-memory mock of the haematite storage API (for developing/testing liminal's durability layer; not the real content-addressed engine)"
 
 [dependencies]
 thiserror = "2"

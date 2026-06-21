@@ -1,9 +1,12 @@
 //! Content-hash module loading and hot deployment for routing functions.
 //!
-//! Wraps the beamr module registry. Modules are content-addressed: loading the
-//! same bytecode twice reuses the already-loaded module, and hot deployment
-//! atomically swaps the active function while in-flight executions keep their
-//! own reference to the previous version until they complete.
+//! Status (2026-06): this is an in-memory `HashMap` keyed by content hash, not a
+//! beamr module registry. Module bytecode is only hashed for dedup; it is never
+//! executed — routing logic is supplied as a native Rust closure. Modules are
+//! content-addressed: loading the same bytecode twice reuses the already-loaded
+//! module, and hot deployment atomically swaps the active function while
+//! in-flight executions keep their own reference to the previous version until
+//! they complete.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -125,8 +128,10 @@ impl std::fmt::Debug for RoutingFunction {
 
 /// Loads routing modules by content hash, deduplicating identical bytecode.
 ///
-/// Wraps the beamr module registry. Loading the same content hash twice returns
-/// a handle to the already-loaded module rather than loading it again.
+/// Backed by an in-memory `HashMap` keyed by content hash, not a beamr module
+/// registry; the bytecode is hashed for dedup only and is never executed.
+/// Loading the same content hash twice returns a handle to the already-loaded
+/// module rather than loading it again.
 #[derive(Debug, Default)]
 pub struct ModuleLoader {
     loaded: Mutex<HashMap<ContentHash, Arc<LoadedModule>>>,
