@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use crate::ServerError;
+use crate::config::file::load_config;
 
 /// Starts the server deployment wrapper for the supplied configuration path.
 ///
@@ -18,9 +19,12 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         });
     }
 
+    let config = load_config(config_path)?;
+
     tracing::debug!(
         config_path = %config_path.display(),
-        "liminal server bootstrap initialized"
+        listen_address = %config.listen_address,
+        "liminal server configuration validated"
     );
 
     Ok(())
