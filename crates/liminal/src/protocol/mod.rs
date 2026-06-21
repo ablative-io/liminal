@@ -15,4 +15,5 @@ pub use codec::{decode, encode, encoded_len};
 pub use envelope::{MessageEnvelope, SchemaId};
 pub use error::ProtocolError;
 pub use frame::{Frame, FrameHeader, FrameType, validate_stream};
+pub use multiplex::{StreamAllocator, StreamId, StreamState, StreamTable};
 pub use version::{ProtocolVersion, negotiate_version};
