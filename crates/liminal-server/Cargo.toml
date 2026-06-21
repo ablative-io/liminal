@@ -13,6 +13,7 @@ anyhow = "1"
 beamr = { version = "0.6.4", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 liminal = { path = "../liminal" }
+serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"
 tracing = "0.1"

@@ -1068,6 +1068,7 @@ dependencies = [
  "beamr",
  "clap",
  "liminal",
+ "serde",
  "thiserror",
  "toml",
  "tracing",
