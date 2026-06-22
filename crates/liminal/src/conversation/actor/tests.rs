@@ -1,9 +1,8 @@
 use std::error::Error;
-use std::time::{Duration, Instant};
 
 use beamr::process::ExitReason;
 
-use super::ConversationSupervisor;
+use super::{ConversationActor, ConversationSupervisor};
 use crate::channel::ChannelMode;
 use crate::conversation::types::{
     ConversationConfig, ConversationPhase, CrashPolicy, ParticipantHealth, ParticipantPid,
@@ -19,19 +18,38 @@ fn test_envelope(payload: &[u8]) -> Envelope {
     )
 }
 
-fn wait_until_trapped_exit_message(
-    scheduler: &beamr::scheduler::Scheduler,
-    actor_pid: ParticipantPid,
-    participant: ParticipantPid,
-) -> Option<bool> {
-    let deadline = Instant::now() + Duration::from_millis(100);
-    loop {
-        let observed = scheduler.has_trapped_exit_message(actor_pid.get(), participant.get());
-        if observed == Some(true) || Instant::now() >= deadline {
-            return observed;
+/// Drive the actor's command loop until it reflects the participant death, then
+/// return the observed state.
+///
+/// We deliberately assert on the *durable effect* of the trapped exit — the
+/// `Failed`/`Dead` transition performed by `handle_participant_exit` — rather
+/// than scanning the actor mailbox for the raw `{EXIT, _, _}` tuple. The tuple
+/// is a transient artifact: once the scheduler runs the actor's slice it
+/// consumes the message (`RemoveMessage`) and applies its effect, so polling
+/// for the tuple races consumption and is inherently non-deterministic. The
+/// state transition, by contrast, is the observable, monotone outcome the test
+/// actually cares about: a participant death must arrive as a *trapped* exit
+/// (the actor survives it) and be recorded (not silently dropped or timed out).
+///
+/// `state()` enqueues a `QueryState` command behind the already-delivered EXIT
+/// message in the actor mailbox, so FIFO processing guarantees the snapshot we
+/// observe is taken no earlier than the exit was handled. Each successful
+/// `state()` call also proves the actor is still alive and responsive — i.e. it
+/// trapped the exit rather than being cascade-killed by it, and answered
+/// "without timeout".
+fn state_after_trapped_participant_death(
+    actor: &ConversationActor,
+) -> Result<crate::conversation::types::ConversationState, Box<dyn Error>> {
+    // Generous bound: the work is a single scheduler slice; this only guards
+    // against a genuine hang (the failure the test name warns against).
+    for _ in 0..1_000 {
+        let state = actor.state()?;
+        if state.current_phase == ConversationPhase::Failed {
+            return Ok(state);
         }
-        std::thread::sleep(Duration::from_millis(1));
+        std::thread::yield_now();
     }
+    Err("actor did not record trapped participant death".into())
 }
 
 #[test]
@@ -97,16 +115,25 @@ fn participant_death_arrives_as_trapped_exit_without_timeout() -> Result<(), Box
         CrashPolicy::Fail,
     ))?;
     let actor_pid = actor.pid()?;
+    assert!(scheduler.is_linked(actor_pid.get(), participant.get()));
 
     scheduler.terminate_process(participant.get(), ExitReason::Error);
 
-    assert_eq!(
-        wait_until_trapped_exit_message(scheduler.as_ref(), actor_pid, participant),
-        Some(true)
-    );
-    let state = actor.state()?;
+    // The participant died with an abnormal reason while linked to the actor.
+    // Because the actor traps exits, this must arrive as a trapped `{EXIT, _, _}`
+    // and be recorded as a participant crash — the actor must NOT be
+    // cascade-killed by it. We observe the durable, monotone effect of that
+    // trapped exit (Failed/Dead) rather than the transient mailbox tuple, which
+    // the actor consumes as soon as it runs (see helper docs).
+    let state = state_after_trapped_participant_death(&actor)?;
     assert_eq!(state.current_phase, ConversationPhase::Failed);
     assert_eq!(state.participants[0].health, ParticipantHealth::Dead);
+
+    // The actor itself survived the linked exit (trapped, not killed): its pid
+    // is unchanged and still live in the process table.
+    assert_eq!(actor.pid()?, actor_pid);
+    assert!(scheduler.process_table().get(actor_pid.get()).is_some());
+
     supervisor.shutdown();
     Ok(())
 }
