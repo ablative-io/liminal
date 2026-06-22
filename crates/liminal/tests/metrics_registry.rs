@@ -1,5 +1,5 @@
 use liminal::MetricsRegistry;
-use liminal::metrics::{MetricKind, MetricValue, MetricsSnapshot};
+use liminal::metrics::{MetricKind, MetricRegistrationError, MetricValue, MetricsSnapshot};
 
 #[test]
 fn metrics_registry_is_clone_send_sync() {
@@ -78,6 +78,37 @@ fn duplicate_name_with_different_kind_returns_error() -> Result<(), Box<dyn std:
             .register_gauge("delivery_events", [("channel", "alpha")])
             .is_err()
     );
+
+    Ok(())
+}
+
+#[test]
+fn histogram_registration_rejects_more_than_fixed_bucket_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let registry = MetricsRegistry::new();
+    let buckets = (0..=64).map(f64::from).collect::<Vec<_>>();
+
+    let error = match registry.register_histogram(
+        "large_latency",
+        std::iter::empty::<(&str, &str)>(),
+        buckets,
+    ) {
+        Ok(_handle) => {
+            return Err(
+                std::io::Error::other("large_latency registration unexpectedly succeeded").into(),
+            );
+        }
+        Err(error) => error,
+    };
+
+    assert!(matches!(
+        error,
+        MetricRegistrationError::TooManyHistogramBuckets {
+            name,
+            count: 65,
+            max: 64,
+        } if name == "large_latency"
+    ));
 
     Ok(())
 }

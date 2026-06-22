@@ -2,113 +2,28 @@
 
 mod collectors;
 mod families;
+mod histogram_value;
+mod types;
 
 use std::collections::{BTreeMap, btree_map::Entry};
-use std::error::Error;
-use std::fmt::{Display, Formatter, Result as FmtResult};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub use collectors::{CounterHandle, GaugeHandle, HistogramHandle};
 pub use families::{CounterFamily, GaugeFamily, HistogramFamily};
+pub use histogram_value::HistogramValue;
+pub use types::{
+    HistogramBucketSnapshot, HistogramSnapshot, MetricKind, MetricRegistrationError,
+    MetricSnapshot, MetricValue, MetricsSnapshot,
+};
 
 use collectors::{CounterMetric, GaugeMetric, HistogramMetric};
 
+/// Keeps histogram observation bounded to fixed work on actor hot paths.
+pub(crate) const MAX_HISTOGRAM_BUCKETS: usize = 64;
+
 static METRICS_ENABLED: AtomicBool = AtomicBool::new(false);
 static GLOBAL_METRICS: OnceLock<MetricsRegistry> = OnceLock::new();
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MetricKind {
-    Counter,
-    Gauge,
-    Histogram,
-}
-
-impl Display for MetricKind {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::Counter => formatter.write_str("counter"),
-            Self::Gauge => formatter.write_str("gauge"),
-            Self::Histogram => formatter.write_str("histogram"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MetricRegistrationError {
-    IncompatibleMetricKind {
-        name: String,
-        existing: MetricKind,
-        requested: MetricKind,
-    },
-    IncompatibleHistogramBuckets {
-        name: String,
-        labels: Vec<(String, String)>,
-    },
-    GlobalRegistryAlreadyInstalled,
-}
-
-impl Display for MetricRegistrationError {
-    fn fmt(&self, formatter: &mut Formatter<'_>) -> FmtResult {
-        match self {
-            Self::IncompatibleMetricKind {
-                name,
-                existing,
-                requested,
-            } => write!(
-                formatter,
-                "metric `{name}` is registered as {existing}, not {requested}"
-            ),
-            Self::IncompatibleHistogramBuckets { name, labels } => write!(
-                formatter,
-                "histogram `{name}` with labels {labels:?} is registered with different buckets"
-            ),
-            Self::GlobalRegistryAlreadyInstalled => {
-                formatter.write_str("global metrics registry is already installed")
-            }
-        }
-    }
-}
-
-impl Error for MetricRegistrationError {}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetricsSnapshot {
-    pub metrics: Vec<MetricSnapshot>,
-}
-
-impl MetricsSnapshot {
-    #[must_use]
-    pub fn metrics(&self) -> &[MetricSnapshot] {
-        &self.metrics
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MetricSnapshot {
-    pub name: String,
-    pub labels: Vec<(String, String)>,
-    pub kind: MetricKind,
-    pub value: MetricValue,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MetricValue {
-    Counter(u64),
-    Gauge(i64),
-    Histogram(HistogramSnapshot),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistogramSnapshot {
-    pub buckets: Vec<HistogramBucketSnapshot>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HistogramBucketSnapshot {
-    pub upper_bound: Option<u64>,
-    pub count: u64,
-}
 
 #[derive(Clone, Debug)]
 pub struct MetricsRegistry {
@@ -183,16 +98,17 @@ impl MetricsRegistry {
     ///
     /// Returns an error if `name` was previously registered with a different
     /// kind, or if the exact histogram was registered with different buckets.
-    pub fn register_histogram<Labels, Key, Value>(
+    pub fn register_histogram<Labels, Key, Value, Bucket>(
         &self,
         name: impl Into<String>,
         labels: Labels,
-        buckets: Vec<u64>,
+        buckets: Vec<Bucket>,
     ) -> Result<HistogramHandle, MetricRegistrationError>
     where
         Labels: IntoIterator<Item = (Key, Value)>,
         Key: Into<String>,
         Value: Into<String>,
+        Bucket: HistogramValue,
     {
         let name = name.into();
         let labels = normalize_labels(labels);
@@ -307,7 +223,7 @@ impl RegistryInner {
 
 #[derive(Debug, Default)]
 struct RegistryState {
-    histogram_buckets_by_name: BTreeMap<String, Vec<u64>>,
+    histogram_buckets_by_name: BTreeMap<String, Vec<f64>>,
     metrics: BTreeMap<MetricKey, MetricEntry>,
     kind_by_name: BTreeMap<String, MetricKind>,
 }
@@ -397,10 +313,30 @@ where
     labels
 }
 
-fn normalize_buckets(mut buckets: Vec<u64>) -> Vec<u64> {
-    buckets.sort_unstable();
-    buckets.dedup();
+pub(super) fn normalize_buckets<Bucket>(buckets: Vec<Bucket>) -> Vec<f64>
+where
+    Bucket: HistogramValue,
+{
+    let mut buckets = buckets
+        .into_iter()
+        .map(HistogramValue::into_f64)
+        .filter(|bucket| bucket.is_finite())
+        .collect::<Vec<_>>();
+    buckets.sort_by(f64::total_cmp);
+    buckets.dedup_by(|left, right| left.total_cmp(right).is_eq());
     buckets
+}
+
+fn ensure_histogram_bucket_count(name: &str, count: usize) -> Result<(), MetricRegistrationError> {
+    if count <= MAX_HISTOGRAM_BUCKETS {
+        return Ok(());
+    }
+
+    Err(MetricRegistrationError::TooManyHistogramBuckets {
+        name: name.to_owned(),
+        count,
+        max: MAX_HISTOGRAM_BUCKETS,
+    })
 }
 
 fn read_registry_state(lock: &RwLock<RegistryState>) -> RwLockReadGuard<'_, RegistryState> {
@@ -451,7 +387,7 @@ fn ensure_histogram_buckets(
     collector: &MetricCollector,
     name: &str,
     labels: &[(String, String)],
-    requested_buckets: &[u64],
+    requested_buckets: &[f64],
 ) -> Result<(), MetricRegistrationError> {
     ensure_collector_kind(collector, name, MetricKind::Histogram)?;
     match collector {

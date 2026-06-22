@@ -108,9 +108,9 @@ fn delivery_latency_records_configured_histogram() -> Result<(), Box<dyn std::er
         |value| {
             matches!(value, MetricValue::Histogram(histogram)
                 if histogram.buckets.len() == 3
-                    && histogram.buckets[0].upper_bound == Some(10)
+                    && histogram.buckets[0].upper_bound == Some(10.0)
                     && histogram.buckets[0].count == 0
-                    && histogram.buckets[1].upper_bound == Some(100)
+                    && histogram.buckets[1].upper_bound == Some(100.0)
                     && histogram.buckets[1].count == 1
                     && histogram.buckets[2].upper_bound.is_none()
                     && histogram.buckets[2].count == 0)
