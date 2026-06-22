@@ -76,6 +76,46 @@ fn message_frames_preserve_envelope_payload_bytes() -> Result<(), ProtocolError>
 }
 
 #[test]
+fn subscription_schema_fields_round_trip_and_remain_accessible() -> Result<(), ProtocolError> {
+    let hash_a = sample_schema(0xA1);
+    let hash_b = sample_schema(0xB2);
+    let decoded = round_trip(&Frame::Subscribe {
+        flags: 4,
+        stream_id: 9,
+        channel: "orders".to_owned(),
+        accepted_schemas: vec![hash_a, hash_b],
+    })?;
+    assert!(matches!(
+        decoded,
+        Frame::Subscribe { accepted_schemas, .. } if accepted_schemas == vec![hash_a, hash_b]
+    ));
+
+    let decoded = round_trip(&Frame::Subscribe {
+        flags: 4,
+        stream_id: 9,
+        channel: "orders".to_owned(),
+        accepted_schemas: Vec::new(),
+    })?;
+    assert!(matches!(
+        decoded,
+        Frame::Subscribe { accepted_schemas, .. } if accepted_schemas.is_empty()
+    ));
+
+    let selected_schema = sample_schema(0xC3);
+    let decoded = round_trip(&Frame::SubscribeAck {
+        flags: 5,
+        stream_id: 9,
+        subscription_id: 101,
+        selected_schema,
+    })?;
+    assert!(matches!(
+        decoded,
+        Frame::SubscribeAck { selected_schema: decoded_schema, .. } if decoded_schema == selected_schema
+    ));
+    Ok(())
+}
+
+#[test]
 fn causal_context_extracts_from_publish_frame_envelope_bytes() -> Result<(), ProtocolError> {
     let causal_context = CausalContext {
         parent_id: Some(MessageId::from("publish-parent")),
@@ -270,12 +310,13 @@ fn subscription_frames() -> [Frame; 4] {
             flags: 4,
             stream_id: 1,
             channel: "orders".to_owned(),
-            schema: Some("application/json".to_owned()),
+            accepted_schemas: vec![sample_schema(0xA1), sample_schema(0xB2)],
         },
         Frame::SubscribeAck {
             flags: 5,
             stream_id: 1,
             subscription_id: 101,
+            selected_schema: sample_schema(0xA1),
         },
         Frame::SubscribeError {
             flags: 6,
@@ -367,13 +408,17 @@ fn pressure_frames() -> [Frame; 3] {
 
 fn sample_envelope(payload: Vec<u8>) -> MessageEnvelope {
     MessageEnvelope::new(
-        SchemaId::new([0x11; 32]),
+        sample_schema(0x11),
         CausalContext {
             parent_id: Some(MessageId::from("parent-1")),
             vector_clock_entry: Some(99),
         },
         payload,
     )
+}
+
+fn sample_schema(seed: u8) -> SchemaId {
+    SchemaId::new([seed; SchemaId::WIRE_LEN])
 }
 
 fn publish_envelope_bytes<'a>(
