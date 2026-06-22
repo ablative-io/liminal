@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use super::{
-    CounterHandle, GaugeHandle, HistogramHandle, MetricKind, MetricRegistrationError,
-    MetricsRegistry, RegistryState, ensure_name_kind, normalize_buckets, write_registry_state,
+    CounterHandle, GaugeHandle, HistogramHandle, HistogramValue, MetricKind,
+    MetricRegistrationError, MetricsRegistry, RegistryState, ensure_histogram_bucket_count,
+    ensure_name_kind, normalize_buckets, write_registry_state,
 };
 
 #[derive(Clone, Debug)]
@@ -160,12 +161,15 @@ pub struct HistogramFamily {
 }
 
 impl HistogramFamily {
-    pub(super) fn new(
+    pub(super) fn new<Bucket>(
         registry: MetricsRegistry,
         name: impl Into<String>,
         label_name: impl Into<String>,
-        buckets: Vec<u64>,
-    ) -> Result<Self, MetricRegistrationError> {
+        buckets: Vec<Bucket>,
+    ) -> Result<Self, MetricRegistrationError>
+    where
+        Bucket: HistogramValue,
+    {
         let name = name.into();
         let buckets = normalize_buckets(buckets);
         registry.reserve_histogram_family(name.clone(), buckets.clone())?;
@@ -180,12 +184,15 @@ impl HistogramFamily {
         })
     }
 
-    pub fn observe(&self, label_value: &str, value: u64) {
+    pub fn observe<Value>(&self, label_value: &str, value: Value)
+    where
+        Value: HistogramValue,
+    {
         self.handle(label_value).observe(value);
     }
 
     #[must_use]
-    pub fn boundaries(&self) -> &[u64] {
+    pub fn boundaries(&self) -> &[f64] {
         &self.inner.buckets
     }
 
@@ -225,7 +232,7 @@ struct HistogramFamilyInner {
     registry: MetricsRegistry,
     name: String,
     label_name: String,
-    buckets: Vec<u64>,
+    buckets: Vec<f64>,
     handles: RwLock<HashMap<String, HistogramHandle>>,
 }
 
@@ -256,12 +263,15 @@ impl MetricsRegistry {
     ///
     /// Returns an error if `name` was previously registered with a different kind
     /// or if the histogram family was registered with different buckets.
-    pub fn register_histogram_family(
+    pub fn register_histogram_family<Bucket>(
         &self,
         name: impl Into<String>,
         label_name: impl Into<String>,
-        buckets: Vec<u64>,
-    ) -> Result<HistogramFamily, MetricRegistrationError> {
+        buckets: Vec<Bucket>,
+    ) -> Result<HistogramFamily, MetricRegistrationError>
+    where
+        Bucket: HistogramValue,
+    {
         HistogramFamily::new(self.clone(), name, label_name, buckets)
     }
 
@@ -277,8 +287,9 @@ impl MetricsRegistry {
     pub(super) fn reserve_histogram_family(
         &self,
         name: String,
-        buckets: Vec<u64>,
+        buckets: Vec<f64>,
     ) -> Result<(), MetricRegistrationError> {
+        ensure_histogram_bucket_count(&name, buckets.len())?;
         let mut state = write_registry_state(&self.inner.state);
         ensure_name_kind(&mut state, &name, MetricKind::Histogram)?;
         ensure_histogram_family_buckets(&mut state, name, buckets)
@@ -288,7 +299,7 @@ impl MetricsRegistry {
 fn ensure_histogram_family_buckets(
     state: &mut RegistryState,
     name: String,
-    buckets: Vec<u64>,
+    buckets: Vec<f64>,
 ) -> Result<(), MetricRegistrationError> {
     match state.histogram_buckets_by_name.get(&name) {
         Some(existing) if existing != &buckets => {

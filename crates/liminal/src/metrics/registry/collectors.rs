@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
-use super::{HistogramBucketSnapshot, HistogramSnapshot};
+use super::{HistogramBucketSnapshot, HistogramSnapshot, HistogramValue};
 
 #[derive(Debug)]
 pub(super) struct CounterMetric {
@@ -39,19 +39,19 @@ impl GaugeMetric {
 
 #[derive(Debug)]
 pub(super) struct HistogramMetric {
-    boundaries: Vec<u64>,
+    boundaries: Vec<f64>,
     counts: Vec<AtomicU64>,
 }
 
 impl HistogramMetric {
-    pub(super) fn new(boundaries: Vec<u64>) -> Self {
+    pub(super) fn new(boundaries: Vec<f64>) -> Self {
         let counts_len = boundaries.len().saturating_add(1);
         let counts = (0..counts_len).map(|_| AtomicU64::new(0)).collect();
 
         Self { boundaries, counts }
     }
 
-    pub(super) fn boundaries(&self) -> &[u64] {
+    pub(super) fn boundaries(&self) -> &[f64] {
         &self.boundaries
     }
 
@@ -69,7 +69,7 @@ impl HistogramMetric {
         HistogramSnapshot { buckets }
     }
 
-    fn bucket_index(&self, value: u64) -> usize {
+    fn bucket_index(&self, value: f64) -> usize {
         for (index, boundary) in self.boundaries.iter().enumerate() {
             if value <= *boundary {
                 return index;
@@ -156,12 +156,19 @@ pub struct HistogramHandle {
 
 impl HistogramHandle {
     #[must_use]
-    pub(super) fn noop(boundaries: Vec<u64>) -> Self {
+    pub(super) fn noop(boundaries: Vec<f64>) -> Self {
         let metric = Arc::new(HistogramMetric::new(boundaries));
         Self { metric }
     }
 
-    pub fn observe(&self, value: u64) {
+    pub fn observe<Value>(&self, value: Value)
+    where
+        Value: HistogramValue,
+    {
+        let value = value.into_f64();
+        if !value.is_finite() {
+            return;
+        }
         let bucket_index = self.metric.bucket_index(value);
         if let Some(count) = self.metric.counts.get(bucket_index) {
             count.fetch_add(1, Ordering::Relaxed);
@@ -169,7 +176,7 @@ impl HistogramHandle {
     }
 
     #[must_use]
-    pub fn boundaries(&self) -> &[u64] {
+    pub fn boundaries(&self) -> &[f64] {
         self.metric.boundaries()
     }
 }
