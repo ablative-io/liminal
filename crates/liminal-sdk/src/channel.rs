@@ -6,7 +6,7 @@ use futures_core::Stream;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
-use crate::{SchemaValidate, SdkError};
+use crate::{PressureResponse, SchemaValidate, SdkError};
 
 /// Application-facing typed channel API.
 ///
@@ -55,13 +55,15 @@ pub trait ChannelHandle: core::fmt::Debug + Send + Sync {
     /// Publishes a typed message to the channel.
     ///
     /// The message type must be serializable and must declare schema metadata;
-    /// a merely serializable value is rejected at compile time.
+    /// a merely serializable value is rejected at compile time. The returned
+    /// [`PressureResponse`] reports whether the bus accepted, deferred, or
+    /// rejected the publish attempt.
     ///
     /// # Errors
     ///
     /// Returns [`SdkError`] when the concrete channel implementation cannot
-    /// accept, serialize, validate, or deliver the message.
-    fn publish<M>(&self, message: M) -> Result<(), SdkError>
+    /// serialize, validate, or submit the message for delivery.
+    fn publish<M>(&self, message: M) -> Result<PressureResponse, SdkError>
     where
         M: Serialize + SchemaValidate;
 
