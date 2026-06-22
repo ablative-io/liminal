@@ -18,6 +18,7 @@ pub fn validate(config: &ServerConfig) -> Result<(), ServerError> {
     let mut errors = Vec::new();
 
     validate_listen_address(config, &mut errors);
+    validate_health_listen_address(config, &mut errors);
     validate_channels(config, &mut errors);
     validate_routing_rules(config, &mut errors);
     validate_persistence_path(config, &mut errors);
@@ -35,6 +36,23 @@ pub fn validate(config: &ServerConfig) -> Result<(), ServerError> {
 fn validate_listen_address(config: &ServerConfig, errors: &mut Vec<String>) {
     if config.listen_address.port() == 0 {
         errors.push("listen_address: port must be non-zero".to_owned());
+    }
+}
+
+fn validate_health_listen_address(config: &ServerConfig, errors: &mut Vec<String>) {
+    if config.health_listen_address.port() == 0 {
+        errors.push("health_listen_address: port must be non-zero".to_owned());
+    }
+
+    if config.health_listen_address == config.listen_address {
+        errors.push(
+            "health_listen_address: must differ from listen_address for probe isolation".to_owned(),
+        );
+    } else if config.health_listen_address.port() == config.listen_address.port() {
+        errors.push(
+            "health_listen_address: port must differ from listen_address port for probe isolation"
+                .to_owned(),
+        );
     }
 }
 
@@ -176,6 +194,7 @@ mod tests {
     fn sample_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         Ok(ServerConfig {
             listen_address: socket("127.0.0.1:8080")?,
+            health_listen_address: socket("127.0.0.1:8081")?,
             channels: vec![ChannelDef {
                 name: "orders".to_owned(),
                 schema_ref: "schemas/orders.json".to_owned(),
@@ -226,6 +245,48 @@ mod tests {
         let message = config_validation_message(validate(&config));
 
         assert!(message.contains("listen_address"));
+        assert!(message.contains("port"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_health_listen_address_reports_field_name() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut config = sample_config()?;
+        config.health_listen_address = socket("127.0.0.1:0")?;
+
+        let message = config_validation_message(validate(&config));
+
+        assert!(message.contains("health_listen_address"));
+        assert!(message.contains("port"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn matching_health_and_main_listen_addresses_are_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.health_listen_address = config.listen_address;
+
+        let message = config_validation_message(validate(&config));
+
+        assert!(message.contains("health_listen_address"));
+        assert!(message.contains("listen_address"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn matching_health_and_main_listen_ports_are_rejected() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut config = sample_config()?;
+        config.health_listen_address = socket("0.0.0.0:8080")?;
+
+        let message = config_validation_message(validate(&config));
+
+        assert!(message.contains("health_listen_address"));
         assert!(message.contains("port"));
 
         Ok(())
