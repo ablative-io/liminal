@@ -105,7 +105,16 @@ fn serve(
 ) -> Result<(), ServerError> {
     while !shutdown.load(Ordering::SeqCst) {
         match listener.accept() {
-            Ok((stream, ..)) => handle_connection(stream, readiness)?,
+            Ok((stream, ..)) => {
+                // A per-connection error (e.g. a TCP probe that connects but sends no HTTP
+                // data within the read timeout) must NOT terminate the serve loop — otherwise
+                // a single port probe kills the health server for the process lifetime and
+                // subsequent liveness/readiness probes get connection-refused. Only fatal
+                // listener-level accept errors (below) terminate serving.
+                if let Err(error) = handle_connection(stream, readiness) {
+                    tracing::debug!(%error, "health endpoint connection error");
+                }
+            }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(10));
             }
