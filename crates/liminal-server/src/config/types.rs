@@ -7,6 +7,8 @@ use std::path::PathBuf;
 pub struct ServerConfig {
     /// Socket address where the standalone server will listen for client traffic.
     pub listen_address: SocketAddr,
+    /// Socket address where the health endpoint server will listen for probes.
+    pub health_listen_address: SocketAddr,
     /// Channel topology definitions declared by the operator.
     pub channels: Vec<ChannelDef>,
     /// Declarative routing rules that connect configured channels.

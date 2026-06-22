@@ -8,6 +8,7 @@ use super::types::ServerConfig;
 
 const ENV_PREFIX: &str = "LIMINAL_";
 const LISTEN_ADDRESS: &str = "LIMINAL_LISTEN_ADDRESS";
+const HEALTH_LISTEN_ADDRESS: &str = "LIMINAL_HEALTH_LISTEN_ADDRESS";
 const PERSISTENCE_PATH: &str = "LIMINAL_PERSISTENCE_PATH";
 const CLUSTER_NODE_NAME: &str = "LIMINAL_CLUSTER_NODE_NAME";
 const CLUSTER_SEED_NODES: &str = "LIMINAL_CLUSTER_SEED_NODES";
@@ -15,8 +16,9 @@ const CLUSTER_SEED_NODES: &str = "LIMINAL_CLUSTER_SEED_NODES";
 /// Applies supported `LIMINAL_` environment variable overrides to a config.
 ///
 /// Absent variables leave the supplied configuration unchanged. Supported
-/// variables are `LIMINAL_LISTEN_ADDRESS`, `LIMINAL_PERSISTENCE_PATH`,
-/// `LIMINAL_CLUSTER_NODE_NAME`, and `LIMINAL_CLUSTER_SEED_NODES`.
+/// variables are `LIMINAL_LISTEN_ADDRESS`, `LIMINAL_HEALTH_LISTEN_ADDRESS`,
+/// `LIMINAL_PERSISTENCE_PATH`, `LIMINAL_CLUSTER_NODE_NAME`, and
+/// `LIMINAL_CLUSTER_SEED_NODES`.
 ///
 /// # Errors
 ///
@@ -45,6 +47,9 @@ where
         match key {
             LISTEN_ADDRESS => {
                 config.listen_address = parse_socket_addr(LISTEN_ADDRESS, &value)?;
+            }
+            HEALTH_LISTEN_ADDRESS => {
+                config.health_listen_address = parse_socket_addr(HEALTH_LISTEN_ADDRESS, &value)?;
             }
             PERSISTENCE_PATH => {
                 config.persistence_path = Some(PathBuf::from(value));
@@ -149,6 +154,7 @@ mod tests {
     fn sample_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         Ok(ServerConfig {
             listen_address: socket("127.0.0.1:8080")?,
+            health_listen_address: socket("127.0.0.1:8081")?,
             channels: vec![ChannelDef {
                 name: "orders".to_owned(),
                 schema_ref: "schemas/orders.json".to_owned(),
@@ -201,6 +207,20 @@ mod tests {
     }
 
     #[test]
+    fn health_listen_address_override_replaces_file_value() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let config = sample_config()?;
+        let config = apply_env_overrides_from(
+            config,
+            vec![env_pair("LIMINAL_HEALTH_LISTEN_ADDRESS", "0.0.0.0:9191")],
+        )?;
+
+        assert_eq!(config.health_listen_address, socket("0.0.0.0:9191")?);
+
+        Ok(())
+    }
+
+    #[test]
     fn persistence_path_override_replaces_file_value() -> Result<(), Box<dyn std::error::Error>> {
         let config = sample_config()?;
         let config = apply_env_overrides_from(
@@ -247,6 +267,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let config = sample_config()?;
         let original_address = config.listen_address;
+        let original_health_address = config.health_listen_address;
         let original_path = config.persistence_path.clone();
         let original_cluster_name = config
             .cluster
@@ -256,6 +277,7 @@ mod tests {
         let config = apply_env_overrides_from(config, Vec::new())?;
 
         assert_eq!(config.listen_address, original_address);
+        assert_eq!(config.health_listen_address, original_health_address);
         assert_eq!(config.persistence_path, original_path);
         assert_eq!(
             config
@@ -283,6 +305,20 @@ mod tests {
     }
 
     #[test]
+    fn invalid_health_listen_address_override_returns_config_load()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = sample_config()?;
+        let result = apply_env_overrides_from(
+            config,
+            vec![env_pair("LIMINAL_HEALTH_LISTEN_ADDRESS", "not-a-socket")],
+        );
+
+        assert!(matches!(result, Err(ServerError::ConfigLoad { .. })));
+
+        Ok(())
+    }
+
+    #[test]
     fn cluster_override_without_cluster_section_returns_validation_error()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut config = sample_config()?;
@@ -302,6 +338,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let toml = r#"
 listen_address = "127.0.0.1:8080"
+health_listen_address = "127.0.0.1:8081"
 persistence_path = "/tmp"
 
 [[channels]]

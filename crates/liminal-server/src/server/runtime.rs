@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::ServerError;
 use crate::config::file::load_config;
+use crate::health::{ReadinessState, SharedReadinessState, start_health_server};
 
 /// Starts the server deployment wrapper for the supplied configuration path.
 ///
@@ -21,11 +22,19 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
 
     let config = load_config(config_path)?;
 
+    let readiness = SharedReadinessState::new(ReadinessState::default());
+    let health_server = start_health_server(config.health_listen_address, readiness.clone())?;
+    readiness.set_config_loaded(true);
+    readiness.set_cluster_configured(config.cluster.is_some());
+
     tracing::debug!(
         config_path = %config_path.display(),
         listen_address = %config.listen_address,
+        health_listen_address = %health_server.local_addr(),
         "liminal server configuration validated"
     );
+
+    health_server.shutdown()?;
 
     Ok(())
 }
