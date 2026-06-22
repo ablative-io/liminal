@@ -35,6 +35,9 @@ pub trait DurableStore: std::fmt::Debug + Send + Sync {
     /// Atomically replaces a stored numeric value if it equals `old_value`.
     async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError>;
 
+    /// Reads a numeric value previously updated through compare-and-swap.
+    async fn read_value(&self, key: &str) -> Result<Option<u64>, DurabilityError>;
+
     /// Scans entries by store prefix.
     async fn scan(&self, prefix: &str) -> Result<Vec<StoredEntry>, DurabilityError>;
 }
@@ -85,6 +88,13 @@ impl DurableStore for HaematiteStore {
     async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {
         self.event_store
             .cas(key, old_value, new_value)
+            .await
+            .map_err(map_store_error)
+    }
+
+    async fn read_value(&self, key: &str) -> Result<Option<u64>, DurabilityError> {
+        self.event_store
+            .read_value(key)
             .await
             .map_err(map_store_error)
     }

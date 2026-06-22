@@ -94,6 +94,16 @@ impl EventStore {
         Ok(())
     }
 
+    /// Reads a numeric value previously updated through compare-and-swap.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the lock is poisoned.
+    pub async fn read_value(&self, key: &str) -> Result<Option<u64>, EventStoreError> {
+        let values = self.values.read().map_err(lock_error)?;
+        Ok(values.get(key).copied())
+    }
+
     /// Scans event streams whose stream keys begin with `prefix`.
     ///
     /// # Errors
