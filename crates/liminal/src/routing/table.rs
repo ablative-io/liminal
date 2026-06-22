@@ -428,12 +428,12 @@ mod tests {
             let accessor = BlockingAccessor::new(entered_sender, release_receiver);
             resolver_table.resolve("orders", &accessor).len()
         });
+
+        assert!(entered_receiver.recv().is_ok());
         let updater = thread::spawn(move || {
             let _ = updater_table.register("orders", subscription("new", gate_predicate()));
             updated_sender.send(())
         });
-
-        assert!(entered_receiver.recv().is_ok());
         assert!(
             updated_receiver
                 .recv_timeout(Duration::from_secs(1))

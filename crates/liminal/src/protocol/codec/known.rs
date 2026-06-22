@@ -89,12 +89,13 @@ fn decode_subscription_payload(
             flags,
             stream_id,
             channel: reader.read_string_field()?,
-            schema: reader.read_optional_string()?,
+            accepted_schemas: reader.read_schema_ids_field()?,
         }),
         FrameType::SubscribeAck => Ok(Frame::SubscribeAck {
             flags,
             stream_id,
             subscription_id: reader.read_u64()?,
+            selected_schema: reader.read_schema_id()?,
         }),
         FrameType::SubscribeError => Ok(Frame::SubscribeError {
             flags,

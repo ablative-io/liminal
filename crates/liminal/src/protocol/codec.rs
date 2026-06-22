@@ -1,13 +1,14 @@
 mod known;
 mod payload;
 
+use super::envelope::SchemaId;
 use super::error::ProtocolError;
 use super::frame::{Frame, FrameType, HEADER_LEN, validate_stream};
 use super::version::ProtocolVersion;
 use known::decode_known_payload;
 use payload::{
     PayloadReader, PayloadWriter, U16_LEN, U32_LEN, U64_LEN, bytes_field_len, checked_u32_len,
-    option_string_len, option_u16_len, string_field_len, sum_lengths,
+    option_string_len, option_u16_len, schema_ids_field_len, string_field_len, sum_lengths,
 };
 
 /// Return the number of bytes needed to encode a frame.
@@ -148,14 +149,15 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         }
         Frame::Disconnect { .. } | Frame::Ping { .. } | Frame::Pong { .. } => Ok(0),
         Frame::Subscribe {
-            channel, schema, ..
+            channel,
+            accepted_schemas,
+            ..
         } => sum_lengths(&[
             string_field_len(channel)?,
-            option_string_len(schema.as_deref())?,
+            schema_ids_field_len(accepted_schemas)?,
         ]),
-        Frame::SubscribeAck { .. } | Frame::Unsubscribe { .. } | Frame::PublishAck { .. } => {
-            Ok(U64_LEN)
-        }
+        Frame::SubscribeAck { .. } => sum_lengths(&[U64_LEN, SchemaId::WIRE_LEN]),
+        Frame::Unsubscribe { .. } | Frame::PublishAck { .. } => Ok(U64_LEN),
         Frame::Publish {
             channel, envelope, ..
         } => sum_lengths(&[
@@ -248,15 +250,22 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
         }
         Frame::Disconnect { .. } | Frame::Ping { .. } | Frame::Pong { .. } => {}
         Frame::Subscribe {
-            channel, schema, ..
+            channel,
+            accepted_schemas,
+            ..
         } => {
             writer.write_string_field(channel)?;
-            writer.write_optional_string(schema.as_deref())?;
+            writer.write_schema_ids_field(accepted_schemas)?;
         }
         Frame::SubscribeAck {
-            subscription_id, ..
+            subscription_id,
+            selected_schema,
+            ..
+        } => {
+            writer.write_u64(*subscription_id)?;
+            writer.write_schema_id(*selected_schema)?;
         }
-        | Frame::Unsubscribe {
+        Frame::Unsubscribe {
             subscription_id, ..
         } => writer.write_u64(*subscription_id)?,
         Frame::Publish {

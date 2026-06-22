@@ -1,4 +1,8 @@
-use super::{envelope::MessageEnvelope, error::ProtocolError, version::ProtocolVersion};
+use super::{
+    envelope::{MessageEnvelope, SchemaId},
+    error::ProtocolError,
+    version::ProtocolVersion,
+};
 
 /// Number of bytes in every serialized frame header.
 pub const HEADER_LEN: usize = 10;
@@ -164,18 +168,19 @@ pub enum Frame {
     },
     /// Connection close notification with no payload.
     Disconnect { flags: u8 },
-    /// Channel subscription request carrying a channel and optional schema reference.
+    /// Channel subscription request carrying a channel and accepted schema hashes.
     Subscribe {
         flags: u8,
         stream_id: u32,
         channel: String,
-        schema: Option<String>,
+        accepted_schemas: Vec<SchemaId>,
     },
-    /// Channel subscription success carrying a server-visible subscription id.
+    /// Channel subscription success carrying a subscription id and selected schema.
     SubscribeAck {
         flags: u8,
         stream_id: u32,
         subscription_id: u64,
+        selected_schema: SchemaId,
     },
     /// Channel subscription failure carrying a numeric reason and optional message.
     SubscribeError {

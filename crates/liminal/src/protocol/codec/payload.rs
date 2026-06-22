@@ -1,6 +1,6 @@
 use std::str;
 
-use crate::protocol::ProtocolError;
+use crate::protocol::{ProtocolError, SchemaId};
 
 pub(super) const U16_LEN: usize = 2;
 pub(super) const U32_LEN: usize = 4;
@@ -38,6 +38,15 @@ pub(super) fn option_string_len(value: Option<&str>) -> Result<usize, ProtocolEr
         Some(inner) => sum_lengths(&[U8_LEN, string_field_len(inner)?]),
         None => Ok(U8_LEN),
     }
+}
+
+pub(super) fn schema_ids_field_len(schema_ids: &[SchemaId]) -> Result<usize, ProtocolError> {
+    checked_u32_len(schema_ids.len())?;
+    let ids_len = schema_ids
+        .len()
+        .checked_mul(SchemaId::WIRE_LEN)
+        .ok_or_else(|| ProtocolError::codec("schema id vector length overflowed usize"))?;
+    sum_lengths(&[U32_LEN, ids_len])
 }
 
 pub(super) const fn option_u16_len(value: Option<u16>) -> usize {
@@ -83,6 +92,23 @@ impl<'a> PayloadWriter<'a> {
         };
         target.copy_from_slice(bytes);
         self.offset = end;
+        Ok(())
+    }
+
+    pub(super) fn write_schema_id(&mut self, schema_id: SchemaId) -> Result<(), ProtocolError> {
+        self.write_slice(schema_id.as_bytes())
+    }
+
+    pub(super) fn write_schema_ids_field(
+        &mut self,
+        schema_ids: &[SchemaId],
+    ) -> Result<(), ProtocolError> {
+        let len = u32::try_from(schema_ids.len())
+            .map_err(|_| ProtocolError::codec("schema id count exceeded u32::MAX"))?;
+        self.write_u32(len)?;
+        for schema_id in schema_ids {
+            self.write_schema_id(*schema_id)?;
+        }
         Ok(())
     }
 
@@ -169,6 +195,34 @@ impl<'a> PayloadReader<'a> {
             return Err(ProtocolError::codec("payload u64 field was truncated"));
         };
         Ok(u64::from_be_bytes([*b0, *b1, *b2, *b3, *b4, *b5, *b6, *b7]))
+    }
+
+    pub(super) fn read_schema_id(&mut self) -> Result<SchemaId, ProtocolError> {
+        let bytes = self.read_slice(SchemaId::WIRE_LEN)?;
+        let mut schema_id = [0_u8; SchemaId::WIRE_LEN];
+        schema_id.copy_from_slice(bytes);
+        Ok(SchemaId::new(schema_id))
+    }
+
+    pub(super) fn read_schema_ids_field(&mut self) -> Result<Vec<SchemaId>, ProtocolError> {
+        let count = usize::try_from(self.read_u32()?)
+            .map_err(|_| ProtocolError::codec("schema id count cannot fit usize"))?;
+        let byte_len = count
+            .checked_mul(SchemaId::WIRE_LEN)
+            .ok_or_else(|| ProtocolError::codec("schema id vector length overflowed usize"))?;
+        let bytes = self.read_slice(byte_len)?;
+        let mut schema_ids = Vec::new();
+        schema_ids
+            .try_reserve_exact(count)
+            .map_err(|_| ProtocolError::codec("schema id vector allocation failed"))?;
+
+        for chunk in bytes.chunks_exact(SchemaId::WIRE_LEN) {
+            let mut schema_id = [0_u8; SchemaId::WIRE_LEN];
+            schema_id.copy_from_slice(chunk);
+            schema_ids.push(SchemaId::new(schema_id));
+        }
+
+        Ok(schema_ids)
     }
 
     fn read_slice(&mut self, len: usize) -> Result<&'a [u8], ProtocolError> {
