@@ -206,7 +206,7 @@ pub trait ReconnectJitter: fmt::Debug {
     fn jitter(&mut self, attempt: u32, capped_delay: Duration) -> Duration;
 }
 
-type ConnectionObserver = Box<dyn FnMut(&ConnectionEvent)>;
+type ConnectionObserver = Box<dyn FnMut(&ConnectionEvent) + Send>;
 
 /// Owns the SDK connection lifecycle state and emits validated transitions.
 pub struct ConnectionLifecycle {
@@ -241,7 +241,7 @@ impl ConnectionLifecycle {
     }
 
     /// Registers an observer that is called after each successful transition.
-    pub fn observe(&mut self, observer: impl FnMut(&ConnectionEvent) + 'static) {
+    pub fn observe(&mut self, observer: impl FnMut(&ConnectionEvent) + Send + 'static) {
         self.observers.push(Box::new(observer));
     }
 
