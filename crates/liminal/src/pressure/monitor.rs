@@ -251,13 +251,19 @@ impl PressureMonitor {
     ) -> ChannelPressureSnapshot {
         let channel_id = channel_id.into();
         let consumer_id = consumer_id.into();
-        let metrics = self
+        // Only record signals for an already-tracked consumer. A consumer must
+        // first be registered via `record_consumer_metrics` (which supplies the
+        // capacity baseline); recording a signal for an unknown consumer here
+        // would create a zero-capacity "ghost" (utilization 0.0) that silently
+        // dilutes the channel's aggregate pressure score and inflates the
+        // consumer count, disabling backpressure. Drop the unmatched signal.
+        if let Some(metrics) = self
             .channels
-            .entry(channel_id.clone())
-            .or_default()
-            .entry(consumer_id)
-            .or_default();
-        record(metrics);
+            .get_mut(&channel_id)
+            .and_then(|consumers| consumers.get_mut(consumer_id.as_str()))
+        {
+            record(metrics);
+        }
         self.channel_snapshot(&channel_id)
     }
 
@@ -355,6 +361,13 @@ mod tests {
     #[test]
     fn monitor_tracks_accept_defer_and_reject_counts_per_consumer() {
         let mut monitor = PressureMonitor::new();
+        // Per ADR-004 a consumer declares capacity before its signals are
+        // tracked; register it first, then record the wire signals.
+        monitor.record_consumer_metrics(
+            "orders",
+            "consumer-a",
+            ConsumerPressureMetrics::new(0, 10, 0),
+        );
 
         monitor.record_accept("orders", "consumer-a");
         monitor.record_defer("orders", "consumer-a");
@@ -370,6 +383,32 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn signal_for_unregistered_consumer_does_not_create_ghost_or_dilute_pressure() {
+        let mut monitor = PressureMonitor::new();
+        // A saturated, declared consumer → channel pressure 1.0.
+        monitor.record_consumer_metrics(
+            "orders",
+            "consumer-a",
+            ConsumerPressureMetrics::new(10, 10, 0),
+        );
+        assert!(close_to(monitor.channel_pressure("orders"), 1.0));
+
+        // A stray signal for a consumer that never declared capacity (e.g. a
+        // mismatched id) must NOT create a zero-capacity ghost: that would
+        // dilute the aggregate pressure score (disabling backpressure on a
+        // saturated channel) and inflate the consumer count.
+        monitor.record_accept("orders", "consumer-typo");
+
+        assert!(close_to(monitor.channel_pressure("orders"), 1.0));
+        assert_eq!(monitor.channel_consumer_count("orders"), 1);
+        assert!(
+            monitor
+                .consumer_metrics("orders", "consumer-typo")
+                .is_none()
+        );
     }
 
     #[test]
