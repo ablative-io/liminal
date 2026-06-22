@@ -275,6 +275,10 @@ impl DurableStore for FakeStore {
         Ok(())
     }
 
+    async fn read_value(&self, _: &str) -> Result<Option<u64>, DurabilityError> {
+        Ok(None)
+    }
+
     async fn scan(&self, _: &str) -> Result<Vec<StoredEntry>, DurabilityError> {
         Ok(Vec::new())
     }
