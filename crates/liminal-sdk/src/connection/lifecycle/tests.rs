@@ -1,6 +1,6 @@
-use alloc::rc::Rc;
-use core::cell::RefCell;
+use alloc::sync::Arc;
 use core::time::Duration;
+use spin::Mutex;
 
 use crate::SdkError;
 
@@ -40,16 +40,16 @@ fn disconnected_to_connected_is_rejected() -> Result<(), SdkError> {
 
 #[test]
 fn observers_receive_successful_transitions() -> Result<(), SdkError> {
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let observed = Rc::clone(&events);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
     let mut lifecycle = ConnectionLifecycle::default();
 
-    lifecycle.observe(move |event| observed.borrow_mut().push(event.clone()));
+    lifecycle.observe(move |event| observed.lock().push(event.clone()));
     lifecycle.connected()?;
     lifecycle.disconnect(DisconnectReason::Timeout)?;
 
-    assert_eq!(events.borrow().len(), 2);
-    let first = events.borrow()[0].clone();
+    assert_eq!(events.lock().len(), 2);
+    let first = events.lock()[0].clone();
     assert_eq!(
         first,
         ConnectionEvent::new(ConnectionState::Connecting, ConnectionState::Connected)
@@ -59,14 +59,14 @@ fn observers_receive_successful_transitions() -> Result<(), SdkError> {
 
 #[test]
 fn disconnect_from_connecting_is_observable() -> Result<(), SdkError> {
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let observed = Rc::clone(&events);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
     let mut lifecycle = ConnectionLifecycle::default();
 
     // A fresh lifecycle starts in `Connecting`.
     assert_eq!(lifecycle.state(), &ConnectionState::Connecting);
 
-    lifecycle.observe(move |event| observed.borrow_mut().push(event.clone()));
+    lifecycle.observe(move |event| observed.lock().push(event.clone()));
     lifecycle.disconnect(DisconnectReason::Error)?;
 
     assert_eq!(
@@ -75,9 +75,10 @@ fn disconnect_from_connecting_is_observable() -> Result<(), SdkError> {
             reason: DisconnectReason::Error
         }
     );
-    assert_eq!(events.borrow().len(), 1);
+    assert_eq!(events.lock().len(), 1);
+    let observed_event = events.lock()[0].clone();
     assert_eq!(
-        events.borrow()[0],
+        observed_event,
         ConnectionEvent::new(
             ConnectionState::Connecting,
             ConnectionState::Disconnected {
@@ -90,8 +91,8 @@ fn disconnect_from_connecting_is_observable() -> Result<(), SdkError> {
 
 #[test]
 fn disconnect_from_reconnecting_is_observable() -> Result<(), SdkError> {
-    let events = Rc::new(RefCell::new(Vec::new()));
-    let observed = Rc::clone(&events);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&events);
     let mut lifecycle = ConnectionLifecycle::default();
     let mut jitter = FixedJitter::new(Duration::ZERO);
 
@@ -102,7 +103,7 @@ fn disconnect_from_reconnecting_is_observable() -> Result<(), SdkError> {
         &ConnectionState::Reconnecting { attempt: 0 }
     );
 
-    lifecycle.observe(move |event| observed.borrow_mut().push(event.clone()));
+    lifecycle.observe(move |event| observed.lock().push(event.clone()));
     lifecycle.disconnect(DisconnectReason::Error)?;
 
     assert_eq!(
@@ -111,9 +112,10 @@ fn disconnect_from_reconnecting_is_observable() -> Result<(), SdkError> {
             reason: DisconnectReason::Error
         }
     );
-    assert_eq!(events.borrow().len(), 1);
+    assert_eq!(events.lock().len(), 1);
+    let observed_event = events.lock()[0].clone();
     assert_eq!(
-        events.borrow()[0],
+        observed_event,
         ConnectionEvent::new(
             ConnectionState::Reconnecting { attempt: 0 },
             ConnectionState::Disconnected {

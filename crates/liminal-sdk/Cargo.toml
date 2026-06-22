@@ -15,6 +15,8 @@ std = ["thiserror/std", "serde/std"]
 [dependencies]
 futures-core = { version = "0.3", default-features = false }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
+serde_json = { version = "1", default-features = false, features = ["alloc"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 thiserror = { version = "2", default-features = false }
 
 [lints]
