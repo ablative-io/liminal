@@ -1,6 +1,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 mod collectors;
+mod families;
 
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::error::Error;
@@ -9,6 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 pub use collectors::{CounterHandle, GaugeHandle, HistogramHandle};
+pub use families::{CounterFamily, GaugeFamily, HistogramFamily};
 
 use collectors::{CounterMetric, GaugeMetric, HistogramMetric};
 
@@ -195,6 +197,7 @@ impl MetricsRegistry {
         let name = name.into();
         let labels = normalize_labels(labels);
         let bucket_boundaries = normalize_buckets(buckets);
+        self.reserve_histogram_family(name.clone(), bucket_boundaries.clone())?;
         let labels_for_error = labels.clone();
         let collector = self.register_collector(
             name.clone(),
@@ -304,8 +307,9 @@ impl RegistryInner {
 
 #[derive(Debug, Default)]
 struct RegistryState {
-    kind_by_name: BTreeMap<String, MetricKind>,
+    histogram_buckets_by_name: BTreeMap<String, Vec<u64>>,
     metrics: BTreeMap<MetricKey, MetricEntry>,
+    kind_by_name: BTreeMap<String, MetricKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
