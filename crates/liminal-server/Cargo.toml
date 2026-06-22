@@ -10,7 +10,7 @@ description = "Standalone server for the liminal messaging bus"
 
 [dependencies]
 anyhow = "1"
-beamr = { version = "0.7.0", features = ["json"] }
+beamr = { version = "0.8.0", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 liminal = { path = "../liminal" }
 serde = { version = "1", features = ["derive"] }
