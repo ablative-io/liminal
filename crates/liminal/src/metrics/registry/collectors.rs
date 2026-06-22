@@ -86,6 +86,12 @@ pub struct CounterHandle {
 }
 
 impl CounterHandle {
+    #[must_use]
+    pub(super) fn noop() -> Self {
+        let metric = Arc::new(CounterMetric::new());
+        Self { metric }
+    }
+
     pub fn increment(&self) {
         self.increment_by(1);
     }
@@ -111,6 +117,12 @@ pub struct GaugeHandle {
 }
 
 impl GaugeHandle {
+    #[must_use]
+    pub(super) fn noop() -> Self {
+        let metric = Arc::new(GaugeMetric::new());
+        Self { metric }
+    }
+
     pub fn set(&self, value: i64) {
         self.metric.value.store(value, Ordering::Relaxed);
     }
@@ -143,6 +155,12 @@ pub struct HistogramHandle {
 }
 
 impl HistogramHandle {
+    #[must_use]
+    pub(super) fn noop(boundaries: Vec<u64>) -> Self {
+        let metric = Arc::new(HistogramMetric::new(boundaries));
+        Self { metric }
+    }
+
     pub fn observe(&self, value: u64) {
         let bucket_index = self.metric.bucket_index(value);
         if let Some(count) = self.metric.counts.get(bucket_index) {
