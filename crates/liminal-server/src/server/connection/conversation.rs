@@ -12,7 +12,9 @@ use std::time::{Duration, Instant};
 use liminal::channel::SchemaId;
 use liminal::conversation::{ConversationActor, ConversationPhase, ParticipantPid};
 use liminal::envelope::{Envelope, PublisherId};
-use liminal::protocol::MessageEnvelope;
+use liminal::protocol::{
+    CausalContext as ProtocolCausalContext, MessageEnvelope, SchemaId as ProtocolSchemaId,
+};
 
 use crate::ServerError;
 
@@ -45,6 +47,18 @@ pub trait ConversationResource: std::fmt::Debug + Send {
     /// The wait is event-driven (parks on the exit notifier and is woken by the
     /// EXIT handler), not a poll loop. Used by tests to prove real detection.
     fn await_crash(&self, timeout: Duration) -> Option<Instant>;
+
+    /// Receives the next reply the participant produced for this conversation,
+    /// bounded by `timeout`.
+    ///
+    /// A real participant processes each forwarded message and delivers a reply
+    /// back through the conversation; this drains that reply. A trace-only or
+    /// non-replying resource times out.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when no reply arrives within `timeout`, the
+    /// participant crashed, or the conversation is unavailable.
+    fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError>;
 
     /// Releases or finishes the library conversation resource.
     ///
@@ -87,6 +101,16 @@ impl ConnectionConversation {
     #[must_use]
     pub fn await_crash(&self, timeout: Duration) -> Option<Instant> {
         self.resource.await_crash(timeout)
+    }
+
+    /// Receives the next participant reply for this conversation, bounded by
+    /// `timeout`.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when no reply arrives in time or the conversation
+    /// is unavailable.
+    pub fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError> {
+        self.resource.receive_reply(timeout)
     }
 
     pub(super) fn close(self) -> Result<(), ServerError> {
@@ -202,6 +226,24 @@ impl ConversationResource for LiminalConversationResource {
             .map_or(None, |rx| rx.recv_timeout(timeout).ok());
         self.cache(received);
         received
+    }
+
+    fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError> {
+        // The participant produced a reply that the conversation actor delivered
+        // back into the conversation; drain it (bounded). This is the reply leg
+        // of the request-reply path — proof the participant genuinely processed
+        // the forwarded message, not just that it was linked.
+        let reply =
+            self.actor
+                .receive_timeout(timeout)
+                .map_err(|error| ServerError::ListenerAccept {
+                    message: format!("conversation reply receive failed: {error}"),
+                })?;
+        Ok(MessageEnvelope::new(
+            ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
+            ProtocolCausalContext::independent(),
+            reply.payload,
+        ))
     }
 
     fn close(self: Box<Self>) -> Result<(), ServerError> {

@@ -77,6 +77,47 @@ fn conversation_message_drives_real_actor() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Bound on the request-reply round trip. The reply receive parks on the
+/// conversation actor and is woken when the participant delivers its reply; this
+/// guard only bounds a genuine hang so CI cannot block.
+const REPLY_GUARD: Duration = Duration::from_secs(5);
+
+/// THE KEY PROOF (request-reply): a message sent through the server reaches the
+/// REAL participant process, which genuinely PROCESSES it (the `EchoBehaviour`)
+/// and produces a reply that flows back through the conversation to the caller.
+///
+/// This PASSES now but FAILS against the old inert `spawn_test_process`
+/// participant: that stand-in is a live, linked beamr process (so crash
+/// detection works) but it runs NO handler and processes NO messages. With the
+/// inert participant the forwarded request is consumed by nothing, no reply is
+/// ever delivered into the conversation, and `receive_reply` would exhaust
+/// `REPLY_GUARD` and return a timeout error instead of the echoed payload. The
+/// distinctive payload below proves an actual round trip through the participant,
+/// not an accidental loopback: the reply must carry the exact request bytes that
+/// the participant's behaviour echoed back.
+#[test]
+fn request_reply_message_is_really_processed_by_the_participant() -> Result<(), Box<dyn Error>> {
+    let services = LiminalConnectionServices::empty()?;
+    let conversation = services.open_conversation(99, "request-reply")?;
+
+    let request = b"request-reply-proof-payload";
+    services.conversation_message(&conversation, &message_envelope(request))?;
+
+    // Drain the participant's reply (bounded). A real participant processed the
+    // forwarded request and delivered this reply back through the conversation;
+    // the inert stand-in would never produce it, so this would time out.
+    let reply = conversation.receive_reply(REPLY_GUARD)?;
+    assert_eq!(
+        reply.payload, request,
+        "the participant must genuinely process the request and echo it back; \
+         an inert participant produces no reply and this drain would time out"
+    );
+
+    services.close_conversation(conversation)?;
+    services.conversation_supervisor().shutdown();
+    Ok(())
+}
+
 /// THE PROOF: open a conversation through the server, then KILL its participant
 /// process. The supervised actor traps the participant's EXIT (a beamr process
 /// link), which fires the structural crash signal in microseconds. The services

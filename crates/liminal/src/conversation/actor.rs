@@ -1,32 +1,30 @@
 use std::any::Any;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use beamr::atom::{Atom, AtomTable};
 use beamr::module::ModuleRegistry;
-use beamr::native::ProcessContext;
 use beamr::scheduler::{Scheduler, SchedulerConfig};
-use beamr::term::Term;
 
 mod backend;
 mod beam;
+mod core;
 mod exit;
 mod queue;
 mod sync;
 
+use crate::conversation::participant::{
+    ParticipantBehaviour, ParticipantChannel, ParticipantProcess, ParticipantRuntime,
+};
 use crate::conversation::types::{
-    ConversationConfig, ConversationHandle, ConversationPhase, ConversationState, CrashPolicy,
-    ParticipantPid,
+    ConversationConfig, ConversationHandle, ConversationState, CrashPolicy, ParticipantPid,
 };
 use crate::envelope::Envelope;
 use crate::error::LiminalError;
 use backend::ActorBackend;
 use beam::{ActorRuntime, actor_module};
-use exit::ExitNotifierRegistry;
-use queue::{QueuedCommand, QueuedCommandKind};
-use sync::{lock, send_reply, wait_for};
+pub(crate) use core::ActorCore;
 
 #[cfg(test)]
 mod tests;
@@ -53,17 +51,64 @@ impl ConversationSupervisor {
         })
     }
 
-    /// Spawns one supervised conversation actor.
+    /// Spawns one supervised conversation actor over the given participant pids.
+    ///
+    /// The participants are linked for crash detection but are NOT forwarded
+    /// requests (they are inert from the conversation's perspective). Use
+    /// [`ConversationSupervisor::spawn_with_participant`] to attach a real
+    /// participant that processes forwarded messages.
     ///
     /// # Errors
     /// Returns [`LiminalError`] when spawn, boot, or participant linking fails.
     pub fn spawn(&self, config: ConversationConfig) -> Result<ConversationActor, LiminalError> {
-        let core = Arc::new(ActorCore::new(Arc::clone(&self.inner), config));
+        let core = Arc::new(ActorCore::new(Arc::clone(&self.inner), config, Vec::new()));
         self.inner.spawn_actor_for(&core)?;
         let handle = ConversationHandle::new(Arc::new(ActorBackend {
             core: Arc::clone(&core),
         }));
         Ok(ConversationActor { core, handle })
+    }
+
+    /// Spawns a real participant native process running `behaviour`, then a
+    /// supervised conversation actor linked to it. Requests sent through the
+    /// returned actor's handle are FORWARDED to the participant process, which
+    /// genuinely processes them and delivers any reply back into the
+    /// conversation — the request-reply path from LIM-005.
+    ///
+    /// Returns the actor and the spawned participant's pid (for crash injection
+    /// and linkage assertions).
+    ///
+    /// # Errors
+    /// Returns [`LiminalError`] when participant spawn, actor spawn, boot, or
+    /// linking fails.
+    pub fn spawn_with_participant(
+        &self,
+        behaviour: Arc<dyn ParticipantBehaviour>,
+        timeout: Option<std::time::Duration>,
+        mode: crate::channel::ChannelMode,
+        on_crash: CrashPolicy,
+    ) -> Result<(ConversationActor, ParticipantPid), LiminalError> {
+        let channel = self.inner.spawn_participant()?;
+        let participant = channel.pid();
+        let config = ConversationConfig::new(vec![participant], timeout, mode, on_crash);
+        let core = Arc::new(ActorCore::new(
+            Arc::clone(&self.inner),
+            config,
+            vec![channel.clone()],
+        ));
+        // Register the participant with its inbox, behaviour, and a weak handle to
+        // the core so produced replies route back into this conversation.
+        self.inner.participant_runtime.register(
+            participant,
+            channel.inbox_arc(),
+            behaviour,
+            Arc::downgrade(&core),
+        )?;
+        self.inner.spawn_actor_for(&core)?;
+        let handle = ConversationHandle::new(Arc::new(ActorBackend {
+            core: Arc::clone(&core),
+        }));
+        Ok((ConversationActor { core, handle }, participant))
     }
 
     /// Returns the scheduler used by this supervisor.
@@ -107,6 +152,18 @@ impl ConversationActor {
         self.handle.query_state()
     }
 
+    /// Receives the next reply from the conversation, bounded by `timeout`.
+    ///
+    /// Returns [`LiminalError::ConversationTimeout`] if no reply arrives in time,
+    /// or [`LiminalError::ParticipantCrashed`] if a linked participant crashes
+    /// while waiting (the crash drains the pending receive immediately).
+    ///
+    /// # Errors
+    /// Returns [`LiminalError`] on timeout, participant crash, or actor failure.
+    pub fn receive_timeout(&self, timeout: std::time::Duration) -> Result<Envelope, LiminalError> {
+        self.core.submit_receive_timeout(timeout)
+    }
+
     /// Registers a one-shot notifier fired the instant `participant`'s trapped
     /// EXIT is processed (carrying the observed [`Instant`] — a structural link
     /// wakeup, not a poll). If `participant` is already dead at registration
@@ -128,6 +185,8 @@ impl ConversationActor {
 struct SupervisorInner {
     scheduler: Arc<Scheduler>,
     runtime: Arc<ActorRuntime>,
+    participant_runtime: Arc<ParticipantRuntime>,
+    participant_wakeup_atom: Atom,
     module_name: Atom,
     entry_function: Atom,
 }
@@ -150,7 +209,9 @@ impl SupervisorInner {
         let entry_function = atoms.intern("main");
         let command_function = atoms.intern("process_command");
         let command_atom = atoms.intern("liminal_conversation_command");
+        let participant_wakeup_atom = atoms.intern("liminal_conversation_participant_wakeup");
         let runtime = Arc::new(ActorRuntime::new(command_atom));
+        let participant_runtime = Arc::new(ParticipantRuntime::default());
         let registry = Arc::new(ModuleRegistry::new());
         registry.insert(actor_module(module_name, entry_function, command_function));
         let private_data: Arc<dyn Any + Send + Sync> = runtime.clone();
@@ -166,9 +227,33 @@ impl SupervisorInner {
         Ok(Self {
             scheduler: Arc::new(scheduler),
             runtime,
+            participant_runtime,
+            participant_wakeup_atom,
             module_name,
             entry_function,
         })
+    }
+
+    /// Spawns a real participant native process running `behaviour`, registers it
+    /// with the participant runtime, and returns the channel the conversation
+    /// actor forwards requests through plus the participant pid. The process is a
+    /// first-class beamr [`NativeHandler`]; the conversation actor links to it
+    /// during boot for structural crash detection.
+    fn spawn_participant(&self) -> Result<ParticipantChannel, LiminalError> {
+        let runtime = Arc::clone(&self.participant_runtime);
+        let wakeup_atom = self.participant_wakeup_atom;
+        let factory = Box::new(move || {
+            Box::new(ParticipantProcess::new(Arc::clone(&runtime), wakeup_atom))
+                as Box<dyn beamr::native::native_process::NativeHandler>
+        });
+        let pid = self.scheduler.spawn_native(factory).map_err(|error| {
+            LiminalError::ConversationFailed {
+                message: format!("failed to spawn conversation participant: {error}"),
+            }
+        })?;
+        let participant = ParticipantPid::new(pid);
+        let inbox = Arc::new(Mutex::new(VecDeque::new()));
+        Ok(ParticipantChannel::new(participant, inbox))
     }
 
     fn spawn_actor_for(&self, core: &Arc<ActorCore>) -> Result<ParticipantPid, LiminalError> {
@@ -183,304 +268,5 @@ impl SupervisorInner {
         core.set_current_pid(participant)?;
         core.boot(participant)?;
         Ok(participant)
-    }
-}
-
-struct ActorCore {
-    supervisor: Arc<SupervisorInner>,
-    config: ConversationConfig,
-    state: Mutex<ConversationState>,
-    inbox: Mutex<VecDeque<Envelope>>,
-    pending_receives: Mutex<VecDeque<mpsc::SyncSender<Result<Envelope, LiminalError>>>>,
-    commands: Mutex<VecDeque<QueuedCommand>>,
-    current_pid: Mutex<Option<ParticipantPid>>,
-    restart_lock: Mutex<()>,
-    next_command_id: AtomicU64,
-    exit_notifiers: ExitNotifierRegistry,
-}
-
-impl std::fmt::Debug for ActorCore {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ActorCore")
-            .field("config", &self.config)
-            .field("current_pid", &self.current_pid.lock().ok())
-            .finish_non_exhaustive()
-    }
-}
-
-impl ActorCore {
-    fn new(supervisor: Arc<SupervisorInner>, config: ConversationConfig) -> Self {
-        let state = ConversationState::from_config(&config, Instant::now());
-        Self {
-            supervisor,
-            config,
-            state: Mutex::new(state),
-            inbox: Mutex::new(VecDeque::new()),
-            pending_receives: Mutex::new(VecDeque::new()),
-            commands: Mutex::new(VecDeque::new()),
-            current_pid: Mutex::new(None),
-            restart_lock: Mutex::new(()),
-            next_command_id: AtomicU64::new(1),
-            exit_notifiers: ExitNotifierRegistry::default(),
-        }
-    }
-
-    fn ensure_running(self: &Arc<Self>) -> Result<ParticipantPid, LiminalError> {
-        let restart_guard = lock(&self.restart_lock, "actor restart")?;
-        if self.is_closed()? {
-            return Err(LiminalError::ConversationFailed {
-                message: "conversation is closed".to_owned(),
-            });
-        }
-        let current = *lock(&self.current_pid, "actor pid")?;
-        if let Some(pid) = current {
-            if self
-                .supervisor
-                .scheduler
-                .process_table()
-                .get(pid.get())
-                .is_some()
-            {
-                return Ok(pid);
-            }
-        }
-        let pid = self.supervisor.spawn_actor_for(self);
-        drop(restart_guard);
-        pid
-    }
-
-    fn set_current_pid(&self, pid: ParticipantPid) -> Result<(), LiminalError> {
-        *lock(&self.current_pid, "actor pid")? = Some(pid);
-        Ok(())
-    }
-
-    fn boot(self: &Arc<Self>, pid: ParticipantPid) -> Result<(), LiminalError> {
-        let (reply, response) = mpsc::sync_channel(1);
-        self.enqueue_for_pid(pid, QueuedCommandKind::Boot { reply })?;
-        wait_for(&response, "conversation actor boot")
-    }
-
-    fn submit_send(self: &Arc<Self>, message: Envelope) -> Result<(), LiminalError> {
-        let pid = self.ensure_running()?;
-        let (reply, response) = mpsc::sync_channel(1);
-        self.enqueue_for_pid(pid, QueuedCommandKind::Send { message, reply })?;
-        wait_for(&response, "conversation send")
-    }
-
-    fn submit_receive(self: &Arc<Self>) -> Result<Envelope, LiminalError> {
-        let pid = self.ensure_running()?;
-        let (reply, response) = mpsc::sync_channel(1);
-        self.enqueue_for_pid(pid, QueuedCommandKind::Receive { reply })?;
-        wait_for(&response, "conversation receive")
-    }
-
-    fn submit_close(self: &Arc<Self>) -> Result<(), LiminalError> {
-        let pid = self.ensure_running()?;
-        let (reply, response) = mpsc::sync_channel(1);
-        self.enqueue_for_pid(pid, QueuedCommandKind::Close { reply })?;
-        wait_for(&response, "conversation close")
-    }
-
-    fn submit_query_state(self: &Arc<Self>) -> Result<ConversationState, LiminalError> {
-        if self.is_closed()? {
-            return self.snapshot();
-        }
-        let pid = self.ensure_running()?;
-        let (reply, response) = mpsc::sync_channel(1);
-        self.enqueue_for_pid(pid, QueuedCommandKind::QueryState { reply })?;
-        wait_for(&response, "conversation state query")
-    }
-
-    fn enqueue_for_pid(
-        &self,
-        pid: ParticipantPid,
-        kind: QueuedCommandKind,
-    ) -> Result<(), LiminalError> {
-        let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
-        lock(&self.commands, "actor command queue")?.push_back(QueuedCommand { id, kind });
-        if self
-            .supervisor
-            .scheduler
-            .enqueue_atom_message(pid.get(), self.supervisor.runtime.command_atom())
-        {
-            Ok(())
-        } else {
-            self.remove_command(id)?;
-            Err(LiminalError::DeliveryFailed {
-                message: format!("conversation actor pid {} is not live", pid.get()),
-            })
-        }
-    }
-
-    fn remove_command(&self, id: u64) -> Result<(), LiminalError> {
-        lock(&self.commands, "actor command queue")?.retain(|command| command.id != id);
-        Ok(())
-    }
-
-    fn process_next_command(&self, context: &mut ProcessContext<'_>) -> Result<Term, Term> {
-        let Some(command) = lock(&self.commands, "actor command queue")
-            .map_err(|_| Term::atom(Atom::BADARG))?
-            .pop_front()
-        else {
-            return Ok(Term::atom(Atom::OK));
-        };
-        match command.kind {
-            QueuedCommandKind::Boot { reply } => {
-                send_reply(&reply, beam::link_participants(self, context));
-            }
-            QueuedCommandKind::Send { message, reply } => {
-                send_reply(&reply, self.apply_send(message));
-            }
-            QueuedCommandKind::Receive { reply } => {
-                self.apply_receive(reply);
-            }
-            QueuedCommandKind::Close { reply } => {
-                let result = self.apply_close();
-                let should_shutdown = result.is_ok();
-                send_reply(&reply, result);
-                if should_shutdown {
-                    context.request_shutdown();
-                }
-            }
-            QueuedCommandKind::QueryState { reply } => send_reply(&reply, self.snapshot()),
-        }
-        Ok(Term::atom(Atom::OK))
-    }
-
-    fn apply_send(&self, message: Envelope) -> Result<(), LiminalError> {
-        {
-            let mut state = lock(&self.state, "conversation state")?;
-            state.activate()?;
-            state.record_sent(message.clone());
-        }
-        let reply = { lock(&self.pending_receives, "pending receives")?.pop_front() };
-        if let Some(reply) = reply {
-            lock(&self.state, "conversation state")?.record_received(message.clone());
-            send_reply(&reply, Ok(message));
-        } else {
-            lock(&self.inbox, "conversation inbox")?.push_back(message);
-        }
-        Ok(())
-    }
-
-    fn apply_receive(&self, reply: mpsc::SyncSender<Result<Envelope, LiminalError>>) {
-        let envelope = match lock(&self.inbox, "conversation inbox") {
-            Ok(mut inbox) => inbox.pop_front(),
-            Err(error) => {
-                send_reply(&reply, Err(error));
-                return;
-            }
-        };
-        {
-            let mut state = match lock(&self.state, "conversation state") {
-                Ok(state) => state,
-                Err(error) => {
-                    send_reply(&reply, Err(error));
-                    return;
-                }
-            };
-            if let Err(error) = state.activate() {
-                send_reply(&reply, Err(error));
-                return;
-            }
-            if let Some(envelope) = &envelope {
-                state.record_received(envelope.clone());
-            }
-        }
-        if let Some(envelope) = envelope {
-            send_reply(&reply, Ok(envelope));
-        } else {
-            match lock(&self.pending_receives, "pending receives") {
-                Ok(mut pending) => pending.push_back(reply),
-                Err(error) => send_reply(&reply, Err(error)),
-            }
-        }
-    }
-
-    fn apply_close(&self) -> Result<(), LiminalError> {
-        {
-            let mut state = lock(&self.state, "conversation state")?;
-            if state.current_phase == ConversationPhase::Created {
-                state.activate()?;
-            }
-            state.begin_completing()?;
-            state.close()?;
-        }
-        let message = "conversation closed before receive completed".to_owned();
-        for reply in lock(&self.pending_receives, "pending receives")?.drain(..) {
-            send_reply(
-                &reply,
-                Err(LiminalError::ConversationFailed {
-                    message: message.clone(),
-                }),
-            );
-        }
-        Ok(())
-    }
-
-    fn snapshot(&self) -> Result<ConversationState, LiminalError> {
-        Ok(lock(&self.state, "conversation state")?.clone())
-    }
-
-    /// Registers `notifier` for `participant`'s EXIT, replaying an already-
-    /// recorded crash immediately to close the crash-before-register race.
-    /// Serialized against crash recording so exactly one notification is
-    /// delivered, never zero.
-    ///
-    /// # Errors
-    /// Returns [`LiminalError`] when a state or registry lock is poisoned.
-    fn register_exit_notifier(
-        &self,
-        participant: ParticipantPid,
-        notifier: mpsc::SyncSender<Instant>,
-    ) -> Result<(), LiminalError> {
-        // Hold the state lock across the dead-check and register-or-fire (state →
-        // registry ordering, matching `handle_participant_exit`) so a crash
-        // cannot signal an empty registry between the check and the push.
-        let state = lock(&self.state, "conversation state")?;
-        self.exit_notifiers
-            .register(participant, notifier, &state.participants)
-    }
-
-    fn handle_participant_exit(&self, participant: ParticipantPid) -> Result<(), LiminalError> {
-        // Capture the link-fire instant first: the real detection moment,
-        // propagated to blocked dispatchers as the start of reroute latency.
-        let observed_at = Instant::now();
-        // Record the crash and signal notifiers under the SAME state lock that
-        // `register_exit_notifier` holds, so a registrant can never observe the
-        // participant alive yet have the signal fire into an empty registry.
-        // Either it registers first (then this signal wakes it) or this records
-        // Dead first (then it replays the recorded instant): exactly one wakeup.
-        let failed = {
-            let mut state = lock(&self.state, "conversation state")?;
-            state.record_participant_crash(participant, self.config.on_crash, observed_at);
-            self.exit_notifiers.signal(participant, observed_at)?;
-            if self.config.on_crash == CrashPolicy::Fail {
-                state.fail();
-                true
-            } else {
-                false
-            }
-        };
-        if failed {
-            let message = format!("conversation participant {} crashed", participant.get());
-            for reply in lock(&self.pending_receives, "pending receives")?.drain(..) {
-                send_reply(
-                    &reply,
-                    Err(LiminalError::ParticipantCrashed {
-                        message: message.clone(),
-                    }),
-                );
-            }
-        }
-        Ok(())
-    }
-
-    fn is_closed(&self) -> Result<bool, LiminalError> {
-        Ok(matches!(
-            lock(&self.state, "conversation state")?.current_phase,
-            ConversationPhase::Closed
-        ))
     }
 }
