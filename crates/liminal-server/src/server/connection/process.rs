@@ -12,9 +12,8 @@ use liminal::protocol::{
     encode, encoded_len, negotiate_version,
 };
 
-use super::services::{
-    ConnectionConversation, ConnectionServices, ConnectionSubscription, server_error_from_protocol,
-};
+use super::conversation::ConnectionConversation;
+use super::services::{ConnectionServices, ConnectionSubscription, server_error_from_protocol};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
 use crate::ServerError;
 

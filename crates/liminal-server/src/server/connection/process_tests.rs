@@ -3,7 +3,8 @@ use std::sync::Mutex;
 use liminal::protocol::{CausalContext, MessageEnvelope, SchemaId};
 
 use super::*;
-use crate::server::connection::services::{ConversationResource, SubscriptionResource};
+use crate::server::connection::conversation::ConversationResource;
+use crate::server::connection::services::SubscriptionResource;
 
 #[derive(Debug, Default)]
 struct RecordingServices {
@@ -96,6 +97,18 @@ impl ConversationResource for TestConversation {
             });
         }
         Ok(())
+    }
+
+    fn participant_pids(&self) -> Vec<u64> {
+        Vec::new()
+    }
+
+    fn has_detected_crash(&self) -> bool {
+        false
+    }
+
+    fn await_crash(&self, _timeout: std::time::Duration) -> Option<std::time::Instant> {
+        None
     }
 
     fn close(self: Box<Self>) -> Result<(), ServerError> {

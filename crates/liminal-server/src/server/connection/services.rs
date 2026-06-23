@@ -1,14 +1,18 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, mpsc};
+use std::time::Instant;
 
 use haematite::EventStore;
 use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, Schema};
-use liminal::conversation::Conversation;
+use liminal::conversation::{
+    ConversationConfig, ConversationSupervisor, CrashPolicy, ParticipantPid,
+};
 use liminal::durability::{DurableStore, HaematiteStore};
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
+use super::conversation::{ConnectionConversation, LiminalConversationResource};
 use crate::ServerError;
 use crate::config::types::ServerConfig;
 
@@ -58,43 +62,6 @@ impl ConnectionSubscription {
 
     pub(super) fn unsubscribe(self) -> Result<(), ServerError> {
         self.resource.unsubscribe()
-    }
-}
-
-/// Marker for library conversation state owned by a single connection process.
-pub trait ConversationResource: std::fmt::Debug + Send {
-    /// Delegates one conversation message to the library resource.
-    ///
-    /// # Errors
-    /// Returns [`ServerError`] when the liminal library rejects the conversation message.
-    fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError>;
-
-    /// Releases or finishes the library conversation resource.
-    ///
-    /// # Errors
-    /// Returns [`ServerError`] when the liminal library reports a close failure.
-    fn close(self: Box<Self>) -> Result<(), ServerError>;
-}
-
-/// Library conversation resource owned by a single connection process.
-#[derive(Debug)]
-pub struct ConnectionConversation {
-    resource: Box<dyn ConversationResource>,
-}
-
-impl ConnectionConversation {
-    /// Creates an owned conversation resource for one connection process.
-    #[must_use]
-    pub fn new(resource: Box<dyn ConversationResource>) -> Self {
-        Self { resource }
-    }
-
-    pub(super) fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
-        self.resource.message(envelope)
-    }
-
-    pub(super) fn close(self) -> Result<(), ServerError> {
-        self.resource.close()
     }
 }
 
@@ -160,6 +127,7 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
 pub struct LiminalConnectionServices {
     channels: HashMap<String, ConfiguredChannel>,
     durable_store: Arc<dyn DurableStore>,
+    conversation_supervisor: Arc<ConversationSupervisor>,
     next_message_id: AtomicU64,
     next_subscription_id: AtomicU64,
 }
@@ -220,29 +188,52 @@ impl LiminalConnectionServices {
                 },
             );
         }
+        let conversation_supervisor = Arc::new(ConversationSupervisor::new().map_err(|error| {
+            ServerError::ConfigValidation {
+                message: format!("failed to start conversation supervisor: {error}"),
+            }
+        })?);
         Ok(Self {
             channels,
             durable_store,
+            conversation_supervisor,
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
         })
     }
 
     /// Builds services with no configured channels.
-    #[must_use]
-    pub fn empty() -> Self {
-        Self {
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when the conversation supervisor scheduler cannot start.
+    pub fn empty() -> Result<Self, ServerError> {
+        let conversation_supervisor = Arc::new(ConversationSupervisor::new().map_err(|error| {
+            ServerError::ConfigValidation {
+                message: format!("failed to start conversation supervisor: {error}"),
+            }
+        })?);
+        Ok(Self {
             channels: HashMap::new(),
             durable_store: default_store(),
+            conversation_supervisor,
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
-        }
+        })
     }
 
     /// Returns the shared durable store backing this service's durable channels.
     #[must_use]
     pub fn durable_store(&self) -> Arc<dyn DurableStore> {
         Arc::clone(&self.durable_store)
+    }
+
+    /// Returns the conversation supervisor backing supervised conversations.
+    ///
+    /// Tests use this to reach the underlying beamr scheduler so they can spawn
+    /// or terminate participant processes and exercise crash detection.
+    #[must_use]
+    pub fn conversation_supervisor(&self) -> Arc<ConversationSupervisor> {
+        Arc::clone(&self.conversation_supervisor)
     }
 }
 
@@ -309,11 +300,51 @@ impl ConnectionServices for LiminalConnectionServices {
         conversation_id: u64,
         subject: &str,
     ) -> Result<ConnectionConversation, ServerError> {
-        let name = format!("{conversation_id}:{subject}");
+        // Spawn a real participant process on the conversation supervisor's
+        // scheduler. The supervised conversation actor traps this participant's
+        // EXIT (a beamr process link), so killing it fires a structural,
+        // microsecond-scale crash signal — not a placeholder trace span.
+        let scheduler = self.conversation_supervisor.scheduler();
+        let participant = ParticipantPid::new(scheduler.spawn_test_process(false));
+
+        let actor = self
+            .conversation_supervisor
+            .spawn(ConversationConfig::new(
+                vec![participant],
+                None,
+                ChannelMode::Ephemeral,
+                CrashPolicy::Fail,
+            ))
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!(
+                    "failed to spawn supervised conversation {conversation_id} ('{subject}'): {error}"
+                ),
+            })?;
+
+        // Drive boot to completion so the beamr link to the participant exists
+        // before any message is forwarded (link-before-forward), mirroring the
+        // ROUTING-004 dispatch pattern.
+        actor.pid().map_err(|error| ServerError::ListenerAccept {
+            message: format!(
+                "failed to boot supervised conversation {conversation_id} ('{subject}'): {error}"
+            ),
+        })?;
+
+        // Register the structural EXIT notifier BEFORE returning, so a crash that
+        // fires the instant a message reaches the participant is never missed.
+        // The notifier is woken by the actor's trapped-EXIT handler (event
+        // driven), and a crash that already landed is replayed immediately.
+        let (exit_tx, exit_rx) = mpsc::sync_channel::<Instant>(1);
+        actor
+            .notify_on_participant_exit(participant, exit_tx)
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!(
+                    "failed to arm crash detection for conversation {conversation_id}: {error}"
+                ),
+            })?;
+
         Ok(ConnectionConversation::new(Box::new(
-            LiminalConversationResource {
-                conversation: Conversation::start(name),
-            },
+            LiminalConversationResource::new(actor, participant, exit_rx),
         )))
     }
 
@@ -360,26 +391,6 @@ struct LiminalSubscriptionResource {
 impl SubscriptionResource for LiminalSubscriptionResource {
     fn unsubscribe(self: Box<Self>) -> Result<(), ServerError> {
         drop(self.subscription);
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-struct LiminalConversationResource {
-    conversation: Conversation,
-}
-
-impl ConversationResource for LiminalConversationResource {
-    fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
-        let conversation_message = self.conversation.message(envelope.payload.clone());
-        drop(conversation_message);
-        Ok(())
-    }
-
-    fn close(self: Box<Self>) -> Result<(), ServerError> {
-        let Self { conversation } = *self;
-        let span = conversation.finish();
-        drop(span);
         Ok(())
     }
 }

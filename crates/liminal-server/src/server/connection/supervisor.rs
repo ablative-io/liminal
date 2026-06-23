@@ -40,7 +40,7 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when scheduler startup fails.
     pub fn new() -> Result<Self, ServerError> {
-        Self::with_services(Arc::new(LiminalConnectionServices::empty()))
+        Self::with_services(Arc::new(LiminalConnectionServices::empty()?))
     }
 
     /// Creates a connection supervisor using an explicit service adapter.
