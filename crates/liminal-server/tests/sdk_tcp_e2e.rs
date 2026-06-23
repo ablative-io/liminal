@@ -69,6 +69,7 @@ impl RunningServer {
             routing_rules: Vec::new(),
             persistence_path: None,
             cluster: None,
+            drain_timeout_ms: 30_000,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;

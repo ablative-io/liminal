@@ -118,6 +118,20 @@ impl EventStore {
             .flat_map(|(_, events)| events.iter().cloned())
             .collect())
     }
+
+    /// Flushes buffered event-store state to durable storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns a store error if the backend cannot prove pending writes are durable.
+    ///
+    /// The current haematite backend is in-memory and every write is committed
+    /// under the store lock before its operation returns, so there is no extra
+    /// buffer to drain. File-backed backends must perform their fsync-equivalent
+    /// work here before returning.
+    pub async fn flush(&self) -> Result<(), EventStoreError> {
+        Ok(())
+    }
 }
 
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> EventStoreError {

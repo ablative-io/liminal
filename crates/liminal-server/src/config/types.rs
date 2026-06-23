@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Declarative configuration for the standalone liminal server wrapper.
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -9,6 +10,8 @@ pub struct ServerConfig {
     pub listen_address: SocketAddr,
     /// Socket address where the health endpoint server will listen for probes.
     pub health_listen_address: SocketAddr,
+    /// Maximum time to allow existing connections to drain during graceful shutdown.
+    pub drain_timeout_ms: u64,
     /// Channel topology definitions declared by the operator.
     pub channels: Vec<ChannelDef>,
     /// Declarative routing rules that connect configured channels.
@@ -17,6 +20,14 @@ pub struct ServerConfig {
     pub persistence_path: Option<PathBuf>,
     /// Optional beamr distribution cluster membership configuration.
     pub cluster: Option<ClusterConfig>,
+}
+
+impl ServerConfig {
+    /// Returns the configured graceful-shutdown drain timeout.
+    #[must_use]
+    pub const fn drain_timeout(&self) -> Duration {
+        Duration::from_millis(self.drain_timeout_ms)
+    }
 }
 
 /// Declarative channel definition loaded from server configuration.

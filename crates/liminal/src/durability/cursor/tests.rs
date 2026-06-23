@@ -217,6 +217,10 @@ struct FakeStore {
 
 #[async_trait::async_trait]
 impl DurableStore for FakeStore {
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        Ok(())
+    }
+
     async fn append(
         &self,
         stream_key: &str,

@@ -15,7 +15,7 @@ use liminal::protocol::{
 use super::services::{
     ConnectionConversation, ConnectionServices, ConnectionSubscription, server_error_from_protocol,
 };
-use super::supervisor::ConnectionRuntime;
+use super::supervisor::{ConnectionControl, ConnectionRuntime};
 use crate::ServerError;
 
 const READ_BUFFER_BYTES: usize = 8192;
@@ -115,6 +115,75 @@ impl ConnectionProcess {
             }
         }
     }
+
+    fn handle_control(&mut self, pid: u64, control: ConnectionControl) -> Option<NativeOutcome> {
+        match control {
+            ConnectionControl::NotifyShutdown => {
+                self.notify_shutdown(pid, true);
+                None
+            }
+            ConnectionControl::ForceClose => {
+                self.notify_shutdown(pid, false);
+                self.stream.take();
+                self.runtime.finish(pid);
+                Some(NativeOutcome::Stop(ExitReason::Normal))
+            }
+        }
+    }
+
+    fn notify_shutdown(&mut self, pid: u64, subscribers_only: bool) {
+        if self.state.shutdown_notification_attempted {
+            return;
+        }
+        if subscribers_only && self.state.subscriptions.is_empty() {
+            return;
+        }
+
+        self.state.shutdown_notification_attempted = true;
+        let Some(stream) = self.stream.as_mut() else {
+            tracing::warn!(
+                connection_pid = pid,
+                peer_addr = ?self.peer_addr,
+                "shutdown notification skipped because connection stream is unavailable"
+            );
+            return;
+        };
+
+        match write_frame(stream, &Frame::Disconnect { flags: 0 }) {
+            Ok(()) => {
+                tracing::debug!(
+                    connection_pid = pid,
+                    peer_addr = ?self.peer_addr,
+                    subscriber_count = self.state.subscriptions.len(),
+                    "sent shutdown notification to connection"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    connection_pid = pid,
+                    peer_addr = ?self.peer_addr,
+                    %error,
+                    "shutdown notification failed; connection will not be retried"
+                );
+            }
+        }
+    }
+
+    fn handle_message(&mut self, pid: u64, message: Term) -> Option<NativeOutcome> {
+        if message == Term::atom(Atom::ERROR) {
+            self.runtime
+                .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+            return Some(NativeOutcome::Stop(ExitReason::Error));
+        }
+        if message.as_atom() == Some(self.runtime.control_atom()) {
+            while let Some(control) = self.runtime.pop_control(pid) {
+                if let Some(outcome) = self.handle_control(pid, control) {
+                    return Some(outcome);
+                }
+            }
+        }
+        None
+    }
 }
 
 impl NativeHandler for ConnectionProcess {
@@ -127,10 +196,8 @@ impl NativeHandler for ConnectionProcess {
         // double-write (spawn-thread `insert` racing a handler `or_insert`) and
         // its lost-update/duplicate-record hazard.
         while let Some(message) = ctx.recv() {
-            if message == Term::atom(Atom::ERROR) {
-                self.runtime
-                    .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-                return NativeOutcome::Stop(ExitReason::Error);
+            if let Some(outcome) = self.handle_message(pid, message) {
+                return outcome;
             }
         }
         self.handle_stream(pid)
@@ -139,6 +206,7 @@ impl NativeHandler for ConnectionProcess {
 
 #[derive(Debug, Default)]
 pub(super) struct ConnectionProcessState {
+    shutdown_notification_attempted: bool,
     subscriptions: HashMap<u64, ConnectionSubscription>,
     conversations: HashMap<u64, ConnectionConversation>,
 }

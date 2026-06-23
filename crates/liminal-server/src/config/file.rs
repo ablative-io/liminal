@@ -52,6 +52,7 @@ mod tests {
         r#"
 listen_address = "127.0.0.1:8080"
 health_listen_address = "127.0.0.1:8081"
+drain_timeout_ms = 30000
 persistence_path = "/tmp"
 
 [[channels]]
@@ -102,6 +103,7 @@ seed_nodes = ["127.0.0.1:9000"]
 
         assert_eq!(config.listen_address.to_string(), "127.0.0.1:8080");
         assert_eq!(config.health_listen_address.to_string(), "127.0.0.1:8081");
+        assert_eq!(config.drain_timeout_ms, 30_000);
         assert_eq!(config.channels.len(), 1);
         assert_eq!(config.channels[0].name, "orders");
         assert_eq!(config.routing_rules.len(), 1);

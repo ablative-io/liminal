@@ -178,6 +178,15 @@ impl DurableChannel {
         Ok(assigned_seq)
     }
 
+    /// Flushes the backing store so every appended message is durably persisted.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`DurabilityError`] returned by [`DurableStore::flush`].
+    pub async fn flush_store(&self) -> Result<(), DurabilityError> {
+        self.store.flush().await
+    }
+
     fn from_parts(
         channel_id: String,
         partition_count: usize,

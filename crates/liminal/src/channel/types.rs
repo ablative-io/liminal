@@ -1,4 +1,5 @@
 use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -6,8 +7,18 @@ use crate::causal::CausalContext;
 use crate::channel::SubscriptionHandle;
 use crate::channel::actor::ChannelActor;
 use crate::channel::schema::{Schema, SchemaId, SchemaValidationError};
+use crate::durability::bridge::block_on;
+use crate::durability::{DurableChannel, DurableStore, MessageEnvelope};
 use crate::envelope::PublisherId;
 use crate::error::LiminalError;
+
+/// Single-partition count used to back a flat runtime channel with durable storage.
+///
+/// The runtime channel model is flat (no operator-visible partitioning), so a
+/// durable runtime channel maps onto exactly one durable partition. Partitioned
+/// durable topologies are a durability-subsystem concern, not a runtime-channel
+/// one.
+const RUNTIME_DURABLE_PARTITIONS: usize = 1;
 
 /// Defines whether a channel is memory-only or durable across restarts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,17 +56,54 @@ impl ChannelConfig {
 pub struct ChannelHandle {
     config: ChannelConfig,
     actor: Arc<Mutex<ChannelActor>>,
+    durable: Option<Arc<Mutex<DurableChannel>>>,
 }
 
 impl ChannelHandle {
-    /// Creates a handle backed by in-memory channel actor state.
+    /// Creates an ephemeral handle backed only by in-memory channel actor state.
+    ///
+    /// Ephemeral channels carry no durable store; [`Self::publish`] fans out in
+    /// memory and [`Self::flush`] is a no-op.
     #[must_use]
     pub fn new(config: ChannelConfig) -> Self {
         let actor = ChannelActor::new(config.schema.clone());
         Self {
             config,
             actor: Arc::new(Mutex::new(actor)),
+            durable: None,
         }
+    }
+
+    /// Creates a durable handle that persists every accepted publish to `store`
+    /// before fanning it out to subscribers.
+    ///
+    /// The durable channel is keyed by `config.name` and backed by a single
+    /// partition (see [`RUNTIME_DURABLE_PARTITIONS`]). Each publish appends the
+    /// message to the store with a monotonic sequence; [`Self::flush`] drives
+    /// the store's own flush so all accepted writes are persisted before it
+    /// returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiminalError::PublishFailed`] when the durable channel cannot be
+    /// initialized over `store`.
+    pub fn new_durable(
+        config: ChannelConfig,
+        store: Arc<dyn DurableStore>,
+    ) -> Result<Self, LiminalError> {
+        let durable = DurableChannel::new(config.name.clone(), RUNTIME_DURABLE_PARTITIONS, store)
+            .map_err(|error| LiminalError::PublishFailed {
+            message: format!(
+                "failed to initialize durable channel '{}': {error}",
+                config.name
+            ),
+        })?;
+        let actor = ChannelActor::new(config.schema.clone());
+        Ok(Self {
+            config,
+            actor: Arc::new(Mutex::new(actor)),
+            durable: Some(Arc::new(Mutex::new(durable))),
+        })
     }
 
     /// Returns the channel configuration used to create this handle.
@@ -106,8 +154,53 @@ impl ChannelHandle {
     where
         Payload: AsRef<[u8]>,
     {
+        // Durable channels persist the message to the store BEFORE acknowledging
+        // the publish (and before fanning out): a published message that was
+        // not durably recorded would be lost on shutdown, which CN7 forbids.
+        if let Some(durable) = self.durable.as_ref() {
+            self.persist_durable(durable, payload.as_ref(), &publisher_id)?;
+        }
         let mut actor = self.lock_actor()?;
         actor.publish(payload.as_ref(), publisher_id, causal_context)
+    }
+
+    fn persist_durable(
+        &self,
+        durable: &Arc<Mutex<DurableChannel>>,
+        payload: &[u8],
+        publisher_id: &PublisherId,
+    ) -> Result<(), LiminalError> {
+        let envelope = MessageEnvelope {
+            payload: payload.to_vec(),
+            causal_context: None,
+            timestamp: now_millis(),
+            publisher_id: publisher_id.as_str().to_owned(),
+            idempotency_key: None,
+        };
+        let publish_result = {
+            let mut channel = durable
+                .lock()
+                .map_err(|error| LiminalError::PublishFailed {
+                    message: format!("durable channel state unavailable: {error}"),
+                })?;
+            // The guard is released at the end of this block, before the error is
+            // mapped and propagated, keeping the critical section minimal.
+            block_on(channel.publish(&envelope))
+        };
+        publish_result
+            .map_err(|error| LiminalError::PublishFailed {
+                message: format!(
+                    "durable publish bridge for channel '{}' failed: {error}",
+                    self.config.name
+                ),
+            })?
+            .map_err(|error| LiminalError::PublishFailed {
+                message: format!(
+                    "durable publish to channel '{}' failed: {error}",
+                    self.config.name
+                ),
+            })?;
+        Ok(())
     }
 
     /// Returns the schema version currently owned by the channel actor.
@@ -145,6 +238,49 @@ impl ChannelHandle {
         actor.subscribe()
     }
 
+    /// Flushes buffered durable channel state to the backing store before shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LiminalError`] when the channel actor cannot be inspected or
+    /// when the durable store flush fails.
+    ///
+    /// For a durable channel this drives the backing [`DurableStore::flush`],
+    /// guaranteeing every accepted publish (each already appended synchronously
+    /// during [`Self::publish`]) is persisted before this call returns. For an
+    /// ephemeral channel there is no store, so this only confirms the actor is
+    /// reachable and returns.
+    pub fn flush(&self) -> Result<(), LiminalError> {
+        drop(self.lock_actor()?);
+        let Some(durable) = self.durable.as_ref() else {
+            return Ok(());
+        };
+        let flush_result = {
+            let channel = durable
+                .lock()
+                .map_err(|error| LiminalError::PublishFailed {
+                    message: format!("durable channel state unavailable: {error}"),
+                })?;
+            // The guard is released at the end of this block, before the error is
+            // mapped and propagated, keeping the critical section minimal.
+            block_on(channel.flush_store())
+        };
+        flush_result
+            .map_err(|error| LiminalError::PublishFailed {
+                message: format!(
+                    "durable flush bridge for channel '{}' failed: {error}",
+                    self.config.name
+                ),
+            })?
+            .map_err(|error| LiminalError::PublishFailed {
+                message: format!(
+                    "durable flush for channel '{}' failed: {error}",
+                    self.config.name
+                ),
+            })?;
+        Ok(())
+    }
+
     /// Closes the channel gracefully.
     ///
     /// # Errors
@@ -172,4 +308,13 @@ impl ChannelHandle {
                 message: format!("channel actor unavailable: {error}"),
             })
     }
+}
+
+/// Returns the current epoch milliseconds, saturating to zero before the epoch.
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
 }
