@@ -41,6 +41,7 @@ impl GaugeMetric {
 pub(super) struct HistogramMetric {
     boundaries: Vec<f64>,
     counts: Vec<AtomicU64>,
+    sum_bits: AtomicU64,
 }
 
 impl HistogramMetric {
@@ -48,7 +49,11 @@ impl HistogramMetric {
         let counts_len = boundaries.len().saturating_add(1);
         let counts = (0..counts_len).map(|_| AtomicU64::new(0)).collect();
 
-        Self { boundaries, counts }
+        Self {
+            boundaries,
+            counts,
+            sum_bits: AtomicU64::new(0.0_f64.to_bits()),
+        }
     }
 
     pub(super) fn boundaries(&self) -> &[f64] {
@@ -65,8 +70,9 @@ impl HistogramMetric {
                 count: count.load(Ordering::Relaxed),
             })
             .collect();
+        let sum = f64::from_bits(self.sum_bits.load(Ordering::Relaxed));
 
-        HistogramSnapshot { buckets }
+        HistogramSnapshot { buckets, sum }
     }
 
     fn bucket_index(&self, value: f64) -> usize {
@@ -171,6 +177,11 @@ impl HistogramHandle {
         }
         let bucket_index = self.metric.bucket_index(value);
         if let Some(count) = self.metric.counts.get(bucket_index) {
+            let _ = self.metric.sum_bits.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |current| Some((f64::from_bits(current) + value).to_bits()),
+            );
             count.fetch_add(1, Ordering::Relaxed);
         }
     }

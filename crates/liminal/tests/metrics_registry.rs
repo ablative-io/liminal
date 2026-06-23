@@ -141,7 +141,7 @@ fn snapshot_contains_owned_metric_values() -> Result<(), Box<dyn std::error::Err
     assert!(snapshot.metrics().iter().any(|metric| {
         metric.name == "latency_ms"
             && metric.kind == MetricKind::Histogram
-            && matches!(&metric.value, MetricValue::Histogram(histogram) if histogram.buckets[1].count == 1)
+            && matches!(&metric.value, MetricValue::Histogram(histogram) if histogram.buckets[1].count == 1 && histogram.sum.to_bits() == 42.0_f64.to_bits())
     }));
 
     Ok(())
