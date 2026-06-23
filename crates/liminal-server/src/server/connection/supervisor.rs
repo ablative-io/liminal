@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use beamr::atom::Atom;
+use beamr::atom::{Atom, AtomTable};
 use beamr::module::ModuleRegistry;
 use beamr::native::native_process::NativeHandlerFactory;
 use beamr::process::ExitReason;
@@ -14,6 +14,7 @@ use crate::ServerError;
 use crate::config::types::ServerConfig;
 
 const CONNECTION_SCHEDULER_THREADS: usize = 4;
+const CONNECTION_SHUTDOWN_CONTROL_ATOM: &str = "liminal_server_connection_shutdown_control";
 
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
@@ -82,6 +83,47 @@ impl ConnectionSupervisor {
     #[must_use]
     pub fn active_connection_count(&self) -> usize {
         self.inner.runtime.active_count()
+    }
+
+    /// Broadcasts a best-effort shutdown notification to active connections.
+    ///
+    /// Connections with no active subscriptions ignore the notification. Failures
+    /// to enqueue the control message are logged and skipped; they are not retried.
+    pub fn notify_shutdown_subscribers(&self) {
+        self.inner
+            .broadcast_control(ConnectionControl::NotifyShutdown);
+    }
+
+    /// Sends a force-close control message to every tracked connection process.
+    ///
+    /// Each live process attempts one shutdown notification before closing its
+    /// stream and exiting normally. Enqueue failures are logged and skipped.
+    pub fn force_close_active_connections(&self) {
+        for connection in self.inner.runtime.active_connections() {
+            tracing::warn!(
+                connection_pid = connection.pid,
+                peer_addr = ?connection.peer_addr,
+                "forcefully closing connection after drain timeout"
+            );
+            if !self
+                .inner
+                .enqueue_control(connection.pid, ConnectionControl::ForceClose)
+            {
+                tracing::warn!(
+                    connection_pid = connection.pid,
+                    peer_addr = ?connection.peer_addr,
+                    "failed to request forceful connection close; process is not live"
+                );
+            }
+        }
+    }
+
+    /// Flushes durable channel state through the configured liminal services.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ShutdownFlush`] when the underlying service flush fails.
+    pub fn flush_durable_state(&self) -> Result<(), ServerError> {
+        self.inner.runtime.services().flush_durable_state()
     }
 
     /// Stops the beamr scheduler used by connection processes.
@@ -156,7 +198,10 @@ impl std::fmt::Debug for SupervisorInner {
 
 impl SupervisorInner {
     fn new(services: Arc<dyn ConnectionServices>) -> Result<Self, ServerError> {
+        let atoms = AtomTable::with_common_atoms();
+        let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let registry = Arc::new(ModuleRegistry::new());
+
         let scheduler = Scheduler::new(
             SchedulerConfig {
                 thread_count: Some(CONNECTION_SCHEDULER_THREADS),
@@ -169,7 +214,7 @@ impl SupervisorInner {
         })?;
         Ok(Self {
             scheduler: Arc::new(scheduler),
-            runtime: Arc::new(ConnectionRuntime::new(services)),
+            runtime: Arc::new(ConnectionRuntime::new(services, control_atom)),
         })
     }
 
@@ -206,24 +251,72 @@ impl SupervisorInner {
             supervisor: Arc::clone(self),
         })
     }
+
+    fn broadcast_control(&self, control: ConnectionControl) {
+        for connection in self.runtime.active_connections() {
+            if !self.enqueue_control(connection.pid, control) {
+                tracing::debug!(
+                    connection_pid = connection.pid,
+                    peer_addr = ?connection.peer_addr,
+                    ?control,
+                    "connection control message skipped because process is not live"
+                );
+            }
+        }
+    }
+
+    fn enqueue_control(&self, pid: u64, control: ConnectionControl) -> bool {
+        if self.runtime.push_control(pid, control).is_err() {
+            return false;
+        }
+        if self
+            .scheduler
+            .enqueue_atom_message(pid, self.runtime.control_atom())
+        {
+            true
+        } else {
+            self.runtime.remove_control(pid, control);
+            false
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ConnectionControl {
+    NotifyShutdown,
+    ForceClose,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveConnection {
+    pid: u64,
+    peer_addr: Option<SocketAddr>,
 }
 
 #[derive(Debug)]
 pub(super) struct ConnectionRuntime {
     services: Arc<dyn ConnectionServices>,
     records: Mutex<HashMap<u64, ConnectionRecord>>,
+    controls: Mutex<Vec<QueuedConnectionControl>>,
+    control_atom: Atom,
 }
 
 impl ConnectionRuntime {
-    fn new(services: Arc<dyn ConnectionServices>) -> Self {
+    fn new(services: Arc<dyn ConnectionServices>, control_atom: Atom) -> Self {
         Self {
             services,
             records: Mutex::new(HashMap::new()),
+            controls: Mutex::new(Vec::new()),
+            control_atom,
         }
     }
 
     pub(super) fn services(&self) -> &dyn ConnectionServices {
         self.services.as_ref()
+    }
+
+    pub(super) const fn control_atom(&self) -> Atom {
+        self.control_atom
     }
 
     /// Sole registration path for a connection: the spawn thread inserts the
@@ -298,6 +391,46 @@ impl ConnectionRuntime {
             .is_ok_and(|records| records.contains_key(&pid))
     }
 
+    fn active_connections(&self) -> Vec<ActiveConnection> {
+        self.records.lock().map_or_else(
+            |_| Vec::new(),
+            |records| {
+                records
+                    .iter()
+                    .map(|(&pid, record)| ActiveConnection {
+                        pid,
+                        peer_addr: record.peer_addr,
+                    })
+                    .collect()
+            },
+        )
+    }
+
+    fn push_control(&self, pid: u64, control: ConnectionControl) -> Result<(), ServerError> {
+        lock(&self.controls, "connection control queue")?
+            .push(QueuedConnectionControl { pid, control });
+        Ok(())
+    }
+
+    pub(super) fn pop_control(&self, pid: u64) -> Option<ConnectionControl> {
+        let mut controls = self.controls.lock().ok()?;
+        let index = controls.iter().position(|queued| queued.pid == pid)?;
+        Some(controls.remove(index).control)
+    }
+
+    fn remove_control(&self, pid: u64, control: ConnectionControl) {
+        let Ok(mut controls) = self.controls.lock() else {
+            return;
+        };
+        let Some(index) = controls
+            .iter()
+            .position(|queued| queued.pid == pid && queued.control == control)
+        else {
+            return;
+        };
+        controls.remove(index);
+    }
+
     fn active_count(&self) -> usize {
         self.records.lock().map_or(0, |records| records.len())
     }
@@ -313,6 +446,12 @@ impl ConnectionRuntime {
 #[derive(Debug, Clone, Copy)]
 struct ConnectionRecord {
     peer_addr: Option<SocketAddr>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QueuedConnectionControl {
+    pid: u64,
+    control: ConnectionControl,
 }
 
 fn lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> Result<MutexGuard<'a, T>, ServerError> {

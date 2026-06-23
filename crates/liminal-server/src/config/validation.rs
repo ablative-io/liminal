@@ -19,6 +19,7 @@ pub fn validate(config: &ServerConfig) -> Result<(), ServerError> {
 
     validate_listen_address(config, &mut errors);
     validate_health_listen_address(config, &mut errors);
+    validate_drain_timeout(config, &mut errors);
     validate_channels(config, &mut errors);
     validate_routing_rules(config, &mut errors);
     validate_persistence_path(config, &mut errors);
@@ -53,6 +54,12 @@ fn validate_health_listen_address(config: &ServerConfig, errors: &mut Vec<String
             "health_listen_address: port must differ from listen_address port for probe isolation"
                 .to_owned(),
         );
+    }
+}
+
+fn validate_drain_timeout(config: &ServerConfig, errors: &mut Vec<String>) {
+    if config.drain_timeout_ms == 0 {
+        errors.push("drain_timeout_ms: must be greater than zero".to_owned());
     }
 }
 
@@ -195,6 +202,7 @@ mod tests {
         Ok(ServerConfig {
             listen_address: socket("127.0.0.1:8080")?,
             health_listen_address: socket("127.0.0.1:8081")?,
+            drain_timeout_ms: 30_000,
             channels: vec![ChannelDef {
                 name: "orders".to_owned(),
                 schema_ref: "schemas/orders.json".to_owned(),
@@ -288,6 +296,19 @@ mod tests {
 
         assert!(message.contains("health_listen_address"));
         assert!(message.contains("port"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn zero_drain_timeout_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.drain_timeout_ms = 0;
+
+        let message = config_validation_message(validate(&config));
+
+        assert!(message.contains("drain_timeout_ms"));
+        assert!(message.contains("greater than zero"));
 
         Ok(())
     }

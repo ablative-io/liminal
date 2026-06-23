@@ -70,6 +70,10 @@ impl ConnectionServices for RecordingServices {
     fn close_conversation(&self, conversation: ConnectionConversation) -> Result<(), ServerError> {
         conversation.close()
     }
+
+    fn flush_durable_state(&self) -> Result<(), ServerError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]

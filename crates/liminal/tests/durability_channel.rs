@@ -362,6 +362,10 @@ impl DurableStore for RecordingStore {
         self.scan_calls.fetch_add(1, Ordering::Relaxed);
         Ok(Vec::new())
     }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        Ok(())
+    }
 }
 
 fn store_error(message: &str) -> DurabilityError {

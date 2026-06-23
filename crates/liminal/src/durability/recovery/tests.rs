@@ -271,6 +271,10 @@ impl DurableStore for FakeStore {
             .flat_map(|(_, entries)| entries.clone())
             .collect())
     }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        Ok(())
+    }
 }
 
 impl FakeStore {

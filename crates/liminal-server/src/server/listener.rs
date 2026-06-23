@@ -53,16 +53,25 @@ impl ServerListener {
         self.stop_worker()
     }
 
+    /// Stops accepting new connections and waits for the accept worker to finish.
+    ///
+    /// Existing accepted connections remain supervised so the graceful shutdown
+    /// coordinator can drain or force-close them before stopping the scheduler.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] if the accept worker panicked or returned a fatal error.
+    pub fn stop_accepting(&mut self) -> Result<(), ServerError> {
+        self.stop_worker()
+    }
+
     fn stop_worker(&mut self) -> Result<(), ServerError> {
         self.shutdown.store(true, Ordering::SeqCst);
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
-        let result = worker.join().map_err(|_| ServerError::ListenerAccept {
+        worker.join().map_err(|_| ServerError::ListenerAccept {
             message: "listener accept worker terminated unexpectedly".to_owned(),
-        })?;
-        self.supervisor.shutdown();
-        result
+        })?
     }
 }
 
@@ -236,6 +245,27 @@ mod tests {
     }
 
     #[test]
+    fn stop_accepting_refuses_new_connections() -> Result<(), Box<dyn std::error::Error>> {
+        let address = reserve_loopback_port()?;
+        let config = sample_config(address)?;
+        let supervisor = ConnectionSupervisor::new()?;
+        let mut listener = ServerListener::bind(&config, supervisor.clone())?;
+        let local_addr = listener.local_addr();
+
+        let client = TcpStream::connect(local_addr)?;
+        wait_for_connections(&supervisor, 1)?;
+        listener.stop_accepting()?;
+
+        let result = TcpStream::connect(local_addr);
+
+        assert!(result.is_err());
+        assert_eq!(supervisor.active_connection_count(), 1);
+        drop(client);
+        supervisor.shutdown();
+        Ok(())
+    }
+
+    #[test]
     fn resource_exhaustion_accept_error_is_transient() {
         let error = std::io::Error::from_raw_os_error(emfile());
 
@@ -275,6 +305,7 @@ mod tests {
         Ok(ServerConfig {
             listen_address: address,
             health_listen_address: reserve_loopback_port()?,
+            drain_timeout_ms: 30_000,
             channels: vec![ChannelDef {
                 name: "orders".to_owned(),
                 schema_ref: "schemas/orders.json".to_owned(),

@@ -40,6 +40,12 @@ pub trait DurableStore: std::fmt::Debug + Send + Sync {
 
     /// Scans entries by store prefix.
     async fn scan(&self, prefix: &str) -> Result<Vec<StoredEntry>, DurabilityError>;
+
+    /// Flushes buffered writes so completed durable operations are persisted.
+    ///
+    /// # Errors
+    /// Returns [`DurabilityError`] when the underlying store cannot complete the flush.
+    async fn flush(&self) -> Result<(), DurabilityError>;
 }
 
 /// `DurableStore` implementation that delegates directly to haematite's `EventStore`.
@@ -107,6 +113,10 @@ impl DurableStore for HaematiteStore {
             .map_err(map_store_error)?;
 
         Ok(entries.into_iter().map(StoredEntry::from).collect())
+    }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        self.event_store.flush().await.map_err(map_store_error)
     }
 }
 

@@ -1,9 +1,12 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use haematite::EventStore;
 use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, Schema};
 use liminal::conversation::Conversation;
+use liminal::durability::{DurableStore, HaematiteStore};
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
 use crate::ServerError;
@@ -144,12 +147,19 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns [`ServerError`] when the liminal conversation close operation fails.
     fn close_conversation(&self, conversation: ConnectionConversation) -> Result<(), ServerError>;
+
+    /// Flushes durable channel state through the liminal library boundary.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when the liminal channel flush operation fails.
+    fn flush_durable_state(&self) -> Result<(), ServerError>;
 }
 
 /// Default adapter from server wire frames to liminal channel/conversation APIs.
 #[derive(Debug)]
 pub struct LiminalConnectionServices {
     channels: HashMap<String, ConfiguredChannel>,
+    durable_store: Arc<dyn DurableStore>,
     next_message_id: AtomicU64,
     next_subscription_id: AtomicU64,
 }
@@ -157,9 +167,27 @@ pub struct LiminalConnectionServices {
 impl LiminalConnectionServices {
     /// Builds library-backed services from validated server configuration.
     ///
+    /// Durable-mode channels are backed by a shared haematite event store so
+    /// their publishes are persisted and survive the graceful-shutdown flush;
+    /// ephemeral channels carry no store.
+    ///
     /// # Errors
     /// Returns [`ServerError`] when a configured channel cannot be initialized.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
+        Self::from_config_with_store(config, default_store())
+    }
+
+    /// Builds services over a caller-provided durable store.
+    ///
+    /// Used by tests that need to inspect persisted state through the same store
+    /// handle the durable channels write to.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when a configured channel cannot be initialized.
+    pub fn from_config_with_store(
+        config: &ServerConfig,
+        durable_store: Arc<dyn DurableStore>,
+    ) -> Result<Self, ServerError> {
         let mut channels = HashMap::new();
         for channel in &config.channels {
             let schema = Schema::new(serde_json::json!({})).map_err(|error| {
@@ -167,12 +195,23 @@ impl LiminalConnectionServices {
                     message: format!("failed to initialize channel '{}': {error}", channel.name),
                 }
             })?;
-            let mode = if channel.durable {
-                ChannelMode::Durable
+            let channel_config = if channel.durable {
+                ChannelConfig::new(channel.name.clone(), schema, ChannelMode::Durable)
             } else {
-                ChannelMode::Ephemeral
+                ChannelConfig::new(channel.name.clone(), schema, ChannelMode::Ephemeral)
             };
-            let handle = ChannelHandle::new(ChannelConfig::new(channel.name.clone(), schema, mode));
+            let handle = if channel.durable {
+                ChannelHandle::new_durable(channel_config, Arc::clone(&durable_store)).map_err(
+                    |error| ServerError::ConfigValidation {
+                        message: format!(
+                            "failed to initialize durable channel '{}': {error}",
+                            channel.name
+                        ),
+                    },
+                )?
+            } else {
+                ChannelHandle::new(channel_config)
+            };
             channels.insert(
                 channel.name.clone(),
                 ConfiguredChannel {
@@ -183,6 +222,7 @@ impl LiminalConnectionServices {
         }
         Ok(Self {
             channels,
+            durable_store,
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
         })
@@ -193,10 +233,22 @@ impl LiminalConnectionServices {
     pub fn empty() -> Self {
         Self {
             channels: HashMap::new(),
+            durable_store: default_store(),
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
         }
     }
+
+    /// Returns the shared durable store backing this service's durable channels.
+    #[must_use]
+    pub fn durable_store(&self) -> Arc<dyn DurableStore> {
+        Arc::clone(&self.durable_store)
+    }
+}
+
+/// Constructs the default in-memory haematite-backed durable store.
+fn default_store() -> Arc<dyn DurableStore> {
+    Arc::new(HaematiteStore::new(Arc::new(EventStore::new())))
 }
 
 impl ConnectionServices for LiminalConnectionServices {
@@ -275,6 +327,22 @@ impl ConnectionServices for LiminalConnectionServices {
 
     fn close_conversation(&self, conversation: ConnectionConversation) -> Result<(), ServerError> {
         conversation.close()
+    }
+
+    fn flush_durable_state(&self) -> Result<(), ServerError> {
+        for (channel_name, configured) in &self.channels {
+            if configured.handle.config().mode == ChannelMode::Durable {
+                configured
+                    .handle
+                    .flush()
+                    .map_err(|error| ServerError::ShutdownFlush {
+                        message: format!(
+                            "failed to flush durable channel '{channel_name}': {error}"
+                        ),
+                    })?;
+            }
+        }
+        Ok(())
     }
 }
 
