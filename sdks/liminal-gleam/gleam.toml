@@ -1,0 +1,29 @@
+name = "liminal"
+version = "0.1.0"
+description = "Gleam SDK facade for typed liminal channels backed by the Rust SDK"
+licences = ["MIT"]
+target = "erlang"
+gleam = ">= 1.17.0"
+internal_modules = ["liminal/ffi"]
+
+[repository]
+type = "github"
+user = "tomWhiting"
+repo = "liminal"
+path = "sdks/liminal-gleam"
+
+[dependencies]
+gleam_stdlib = ">= 0.44.0 and < 2.0.0"
+
+[dev_dependencies]
+gleeunit = ">= 1.0.0 and < 2.0.0"
+
+# Informational only: Gleam does not read `[tools.*]` tables. The real FFI link
+# is the `@external(erlang, "liminal_sdk_ffi", ...)` declarations in
+# src/liminal/ffi.gleam. This table records the Rust crate + NIF module that a
+# build/packaging step is expected to provide at runtime.
+[tools.liminal_sdk_ffi]
+rust_crate = "liminal-sdk"
+crate_path = "../../crates/liminal-sdk"
+erlang_module = "liminal_sdk_ffi"
+beam_target = "erlang"
