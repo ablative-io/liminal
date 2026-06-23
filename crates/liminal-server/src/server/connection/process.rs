@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use beamr::atom::Atom;
 use beamr::native::native_process::{NativeContext, NativeHandler, NativeOutcome};
@@ -20,7 +19,6 @@ use super::supervisor::ConnectionRuntime;
 use crate::ServerError;
 
 const READ_BUFFER_BYTES: usize = 8192;
-const POLL_BACKOFF_MS: u64 = 10;
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
 
@@ -39,7 +37,29 @@ impl ConnectionProcess {
         peer_addr: Option<SocketAddr>,
         holder: &Arc<Mutex<Option<TcpStream>>>,
     ) -> Self {
-        let stream = holder.lock().ok().and_then(|mut stream| stream.take());
+        // The `NativeHandlerFactory` is `Fn + Send + Sync`, so the accepted
+        // `TcpStream` cannot be moved into the closure (a `Fn` captures by shared
+        // reference and may be invoked more than once for restart). The shared
+        // `Arc<Mutex<Option<TcpStream>>>` is the interior-mutability proxy that
+        // lets the FIRST handler build take the stream out exactly once; the
+        // Mutex is required by the `Sync` bound, not incidental.
+        //
+        // If the lock is poisoned the take silently yields `None`, and the
+        // process would later stop with a bare crash and no root cause. Log the
+        // poisoning clearly (with the peer address) so a missing-stream handoff
+        // is diagnosable instead of a mystery crash.
+        let stream = match holder.lock() {
+            Ok(mut held) => held.take(),
+            Err(poisoned) => {
+                tracing::error!(
+                    peer_addr = ?peer_addr,
+                    error = %poisoned,
+                    "connection stream handoff failed: stream holder mutex was poisoned; \
+                     the connection process will start without a stream and stop immediately"
+                );
+                None
+            }
+        };
         Self {
             runtime,
             peer_addr,
@@ -61,7 +81,17 @@ impl ConnectionProcess {
                 return NativeOutcome::Stop(ExitReason::Normal);
             }
             Ok(ReadStatus::WouldBlock) => {
-                std::thread::sleep(Duration::from_millis(POLL_BACKOFF_MS));
+                // No bytes ready on this non-blocking socket right now. Do NOT
+                // sleep: that would block a beamr scheduler worker thread (the
+                // supervisor runs `CONNECTION_SCHEDULER_THREADS`) on every idle
+                // poll and starve every other connection process sharing it.
+                // `NativeOutcome::Continue` maps to `SliceOutcome::Requeue`,
+                // which re-queues this pid behind every other runnable process
+                // (cooperative round-robin) and reschedules us to poll again —
+                // yielding the thread without parking. `Wait` is wrong here:
+                // it parks until a *message* arrives, but socket readiness does
+                // not enqueue a message, so the connection would hang forever.
+                return NativeOutcome::Continue;
             }
             Ok(ReadStatus::Read) => {}
             Err(error) => {
@@ -90,10 +120,12 @@ impl ConnectionProcess {
 impl NativeHandler for ConnectionProcess {
     fn handle(&mut self, ctx: &mut NativeContext<'_>) -> NativeOutcome {
         let pid = ctx.self_pid();
-        if let Err(error) = self.runtime.ensure_registered(pid, self.peer_addr) {
-            tracing::warn!(connection_pid = pid, %error, "connection registration failed");
-            return NativeOutcome::Stop(ExitReason::Error);
-        }
+        // Registration is owned solely by the spawn thread (`SupervisorInner::
+        // spawn_connection` calls `runtime.register` before returning the
+        // handle), so the handler never writes the registry — it only reads its
+        // record via `mark_crashed`/`finish`. This removes the previous
+        // double-write (spawn-thread `insert` racing a handler `or_insert`) and
+        // its lost-update/duplicate-record hazard.
         while let Some(message) = ctx.recv() {
             if message == Term::atom(Atom::ERROR) {
                 self.runtime

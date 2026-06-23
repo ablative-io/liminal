@@ -226,19 +226,22 @@ impl ConnectionRuntime {
         self.services.as_ref()
     }
 
+    /// Sole registration path for a connection: the spawn thread inserts the
+    /// record synchronously, before `spawn_connection` returns the handle, so
+    /// `is_tracked`/`active_connection_count` reflect the connection
+    /// immediately. The connection handler never writes the registry (it only
+    /// reads via `mark_crashed`/`finish`), so there is a single writer here and
+    /// no register/ensure-register race.
+    ///
+    /// Ordering note: `spawn_native` only enqueues the process, so its first
+    /// slice may run on another worker thread before this insert lands. If that
+    /// first slice exits immediately (e.g. a missing-stream crash) its
+    /// `mark_crashed`/`finish` removes nothing and this insert then leaves a
+    /// record for an already-dead pid. That orphan is self-healing:
+    /// `reap_crashed`, driven continuously by the listener loop, removes any
+    /// record whose pid is absent from the scheduler process table.
     fn register(&self, pid: u64, peer_addr: Option<SocketAddr>) -> Result<(), ServerError> {
         lock(&self.records, "connection registry")?.insert(pid, ConnectionRecord { peer_addr });
-        Ok(())
-    }
-
-    pub(super) fn ensure_registered(
-        &self,
-        pid: u64,
-        peer_addr: Option<SocketAddr>,
-    ) -> Result<(), ServerError> {
-        lock(&self.records, "connection registry")?
-            .entry(pid)
-            .or_insert(ConnectionRecord { peer_addr });
         Ok(())
     }
 
@@ -269,10 +272,18 @@ impl ConnectionRuntime {
             if scheduler.process_table().get(pid).is_none() {
                 let removed = self.remove(pid);
                 let peer_addr = removed.and_then(|record| record.peer_addr);
+                // This process exited without ever reaching `mark_crashed`/`finish`
+                // (e.g. the beamr scheduler terminated it externally). beamr records
+                // the real `ExitReason` in its private `exit_tombstones` map, but its
+                // public `Scheduler` API exposes no non-blocking accessor for it
+                // (only `run_until_exit`, which blocks). So we cannot recover the true
+                // reason here; log a truthful, specific message rather than the
+                // misleading literal "unknown". If beamr later grows a public,
+                // non-blocking exit-reason query for a dead pid, read it here instead.
                 tracing::warn!(
                     connection_pid = pid,
                     ?peer_addr,
-                    reason = "unknown",
+                    reason = "terminated externally (no exit reason recorded by supervisor)",
                     "connection process crashed"
                 );
                 reaped += 1;
