@@ -130,6 +130,24 @@ impl WirePublishRequest {
             payload: self.payload.clone(),
         }
     }
+
+    /// Application channel this publish targets.
+    #[cfg(feature = "std")]
+    pub(super) fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    /// Schema metadata declared for the published message type.
+    #[cfg(feature = "std")]
+    pub(super) const fn schema(&self) -> &SchemaMetadata {
+        &self.schema
+    }
+
+    /// Serialized application payload bytes.
+    #[cfg(feature = "std")]
+    pub(super) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 #[derive(Debug)]
@@ -168,6 +186,18 @@ impl WireSubscribeRequest {
             stream_id: self.stream_id,
         }
     }
+
+    /// Application channel this subscription targets.
+    #[cfg(feature = "std")]
+    pub(super) fn channel(&self) -> &str {
+        &self.channel
+    }
+
+    /// Protocol stream id allocated for this subscription.
+    #[cfg(feature = "std")]
+    pub(super) const fn stream_id(&self) -> u32 {
+        self.stream_id
+    }
 }
 
 #[derive(Debug)]
@@ -196,6 +226,18 @@ impl WireConversationRequest {
             payload: self.payload.clone(),
         }
     }
+
+    /// Application conversation identifier this message belongs to.
+    #[cfg(feature = "std")]
+    pub(super) const fn conversation_id(&self) -> &ConversationId {
+        &self.conversation_id
+    }
+
+    /// Serialized application payload bytes.
+    #[cfg(feature = "std")]
+    pub(super) fn payload(&self) -> &[u8] {
+        &self.payload
+    }
 }
 
 #[derive(Debug)]
@@ -218,6 +260,18 @@ impl WireResumeRequest {
             subscription_id: self.subscription_id.get(),
             from_sequence: self.from_sequence,
         }
+    }
+
+    /// Subscription this resume request reopens.
+    #[cfg(feature = "std")]
+    pub(super) const fn subscription_id(&self) -> SubscriptionId {
+        self.subscription_id
+    }
+
+    /// Sequence number the consumer wants delivery to resume from.
+    #[cfg(feature = "std")]
+    pub(super) const fn resume_from_sequence(&self) -> u64 {
+        self.from_sequence
     }
 }
 
