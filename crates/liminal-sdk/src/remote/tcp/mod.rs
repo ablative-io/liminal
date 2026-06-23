@@ -11,44 +11,35 @@
 //! `Result` values, and the rest of the SDK (connection pool, lifecycle) is
 //! driven by ordinary blocking calls. This transport therefore uses
 //! `std::net::TcpStream` in blocking mode with explicit read/write timeouts; it
-//! does not introduce an async runtime. Each transport call performs one
-//! request/response round trip under a short-lived connection lock.
+//! does not introduce an async runtime. Each transport call holds a short-lived
+//! connection lock for the duration of one request/response exchange.
+
+mod connection;
 
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
-use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt;
-use core::time::Duration;
 
-use std::io::{Read, Write};
-use std::net::TcpStream;
-
-use liminal::protocol::{
-    CausalContext, Frame, FrameType, MessageEnvelope, ProtocolError, ProtocolVersion, SchemaId,
-    decode, encode, encoded_len,
-};
+use liminal::protocol::{CausalContext, Frame, MessageEnvelope, SchemaId};
 use spin::Mutex;
 
 use crate::{PressureResponse, SdkError};
 
+use self::connection::{Connection, unexpected_frame};
 use super::ServerAddress;
 use super::protocol::{
     RemoteTransport, WireConversationRequest, WirePublishRequest, WireResumeRequest,
     WireSubscribeRequest,
 };
 
-/// Minimum protocol version this client advertises during the handshake.
-const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
-/// Maximum protocol version this client advertises during the handshake.
-const CLIENT_MAX_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
-/// Maximum time spent waiting on a single socket read or write.
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
-/// Read chunk size used when draining the socket into the frame buffer.
-const READ_CHUNK_BYTES: usize = 4096;
-/// Upper bound on a single response frame, guarding against runaway buffering.
-const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Application stream id used for non-subscription application frames.
+const APPLICATION_STREAM_ID: u32 = 1;
+/// In-flight credit advertised on subscribe; one keeps strict pacing.
+const DEFAULT_MAX_IN_FLIGHT: u32 = 1;
+/// Schema id used for payloads whose schema is not carried on the wire.
+const SCHEMALESS_SCHEMA: &[u8] = &[];
 
 /// Real TCP transport that exchanges canonical wire frames with a liminal server.
 pub struct TcpRemoteTransport {
@@ -80,13 +71,7 @@ impl TcpRemoteTransport {
 
     fn round_trip(&self, request: &Frame) -> Result<Frame, SdkError> {
         let mut connection = self.connection.lock();
-        connection.send(request)?;
-        connection.receive()
-    }
-
-    fn fire(&self, request: &Frame) -> Result<(), SdkError> {
-        let mut connection = self.connection.lock();
-        connection.send(request)
+        connection.round_trip(request)
     }
 }
 
@@ -130,17 +115,11 @@ impl RemoteTransport for TcpRemoteTransport {
         _server_address: &ServerAddress,
         request: &WireConversationRequest,
     ) -> Result<(), SdkError> {
-        let conversation_id = conversation_wire_id(request.conversation_id().as_str());
+        let conversation_label = request.conversation_id().as_str();
+        let conversation_id = conversation_wire_id(conversation_label);
         let envelope = build_envelope(SCHEMALESS_SCHEMA, request.payload());
-        let frame = Frame::ConversationMessage {
-            flags: 0,
-            stream_id: APPLICATION_STREAM_ID,
-            conversation_id,
-            envelope,
-        };
-        // Conversation messages are fire-and-forget on the success path: the
-        // server only replies with a ConversationError frame on failure.
-        self.fire(&frame)
+        let mut connection = self.connection.lock();
+        connection.send_conversation_message(conversation_id, conversation_label, envelope)
     }
 
     fn resume(
@@ -148,141 +127,19 @@ impl RemoteTransport for TcpRemoteTransport {
         _server_address: &ServerAddress,
         request: &WireResumeRequest,
     ) -> Result<(), SdkError> {
-        // The wire protocol expresses resume as re-subscription bookkeeping; the
-        // SDK tracks the resume sequence locally and the server replays from its
-        // durable log. There is no distinct resume frame, so a resume is a no-op
-        // over the socket beyond recording intent, which the caller already did.
+        // The wire protocol has no resume frame: the server replays a subscription
+        // from its durable log only when the SDK re-issues the Subscribe for that
+        // stream on reconnect. This transport does not retain the channel/stream
+        // mapping needed to re-drive that Subscribe here, so it cannot honour the
+        // resume over the socket. Returning a clear error keeps the contract honest
+        // rather than reporting success while dropping the user's resume intent.
         let _ = (request.subscription_id(), request.resume_from_sequence());
-        Ok(())
-    }
-}
-
-/// Application stream id used for non-subscription application frames.
-const APPLICATION_STREAM_ID: u32 = 1;
-/// In-flight credit advertised on subscribe; one keeps strict pacing.
-const DEFAULT_MAX_IN_FLIGHT: u32 = 1;
-/// Schema id used for payloads whose schema is not carried on the wire.
-const SCHEMALESS_SCHEMA: &[u8] = &[];
-
-/// Owns the socket and the partial-frame read buffer for one server connection.
-struct Connection {
-    stream: TcpStream,
-    buffer: Vec<u8>,
-}
-
-impl Connection {
-    fn connect(address: &str) -> Result<Self, SdkError> {
-        let stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
-            description: format!("failed to connect to {address}: {source}"),
-        })?;
-        stream
-            .set_nodelay(true)
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to disable Nagle for {address}: {source}"),
-            })?;
-        stream
-            .set_read_timeout(Some(IO_TIMEOUT))
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to set read timeout for {address}: {source}"),
-            })?;
-        stream
-            .set_write_timeout(Some(IO_TIMEOUT))
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to set write timeout for {address}: {source}"),
-            })?;
-
-        let mut connection = Self {
-            stream,
-            buffer: Vec::new(),
-        };
-        connection.handshake()?;
-        Ok(connection)
-    }
-
-    fn handshake(&mut self) -> Result<(), SdkError> {
-        let connect = Frame::Connect {
-            flags: 0,
-            min_version: CLIENT_MIN_VERSION,
-            max_version: CLIENT_MAX_VERSION,
-            auth_token: Vec::new(),
-        };
-        self.send(&connect)?;
-        match self.receive()? {
-            Frame::ConnectAck { .. } => Ok(()),
-            Frame::ConnectError {
-                reason_code,
-                message,
-                ..
-            } => Err(SdkError::Connection {
-                description: format!(
-                    "server rejected connection (reason {reason_code}): {}",
-                    message.unwrap_or_else(|| "no detail".to_string())
-                ),
-            }),
-            other => Err(unexpected_frame("ConnectAck", &other)),
-        }
-    }
-
-    fn send(&mut self, frame: &Frame) -> Result<(), SdkError> {
-        let len = encoded_len(frame).map_err(|error| protocol_error(&error))?;
-        let mut bytes = vec![0_u8; len];
-        let written = encode(frame, &mut bytes).map_err(|error| protocol_error(&error))?;
-        let encoded = bytes.get(..written).ok_or_else(|| SdkError::Protocol {
-            description: "wire encoder reported an invalid byte count".to_string(),
-        })?;
-        self.stream
-            .write_all(encoded)
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to write frame to server: {source}"),
-            })?;
-        self.stream.flush().map_err(|source| SdkError::Connection {
-            description: format!("failed to flush frame to server: {source}"),
-        })
-    }
-
-    fn receive(&mut self) -> Result<Frame, SdkError> {
-        loop {
-            match decode(&self.buffer) {
-                Ok((frame, consumed)) => {
-                    self.buffer.drain(..consumed);
-                    return Ok(frame);
-                }
-                Err(
-                    ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
-                ) => self.fill_buffer()?,
-                Err(error) => return Err(protocol_error(&error)),
-            }
-        }
-    }
-
-    fn fill_buffer(&mut self) -> Result<(), SdkError> {
-        if self.buffer.len() > MAX_RESPONSE_BYTES {
-            return Err(SdkError::Protocol {
-                description: format!(
-                    "server response exceeded {MAX_RESPONSE_BYTES} bytes without a complete frame"
-                ),
-            });
-        }
-        let mut chunk = [0_u8; READ_CHUNK_BYTES];
-        let read = self
-            .stream
-            .read(&mut chunk)
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to read frame from server: {source}"),
-            })?;
-        if read == 0 {
-            return Err(SdkError::Connection {
-                description: "server closed the connection before a full frame arrived".to_string(),
-            });
-        }
-        let Some(received) = chunk.get(..read) else {
-            return Err(SdkError::Protocol {
-                description: "socket read reported more bytes than the read buffer holds"
+        Err(SdkError::Protocol {
+            description:
+                "resume is not yet supported over the TCP transport; re-subscribe to trigger \
+                 server replay"
                     .to_string(),
-            });
-        };
-        self.buffer.extend_from_slice(received);
-        Ok(())
+        })
     }
 }
 
@@ -359,21 +216,6 @@ fn subscribe_response(frame: Frame) -> Result<(), SdkError> {
             ),
         }),
         other => Err(unexpected_frame("SubscribeAck", &other)),
-    }
-}
-
-fn protocol_error(error: &ProtocolError) -> SdkError {
-    SdkError::Protocol {
-        description: format!("wire codec error: {error}"),
-    }
-}
-
-fn unexpected_frame(expected: &str, actual: &Frame) -> SdkError {
-    SdkError::Protocol {
-        description: format!(
-            "expected {expected} frame, received {:?}",
-            FrameType::from(u8::from(actual.frame_type()))
-        ),
     }
 }
 

@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use futures_core::Stream;
 use liminal_sdk::{
-    ChannelHandle, ConnectionPoolConfig, PressureResponse, RemoteConfig, SchemaMetadata,
-    SchemaValidate, SdkConfig, build_channel_handle,
+    ChannelHandle, ConnectionPoolConfig, ConversationHandle, PressureResponse, RemoteConfig,
+    SchemaMetadata, SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
 };
 use liminal_server::config::{ChannelDef, ServerConfig};
 use liminal_server::server::connection::ConnectionSupervisor;
@@ -42,6 +42,11 @@ impl SchemaValidate for OrderPlaced {
     fn schema_metadata() -> SchemaMetadata {
         SchemaMetadata::new("orders.placed", "1", br#"{"type":"object"}"#.as_slice())
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct ChatMessage {
+    text: String,
 }
 
 /// Holds the running listener so it stays bound for the lifetime of a test.
@@ -214,5 +219,44 @@ fn sdk_tcp_connect_to_closed_port_fails() -> Result<(), Box<dyn Error>> {
         "connecting the real TCP transport to a closed port must fail; \
          a mock that never touches the network would have succeeded"
     );
+    Ok(())
+}
+
+/// A conversation message must actually reach the server (`ConversationOpen` +
+/// `ConversationMessage`), report a true outcome instead of silently dropping, and
+/// leave the shared connection in sync so a following publish still works.
+///
+/// Against the old fire-and-forget path this would either: (a) report success
+/// while the server replied `ConversationError` (silent drop), and (b) leave that
+/// error frame undrained so the next publish read a stale `ConversationError` as
+/// its response and failed -- a head-of-line desync. Both are exercised here.
+#[test]
+fn sdk_tcp_conversation_send_then_publish_stays_in_sync() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let client = connect_client(server.address())?;
+    server.wait_for_connection()?;
+
+    // The transport opens the conversation, sends the message, and drains any
+    // error reply. open_conversation always succeeds server-side, so this must
+    // return Ok -- proving the frames crossed the socket and were accepted.
+    let conversation = build_conversation_handle(&client)?;
+    conversation.send(ChatMessage {
+        text: "hello".to_owned(),
+    })?;
+
+    // Sending a second message on the now-open conversation must also succeed
+    // without re-opening (no duplicate open, no desync).
+    conversation.send(ChatMessage {
+        text: "world".to_owned(),
+    })?;
+
+    // The shared connection is still in sync: a publish round trip reads its own
+    // PublishAck, not a stale conversation reply. With the old undrained-error
+    // path this publish would have consumed a leftover frame and failed.
+    let channel = build_channel_handle(&client)?;
+    let response = channel.publish(OrderPlaced { id: 3 })?;
+    assert_eq!(response, PressureResponse::Accept);
+
+    server.shutdown()?;
     Ok(())
 }
