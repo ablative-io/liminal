@@ -1,13 +1,16 @@
 #![allow(clippy::module_name_repetitions)]
 
-use super::{DurabilityError, DurableStore};
+use super::{CheckpointPolicy, DurabilityConfig, DurabilityError, DurableStore};
 
 /// Partition-specific durable read position for one consumer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConsumerCursor {
-    consumer_id: String,
-    partition_key: String,
-    current_offset: u64,
+    /// Stable consumer identifier.
+    pub consumer_id: String,
+    /// Durable channel partition key, formatted as `channel_id:partition_index`.
+    pub partition_key: String,
+    /// Current persisted read offset for this consumer and partition.
+    pub current_offset: u64,
 }
 
 impl ConsumerCursor {
@@ -102,8 +105,140 @@ impl ConsumerCursor {
     }
 }
 
+/// Drives cursor checkpoints according to the channel's configured policy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CheckpointDriver {
+    policy: CheckpointPolicy,
+    messages_since_last_checkpoint: usize,
+    pending_offset: Option<u64>,
+}
+
+impl CheckpointDriver {
+    /// Creates a checkpoint driver from a checkpoint policy or full durability config.
+    #[must_use]
+    pub fn new(policy: impl Into<CheckpointPolicy>) -> Self {
+        Self::from_policy(policy.into())
+    }
+
+    /// Creates a checkpoint driver from an explicit checkpoint policy.
+    #[must_use]
+    pub const fn from_policy(policy: CheckpointPolicy) -> Self {
+        Self {
+            policy,
+            messages_since_last_checkpoint: 0,
+            pending_offset: None,
+        }
+    }
+
+    /// Creates a checkpoint driver from a durability configuration.
+    #[must_use]
+    pub const fn from_config(config: DurabilityConfig) -> Self {
+        Self::from_policy(config.checkpoint_policy())
+    }
+
+    /// Returns the active checkpoint policy.
+    #[must_use]
+    pub const fn policy(&self) -> CheckpointPolicy {
+        self.policy
+    }
+
+    /// Returns the number of processed messages since the last successful checkpoint.
+    #[must_use]
+    pub const fn messages_since_last_checkpoint(&self) -> usize {
+        self.messages_since_last_checkpoint
+    }
+
+    /// Returns the latest processed offset waiting to be checkpointed.
+    #[must_use]
+    pub const fn pending_offset(&self) -> Option<u64> {
+        self.pending_offset
+    }
+
+    /// Records one processed message and checkpoints if the configured policy requires it.
+    ///
+    /// `next_offset` is the partition offset from which the consumer should resume after the
+    /// processed message. The driver delegates all persistence to [`ConsumerCursor::checkpoint`].
+    ///
+    /// # Errors
+    ///
+    /// Returns cursor checkpoint errors from the store, or a configuration error for an invalid
+    /// raw batch policy.
+    pub async fn record_processed(
+        &mut self,
+        cursor: &mut ConsumerCursor,
+        store: &dyn DurableStore,
+        next_offset: u64,
+    ) -> Result<(), DurabilityError> {
+        self.validate_policy()?;
+        self.messages_since_last_checkpoint = self
+            .messages_since_last_checkpoint
+            .checked_add(1)
+            .ok_or_else(|| {
+                DurabilityError::ConfigError("messages since last checkpoint overflow".to_owned())
+            })?;
+        self.pending_offset = Some(next_offset);
+
+        match self.policy {
+            CheckpointPolicy::PerMessage => self.checkpoint_pending(cursor, store).await,
+            CheckpointPolicy::PerBatch(batch_size)
+                if self.messages_since_last_checkpoint >= batch_size =>
+            {
+                self.checkpoint_pending(cursor, store).await
+            }
+            CheckpointPolicy::PerBatch(_) | CheckpointPolicy::ExplicitFlush => Ok(()),
+        }
+    }
+
+    /// Flushes any processed offset that is waiting to be checkpointed.
+    ///
+    /// # Errors
+    ///
+    /// Returns cursor checkpoint errors from the store, or a configuration error for an invalid
+    /// raw batch policy.
+    pub async fn flush(
+        &mut self,
+        cursor: &mut ConsumerCursor,
+        store: &dyn DurableStore,
+    ) -> Result<(), DurabilityError> {
+        self.validate_policy()?;
+        self.checkpoint_pending(cursor, store).await
+    }
+
+    async fn checkpoint_pending(
+        &mut self,
+        cursor: &mut ConsumerCursor,
+        store: &dyn DurableStore,
+    ) -> Result<(), DurabilityError> {
+        let Some(next_offset) = self.pending_offset else {
+            return Ok(());
+        };
+        cursor.checkpoint(store, next_offset).await?;
+        self.messages_since_last_checkpoint = 0;
+        self.pending_offset = None;
+        Ok(())
+    }
+
+    fn validate_policy(&self) -> Result<(), DurabilityError> {
+        if self.policy == CheckpointPolicy::PerBatch(0) {
+            return Err(DurabilityError::ConfigError(
+                "checkpoint batch size must be at least 1".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl From<DurabilityConfig> for CheckpointPolicy {
+    fn from(config: DurabilityConfig) -> Self {
+        config.checkpoint_policy()
+    }
+}
+
 /// Formats the haematite key used for cursor compare-and-swap state.
 #[must_use]
 pub fn cursor_key_for(consumer_id: &str, partition_key: &str) -> String {
     format!("{consumer_id}:{partition_key}")
 }
+
+#[cfg(test)]
+mod tests;
