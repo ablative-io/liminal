@@ -12,7 +12,7 @@ pub mod store;
 pub use channel::{CausalContext, DurableChannel, EphemeralChannel, MessageEnvelope, PartitionKey};
 pub use config::{CheckpointPolicy, DurabilityConfig, DurabilityMode};
 pub use conversation::{ConversationEvent, DurableConversation, RedeliveryDecision};
-pub use cursor::{ConsumerCursor, cursor_key_for};
+pub use cursor::{CheckpointDriver, ConsumerCursor, cursor_key_for};
 pub use dedup::{DedupCache, DedupDecision, DedupEntry, DedupSweepReport, DedupSweeper};
 pub use error::DurabilityError;
 pub use receipt::ProcessingReceipt;
