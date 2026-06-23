@@ -1,4 +1,6 @@
-use crate::protocol::{Frame, FrameType, MessageEnvelope, ProtocolError, ProtocolVersion};
+use crate::protocol::{
+    Frame, FrameType, MessageEnvelope, MessageId, ProtocolError, ProtocolVersion, StreamPressure,
+};
 
 use super::payload::PayloadReader;
 
@@ -85,12 +87,19 @@ fn decode_subscription_payload(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Frame, ProtocolError> {
     match frame_type {
-        FrameType::Subscribe => Ok(Frame::Subscribe {
-            flags,
-            stream_id,
-            channel: reader.read_string_field()?,
-            accepted_schemas: reader.read_schema_ids_field()?,
-        }),
+        FrameType::Subscribe => {
+            let channel = reader.read_string_field()?;
+            let accepted_schemas = reader.read_schema_ids_field()?;
+            let max_in_flight = reader.read_u32()?;
+            StreamPressure::new(max_in_flight)?;
+            Ok(Frame::Subscribe {
+                flags,
+                stream_id,
+                channel,
+                accepted_schemas,
+                max_in_flight,
+            })
+        }
         FrameType::SubscribeAck => Ok(Frame::SubscribeAck {
             flags,
             stream_id,
@@ -192,18 +201,19 @@ fn decode_pressure_payload(
         FrameType::Accept => Ok(Frame::Accept {
             flags,
             stream_id,
-            credit: reader.read_u32()?,
+            referenced_message_id: MessageId::new(reader.read_string_field()?),
         }),
         FrameType::Defer => Ok(Frame::Defer {
             flags,
             stream_id,
-            retry_after_ms: reader.read_u32()?,
+            referenced_message_id: MessageId::new(reader.read_string_field()?),
+            reason: reader.read_optional_string()?,
         }),
         FrameType::Reject => Ok(Frame::Reject {
             flags,
             stream_id,
-            reason_code: reader.read_u16()?,
-            message: reader.read_optional_string()?,
+            referenced_message_id: MessageId::new(reader.read_string_field()?),
+            reason: reader.read_optional_string()?,
         }),
         _ => Err(ProtocolError::codec("frame type was not a pressure frame")),
     }

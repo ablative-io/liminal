@@ -1,4 +1,5 @@
 use super::{
+    causal::MessageId,
     envelope::{MessageEnvelope, SchemaId},
     error::ProtocolError,
     version::ProtocolVersion,
@@ -174,6 +175,7 @@ pub enum Frame {
         stream_id: u32,
         channel: String,
         accepted_schemas: Vec<SchemaId>,
+        max_in_flight: u32,
     },
     /// Channel subscription success carrying a subscription id and selected schema.
     SubscribeAck {
@@ -245,24 +247,25 @@ pub enum Frame {
         reason_code: u16,
         message: Option<String>,
     },
-    /// Backpressure acceptance carrying additional message credit.
+    /// Backpressure acceptance for a delivered message.
     Accept {
         flags: u8,
         stream_id: u32,
-        credit: u32,
+        referenced_message_id: MessageId,
     },
-    /// Backpressure deferral carrying a retry delay in milliseconds.
+    /// Backpressure deferral for a buffered message.
     Defer {
         flags: u8,
         stream_id: u32,
-        retry_after_ms: u32,
+        referenced_message_id: MessageId,
+        reason: Option<String>,
     },
-    /// Backpressure rejection carrying a numeric reason and optional message.
+    /// Backpressure rejection for a shed message.
     Reject {
         flags: u8,
         stream_id: u32,
-        reason_code: u16,
-        message: Option<String>,
+        referenced_message_id: MessageId,
+        reason: Option<String>,
     },
     /// Connection keepalive ping.
     Ping { flags: u8 },
@@ -393,7 +396,17 @@ impl Frame {
 
     /// Validate the stream invariant for this frame.
     pub(crate) fn validate(&self) -> Result<(), ProtocolError> {
-        validate_stream(self.frame_type(), self.stream_id())
+        validate_stream(self.frame_type(), self.stream_id())?;
+
+        if let Self::Subscribe { max_in_flight, .. } = self {
+            if *max_in_flight == 0 {
+                return Err(ProtocolError::codec(
+                    "max_in_flight must be greater than zero",
+                ));
+            }
+        }
+
+        Ok(())
     }
 }
 
