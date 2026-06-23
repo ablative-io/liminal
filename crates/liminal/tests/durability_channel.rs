@@ -369,7 +369,7 @@ impl DurableStore for RecordingStore {
 }
 
 fn store_error(message: &str) -> DurabilityError {
-    DurabilityError::StoreError(haematite::EventStoreError::from(std::io::Error::other(
-        message.to_owned(),
-    )))
+    DurabilityError::StoreError(haematite::ApiError::Storage(
+        haematite::DatabaseError::IoError(std::io::Error::other(message.to_owned())),
+    ))
 }

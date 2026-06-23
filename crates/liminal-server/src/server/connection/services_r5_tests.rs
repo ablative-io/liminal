@@ -1,14 +1,28 @@
 use std::sync::Arc;
 
-use haematite::EventStore;
+use haematite::{Database, DatabaseConfig, EventStore};
 use liminal::durability::bridge::block_on;
 use liminal::durability::{
     DurableStore, HaematiteStore, MessageEnvelope as DurableEnvelope, StoredEntry,
 };
 use liminal::protocol::{CausalContext, MessageEnvelope, SchemaId};
+use tempfile::TempDir;
 
 use super::services::{ConnectionServices, LiminalConnectionServices};
 use crate::config::types::{ChannelDef, ServerConfig};
+
+/// Builds an on-disk haematite store in a fresh tempdir, returning both the
+/// store and the `TempDir` guard (which must outlive the store).
+fn disk_store() -> Result<(Arc<dyn DurableStore>, TempDir), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let database = Database::create(DatabaseConfig {
+        data_dir: dir.path().join("db"),
+        shard_count: 4,
+    })?;
+    let store: Arc<dyn DurableStore> =
+        Arc::new(HaematiteStore::new(Arc::new(EventStore::new(database))));
+    Ok((store, dir))
+}
 
 // The durable runtime channel maps onto a single partition, so its store stream
 // key is "<channel>:0" (see `DurableChannel::stream_key_for`).
@@ -17,7 +31,7 @@ const ORDERS_STREAM_KEY: &str = "orders:0";
 #[test]
 fn shutdown_flush_persists_durable_channel_state_to_store() -> Result<(), Box<dyn std::error::Error>>
 {
-    let store: Arc<dyn DurableStore> = Arc::new(HaematiteStore::new(Arc::new(EventStore::new())));
+    let (store, _dir) = disk_store()?;
     let services =
         LiminalConnectionServices::from_config_with_store(&durable_orders_config()?, store)?;
 
@@ -43,7 +57,7 @@ fn shutdown_flush_persists_durable_channel_state_to_store() -> Result<(), Box<dy
 #[test]
 fn persisted_durable_state_survives_fresh_services_over_same_store()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store: Arc<dyn DurableStore> = Arc::new(HaematiteStore::new(Arc::new(EventStore::new())));
+    let (store, _dir) = disk_store()?;
 
     // First "process lifetime": publish + shutdown flush.
     {

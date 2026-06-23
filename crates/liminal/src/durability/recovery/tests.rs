@@ -433,7 +433,7 @@ fn len_to_u64(len: usize) -> Result<u64, DurabilityError> {
 }
 
 fn lock_error() -> DurabilityError {
-    DurabilityError::StoreError(haematite::EventStoreError::StoreIo(std::io::Error::other(
-        "fake store lock poisoned",
-    )))
+    DurabilityError::StoreError(haematite::ApiError::Storage(
+        haematite::DatabaseError::IoError(std::io::Error::other("fake store lock poisoned")),
+    ))
 }

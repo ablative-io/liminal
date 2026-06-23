@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    "crates/haematite",
     "crates/liminal",
     "crates/liminal-sdk",
     "crates/liminal-server",

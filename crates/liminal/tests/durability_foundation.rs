@@ -4,10 +4,28 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use haematite::{Database, DatabaseConfig, EventStore};
 use liminal::durability::{
     CheckpointPolicy, DurabilityConfig, DurabilityError, DurabilityMode, DurableStore,
     HaematiteStore, StoredEntry,
 };
+use tempfile::TempDir;
+
+/// Builds an on-disk haematite-backed store in a fresh tempdir.
+///
+/// Returns the store together with the `TempDir` guard, which must outlive the
+/// store: dropping it removes the on-disk database directory.
+fn disk_store() -> Result<(HaematiteStore, TempDir), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let database = Database::create(DatabaseConfig {
+        data_dir: dir.path().join("db"),
+        shard_count: 4,
+    })?;
+    Ok((
+        HaematiteStore::new(Arc::new(EventStore::new(database))),
+        dir,
+    ))
+}
 
 fn durability_error_question_mark_compile_check() -> Result<(), Box<dyn std::error::Error>> {
     Err(DurabilityError::ConfigError("test".into()))?;
@@ -19,8 +37,8 @@ fn durability_error_variants_carry_required_context_and_error_trait() {
     fn assert_error<E: std::error::Error>() {}
     assert_error::<DurabilityError>();
 
-    let store_error = DurabilityError::from(haematite::EventStoreError::from(
-        std::io::Error::other("disk unavailable"),
+    let store_error = DurabilityError::from(haematite::ApiError::Storage(
+        haematite::DatabaseError::IoError(std::io::Error::other("disk unavailable")),
     ));
     assert!(matches!(store_error, DurabilityError::StoreError(_)));
 
@@ -115,13 +133,14 @@ fn durability_config_validates_fields_and_exposes_values() -> Result<(), Box<dyn
 }
 
 #[test]
-fn durable_store_trait_is_object_safe_and_has_expected_entry_shape() {
+fn durable_store_trait_is_object_safe_and_has_expected_entry_shape()
+-> Result<(), Box<dyn std::error::Error>> {
     fn assert_debug<T: std::fmt::Debug>() {}
     fn assert_object_safe(_: &dyn DurableStore) {}
 
     assert_debug::<StoredEntry>();
 
-    let store = HaematiteStore::new(Arc::new(haematite::EventStore::new()));
+    let (store, _dir) = disk_store()?;
     assert_object_safe(&store);
 
     let entry = StoredEntry {
@@ -132,12 +151,14 @@ fn durable_store_trait_is_object_safe_and_has_expected_entry_shape() {
     assert_eq!(entry.payload, vec![1, 2, 3]);
     assert_eq!(entry.sequence, 11);
     assert_eq!(entry.timestamp, 12);
+
+    Ok(())
 }
 
 #[test]
 fn haematite_store_delegates_append_read_scan_and_maps_sequence_conflict()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = HaematiteStore::new(Arc::new(haematite::EventStore::new()));
+    let (store, _dir) = disk_store()?;
 
     let sequence = block_on_ready(store.append("stream-a", b"first".to_vec(), 0))?;
     assert_eq!(sequence, 0);
@@ -166,7 +187,7 @@ fn haematite_store_delegates_append_read_scan_and_maps_sequence_conflict()
 #[test]
 fn haematite_store_delegates_cas_and_maps_mismatch_to_cursor_regression()
 -> Result<(), Box<dyn std::error::Error>> {
-    let store = HaematiteStore::new(Arc::new(haematite::EventStore::new()));
+    let (store, _dir) = disk_store()?;
 
     block_on_ready(store.cas("consumer-a", 0, 10))?;
     match block_on_durability(store.cas("consumer-a", 5, 11)) {
@@ -208,9 +229,11 @@ fn block_on_durability<T>(
 
     match Future::poll(Pin::as_mut(&mut future), &mut context) {
         Poll::Ready(output) => output,
-        Poll::Pending => Err(DurabilityError::StoreError(
-            std::io::Error::other("future unexpectedly returned Poll::Pending").into(),
-        )),
+        Poll::Pending => Err(DurabilityError::StoreError(haematite::ApiError::Storage(
+            haematite::DatabaseError::IoError(std::io::Error::other(
+                "future unexpectedly returned Poll::Pending",
+            )),
+        ))),
     }
 }
 
