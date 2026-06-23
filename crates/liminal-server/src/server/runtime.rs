@@ -3,6 +3,8 @@ use std::path::Path;
 use crate::ServerError;
 use crate::config::file::load_config;
 use crate::health::{ReadinessState, SharedReadinessState, start_health_server};
+use crate::server::connection::ConnectionSupervisor;
+use crate::server::listener::ServerListener;
 
 /// Starts the server deployment wrapper for the supplied configuration path.
 ///
@@ -24,7 +26,10 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
 
     let readiness = SharedReadinessState::new(ReadinessState::default());
     let health_server = start_health_server(config.health_listen_address, readiness.clone())?;
+    let connection_supervisor = ConnectionSupervisor::from_config(&config)?;
+    let listener = ServerListener::bind(&config, connection_supervisor)?;
     readiness.set_config_loaded(true);
+    readiness.set_listener_bound(true);
     readiness.set_cluster_configured(config.cluster.is_some());
 
     tracing::debug!(
@@ -34,7 +39,13 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         "liminal server configuration validated"
     );
 
-    health_server.shutdown()?;
+    tracing::info!(
+        listen_address = %listener.local_addr(),
+        health_listen_address = %health_server.local_addr(),
+        "liminal server started"
+    );
 
-    Ok(())
+    loop {
+        std::thread::park();
+    }
 }
