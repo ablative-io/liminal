@@ -116,19 +116,37 @@ impl DurableStore for HaematiteStore {
     }
 
     async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {
-        // Preserve liminal's "absent == 0" cursor contract atomically.
+        // Preserve liminal's "absent == 0" cursor contract faithfully over an
+        // engine that distinguishes `None` (absent) from `Some(0)` (a stored
+        // zero). The invariant that makes the mapping below correct: we NEVER
+        // persist a physical zero, so a logical value of 0 and physical absence
+        // always coincide.
         //
-        // The real `EventStore::cas` distinguishes `None` (expect-absent) from
-        // `Some(0)` (expect-stored-zero). A cursor only ever issues `cas(0, n)`
-        // on its *first* checkpoint, when the key has never been written and is
-        // therefore absent; every later checkpoint moves from a stored value
-        // `> 0`. So `old_value == 0` maps to the expect-absent expectation
-        // `None`, and any other `old_value` maps to `Some(old_value)`.
-        //
-        // This is a single CAS routed to the owning shard actor, where the read,
-        // compare, and write run with no interleaving point (see haematite's
-        // `ShardActor::cas`). There is no read-then-cas in this layer, so the
-        // atomicity the engine guarantees is preserved end to end.
+        // A `cas` whose target `new_value` is 0 must therefore write nothing — it
+        // only asserts the precondition. This is reachable as `cas(0, 0)` (a
+        // cursor checkpoint at offset 0; offsets are monotonic so they never CAS
+        // down to 0 from a higher value). Were we instead to let it store a
+        // physical zero, the *next* `cas(0, n)` — mapped to expect-absent `None`
+        // — would wrongly fail against the now-present key and permanently stall
+        // the cursor. Asserting via a read is race-free here precisely because no
+        // value is written, so there is no lost-update window.
+        if new_value == 0 {
+            return self
+                .event_store
+                .read_value(key.as_bytes())
+                .map_err(DurabilityError::from)?
+                .map_or(Ok(()), |stored| {
+                    Err(DurabilityError::CursorRegression {
+                        stored,
+                        attempted: old_value,
+                    })
+                });
+        }
+        // With a physical zero never stored, `old_value == 0` is exactly the
+        // expect-absent expectation. Any other `old_value` maps to `Some(_)`.
+        // This is a single CAS routed to the owning shard actor, where read,
+        // compare, and write run with no interleaving point (haematite's
+        // `ShardActor::cas`) — the engine's atomicity is preserved end to end.
         let expected = if old_value == 0 {
             None
         } else {

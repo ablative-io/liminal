@@ -203,6 +203,42 @@ fn haematite_store_delegates_cas_and_maps_mismatch_to_cursor_regression()
     Ok(())
 }
 
+#[test]
+fn cas_to_offset_zero_does_not_brick_a_cursor_that_later_advances()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Regression: a cursor may legitimately checkpoint at offset 0 (`cas(0, 0)`).
+    // That MUST NOT persist a physical zero, or the next forward checkpoint
+    // `cas(0, n)` — which maps to expect-absent — would wrongly fail against the
+    // now-present key and stall the cursor permanently. (The mock FakeStore hid
+    // this because it encodes a different "absent == stored-0" CAS contract.)
+    let (store, _dir) = disk_store()?;
+
+    // Checkpoint at offset 0 succeeds and writes nothing.
+    block_on_ready(store.cas("consumer-z", 0, 0))?;
+    if block_on_ready(store.read_value("consumer-z"))?.is_some() {
+        return Err("cas(0, 0) must not persist a physical zero".into());
+    }
+
+    // The next forward checkpoint must succeed — this FAILED before the fix.
+    block_on_ready(store.cas("consumer-z", 0, 5))?;
+    if block_on_ready(store.read_value("consumer-z"))? != Some(5) {
+        return Err("forward checkpoint after cas(0, 0) did not advance the cursor".into());
+    }
+
+    // A stale `cas(0, 0)` against the now-advanced key is still caught honestly.
+    match block_on_durability(store.cas("consumer-z", 0, 0)) {
+        Err(DurabilityError::CursorRegression {
+            stored: 5,
+            attempted: 0,
+        }) => {}
+        result => {
+            return Err(format!("expected regression for stale cas(0, 0), got {result:?}").into());
+        }
+    }
+
+    Ok(())
+}
+
 fn block_on_ready<T, E>(
     future: impl Future<Output = Result<T, E>>,
 ) -> Result<T, Box<dyn std::error::Error>>
