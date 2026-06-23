@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex, Weak};
 
 use beamr::atom::Atom;
 use beamr::native::native_process::{NativeContext, NativeHandler, NativeOutcome};
-use beamr::process::ExitReason;
 use beamr::scheduler::Scheduler;
 
 use super::actor::ActorCore;
@@ -245,17 +244,12 @@ impl NativeHandler for ParticipantProcess {
         let pid = ctx.self_pid();
         // Drain the atom wakeups the actor enqueued. The payloads themselves
         // travel through the shared Rust-side queue (the `ActorCore` pattern):
-        // beamr's host enqueue API moves only atoms, so the atom is the wakeup
-        // and `run_slice` does the real work against the shared queue.
-        let mut saw_error = false;
-        while let Some(message) = ctx.recv() {
-            if message == beamr::term::Term::atom(Atom::ERROR) {
-                saw_error = true;
-            }
-        }
-        if saw_error {
-            return NativeOutcome::Stop(ExitReason::Error);
-        }
+        // beamr's host enqueue API moves only atoms, so the atom is just the
+        // wakeup signal and `run_slice` does the real work against the shared
+        // queue. Participant failure is surfaced structurally via the beamr
+        // link/EXIT to the supervised actor, not through a mailbox message, so
+        // there is no message-driven shutdown branch here.
+        while ctx.recv().is_some() {}
         self.runtime.run_slice(pid);
         NativeOutcome::Wait
     }
