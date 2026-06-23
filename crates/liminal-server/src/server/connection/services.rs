@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Instant;
 
-use haematite::EventStore;
+use haematite::{Database, DatabaseConfig, EventStore};
 use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, Schema};
 use liminal::conversation::{ConversationSupervisor, CrashPolicy, EchoBehaviour};
 use liminal::durability::{DurableStore, HaematiteStore};
@@ -140,7 +141,8 @@ impl LiminalConnectionServices {
     /// # Errors
     /// Returns [`ServerError`] when a configured channel cannot be initialized.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
-        Self::from_config_with_store(config, default_store())
+        let store = build_durable_store(config.persistence_path.as_deref())?;
+        Self::from_config_with_store(config, store)
     }
 
     /// Builds services over a caller-provided durable store.
@@ -212,7 +214,7 @@ impl LiminalConnectionServices {
         })?);
         Ok(Self {
             channels: HashMap::new(),
-            durable_store: default_store(),
+            durable_store: build_durable_store(None)?,
             conversation_supervisor,
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
@@ -235,9 +237,61 @@ impl LiminalConnectionServices {
     }
 }
 
-/// Constructs the default in-memory haematite-backed durable store.
-fn default_store() -> Arc<dyn DurableStore> {
-    Arc::new(HaematiteStore::new(Arc::new(EventStore::new())))
+/// Default shard count for an on-disk durable store.
+///
+/// Haematite routes keys across this many single-threaded shard actors; a small
+/// power of two gives parallelism across cursors/streams without spawning an
+/// actor per core. The value is fixed (haematite has no silent default) and not
+/// yet surfaced in server config.
+const DEFAULT_SHARD_COUNT: usize = 8;
+
+/// Builds the on-disk haematite-backed durable store.
+///
+/// When `persistence_path` is `Some`, the database lives there and survives
+/// process restarts: an existing database directory is reopened, a fresh one is
+/// created. When it is `None` (no durable path configured, or the channel-free
+/// `empty()` services used by tests), an ephemeral per-instance directory under
+/// the system temp dir is created instead — it still persists to disk for the
+/// lifetime of the process, but is not a stable restart location.
+fn build_durable_store(
+    persistence_path: Option<&Path>,
+) -> Result<Arc<dyn DurableStore>, ServerError> {
+    let data_dir = persistence_path.map_or_else(ephemeral_data_dir, |path| path.join("durability"));
+    let database = open_or_create_database(&data_dir)?;
+    let event_store = EventStore::new(database);
+    Ok(Arc::new(HaematiteStore::new(Arc::new(event_store))))
+}
+
+/// Opens an existing haematite database at `data_dir`, or creates one.
+fn open_or_create_database(data_dir: &Path) -> Result<Database, ServerError> {
+    let config_file = data_dir.join("config.json");
+    let result = if config_file.exists() {
+        Database::open(data_dir)
+    } else {
+        Database::create(DatabaseConfig {
+            data_dir: data_dir.to_path_buf(),
+            shard_count: DEFAULT_SHARD_COUNT,
+        })
+    };
+    result.map_err(|error| ServerError::ConfigValidation {
+        message: format!(
+            "failed to open durable store at {}: {error}",
+            data_dir.display()
+        ),
+    })
+}
+
+/// Produces a unique on-disk directory under the system temp dir.
+///
+/// The pid plus a monotonic counter keep concurrent servers and parallel tests
+/// from sharing a database directory.
+fn ephemeral_data_dir() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "liminal-durability-{}-{unique}",
+        std::process::id()
+    ))
 }
 
 impl ConnectionServices for LiminalConnectionServices {

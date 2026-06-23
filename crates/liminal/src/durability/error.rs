@@ -2,8 +2,12 @@
 #[derive(Debug, thiserror::Error)]
 pub enum DurabilityError {
     /// Haematite returned a store-level failure.
+    ///
+    /// The umbrella `From<haematite::ApiError>` conversion lives in
+    /// [`super::store`] because it routes the optimistic-concurrency variants to
+    /// their dedicated cases rather than wrapping them here.
     #[error("haematite store error: {0}")]
-    StoreError(#[from] haematite::EventStoreError),
+    StoreError(haematite::ApiError),
 
     /// An append observed a different stream sequence than the caller expected.
     #[error("sequence conflict: expected {expected}, actual {actual}")]
@@ -50,9 +54,13 @@ impl From<haematite::SequenceConflict> for DurabilityError {
 
 impl From<haematite::CasMismatch> for DurabilityError {
     fn from(error: haematite::CasMismatch) -> Self {
+        // The real `CasMismatch` carries `Option<u64>` to distinguish absent
+        // (`None`) from stored-zero (`Some(0)`). The cursor contract treats an
+        // absent key as the value 0 (see `HaematiteStore::cas`), so a `None`
+        // collapses to 0 here when reporting a regression.
         Self::CursorRegression {
-            stored: error.actual,
-            attempted: error.expected,
+            stored: error.actual.unwrap_or(0),
+            attempted: error.expected.unwrap_or(0),
         }
     }
 }

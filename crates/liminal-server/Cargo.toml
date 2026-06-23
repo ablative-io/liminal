@@ -12,7 +12,7 @@ description = "Standalone server for the liminal messaging bus"
 anyhow = "1"
 beamr = { version = "0.8.1", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
-haematite = { path = "../haematite" }
+haematite = "0.1.0"
 liminal = { path = "../liminal" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,6 +24,7 @@ tracing = "0.1"
 [dev-dependencies]
 futures-core = "0.3"
 liminal-sdk = { path = "../liminal-sdk" }
+tempfile = "3"
 
 [lints]
 workspace = true

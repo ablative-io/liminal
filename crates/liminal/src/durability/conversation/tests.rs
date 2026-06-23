@@ -330,7 +330,7 @@ impl Wake for NoopWaker {
 }
 
 fn lock_error() -> DurabilityError {
-    DurabilityError::StoreError(haematite::EventStoreError::StoreIo(std::io::Error::other(
-        "fake store lock poisoned",
-    )))
+    DurabilityError::StoreError(haematite::ApiError::Storage(
+        haematite::DatabaseError::IoError(std::io::Error::other("fake store lock poisoned")),
+    ))
 }
