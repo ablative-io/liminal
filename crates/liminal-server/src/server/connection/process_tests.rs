@@ -145,6 +145,7 @@ fn subscribe_and_unsubscribe_delegate_to_services() -> Result<(), ServerError> {
         stream_id: 1,
         channel: "orders".to_owned(),
         accepted_schemas: Vec::new(),
+        max_in_flight: 16,
     };
 
     let action = apply_frame(&services, &mut state, subscribe);

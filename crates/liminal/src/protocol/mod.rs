@@ -10,6 +10,7 @@ pub mod multiplex;
 pub mod schema;
 pub mod version;
 
+pub use backpressure::{AcceptPayload, DeferPayload, PressureState, RejectPayload, StreamPressure};
 pub use causal::{CausalContext, MessageId, extract_causal_context};
 pub use codec::{decode, encode, encoded_len};
 pub use envelope::{MessageEnvelope, SchemaId};

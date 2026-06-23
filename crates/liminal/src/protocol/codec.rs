@@ -1,6 +1,10 @@
 mod known;
 mod payload;
 
+#[cfg(test)]
+mod tests_support;
+
+use super::causal::MessageId;
 use super::envelope::SchemaId;
 use super::error::ProtocolError;
 use super::frame::{Frame, FrameType, HEADER_LEN, validate_stream};
@@ -143,8 +147,7 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         Frame::ConnectAck { .. } => sum_lengths(&[ProtocolVersion::WIRE_LEN, U32_LEN]),
         Frame::ConnectError { message, .. }
         | Frame::SubscribeError { message, .. }
-        | Frame::PublishError { message, .. }
-        | Frame::Reject { message, .. } => {
+        | Frame::PublishError { message, .. } => {
             sum_lengths(&[U16_LEN, option_string_len(message.as_deref())?])
         }
         Frame::Disconnect { .. } | Frame::Ping { .. } | Frame::Pong { .. } => Ok(0),
@@ -155,6 +158,7 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         } => sum_lengths(&[
             string_field_len(channel)?,
             schema_ids_field_len(accepted_schemas)?,
+            U32_LEN,
         ]),
         Frame::SubscribeAck { .. } => sum_lengths(&[U64_LEN, SchemaId::WIRE_LEN]),
         Frame::Unsubscribe { .. } | Frame::PublishAck { .. } => Ok(U64_LEN),
@@ -182,7 +186,23 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         Frame::ConversationError { message, .. } => {
             sum_lengths(&[U64_LEN, U16_LEN, option_string_len(message.as_deref())?])
         }
-        Frame::Accept { .. } | Frame::Defer { .. } => Ok(U32_LEN),
+        Frame::Accept {
+            referenced_message_id,
+            ..
+        } => message_id_field_len(referenced_message_id),
+        Frame::Defer {
+            referenced_message_id,
+            reason,
+            ..
+        }
+        | Frame::Reject {
+            referenced_message_id,
+            reason,
+            ..
+        } => sum_lengths(&[
+            message_id_field_len(referenced_message_id)?,
+            option_string_len(reason.as_deref())?,
+        ]),
         Frame::Unknown { payload, .. } => checked_u32_len(payload.len()).map(|()| payload.len()),
     }
 }
@@ -190,6 +210,10 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
 fn envelope_bytes_field_len(envelope_len: usize) -> Result<usize, ProtocolError> {
     checked_u32_len(envelope_len)?;
     sum_lengths(&[U32_LEN, envelope_len])
+}
+
+fn message_id_field_len(message_id: &MessageId) -> Result<usize, ProtocolError> {
+    string_field_len(message_id.as_str())
 }
 
 fn write_handshake_payload(
@@ -219,6 +243,32 @@ fn write_handshake_payload(
     }
 }
 
+fn write_pressure_payload(
+    frame: &Frame,
+    writer: &mut PayloadWriter<'_>,
+) -> Result<(), ProtocolError> {
+    match frame {
+        Frame::Accept {
+            referenced_message_id,
+            ..
+        } => writer.write_string_field(referenced_message_id.as_str()),
+        Frame::Defer {
+            referenced_message_id,
+            reason,
+            ..
+        }
+        | Frame::Reject {
+            referenced_message_id,
+            reason,
+            ..
+        } => {
+            writer.write_string_field(referenced_message_id.as_str())?;
+            writer.write_optional_string(reason.as_deref())
+        }
+        _ => Err(ProtocolError::codec("frame type was not a pressure frame")),
+    }
+}
+
 fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> {
     let mut writer = PayloadWriter::new(buffer);
     match frame {
@@ -239,11 +289,6 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
             reason_code,
             message,
             ..
-        }
-        | Frame::Reject {
-            reason_code,
-            message,
-            ..
         } => {
             writer.write_u16(*reason_code)?;
             writer.write_optional_string(message.as_deref())?;
@@ -252,10 +297,12 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
         Frame::Subscribe {
             channel,
             accepted_schemas,
+            max_in_flight,
             ..
         } => {
             writer.write_string_field(channel)?;
             writer.write_schema_ids_field(accepted_schemas)?;
+            writer.write_u32(*max_in_flight)?;
         }
         Frame::SubscribeAck {
             subscription_id,
@@ -311,8 +358,9 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
             writer.write_u16(*reason_code)?;
             writer.write_optional_string(message.as_deref())?;
         }
-        Frame::Accept { credit, .. } => writer.write_u32(*credit)?,
-        Frame::Defer { retry_after_ms, .. } => writer.write_u32(*retry_after_ms)?,
+        Frame::Accept { .. } | Frame::Defer { .. } | Frame::Reject { .. } => {
+            write_pressure_payload(frame, &mut writer)?;
+        }
         Frame::Unknown { payload, .. } => writer.write_slice(payload)?,
     }
     writer.finish()
