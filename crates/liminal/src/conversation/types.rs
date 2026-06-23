@@ -198,6 +198,10 @@ pub struct ParticipantStatus {
     pub participant: ParticipantPid,
     /// Last known participant liveness.
     pub health: ParticipantHealth,
+    /// Instant the participant's EXIT signal was observed, set when the
+    /// participant is marked dead. Replayed to a late exit-notifier registrant
+    /// so a crash that lands before registration is not lost.
+    pub exited_at: Option<Instant>,
 }
 
 impl ParticipantStatus {
@@ -207,12 +211,14 @@ impl ParticipantStatus {
         Self {
             participant,
             health: ParticipantHealth::Alive,
+            exited_at: None,
         }
     }
 
-    /// Marks this participant dead.
-    pub const fn mark_dead(&mut self) {
+    /// Marks this participant dead, recording the instant its EXIT was observed.
+    pub const fn mark_dead_at(&mut self, at: Instant) {
         self.health = ParticipantHealth::Dead;
+        self.exited_at = Some(at);
     }
 }
 
@@ -332,11 +338,17 @@ impl ConversationState {
             .push(ConversationContextEntry::Received(envelope));
     }
 
-    /// Records participant crash handling and marks that participant dead.
-    pub fn record_participant_crash(&mut self, participant: ParticipantPid, policy: CrashPolicy) {
+    /// Records participant crash handling and marks that participant dead,
+    /// stamping `exited_at` as the instant the EXIT signal was observed.
+    pub fn record_participant_crash(
+        &mut self,
+        participant: ParticipantPid,
+        policy: CrashPolicy,
+        exited_at: Instant,
+    ) {
         for status in &mut self.participants {
             if status.participant == participant {
-                status.mark_dead();
+                status.mark_dead_at(exited_at);
             }
         }
         self.context

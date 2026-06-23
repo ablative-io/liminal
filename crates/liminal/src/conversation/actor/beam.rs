@@ -121,6 +121,37 @@ pub(super) fn actor_module(
     }
 }
 
+/// Establishes a beamr process link from the conversation actor to each of its
+/// configured participants. Called during boot, before any message is forwarded,
+/// so the link delivering EXIT signals exists before the consumer can crash.
+pub(super) fn link_participants(
+    core: &ActorCore,
+    context: &ProcessContext<'_>,
+) -> Result<(), LiminalError> {
+    let actor_pid = context
+        .pid()
+        .ok_or_else(|| LiminalError::ConversationFailed {
+            message: "conversation actor has no beamr pid".to_owned(),
+        })?;
+    let link_facility =
+        context
+            .link_facility()
+            .ok_or_else(|| LiminalError::ConversationFailed {
+                message: "beamr link facility is unavailable".to_owned(),
+            })?;
+    for participant in &core.config.participants {
+        link_facility
+            .link(actor_pid, participant.get())
+            .map_err(|error| LiminalError::ParticipantCrashed {
+                message: format!(
+                    "failed to link actor {actor_pid} to participant {}: {error}",
+                    participant.get()
+                ),
+            })?;
+    }
+    Ok(())
+}
+
 fn process_command_nif(args: &[Term], context: &mut ProcessContext<'_>) -> Result<Term, Term> {
     let [message] = args else {
         return Err(badarg());

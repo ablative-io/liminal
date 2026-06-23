@@ -138,6 +138,55 @@ fn participant_death_arrives_as_trapped_exit_without_timeout() -> Result<(), Box
     Ok(())
 }
 
+/// Crash-before-register race: a notifier registered AFTER the participant is
+/// already recorded dead must fire immediately, replaying the recorded EXIT
+/// instant. This is exactly the link→register window the dispatcher cannot
+/// otherwise observe. If `register` ignored already-dead state (the bug), the
+/// notifier would never fire and `recv_timeout` would elapse, failing the test.
+#[test]
+fn notify_on_already_dead_participant_fires_immediately() -> Result<(), Box<dyn Error>> {
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let participant = ParticipantPid::new(scheduler.spawn_test_process(false));
+    let actor = supervisor.spawn(ConversationConfig::new(
+        vec![participant],
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    ))?;
+    let actor_pid = actor.pid()?;
+    assert!(scheduler.is_linked(actor_pid.get(), participant.get()));
+
+    let before_crash = Instant::now();
+    // Kill the participant and wait until the actor has RECORDED it dead, so the
+    // subsequent registration genuinely observes already-dead state.
+    scheduler.terminate_process(participant.get(), ExitReason::Error);
+    let state = state_after_trapped_participant_death(&actor)?;
+    assert_eq!(state.participants[0].health, ParticipantHealth::Dead);
+    let recorded_exit = state.participants[0]
+        .exited_at
+        .ok_or("EXIT instant must be recorded when a participant is marked dead")?;
+    assert!(recorded_exit >= before_crash, "recorded EXIT must be real");
+
+    // Register only now, after death is recorded. The notifier must fire
+    // immediately with the recorded instant — not block.
+    let (tx, rx) = mpsc::sync_channel::<Instant>(1);
+    actor.notify_on_participant_exit(participant, tx)?;
+    let replayed = rx
+        .recv_timeout(Duration::from_millis(50))
+        .map_err(|_| "already-dead registration must replay the EXIT immediately")?;
+    assert_eq!(
+        replayed, recorded_exit,
+        "replayed instant must equal the recorded EXIT instant"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
 #[test]
 fn supervisor_restarts_only_crashed_actor() -> Result<(), Box<dyn Error>> {
     let supervisor = ConversationSupervisor::new()?;
