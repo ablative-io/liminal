@@ -95,6 +95,7 @@ pub enum MetricValue {
 #[derive(Debug, Clone, PartialEq)]
 pub struct HistogramSnapshot {
     pub buckets: Vec<HistogramBucketSnapshot>,
+    pub sum: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
