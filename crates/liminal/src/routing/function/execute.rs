@@ -146,6 +146,13 @@ impl RoutingMessage {
     pub fn get(&self, field: &str) -> Option<&FieldValue> {
         self.fields.get(field)
     }
+
+    /// Iterates the message's fields in deterministic (key-sorted) order.
+    pub fn fields(&self) -> impl Iterator<Item = (&str, &FieldValue)> {
+        self.fields
+            .iter()
+            .map(|(name, value)| (name.as_str(), value))
+    }
 }
 
 /// Failure surfaced when a supervised routing function does not complete.

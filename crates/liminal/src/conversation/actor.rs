@@ -10,17 +10,21 @@ use beamr::native::ProcessContext;
 use beamr::scheduler::{Scheduler, SchedulerConfig};
 use beamr::term::Term;
 
+mod backend;
 mod beam;
+mod exit;
 mod queue;
 mod sync;
 
 use crate::conversation::types::{
-    ConversationConfig, ConversationHandle, ConversationHandleBackend, ConversationPhase,
-    ConversationState, CrashPolicy, ParticipantPid,
+    ConversationConfig, ConversationHandle, ConversationPhase, ConversationState, CrashPolicy,
+    ParticipantPid,
 };
 use crate::envelope::Envelope;
 use crate::error::LiminalError;
+use backend::ActorBackend;
 use beam::{ActorRuntime, actor_module};
+use exit::ExitNotifierRegistry;
 use queue::{QueuedCommand, QueuedCommandKind};
 use sync::{lock, send_reply, wait_for};
 
@@ -102,32 +106,22 @@ impl ConversationActor {
     pub fn state(&self) -> Result<ConversationState, LiminalError> {
         self.handle.query_state()
     }
-}
 
-#[derive(Debug)]
-struct ActorBackend {
-    core: Arc<ActorCore>,
-}
-
-impl ConversationHandleBackend for ActorBackend {
-    fn send(&self, message: Envelope) -> Result<(), LiminalError> {
-        self.core.submit_send(message)
-    }
-
-    fn receive(&self) -> Result<Envelope, LiminalError> {
-        self.core.submit_receive()
-    }
-
-    fn close(&self) -> Result<(), LiminalError> {
-        self.core.submit_close()
-    }
-
-    fn query_state(&self) -> Result<ConversationState, LiminalError> {
-        self.core.submit_query_state()
-    }
-
-    fn actor_pid(&self) -> Result<ParticipantPid, LiminalError> {
-        self.core.ensure_running()
+    /// Registers a one-shot notifier fired the instant `participant`'s trapped
+    /// EXIT is processed (carrying the observed [`Instant`] — a structural link
+    /// wakeup, not a poll). If `participant` is already dead at registration
+    /// (it crashed before this call), the recorded EXIT instant is replayed
+    /// immediately, so a crash-before-register is never lost. See
+    /// [`ActorCore::register_exit_notifier`].
+    ///
+    /// # Errors
+    /// Returns [`LiminalError`] when a state or registry lock is poisoned.
+    pub fn notify_on_participant_exit(
+        &self,
+        participant: ParticipantPid,
+        notifier: mpsc::SyncSender<Instant>,
+    ) -> Result<(), LiminalError> {
+        self.core.register_exit_notifier(participant, notifier)
     }
 }
 
@@ -202,6 +196,7 @@ struct ActorCore {
     current_pid: Mutex<Option<ParticipantPid>>,
     restart_lock: Mutex<()>,
     next_command_id: AtomicU64,
+    exit_notifiers: ExitNotifierRegistry,
 }
 
 impl std::fmt::Debug for ActorCore {
@@ -227,6 +222,7 @@ impl ActorCore {
             current_pid: Mutex::new(None),
             restart_lock: Mutex::new(()),
             next_command_id: AtomicU64::new(1),
+            exit_notifiers: ExitNotifierRegistry::default(),
         }
     }
 
@@ -331,7 +327,7 @@ impl ActorCore {
         };
         match command.kind {
             QueuedCommandKind::Boot { reply } => {
-                send_reply(&reply, self.link_participants(context));
+                send_reply(&reply, beam::link_participants(self, context));
             }
             QueuedCommandKind::Send { message, reply } => {
                 send_reply(&reply, self.apply_send(message));
@@ -350,31 +346,6 @@ impl ActorCore {
             QueuedCommandKind::QueryState { reply } => send_reply(&reply, self.snapshot()),
         }
         Ok(Term::atom(Atom::OK))
-    }
-
-    fn link_participants(&self, context: &ProcessContext<'_>) -> Result<(), LiminalError> {
-        let actor_pid = context
-            .pid()
-            .ok_or_else(|| LiminalError::ConversationFailed {
-                message: "conversation actor has no beamr pid".to_owned(),
-            })?;
-        let link_facility =
-            context
-                .link_facility()
-                .ok_or_else(|| LiminalError::ConversationFailed {
-                    message: "beamr link facility is unavailable".to_owned(),
-                })?;
-        for participant in &self.config.participants {
-            link_facility
-                .link(actor_pid, participant.get())
-                .map_err(|error| LiminalError::ParticipantCrashed {
-                    message: format!(
-                        "failed to link actor {actor_pid} to participant {}: {error}",
-                        participant.get()
-                    ),
-                })?;
-        }
-        Ok(())
     }
 
     fn apply_send(&self, message: Envelope) -> Result<(), LiminalError> {
@@ -452,10 +423,39 @@ impl ActorCore {
         Ok(lock(&self.state, "conversation state")?.clone())
     }
 
+    /// Registers `notifier` for `participant`'s EXIT, replaying an already-
+    /// recorded crash immediately to close the crash-before-register race.
+    /// Serialized against crash recording so exactly one notification is
+    /// delivered, never zero.
+    ///
+    /// # Errors
+    /// Returns [`LiminalError`] when a state or registry lock is poisoned.
+    fn register_exit_notifier(
+        &self,
+        participant: ParticipantPid,
+        notifier: mpsc::SyncSender<Instant>,
+    ) -> Result<(), LiminalError> {
+        // Hold the state lock across the dead-check and register-or-fire (state →
+        // registry ordering, matching `handle_participant_exit`) so a crash
+        // cannot signal an empty registry between the check and the push.
+        let state = lock(&self.state, "conversation state")?;
+        self.exit_notifiers
+            .register(participant, notifier, &state.participants)
+    }
+
     fn handle_participant_exit(&self, participant: ParticipantPid) -> Result<(), LiminalError> {
+        // Capture the link-fire instant first: the real detection moment,
+        // propagated to blocked dispatchers as the start of reroute latency.
+        let observed_at = Instant::now();
+        // Record the crash and signal notifiers under the SAME state lock that
+        // `register_exit_notifier` holds, so a registrant can never observe the
+        // participant alive yet have the signal fire into an empty registry.
+        // Either it registers first (then this signal wakes it) or this records
+        // Dead first (then it replays the recorded instant): exactly one wakeup.
         let failed = {
             let mut state = lock(&self.state, "conversation state")?;
-            state.record_participant_crash(participant, self.config.on_crash);
+            state.record_participant_crash(participant, self.config.on_crash, observed_at);
+            self.exit_notifiers.signal(participant, observed_at)?;
             if self.config.on_crash == CrashPolicy::Fail {
                 state.fail();
                 true
