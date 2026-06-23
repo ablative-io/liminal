@@ -111,6 +111,12 @@ impl ConversationResource for TestConversation {
         None
     }
 
+    fn receive_reply(&self, _timeout: std::time::Duration) -> Result<MessageEnvelope, ServerError> {
+        Err(ServerError::ListenerAccept {
+            message: "test conversation produces no reply".to_owned(),
+        })
+    }
+
     fn close(self: Box<Self>) -> Result<(), ServerError> {
         Ok(())
     }

@@ -1,7 +1,7 @@
 use std::sync::{Mutex, mpsc};
 use std::time::Instant;
 
-use super::lock;
+use super::sync::lock;
 use crate::conversation::types::{ParticipantHealth, ParticipantPid, ParticipantStatus};
 use crate::error::LiminalError;
 

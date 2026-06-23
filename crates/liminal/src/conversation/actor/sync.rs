@@ -22,6 +22,25 @@ pub(super) fn wait_for<T>(
         })?
 }
 
+/// Waits up to `timeout` for a reply. A timeout maps to
+/// [`LiminalError::ConversationTimeout`]; a closed channel (e.g. the actor shut
+/// down) maps to [`LiminalError::ConversationFailed`].
+pub(super) fn wait_for_timeout<T>(
+    response: &mpsc::Receiver<Result<T, LiminalError>>,
+    operation: &str,
+    timeout: std::time::Duration,
+) -> Result<T, LiminalError> {
+    match response.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(LiminalError::ConversationTimeout {
+            message: format!("{operation} timed out after {timeout:?}"),
+        }),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(LiminalError::ConversationFailed {
+            message: format!("{operation} response channel closed"),
+        }),
+    }
+}
+
 pub(super) fn lock<'a, T>(
     mutex: &'a Mutex<T>,
     name: &str,

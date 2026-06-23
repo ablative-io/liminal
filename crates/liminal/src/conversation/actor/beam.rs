@@ -10,7 +10,8 @@ use beamr::native::{Capability, NativeEntry, ProcessContext};
 use beamr::term::Term;
 use beamr::term::boxed::Tuple;
 
-use super::{ActorCore, lock};
+use super::ActorCore;
+use super::sync::lock;
 use crate::conversation::types::ParticipantPid;
 use crate::error::LiminalError;
 

@@ -6,9 +6,7 @@ use std::time::Instant;
 
 use haematite::EventStore;
 use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, Schema};
-use liminal::conversation::{
-    ConversationConfig, ConversationSupervisor, CrashPolicy, ParticipantPid,
-};
+use liminal::conversation::{ConversationSupervisor, CrashPolicy, EchoBehaviour};
 use liminal::durability::{DurableStore, HaematiteStore};
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
@@ -300,21 +298,22 @@ impl ConnectionServices for LiminalConnectionServices {
         conversation_id: u64,
         subject: &str,
     ) -> Result<ConnectionConversation, ServerError> {
-        // Spawn a real participant process on the conversation supervisor's
-        // scheduler. The supervised conversation actor traps this participant's
-        // EXIT (a beamr process link), so killing it fires a structural,
-        // microsecond-scale crash signal — not a placeholder trace span.
-        let scheduler = self.conversation_supervisor.scheduler();
-        let participant = ParticipantPid::new(scheduler.spawn_test_process(false));
-
-        let actor = self
+        // Spawn a REAL participant process (a beamr `NativeHandler` running the
+        // request-reply `EchoBehaviour`) on the conversation supervisor's
+        // scheduler, and a supervised conversation actor linked to it. The actor
+        // FORWARDS each conversation message to the participant, which genuinely
+        // processes it and delivers a reply back — replacing the inert
+        // `spawn_test_process` stand-in that processed nothing. The actor still
+        // traps the participant's EXIT (a beamr process link), so killing it
+        // fires a structural, microsecond-scale crash signal.
+        let (actor, participant) = self
             .conversation_supervisor
-            .spawn(ConversationConfig::new(
-                vec![participant],
+            .spawn_with_participant(
+                Arc::new(EchoBehaviour),
                 None,
                 ChannelMode::Ephemeral,
                 CrashPolicy::Fail,
-            ))
+            )
             .map_err(|error| ServerError::ListenerAccept {
                 message: format!(
                     "failed to spawn supervised conversation {conversation_id} ('{subject}'): {error}"
