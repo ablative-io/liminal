@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 /// Error taxonomy for standalone liminal server deployment failures.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -10,8 +12,14 @@ pub enum ServerError {
     ConfigValidation { message: String },
 
     /// The server could not bind its configured listener address.
-    #[error("listener bind failed: {message}")]
-    ListenerBind { message: String },
+    #[error("listener bind failed for {address}: {source}")]
+    ListenerBind {
+        /// Address the server attempted to bind.
+        address: SocketAddr,
+        /// Underlying operating-system bind failure.
+        #[source]
+        source: std::io::Error,
+    },
 
     /// The server listener failed while accepting an inbound connection.
     #[error("listener accept failed: {message}")]
