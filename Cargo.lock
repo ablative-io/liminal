@@ -1057,6 +1057,7 @@ name = "liminal-sdk"
 version = "0.1.0"
 dependencies = [
  "futures-core",
+ "liminal",
  "serde",
  "serde_json",
  "spin",
@@ -1070,7 +1071,9 @@ dependencies = [
  "anyhow",
  "beamr",
  "clap",
+ "futures-core",
  "liminal",
+ "liminal-sdk",
  "serde",
  "serde_json",
  "thiserror",

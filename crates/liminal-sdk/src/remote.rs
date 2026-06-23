@@ -3,6 +3,11 @@
 mod config;
 mod handles;
 mod protocol;
+#[cfg(feature = "std")]
+mod tcp;
+
+#[cfg(feature = "std")]
+pub use tcp::TcpRemoteTransport;
 
 pub use config::{SdkConfig, build_channel_handle, build_conversation_handle};
 pub use handles::{
@@ -89,6 +94,24 @@ impl RemoteConfig {
     pub const fn with_reconnect_config(mut self, reconnect_config: ReconnectConfig) -> Self {
         self.reconnect_config = reconnect_config;
         self
+    }
+
+    /// Opens a real TCP connection to the configured server and installs the
+    /// live wire transport, replacing the in-process protocol transport.
+    ///
+    /// This performs the protocol handshake (`Connect` -> `ConnectAck`) eagerly,
+    /// so a returned configuration is already connected to the server. Subsequent
+    /// publish, subscribe, and conversation calls traverse the socket.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the TCP connection cannot be
+    /// established and [`SdkError::Protocol`] when the handshake is rejected.
+    #[cfg(feature = "std")]
+    pub fn connect_tcp(mut self) -> Result<Self, SdkError> {
+        let transport = self::tcp::TcpRemoteTransport::connect(&self.server_address)?;
+        self.transport = Arc::new(transport);
+        Ok(self)
     }
 }
 
