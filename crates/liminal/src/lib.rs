@@ -11,7 +11,10 @@ pub mod protocol;
 pub mod routing;
 pub mod tracing;
 
-pub use channel::{ChannelConfig, ChannelHandle, ChannelMode};
+pub use channel::{
+    ChannelConfig, ChannelHandle, ChannelMode, ChannelRegistry, ChannelRestartPolicy,
+    ChannelSummary, ChannelSupervisor,
+};
 pub use conversation::{ConversationConfig, ConversationHandle, ConversationState};
 pub use envelope::Envelope;
 pub use error::LiminalError;

@@ -1,23 +1,34 @@
-use std::sync::{Arc, Mutex};
+//! Public channel surface: [`ChannelConfig`], [`ChannelMode`], and the
+//! cloneable [`ChannelHandle`] that drives a REAL supervised beamr channel
+//! actor (LIM-002).
+//!
+//! The handle is a thin, synchronous-looking facade over the process-backed
+//! actor: every operation enqueues a typed command onto the actor's mailbox and
+//! blocks on a per-command reply (the haematite `ShardHandle` pattern). It owns
+//! no subscriber state and performs no fan-out itself — the actor process does.
+//!
+//! `ChannelHandle::new` stays infallible (existing call-sites depend on it): the
+//! actor is spawned lazily on first use and the spawn result is memoised, so a
+//! scheduler failure surfaces as a `LiminalError` from the first operation
+//! rather than as a panic.
+
+use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
 use crate::causal::CausalContext;
-use crate::channel::SubscriptionHandle;
-use crate::channel::actor::ChannelActor;
+use crate::channel::actor::{ChannelActorCore, predicate_from};
 use crate::channel::schema::{Schema, SchemaId, SchemaValidationError};
+use crate::channel::subscription::{SubscriptionHandle, SubscriptionPredicate};
+use crate::channel::supervisor::{ChannelSupervisor, shared_supervisor};
 use crate::durability::bridge::block_on;
 use crate::durability::{DurableChannel, DurableStore, MessageEnvelope};
-use crate::envelope::PublisherId;
+use crate::envelope::{Envelope, PublisherId};
 use crate::error::LiminalError;
 
 /// Single-partition count used to back a flat runtime channel with durable storage.
-///
-/// The runtime channel model is flat (no operator-visible partitioning), so a
-/// durable runtime channel maps onto exactly one durable partition. Partitioned
-/// durable topologies are a durability-subsystem concern, not a runtime-channel
-/// one.
 const RUNTIME_DURABLE_PARTITIONS: usize = 1;
 
 /// Defines whether a channel is memory-only or durable across restarts.
@@ -51,37 +62,99 @@ impl ChannelConfig {
     }
 }
 
-/// Cloneable handle for interacting with a channel process.
+/// A lazily-spawned, supervised channel actor shared by every clone of a handle.
+///
+/// `supervisor` is stored as a `Result` so [`ChannelHandle::new`] can stay
+/// infallible: a scheduler-start failure is captured here and surfaced as a
+/// `LiminalError` the first time the actor is actually used.
+struct ChannelActorState {
+    supervisor: Result<ChannelSupervisor, String>,
+    core: OnceLock<Result<Arc<ChannelActorCore>, String>>,
+    restarts: AtomicU32,
+}
+
+impl ChannelActorState {
+    const fn new(supervisor: Result<ChannelSupervisor, String>) -> Self {
+        Self {
+            supervisor,
+            core: OnceLock::new(),
+            restarts: AtomicU32::new(0),
+        }
+    }
+
+    fn supervisor(&self) -> Result<&ChannelSupervisor, LiminalError> {
+        self.supervisor
+            .as_ref()
+            .map_err(|message| LiminalError::PublishFailed {
+                message: format!("channel supervisor unavailable: {message}"),
+            })
+    }
+
+    /// Returns the live actor core, spawning it (and any restart) on demand.
+    fn core(&self, schema: &Schema) -> Result<Arc<ChannelActorCore>, LiminalError> {
+        let supervisor = self.supervisor()?;
+        let stored = self.core.get_or_init(|| {
+            supervisor
+                .spawn_channel(schema.clone())
+                .map_err(|error| error.to_string())
+        });
+        let core = stored
+            .as_ref()
+            .map_err(|message| LiminalError::PublishFailed {
+                message: format!("channel actor unavailable: {message}"),
+            })?;
+        // Restart on a dead pid (R4) before returning the core for use.
+        supervisor.ensure_running(core, &self.restarts)?;
+        Ok(Arc::clone(core))
+    }
+}
+
+impl std::fmt::Debug for ChannelActorState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ChannelActorState")
+            .field("supervisor", &self.supervisor)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Cloneable handle for interacting with a channel actor process.
 #[derive(Clone, Debug)]
 pub struct ChannelHandle {
     config: ChannelConfig,
-    actor: Arc<Mutex<ChannelActor>>,
+    actor: Arc<ChannelActorState>,
     durable: Option<Arc<Mutex<DurableChannel>>>,
 }
 
 impl ChannelHandle {
-    /// Creates an ephemeral handle backed only by in-memory channel actor state.
+    /// Creates an ephemeral handle backed by a real supervised channel actor on
+    /// the shared default supervisor.
     ///
-    /// Ephemeral channels carry no durable store; [`Self::publish`] fans out in
-    /// memory and [`Self::flush`] is a no-op.
+    /// The actor process is spawned lazily on first use; a scheduler failure is
+    /// surfaced as a [`LiminalError`] from the first operation, not a panic.
     #[must_use]
     pub fn new(config: ChannelConfig) -> Self {
-        let actor = ChannelActor::new(config.schema.clone());
+        let supervisor = shared_supervisor().map_err(|error| error.to_string());
         Self {
             config,
-            actor: Arc::new(Mutex::new(actor)),
+            actor: Arc::new(ChannelActorState::new(supervisor)),
+            durable: None,
+        }
+    }
+
+    /// Creates an ephemeral handle bound to an explicit `supervisor` (isolation
+    /// for the registry and tests).
+    #[must_use]
+    pub fn with_supervisor(config: ChannelConfig, supervisor: ChannelSupervisor) -> Self {
+        Self {
+            config,
+            actor: Arc::new(ChannelActorState::new(Ok(supervisor))),
             durable: None,
         }
     }
 
     /// Creates a durable handle that persists every accepted publish to `store`
     /// before fanning it out to subscribers.
-    ///
-    /// The durable channel is keyed by `config.name` and backed by a single
-    /// partition (see [`RUNTIME_DURABLE_PARTITIONS`]). Each publish appends the
-    /// message to the store with a monotonic sequence; [`Self::flush`] drives
-    /// the store's own flush so all accepted writes are persisted before it
-    /// returns.
     ///
     /// # Errors
     ///
@@ -98,10 +171,10 @@ impl ChannelHandle {
                 config.name
             ),
         })?;
-        let actor = ChannelActor::new(config.schema.clone());
+        let supervisor = shared_supervisor()?;
         Ok(Self {
             config,
-            actor: Arc::new(Mutex::new(actor)),
+            actor: Arc::new(ChannelActorState::new(Ok(supervisor))),
             durable: Some(Arc::new(Mutex::new(durable))),
         })
     }
@@ -155,13 +228,13 @@ impl ChannelHandle {
         Payload: AsRef<[u8]>,
     {
         // Durable channels persist the message to the store BEFORE acknowledging
-        // the publish (and before fanning out): a published message that was
-        // not durably recorded would be lost on shutdown, which CN7 forbids.
+        // the publish (and before fanning out): a published message that was not
+        // durably recorded would be lost on shutdown, which CN7 forbids.
         if let Some(durable) = self.durable.as_ref() {
             self.persist_durable(durable, payload.as_ref(), &publisher_id)?;
         }
-        let mut actor = self.lock_actor()?;
-        actor.publish(payload.as_ref(), publisher_id, causal_context)
+        let core = self.core()?;
+        core.publish(payload.as_ref().to_vec(), publisher_id, causal_context)
     }
 
     fn persist_durable(
@@ -183,8 +256,6 @@ impl ChannelHandle {
                 .map_err(|error| LiminalError::PublishFailed {
                     message: format!("durable channel state unavailable: {error}"),
                 })?;
-            // The guard is released at the end of this block, before the error is
-            // mapped and propagated, keeping the critical section minimal.
             block_on(channel.publish(&envelope))
         };
         publish_result
@@ -209,8 +280,7 @@ impl ChannelHandle {
     ///
     /// Returns a [`LiminalError`] when the channel actor cannot be read.
     pub fn current_schema_id(&self) -> Result<SchemaId, LiminalError> {
-        let actor = self.lock_actor()?;
-        Ok(actor.schema_id())
+        self.core()?.schema_id()
     }
 
     /// Evolves the channel schema by adding a defaulted field without disconnecting subscribers.
@@ -224,18 +294,54 @@ impl ChannelHandle {
         field_schema: Value,
         default: Value,
     ) -> Result<SchemaId, SchemaValidationError> {
-        let mut actor = self.lock_actor_for_schema()?;
-        actor.evolve_add_field(name, field_schema, default)
+        let core = self
+            .core()
+            .map_err(|error| SchemaValidationError::InvalidSchema {
+                message: error.to_string(),
+            })?;
+        core.evolve(name.into(), field_schema, default)
     }
 
-    /// Subscribes to the channel.
+    /// Subscribes to the channel, receiving every published message.
     ///
     /// # Errors
     ///
     /// Returns a [`LiminalError`] when a subscription cannot be created.
     pub fn subscribe(&self) -> Result<SubscriptionHandle, LiminalError> {
-        let mut actor = self.lock_actor()?;
-        actor.subscribe()
+        self.subscribe_inner(None)
+    }
+
+    /// Subscribes with a delivery predicate: only messages for which `predicate`
+    /// returns `true` are delivered to this subscriber. The predicate is owned
+    /// and evaluated by the actor process (R3).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LiminalError`] when a subscription cannot be created.
+    pub fn subscribe_filtered<F>(&self, predicate: F) -> Result<SubscriptionHandle, LiminalError>
+    where
+        F: Fn(&Envelope) -> bool + Send + Sync + 'static,
+    {
+        self.subscribe_inner(Some(predicate_from(predicate)))
+    }
+
+    fn subscribe_inner(
+        &self,
+        predicate: Option<SubscriptionPredicate>,
+    ) -> Result<SubscriptionHandle, LiminalError> {
+        let core = self.core()?;
+        let (handle, registration) = SubscriptionHandle::spawn(core.scheduler(), predicate)?;
+        core.subscribe(registration)?;
+        Ok(handle)
+    }
+
+    /// Unsubscribes the subscriber owning `subscription` by its process pid.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LiminalError`] when the unsubscribe command fails.
+    pub fn unsubscribe(&self, subscription: &SubscriptionHandle) -> Result<(), LiminalError> {
+        self.core()?.unsubscribe(subscription.pid())
     }
 
     /// Flushes buffered durable channel state to the backing store before shutdown.
@@ -244,14 +350,9 @@ impl ChannelHandle {
     ///
     /// Returns a [`LiminalError`] when the channel actor cannot be inspected or
     /// when the durable store flush fails.
-    ///
-    /// For a durable channel this drives the backing [`DurableStore::flush`],
-    /// guaranteeing every accepted publish (each already appended synchronously
-    /// during [`Self::publish`]) is persisted before this call returns. For an
-    /// ephemeral channel there is no store, so this only confirms the actor is
-    /// reachable and returns.
     pub fn flush(&self) -> Result<(), LiminalError> {
-        drop(self.lock_actor()?);
+        // Confirm the actor is reachable (and restart it if needed) before flush.
+        drop(self.core()?);
         let Some(durable) = self.durable.as_ref() else {
             return Ok(());
         };
@@ -261,8 +362,6 @@ impl ChannelHandle {
                 .map_err(|error| LiminalError::PublishFailed {
                     message: format!("durable channel state unavailable: {error}"),
                 })?;
-            // The guard is released at the end of this block, before the error is
-            // mapped and propagated, keeping the critical section minimal.
             block_on(channel.flush_store())
         };
         flush_result
@@ -281,32 +380,43 @@ impl ChannelHandle {
         Ok(())
     }
 
-    /// Closes the channel gracefully.
+    /// Returns the number of currently-active subscribers on the channel actor.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LiminalError`] when the actor cannot service the query.
+    pub fn subscriber_count(&self) -> Result<usize, LiminalError> {
+        Ok(self.core()?.list_subscribers()?.len())
+    }
+
+    /// Closes the channel gracefully, stopping the actor process.
     ///
     /// # Errors
     ///
     /// Returns a [`LiminalError`] when the channel cannot be shut down.
     pub fn close(&self) -> Result<(), LiminalError> {
-        self.lock_actor()?.close();
-        Ok(())
+        self.core()?.close()
     }
 
-    fn lock_actor(&self) -> Result<std::sync::MutexGuard<'_, ChannelActor>, LiminalError> {
-        self.actor
-            .lock()
-            .map_err(|error| LiminalError::PublishFailed {
-                message: format!("channel actor unavailable: {error}"),
+    fn core(&self) -> Result<Arc<ChannelActorCore>, LiminalError> {
+        self.actor.core(&self.config.schema)
+    }
+
+    /// The channel actor's current beamr pid, ensuring it is running first.
+    /// Test-only: lets restart tests crash the exact actor process.
+    #[cfg(test)]
+    pub(crate) fn actor_pid(&self) -> Result<u64, LiminalError> {
+        let core = self.core()?;
+        core.current_pid()?
+            .ok_or_else(|| LiminalError::DeliveryFailed {
+                message: "channel actor has no live pid".to_owned(),
             })
     }
 
-    fn lock_actor_for_schema(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, ChannelActor>, SchemaValidationError> {
-        self.actor
-            .lock()
-            .map_err(|error| SchemaValidationError::InvalidSchema {
-                message: format!("channel actor unavailable: {error}"),
-            })
+    /// The scheduler the channel actor and its subscribers run on (test-only).
+    #[cfg(test)]
+    pub(crate) fn scheduler(&self) -> Result<Arc<beamr::scheduler::Scheduler>, LiminalError> {
+        Ok(Arc::clone(self.core()?.scheduler()))
     }
 }
 
