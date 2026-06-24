@@ -10,7 +10,7 @@ description = "Standalone server for the liminal messaging bus"
 
 [dependencies]
 anyhow = "1"
-beamr = { version = "0.8.1", features = ["json"] }
+beamr = { version = "0.9.0", features = ["json"] }
 clap = { version = "4", features = ["derive"] }
 haematite = "0.1.0"
 liminal = { path = "../liminal" }
