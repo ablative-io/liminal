@@ -118,7 +118,7 @@ impl ChannelActorCore {
         payload: Vec<u8>,
         publisher_id: PublisherId,
         causal_context: Option<CausalContext>,
-    ) -> Result<(), LiminalError> {
+    ) -> Result<Envelope, LiminalError> {
         let (reply, response) = mpsc::sync_channel(1);
         let pid = self.enqueue(ChannelCommandKind::Publish {
             payload,
@@ -320,7 +320,7 @@ impl ChannelActorCore {
         payload: &[u8],
         publisher_id: PublisherId,
         causal_context: Option<CausalContext>,
-    ) -> Result<(), LiminalError> {
+    ) -> Result<Envelope, LiminalError> {
         if *lock(&self.closed)? {
             return Err(LiminalError::ChannelClosed {
                 message: "channel is closed".to_owned(),
@@ -341,7 +341,9 @@ impl ChannelActorCore {
             subscriber.deliver(&envelope)?;
         }
         drop(subscribers);
-        Ok(())
+        // Return the normalised envelope so the host can fan the SAME message out
+        // to remote subscribers via the cluster observer (SRV-005).
+        Ok(envelope)
     }
 
     fn apply_subscribe(

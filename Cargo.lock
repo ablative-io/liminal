@@ -145,9 +145,37 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beamr"
-version = "0.8.1"
+version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "471175f8e851b2bc037e8149cb26c4f41df9c20e42ffa0c03b632285c65b7452"
+checksum = "7dfbd8e4b5a5391d907986b8d3b5ca3c26d4a524f35297fd451ef595b54554d4"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "crossbeam-channel",
+ "crossbeam-deque",
+ "crossbeam-queue",
+ "dashmap",
+ "flate2",
+ "gleam-types",
+ "io-uring",
+ "libc",
+ "md5",
+ "num_cpus",
+ "rand",
+ "rustix",
+ "tokio",
+ "unicode-segmentation",
+ "zstd",
+]
+
+[[package]]
+name = "beamr"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62a857ad3b628a27b579ba922b3f7790aca27af006bce57b2db6d2b56d0eddc7"
 dependencies = [
  "base64",
  "cranelift-codegen",
@@ -789,7 +817,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "18dc7a0f86c29c1a2aa3b4ad743393276d48dfb98dea788b0da2cab4be1d186d"
 dependencies = [
- "beamr",
+ "beamr 0.8.2",
  "blake3",
  "crc32fast",
  "log",
@@ -1091,7 +1119,7 @@ name = "liminal"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "beamr",
+ "beamr 0.9.0",
  "chrono",
  "haematite",
  "jsonschema",
@@ -1120,7 +1148,7 @@ name = "liminal-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "beamr",
+ "beamr 0.9.0",
  "clap",
  "futures-core",
  "haematite",
@@ -1131,6 +1159,7 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "tracing",
 ]

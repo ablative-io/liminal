@@ -54,12 +54,31 @@ pub struct RoutingRuleDef {
     pub predicate: Option<String>,
 }
 
+/// Default beamr distribution handshake cookie, used when the operator does not
+/// configure one. Mirrors beamr's own [`beamr::distribution::DEFAULT_COOKIE`].
+pub const DEFAULT_COOKIE: &str = "beamr-cookie";
+
 /// Beamr distribution cluster configuration for standalone deployment.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClusterConfig {
     /// Unique node name advertised to the beamr distribution cluster.
     pub node_name: String,
+    /// Socket address this node binds for inbound distribution links from peers.
+    ///
+    /// This is distinct from [`ServerConfig::listen_address`] (the client wire
+    /// port): a clustered node listens on two ports — one for clients, one for
+    /// peer distribution traffic.
+    pub listen_address: SocketAddr,
     /// Seed node socket addresses used to join an existing cluster.
     pub seed_nodes: Vec<SocketAddr>,
+    /// Shared distribution handshake cookie. Every node in a cluster MUST use the
+    /// same cookie or the OTP handshake is rejected. Defaults to
+    /// [`DEFAULT_COOKIE`] when omitted.
+    #[serde(default = "default_cookie")]
+    pub cookie: String,
+}
+
+fn default_cookie() -> String {
+    DEFAULT_COOKIE.to_owned()
 }

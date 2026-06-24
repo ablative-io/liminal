@@ -154,6 +154,21 @@ fn validate_cluster(config: &ServerConfig, errors: &mut Vec<String>) {
         errors.push("cluster.node_name: node name must not be empty".to_owned());
     }
 
+    if cluster.cookie.is_empty() {
+        errors.push("cluster.cookie: distribution cookie must not be empty".to_owned());
+    }
+
+    if cluster.listen_address.port() == 0 {
+        errors.push("cluster.listen_address: distribution port must be non-zero".to_owned());
+    }
+
+    if cluster.listen_address == config.listen_address {
+        errors.push(
+            "cluster.listen_address: distribution port must differ from the client listen_address"
+                .to_owned(),
+        );
+    }
+
     let mut seed_node_counts = BTreeMap::new();
     for (index, seed_node) in cluster.seed_nodes.iter().enumerate() {
         if seed_node.port() == 0 {
@@ -216,7 +231,9 @@ mod tests {
             persistence_path: None,
             cluster: Some(ClusterConfig {
                 node_name: "node-a".to_owned(),
-                seed_nodes: vec![socket("127.0.0.1:9000")?],
+                listen_address: socket("127.0.0.1:9000")?,
+                seed_nodes: vec![socket("127.0.0.1:9001")?],
+                cookie: "test-cookie".to_owned(),
             }),
         })
     }

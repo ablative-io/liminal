@@ -12,8 +12,11 @@ use liminal::durability::{DurableStore, HaematiteStore};
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
 use super::conversation::{ConnectionConversation, LiminalConversationResource};
+use super::services_cluster::build_channel_cluster;
 use crate::ServerError;
 use crate::config::types::ServerConfig;
+
+pub use super::services_cluster::ChannelCluster;
 
 /// Marker for resources retained by a connection process until unsubscribe.
 pub trait SubscriptionResource: std::fmt::Debug + Send {
@@ -125,6 +128,7 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
 #[derive(Debug)]
 pub struct LiminalConnectionServices {
     channels: HashMap<String, ConfiguredChannel>,
+    cluster: ChannelCluster,
     durable_store: Arc<dyn DurableStore>,
     conversation_supervisor: Arc<ConversationSupervisor>,
     next_message_id: AtomicU64,
@@ -156,6 +160,11 @@ impl LiminalConnectionServices {
         config: &ServerConfig,
         durable_store: Arc<dyn DurableStore>,
     ) -> Result<Self, ServerError> {
+        // Build ONE shared channel supervisor for the whole server. When a
+        // [cluster] section is present it is distribution-enabled, so every
+        // channel actor and subscriber shares the clustered scheduler the cluster
+        // attaches its process-group transport to (SRV-005, Constraint B).
+        let cluster = build_channel_cluster(config.cluster.as_ref())?;
         let mut channels = HashMap::new();
         for channel in &config.channels {
             let schema = Schema::new(serde_json::json!({})).map_err(|error| {
@@ -169,16 +178,19 @@ impl LiminalConnectionServices {
                 ChannelConfig::new(channel.name.clone(), schema, ChannelMode::Ephemeral)
             };
             let handle = if channel.durable {
-                ChannelHandle::new_durable(channel_config, Arc::clone(&durable_store)).map_err(
-                    |error| ServerError::ConfigValidation {
-                        message: format!(
-                            "failed to initialize durable channel '{}': {error}",
-                            channel.name
-                        ),
-                    },
-                )?
+                ChannelHandle::new_durable_with_supervisor(
+                    channel_config,
+                    Arc::clone(&durable_store),
+                    cluster.supervisor().clone(),
+                )
+                .map_err(|error| ServerError::ConfigValidation {
+                    message: format!(
+                        "failed to initialize durable channel '{}': {error}",
+                        channel.name
+                    ),
+                })?
             } else {
-                ChannelHandle::new(channel_config)
+                ChannelHandle::with_supervisor(channel_config, cluster.supervisor().clone())
             };
             channels.insert(
                 channel.name.clone(),
@@ -195,6 +207,7 @@ impl LiminalConnectionServices {
         })?);
         Ok(Self {
             channels,
+            cluster,
             durable_store,
             conversation_supervisor,
             next_message_id: AtomicU64::new(1),
@@ -214,11 +227,21 @@ impl LiminalConnectionServices {
         })?);
         Ok(Self {
             channels: HashMap::new(),
+            cluster: build_channel_cluster(None)?,
             durable_store: build_durable_store(None)?,
             conversation_supervisor,
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
         })
+    }
+
+    /// The shared channel supervisor + cluster resolver backing this service.
+    ///
+    /// The server runtime uses this to attach the cluster to the channel
+    /// supervisor's clustered scheduler (SRV-005).
+    #[must_use]
+    pub const fn channel_cluster(&self) -> &ChannelCluster {
+        &self.cluster
     }
 
     /// Returns the shared durable store backing this service's durable channels.

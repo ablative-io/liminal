@@ -67,7 +67,8 @@ predicate = "true"
 
 [cluster]
 node_name = "node-a"
-seed_nodes = ["127.0.0.1:9000"]
+listen_address = "127.0.0.1:9000"
+seed_nodes = ["127.0.0.1:9001"]
 "#
     }
 
@@ -111,7 +112,16 @@ seed_nodes = ["127.0.0.1:9000"]
             config.persistence_path.as_deref(),
             Some(std::path::Path::new("/tmp"))
         );
-        assert!(config.cluster.is_some());
+        let cluster = config
+            .cluster
+            .as_ref()
+            .ok_or("cluster section should be present")?;
+        assert_eq!(cluster.node_name, "node-a");
+        assert_eq!(cluster.listen_address.to_string(), "127.0.0.1:9000");
+        assert_eq!(cluster.seed_nodes.len(), 1);
+        // The cookie is omitted from the fixture, so it must fall back to the
+        // shared default rather than parse-failing.
+        assert_eq!(cluster.cookie, crate::config::types::DEFAULT_COOKIE);
 
         Ok(())
     }
