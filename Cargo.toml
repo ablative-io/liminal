@@ -3,6 +3,7 @@ members = [
     "crates/liminal",
     "crates/liminal-sdk",
     "crates/liminal-server",
+    "sdks/liminal-ts/wasm-src",
 ]
 resolver = "2"
 
