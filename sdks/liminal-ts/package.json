@@ -1,0 +1,39 @@
+{
+  "name": "@liminal/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK facade for typed liminal channels backed by the Rust WASM protocol bridge",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tomWhiting/liminal.git",
+    "directory": "sdks/liminal-ts"
+  },
+  "type": "module",
+  "main": "./dist/cjs/index.cjs",
+  "module": "./dist/esm/index.mjs",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.mjs",
+      "require": "./dist/cjs/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "wasm"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build:wasm": "wasm-pack build wasm-src --target web --out-dir ../wasm --out-name liminal_protocol_wasm",
+    "build:esm": "tsc -p tsconfig.esm.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json",
+    "build:extensions": "node scripts/copy-build-extensions.cjs",
+    "build": "npm run clean && npm run build:wasm && npm run build:esm && npm run build:cjs && npm run build:extensions"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "typescript": "^5.6.3"
+  }
+}
