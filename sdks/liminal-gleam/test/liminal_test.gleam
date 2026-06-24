@@ -31,10 +31,13 @@
 ////      types produce a compile error" gate — it cannot live uncommented in a
 ////      passing suite precisely because it would (correctly) fail to compile.
 
+import gleam/option.{type Option, Some}
 import gleeunit
 import gleeunit/should
 import liminal
 import liminal/channel
+import liminal/conversation
+import liminal/schema
 
 pub fn main() {
   gleeunit.main()
@@ -43,6 +46,23 @@ pub fn main() {
 /// A typed record message type, exactly as an SDK consumer would define one.
 pub type ChatMessage {
   ChatMessage(author: String, body: String, sent_at_millis: Int)
+}
+
+/// A typed record used by schema derivation tests.
+pub type Person {
+  Person(name: String, age: Int)
+}
+
+pub type CounterConfig {
+  CounterConfig(start: Int)
+}
+
+pub type CounterMessage {
+  CounterMessage(increment: Int)
+}
+
+pub type CounterReply {
+  CounterReply(total: Int)
 }
 
 // --- Compile-time surface (type-checked, never executed) ----------------------
@@ -72,6 +92,29 @@ pub fn typed_publish_surface_via_facade(
   )
 }
 
+/// Proves that the schema module exports a type-checked derive function for
+/// Gleam record schema providers.
+pub fn derive_schema_surface(
+  person_schema: schema.Schema(Person),
+) -> schema.SchemaMetadata {
+  schema.derive_schema(person_schema)
+}
+
+/// Proves that all four conversation callbacks are required by the handler type.
+pub fn conversation_handler_surface(
+  handler: conversation.Handler(
+    CounterConfig,
+    Int,
+    CounterMessage,
+    CounterReply,
+  ),
+  config: CounterConfig,
+  message: CounterMessage,
+) -> Result(#(Int, Option(CounterReply)), channel.SdkError) {
+  let state = conversation.init(handler, config) |> should.be_ok
+  conversation.handle_message(handler, state, message)
+}
+
 // COMPILE-ERROR DEMONSTRATION (must stay commented out).
 //
 // Uncommenting the function below makes `gleam build`/`gleam test` fail with a
@@ -91,6 +134,21 @@ pub fn typed_publish_surface_via_facade(
 //   // A wholly unrelated record is also rejected, because the channel is
 //   // parameterised over ChatMessage, not over `dynamic`:
 //   //   channel.publish(chat, "not even a record")  // compile error
+// }
+
+// COMPILE-ERROR DEMONSTRATION (must stay commented out).
+//
+// Uncommenting the function below makes `gleam build`/`gleam test` fail because
+// the `Handler` constructor requires init, handle_message, handle_timeout, and
+// terminate. Leaving out any one callback is a compile-time error. The review
+// suite also verifies this with an isolated negative `gleam check` fixture.
+//
+// pub fn missing_callback_handler() {
+//   conversation.Handler(
+//     init: counter_init,
+//     handle_message: counter_handle_message,
+//     handle_timeout: counter_handle_timeout,
+//   )
 // }
 
 // --- Runtime assertions over pure, NIF-free construction ----------------------
@@ -180,4 +238,144 @@ pub fn sdk_error_constructs_test() {
 /// the caller's match is not narrowed to a single variant by flow analysis.
 fn classify_error(description: String) -> channel.SdkError {
   channel.TypeValidation(description: description)
+}
+
+/// Conversation handlers construct as a four-callback contract and helpers
+/// invoke each callback with the state threaded through the exchange.
+pub fn conversation_handler_callbacks_test() {
+  let handler = counter_handler()
+  let state =
+    conversation.init(handler, CounterConfig(start: 2))
+    |> should.be_ok
+
+  state |> should.equal(2)
+
+  let #(next_state, maybe_reply) =
+    conversation.handle_message(handler, state, CounterMessage(increment: 3))
+    |> should.be_ok
+
+  next_state |> should.equal(5)
+  let reply = maybe_reply |> should.be_some
+  reply.total |> should.equal(5)
+
+  conversation.handle_timeout(handler, next_state)
+  |> should.be_ok
+  |> should.equal(conversation.Continue)
+
+  conversation.terminate(handler, next_state, conversation.Completed)
+}
+
+/// Timeout and termination lifecycle types are public and exhaustive to match.
+pub fn conversation_lifecycle_types_construct_test() {
+  conversation.Close |> should.equal(conversation.Close)
+
+  let reason = classify_terminate_reason("handler failed")
+
+  let description = case reason {
+    conversation.Completed -> "completed"
+    conversation.Closed -> "closed"
+    conversation.TimedOut -> "timed out"
+    conversation.Failed(channel.Conversation(description:, ..)) -> description
+    conversation.Failed(_) -> "other failure"
+  }
+
+  description |> should.equal("handler failed")
+}
+
+/// Schema derivation from a typed record provider produces field names, Gleam
+/// type names, and a Rust-SDK-compatible encoded object schema without any
+/// external schema file.
+pub fn derive_schema_contains_person_fields_test() {
+  let person_schema = schema.derive_schema(person_schema())
+
+  person_schema.name |> should.equal("Person")
+  person_schema.version |> should.equal("1")
+  person_schema.fields |> field_names |> should.equal(["name", "age"])
+  person_schema.fields |> field_types |> should.equal(["String", "Int"])
+  person_schema.encoded_schema
+  |> should.equal(
+    "{\"type\":\"object\",\"required\":[\"name\",\"age\"],\"properties\":{\"name\":{\"type\":\"String\"},\"age\":{\"type\":\"Int\"}}}",
+  )
+}
+
+/// Schema encoding escapes control characters so the Rust SDK receives valid
+/// JSON schema bytes even for unusual record or field names.
+pub fn record_schema_escapes_json_strings_test() {
+  let weird_schema =
+    schema.record_schema(name: "Weird", version: "1", fields: [
+      schema.field(name: "line\nbreak", field_type: "Quote\\\"Tab\t"),
+    ])
+
+  weird_schema.encoded_schema
+  |> should.equal(
+    "{\"type\":\"object\",\"required\":[\"line\\nbreak\"],\"properties\":{\"line\\nbreak\":{\"type\":\"Quote\\\\\\\"Tab\\t\"}}}",
+  )
+}
+
+fn person_schema() -> schema.Schema(Person) {
+  schema.record(name: "Person", version: "1", fields: [
+    schema.string_field(name: "name"),
+    schema.int_field(name: "age"),
+  ])
+}
+
+fn classify_terminate_reason(
+  description: String,
+) -> conversation.TerminateReason {
+  conversation.Failed(channel.Conversation(
+    conversation_id: "conv-1",
+    description: description,
+  ))
+}
+
+fn counter_handler() -> conversation.Handler(
+  CounterConfig,
+  Int,
+  CounterMessage,
+  CounterReply,
+) {
+  conversation.Handler(
+    init: counter_init,
+    handle_message: counter_handle_message,
+    handle_timeout: counter_handle_timeout,
+    terminate: counter_terminate,
+  )
+}
+
+fn counter_init(config: CounterConfig) -> Result(Int, channel.SdkError) {
+  Ok(config.start)
+}
+
+fn counter_handle_message(
+  state: Int,
+  message: CounterMessage,
+) -> Result(#(Int, Option(CounterReply)), channel.SdkError) {
+  let next_state = state + message.increment
+  Ok(#(next_state, Some(CounterReply(total: next_state))))
+}
+
+fn counter_handle_timeout(
+  state: Int,
+) -> Result(conversation.TimeoutAction, channel.SdkError) {
+  case state < 10 {
+    True -> Ok(conversation.Continue)
+    False -> Ok(conversation.Close)
+  }
+}
+
+fn counter_terminate(
+  _state: Int,
+  _reason: conversation.TerminateReason,
+) -> Nil {
+  Nil
+}
+
+fn field_types(fields: List(channel.SchemaField)) -> List(String) {
+  case fields {
+    [] -> []
+    [channel.SchemaField(field_type:, ..), ..rest] -> [
+      field_type,
+      ..field_types(rest)
+    ]
+  }
 }
