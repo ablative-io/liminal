@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 
-use crate::causal::CausalContext;
+use crate::causal::{CausalContext, MessageId};
 use crate::channel::SchemaId;
 
 /// Identity of the publisher that submitted a message.
@@ -42,6 +42,8 @@ impl Default for PublisherId {
 /// Message envelope used as the delivery unit inside the core bus.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Envelope {
+    /// UUID-based unique identifier assigned when the message is published.
+    pub message_id: MessageId,
     /// Validated payload bytes, normalized by the schema when defaults are applied.
     pub payload: Vec<u8>,
     /// Optional parent reference for causal-chain metadata.
@@ -68,7 +70,46 @@ impl Envelope {
 
     /// Creates an envelope with an explicit timestamp.
     #[must_use]
-    pub const fn with_timestamp(
+    pub fn with_timestamp(
+        payload: Vec<u8>,
+        causal_context: Option<CausalContext>,
+        schema_id: SchemaId,
+        publisher_id: PublisherId,
+        timestamp: DateTime<Utc>,
+    ) -> Self {
+        Self::with_message_id_and_timestamp(
+            MessageId::new(),
+            payload,
+            causal_context,
+            schema_id,
+            publisher_id,
+            timestamp,
+        )
+    }
+
+    /// Creates an envelope with an explicit message identifier and current UTC timestamp.
+    #[must_use]
+    pub fn with_message_id(
+        message_id: MessageId,
+        payload: Vec<u8>,
+        causal_context: Option<CausalContext>,
+        schema_id: SchemaId,
+        publisher_id: PublisherId,
+    ) -> Self {
+        Self::with_message_id_and_timestamp(
+            message_id,
+            payload,
+            causal_context,
+            schema_id,
+            publisher_id,
+            Utc::now(),
+        )
+    }
+
+    /// Creates an envelope with explicit message identifier and timestamp.
+    #[must_use]
+    pub const fn with_message_id_and_timestamp(
+        message_id: MessageId,
         payload: Vec<u8>,
         causal_context: Option<CausalContext>,
         schema_id: SchemaId,
@@ -76,6 +117,7 @@ impl Envelope {
         timestamp: DateTime<Utc>,
     ) -> Self {
         Self {
+            message_id,
             payload,
             causal_context,
             schema_id,
@@ -100,8 +142,10 @@ mod tests {
         let parent = MessageId::new();
         let causal_context = Some(CausalContext::child_of(parent));
         let timestamp = fixed_timestamp();
+        let message_id = MessageId::new();
 
-        let envelope = Envelope::with_timestamp(
+        let envelope = Envelope::with_message_id_and_timestamp(
+            message_id,
             b"{}".to_vec(),
             causal_context.clone(),
             schema_id,
@@ -109,11 +153,20 @@ mod tests {
             timestamp,
         );
 
+        assert_eq!(envelope.message_id, message_id);
         assert_eq!(envelope.payload, b"{}".to_vec());
         assert_eq!(envelope.causal_context, causal_context);
         assert_eq!(envelope.schema_id, schema_id);
         assert_eq!(envelope.publisher_id, publisher_id);
         assert_eq!(envelope.timestamp, timestamp);
+    }
+
+    #[test]
+    fn envelope_assigns_unique_message_ids() {
+        let first = Envelope::new(vec![], None, SchemaId::new(), PublisherId::default());
+        let second = Envelope::new(vec![], None, SchemaId::new(), PublisherId::default());
+
+        assert_ne!(first.message_id, second.message_id);
     }
 
     fn fixed_timestamp() -> chrono::DateTime<Utc> {
