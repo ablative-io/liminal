@@ -13,13 +13,16 @@ const DRAIN_TIMEOUT_MS: &str = "LIMINAL_DRAIN_TIMEOUT_MS";
 const PERSISTENCE_PATH: &str = "LIMINAL_PERSISTENCE_PATH";
 const CLUSTER_NODE_NAME: &str = "LIMINAL_CLUSTER_NODE_NAME";
 const CLUSTER_SEED_NODES: &str = "LIMINAL_CLUSTER_SEED_NODES";
+const CLUSTER_LISTEN_ADDRESS: &str = "LIMINAL_CLUSTER_LISTEN_ADDRESS";
+const CLUSTER_COOKIE: &str = "LIMINAL_CLUSTER_COOKIE";
 
 /// Applies supported `LIMINAL_` environment variable overrides to a config.
 ///
 /// Absent variables leave the supplied configuration unchanged. Supported
 /// variables are `LIMINAL_LISTEN_ADDRESS`, `LIMINAL_HEALTH_LISTEN_ADDRESS`,
 /// `LIMINAL_DRAIN_TIMEOUT_MS`, `LIMINAL_PERSISTENCE_PATH`,
-/// `LIMINAL_CLUSTER_NODE_NAME`, and `LIMINAL_CLUSTER_SEED_NODES`.
+/// `LIMINAL_CLUSTER_NODE_NAME`, `LIMINAL_CLUSTER_SEED_NODES`,
+/// `LIMINAL_CLUSTER_LISTEN_ADDRESS`, and `LIMINAL_CLUSTER_COOKIE`.
 ///
 /// # Errors
 ///
@@ -65,6 +68,15 @@ where
             CLUSTER_SEED_NODES => {
                 let seed_nodes = parse_seed_nodes(&value)?;
                 cluster_required(&mut config, CLUSTER_SEED_NODES)?.seed_nodes = seed_nodes;
+            }
+            CLUSTER_LISTEN_ADDRESS => {
+                let listen_address = parse_socket_addr(CLUSTER_LISTEN_ADDRESS, &value)?;
+                cluster_required(&mut config, CLUSTER_LISTEN_ADDRESS)?.listen_address =
+                    listen_address;
+            }
+            CLUSTER_COOKIE => {
+                let cookie = env_string(CLUSTER_COOKIE, &value)?;
+                cluster_required(&mut config, CLUSTER_COOKIE)?.cookie = cookie;
             }
             _ => {}
         }
@@ -182,7 +194,9 @@ mod tests {
             persistence_path: Some(PathBuf::from("/tmp")),
             cluster: Some(ClusterConfig {
                 node_name: "node-a".to_owned(),
-                seed_nodes: vec![socket("127.0.0.1:9000")?],
+                listen_address: socket("127.0.0.1:9000")?,
+                seed_nodes: vec![socket("127.0.0.1:9001")?],
+                cookie: "test-cookie".to_owned(),
             }),
         })
     }
@@ -283,6 +297,42 @@ mod tests {
         assert_eq!(cluster.seed_nodes.len(), 2);
         assert_eq!(cluster.seed_nodes[0], socket("127.0.0.1:9100")?);
         assert_eq!(cluster.seed_nodes[1], socket("127.0.0.1:9200")?);
+
+        Ok(())
+    }
+
+    #[test]
+    fn cluster_listen_address_and_cookie_overrides_replace_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = sample_config()?;
+        let config = apply_env_overrides_from(
+            config,
+            vec![
+                env_pair("LIMINAL_CLUSTER_LISTEN_ADDRESS", "127.0.0.1:9500"),
+                env_pair("LIMINAL_CLUSTER_COOKIE", "override-cookie"),
+            ],
+        )?;
+
+        let Some(cluster) = config.cluster else {
+            return Err("cluster config should remain present".into());
+        };
+        assert_eq!(cluster.listen_address, socket("127.0.0.1:9500")?);
+        assert_eq!(cluster.cookie, "override-cookie");
+
+        Ok(())
+    }
+
+    #[test]
+    fn cluster_listen_address_override_without_cluster_section_returns_validation_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.cluster = None;
+        let result = apply_env_overrides_from(
+            config,
+            vec![env_pair("LIMINAL_CLUSTER_LISTEN_ADDRESS", "127.0.0.1:9500")],
+        );
+
+        assert!(matches!(result, Err(ServerError::ConfigValidation { .. })));
 
         Ok(())
     }

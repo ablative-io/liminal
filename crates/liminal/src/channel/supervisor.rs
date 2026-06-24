@@ -17,10 +17,12 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use beamr::atom::{Atom, AtomTable};
+use beamr::distribution::{DistributionConfig, Resolver};
 use beamr::module::ModuleRegistry;
 use beamr::scheduler::{Scheduler, SchedulerConfig};
 
 use crate::channel::actor::{ActorRuntime, ChannelActorCore, actor_module, private_data};
+use crate::channel::observer::ClusterObserver;
 use crate::channel::schema::Schema;
 use crate::error::LiminalError;
 
@@ -75,6 +77,10 @@ struct SupervisorInner {
     policy: ChannelRestartPolicy,
     module_name: Atom,
     entry_function: Atom,
+    /// Optional cluster observer installed once, after construction, by the
+    /// standalone server when clustering is configured (SRV-005). The library
+    /// itself never installs one — clustering is an out-of-library concern.
+    observer: OnceLock<Arc<dyn ClusterObserver>>,
 }
 
 impl std::fmt::Debug for ChannelSupervisor {
@@ -95,11 +101,46 @@ impl ChannelSupervisor {
         Self::with_policy(ChannelRestartPolicy::default())
     }
 
-    /// Builds a supervisor with an explicit restart policy.
+    /// Builds a supervisor with an explicit restart policy on a non-clustered
+    /// scheduler.
     ///
     /// # Errors
     /// Returns [`LiminalError::ConversationFailed`] when the scheduler cannot start.
     pub fn with_policy(policy: ChannelRestartPolicy) -> Result<Self, LiminalError> {
+        Self::build(policy, None, None, None)
+    }
+
+    /// Builds a supervisor whose scheduler is distribution-enabled (SRV-005), so
+    /// every channel actor and every subscriber process this supervisor spawns
+    /// shares ONE clustered scheduler. This is the scheduler the cluster attaches
+    /// its process-group transport to: a subscriber pid joined to a channel's pg
+    /// group MUST live on the same scheduler that owns the distribution
+    /// connections, or cross-node delivery cannot reach it.
+    ///
+    /// `node_name`/`creation` form this node's distribution identity; `cookie`
+    /// and `resolver` are handed verbatim to the scheduler's
+    /// [`DistributionConfig`] (the resolver MUST be the same instance the cluster
+    /// uses to dial seeds, so handshake-established names resolve consistently).
+    ///
+    /// # Errors
+    /// Returns [`LiminalError::ConversationFailed`] when the scheduler cannot start.
+    pub fn with_distribution(
+        node_name: String,
+        creation: u32,
+        cookie: String,
+        resolver: Resolver,
+        policy: ChannelRestartPolicy,
+    ) -> Result<Self, LiminalError> {
+        let distribution = DistributionConfig { resolver, cookie };
+        Self::build(policy, Some(node_name), Some(creation), Some(distribution))
+    }
+
+    fn build(
+        policy: ChannelRestartPolicy,
+        node_name: Option<String>,
+        creation: Option<u32>,
+        distribution: Option<DistributionConfig>,
+    ) -> Result<Self, LiminalError> {
         let atoms = AtomTable::with_common_atoms();
         let module_name = atoms.intern("liminal_channel_actor");
         let entry_function = atoms.intern("main");
@@ -112,6 +153,9 @@ impl ChannelSupervisor {
             SchedulerConfig {
                 thread_count: Some(CHANNEL_SCHEDULER_THREADS),
                 nif_private_data: Some(private_data(Arc::clone(&runtime))),
+                node_name,
+                creation,
+                distribution,
                 ..SchedulerConfig::default()
             },
             registry,
@@ -124,6 +168,7 @@ impl ChannelSupervisor {
                 policy,
                 module_name,
                 entry_function,
+                observer: OnceLock::new(),
             }),
         })
     }
@@ -132,6 +177,19 @@ impl ChannelSupervisor {
     #[must_use]
     pub fn scheduler(&self) -> Arc<Scheduler> {
         Arc::clone(&self.inner.scheduler)
+    }
+
+    /// Installs the cluster observer (SRV-005). Idempotent: the first install
+    /// wins and later attempts are ignored, so the observer can be wired exactly
+    /// once after the supervisor (and its scheduler) exist.
+    pub fn install_observer(&self, observer: Arc<dyn ClusterObserver>) {
+        let _ = self.inner.observer.set(observer);
+    }
+
+    /// The installed cluster observer, if any.
+    #[must_use]
+    pub(crate) fn observer(&self) -> Option<&Arc<dyn ClusterObserver>> {
+        self.inner.observer.get()
     }
 
     /// The configured restart policy.

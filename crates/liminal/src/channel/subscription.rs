@@ -23,7 +23,9 @@ use std::sync::{Arc, Mutex};
 use beamr::native::native_process::{NativeContext, NativeHandler, NativeOutcome};
 use beamr::process::ExitReason;
 use beamr::scheduler::Scheduler;
+use beamr::term::binary_ref::BinaryRef;
 
+use crate::channel::wire::decode_envelope;
 use crate::envelope::Envelope;
 use crate::error::LiminalError;
 
@@ -36,13 +38,26 @@ pub(crate) type SubscriptionPredicate = Arc<dyn Fn(&Envelope) -> bool + Send + S
 
 /// Real beamr native process backing one subscription.
 ///
-/// It is an idle handler (mirroring `aion::worker::link::IdleWorkerProcess`): it
-/// owns no delivery logic — envelopes travel through the shared [`SubscriberInbox`]
-/// the channel actor writes and [`SubscriptionHandle::try_next`] reads. Its sole
-/// job is to BE a first-class linkable, killable process whose lifetime equals
-/// the subscription's, so the channel actor can detect the subscription dying via
-/// a real EXIT signal rather than by polling a weak pointer.
-struct SubscriberProcess;
+/// For LOCAL delivery it is an idle handler (mirroring
+/// `aion::worker::link::IdleWorkerProcess`): local envelopes travel through the
+/// shared [`SubscriberInbox`] the channel actor writes and
+/// [`SubscriptionHandle::try_next`] reads. Its other job is to BE a first-class
+/// linkable, killable process whose lifetime equals the subscription's, so the
+/// channel actor detects the subscription dying via a real EXIT signal rather
+/// than by polling a weak pointer.
+///
+/// For CROSS-NODE delivery (SRV-005) it is also the landing point for a remote
+/// publish: a remote node sends a published envelope, encoded by
+/// [`crate::channel::wire::encode_envelope`], as a single beamr binary directly
+/// to this process's pid (the pid the cluster registered in the channel's
+/// distributed process group). The binary lands in this process's mailbox; the
+/// handler decodes it back into an [`Envelope`] and pushes it onto the SAME
+/// inbox a local publish would, so a subscriber observes local and remote
+/// messages identically. Non-binary wakeups (trapped `{EXIT, _, _}` signals) are
+/// drained and ignored.
+struct SubscriberProcess {
+    inbox: SubscriberInbox,
+}
 
 impl NativeHandler for SubscriberProcess {
     fn handle(&mut self, ctx: &mut NativeContext<'_>) -> NativeOutcome {
@@ -50,12 +65,31 @@ impl NativeHandler for SubscriberProcess {
         // so it holds before the actor ever links — re-assert it here defensively
         // for any future restart of this handler.
         ctx.set_trap_exit(true);
-        // Drain any wakeups (including trapped `{EXIT, _, _}` signals from a
-        // crashed actor the subscriber outlives) and park; the subscriber carries
-        // no work of its own. Death is driven only by an explicit
-        // `terminate_process` on unsubscribe/handle drop.
-        while ctx.recv().is_some() {}
+        // Drain every queued wakeup. A binary message is a remote envelope frame
+        // (SRV-005) to decode and enqueue; everything else (e.g. a trapped
+        // `{EXIT, _, _}` tuple from a crashed actor this subscriber outlives) is
+        // ignored. Death is driven only by an explicit `terminate_process` on
+        // unsubscribe/handle drop.
+        while let Some(message) = ctx.recv() {
+            if let Some(binary) = BinaryRef::new(message) {
+                self.accept_remote_frame(binary.as_bytes());
+            }
+        }
         NativeOutcome::Wait
+    }
+}
+
+impl SubscriberProcess {
+    /// Decode a remote envelope frame and push it onto the inbox. A frame that
+    /// fails to decode is dropped: a corrupt cross-node payload must never crash
+    /// the subscriber or stall delivery of well-formed messages.
+    fn accept_remote_frame(&self, bytes: &[u8]) {
+        let Ok(envelope) = decode_envelope(bytes) else {
+            return;
+        };
+        if let Ok(mut inbox) = self.inbox.lock() {
+            inbox.push_back(envelope);
+        }
     }
 }
 
@@ -129,7 +163,13 @@ impl SubscriptionHandle {
         scheduler: &Arc<Scheduler>,
         predicate: Option<SubscriptionPredicate>,
     ) -> Result<(Self, SubscriberRegistration), LiminalError> {
-        let factory = Box::new(|| Box::new(SubscriberProcess) as Box<dyn NativeHandler>);
+        let inbox: SubscriberInbox = Arc::new(Mutex::new(VecDeque::new()));
+        let process_inbox = Arc::clone(&inbox);
+        let factory = Box::new(move || {
+            Box::new(SubscriberProcess {
+                inbox: Arc::clone(&process_inbox),
+            }) as Box<dyn NativeHandler>
+        });
         let pid =
             scheduler
                 .spawn_native(factory)
@@ -148,7 +188,6 @@ impl SubscriptionHandle {
             .map_err(|error| LiminalError::SubscriptionFailed {
                 message: format!("failed to set trap_exit on subscriber process {pid}: {error:?}"),
             })?;
-        let inbox: SubscriberInbox = Arc::new(Mutex::new(VecDeque::new()));
         let handle = Self {
             inner: Arc::new(SubscriptionInner {
                 pid,

@@ -13,7 +13,7 @@ use serde_json::Value;
 use crate::causal::CausalContext;
 use crate::channel::schema::{SchemaId, SchemaValidationError};
 use crate::channel::subscription::{SubscriberRegistration, SubscriptionPredicate};
-use crate::envelope::PublisherId;
+use crate::envelope::{Envelope, PublisherId};
 use crate::error::LiminalError;
 
 /// A queued channel command: a monotonic id (so a failed wake can be rolled
@@ -38,11 +38,16 @@ pub enum ChannelCommandKind {
         reply: SyncSender<Result<(), LiminalError>>,
     },
     /// Validate, normalise, wrap, and fan a payload out to matching subscribers.
+    ///
+    /// On success the reply carries the normalised [`Envelope`] the actor built
+    /// and delivered to local subscribers, so the host can hand the SAME envelope
+    /// to the cluster observer for cross-node fan-out (SRV-005). Remote
+    /// subscribers must receive the identical envelope local subscribers got.
     Publish {
         payload: Vec<u8>,
         publisher_id: PublisherId,
         causal_context: Option<CausalContext>,
-        reply: SyncSender<Result<(), LiminalError>>,
+        reply: SyncSender<Result<Envelope, LiminalError>>,
     },
     /// Register a subscriber (already-spawned process) and link to its pid.
     Subscribe {
