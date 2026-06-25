@@ -1,0 +1,110 @@
+{
+  "$schema": "https://liminal.dev/conformance/scenarios.schema.json",
+  "version": 1,
+  "result_format": {
+    "sdk": "rust|gleam|typescript",
+    "results": [
+      {
+        "scenario": "scenario name",
+        "pass": true,
+        "expected": {},
+        "observed": {}
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "name": "connection.normal_connect",
+      "category": "connection_lifecycle",
+      "description": "A normal connection attempt exposes connecting, then connected.",
+      "operations": [
+        { "op": "connect", "expect_state": "connecting" },
+        { "op": "establish", "expect_state": "connected" }
+      ],
+      "expected": {
+        "state_transitions": ["connecting", "connected"],
+        "final_state": "connected"
+      }
+    },
+    {
+      "name": "connection.reconnect_after_drop",
+      "category": "connection_lifecycle",
+      "description": "A dropped connected link enters reconnecting and then returns to connected.",
+      "operations": [
+        { "op": "connect", "expect_state": "connecting" },
+        { "op": "establish", "expect_state": "connected" },
+        { "op": "drop" },
+        { "op": "reconnect", "expect_state": "reconnecting" },
+        { "op": "establish", "expect_state": "connected" }
+      ],
+      "expected": {
+        "state_transitions": ["connecting", "connected", "reconnecting", "connected"],
+        "final_state": "connected",
+        "reconnect_attempts": [0]
+      }
+    },
+    {
+      "name": "connection.clean_disconnect",
+      "category": "connection_lifecycle",
+      "description": "A caller-requested disconnect is visible as a clean disconnected state.",
+      "operations": [
+        { "op": "connect", "expect_state": "connecting" },
+        { "op": "establish", "expect_state": "connected" },
+        { "op": "disconnect", "reason": "normal", "expect_state": "disconnected" }
+      ],
+      "expected": {
+        "state_transitions": ["connecting", "connected", "disconnected"],
+        "final_state": "disconnected",
+        "disconnect_reason": "normal"
+      }
+    },
+    {
+      "name": "subscription.resume_from_last_acknowledged",
+      "category": "subscription_recovery",
+      "description": "After reconnect, a subscription resumes after the last acknowledged sequence rather than from zero.",
+      "operations": [
+        { "op": "subscribe", "subscription": "orders" },
+        { "op": "ack", "subscription": "orders", "sequence": 5 },
+        { "op": "disconnect" },
+        { "op": "reconnect" },
+        { "op": "resume", "subscription": "orders" }
+      ],
+      "expected": {
+        "subscription": "orders",
+        "last_acknowledged_sequence": 5,
+        "from_sequence": 6
+      }
+    },
+    {
+      "name": "backpressure.publish_variants",
+      "category": "backpressure",
+      "description": "Publishing under pressure surfaces accept, defer, and reject responses with typed payloads.",
+      "operations": [
+        { "op": "publish_under_pressure", "variant": "accept" },
+        { "op": "publish_under_pressure", "variant": "defer", "delay": 250 },
+        { "op": "publish_under_pressure", "variant": "reject", "reason": "consumer overloaded" }
+      ],
+      "expected": {
+        "responses": [
+          { "kind": "accept" },
+          { "kind": "defer", "delay": 250 },
+          { "kind": "reject", "reason": "consumer overloaded" }
+        ]
+      }
+    },
+    {
+      "name": "conversation.open_message_close",
+      "category": "conversation_lifecycle",
+      "description": "A conversation exposes the canonical opened, message, closing, closed event sequence.",
+      "operations": [
+        { "op": "open_conversation", "conversation": "conv-1" },
+        { "op": "send", "conversation": "conv-1" },
+        { "op": "receive_message", "conversation": "conv-1" },
+        { "op": "close", "conversation": "conv-1" }
+      ],
+      "expected": {
+        "events": ["opened", "message", "closing", "closed"]
+      }
+    }
+  ]
+}

@@ -52,6 +52,7 @@ export type {
   ConnectionStateChange,
   ConnectionStateListener,
   ConnectionTransport,
+  DisconnectReason,
   SubscriptionCursor,
 } from "./connection.js";
 
