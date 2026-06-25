@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use std::{collections::BTreeMap, time::SystemTime};
 
 use crate::pressure::{

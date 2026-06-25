@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::fmt;

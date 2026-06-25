@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 mod collectors;
 mod families;
 mod histogram_value;

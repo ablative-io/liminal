@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::channels::{ChannelName, history_channel};

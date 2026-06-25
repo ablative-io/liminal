@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use std::{collections::BTreeMap, fmt, sync::Arc};
 
 type ScoringFn = dyn Fn(&[ConsumerPressureMetrics]) -> f64 + Send + Sync;

@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::vec::Vec;
