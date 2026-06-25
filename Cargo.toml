@@ -10,7 +10,7 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 rust-version = "1.85"
-license = "MIT"
+license = "AGPL-3.0-only"
 repository = "https://github.com/tomWhiting/liminal"
 authors = [
     "Tom Whiting <tom@ablative.com.au>",
