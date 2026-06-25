@@ -29,12 +29,24 @@ export type ConnectionState =
   | "reconnecting"
   | "disconnected";
 
+/**
+ * Reason a connection entered the `disconnected` state. Mirrors the Rust SDK's
+ * `DisconnectReason` so both SDKs report the same disconnect cause.
+ *
+ * - `normal` — closed intentionally via {@link Connection.close}.
+ * - `error` — closed because reconnection was exhausted or the link errored.
+ * - `timeout` — closed because a timeout elapsed.
+ */
+export type DisconnectReason = "normal" | "error" | "timeout";
+
 /** A single state-change observation delivered to subscribers. */
 export interface ConnectionStateChange {
   readonly previous: ConnectionState;
   readonly current: ConnectionState;
   /** Retry attempt index (0-based) when entering `reconnecting`, else undefined. */
   readonly attempt?: number;
+  /** Disconnect cause when entering `disconnected`, else undefined. */
+  readonly reason?: DisconnectReason;
 }
 
 /** Callback invoked on every connection state transition. */
@@ -126,6 +138,7 @@ export function backoffDelay(
  */
 export class Connection {
   private state: ConnectionState = "disconnected";
+  private reason: DisconnectReason | undefined;
   private readonly listeners = new Set<ConnectionStateListener>();
   private readonly subscriptions = new Map<string, SubscriptionCursor>();
   private readonly transport: ConnectionTransport;
@@ -140,6 +153,14 @@ export class Connection {
   /** Returns the current connection state. */
   get currentState(): ConnectionState {
     return this.state;
+  }
+
+  /**
+   * Returns the reason for the most recent disconnect, or `undefined` if the
+   * connection has never been disconnected since the last successful connect.
+   */
+  get lastDisconnectReason(): DisconnectReason | undefined {
+    return this.reason;
   }
 
   /** Registers a state-change listener; returns an unsubscribe function. */
@@ -184,6 +205,7 @@ export class Connection {
    */
   async connect(): Promise<void> {
     this.generation += 1;
+    this.reason = undefined;
     this.transition("connecting");
     try {
       await this.transport.open();
@@ -208,7 +230,7 @@ export class Connection {
   async close(): Promise<void> {
     this.generation += 1;
     const wasActive = this.state !== "disconnected";
-    this.transition("disconnected");
+    this.transition("disconnected", undefined, "normal");
     if (wasActive) {
       await this.transport.close();
     }
@@ -240,7 +262,7 @@ export class Connection {
         // Fall through to the next backoff iteration; never fixed-interval.
       }
     }
-    this.transition("disconnected");
+    this.transition("disconnected", undefined, "error");
     throw new SdkError("Connection", "exhausted reconnection attempts", {
       details: { attempts: this.config.maxAttempts },
     });
@@ -259,16 +281,25 @@ export class Connection {
     }
   }
 
-  private transition(next: ConnectionState, attempt?: number): void {
+  private transition(
+    next: ConnectionState,
+    attempt?: number,
+    reason?: DisconnectReason,
+  ): void {
     if (next === this.state && attempt === undefined) {
       return;
     }
     const previous = this.state;
     this.state = next;
-    const change: ConnectionStateChange =
-      attempt === undefined
-        ? { previous, current: next }
-        : { previous, current: next, attempt };
+    let change: ConnectionStateChange;
+    if (next === "disconnected") {
+      this.reason = reason ?? "normal";
+      change = { previous, current: next, reason: this.reason };
+    } else if (attempt === undefined) {
+      change = { previous, current: next };
+    } else {
+      change = { previous, current: next, attempt };
+    }
     for (const listener of this.listeners) {
       listener(change);
     }

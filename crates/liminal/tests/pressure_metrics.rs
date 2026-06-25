@@ -205,9 +205,13 @@ fn assert_metric_absent(
     label_name: &str,
     label_value: &str,
 ) {
-    assert!(!registry.snapshot().metrics().iter().any(|metric| {
-        metric.name == name && has_label(metric, label_name, label_value)
-    }));
+    assert!(
+        !registry
+            .snapshot()
+            .metrics()
+            .iter()
+            .any(|metric| { metric.name == name && has_label(metric, label_name, label_value) })
+    );
 }
 
 fn has_label(metric: &MetricSnapshot, label_name: &str, label_value: &str) -> bool {
