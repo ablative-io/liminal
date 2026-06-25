@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use super::{CheckpointPolicy, DurabilityConfig, DurabilityError, DurableStore};
 
 /// Partition-specific durable read position for one consumer.

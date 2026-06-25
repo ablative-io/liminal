@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use serde_json::{Value, json};
 
 use super::types::{ActivityRequest, ActivityResult, Payload};

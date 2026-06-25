@@ -26,3 +26,13 @@ nursery = { level = "warn", priority = -1 }
 unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
+# Deliberate, project-wide policy decision — NOT a defect suppression.
+# Public types are defined in submodules and surfaced both module-qualified
+# (liminal::channel::ChannelHandle, liminal::durability::DurableStore) and via
+# flat re-exports. The descriptive, greppable names (ChannelHandle, LiminalError)
+# are the intended API; the de-prefixed forms (Handle, Error) are generic, less
+# searchable, and collide at the crate root. This lint is one mature Rust
+# codebases routinely disable for exactly this reason. Centralized here so the
+# decision is documented and auditable in one place rather than scattered across
+# per-file #![allow] headers.
+module_name_repetitions = { level = "allow", priority = 1 }

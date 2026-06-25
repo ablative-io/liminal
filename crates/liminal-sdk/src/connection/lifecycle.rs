@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;

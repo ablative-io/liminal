@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};

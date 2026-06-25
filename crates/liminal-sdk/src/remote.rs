@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 mod config;
 mod handles;
 mod protocol;

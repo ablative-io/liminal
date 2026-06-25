@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;

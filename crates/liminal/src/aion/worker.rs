@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};

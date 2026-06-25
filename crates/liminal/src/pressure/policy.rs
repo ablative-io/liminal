@@ -1,5 +1,3 @@
-#![allow(clippy::module_name_repetitions)]
-
 /// Operator-facing severity for pressure alert policy actions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AlertSeverity {
