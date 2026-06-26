@@ -365,6 +365,42 @@ mod tests {
     }
 
     #[test]
+    fn repeated_panics_do_not_poison_the_shared_supervisor() -> Result<(), Box<dyn Error>> {
+        // Real beamr supervision (not an ad-hoc panic catch on the calling
+        // thread) must keep the shared scheduler healthy under a sustained
+        // fault load: every crashing invocation is contained as `Crashed`, and
+        // a healthy invocation spawned on the *same* scheduler immediately
+        // after each crash still runs to a correct decision. If a panic escaped
+        // the supervised actor it would unwind the scheduler worker and the
+        // interleaved healthy invocations would hang or fail.
+        let loader = ModuleLoader::new();
+        let crashing = loader.load(RoutingModule::new(b"flaky", |_message, _consumers| {
+            std::panic::resume_unwind(Box::new("repeated intentional crash".to_owned()))
+        }));
+        let healthy = loader.load(select_first_with_capacity_module(b"steady"));
+        let (_supervisor, executor) = supervised_executor()?;
+
+        for _ in 0..16 {
+            let crashed = executor.execute(&crashing, RoutingMessage::new(), Vec::new());
+            assert_eq!(
+                crashed,
+                Err(FunctionError::Crashed(crashing.content_hash()))
+            );
+
+            let served = executor.execute(
+                &healthy,
+                RoutingMessage::new(),
+                vec![consumer("ready", 0, 1, &[])],
+            );
+            assert!(
+                matches!(served, Ok(ref outcome) if selected_name(outcome) == Some("ready")),
+                "scheduler must keep serving healthy invocations after a contained panic"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn function_exceeding_timeout_is_terminated_with_error() -> Result<(), Box<dyn Error>> {
         let loader = ModuleLoader::new();
         let slow = loader.load(RoutingModule::new(b"slow", |_message, _consumers| {
