@@ -6,13 +6,14 @@
 //! [`FunctionError::TimedOut`]. Neither outcome affects any other channel.
 
 use std::collections::BTreeMap;
-use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::mpsc::{RecvTimeoutError, sync_channel};
-use std::thread;
+use std::sync::Arc;
 use std::time::Duration;
+
+use beamr::scheduler::Scheduler;
 
 use crate::routing::FieldValue;
 use crate::routing::function::loader::{ContentHash, RoutingFunction};
+mod actor;
 
 /// Identifier of a consumer that a routing function may select.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -175,8 +176,9 @@ pub enum FunctionError {
 /// returned as [`FunctionError::Crashed`]; a function that runs past the
 /// supervision timeout is abandoned and returns [`FunctionError::TimedOut`].
 /// Neither outcome affects the execution of any other channel's functions.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SupervisedExecutor {
+    scheduler: Arc<Scheduler>,
     timeout: Duration,
 }
 
@@ -186,14 +188,20 @@ impl SupervisedExecutor {
 
     /// Creates an executor with the given supervision timeout.
     #[must_use]
-    pub const fn new(timeout: Duration) -> Self {
-        Self { timeout }
+    pub const fn new(scheduler: Arc<Scheduler>, timeout: Duration) -> Self {
+        Self { scheduler, timeout }
     }
 
     /// Creates an executor using [`SupervisedExecutor::DEFAULT_TIMEOUT`].
     #[must_use]
-    pub const fn with_default_timeout() -> Self {
-        Self::new(Self::DEFAULT_TIMEOUT)
+    pub const fn with_default_timeout(scheduler: Arc<Scheduler>) -> Self {
+        Self::new(scheduler, Self::DEFAULT_TIMEOUT)
+    }
+
+    /// Returns the beamr scheduler backing supervised invocations.
+    #[must_use]
+    pub fn scheduler(&self) -> Arc<Scheduler> {
+        Arc::clone(&self.scheduler)
     }
 
     /// Executes `function` against `message` and `consumers` under supervision.
@@ -212,32 +220,33 @@ impl SupervisedExecutor {
         message: RoutingMessage,
         consumers: Vec<ConsumerStateView>,
     ) -> Result<RoutingDecision, FunctionError> {
-        let logic = function.logic();
+        let invocation = actor::BeamrInvocation::new(Arc::clone(&self.scheduler), self.timeout);
         let hash = function.content_hash();
-        let (sender, receiver) = sync_channel(1);
-
-        let spawned = thread::Builder::new()
-            .name(format!("routing-fn-{hash}"))
-            .spawn(move || {
-                let outcome = catch_unwind(AssertUnwindSafe(|| logic(&message, &consumers)));
-                let _ = sender.send(outcome);
-            });
-
-        if let Err(error) = spawned {
-            return Err(FunctionError::SpawnFailed(error.to_string()));
+        match invocation.execute(function.clone(), message, consumers) {
+            Ok(decision) => Ok(decision),
+            Err(actor::InvocationError::Crashed) => Err(FunctionError::Crashed(hash)),
+            Err(actor::InvocationError::TimedOut(timed_out_hash)) => {
+                Err(FunctionError::TimedOut(timed_out_hash))
+            }
+            Err(actor::InvocationError::SpawnFailed(message)) => {
+                Err(FunctionError::SpawnFailed(message))
+            }
         }
+    }
+}
 
-        match receiver.recv_timeout(self.timeout) {
-            Ok(Ok(decision)) => Ok(decision),
-            Ok(Err(_panic)) => Err(FunctionError::Crashed(hash)),
-            Err(RecvTimeoutError::Timeout) => Err(FunctionError::TimedOut(hash)),
-            Err(RecvTimeoutError::Disconnected) => Err(FunctionError::Crashed(hash)),
-        }
+impl std::fmt::Debug for SupervisedExecutor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SupervisedExecutor")
+            .field("timeout", &self.timeout)
+            .finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::error::Error;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::thread;
@@ -247,6 +256,7 @@ mod tests {
         ConsumerId, ConsumerStateView, FunctionError, RoutingDecision, RoutingMessage,
         SupervisedExecutor,
     };
+    use crate::conversation::ConversationSupervisor;
     use crate::routing::FieldValue;
     use crate::routing::function::loader::{ModuleLoader, RoutingModule, RoutingSlot};
 
@@ -275,11 +285,18 @@ mod tests {
         decision.selected().map(ConsumerId::as_str)
     }
 
+    fn supervised_executor() -> Result<(ConversationSupervisor, SupervisedExecutor), Box<dyn Error>>
+    {
+        let supervisor = ConversationSupervisor::new()?;
+        let executor = SupervisedExecutor::with_default_timeout(supervisor.scheduler());
+        Ok((supervisor, executor))
+    }
+
     #[test]
-    fn execution_returns_decision_using_consumer_state_view() {
+    fn execution_returns_decision_using_consumer_state_view() -> Result<(), Box<dyn Error>> {
         let loader = ModuleLoader::new();
         let function = loader.load(select_first_with_capacity_module(b"v1"));
-        let executor = SupervisedExecutor::with_default_timeout();
+        let (_supervisor, executor) = supervised_executor()?;
         let consumers = vec![
             consumer("saturated", 5, 5, &["fast"]),
             consumer("ready", 1, 4, &["fast"]),
@@ -288,10 +305,11 @@ mod tests {
         let decision = executor.execute(&function, RoutingMessage::new(), consumers);
 
         assert!(matches!(decision, Ok(ref outcome) if selected_name(outcome) == Some("ready")));
+        Ok(())
     }
 
     #[test]
-    fn message_fields_are_visible_to_routing_function() {
+    fn message_fields_are_visible_to_routing_function() -> Result<(), Box<dyn Error>> {
         let loader = ModuleLoader::new();
         let function = loader.load(RoutingModule::new(
             b"amount-router",
@@ -311,23 +329,25 @@ mod tests {
                 }
             },
         ));
-        let executor = SupervisedExecutor::with_default_timeout();
+        let (_supervisor, executor) = supervised_executor()?;
         let message = RoutingMessage::new().with("amount", FieldValue::Integer(5_000));
 
         let decision = executor.execute(&function, message, vec![consumer("priority", 0, 1, &[])]);
 
         assert!(matches!(decision, Ok(ref outcome) if selected_name(outcome) == Some("priority")));
+        Ok(())
     }
 
     #[test]
-    #[allow(clippy::panic)]
-    fn panic_in_function_is_contained_and_other_channels_proceed() {
+    fn panic_in_function_is_contained_and_other_channels_proceed() -> Result<(), Box<dyn Error>> {
         let loader = ModuleLoader::new();
         let crashing = loader.load(RoutingModule::new(b"channel-a", |_message, _consumers| {
-            panic!("intentional crash for fault-isolation test")
+            std::panic::resume_unwind(Box::new(
+                "intentional crash for fault-isolation test".to_owned(),
+            ))
         }));
         let healthy = loader.load(select_first_with_capacity_module(b"channel-b"));
-        let executor = SupervisedExecutor::with_default_timeout();
+        let (_supervisor, executor) = supervised_executor()?;
 
         let crashed = executor.execute(&crashing, RoutingMessage::new(), Vec::new());
         assert_eq!(
@@ -341,24 +361,28 @@ mod tests {
             vec![consumer("ready", 0, 1, &[])],
         );
         assert!(matches!(recovered, Ok(ref outcome) if selected_name(outcome) == Some("ready")));
+        Ok(())
     }
 
     #[test]
-    fn function_exceeding_timeout_is_terminated_with_error() {
+    fn function_exceeding_timeout_is_terminated_with_error() -> Result<(), Box<dyn Error>> {
         let loader = ModuleLoader::new();
         let slow = loader.load(RoutingModule::new(b"slow", |_message, _consumers| {
-            thread::sleep(Duration::from_secs(30));
+            thread::sleep(Duration::from_millis(200));
             RoutingDecision::none()
         }));
-        let executor = SupervisedExecutor::new(Duration::from_millis(20));
+        let supervisor = ConversationSupervisor::new()?;
+        let executor = SupervisedExecutor::new(supervisor.scheduler(), Duration::from_millis(20));
 
         let result = executor.execute(&slow, RoutingMessage::new(), Vec::new());
 
         assert_eq!(result, Err(FunctionError::TimedOut(slow.content_hash())));
+        Ok(())
     }
 
     #[test]
-    fn hot_deploy_does_not_interrupt_in_flight_and_swaps_next_version() {
+    fn hot_deploy_does_not_interrupt_in_flight_and_swaps_next_version() -> Result<(), Box<dyn Error>>
+    {
         let loader = ModuleLoader::new();
         let entered = Arc::new(AtomicBool::new(false));
         let release = Arc::new(AtomicBool::new(false));
@@ -379,12 +403,13 @@ mod tests {
         let new_hash = new.content_hash();
 
         let slot = Arc::new(RoutingSlot::new(old));
-        let executor = SupervisedExecutor::with_default_timeout();
+        let (_supervisor, executor) = supervised_executor()?;
         let slot_for_thread = Arc::clone(&slot);
+        let executor_for_thread = executor.clone();
 
         let in_flight = thread::spawn(move || {
             let function = slot_for_thread.current();
-            executor.execute(&function, RoutingMessage::new(), Vec::new())
+            executor_for_thread.execute(&function, RoutingMessage::new(), Vec::new())
         });
 
         while !entered.load(Ordering::SeqCst) {
@@ -407,11 +432,8 @@ mod tests {
             Ok(Ok(ref outcome)) if selected_name(outcome) == Some("old")
         ));
 
-        let next = SupervisedExecutor::with_default_timeout().execute(
-            &slot.current(),
-            RoutingMessage::new(),
-            Vec::new(),
-        );
+        let next = executor.execute(&slot.current(), RoutingMessage::new(), Vec::new());
         assert!(matches!(next, Ok(ref outcome) if selected_name(outcome) == Some("new")));
+        Ok(())
     }
 }

@@ -2,6 +2,7 @@ use std::error::Error;
 use std::sync::Arc;
 
 use super::*;
+use crate::conversation::ConversationSupervisor;
 use crate::routing::{
     FieldValue, ModuleLoader, RoutingDecision, RoutingModule, RoutingSlot, SupervisedExecutor,
 };
@@ -206,9 +207,10 @@ fn routing_function_adapter_selects_from_current_candidates() -> Result<(), Box<
             }
         },
     ));
+    let supervisor = ConversationSupervisor::new()?;
     let router = RoutingFunctionDispatchRouter::new(
         Arc::new(RoutingSlot::new(function)),
-        SupervisedExecutor::with_default_timeout(),
+        SupervisedExecutor::with_default_timeout(supervisor.scheduler()),
     );
     let workers = vec![worker("worker-a", 11), worker("worker-b", 12)];
     let channel_name = dispatch_channel("prod", "email")?;

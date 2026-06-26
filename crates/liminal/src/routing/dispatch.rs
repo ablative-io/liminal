@@ -147,9 +147,10 @@ impl DispatchConversation {
     /// conversation supervisor cannot start.
     pub fn new(group: ConsumerGroup) -> Result<Self, DispatchError> {
         let supervisor = ConversationSupervisor::new()?;
+        let executor = SupervisedExecutor::with_default_timeout(supervisor.scheduler());
         Ok(Self {
             group,
-            executor: SupervisedExecutor::with_default_timeout(),
+            executor,
             supervisor,
         })
     }
