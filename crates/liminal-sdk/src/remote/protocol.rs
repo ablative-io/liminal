@@ -42,6 +42,22 @@ pub(super) trait RemoteTransport: fmt::Debug + Send + Sync {
         request: &WireConversationRequest,
     ) -> Result<(), SdkError>;
 
+    /// Sends a conversation request and blocks for its correlated reply payload.
+    ///
+    /// Returns the serialized reply bytes the server delivered for this
+    /// conversation. The default in-process transport has no socket, so it
+    /// reports a protocol error; the real TCP transport performs the round trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] when the request cannot be sent, no correlated reply
+    /// arrives, or the server rejects the conversation.
+    fn request_reply_conversation(
+        &self,
+        server_address: &ServerAddress,
+        request: &WireConversationRequest,
+    ) -> Result<Vec<u8>, SdkError>;
+
     fn resume(
         &self,
         server_address: &ServerAddress,
@@ -88,6 +104,25 @@ impl RemoteTransport for ProtocolRemoteTransport {
         let encoded = encode_frame(&frame)?;
         core::hint::black_box((endpoint, encoded));
         Ok(())
+    }
+
+    fn request_reply_conversation(
+        &self,
+        server_address: &ServerAddress,
+        request: &WireConversationRequest,
+    ) -> Result<Vec<u8>, SdkError> {
+        let endpoint = server_address.as_str();
+        let frame = request.to_frame();
+        let encoded = encode_frame(&frame)?;
+        core::hint::black_box((endpoint, encoded));
+        // The in-process transport never opens a socket, so it cannot carry a
+        // correlated reply back. Report this honestly rather than synthesising a
+        // fake reply; the real round trip is the TCP transport's job.
+        Err(SdkError::Protocol {
+            description: "request/reply requires the TCP transport; the in-process transport \
+                          cannot carry a correlated reply"
+                .to_string(),
+        })
     }
 
     fn resume(
@@ -332,6 +367,15 @@ where
 {
     serde_json::to_vec(message).map_err(|source| SdkError::Serialization {
         description: format!("failed to encode remote payload: {source}"),
+    })
+}
+
+pub(super) fn deserialize_payload<M>(payload: &[u8]) -> Result<M, SdkError>
+where
+    M: serde::de::DeserializeOwned,
+{
+    serde_json::from_slice(payload).map_err(|source| SdkError::Serialization {
+        description: format!("failed to decode remote reply payload: {source}"),
     })
 }
 

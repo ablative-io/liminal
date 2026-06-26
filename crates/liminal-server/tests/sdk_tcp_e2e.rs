@@ -14,6 +14,7 @@
 //! server emits. Here the SDK is handed the live port and the bytes travel the wire.
 
 use std::error::Error;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
@@ -21,8 +22,9 @@ use std::time::{Duration, Instant};
 
 use futures_core::Stream;
 use liminal_sdk::{
-    ChannelHandle, ConnectionPoolConfig, ConversationHandle, PressureResponse, RemoteConfig,
-    SchemaMetadata, SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
+    ChannelHandle, ConnectionPoolConfig, ConversationHandle, PressureResponse, RemoteChannelHandle,
+    RemoteConfig, RemoteConversationHandle, SchemaMetadata, SchemaValidate, SdkConfig,
+    build_channel_handle, build_conversation_handle,
 };
 use liminal_server::config::{ChannelDef, ServerConfig};
 use liminal_server::server::connection::ConnectionSupervisor;
@@ -47,6 +49,62 @@ impl SchemaValidate for OrderPlaced {
 #[derive(Serialize, Deserialize)]
 struct ChatMessage {
     text: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+struct DispatchRequest {
+    activity: String,
+}
+
+impl SchemaValidate for DispatchRequest {
+    fn schema_metadata() -> SchemaMetadata {
+        SchemaMetadata::new("dispatch.request", "1", br#"{"type":"object"}"#.as_slice())
+    }
+}
+
+/// Drives a `ReadyResult`-style future to completion. The TCP transport completes
+/// the round trip synchronously inside the call that builds the future, so a
+/// single poll resolves it; a `Pending` would mean the synchronous contract was
+/// violated and is surfaced as a test failure.
+fn block_on<F: Future>(future: F) -> Result<F::Output, Box<dyn Error>> {
+    let mut future = pin!(future);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    match future.as_mut().poll(&mut context) {
+        Poll::Ready(value) => Ok(value),
+        Poll::Pending => Err("synchronous transport future parked unexpectedly".into()),
+    }
+}
+
+/// Builds a TCP-connected `RemoteConfig` directly (not wrapped in `SdkConfig`), so
+/// the test can construct concrete remote handles and reach the request-reply
+/// surface. Mirrors `connect_client`'s connect-retry loop.
+fn connect_remote_config(
+    address: SocketAddr,
+    channel: &str,
+    conversation: &str,
+) -> Result<RemoteConfig, Box<dyn Error>> {
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        let config = RemoteConfig::new(
+            address.to_string(),
+            channel,
+            conversation.to_owned(),
+            ConnectionPoolConfig::new(1, 10, 16),
+        )?;
+        match config.connect_tcp() {
+            Ok(connected) => return Ok(connected),
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    Err(last_error.map_or_else(
+        || "client never connected within timeout".into(),
+        |error| format!("client never connected within timeout: {error}").into(),
+    ))
 }
 
 /// Holds the running listener so it stays bound for the lifetime of a test.
@@ -257,6 +315,72 @@ fn sdk_tcp_conversation_send_then_publish_stays_in_sync() -> Result<(), Box<dyn 
     let channel = build_channel_handle(&client)?;
     let response = channel.publish(OrderPlaced { id: 3 })?;
     assert_eq!(response, PressureResponse::Accept);
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// 13-L0 load-bearing proof: a remote `request_reply` carries a CORRELATED reply
+/// back through the SDK over the real TCP socket.
+///
+/// The client opens a conversation, sends a request frame tagged with the
+/// reply-requested flag, the server forwards it to the echo participant, drains
+/// the participant's reply, and sends a `ConversationMessage` reply carrying the
+/// same `conversation_id`; the client read path matches that response by
+/// conversation id and returns the deserialized payload. Against the old stub this
+/// returned `Err("remote request/reply awaits protocol response integration")`
+/// without ever reaching the socket.
+#[test]
+fn sdk_tcp_request_reply_returns_correlated_response() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let config = connect_remote_config(server.address(), CHANNEL, "rr-conversation")?;
+    server.wait_for_connection()?;
+
+    let handle = RemoteChannelHandle::new(&config)?;
+    let request = DispatchRequest {
+        activity: "charge-card".to_owned(),
+    };
+    let reply: DispatchRequest = block_on(handle.request_reply(request))??;
+
+    // The echo participant returns the request payload verbatim, so a correlated
+    // round trip yields back exactly what was sent. A miscorrelated or dropped
+    // reply would fail to deserialize or return the wrong value.
+    assert_eq!(
+        reply,
+        DispatchRequest {
+            activity: "charge-card".to_owned(),
+        }
+    );
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// 13-L0: the conversation `request` + `receive` pair also carries a correlated
+/// reply over the socket, proving the aion `send`-then-`receive` dispatch shape.
+///
+/// `request` performs the round trip (send with reply flag, block for the
+/// correlated reply) and buffers the answer; `receive` deserializes it. Against
+/// the old stub `receive` returned `Err("remote receive awaits protocol inbox
+/// integration")`.
+#[test]
+fn sdk_tcp_conversation_request_then_receive_correlates() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let config = connect_remote_config(server.address(), CHANNEL, "dispatch-conversation")?;
+    server.wait_for_connection()?;
+
+    let conversation = RemoteConversationHandle::new(&config);
+    conversation.request(DispatchRequest {
+        activity: "ship-order".to_owned(),
+    })?;
+    let reply: DispatchRequest = block_on(conversation.receive())??;
+
+    assert_eq!(
+        reply,
+        DispatchRequest {
+            activity: "ship-order".to_owned(),
+        }
+    );
 
     server.shutdown()?;
     Ok(())

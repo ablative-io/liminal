@@ -122,6 +122,18 @@ impl RemoteTransport for TcpRemoteTransport {
         connection.send_conversation_message(conversation_id, conversation_label, envelope)
     }
 
+    fn request_reply_conversation(
+        &self,
+        _server_address: &ServerAddress,
+        request: &WireConversationRequest,
+    ) -> Result<Vec<u8>, SdkError> {
+        let conversation_label = request.conversation_id().as_str();
+        let conversation_id = conversation_wire_id(conversation_label);
+        let envelope = build_envelope(SCHEMALESS_SCHEMA, request.payload());
+        let mut connection = self.connection.lock();
+        connection.conversation_request_reply(conversation_id, conversation_label, envelope)
+    }
+
     fn resume(
         &self,
         _server_address: &ServerAddress,
