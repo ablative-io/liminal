@@ -1,5 +1,6 @@
 use crate::protocol::{
     Frame, FrameType, MessageEnvelope, MessageId, ProtocolError, ProtocolVersion, StreamPressure,
+    frame::PUBLISH_IDEMPOTENCY_KEY_FLAG,
 };
 
 use super::payload::PayloadReader;
@@ -130,12 +131,25 @@ fn decode_publish_payload(
     reader: &mut PayloadReader<'_>,
 ) -> Result<Frame, ProtocolError> {
     match frame_type {
-        FrameType::Publish => Ok(Frame::Publish {
-            flags,
-            stream_id,
-            channel: reader.read_string_field()?,
-            envelope: MessageEnvelope::deserialize(&reader.read_bytes_field()?)?,
-        }),
+        FrameType::Publish => {
+            let channel = reader.read_string_field()?;
+            let envelope = MessageEnvelope::deserialize(&reader.read_bytes_field()?)?;
+            // The trailing idempotency-key field is present ONLY when the publisher
+            // set PUBLISH_IDEMPOTENCY_KEY_FLAG; otherwise the payload ends here and
+            // `reader.finish()` confirms no trailing bytes, exactly as before.
+            let idempotency_key = if flags & PUBLISH_IDEMPOTENCY_KEY_FLAG == 0 {
+                None
+            } else {
+                Some(reader.read_string_field()?)
+            };
+            Ok(Frame::Publish {
+                flags,
+                stream_id,
+                channel,
+                envelope,
+                idempotency_key,
+            })
+        }
         FrameType::PublishAck => Ok(Frame::PublishAck {
             flags,
             stream_id,

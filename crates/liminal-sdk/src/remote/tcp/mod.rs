@@ -22,10 +22,13 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
-use liminal::protocol::{CausalContext, Frame, MessageEnvelope, SchemaId};
+use liminal::protocol::{
+    CausalContext, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG, PUBLISH_IDEMPOTENCY_KEY_FLAG,
+    SchemaId,
+};
 use spin::Mutex;
 
-use crate::{PressureResponse, SdkError};
+use crate::{DeliveryAck, PressureResponse, SdkError};
 
 use self::connection::{Connection, unexpected_frame};
 use super::ServerAddress;
@@ -81,15 +84,19 @@ impl RemoteTransport for TcpRemoteTransport {
         _server_address: &ServerAddress,
         request: &WirePublishRequest,
     ) -> Result<PressureResponse, SdkError> {
-        let envelope = build_envelope(request.schema().schema.as_ref(), request.payload());
-        let frame = Frame::Publish {
-            flags: 0,
-            stream_id: APPLICATION_STREAM_ID,
-            channel: request.channel().to_string(),
-            envelope,
-        };
+        let frame = build_publish_frame(request);
         let response = self.round_trip(&frame)?;
         publish_response(response)
+    }
+
+    fn publish_with_delivery(
+        &self,
+        _server_address: &ServerAddress,
+        request: &WirePublishRequest,
+    ) -> Result<DeliveryAck, SdkError> {
+        let frame = build_publish_frame(request);
+        let response = self.round_trip(&frame)?;
+        publish_delivery_response(response)
     }
 
     fn subscribe(
@@ -197,9 +204,49 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
+/// Builds the wire `Publish` frame, attaching the idempotency key (and its flag)
+/// only when the request carries one so a no-key publish stays byte-identical to
+/// the pre-13-L1 layout.
+fn build_publish_frame(request: &WirePublishRequest) -> Frame {
+    let envelope = build_envelope(request.schema().schema.as_ref(), request.payload());
+    let flags = match request.idempotency_key() {
+        Some(_) => PUBLISH_IDEMPOTENCY_KEY_FLAG,
+        None => 0,
+    };
+    Frame::Publish {
+        flags,
+        stream_id: APPLICATION_STREAM_ID,
+        channel: request.channel().to_string(),
+        envelope,
+        idempotency_key: request.idempotency_key().map(ToString::to_string),
+    }
+}
+
 fn publish_response(frame: Frame) -> Result<PressureResponse, SdkError> {
     match frame {
         Frame::PublishAck { .. } => Ok(PressureResponse::Accept),
+        Frame::PublishError {
+            reason_code,
+            message,
+            ..
+        } => Err(SdkError::Backpressure {
+            reason: format!(
+                "server rejected publish (reason {reason_code}): {}",
+                message.unwrap_or_else(|| "no detail".to_string())
+            ),
+        }),
+        other => Err(unexpected_frame("PublishAck", &other)),
+    }
+}
+
+/// Maps a publish ack into a genuine delivery ack: the `PUBLISH_DELIVERED_FLAG`
+/// bit on the ack reports whether a subscriber actually received the message.
+fn publish_delivery_response(frame: Frame) -> Result<DeliveryAck, SdkError> {
+    match frame {
+        Frame::PublishAck { flags, .. } => {
+            let accepted = flags & PUBLISH_DELIVERED_FLAG != 0;
+            Ok(DeliveryAck::new(PressureResponse::Accept, accepted))
+        }
         Frame::PublishError {
             reason_code,
             message,

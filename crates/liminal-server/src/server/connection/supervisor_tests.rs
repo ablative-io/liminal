@@ -116,9 +116,13 @@ impl ConnectionServices for FlushFailingServices {
         &self,
         channel: &str,
         envelope: &liminal::protocol::MessageEnvelope,
-    ) -> Result<u64, crate::ServerError> {
-        let _ = (channel, envelope);
-        Ok(1)
+        idempotency_key: Option<&str>,
+    ) -> Result<crate::server::connection::services::PublishOutcome, crate::ServerError> {
+        let _ = (channel, envelope, idempotency_key);
+        Ok(crate::server::connection::services::PublishOutcome {
+            message_id: 1,
+            delivered: true,
+        })
     }
 
     fn subscribe(

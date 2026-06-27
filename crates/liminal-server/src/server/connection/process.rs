@@ -10,8 +10,9 @@ use beamr::process::ExitReason;
 use beamr::term::Term;
 
 use liminal::protocol::{
-    CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope, ProtocolError, ProtocolVersion,
-    SchemaId as ProtocolSchemaId, decode, encode, encoded_len, negotiate_version,
+    CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG,
+    ProtocolError, ProtocolVersion, SchemaId as ProtocolSchemaId, decode, encode, encoded_len,
+    negotiate_version,
 };
 
 use super::conversation::ConnectionConversation;
@@ -242,8 +243,15 @@ pub(super) fn apply_frame(
             stream_id,
             channel,
             envelope,
+            idempotency_key,
             ..
-        } => publish_response(services, stream_id, &channel, &envelope),
+        } => publish_response(
+            services,
+            stream_id,
+            &channel,
+            &envelope,
+            idempotency_key.as_deref(),
+        ),
         Frame::Subscribe {
             stream_id,
             channel,
@@ -334,12 +342,21 @@ fn publish_response(
     stream_id: u32,
     channel: &str,
     envelope: &MessageEnvelope,
+    idempotency_key: Option<&str>,
 ) -> FrameAction {
-    match services.publish(channel, envelope) {
-        Ok(message_id) => FrameAction::Respond(Frame::PublishAck {
-            flags: 0,
+    match services.publish(channel, envelope, idempotency_key) {
+        Ok(outcome) => FrameAction::Respond(Frame::PublishAck {
+            // Set the genuine-delivery flag only when the publish was accepted by
+            // at least one subscriber. The ack is always sent on success (the
+            // backpressure contract is unchanged); the flag bit is the additive
+            // delivery-ack signal the caller can observe.
+            flags: if outcome.delivered {
+                PUBLISH_DELIVERED_FLAG
+            } else {
+                0
+            },
             stream_id,
-            message_id,
+            message_id: outcome.message_id,
         }),
         Err(error) => FrameAction::Respond(Frame::PublishError {
             flags: 0,

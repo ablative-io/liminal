@@ -7,8 +7,8 @@ use core::time::Duration;
 use serde::Serialize;
 
 use crate::{
-    ConversationId, PressureResponse, ResumeRequest, SchemaMetadata, SchemaValidate, SdkError,
-    SubscriptionId,
+    ConversationId, DeliveryAck, PressureResponse, ResumeRequest, SchemaMetadata, SchemaValidate,
+    SdkError, SubscriptionId,
 };
 
 use super::ServerAddress;
@@ -29,6 +29,24 @@ pub(super) trait RemoteTransport: fmt::Debug + Send + Sync {
         server_address: &ServerAddress,
         request: &WirePublishRequest,
     ) -> Result<PressureResponse, SdkError>;
+
+    /// Publishes and reports a genuine delivery ack (and optional dedup key).
+    ///
+    /// Returns a [`DeliveryAck`] whose `is_accepted` reflects whether a subscriber
+    /// genuinely received the message. The default in-process transport cannot
+    /// observe a real subscriber, so it reports a protocol error rather than
+    /// faking acceptance; the TCP transport reads the delivery flag the server
+    /// sets on the publish ack.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] when the publish cannot be sent or no genuine delivery
+    /// ack can be produced.
+    fn publish_with_delivery(
+        &self,
+        server_address: &ServerAddress,
+        request: &WirePublishRequest,
+    ) -> Result<DeliveryAck, SdkError>;
 
     fn subscribe(
         &self,
@@ -80,6 +98,26 @@ impl RemoteTransport for ProtocolRemoteTransport {
         let encoded = encode_frame(&frame)?;
         core::hint::black_box((endpoint, encoded));
         decode_backpressure(FRAME_TYPE_ACCEPT, Duration::ZERO, String::new()).map(map_backpressure)
+    }
+
+    fn publish_with_delivery(
+        &self,
+        server_address: &ServerAddress,
+        request: &WirePublishRequest,
+    ) -> Result<DeliveryAck, SdkError> {
+        let endpoint = server_address.as_str();
+        let frame = request.to_frame();
+        let encoded = encode_frame(&frame)?;
+        core::hint::black_box((endpoint, encoded));
+        // The in-process transport never opens a socket, so it cannot observe a
+        // genuine subscriber delivery. Report this honestly rather than
+        // synthesising an acceptance the way the backpressure-only `publish` does;
+        // a true delivery ack is the TCP transport's job.
+        Err(SdkError::Protocol {
+            description: "delivery ack requires the TCP transport; the in-process transport \
+                          cannot observe a genuine subscriber delivery"
+                .to_string(),
+        })
     }
 
     fn subscribe(
@@ -143,6 +181,7 @@ pub(super) struct WirePublishRequest {
     channel: String,
     schema: SchemaMetadata,
     payload: Vec<u8>,
+    idempotency_key: Option<String>,
 }
 
 impl WirePublishRequest {
@@ -154,7 +193,31 @@ impl WirePublishRequest {
             channel: channel.to_string(),
             schema: M::schema_metadata(),
             payload: serialize_payload(message)?,
+            idempotency_key: None,
         })
+    }
+
+    /// Builds a publish request carrying an idempotency key for dedup-on-delivery.
+    pub(super) fn with_idempotency_key<M>(
+        channel: &str,
+        message: &M,
+        idempotency_key: &str,
+    ) -> Result<Self, SdkError>
+    where
+        M: Serialize + SchemaValidate,
+    {
+        Ok(Self {
+            channel: channel.to_string(),
+            schema: M::schema_metadata(),
+            payload: serialize_payload(message)?,
+            idempotency_key: Some(idempotency_key.to_string()),
+        })
+    }
+
+    /// Idempotency key carried with this publish, when dedup-on-delivery is requested.
+    #[cfg(feature = "std")]
+    pub(super) fn idempotency_key(&self) -> Option<&str> {
+        self.idempotency_key.as_deref()
     }
 
     fn to_frame(&self) -> WireFrame {

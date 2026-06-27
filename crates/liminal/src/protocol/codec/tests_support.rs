@@ -84,6 +84,7 @@ fn publish_frames() -> [Frame; 3] {
             stream_id: 2,
             channel: "orders".to_owned(),
             envelope: sample_envelope(vec![0x10, 0x20, 0x30]),
+            idempotency_key: None,
         },
         Frame::PublishAck {
             flags: 9,

@@ -9,6 +9,47 @@ use super::tests_support::{
     sample_schema,
 };
 
+/// 13-L1: a publish carrying an idempotency key round-trips the key, and a
+/// no-key publish encodes to bytes byte-identical to the pre-13-L1 layout (the
+/// additive flag-gated field never changes the wire when absent).
+#[test]
+fn publish_idempotency_key_is_additive_and_round_trips() -> Result<(), ProtocolError> {
+    let envelope = sample_envelope(vec![1, 2, 3]);
+
+    // A no-key publish must be byte-identical to the canonical `new_publish` frame.
+    let plain = Frame::Publish {
+        flags: 0,
+        stream_id: 1,
+        channel: "orders".to_owned(),
+        envelope: envelope.clone(),
+        idempotency_key: None,
+    };
+    let canonical = Frame::new_publish(1, "orders", envelope.clone())?;
+    let mut plain_bytes = vec![0_u8; encoded_len(&plain)?];
+    let mut canonical_bytes = vec![0_u8; encoded_len(&canonical)?];
+    encode(&plain, &mut plain_bytes)?;
+    encode(&canonical, &mut canonical_bytes)?;
+    assert_eq!(
+        plain_bytes, canonical_bytes,
+        "a no-key publish must be byte-identical to the canonical publish frame"
+    );
+
+    // A keyed publish round-trips the key (and sets the flag).
+    let keyed = Frame::new_publish_with_idempotency_key(1, "orders", envelope, "dispatch-42")?;
+    let len = encoded_len(&keyed)?;
+    let mut bytes = vec![0_u8; len];
+    encode(&keyed, &mut bytes)?;
+    let (decoded, consumed) = decode(&bytes)?;
+    assert_eq!(consumed, len);
+    assert_eq!(decoded, keyed);
+    assert!(matches!(
+        decoded,
+        Frame::Publish { idempotency_key: Some(key), .. } if key == "dispatch-42"
+    ));
+
+    Ok(())
+}
+
 #[test]
 fn round_trips_all_named_frame_types() -> Result<(), ProtocolError> {
     for frame in sample_frames() {
@@ -35,6 +76,7 @@ fn encode_writes_header_fields_in_wire_order() -> Result<(), ProtocolError> {
         stream_id: 0x0102_0304,
         channel: "orders".to_owned(),
         envelope: sample_envelope(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+        idempotency_key: None,
     };
     let mut buffer = vec![0_u8; encoded_len(&frame)?];
     let written = encode(&frame, &mut buffer)?;
@@ -58,6 +100,7 @@ fn message_frames_preserve_envelope_payload_bytes() -> Result<(), ProtocolError>
         stream_id: 7,
         channel: "payloads".to_owned(),
         envelope: publish_envelope.clone(),
+        idempotency_key: None,
     };
     let decoded_publish = round_trip(&publish)?;
     assert!(matches!(
@@ -156,6 +199,7 @@ fn causal_context_extracts_from_publish_frame_envelope_bytes() -> Result<(), Pro
         stream_id: 7,
         channel: "payloads".to_owned(),
         envelope,
+        idempotency_key: None,
     };
     let mut buffer = vec![0_u8; encoded_len(&frame)?];
     let written = encode(&frame, &mut buffer)?;

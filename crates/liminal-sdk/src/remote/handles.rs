@@ -16,7 +16,8 @@ use crate::embedded::{
     SdkSubscription,
 };
 use crate::{
-    ChannelHandle, ConversationHandle, ConversationId, PressureResponse, SchemaValidate, SdkError,
+    ChannelHandle, ConversationHandle, ConversationId, DeliveryAck, PressureResponse,
+    SchemaValidate, SdkError,
 };
 
 use super::config::SdkConfig;
@@ -196,6 +197,34 @@ impl ChannelHandle for RemoteChannelHandle {
 }
 
 impl RemoteChannelHandle {
+    /// Publishes a message with an idempotency key and returns a genuine delivery
+    /// ack.
+    ///
+    /// The idempotency key drives dedup-on-delivery on the server: a re-publish of
+    /// the same key is delivered to subscribers at most once. The returned
+    /// [`DeliveryAck`] reports whether this publish was genuinely accepted by a
+    /// subscriber ([`DeliveryAck::is_accepted`]), which a caller such as the aion
+    /// outbox uses to treat the send as done only on real acceptance. This is
+    /// distinct from the backpressure-only [`publish`](ChannelHandle::publish).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] when the message cannot be serialized, the round trip
+    /// fails, or the transport cannot produce a genuine delivery ack.
+    pub fn publish_with_idempotency_key<M>(
+        &self,
+        message: &M,
+        idempotency_key: &str,
+    ) -> Result<DeliveryAck, SdkError>
+    where
+        M: Serialize + SchemaValidate,
+    {
+        let request =
+            WirePublishRequest::with_idempotency_key(&self.channel_name, message, idempotency_key)?;
+        self.transport
+            .publish_with_delivery(&self.server_address, &request)
+    }
+
     /// Performs a correlated request-reply round trip over the transport and
     /// deserializes the reply.
     ///

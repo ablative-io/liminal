@@ -21,6 +21,31 @@ pub const HEADER_LEN: usize = 10;
 /// change is required.
 pub const CONVERSATION_REPLY_REQUESTED_FLAG: u8 = 0x01;
 
+/// Frame-flag bit set on a [`Frame::Publish`] to declare that the frame body
+/// carries a trailing idempotency-key string field (the dedup-on-delivery key).
+///
+/// A publisher sets this bit when it wants the server to consult its dedup cache
+/// keyed by the trailing idempotency key, delivering the message to subscribers
+/// AT MOST ONCE across re-publishes of the same key. A `Publish` frame WITHOUT
+/// this bit keeps the pre-existing wire layout EXACTLY: no trailing field is
+/// written and none is read, so a no-key publish is byte-identical to before.
+/// The bit travels in the frame header's `flags` byte, which the codec already
+/// round-trips, so no header-format change is required (the 13-L0 precedent).
+pub const PUBLISH_IDEMPOTENCY_KEY_FLAG: u8 = 0x02;
+
+/// Frame-flag bit set on a [`Frame::PublishAck`] to report a GENUINE delivery
+/// ack: the published message was accepted by at least one live subscriber on
+/// this publish.
+///
+/// This is distinct from the backpressure `Accept`/`Defer`/`Reject` signal: a
+/// `PublishAck` always means the publish was processed without error, but only a
+/// `PublishAck` carrying this bit means a subscriber actually received the
+/// message. An ack WITHOUT this bit means the publish succeeded but reached no
+/// subscriber (an empty channel, or a duplicate suppressed by dedup-on-delivery),
+/// so a caller that needs a true delivery ack can observe the difference. The bit
+/// rides the existing `flags` byte, so no wire-format change is required.
+pub const PUBLISH_DELIVERED_FLAG: u8 = 0x01;
+
 /// Protocol frame categories and their stable wire discriminants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameType {
@@ -211,11 +236,17 @@ pub enum Frame {
         subscription_id: u64,
     },
     /// Publish request carrying a channel and typed message envelope.
+    ///
+    /// `idempotency_key` is `Some` only when the [`PUBLISH_IDEMPOTENCY_KEY_FLAG`]
+    /// flag bit is set; it is the dedup-on-delivery key the server feeds to its
+    /// dedup cache. When `None` (and the flag clear) the frame is byte-identical
+    /// on the wire to a pre-13-L1 publish.
     Publish {
         flags: u8,
         stream_id: u32,
         channel: String,
         envelope: MessageEnvelope,
+        idempotency_key: Option<String>,
     },
     /// Publish success carrying the accepted message id.
     PublishAck {
@@ -320,6 +351,31 @@ impl Frame {
             stream_id,
             channel: channel.into(),
             envelope,
+            idempotency_key: None,
+        })
+    }
+
+    /// Construct a publish frame carrying an idempotency key for dedup-on-delivery.
+    ///
+    /// The returned frame has [`PUBLISH_IDEMPOTENCY_KEY_FLAG`] set and serializes
+    /// the trailing key field, so the server consults its dedup cache for this key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::InvalidStream`] when `stream_id` is zero.
+    pub fn new_publish_with_idempotency_key(
+        stream_id: u32,
+        channel: impl Into<String>,
+        envelope: MessageEnvelope,
+        idempotency_key: impl Into<String>,
+    ) -> Result<Self, ProtocolError> {
+        validate_stream(FrameType::Publish, stream_id)?;
+        Ok(Self::Publish {
+            flags: PUBLISH_IDEMPOTENCY_KEY_FLAG,
+            stream_id,
+            channel: channel.into(),
+            envelope,
+            idempotency_key: Some(idempotency_key.into()),
         })
     }
 

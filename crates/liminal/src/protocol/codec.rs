@@ -163,11 +163,20 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         Frame::SubscribeAck { .. } => sum_lengths(&[U64_LEN, SchemaId::WIRE_LEN]),
         Frame::Unsubscribe { .. } | Frame::PublishAck { .. } => Ok(U64_LEN),
         Frame::Publish {
-            channel, envelope, ..
-        } => sum_lengths(&[
-            string_field_len(channel)?,
-            envelope_bytes_field_len(envelope.encoded_len()?)?,
-        ]),
+            channel,
+            envelope,
+            idempotency_key,
+            ..
+        } => {
+            let mut parts = vec![
+                string_field_len(channel)?,
+                envelope_bytes_field_len(envelope.encoded_len()?)?,
+            ];
+            if let Some(key) = idempotency_key {
+                parts.push(string_field_len(key)?);
+            }
+            sum_lengths(&parts)
+        }
         Frame::ConversationOpen { subject, .. } => {
             sum_lengths(&[U64_LEN, string_field_len(subject)?])
         }
@@ -316,10 +325,20 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
             subscription_id, ..
         } => writer.write_u64(*subscription_id)?,
         Frame::Publish {
-            channel, envelope, ..
+            channel,
+            envelope,
+            idempotency_key,
+            ..
         } => {
             writer.write_string_field(channel)?;
             writer.write_bytes_field(&envelope.serialize()?)?;
+            // The trailing idempotency-key field is written ONLY when present, so
+            // a no-key publish stays byte-identical to the pre-13-L1 layout. The
+            // PUBLISH_IDEMPOTENCY_KEY_FLAG bit (set on construction) tells the
+            // decoder whether to read it back.
+            if let Some(key) = idempotency_key {
+                writer.write_string_field(key)?;
+            }
         }
         Frame::PublishAck { message_id, .. } => writer.write_u64(*message_id)?,
         Frame::ConversationOpen {

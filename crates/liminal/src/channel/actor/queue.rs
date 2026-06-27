@@ -47,7 +47,7 @@ pub enum ChannelCommandKind {
         payload: Vec<u8>,
         publisher_id: PublisherId,
         causal_context: Option<CausalContext>,
-        reply: SyncSender<Result<Envelope, LiminalError>>,
+        reply: SyncSender<Result<PublishOutcome, LiminalError>>,
     },
     /// Register a subscriber (already-spawned process) and link to its pid.
     Subscribe {
@@ -78,6 +78,19 @@ pub enum ChannelCommandKind {
     Close {
         reply: SyncSender<Result<(), LiminalError>>,
     },
+}
+
+/// Outcome of a local publish: the normalised envelope the actor built plus the
+/// number of subscribers it was genuinely delivered to.
+///
+/// `delivered_count` underpins the delivery-ack signal: a publish that reached at
+/// least one subscriber is a genuine delivery, whereas zero means the message was
+/// accepted by the channel but received by no subscriber. Predicate-filtered
+/// subscribers are NOT counted (delivery means the envelope entered the inbox).
+#[derive(Clone, Debug)]
+pub struct PublishOutcome {
+    pub envelope: Envelope,
+    pub delivered_count: usize,
 }
 
 /// Build a [`SubscriptionPredicate`] error-free helper used by callers wiring

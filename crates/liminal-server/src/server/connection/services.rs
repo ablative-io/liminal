@@ -8,7 +8,10 @@ use std::time::Instant;
 use haematite::{Database, DatabaseConfig, EventStore};
 use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, Schema};
 use liminal::conversation::{ConversationSupervisor, CrashPolicy, EchoBehaviour};
-use liminal::durability::{DurableStore, HaematiteStore};
+use liminal::durability::bridge::block_on;
+use liminal::durability::{
+    DedupCache, DedupDecision, DurableStore, HaematiteStore, ProcessingReceipt,
+};
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
 use super::conversation::{ConnectionConversation, LiminalConversationResource};
@@ -67,13 +70,37 @@ impl ConnectionSubscription {
     }
 }
 
+/// Outcome of a server publish.
+///
+/// Carries the assigned message id plus a genuine delivery ack (`delivered` = the
+/// message was accepted by at least one live subscriber on this publish, after any
+/// dedup-on-delivery suppression).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublishOutcome {
+    /// Monotonic message id assigned to the accepted publish.
+    pub message_id: u64,
+    /// Whether the message was genuinely delivered to a subscriber. `false` means
+    /// the publish was accepted but reached no subscriber (empty channel) or was
+    /// a duplicate suppressed by dedup-on-delivery.
+    pub delivered: bool,
+}
+
 /// Operations that adapt wire frames to liminal library calls.
 pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
     /// Delegates a publish request to the liminal library.
     ///
+    /// `idempotency_key`, when `Some`, drives dedup-on-delivery: a re-publish with
+    /// the same key is delivered to subscribers at most once. The returned
+    /// [`PublishOutcome`] carries the genuine delivery ack.
+    ///
     /// # Errors
     /// Returns [`ServerError`] when the liminal publish operation fails.
-    fn publish(&self, channel: &str, envelope: &MessageEnvelope) -> Result<u64, ServerError>;
+    fn publish(
+        &self,
+        channel: &str,
+        envelope: &MessageEnvelope,
+        idempotency_key: Option<&str>,
+    ) -> Result<PublishOutcome, ServerError>;
 
     /// Delegates a subscribe request to the liminal library.
     ///
@@ -130,6 +157,11 @@ pub struct LiminalConnectionServices {
     channels: HashMap<String, ConfiguredChannel>,
     cluster: ChannelCluster,
     durable_store: Arc<dyn DurableStore>,
+    /// In-memory (haematite-backed) dedup cache for dedup-on-delivery. Keyed by
+    /// the per-message idempotency key carried on the publish frame; a duplicate
+    /// key is suppressed before fan-out so a subscriber receives it at most once.
+    /// Not persisted across restarts (13-L1 scope; durable dedup is deferred).
+    dedup: DedupCache,
     conversation_supervisor: Arc<ConversationSupervisor>,
     next_message_id: AtomicU64,
     next_subscription_id: AtomicU64,
@@ -205,10 +237,12 @@ impl LiminalConnectionServices {
                 message: format!("failed to start conversation supervisor: {error}"),
             }
         })?);
+        let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
         Ok(Self {
             channels,
             cluster,
             durable_store,
+            dedup,
             conversation_supervisor,
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
@@ -225,10 +259,13 @@ impl LiminalConnectionServices {
                 message: format!("failed to start conversation supervisor: {error}"),
             }
         })?);
+        let durable_store = build_durable_store(None)?;
+        let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
         Ok(Self {
             channels: HashMap::new(),
             cluster: build_channel_cluster(None)?,
-            durable_store: build_durable_store(None)?,
+            durable_store,
+            dedup,
             conversation_supervisor,
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
@@ -258,6 +295,59 @@ impl LiminalConnectionServices {
     pub fn conversation_supervisor(&self) -> Arc<ConversationSupervisor> {
         Arc::clone(&self.conversation_supervisor)
     }
+
+    /// Subscribes to a configured channel and returns the raw library
+    /// subscription handle so a test can drain the subscriber inbox directly and
+    /// observe exactly which messages reached a subscriber.
+    #[cfg(test)]
+    pub(crate) fn subscribe_handle_for_test(
+        &self,
+        channel: &str,
+    ) -> Result<liminal::channel::SubscriptionHandle, ServerError> {
+        let configured = self
+            .channels
+            .get(channel)
+            .ok_or_else(|| ServerError::ListenerAccept {
+                message: format!("channel '{channel}' is not configured"),
+            })?;
+        configured
+            .handle
+            .subscribe()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("liminal subscribe failed for channel '{channel}': {error}"),
+            })
+    }
+
+    /// Claims the delivery right for an idempotency key.
+    ///
+    /// Returns `Ok(true)` when this is the first publish for the key (the caller
+    /// may deliver), and `Ok(false)` when the key was already claimed/completed (a
+    /// duplicate the caller must suppress). The dedup cache is driven synchronously
+    /// over the in-memory haematite store via the durable bridge.
+    fn claim_delivery(&self, key: &str) -> Result<bool, ServerError> {
+        let decision = block_on(self.dedup.claim_or_get(key, dedup_timestamp_millis()))
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("dedup bridge failed for key '{key}': {error}"),
+            })?
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("dedup claim failed for key '{key}': {error}"),
+            })?;
+        Ok(matches!(decision, DedupDecision::Claimed))
+    }
+}
+
+/// Returns the current epoch-millis timestamp used as the dedup entry anchor.
+///
+/// A clock error before the Unix epoch yields `0`: the timestamp is only a TTL
+/// anchor for the in-memory cache and a zero anchor never breaks the at-most-once
+/// claim semantics, so this avoids surfacing a clock fault on the publish path.
+fn dedup_timestamp_millis() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 /// Default shard count for an on-disk durable store.
@@ -267,6 +357,10 @@ impl LiminalConnectionServices {
 /// actor per core. The value is fixed (haematite has no silent default) and not
 /// yet surfaced in server config.
 const DEFAULT_SHARD_COUNT: usize = 8;
+
+/// Namespace prefix for the dedup-on-delivery cache streams. Keeps delivery dedup
+/// keys from colliding with any other haematite streams in the shared store.
+const DELIVERY_DEDUP_NAMESPACE: &str = "liminal:delivery-dedup";
 
 /// Builds the on-disk haematite-backed durable store.
 ///
@@ -318,7 +412,12 @@ fn ephemeral_data_dir() -> PathBuf {
 }
 
 impl ConnectionServices for LiminalConnectionServices {
-    fn publish(&self, channel: &str, envelope: &MessageEnvelope) -> Result<u64, ServerError> {
+    fn publish(
+        &self,
+        channel: &str,
+        envelope: &MessageEnvelope,
+        idempotency_key: Option<&str>,
+    ) -> Result<PublishOutcome, ServerError> {
         let handle = self
             .channels
             .get(channel)
@@ -326,12 +425,51 @@ impl ConnectionServices for LiminalConnectionServices {
             .ok_or_else(|| ServerError::ListenerAccept {
                 message: format!("channel '{channel}' is not configured"),
             })?;
-        handle
-            .publish(&envelope.payload)
+
+        // Dedup-on-delivery: a publish carrying an idempotency key is delivered to
+        // subscribers AT MOST ONCE across re-publishes of the same key. Only a
+        // fresh `Claimed` decision proceeds to fan-out; a `Completed`/`InFlight`
+        // decision is a duplicate and is suppressed (no second delivery), which is
+        // the at-most-once guarantee the aion outbox relies on.
+        if let Some(key) = idempotency_key {
+            if !self.claim_delivery(key)? {
+                return Ok(PublishOutcome {
+                    message_id: self.next_message_id.fetch_add(1, Ordering::Relaxed),
+                    delivered: false,
+                });
+            }
+        }
+
+        let delivery = handle.publish_with_delivery(
+            &envelope.payload,
+            liminal::envelope::PublisherId::default(),
+            None,
+        );
+        let delivery = delivery.map_err(|error| ServerError::ListenerAccept {
+            message: format!("liminal publish failed for channel '{channel}': {error}"),
+        })?;
+
+        // Record the dedup completion AFTER a successful claimed delivery so the
+        // claim is not left dangling `InFlight` (which would wrongly defer every
+        // future duplicate). The receipt body is empty: the dedup contract here
+        // only needs presence, not a stored result.
+        if let Some(key) = idempotency_key {
+            block_on(
+                self.dedup
+                    .complete_receipt(key, ProcessingReceipt::new(Vec::new())),
+            )
             .map_err(|error| ServerError::ListenerAccept {
-                message: format!("liminal publish failed for channel '{channel}': {error}"),
+                message: format!("dedup receipt bridge failed for key '{key}': {error}"),
+            })?
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("dedup receipt write failed for key '{key}': {error}"),
             })?;
-        Ok(self.next_message_id.fetch_add(1, Ordering::Relaxed))
+        }
+
+        Ok(PublishOutcome {
+            message_id: self.next_message_id.fetch_add(1, Ordering::Relaxed),
+            delivered: delivery.is_delivered(),
+        })
     }
 
     fn subscribe(
