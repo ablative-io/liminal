@@ -32,6 +32,29 @@ use crate::error::LiminalError;
 /// Single-partition count used to back a flat runtime channel with durable storage.
 const RUNTIME_DURABLE_PARTITIONS: usize = 1;
 
+/// Genuine delivery ack returned by [`ChannelHandle::publish_with_delivery`].
+///
+/// Distinct from backpressure: it reports whether a published message was
+/// actually received by a subscriber, not whether it was admitted to the bus.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChannelDelivery {
+    delivered_count: usize,
+}
+
+impl ChannelDelivery {
+    /// Number of local subscribers the message was genuinely delivered to.
+    #[must_use]
+    pub const fn delivered_count(&self) -> usize {
+        self.delivered_count
+    }
+
+    /// Whether the message was accepted by at least one subscriber.
+    #[must_use]
+    pub const fn is_delivered(&self) -> bool {
+        self.delivered_count > 0
+    }
+}
+
 /// Defines whether a channel is memory-only or durable across restarts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChannelMode {
@@ -268,6 +291,31 @@ impl ChannelHandle {
     where
         Payload: AsRef<[u8]>,
     {
+        self.publish_with_delivery(payload, publisher_id, causal_context)
+            .map(|_delivery| ())
+    }
+
+    /// Publishes a payload and reports a genuine delivery ack.
+    ///
+    /// Returns a [`ChannelDelivery`] whose `delivered_count` is the number of
+    /// local subscribers the message was actually delivered to. A caller that
+    /// needs to know the message was ACCEPTED by a subscriber (not merely
+    /// buffered/published) inspects [`ChannelDelivery::is_delivered`]. This is the
+    /// channel-library half of the 13-L1 delivery-ack signal; the publish-without-
+    /// delivery methods stay unchanged for existing callers.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LiminalError`] when the channel cannot accept the payload or the schema rejects it.
+    pub fn publish_with_delivery<Payload>(
+        &self,
+        payload: Payload,
+        publisher_id: PublisherId,
+        causal_context: Option<CausalContext>,
+    ) -> Result<ChannelDelivery, LiminalError>
+    where
+        Payload: AsRef<[u8]>,
+    {
         // Durable channels persist the message to the store BEFORE acknowledging
         // the publish (and before fanning out): a published message that was not
         // durably recorded would be lost on shutdown, which CN7 forbids.
@@ -275,15 +323,17 @@ impl ChannelHandle {
             self.persist_durable(durable, payload.as_ref(), &publisher_id)?;
         }
         let core = self.core()?;
-        let envelope = core.publish(payload.as_ref().to_vec(), publisher_id, causal_context)?;
+        let outcome = core.publish(payload.as_ref().to_vec(), publisher_id, causal_context)?;
         // SRV-005: hand the normalised envelope to the cluster observer so it can
         // fan the message out to remote subscribers. Local fan-out already
         // happened inside `core.publish`; this is purely the cross-node leg and
         // is a no-op when no observer is installed (non-clustered channels).
         if let Some(observer) = self.actor.observer() {
-            observer.on_publish(&self.config.name, &envelope);
+            observer.on_publish(&self.config.name, &outcome.envelope);
         }
-        Ok(())
+        Ok(ChannelDelivery {
+            delivered_count: outcome.delivered_count,
+        })
     }
 
     fn persist_durable(

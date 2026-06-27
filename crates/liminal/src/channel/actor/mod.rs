@@ -38,8 +38,8 @@ use crate::envelope::{Envelope, PublisherId};
 use crate::error::LiminalError;
 
 pub(crate) use beam::{ActorRuntime, actor_module, private_data};
-pub(crate) use queue::predicate_from;
 use queue::{ChannelCommand, ChannelCommandKind, SubscriberSummary};
+pub(crate) use queue::{PublishOutcome, predicate_from};
 
 /// Shared channel-actor state: schema, subscriber fan-out list, closed flag,
 /// the command queue, and the wiring needed to wake the process.
@@ -118,7 +118,7 @@ impl ChannelActorCore {
         payload: Vec<u8>,
         publisher_id: PublisherId,
         causal_context: Option<CausalContext>,
-    ) -> Result<Envelope, LiminalError> {
+    ) -> Result<PublishOutcome, LiminalError> {
         let (reply, response) = mpsc::sync_channel(1);
         let pid = self.enqueue(ChannelCommandKind::Publish {
             payload,
@@ -320,7 +320,7 @@ impl ChannelActorCore {
         payload: &[u8],
         publisher_id: PublisherId,
         causal_context: Option<CausalContext>,
-    ) -> Result<Envelope, LiminalError> {
+    ) -> Result<PublishOutcome, LiminalError> {
         if *lock(&self.closed)? {
             return Err(LiminalError::ChannelClosed {
                 message: "channel is closed".to_owned(),
@@ -337,13 +337,20 @@ impl ChannelActorCore {
             Envelope::new(normalized, causal_context, schema.id(), publisher_id)
         };
         let subscribers = lock(&self.subscribers)?;
+        let mut delivered_count = 0;
         for subscriber in subscribers.iter() {
-            subscriber.deliver(&envelope)?;
+            if subscriber.deliver(&envelope)? {
+                delivered_count += 1;
+            }
         }
         drop(subscribers);
-        // Return the normalised envelope so the host can fan the SAME message out
-        // to remote subscribers via the cluster observer (SRV-005).
-        Ok(envelope)
+        // Return the normalised envelope (so the host can fan the SAME message out
+        // to remote subscribers via the cluster observer, SRV-005) plus the
+        // genuine local delivery count that backs the delivery-ack signal.
+        Ok(PublishOutcome {
+            envelope,
+            delivered_count,
+        })
     }
 
     fn apply_subscribe(

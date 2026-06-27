@@ -108,11 +108,14 @@ impl SubscriberRegistration {
     }
 
     /// Delivers `envelope` to this subscriber when its predicate accepts it (or
-    /// it has no predicate). Returns `Err` only when the inbox lock is poisoned.
-    pub(crate) fn deliver(&self, envelope: &Envelope) -> Result<(), LiminalError> {
+    /// it has no predicate). Returns `Ok(true)` when the envelope was pushed onto
+    /// the inbox, `Ok(false)` when a predicate filtered it out, and `Err` only
+    /// when the inbox lock is poisoned. The boolean lets the channel actor count
+    /// genuine deliveries for the delivery-ack signal.
+    pub(crate) fn deliver(&self, envelope: &Envelope) -> Result<bool, LiminalError> {
         if let Some(predicate) = self.predicate.as_ref() {
             if !predicate(envelope) {
-                return Ok(());
+                return Ok(false);
             }
         }
         self.inbox
@@ -121,7 +124,7 @@ impl SubscriberRegistration {
                 message: format!("subscriber inbox unavailable: {error}"),
             })?
             .push_back(envelope.clone());
-        Ok(())
+        Ok(true)
     }
 }
 

@@ -16,7 +16,8 @@ pub use codec::{decode, encode, encoded_len};
 pub use envelope::{MessageEnvelope, SchemaId};
 pub use error::ProtocolError;
 pub use frame::{
-    CONVERSATION_REPLY_REQUESTED_FLAG, Frame, FrameHeader, FrameType, validate_stream,
+    CONVERSATION_REPLY_REQUESTED_FLAG, Frame, FrameHeader, FrameType, PUBLISH_DELIVERED_FLAG,
+    PUBLISH_IDEMPOTENCY_KEY_FLAG, validate_stream,
 };
 pub use multiplex::{StreamAllocator, StreamId, StreamState, StreamTable};
 pub use schema::{negotiate_schema, subscribe_error_frame};

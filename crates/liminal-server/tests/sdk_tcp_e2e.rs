@@ -22,9 +22,9 @@ use std::time::{Duration, Instant};
 
 use futures_core::Stream;
 use liminal_sdk::{
-    ChannelHandle, ConnectionPoolConfig, ConversationHandle, PressureResponse, RemoteChannelHandle,
-    RemoteConfig, RemoteConversationHandle, SchemaMetadata, SchemaValidate, SdkConfig,
-    build_channel_handle, build_conversation_handle,
+    ChannelHandle, ConnectionPoolConfig, ConversationHandle, DeliveryAck, PressureResponse,
+    RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SchemaMetadata, SchemaValidate,
+    SdkConfig, build_channel_handle, build_conversation_handle,
 };
 use liminal_server::config::{ChannelDef, ServerConfig};
 use liminal_server::server::connection::ConnectionSupervisor;
@@ -380,6 +380,85 @@ fn sdk_tcp_conversation_request_then_receive_correlates() -> Result<(), Box<dyn 
         DispatchRequest {
             activity: "ship-order".to_owned(),
         }
+    );
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// 13-L1 load-bearing proof over the real socket: a publish carrying an
+/// idempotency key returns a GENUINE delivery ack the caller can observe, and a
+/// duplicate of the same key returns a non-ack (dedup-on-delivery suppressed it).
+///
+/// A subscriber is registered first so a genuine delivery is observable. The first
+/// keyed publish is a fresh dedup claim with a live subscriber, so its ack reports
+/// `is_accepted() == true`; the duplicate is suppressed, so its ack reports
+/// `is_accepted() == false`. Against the pre-13-L1 path there was no delivery ack
+/// at all (only the backpressure `Accept`), so this distinction could not be made.
+#[test]
+fn sdk_tcp_publish_with_idempotency_key_reports_genuine_delivery_ack() -> Result<(), Box<dyn Error>>
+{
+    let server = RunningServer::start()?;
+    let config = connect_remote_config(server.address(), CHANNEL, "delivery-ack")?;
+    server.wait_for_connection()?;
+
+    let handle = RemoteChannelHandle::new(&config)?;
+
+    // Register a subscriber on the channel so a delivery is genuinely observable.
+    // Polling the subscription once drives the Subscribe -> SubscribeAck round trip
+    // (the server adds a subscriber to the channel fan-out).
+    let subscription = handle.subscribe::<OrderPlaced>();
+    let mut subscription = pin!(subscription);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    match subscription.as_mut().poll_next(&mut context) {
+        Poll::Ready(None) => {}
+        Poll::Ready(Some(Err(error))) => {
+            return Err(format!("subscribe surfaced a setup error: {error}").into());
+        }
+        Poll::Ready(Some(Ok(_))) => {
+            return Err("subscribe unexpectedly yielded a buffered message".into());
+        }
+        Poll::Pending => return Err("subscribe stream parked unexpectedly".into()),
+    }
+
+    // First keyed publish: fresh claim + a live subscriber => genuine delivery.
+    let first: DeliveryAck =
+        handle.publish_with_idempotency_key(&OrderPlaced { id: 1 }, "dispatch-1")?;
+    assert!(
+        first.is_accepted(),
+        "first keyed publish with a subscriber must report a genuine delivery ack"
+    );
+
+    // Duplicate of the SAME key: dedup suppresses fan-out => a non-ack the caller
+    // can observe (distinct from a backpressure decision).
+    let duplicate: DeliveryAck =
+        handle.publish_with_idempotency_key(&OrderPlaced { id: 1 }, "dispatch-1")?;
+    assert!(
+        !duplicate.is_accepted(),
+        "a duplicate idempotency key must report a non-delivery ack"
+    );
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// 13-L1: a keyed publish with NO subscriber returns a non-ack over the socket,
+/// so a caller can distinguish "a subscriber received it" from "it was accepted
+/// by the bus but reached no one" -- the load-bearing distinction the aion outbox
+/// needs to decide whether a send is genuinely done.
+#[test]
+fn sdk_tcp_publish_with_no_subscriber_reports_non_delivery() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let config = connect_remote_config(server.address(), CHANNEL, "no-subscriber")?;
+    server.wait_for_connection()?;
+
+    let handle = RemoteChannelHandle::new(&config)?;
+    let ack: DeliveryAck =
+        handle.publish_with_idempotency_key(&OrderPlaced { id: 2 }, "lonely-1")?;
+    assert!(
+        !ack.is_accepted(),
+        "a keyed publish that reaches no subscriber must report a non-delivery ack"
     );
 
     server.shutdown()?;

@@ -39,8 +39,8 @@ fn shutdown_flush_persists_durable_channel_state_to_store() -> Result<(), Box<dy
     // (the channel schema validates them as JSON).
     let first = br#"{"order":1}"#.to_vec();
     let second = br#"{"order":2}"#.to_vec();
-    services.publish("orders", &order_envelope(first.clone()))?;
-    services.publish("orders", &order_envelope(second.clone()))?;
+    services.publish("orders", &order_envelope(first.clone()), None)?;
+    services.publish("orders", &order_envelope(second.clone()), None)?;
 
     // Run the graceful-shutdown durable flush.
     services.flush_durable_state()?;
@@ -65,7 +65,7 @@ fn persisted_durable_state_survives_fresh_services_over_same_store()
             &durable_orders_config()?,
             Arc::clone(&store),
         )?;
-        services.publish("orders", &order_envelope(br#"{"order":7}"#.to_vec()))?;
+        services.publish("orders", &order_envelope(br#"{"order":7}"#.to_vec()), None)?;
         services.flush_durable_state()?;
     }
 
@@ -77,6 +77,97 @@ fn persisted_durable_state_survives_fresh_services_over_same_store()
     assert_eq!(persisted, vec![br#"{"order":7}"#.to_vec()]);
 
     Ok(())
+}
+
+/// 13-L1 load-bearing: a duplicate publish carrying the SAME idempotency key is
+/// delivered to a live subscriber EXACTLY ONCE (dedup-on-delivery), while the
+/// genuine delivery ack reports `delivered` truthfully on each publish.
+///
+/// This exercises the real server publish path (the same `services.publish` a
+/// connection process drives) with a real channel subscriber, then drains that
+/// subscriber's inbox to prove the duplicate never reached it.
+#[test]
+fn duplicate_idempotency_key_delivers_to_subscriber_exactly_once()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (store, _dir) = disk_store()?;
+    let services =
+        LiminalConnectionServices::from_config_with_store(&ephemeral_orders_config()?, store)?;
+
+    // A live subscriber on the channel so a delivery is genuinely observable.
+    let subscription = services.subscribe_handle_for_test("orders")?;
+
+    let payload = br#"{"order":1}"#.to_vec();
+
+    // First publish with key "k1": fresh dedup claim, one subscriber => the
+    // genuine delivery ack is `true` and the message reaches the subscriber.
+    let first = services.publish("orders", &order_envelope(payload.clone()), Some("k1"))?;
+    assert!(
+        first.delivered,
+        "first publish of a fresh key with a subscriber must report a genuine delivery"
+    );
+
+    // Duplicate publish with the SAME key "k1": dedup suppresses fan-out, so the
+    // ack reports NOT delivered and the subscriber must NOT receive a second copy.
+    let duplicate = services.publish("orders", &order_envelope(payload.clone()), Some("k1"))?;
+    assert!(
+        !duplicate.delivered,
+        "a duplicate idempotency key must be suppressed (no second delivery)"
+    );
+
+    // A different key "k2" is a distinct message: delivered again.
+    let other_payload = br#"{"order":2}"#.to_vec();
+    let other = services.publish("orders", &order_envelope(other_payload.clone()), Some("k2"))?;
+    assert!(
+        other.delivered,
+        "a different idempotency key must be delivered"
+    );
+
+    // Drain the subscriber inbox: it must hold EXACTLY the two distinct messages
+    // (k1 once, k2 once), never the suppressed duplicate.
+    let mut received = Vec::new();
+    while let Some(envelope) = subscription.try_next()? {
+        received.push(envelope.payload);
+    }
+    assert_eq!(
+        received,
+        vec![payload, other_payload],
+        "subscriber must receive each distinct key once and never the duplicate"
+    );
+
+    Ok(())
+}
+
+/// 13-L1: with NO live subscriber, a publish succeeds but the genuine delivery
+/// ack reports `delivered = false` (accepted by the bus, received by no one).
+#[test]
+fn publish_without_subscriber_reports_not_delivered() -> Result<(), Box<dyn std::error::Error>> {
+    let (store, _dir) = disk_store()?;
+    let services =
+        LiminalConnectionServices::from_config_with_store(&ephemeral_orders_config()?, store)?;
+
+    let outcome = services.publish("orders", &order_envelope(br#"{"order":9}"#.to_vec()), None)?;
+    assert!(
+        !outcome.delivered,
+        "a publish that reaches no subscriber must report a non-delivery ack"
+    );
+
+    Ok(())
+}
+
+fn ephemeral_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    Ok(ServerConfig {
+        listen_address: "127.0.0.1:0".parse()?,
+        health_listen_address: "127.0.0.1:0".parse()?,
+        drain_timeout_ms: 30_000,
+        channels: vec![ChannelDef {
+            name: "orders".to_owned(),
+            schema_ref: "schemas/orders.json".to_owned(),
+            durable: false,
+        }],
+        routing_rules: Vec::new(),
+        persistence_path: None,
+        cluster: None,
+    })
 }
 
 fn durable_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {

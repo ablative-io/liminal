@@ -4,7 +4,7 @@ use liminal::protocol::{CausalContext, MessageEnvelope, SchemaId};
 
 use super::*;
 use crate::server::connection::conversation::ConversationResource;
-use crate::server::connection::services::SubscriptionResource;
+use crate::server::connection::services::{PublishOutcome, SubscriptionResource};
 
 #[derive(Debug, Default)]
 struct RecordingServices {
@@ -14,14 +14,22 @@ struct RecordingServices {
 }
 
 impl ConnectionServices for RecordingServices {
-    fn publish(&self, channel: &str, envelope: &MessageEnvelope) -> Result<u64, ServerError> {
+    fn publish(
+        &self,
+        channel: &str,
+        envelope: &MessageEnvelope,
+        _idempotency_key: Option<&str>,
+    ) -> Result<PublishOutcome, ServerError> {
         self.publishes
             .lock()
             .map_err(|error| ServerError::ListenerAccept {
                 message: format!("test publish recorder unavailable: {error}"),
             })?
             .push((channel.to_owned(), envelope.payload.clone()));
-        Ok(42)
+        Ok(PublishOutcome {
+            message_id: 42,
+            delivered: true,
+        })
     }
 
     fn subscribe(
@@ -131,6 +139,7 @@ fn publish_frame_delegates_to_liminal_services() -> Result<(), ServerError> {
         stream_id: 3,
         channel: "orders".to_owned(),
         envelope,
+        idempotency_key: None,
     };
     let mut state = ConnectionProcessState::default();
 

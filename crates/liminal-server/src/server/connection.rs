@@ -15,5 +15,6 @@ mod supervisor;
 pub use conversation::{ConnectionConversation, ConversationResource};
 pub use services::{
     ChannelCluster, ConnectionServices, ConnectionSubscription, LiminalConnectionServices,
+    PublishOutcome,
 };
 pub use supervisor::{ConnectionHandle, ConnectionSupervisor};
