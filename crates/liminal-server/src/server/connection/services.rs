@@ -2,12 +2,14 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
 use haematite::{Database, DatabaseConfig, EventStore};
 use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, Schema};
-use liminal::conversation::{ConversationSupervisor, CrashPolicy, EchoBehaviour};
+use liminal::conversation::{
+    ConversationSupervisor, CrashPolicy, EchoBehaviour, ParticipantBehaviour,
+};
 use liminal::durability::bridge::block_on;
 use liminal::durability::{
     DedupCache, DedupDecision, DurableStore, HaematiteStore, ProcessingReceipt,
@@ -20,6 +22,13 @@ use crate::ServerError;
 use crate::config::types::ServerConfig;
 
 pub use super::services_cluster::ChannelCluster;
+
+/// Registry of custom conversation responders, keyed by conversation subject.
+///
+/// A registered [`ParticipantBehaviour`] becomes the participant for any
+/// conversation opened on its subject; subjects with no entry fall back to the
+/// built-in [`EchoBehaviour`].
+type ResponderRegistry = HashMap<String, Arc<dyn ParticipantBehaviour>>;
 
 /// Marker for resources retained by a connection process until unsubscribe.
 pub trait SubscriptionResource: std::fmt::Debug + Send {
@@ -163,6 +172,15 @@ pub struct LiminalConnectionServices {
     /// Not persisted across restarts (13-L1 scope; durable dedup is deferred).
     dedup: DedupCache,
     conversation_supervisor: Arc<ConversationSupervisor>,
+    /// Registered custom conversation responders, keyed by conversation subject.
+    ///
+    /// When a conversation is opened (`open_conversation`), the subject is looked
+    /// up here: a registered [`ParticipantBehaviour`] becomes the conversation's
+    /// participant; with no registration the conversation falls back to the
+    /// built-in [`EchoBehaviour`], preserving the original echo semantics exactly.
+    /// This is the seam aion #13 plugs a remote worker responder into. Interior
+    /// mutability is required because the services are shared behind `&self`.
+    responders: Mutex<ResponderRegistry>,
     next_message_id: AtomicU64,
     next_subscription_id: AtomicU64,
 }
@@ -244,6 +262,7 @@ impl LiminalConnectionServices {
             durable_store,
             dedup,
             conversation_supervisor,
+            responders: Mutex::new(HashMap::new()),
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
         })
@@ -267,6 +286,7 @@ impl LiminalConnectionServices {
             durable_store,
             dedup,
             conversation_supervisor,
+            responders: Mutex::new(HashMap::new()),
             next_message_id: AtomicU64::new(1),
             next_subscription_id: AtomicU64::new(1),
         })
@@ -294,6 +314,71 @@ impl LiminalConnectionServices {
     #[must_use]
     pub fn conversation_supervisor(&self) -> Arc<ConversationSupervisor> {
         Arc::clone(&self.conversation_supervisor)
+    }
+
+    /// Registers a custom conversation responder for a routing `subject`.
+    ///
+    /// When a conversation is later opened with this exact `subject`, its
+    /// participant runs `behaviour` instead of the built-in [`EchoBehaviour`].
+    /// The responder is spawned and supervised identically to the echo
+    /// participant — a real linked beamr process with the same crash-detection
+    /// semantics — so this exposes the responder seam without changing how
+    /// participants run. Registering a subject that already has a responder
+    /// replaces it; the previous behaviour is returned.
+    ///
+    /// This is the liminal-side seam aion #13 plugs a remote worker into: it
+    /// registers a responder that forwards each request to the worker and routes
+    /// the worker's reply back through the conversation. Subjects with no
+    /// registration keep echoing, so existing callers are unaffected.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when the responder registry lock is poisoned.
+    pub fn register_responder(
+        &self,
+        subject: impl Into<String>,
+        behaviour: Arc<dyn ParticipantBehaviour>,
+    ) -> Result<Option<Arc<dyn ParticipantBehaviour>>, ServerError> {
+        let mut responders = self.lock_responders()?;
+        Ok(responders.insert(subject.into(), behaviour))
+    }
+
+    /// Removes the custom responder registered for `subject`, if any.
+    ///
+    /// After removal the subject reverts to the built-in [`EchoBehaviour`] on the
+    /// next [`Self::open_conversation`]. Returns the removed behaviour when one
+    /// was registered.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when the responder registry lock is poisoned.
+    pub fn unregister_responder(
+        &self,
+        subject: &str,
+    ) -> Result<Option<Arc<dyn ParticipantBehaviour>>, ServerError> {
+        let mut responders = self.lock_responders()?;
+        Ok(responders.remove(subject))
+    }
+
+    /// Resolves the responder behaviour for `subject`: the registered custom
+    /// responder when present, otherwise the built-in [`EchoBehaviour`].
+    ///
+    /// This is the single routing decision behind the seam — registered-or-echo —
+    /// so the fallback is identical to the original hard-wired echo path.
+    fn responder_for(&self, subject: &str) -> Result<Arc<dyn ParticipantBehaviour>, ServerError> {
+        let responders = self.lock_responders()?;
+        Ok(responders.get(subject).map_or_else(
+            || Arc::new(EchoBehaviour) as Arc<dyn ParticipantBehaviour>,
+            Arc::clone,
+        ))
+    }
+
+    /// Locks the responder registry, mapping a poisoned lock to a [`ServerError`]
+    /// rather than panicking (the workspace denies `unwrap`/`expect`/`panic`).
+    fn lock_responders(&self) -> Result<std::sync::MutexGuard<'_, ResponderRegistry>, ServerError> {
+        self.responders
+            .lock()
+            .map_err(|_poisoned| ServerError::ListenerAccept {
+                message: "responder registry lock poisoned".to_owned(),
+            })
     }
 
     /// Subscribes to a configured channel and returns the raw library
@@ -514,21 +599,22 @@ impl ConnectionServices for LiminalConnectionServices {
         subject: &str,
     ) -> Result<ConnectionConversation, ServerError> {
         // Spawn a REAL participant process (a beamr `NativeHandler` running the
-        // request-reply `EchoBehaviour`) on the conversation supervisor's
+        // resolved responder behaviour) on the conversation supervisor's
         // scheduler, and a supervised conversation actor linked to it. The actor
         // FORWARDS each conversation message to the participant, which genuinely
-        // processes it and delivers a reply back — replacing the inert
-        // `spawn_test_process` stand-in that processed nothing. The actor still
-        // traps the participant's EXIT (a beamr process link), so killing it
-        // fires a structural, microsecond-scale crash signal.
+        // processes it and delivers a reply back. The actor traps the
+        // participant's EXIT (a beamr process link), so killing it fires a
+        // structural, microsecond-scale crash signal.
+        //
+        // The responder is chosen by `subject`: a custom responder registered via
+        // `register_responder` for this subject, or the built-in `EchoBehaviour`
+        // when none is registered. Either way it runs as the SAME supervised,
+        // linked participant process — the seam changes WHO responds, not HOW the
+        // participant is spawned or supervised.
+        let behaviour = self.responder_for(subject)?;
         let (actor, participant) = self
             .conversation_supervisor
-            .spawn_with_participant(
-                Arc::new(EchoBehaviour),
-                None,
-                ChannelMode::Ephemeral,
-                CrashPolicy::Fail,
-            )
+            .spawn_with_participant(behaviour, None, ChannelMode::Ephemeral, CrashPolicy::Fail)
             .map_err(|error| ServerError::ListenerAccept {
                 message: format!(
                     "failed to spawn supervised conversation {conversation_id} ('{subject}'): {error}"
