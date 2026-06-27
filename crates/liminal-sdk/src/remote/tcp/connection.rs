@@ -16,7 +16,8 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 use liminal::protocol::{
-    Frame, FrameType, MessageEnvelope, ProtocolError, ProtocolVersion, decode, encode, encoded_len,
+    CONVERSATION_REPLY_REQUESTED_FLAG, Frame, FrameType, MessageEnvelope, ProtocolError,
+    ProtocolVersion, decode, encode, encoded_len,
 };
 
 use crate::SdkError;
@@ -194,6 +195,64 @@ impl Connection {
         };
         self.send(&message)?;
         self.drain_conversation_error(conversation_id)
+    }
+
+    /// Sends a conversation request that asks for a correlated reply and blocks
+    /// for that reply over the socket.
+    ///
+    /// Opens the conversation on first use, sends the `ConversationMessage` with
+    /// the reply-requested flag set, then reads the server's correlated response.
+    /// A `ConversationMessage` carrying the same `conversation_id` is the reply and
+    /// its payload bytes are returned; a `ConversationError` for the conversation
+    /// is surfaced as an [`SdkError`]. Any other frame is a protocol violation.
+    ///
+    /// Correlation in this synchronous, one-request-per-socket model is positional
+    /// plus `conversation_id`: the reply is the next frame the server writes after
+    /// receiving this request, and its `conversation_id` must match the request's.
+    pub(super) fn conversation_request_reply(
+        &mut self,
+        conversation_id: u64,
+        subject: &str,
+        envelope: MessageEnvelope,
+    ) -> Result<Vec<u8>, SdkError> {
+        self.ensure_conversation_open(conversation_id, subject)?;
+
+        let message = Frame::ConversationMessage {
+            flags: CONVERSATION_REPLY_REQUESTED_FLAG,
+            stream_id: APPLICATION_STREAM_ID,
+            conversation_id,
+            envelope,
+        };
+        self.send(&message)?;
+        self.receive_conversation_reply(conversation_id)
+    }
+
+    /// Reads the correlated reply frame for `conversation_id`, mapping a matching
+    /// `ConversationMessage` to its payload and a `ConversationError` to an error.
+    fn receive_conversation_reply(&mut self, conversation_id: u64) -> Result<Vec<u8>, SdkError> {
+        match self.receive()? {
+            Frame::ConversationMessage {
+                conversation_id: replied,
+                envelope,
+                ..
+            } if replied == conversation_id => Ok(envelope.payload),
+            Frame::ConversationError {
+                conversation_id: replied,
+                reason_code,
+                message,
+                ..
+            } => Err(SdkError::Conversation {
+                conversation_id: replied.to_string(),
+                description: format!(
+                    "server rejected conversation {conversation_id} (reason {reason_code}): {}",
+                    message.unwrap_or_else(|| "no detail".to_string())
+                ),
+            }),
+            other => Err(unexpected_frame(
+                "ConversationMessage reply or ConversationError",
+                &other,
+            )),
+        }
     }
 
     /// Opens the conversation on first use, surfacing any open failure, and records

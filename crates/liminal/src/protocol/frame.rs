@@ -8,6 +8,19 @@ use super::{
 /// Number of bytes in every serialized frame header.
 pub const HEADER_LEN: usize = 10;
 
+/// Frame-flag bit set on a [`Frame::ConversationMessage`] to request a correlated
+/// reply.
+///
+/// A client sets this bit on the request frame of a request-reply round trip. The
+/// server, after delivering the message to the conversation participant, drains
+/// the participant's reply and sends it back as a `ConversationMessage` carrying
+/// the same `conversation_id` (the correlation key) and this same flag bit. A
+/// `ConversationMessage` WITHOUT this bit keeps the pre-existing fire-and-forget
+/// semantics: the server stays silent on success. The bit travels in the frame
+/// header's `flags` byte, which the codec already round-trips, so no wire-format
+/// change is required.
+pub const CONVERSATION_REPLY_REQUESTED_FLAG: u8 = 0x01;
+
 /// Protocol frame categories and their stable wire discriminants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameType {

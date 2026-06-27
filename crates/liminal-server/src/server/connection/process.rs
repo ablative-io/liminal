@@ -2,14 +2,16 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use beamr::atom::Atom;
 use beamr::native::native_process::{NativeContext, NativeHandler, NativeOutcome};
 use beamr::process::ExitReason;
 use beamr::term::Term;
+
 use liminal::protocol::{
-    Frame, MessageEnvelope, ProtocolError, ProtocolVersion, SchemaId as ProtocolSchemaId, decode,
-    encode, encoded_len, negotiate_version,
+    CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope, ProtocolError, ProtocolVersion,
+    SchemaId as ProtocolSchemaId, decode, encode, encoded_len, negotiate_version,
 };
 
 use super::conversation::ConnectionConversation;
@@ -257,11 +259,18 @@ pub(super) fn apply_frame(
             ..
         } => conversation_open(services, state, conversation_id, &subject),
         Frame::ConversationMessage {
+            flags,
             stream_id,
             conversation_id,
             envelope,
-            ..
-        } => conversation_message(services, state, stream_id, conversation_id, &envelope),
+        } => conversation_message(
+            services,
+            state,
+            flags,
+            stream_id,
+            conversation_id,
+            &envelope,
+        ),
         Frame::ConversationClose {
             conversation_id, ..
         } => conversation_close(services, state, conversation_id),
@@ -403,32 +412,70 @@ fn conversation_open(
     }
 }
 
+/// Bounds how long the server waits for the participant's reply on the
+/// request-reply path before reporting a `ConversationError` back to the caller.
+/// The participant processes the forwarded message on a beamr scheduler slice, so
+/// a reply is normally available promptly; this only guards against a stuck or
+/// non-replying participant so the connection thread never blocks indefinitely.
+const CONVERSATION_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
 fn conversation_message(
     services: &dyn ConnectionServices,
     state: &ConnectionProcessState,
+    flags: u8,
     stream_id: u32,
     conversation_id: u64,
     envelope: &MessageEnvelope,
 ) -> FrameAction {
     let Some(conversation) = state.conversations.get(&conversation_id) else {
-        return FrameAction::Respond(Frame::ConversationError {
-            flags: 0,
+        return conversation_error(
             stream_id,
             conversation_id,
-            reason_code: SERVER_ERROR_CODE,
-            message: Some("conversation is not open on this connection".to_owned()),
-        });
+            "conversation is not open on this connection",
+        );
     };
-    match services.conversation_message(conversation, envelope) {
-        Ok(()) => FrameAction::NoResponse,
-        Err(error) => FrameAction::Respond(Frame::ConversationError {
-            flags: 0,
+    if let Err(error) = services.conversation_message(conversation, envelope) {
+        return conversation_error(stream_id, conversation_id, &error.to_string());
+    }
+    // Pre-existing fire-and-forget semantics: without the reply-requested flag the
+    // server stays silent on success, exactly as before. The reply leg is purely
+    // additive and only runs when the client explicitly asked for a correlated
+    // reply on this frame.
+    if flags & CONVERSATION_REPLY_REQUESTED_FLAG == 0 {
+        return FrameAction::NoResponse;
+    }
+    conversation_reply(conversation, stream_id, conversation_id)
+}
+
+/// Drains the participant's correlated reply and frames it back to the caller.
+///
+/// The reply carries the same `conversation_id` (the correlation key) and the
+/// reply-requested flag so the client read path can recognise it as the answer to
+/// its request rather than an unrelated server-initiated frame.
+fn conversation_reply(
+    conversation: &ConnectionConversation,
+    stream_id: u32,
+    conversation_id: u64,
+) -> FrameAction {
+    match conversation.receive_reply(CONVERSATION_REPLY_TIMEOUT) {
+        Ok(reply) => FrameAction::Respond(Frame::ConversationMessage {
+            flags: CONVERSATION_REPLY_REQUESTED_FLAG,
             stream_id,
             conversation_id,
-            reason_code: SERVER_ERROR_CODE,
-            message: Some(error.to_string()),
+            envelope: reply,
         }),
+        Err(error) => conversation_error(stream_id, conversation_id, &error.to_string()),
     }
+}
+
+fn conversation_error(stream_id: u32, conversation_id: u64, message: &str) -> FrameAction {
+    FrameAction::Respond(Frame::ConversationError {
+        flags: 0,
+        stream_id,
+        conversation_id,
+        reason_code: SERVER_ERROR_CODE,
+        message: Some(message.to_owned()),
+    })
 }
 
 fn conversation_close(

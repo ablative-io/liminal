@@ -22,7 +22,7 @@ use crate::{
 use super::config::SdkConfig;
 use super::protocol::{
     RemoteTransport, WireConversationRequest, WirePublishRequest, WireResumeRequest,
-    WireSubscribeRequest, serialize_payload,
+    WireSubscribeRequest, deserialize_payload,
 };
 use super::{RemoteConfig, ServerAddress, connection_error};
 
@@ -191,16 +191,35 @@ impl ChannelHandle for RemoteChannelHandle {
         Req: Serialize + SchemaValidate,
         Resp: DeserializeOwned,
     {
-        let schema = Req::schema_metadata();
-        let result = serialize_payload(&request).map(|payload| {
-            core::hint::black_box((schema, payload));
-        });
-        ReadyResult::new(result.and_then(|()| {
-            Err(SdkError::Protocol {
-                description: "remote request/reply awaits protocol response integration"
-                    .to_string(),
-            })
-        }))
+        ReadyResult::new(self.request_reply_blocking(&request))
+    }
+}
+
+impl RemoteChannelHandle {
+    /// Performs a correlated request-reply round trip over the transport and
+    /// deserializes the reply.
+    ///
+    /// The round trip rides the conversation request-reply path: the channel name
+    /// is used as the conversation correlation id and subject, so the reply the
+    /// server returns is matched back to this request by `conversation_id` on the
+    /// single synchronous connection. Schema validation still runs on the request
+    /// so a request-reply enforces the same typing contract as `publish`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] when the request cannot be serialized, the round trip
+    /// fails, or the reply cannot be deserialized into `Resp`.
+    fn request_reply_blocking<Req, Resp>(&self, request: &Req) -> Result<Resp, SdkError>
+    where
+        Req: Serialize + SchemaValidate,
+        Resp: DeserializeOwned,
+    {
+        let conversation_id = ConversationId::new(self.channel_name.clone());
+        let wire_request = WireConversationRequest::new(&conversation_id, request)?;
+        let reply = self
+            .transport
+            .request_reply_conversation(&self.server_address, &wire_request)?;
+        deserialize_payload(&reply)
     }
 }
 
@@ -211,6 +230,11 @@ pub struct RemoteConversationHandle {
     conversation_id: ConversationId,
     lifecycle: Arc<Mutex<ConnectionLifecycle>>,
     transport: Arc<dyn RemoteTransport>,
+    /// Buffered reply bytes from the most recent [`request`](Self::request) round
+    /// trip, drained by the next [`receive`](ConversationHandle::receive). The
+    /// synchronous transport completes the round trip inside `request`, so the
+    /// correlated reply is held here until the caller deserializes it.
+    pending_reply: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl RemoteConversationHandle {
@@ -224,7 +248,34 @@ impl RemoteConversationHandle {
                 config.reconnect_config,
             ))),
             transport: Arc::clone(&config.transport),
+            pending_reply: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Sends a typed request on this conversation and blocks for its correlated
+    /// reply, buffering the reply for the next [`receive`](ConversationHandle::receive).
+    ///
+    /// This is the request leg of the conversation request-reply pattern. It is
+    /// kept distinct from [`send`](ConversationHandle::send), which stays
+    /// fire-and-forget (the server is silent on success): only `request` sets the
+    /// reply-requested flag and waits for the server's correlated answer. The aion
+    /// dispatch model (`send` request, then `receive` reply) maps onto a `request`
+    /// followed by `receive`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] when the request cannot be serialized or the round
+    /// trip fails.
+    pub fn request<Req>(&self, request: Req) -> Result<(), SdkError>
+    where
+        Req: Serialize,
+    {
+        let wire_request = WireConversationRequest::new(&self.conversation_id, &request)?;
+        let reply = self
+            .transport
+            .request_reply_conversation(&self.server_address, &wire_request)?;
+        *self.pending_reply.lock() = Some(reply);
+        Ok(())
     }
 
     /// Returns current lifecycle state from the SDK-003 state machine.
@@ -262,14 +313,37 @@ impl ConversationHandle for RemoteConversationHandle {
     where
         M: DeserializeOwned,
     {
-        ReadyResult::new(Err(SdkError::Conversation {
-            conversation_id: self.conversation_id.as_str().to_string(),
-            description: "remote receive awaits protocol inbox integration".to_string(),
-        }))
+        ReadyResult::new(self.receive_blocking())
     }
 
     fn lifecycle(&self) -> Self::LifecycleStream {
         EmptyLifecycleStream
+    }
+}
+
+impl RemoteConversationHandle {
+    /// Drains and deserializes the correlated reply buffered by the most recent
+    /// [`request`](Self::request).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Conversation`] when no reply is pending (no `request`
+    /// has completed since the last `receive`), or [`SdkError::Serialization`]
+    /// when the buffered reply cannot be deserialized into `M`.
+    fn receive_blocking<M>(&self) -> Result<M, SdkError>
+    where
+        M: DeserializeOwned,
+    {
+        let payload = self
+            .pending_reply
+            .lock()
+            .take()
+            .ok_or_else(|| SdkError::Conversation {
+                conversation_id: self.conversation_id.as_str().to_string(),
+                description: "no correlated reply is pending; call request before receive"
+                    .to_string(),
+            })?;
+        deserialize_payload(&payload)
     }
 }
 
