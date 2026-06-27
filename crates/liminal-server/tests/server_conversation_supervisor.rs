@@ -8,9 +8,12 @@
 //! therefore nothing to crash and nothing to detect.
 
 use std::error::Error;
+use std::sync::Arc;
 use std::time::Duration;
 
 use beamr::process::ExitReason;
+use liminal::conversation::ParticipantBehaviour;
+use liminal::envelope::Envelope;
 use liminal::protocol::{CausalContext, MessageEnvelope, SchemaId};
 use liminal_server::server::connection::{ConnectionServices, LiminalConnectionServices};
 
@@ -111,6 +114,100 @@ fn request_reply_message_is_really_processed_by_the_participant() -> Result<(), 
         reply.payload, request,
         "the participant must genuinely process the request and echo it back; \
          an inert participant produces no reply and this drain would time out"
+    );
+
+    services.close_conversation(conversation)?;
+    services.conversation_supervisor().shutdown();
+    Ok(())
+}
+
+/// A custom responder that prefixes a marker onto the request payload, proving the
+/// reply came from THIS registered behaviour and not the built-in echo.
+#[derive(Debug)]
+struct PrefixResponder;
+
+impl ParticipantBehaviour for PrefixResponder {
+    fn process(&self, request: &Envelope) -> Option<Envelope> {
+        let mut reply = request.clone();
+        let mut payload = b"responder:".to_vec();
+        payload.extend_from_slice(&request.payload);
+        reply.payload = payload;
+        Some(reply)
+    }
+}
+
+/// THE RESPONDER-SEAM PROOF: registering a NON-echo `ParticipantBehaviour` for a
+/// subject routes that subject's conversation to the custom responder. The reply
+/// carries the responder's transformed payload (`responder:<request>`), which the
+/// echo participant could never produce — so the routing genuinely selected the
+/// registered responder over the echo fallback.
+///
+/// This is the liminal-side seam aion #13-3 plugs a remote worker into: the
+/// registered responder is spawned and supervised exactly as the echo participant
+/// (a real linked beamr process), so it inherits the same crash-detection
+/// semantics — confirmed by `participant_pids()` exposing one live linked process.
+#[test]
+fn registered_responder_handles_its_subject_instead_of_echo() -> Result<(), Box<dyn Error>> {
+    let services = LiminalConnectionServices::empty()?;
+
+    let previous = services.register_responder("worker-subject", Arc::new(PrefixResponder))?;
+    assert!(
+        previous.is_none(),
+        "first registration for a subject replaces nothing"
+    );
+
+    let conversation = services.open_conversation(1001, "worker-subject")?;
+
+    // The custom responder runs as the SAME kind of supervised, linked beamr
+    // participant the echo path uses: exactly one live linked participant process.
+    let participants = conversation.participant_pids();
+    assert_eq!(
+        participants.len(),
+        1,
+        "a registered responder runs as one supervised linked participant process"
+    );
+    let scheduler = services.conversation_supervisor().scheduler();
+    assert!(
+        scheduler.process_table().get(participants[0]).is_some(),
+        "the responder participant must be a live process in the scheduler table"
+    );
+
+    let request = b"ping";
+    services.conversation_message(&conversation, &message_envelope(request))?;
+
+    let reply = conversation.receive_reply(REPLY_GUARD)?;
+    assert_eq!(
+        reply.payload, b"responder:ping",
+        "the reply must come from the registered responder (transformed payload), \
+         not the echo fallback (which would return the raw request bytes)"
+    );
+
+    services.close_conversation(conversation)?;
+    services.conversation_supervisor().shutdown();
+    Ok(())
+}
+
+/// BACKWARD-COMPAT PROOF: with no responder registered for a subject, the
+/// conversation falls back to the built-in `EchoBehaviour` and the reply is the
+/// unmodified request — identical to behaviour before the seam existed. A
+/// responder registered for a DIFFERENT subject does not leak into this one.
+#[test]
+fn unregistered_subject_still_echoes() -> Result<(), Box<dyn Error>> {
+    let services = LiminalConnectionServices::empty()?;
+
+    // Register a responder for an unrelated subject; it must not affect routing
+    // for the subject under test.
+    services.register_responder("other-subject", Arc::new(PrefixResponder))?;
+
+    let conversation = services.open_conversation(1002, "unregistered-subject")?;
+
+    let request = b"echo-me";
+    services.conversation_message(&conversation, &message_envelope(request))?;
+
+    let reply = conversation.receive_reply(REPLY_GUARD)?;
+    assert_eq!(
+        reply.payload, request,
+        "an unregistered subject must echo the request unchanged (no seam regression)"
     );
 
     services.close_conversation(conversation)?;
