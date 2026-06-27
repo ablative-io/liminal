@@ -173,9 +173,9 @@ dependencies = [
 
 [[package]]
 name = "beamr"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62a857ad3b628a27b579ba922b3f7790aca27af006bce57b2db6d2b56d0eddc7"
+checksum = "984cc69d5f7c5e3b6f97254bd98783974c73cd7c79baa11668ff2b8eba0c5563"
 dependencies = [
  "base64",
  "cranelift-codegen",
@@ -188,6 +188,7 @@ dependencies = [
  "crossbeam-queue",
  "dashmap",
  "flate2",
+ "getrandom 0.4.2",
  "gleam-types",
  "io-uring",
  "libc",
@@ -782,11 +783,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0de51e6874e94e7bf76d726fc5d13ba782deca734ff60d5bb2fb2607c7406555"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core",
  "wasip2",
  "wasip3",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1119,7 +1122,7 @@ name = "liminal"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "beamr 0.9.0",
+ "beamr 0.10.0",
  "chrono",
  "haematite",
  "jsonschema",
@@ -1148,7 +1151,7 @@ name = "liminal-server"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "beamr 0.9.0",
+ "beamr 0.10.0",
  "clap",
  "futures-core",
  "haematite",
