@@ -180,7 +180,7 @@ impl ConnectionSupervisor {
         payload: Vec<u8>,
     ) -> Result<PushReplyAwaiter, ServerError> {
         let correlation_id = self.inner.runtime.next_push_correlation_id();
-        let receiver = self.inner.runtime.register_push(correlation_id)?;
+        let receiver = self.inner.runtime.register_push(pid, correlation_id)?;
         let control = ConnectionControl::Push {
             correlation_id,
             payload,
@@ -438,8 +438,10 @@ pub(super) struct ConnectionRuntime {
     control_atom: Atom,
     /// One-shot reply slots for in-flight server pushes, keyed by correlation id.
     /// The supervisor registers a slot in `push_to_connection`; the connection
-    /// process resolves it when the matching `PushReply` frame arrives.
-    push_replies: Mutex<HashMap<u64, Sender<Vec<u8>>>>,
+    /// process resolves it when the matching `PushReply` frame arrives. Each slot
+    /// records the owning connection pid so the close path can drop a connection's
+    /// outstanding slots and wake their awaiters with a prompt disconnected error.
+    push_replies: Mutex<HashMap<u64, PendingPush>>,
     /// Monotonic source of push correlation ids. Server-allocated, so it never
     /// collides with a client-chosen id on this connection.
     next_push_id: AtomicU64,
@@ -520,22 +522,42 @@ impl ConnectionRuntime {
         self.next_push_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Registers a one-shot reply slot for `correlation_id` and returns its
-    /// receiver. The connection process resolves the slot via [`resolve_push`].
+    /// Registers a one-shot reply slot for `correlation_id`, owned by connection
+    /// `pid`, and returns its receiver. The connection process resolves the slot
+    /// via [`resolve_push`]; the close path drops the connection's outstanding
+    /// slots via [`cancel_pushes_for_connection`].
     ///
     /// # Errors
     /// Returns [`ServerError`] when the correlation registry mutex is poisoned.
-    fn register_push(&self, correlation_id: u64) -> Result<Receiver<Vec<u8>>, ServerError> {
+    fn register_push(
+        &self,
+        pid: u64,
+        correlation_id: u64,
+    ) -> Result<Receiver<Vec<u8>>, ServerError> {
         let (sender, receiver) = channel();
-        lock(&self.push_replies, "push correlation registry")?.insert(correlation_id, sender);
+        lock(&self.push_replies, "push correlation registry")?
+            .insert(correlation_id, PendingPush { pid, sender });
         Ok(receiver)
     }
 
     /// Drops a registered reply slot without resolving it (the push could not be
-    /// delivered, so no reply can ever arrive).
+    /// delivered, so no reply can ever arrive). Dropping the slot's `Sender` wakes
+    /// the awaiter with a disconnected error.
     pub(super) fn cancel_push(&self, correlation_id: u64) {
         if let Ok(mut slots) = self.push_replies.lock() {
             slots.remove(&correlation_id);
+        }
+    }
+
+    /// Drops every reply slot owned by connection `pid`, waking each awaiter with a
+    /// disconnected error (the dropped `Sender` disconnects the awaiter's
+    /// `Receiver`). Called from the close path so a connection that exits with
+    /// in-flight pushes signals worker death immediately instead of leaving each
+    /// awaiter to block the full push-reply timeout. A slot that [`resolve_push`]
+    /// already removed is gone, so it is untouched here; an unknown pid is a no-op.
+    fn cancel_pushes_for_connection(&self, pid: u64) {
+        if let Ok(mut slots) = self.push_replies.lock() {
+            slots.retain(|_correlation_id, pending| pending.pid != pid);
         }
     }
 
@@ -544,15 +566,15 @@ impl ConnectionRuntime {
     /// when a correlated `PushReply` frame arrives. A missing slot (already
     /// resolved, cancelled, or unknown id) is ignored.
     pub(super) fn resolve_push(&self, correlation_id: u64, payload: Vec<u8>) {
-        let sender = self
+        let pending = self
             .push_replies
             .lock()
             .ok()
             .and_then(|mut slots| slots.remove(&correlation_id));
-        if let Some(sender) = sender {
+        if let Some(pending) = pending {
             // The receiver may already be gone if the awaiter timed out; a failed
             // send is benign (the reply is simply discarded).
-            sender.send(payload).ok();
+            pending.sender.send(payload).ok();
         }
     }
 
@@ -703,12 +725,30 @@ impl ConnectionRuntime {
         self.records.lock().map_or(0, |records| records.len())
     }
 
+    /// Removes the connection record for `pid` and, in the same close step, drops
+    /// every push reply slot that connection still owns so each waiting
+    /// [`PushReplyAwaiter`] wakes immediately with a disconnected error. This runs
+    /// on every close route — `finish`, `mark_crashed`, and `reap_crashed` all
+    /// remove through here — and fires regardless of whether the connection ever
+    /// registered a worker, so a plain push target is covered too.
     fn remove(&self, pid: u64) -> Option<ConnectionRecord> {
+        self.cancel_pushes_for_connection(pid);
         self.records
             .lock()
             .ok()
             .and_then(|mut records| records.remove(&pid))
     }
+}
+
+/// One in-flight server-push reply slot, associating the awaiter's reply `sender`
+/// with the `pid` of the connection that owns the push. The pid lets the close
+/// path drop exactly that connection's slots; the correlation id (the map key)
+/// still drives [`ConnectionRuntime::resolve_push`] and
+/// [`ConnectionRuntime::cancel_push`].
+#[derive(Debug)]
+struct PendingPush {
+    pid: u64,
+    sender: Sender<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
