@@ -212,6 +212,9 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
             message_id_field_len(referenced_message_id)?,
             option_string_len(reason.as_deref())?,
         ]),
+        Frame::Push { payload, .. } | Frame::PushReply { payload, .. } => {
+            sum_lengths(&[U64_LEN, bytes_field_len(payload)?])
+        }
         Frame::Unknown { payload, .. } => checked_u32_len(payload.len()).map(|()| payload.len()),
     }
 }
@@ -278,6 +281,51 @@ fn write_pressure_payload(
     }
 }
 
+fn write_publish_payload(
+    frame: &Frame,
+    writer: &mut PayloadWriter<'_>,
+) -> Result<(), ProtocolError> {
+    match frame {
+        Frame::Publish {
+            channel,
+            envelope,
+            idempotency_key,
+            ..
+        } => {
+            writer.write_string_field(channel)?;
+            writer.write_bytes_field(&envelope.serialize()?)?;
+            // The trailing idempotency-key field is written ONLY when present, so a
+            // no-key publish stays byte-identical to the pre-13-L1 layout. The
+            // PUBLISH_IDEMPOTENCY_KEY_FLAG bit (set on construction) tells the
+            // decoder whether to read it back.
+            if let Some(key) = idempotency_key {
+                writer.write_string_field(key)?;
+            }
+            Ok(())
+        }
+        _ => Err(ProtocolError::codec("frame type was not a publish frame")),
+    }
+}
+
+fn write_push_payload(frame: &Frame, writer: &mut PayloadWriter<'_>) -> Result<(), ProtocolError> {
+    match frame {
+        Frame::Push {
+            correlation_id,
+            payload,
+            ..
+        }
+        | Frame::PushReply {
+            correlation_id,
+            payload,
+            ..
+        } => {
+            writer.write_u64(*correlation_id)?;
+            writer.write_bytes_field(payload)
+        }
+        _ => Err(ProtocolError::codec("frame type was not a push frame")),
+    }
+}
+
 fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> {
     let mut writer = PayloadWriter::new(buffer);
     match frame {
@@ -324,22 +372,7 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
         Frame::Unsubscribe {
             subscription_id, ..
         } => writer.write_u64(*subscription_id)?,
-        Frame::Publish {
-            channel,
-            envelope,
-            idempotency_key,
-            ..
-        } => {
-            writer.write_string_field(channel)?;
-            writer.write_bytes_field(&envelope.serialize()?)?;
-            // The trailing idempotency-key field is written ONLY when present, so
-            // a no-key publish stays byte-identical to the pre-13-L1 layout. The
-            // PUBLISH_IDEMPOTENCY_KEY_FLAG bit (set on construction) tells the
-            // decoder whether to read it back.
-            if let Some(key) = idempotency_key {
-                writer.write_string_field(key)?;
-            }
-        }
+        Frame::Publish { .. } => write_publish_payload(frame, &mut writer)?,
         Frame::PublishAck { message_id, .. } => writer.write_u64(*message_id)?,
         Frame::ConversationOpen {
             conversation_id,
@@ -379,6 +412,9 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
         }
         Frame::Accept { .. } | Frame::Defer { .. } | Frame::Reject { .. } => {
             write_pressure_payload(frame, &mut writer)?;
+        }
+        Frame::Push { .. } | Frame::PushReply { .. } => {
+            write_push_payload(frame, &mut writer)?;
         }
         Frame::Unknown { payload, .. } => writer.write_slice(payload)?,
     }

@@ -21,7 +21,25 @@ pub(super) fn sample_frames() -> Vec<Frame> {
     frames.extend(publish_frames());
     frames.extend(conversation_frames());
     frames.extend(pressure_frames());
+    frames.extend(push_frames());
     frames
+}
+
+fn push_frames() -> [Frame; 2] {
+    [
+        Frame::Push {
+            flags: 20,
+            stream_id: 4,
+            correlation_id: 404,
+            payload: vec![0xDE, 0xAD, 0xBE, 0xEF],
+        },
+        Frame::PushReply {
+            flags: 21,
+            stream_id: 4,
+            correlation_id: 404,
+            payload: vec![0xCA, 0xFE],
+        },
+    ]
 }
 
 fn control_frames() -> [Frame; 6] {

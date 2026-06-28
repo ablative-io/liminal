@@ -21,6 +21,8 @@ pub use conversation::{ConversationEvent, ConversationHandle, ConversationId};
 pub use embedded::{EmbeddedChannelHandle, EmbeddedConfig, EmbeddedConversationHandle};
 pub use error::SdkError;
 pub use pressure::{DeliveryAck, PressureResponse};
+#[cfg(feature = "std")]
+pub use remote::{PushClient, PushedFrame};
 pub use remote::{
     RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SdkChannelHandle, SdkConfig,
     SdkConversationHandle, ServerAddress, build_channel_handle, build_conversation_handle,

@@ -15,6 +15,9 @@
 //! connection lock for the duration of one request/response exchange.
 
 mod connection;
+mod push_client;
+
+pub use push_client::{PushClient, PushedFrame};
 
 use alloc::format;
 use alloc::string::ToString;

@@ -23,8 +23,8 @@ use std::time::{Duration, Instant};
 use futures_core::Stream;
 use liminal_sdk::{
     ChannelHandle, ConnectionPoolConfig, ConversationHandle, DeliveryAck, PressureResponse,
-    RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SchemaMetadata, SchemaValidate,
-    SdkConfig, build_channel_handle, build_conversation_handle,
+    PushClient, RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SchemaMetadata,
+    SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
 };
 use liminal_server::config::{ChannelDef, ServerConfig};
 use liminal_server::server::connection::ConnectionSupervisor;
@@ -156,6 +156,20 @@ impl RunningServer {
             std::thread::sleep(Duration::from_millis(10));
         }
         Err("server never observed a live client connection".into())
+    }
+
+    /// Waits until exactly one connection is tracked and returns its beamr pid, so
+    /// a test can address a server-initiated push at that specific connection.
+    fn single_connection_pid(&self) -> Result<u64, Box<dyn Error>> {
+        let deadline = Instant::now() + CONNECT_TIMEOUT;
+        while Instant::now() < deadline {
+            let pids = self.supervisor.active_connection_pids();
+            if let [pid] = pids.as_slice() {
+                return Ok(*pid);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("server never observed exactly one live client connection".into())
     }
 
     fn shutdown(mut self) -> Result<(), Box<dyn Error>> {
@@ -461,6 +475,84 @@ fn sdk_tcp_publish_with_no_subscriber_reports_non_delivery() -> Result<(), Box<d
         "a keyed publish that reaches no subscriber must report a non-delivery ack"
     );
 
+    server.shutdown()?;
+    Ok(())
+}
+
+/// Bound on the server-side wait for the client's correlated push reply.
+const PUSH_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+/// Bound on the client-side wait for the server's pushed frame.
+const PUSH_RECV_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// LSUB-0 load-bearing proof over the real socket: the server PUSHES a frame to a
+/// specific connected client on that client's existing connection, the client's
+/// background reader receives it, the client replies with the same correlation id,
+/// and the server matches the correlated reply back to its push.
+///
+/// This is the capability liminal did not have: every prior frame was
+/// client-initiated request/response. Here the server originates the frame
+/// (`push_to_connection`) and gets a correlated answer, end to end over TCP.
+#[test]
+fn server_push_to_client_returns_correlated_reply() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let push_client = PushClient::connect(&server.address().to_string())?;
+    let pid = server.single_connection_pid()?;
+
+    // The server pushes an opaque payload to that specific connection and gets back
+    // an awaiter keyed by a fresh correlation id.
+    let awaiter = server
+        .supervisor
+        .push_to_connection(pid, b"dispatch-activity".to_vec())?;
+
+    // The client's background reader surfaces the pushed frame (no outstanding
+    // client request drove this read — the server originated it).
+    let pushed = push_client.recv_timeout(PUSH_RECV_TIMEOUT)?;
+    assert_eq!(pushed.payload(), b"dispatch-activity");
+    assert_eq!(pushed.correlation_id(), awaiter.correlation_id());
+
+    // The client answers, echoing the correlation id; the server matches the reply
+    // to its originating push.
+    push_client.reply(pushed.correlation_id(), b"activity-done".to_vec())?;
+    let reply = awaiter.receive(PUSH_REPLY_TIMEOUT)?;
+    assert_eq!(reply, b"activity-done");
+
+    drop(push_client);
+    server.shutdown()?;
+    Ok(())
+}
+
+/// LSUB-0 regression guard: the server-push path is additive and does not disturb
+/// the pre-existing client-initiated request/reply path. A normal request/reply
+/// round trip still works on a separate connection while the push machinery exists.
+#[test]
+fn server_push_does_not_regress_request_reply() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+
+    // A push client connects (registers the push machinery on the server side)...
+    let push_client = PushClient::connect(&server.address().to_string())?;
+    let pid = server.single_connection_pid()?;
+    let awaiter = server
+        .supervisor
+        .push_to_connection(pid, b"ping".to_vec())?;
+    let pushed = push_client.recv_timeout(PUSH_RECV_TIMEOUT)?;
+    push_client.reply(pushed.correlation_id(), b"pong".to_vec())?;
+    assert_eq!(awaiter.receive(PUSH_REPLY_TIMEOUT)?, b"pong");
+
+    // ...and a separate ordinary client still completes a request/reply round trip
+    // unchanged, proving the request->response path is unregressed.
+    let config = connect_remote_config(server.address(), CHANNEL, "rr-after-push")?;
+    let handle = RemoteChannelHandle::new(&config)?;
+    let reply: DispatchRequest = block_on(handle.request_reply(DispatchRequest {
+        activity: "still-works".to_owned(),
+    }))??;
+    assert_eq!(
+        reply,
+        DispatchRequest {
+            activity: "still-works".to_owned(),
+        }
+    );
+
+    drop(push_client);
     server.shutdown()?;
     Ok(())
 }

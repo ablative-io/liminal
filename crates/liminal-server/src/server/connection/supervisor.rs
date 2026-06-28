@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use beamr::atom::{Atom, AtomTable};
 use beamr::module::ModuleRegistry;
@@ -85,13 +88,28 @@ impl ConnectionSupervisor {
         self.inner.runtime.active_count()
     }
 
+    /// Returns the beamr process ids of the currently tracked live connections.
+    ///
+    /// Useful for addressing a specific connection — e.g. as the `pid` argument to
+    /// [`push_to_connection`](Self::push_to_connection) when the caller knows there
+    /// is a single connected client.
+    #[must_use]
+    pub fn active_connection_pids(&self) -> Vec<u64> {
+        self.inner
+            .runtime
+            .active_connections()
+            .into_iter()
+            .map(|connection| connection.pid)
+            .collect()
+    }
+
     /// Broadcasts a best-effort shutdown notification to active connections.
     ///
     /// Connections with no active subscriptions ignore the notification. Failures
     /// to enqueue the control message are logged and skipped; they are not retried.
     pub fn notify_shutdown_subscribers(&self) {
         self.inner
-            .broadcast_control(ConnectionControl::NotifyShutdown);
+            .broadcast_control(&ConnectionControl::NotifyShutdown);
     }
 
     /// Sends a force-close control message to every tracked connection process.
@@ -115,6 +133,47 @@ impl ConnectionSupervisor {
                     "failed to request forceful connection close; process is not live"
                 );
             }
+        }
+    }
+
+    /// Pushes an opaque payload to a specific connected client over that client's
+    /// existing connection and returns an awaiter for the client's correlated reply.
+    ///
+    /// This is the server-initiated leg (server-to-client), the inverse of every
+    /// other request frame. It allocates a correlation id, registers a one-shot
+    /// reply slot keyed by that id, and enqueues a [`ConnectionControl::Push`] for
+    /// the connection process owning `pid`; that process writes a [`Frame::Push`]
+    /// out on its socket. When the client answers with a `PushReply` carrying the
+    /// same correlation id, the connection process resolves the awaiter's slot. The
+    /// returned [`PushReplyAwaiter`] blocks (bounded) for that reply.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when the correlation id cannot be allocated, the
+    /// reply slot cannot be registered, or the control message cannot be enqueued
+    /// for the (possibly already-gone) connection process.
+    pub fn push_to_connection(
+        &self,
+        pid: u64,
+        payload: Vec<u8>,
+    ) -> Result<PushReplyAwaiter, ServerError> {
+        let correlation_id = self.inner.runtime.next_push_correlation_id();
+        let receiver = self.inner.runtime.register_push(correlation_id)?;
+        let control = ConnectionControl::Push {
+            correlation_id,
+            payload,
+        };
+        if self.inner.enqueue_control(pid, control) {
+            Ok(PushReplyAwaiter {
+                correlation_id,
+                receiver,
+            })
+        } else {
+            // The process is gone; drop the now-unreachable reply slot so it cannot
+            // leak in the correlation registry.
+            self.inner.runtime.cancel_push(correlation_id);
+            Err(ServerError::ListenerAccept {
+                message: format!("cannot push to connection process {pid}: process is not live"),
+            })
         }
     }
 
@@ -179,6 +238,48 @@ impl ConnectionHandle {
                 message: format!("connection process {} is not live", self.pid),
             })
         }
+    }
+}
+
+/// Awaits the correlated reply to a single server-initiated push.
+///
+/// Returned by [`ConnectionSupervisor::push_to_connection`]. The reply slot is
+/// resolved when the originating connection process receives a `PushReply` frame
+/// carrying the same correlation id, so [`PushReplyAwaiter::receive`] blocks
+/// (bounded) for that one correlated answer.
+#[derive(Debug)]
+pub struct PushReplyAwaiter {
+    correlation_id: u64,
+    receiver: Receiver<Vec<u8>>,
+}
+
+impl PushReplyAwaiter {
+    /// Returns the correlation id this awaiter is matched on.
+    #[must_use]
+    pub const fn correlation_id(&self) -> u64 {
+        self.correlation_id
+    }
+
+    /// Blocks up to `timeout` for the client's correlated reply payload.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when no reply arrives within `timeout` or the
+    /// connection process dropped the reply slot (e.g. the connection closed).
+    pub fn receive(&self, timeout: Duration) -> Result<Vec<u8>, ServerError> {
+        self.receiver.recv_timeout(timeout).map_err(|error| {
+            let detail = match error {
+                RecvTimeoutError::Timeout => "no correlated push reply arrived within the timeout",
+                RecvTimeoutError::Disconnected => {
+                    "the connection closed before sending a correlated push reply"
+                }
+            };
+            ServerError::ListenerAccept {
+                message: format!(
+                    "push correlation {} did not complete: {detail}",
+                    self.correlation_id
+                ),
+            }
+        })
     }
 }
 
@@ -252,9 +353,9 @@ impl SupervisorInner {
         })
     }
 
-    fn broadcast_control(&self, control: ConnectionControl) {
+    fn broadcast_control(&self, control: &ConnectionControl) {
         for connection in self.runtime.active_connections() {
-            if !self.enqueue_control(connection.pid, control) {
+            if !self.enqueue_control(connection.pid, control.clone()) {
                 tracing::debug!(
                     connection_pid = connection.pid,
                     peer_addr = ?connection.peer_addr,
@@ -266,6 +367,10 @@ impl SupervisorInner {
     }
 
     fn enqueue_control(&self, pid: u64, control: ConnectionControl) -> bool {
+        // Keep a key for the failure-path removal before the control is moved into
+        // the queue, so a non-`Copy` (push) control can still be located and pulled
+        // back out if the scheduler wakeup fails.
+        let removal_key = control.clone();
         if self.runtime.push_control(pid, control).is_err() {
             return false;
         }
@@ -275,16 +380,22 @@ impl SupervisorInner {
         {
             true
         } else {
-            self.runtime.remove_control(pid, control);
+            self.runtime.remove_control(pid, &removal_key);
             false
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConnectionControl {
     NotifyShutdown,
     ForceClose,
+    /// Server-initiated push of an opaque payload, correlated by `correlation_id`,
+    /// to be written out as a [`Frame::Push`] by the receiving connection process.
+    Push {
+        correlation_id: u64,
+        payload: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,6 +410,13 @@ pub(super) struct ConnectionRuntime {
     records: Mutex<HashMap<u64, ConnectionRecord>>,
     controls: Mutex<Vec<QueuedConnectionControl>>,
     control_atom: Atom,
+    /// One-shot reply slots for in-flight server pushes, keyed by correlation id.
+    /// The supervisor registers a slot in `push_to_connection`; the connection
+    /// process resolves it when the matching `PushReply` frame arrives.
+    push_replies: Mutex<HashMap<u64, Sender<Vec<u8>>>>,
+    /// Monotonic source of push correlation ids. Server-allocated, so it never
+    /// collides with a client-chosen id on this connection.
+    next_push_id: AtomicU64,
 }
 
 impl ConnectionRuntime {
@@ -308,11 +426,63 @@ impl ConnectionRuntime {
             records: Mutex::new(HashMap::new()),
             controls: Mutex::new(Vec::new()),
             control_atom,
+            push_replies: Mutex::new(HashMap::new()),
+            next_push_id: AtomicU64::new(1),
         }
+    }
+
+    /// Builds a runtime wrapping `services` for unit tests that exercise
+    /// `apply_frame` without a live scheduler. Uses a fresh interned control atom.
+    #[cfg(test)]
+    pub(super) fn for_tests(services: Arc<dyn ConnectionServices>) -> Self {
+        let atoms = AtomTable::with_common_atoms();
+        let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
+        Self::new(services, control_atom)
     }
 
     pub(super) fn services(&self) -> &dyn ConnectionServices {
         self.services.as_ref()
+    }
+
+    /// Allocates the next monotonic push correlation id.
+    fn next_push_correlation_id(&self) -> u64 {
+        self.next_push_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Registers a one-shot reply slot for `correlation_id` and returns its
+    /// receiver. The connection process resolves the slot via [`resolve_push`].
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when the correlation registry mutex is poisoned.
+    fn register_push(&self, correlation_id: u64) -> Result<Receiver<Vec<u8>>, ServerError> {
+        let (sender, receiver) = channel();
+        lock(&self.push_replies, "push correlation registry")?.insert(correlation_id, sender);
+        Ok(receiver)
+    }
+
+    /// Drops a registered reply slot without resolving it (the push could not be
+    /// delivered, so no reply can ever arrive).
+    pub(super) fn cancel_push(&self, correlation_id: u64) {
+        if let Ok(mut slots) = self.push_replies.lock() {
+            slots.remove(&correlation_id);
+        }
+    }
+
+    /// Resolves the reply slot for `correlation_id` with the client's reply
+    /// payload, waking the [`PushReplyAwaiter`]. Called by the connection process
+    /// when a correlated `PushReply` frame arrives. A missing slot (already
+    /// resolved, cancelled, or unknown id) is ignored.
+    pub(super) fn resolve_push(&self, correlation_id: u64, payload: Vec<u8>) {
+        let sender = self
+            .push_replies
+            .lock()
+            .ok()
+            .and_then(|mut slots| slots.remove(&correlation_id));
+        if let Some(sender) = sender {
+            // The receiver may already be gone if the awaiter timed out; a failed
+            // send is benign (the reply is simply discarded).
+            sender.send(payload).ok();
+        }
     }
 
     pub(super) const fn control_atom(&self) -> Atom {
@@ -418,13 +588,13 @@ impl ConnectionRuntime {
         Some(controls.remove(index).control)
     }
 
-    fn remove_control(&self, pid: u64, control: ConnectionControl) {
+    fn remove_control(&self, pid: u64, control: &ConnectionControl) {
         let Ok(mut controls) = self.controls.lock() else {
             return;
         };
         let Some(index) = controls
             .iter()
-            .position(|queued| queued.pid == pid && queued.control == control)
+            .position(|queued| queued.pid == pid && &queued.control == control)
         else {
             return;
         };
@@ -448,7 +618,7 @@ struct ConnectionRecord {
     peer_addr: Option<SocketAddr>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct QueuedConnectionControl {
     pid: u64,
     control: ConnectionControl,

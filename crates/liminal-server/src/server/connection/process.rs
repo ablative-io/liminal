@@ -23,6 +23,9 @@ use crate::ServerError;
 const READ_BUFFER_BYTES: usize = 8192;
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
+/// Application stream id used for server-initiated push frames. Push is an
+/// application-stream frame (non-zero stream id), like publish and conversation.
+const PUSH_STREAM_ID: u32 = 1;
 
 #[derive(Debug)]
 pub(super) struct ConnectionProcess {
@@ -130,6 +133,53 @@ impl ConnectionProcess {
                 self.runtime.finish(pid);
                 Some(NativeOutcome::Stop(ExitReason::Normal))
             }
+            ConnectionControl::Push {
+                correlation_id,
+                payload,
+            } => {
+                self.write_push(pid, correlation_id, payload);
+                None
+            }
+        }
+    }
+
+    /// Writes a server-initiated [`Frame::Push`] out on this connection's stream.
+    ///
+    /// This is the only place the server originates a frame to the client. A write
+    /// failure (or an encode failure, or a missing stream) is logged and the slot
+    /// is cancelled so the awaiter does not block forever on a reply that can never
+    /// arrive; the connection itself is left to its normal read-side lifecycle.
+    fn write_push(&mut self, pid: u64, correlation_id: u64, payload: Vec<u8>) {
+        let Some(stream) = self.stream.as_mut() else {
+            tracing::warn!(
+                connection_pid = pid,
+                correlation_id,
+                "server push skipped because connection stream is unavailable"
+            );
+            self.runtime.cancel_push(correlation_id);
+            return;
+        };
+        let frame = match Frame::new_push(PUSH_STREAM_ID, correlation_id, payload) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(
+                    connection_pid = pid,
+                    correlation_id,
+                    %error,
+                    "server push frame could not be constructed"
+                );
+                self.runtime.cancel_push(correlation_id);
+                return;
+            }
+        };
+        if let Err(error) = write_frame(stream, &frame) {
+            tracing::warn!(
+                connection_pid = pid,
+                correlation_id,
+                %error,
+                "server push write failed; the push reply slot is cancelled"
+            );
+            self.runtime.cancel_push(correlation_id);
         }
     }
 
@@ -227,10 +277,11 @@ pub(super) enum FrameAction {
 }
 
 pub(super) fn apply_frame(
-    services: &dyn ConnectionServices,
+    runtime: &ConnectionRuntime,
     state: &mut ConnectionProcessState,
     frame: Frame,
 ) -> FrameAction {
+    let services = runtime.services();
     match frame {
         Frame::Connect {
             min_version,
@@ -282,7 +333,23 @@ pub(super) fn apply_frame(
         Frame::ConversationClose {
             conversation_id, ..
         } => conversation_close(services, state, conversation_id),
-        Frame::Unknown { .. }
+        Frame::PushReply {
+            correlation_id,
+            payload,
+            ..
+        } => {
+            // The client answered a server-initiated push: resolve the matching
+            // one-shot reply slot so the server-side `PushReplyAwaiter` wakes with
+            // the correlated payload. The server stays silent on the wire — the
+            // reply terminates the push round trip.
+            runtime.resolve_push(correlation_id, payload);
+            FrameAction::NoResponse
+        }
+        // `Push` is server-to-client only; a client must never originate one. Ignore
+        // it rather than treating it as a fatal protocol error so a confused or
+        // malicious client cannot tear the connection down with a stray push.
+        Frame::Push { .. }
+        | Frame::Unknown { .. }
         | Frame::ConnectAck { .. }
         | Frame::ConnectError { .. }
         | Frame::SubscribeAck { .. }
@@ -314,7 +381,7 @@ fn process_buffer(
             Err(error) => return Err(server_error_from_protocol(&error)),
         };
         buffer.drain(..consumed);
-        match apply_frame(runtime.services(), state, frame) {
+        match apply_frame(runtime, state, frame) {
             FrameAction::Respond(response) => write_frame(stream, &response)?,
             FrameAction::NoResponse => {}
             FrameAction::Close => return Ok(ProcessStatus::Close),

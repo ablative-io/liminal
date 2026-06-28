@@ -17,4 +17,4 @@ pub use services::{
     ChannelCluster, ConnectionServices, ConnectionSubscription, LiminalConnectionServices,
     PublishOutcome,
 };
-pub use supervisor::{ConnectionHandle, ConnectionSupervisor};
+pub use supervisor::{ConnectionHandle, ConnectionSupervisor, PushReplyAwaiter};

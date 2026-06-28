@@ -5,7 +5,7 @@ mod protocol;
 mod tcp;
 
 #[cfg(feature = "std")]
-pub use tcp::TcpRemoteTransport;
+pub use tcp::{PushClient, PushedFrame, TcpRemoteTransport};
 
 pub use config::{SdkConfig, build_channel_handle, build_conversation_handle};
 pub use handles::{
