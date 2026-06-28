@@ -247,3 +247,142 @@ impl Drop for SubscriptionInner {
             .terminate_process(self.pid, ExitReason::Normal);
     }
 }
+
+/// WR-9b: the REAL [`SubscriberProcess`] running on beamr's cooperative
+/// (single-threaded / wasm) [`beamr::scheduler::WasmScheduler`].
+///
+/// This proves the production subscriber handler — the same `NativeHandler` the
+/// threaded [`SubscriptionHandle::spawn`] spawns — runs unchanged on the
+/// cooperative scheduler that a browser host drives. There is no toy stand-in:
+/// the test spawns the genuine [`SubscriberProcess`], delivers a genuine
+/// [`crate::channel::wire::encode_envelope`] frame as a real beamr binary, pumps
+/// cooperative `run_until_idle` turns, and asserts the envelope is decoded by the
+/// handler's own `accept_remote_frame` path and lands in the shared inbox a
+/// [`SubscriptionHandle::try_next`] would read.
+///
+/// The handler runs cooperatively AS-IS: its `handle` only touches
+/// platform-neutral [`NativeContext`] capabilities (`set_trap_exit`, `recv`),
+/// [`BinaryRef`], and [`decode_envelope`] — none of which reach for threads,
+/// tokio, sockets, or a `SharedState`. The only wiring the smoke supplies is the
+/// cooperative driver (spawn + owned-binary delivery + turn pump), exactly the
+/// host-side seam the threaded `SubscriptionHandle`/channel-actor provide on
+/// native.
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod cooperative_smoke {
+    use std::cell::RefCell;
+    use std::collections::VecDeque;
+    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
+
+    use beamr::atom::AtomTable;
+    use beamr::ets::copy_term_to_ets;
+    use beamr::module::ModuleRegistry;
+    use beamr::native::BifRegistryImpl;
+    use beamr::process::heap::Heap;
+    use beamr::scheduler::WasmScheduler;
+    use beamr::term::shared_binary::{SharedBinary, write_proc_bin};
+
+    use super::{SubscriberInbox, SubscriberProcess};
+    use crate::channel::SchemaId;
+    use crate::channel::wire::encode_envelope;
+    use crate::envelope::{Envelope, PublisherId};
+
+    /// Build a cooperative scheduler the way a wasm host holds it (single
+    /// `Rc<RefCell<…>>` on one thread).
+    fn cooperative_scheduler() -> Rc<RefCell<WasmScheduler>> {
+        let atom_table = Arc::new(AtomTable::with_common_atoms());
+        let modules = Arc::new(ModuleRegistry::new());
+        let bifs = Arc::new(BifRegistryImpl::new());
+        Rc::new(RefCell::new(WasmScheduler::new(atom_table, modules, bifs)))
+    }
+
+    /// Encode `envelope` into the production wire frame and wrap it as a
+    /// heap-independent beamr binary term ready for `send_owned`, mirroring how a
+    /// remote node hands a published frame to a subscriber pid (SRV-005).
+    fn frame_as_owned_binary(envelope: &Envelope) -> beamr::ets::OwnedTerm {
+        let bytes = encode_envelope(envelope);
+        let shared = SharedBinary::new(bytes);
+        // A ProcBin reference needs three heap words; copy it into ETS-owned
+        // memory so the scratch heap can be dropped before delivery.
+        let mut scratch = Heap::new(8);
+        let words = scratch
+            .alloc_slice(3)
+            .expect("scratch heap holds a proc-bin reference");
+        let term = write_proc_bin(words, &shared).expect("proc-bin term writes");
+        copy_term_to_ets(term).expect("frame copies into an owned binary")
+    }
+
+    fn sample_envelope() -> Envelope {
+        // A whole-millisecond timestamp so the round-trip through the wire codec
+        // (which carries millisecond resolution, see `channel::wire`) is exact;
+        // `Utc::now()` sub-millisecond precision would otherwise be truncated on
+        // decode and is irrelevant to what this smoke proves.
+        let timestamp = chrono::TimeZone::timestamp_millis_opt(&chrono::Utc, 1_700_000_000_123)
+            .single()
+            .expect("valid fixed millisecond timestamp");
+        Envelope::with_timestamp(
+            b"{\"value\":42}".to_vec(),
+            None,
+            SchemaId::new(),
+            PublisherId::from("publisher-cooperative"),
+            timestamp,
+        )
+    }
+
+    #[test]
+    fn real_subscriber_process_delivers_a_published_envelope_cooperatively() {
+        let scheduler = cooperative_scheduler();
+
+        // The shared inbox the subscriber pushes decoded envelopes onto — the
+        // exact channel the threaded `SubscriptionHandle::try_next` reads.
+        let inbox: SubscriberInbox = Arc::new(Mutex::new(VecDeque::new()));
+        let process_inbox = Arc::clone(&inbox);
+
+        // Spawn the GENUINE production subscriber handler as a first-class native
+        // process on the cooperative scheduler.
+        let pid = scheduler.borrow_mut().spawn_native_root(Box::new(move || {
+            Box::new(SubscriberProcess {
+                inbox: Arc::clone(&process_inbox),
+            }) as Box<dyn beamr::native::native_process::NativeHandler>
+        }));
+
+        // First turn: the handler runs once, asserts trap_exit, finds an empty
+        // mailbox, and parks (`Wait`). No envelope has been delivered yet.
+        scheduler.borrow_mut().run_until_idle();
+        assert!(
+            inbox.lock().expect("inbox lock").is_empty(),
+            "no envelope is delivered before one is published"
+        );
+
+        // Publish: deliver a real encoded frame as a beamr binary straight to the
+        // subscriber pid, exactly as a remote publish lands (SRV-005). This wakes
+        // the parked process.
+        let published = sample_envelope();
+        let frame = frame_as_owned_binary(&published);
+        scheduler
+            .borrow_mut()
+            .send_owned(pid, &frame)
+            .expect("frame is delivered to the live subscriber pid");
+
+        // Pump turns: the woken handler drains the binary, decodes it through its
+        // own `accept_remote_frame` path, and pushes the envelope onto the inbox.
+        let mut delivered = None;
+        for _ in 0..8 {
+            scheduler.borrow_mut().run_until_idle();
+            // Pop in a scoped statement so the mutex guard is released before the
+            // `if let` body (no significant-drop guard held across the scrutinee).
+            let next = inbox.lock().expect("inbox lock").pop_front();
+            if let Some(envelope) = next {
+                delivered = Some(envelope);
+                break;
+            }
+        }
+
+        assert_eq!(
+            delivered.as_ref(),
+            Some(&published),
+            "the real subscriber decoded and delivered the published envelope"
+        );
+    }
+}
