@@ -33,7 +33,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 
-use liminal::protocol::{Frame, ProtocolError, ProtocolVersion, decode, encode, encoded_len};
+use liminal::protocol::{
+    Frame, ProtocolError, ProtocolVersion, WorkerRegisterOutcome, WorkerRegistration, decode,
+    encode, encoded_len,
+};
 
 use crate::SdkError;
 
@@ -111,30 +114,42 @@ impl PushClient {
     /// configuration fails, and [`SdkError::Protocol`] when the handshake is
     /// rejected or the socket cannot be cloned for the reader thread.
     pub fn connect(address: &str) -> Result<Self, SdkError> {
-        let mut stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
-            description: format!("failed to connect push client to {address}: {source}"),
-        })?;
-        stream
-            .set_nodelay(true)
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to disable Nagle for {address}: {source}"),
-            })?;
-        // A bounded read timeout lets the reader thread wake to check the stop flag
-        // even when the server is silent; without it the thread would block forever
-        // on a quiet connection and never observe drop.
-        stream
-            .set_read_timeout(Some(READER_POLL_TIMEOUT))
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to set push read timeout for {address}: {source}"),
-            })?;
-        stream
-            .set_write_timeout(Some(WRITE_TIMEOUT))
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to set push write timeout for {address}: {source}"),
-            })?;
-
+        let mut stream = connect_socket(address)?;
         handshake(&mut stream)?;
+        Self::start_reader(stream)
+    }
 
+    /// Connects, performs the handshake, then synchronously registers this client
+    /// as a worker before starting the background reader.
+    ///
+    /// This mirrors the synchronous `Connect`/`ConnectAck` pattern: the
+    /// `WorkerRegister` frame is written and its [`Frame::WorkerRegisterAck`] read
+    /// on the calling thread, BEFORE the Push-only background reader is spawned, so
+    /// the ack is never swallowed by the reader. A connect-variant (rather than a
+    /// `register()` method on a connected client) is the cleanest fit: `connect`
+    /// spawns the reader as its last step, so registration must be threaded into
+    /// the connect sequence to land before that spawn; a post-connect method would
+    /// race the already-running reader for the ack frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the TCP connection or socket
+    /// configuration fails, and [`SdkError::Protocol`] when the handshake is
+    /// rejected, the server rejects the registration (the rejection reason is
+    /// carried in the error), or the socket cannot be cloned for the reader thread.
+    pub fn connect_with_registration(
+        address: &str,
+        registration: WorkerRegistration,
+    ) -> Result<Self, SdkError> {
+        let mut stream = connect_socket(address)?;
+        handshake(&mut stream)?;
+        register(&mut stream, registration)?;
+        Self::start_reader(stream)
+    }
+
+    /// Spawns the Push-only background reader over a handshaken (and, for a worker,
+    /// already-registered) stream and returns the running client.
+    fn start_reader(stream: TcpStream) -> Result<Self, SdkError> {
         // Clone the socket so the reader thread owns one handle and the writer
         // holds the other; both refer to the same underlying connection.
         let read_stream = stream.try_clone().map_err(|source| SdkError::Protocol {
@@ -205,6 +220,66 @@ impl Drop for PushClient {
             // so this join does not hang on a quiet connection.
             reader.join().ok();
         }
+    }
+}
+
+/// Opens and configures the push-client socket (Nagle off, bounded read/write
+/// timeouts) before any framing.
+fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
+    let stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
+        description: format!("failed to connect push client to {address}: {source}"),
+    })?;
+    stream
+        .set_nodelay(true)
+        .map_err(|source| SdkError::Connection {
+            description: format!("failed to disable Nagle for {address}: {source}"),
+        })?;
+    // A bounded read timeout lets the reader thread wake to check the stop flag
+    // even when the server is silent; without it the thread would block forever
+    // on a quiet connection and never observe drop.
+    stream
+        .set_read_timeout(Some(READER_POLL_TIMEOUT))
+        .map_err(|source| SdkError::Connection {
+            description: format!("failed to set push read timeout for {address}: {source}"),
+        })?;
+    stream
+        .set_write_timeout(Some(WRITE_TIMEOUT))
+        .map_err(|source| SdkError::Connection {
+            description: format!("failed to set push write timeout for {address}: {source}"),
+        })?;
+    Ok(stream)
+}
+
+/// Drives the synchronous worker-registration round trip
+/// (`WorkerRegister` -> `WorkerRegisterAck`) on a handshaken socket, before the
+/// background reader is spawned.
+///
+/// A `Rejected` ack maps to a typed [`SdkError::Protocol`] carrying the server's
+/// reason; any non-ack reply is a protocol error.
+fn register(stream: &mut TcpStream, registration: WorkerRegistration) -> Result<(), SdkError> {
+    let frame = Frame::WorkerRegister {
+        flags: 0,
+        registration,
+    };
+    write_frame(stream, &frame)?;
+    let mut buffer = Vec::new();
+    match read_one_frame(stream, &mut buffer)? {
+        Frame::WorkerRegisterAck {
+            outcome: WorkerRegisterOutcome::Accepted,
+            ..
+        } => Ok(()),
+        Frame::WorkerRegisterAck {
+            outcome: WorkerRegisterOutcome::Rejected { reason },
+            ..
+        } => Err(SdkError::Protocol {
+            description: format!("server rejected worker registration: {reason}"),
+        }),
+        other => Err(SdkError::Protocol {
+            description: format!(
+                "expected WorkerRegisterAck during registration, received {:?}",
+                other.frame_type()
+            ),
+        }),
     }
 }
 
@@ -297,8 +372,9 @@ fn next_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Option<Fra
     }
 }
 
-/// Reads one complete frame, blocking (no timeout tolerance) — used only for the
-/// synchronous handshake reply before the background reader starts.
+/// Reads one complete frame, blocking (no timeout tolerance) — used for the
+/// synchronous handshake and worker-registration replies, before the background
+/// reader starts.
 fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, SdkError> {
     loop {
         match decode(buffer) {
@@ -312,7 +388,8 @@ fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame,
                 FillOutcome::Read => {}
                 FillOutcome::TimedOut => {
                     return Err(SdkError::Connection {
-                        description: "push handshake timed out waiting for ConnectAck".to_string(),
+                        description: "push connection timed out waiting for a control-frame reply"
+                            .to_string(),
                     });
                 }
             },

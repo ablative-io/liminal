@@ -11,8 +11,8 @@ use beamr::term::Term;
 
 use liminal::protocol::{
     CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG,
-    ProtocolError, ProtocolVersion, SchemaId as ProtocolSchemaId, decode, encode, encoded_len,
-    negotiate_version,
+    ProtocolError, ProtocolVersion, SchemaId as ProtocolSchemaId, WorkerRegisterOutcome,
+    WorkerRegistration, decode, encode, encoded_len, negotiate_version,
 };
 
 use super::conversation::ConnectionConversation;
@@ -106,7 +106,13 @@ impl ConnectionProcess {
                 return NativeOutcome::Stop(ExitReason::Error);
             }
         }
-        match process_buffer(stream, &self.runtime, &mut self.state, &mut self.buffer) {
+        match process_buffer(
+            pid,
+            stream,
+            &self.runtime,
+            &mut self.state,
+            &mut self.buffer,
+        ) {
             Ok(ProcessStatus::Continue) => NativeOutcome::Continue,
             Ok(ProcessStatus::Close) => {
                 self.runtime.finish(pid);
@@ -277,6 +283,7 @@ pub(super) enum FrameAction {
 }
 
 pub(super) fn apply_frame(
+    pid: u64,
     runtime: &ConnectionRuntime,
     state: &mut ConnectionProcessState,
     frame: Frame,
@@ -345,10 +352,15 @@ pub(super) fn apply_frame(
             runtime.resolve_push(correlation_id, payload);
             FrameAction::NoResponse
         }
-        // `Push` is server-to-client only; a client must never originate one. Ignore
-        // it rather than treating it as a fatal protocol error so a confused or
-        // malicious client cannot tear the connection down with a stray push.
+        Frame::WorkerRegister { registration, .. } => {
+            worker_register_response(pid, runtime, registration)
+        }
+        // `Push` is server-to-client only; a client must never originate one.
+        // `WorkerRegisterAck` is likewise server-to-client. Ignore these rather
+        // than treating them as a fatal protocol error so a confused or malicious
+        // client cannot tear the connection down with a stray inbound frame.
         Frame::Push { .. }
+        | Frame::WorkerRegisterAck { .. }
         | Frame::Unknown { .. }
         | Frame::ConnectAck { .. }
         | Frame::ConnectError { .. }
@@ -364,7 +376,52 @@ pub(super) fn apply_frame(
     }
 }
 
+/// Associates a worker registration with this connection and invokes the
+/// configured connection notifier.
+///
+/// The notifier is consulted FIRST: only after the application accepts (or when
+/// no notifier is configured) is the registration stored on the connection
+/// record, so the close-path `on_worker_unregistered` fires for exactly the
+/// connections the application accepted — a rejected worker leaves no record and
+/// triggers no later deregistration. The ack is synchronous: a notifier error
+/// yields a `Rejected` ack carrying the reason so the worker never believes it is
+/// registered after the application declined it. With no notifier configured the
+/// registration is accepted unconditionally, keeping liminal usable standalone.
+fn worker_register_response(
+    pid: u64,
+    runtime: &ConnectionRuntime,
+    registration: WorkerRegistration,
+) -> FrameAction {
+    if let Some(notifier) = runtime.notifier() {
+        if let Err(error) = notifier.on_worker_registered(pid, &registration) {
+            return worker_register_rejected(error.to_string());
+        }
+    }
+    // Store only after acceptance. A poisoned-registry error here means the
+    // accepted registration cannot be tracked for deregistration, so reject the
+    // worker (and undo the application-side registration) rather than leave a
+    // silent, never-deregistered association.
+    if let Err(error) = runtime.set_registration(pid, registration) {
+        if let Some(notifier) = runtime.notifier() {
+            notifier.on_worker_unregistered(pid);
+        }
+        return worker_register_rejected(error.to_string());
+    }
+    FrameAction::Respond(Frame::WorkerRegisterAck {
+        flags: 0,
+        outcome: WorkerRegisterOutcome::Accepted,
+    })
+}
+
+const fn worker_register_rejected(reason: String) -> FrameAction {
+    FrameAction::Respond(Frame::WorkerRegisterAck {
+        flags: 0,
+        outcome: WorkerRegisterOutcome::Rejected { reason },
+    })
+}
+
 fn process_buffer(
+    pid: u64,
     stream: &mut TcpStream,
     runtime: &ConnectionRuntime,
     state: &mut ConnectionProcessState,
@@ -381,7 +438,7 @@ fn process_buffer(
             Err(error) => return Err(server_error_from_protocol(&error)),
         };
         buffer.drain(..consumed);
-        match apply_frame(runtime, state, frame) {
+        match apply_frame(pid, runtime, state, frame) {
             FrameAction::Respond(response) => write_frame(stream, &response)?,
             FrameAction::NoResponse => {}
             FrameAction::Close => return Ok(ProcessStatus::Close),

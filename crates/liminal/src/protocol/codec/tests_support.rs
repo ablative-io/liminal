@@ -1,6 +1,6 @@
 use crate::protocol::{
     CausalContext, Frame, MessageEnvelope, MessageId, ProtocolError, ProtocolVersion, SchemaId,
-    decode, encode, encoded_len,
+    WorkerRegisterOutcome, WorkerRegistration, decode, encode, encoded_len,
 };
 
 pub(super) fn round_trip(frame: &Frame) -> Result<Frame, ProtocolError> {
@@ -22,7 +22,46 @@ pub(super) fn sample_frames() -> Vec<Frame> {
     frames.extend(conversation_frames());
     frames.extend(pressure_frames());
     frames.extend(push_frames());
+    frames.extend(worker_register_frames());
     frames
+}
+
+pub(super) fn worker_register_frames() -> [Frame; 4] {
+    [
+        // node = Some
+        Frame::WorkerRegister {
+            flags: 22,
+            registration: WorkerRegistration {
+                namespaces: vec!["default".to_owned(), "billing".to_owned()],
+                task_queue: "payments".to_owned(),
+                node: Some("node-a".to_owned()),
+                activity_types: vec!["charge".to_owned(), "refund".to_owned()],
+                identity: "worker-1".to_owned(),
+            },
+        },
+        // node = None (and empty vecs) — exercises the optional-node presence byte
+        // and zero-count string vectors.
+        Frame::WorkerRegister {
+            flags: 0,
+            registration: WorkerRegistration {
+                namespaces: Vec::new(),
+                task_queue: "payments".to_owned(),
+                node: None,
+                activity_types: Vec::new(),
+                identity: "worker-2".to_owned(),
+            },
+        },
+        Frame::WorkerRegisterAck {
+            flags: 23,
+            outcome: WorkerRegisterOutcome::Accepted,
+        },
+        Frame::WorkerRegisterAck {
+            flags: 0,
+            outcome: WorkerRegisterOutcome::Rejected {
+                reason: "task queue not served".to_owned(),
+            },
+        },
+    ]
 }
 
 fn push_frames() -> [Frame; 2] {

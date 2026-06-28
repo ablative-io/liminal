@@ -46,6 +46,14 @@ pub const PUBLISH_IDEMPOTENCY_KEY_FLAG: u8 = 0x02;
 /// rides the existing `flags` byte, so no wire-format change is required.
 pub const PUBLISH_DELIVERED_FLAG: u8 = 0x01;
 
+/// Status byte prefixing a [`Frame::WorkerRegisterAck`] payload that signals the
+/// registration was accepted (no further payload follows).
+pub(crate) const WORKER_REGISTER_ACK_ACCEPTED: u8 = 0x00;
+
+/// Status byte prefixing a [`Frame::WorkerRegisterAck`] payload that signals the
+/// registration was rejected (a length-prefixed reason string follows).
+pub(crate) const WORKER_REGISTER_ACK_REJECTED: u8 = 0x01;
+
 /// Protocol frame categories and their stable wire discriminants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameType {
@@ -93,6 +101,10 @@ pub enum FrameType {
     Push,
     /// Client-initiated correlated reply to a server push.
     PushReply,
+    /// Worker self-registration announcing identity and routing dimensions.
+    WorkerRegister,
+    /// Server acknowledgement of a worker registration (accepted or rejected).
+    WorkerRegisterAck,
     /// Forward-compatible frame type not known to this implementation.
     Unknown(u8),
 }
@@ -109,6 +121,8 @@ impl FrameType {
                 | Self::Disconnect
                 | Self::Ping
                 | Self::Pong
+                | Self::WorkerRegister
+                | Self::WorkerRegisterAck
         )
     }
 }
@@ -138,6 +152,8 @@ impl From<u8> for FrameType {
             0x14 => Self::Pong,
             0x15 => Self::Push,
             0x16 => Self::PushReply,
+            0x17 => Self::WorkerRegister,
+            0x18 => Self::WorkerRegisterAck,
             unknown => Self::Unknown(unknown),
         }
     }
@@ -168,6 +184,8 @@ impl From<FrameType> for u8 {
             FrameType::Pong => 0x14,
             FrameType::Push => 0x15,
             FrameType::PushReply => 0x16,
+            FrameType::WorkerRegister => 0x17,
+            FrameType::WorkerRegisterAck => 0x18,
             FrameType::Unknown(type_id) => type_id,
         }
     }
@@ -189,6 +207,39 @@ pub struct FrameHeader {
 impl FrameHeader {
     /// Serialized header length in bytes.
     pub const WIRE_LEN: usize = HEADER_LEN;
+}
+
+/// Self-describing worker registration carried by [`Frame::WorkerRegister`].
+///
+/// A worker announces the routing dimensions it serves plus a stable identity so
+/// the server can associate the worker with its connection and the application can
+/// route work to it. `node` is optional locality (the routing model treats node as
+/// an optional dimension); the codec encodes it with a presence byte rather than
+/// flattening `None` to an empty string.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerRegistration {
+    /// Namespaces this worker serves.
+    pub namespaces: Vec<String>,
+    /// Task queue this worker pulls from.
+    pub task_queue: String,
+    /// Optional node locality; `None` when the worker declares no node affinity.
+    pub node: Option<String>,
+    /// Activity types this worker can execute.
+    pub activity_types: Vec<String>,
+    /// Stable worker identity.
+    pub identity: String,
+}
+
+/// Outcome of a worker registration, carried by [`Frame::WorkerRegisterAck`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WorkerRegisterOutcome {
+    /// The server accepted the registration.
+    Accepted,
+    /// The server rejected the registration, with a human-readable reason.
+    Rejected {
+        /// Human-readable rejection reason surfaced to the worker.
+        reason: String,
+    },
 }
 
 /// A typed protocol frame body plus the header metadata required to encode it.
@@ -348,6 +399,29 @@ pub enum Frame {
         correlation_id: u64,
         payload: Vec<u8>,
     },
+    /// Worker self-registration over an established connection.
+    ///
+    /// A worker sends this control frame (stream 0) after the connection
+    /// handshake to announce its identity and routing dimensions. The server
+    /// associates the registration with the connection's process id and surfaces
+    /// it to the application via the connection-notifier hook, then answers with a
+    /// [`Frame::WorkerRegisterAck`]. `node` is optional locality and is encoded
+    /// with a presence byte, never flattened to an empty string.
+    WorkerRegister {
+        flags: u8,
+        registration: WorkerRegistration,
+    },
+    /// Server acknowledgement of a [`Frame::WorkerRegister`].
+    ///
+    /// Carries the registration outcome: [`WorkerRegisterOutcome::Accepted`] when
+    /// the server (and any configured notifier) accepted the worker, or
+    /// [`WorkerRegisterOutcome::Rejected`] carrying a human-readable reason when it
+    /// did not. The acknowledgement is synchronous so a worker never believes it is
+    /// registered when the application rejected it.
+    WorkerRegisterAck {
+        flags: u8,
+        outcome: WorkerRegisterOutcome,
+    },
     /// Forward-compatible frame preserved after length-delimited skipping.
     Unknown {
         type_id: u8,
@@ -478,6 +552,8 @@ impl Frame {
             Self::Pong { .. } => FrameType::Pong,
             Self::Push { .. } => FrameType::Push,
             Self::PushReply { .. } => FrameType::PushReply,
+            Self::WorkerRegister { .. } => FrameType::WorkerRegister,
+            Self::WorkerRegisterAck { .. } => FrameType::WorkerRegisterAck,
             Self::Unknown { type_id, .. } => FrameType::Unknown(*type_id),
         }
     }
@@ -508,6 +584,8 @@ impl Frame {
             | Self::Pong { flags }
             | Self::Push { flags, .. }
             | Self::PushReply { flags, .. }
+            | Self::WorkerRegister { flags, .. }
+            | Self::WorkerRegisterAck { flags, .. }
             | Self::Unknown { flags, .. } => *flags,
         }
     }
@@ -521,7 +599,9 @@ impl Frame {
             | Self::ConnectError { .. }
             | Self::Disconnect { .. }
             | Self::Ping { .. }
-            | Self::Pong { .. } => 0,
+            | Self::Pong { .. }
+            | Self::WorkerRegister { .. }
+            | Self::WorkerRegisterAck { .. } => 0,
             Self::Subscribe { stream_id, .. }
             | Self::SubscribeAck { stream_id, .. }
             | Self::SubscribeError { stream_id, .. }
