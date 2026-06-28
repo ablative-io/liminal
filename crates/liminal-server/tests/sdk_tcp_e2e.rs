@@ -21,13 +21,19 @@ use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
 use futures_core::Stream;
+use std::sync::Arc;
+use std::sync::Mutex;
+
+use liminal::protocol::WorkerRegistration;
 use liminal_sdk::{
     ChannelHandle, ConnectionPoolConfig, ConversationHandle, DeliveryAck, PressureResponse,
     PushClient, RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SchemaMetadata,
     SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
 };
+use liminal_server::ServerError;
 use liminal_server::config::{ChannelDef, ServerConfig};
-use liminal_server::server::connection::ConnectionSupervisor;
+use liminal_server::server::connection::notifier::ConnectionNotifier;
+use liminal_server::server::connection::{ConnectionSupervisor, LiminalConnectionServices};
 use liminal_server::server::listener::ServerListener;
 
 use serde::{Deserialize, Serialize};
@@ -130,6 +136,34 @@ impl RunningServer {
             drain_timeout_ms: 30_000,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
+        let listener = ServerListener::bind(&config, supervisor)?;
+        let supervisor = listener.supervisor();
+        let address = listener.local_addr();
+        Ok(Self {
+            listener: Some(listener),
+            supervisor,
+            address,
+        })
+    }
+
+    /// Starts a server whose connection supervisor carries `notifier`, so worker
+    /// registration over a real socket exercises the application hook.
+    fn start_with_notifier(notifier: Arc<dyn ConnectionNotifier>) -> Result<Self, Box<dyn Error>> {
+        let config = ServerConfig {
+            listen_address: "127.0.0.1:0".parse()?,
+            health_listen_address: reserve_loopback_port()?,
+            channels: vec![ChannelDef {
+                name: CHANNEL.to_owned(),
+                schema_ref: "schemas/events.json".to_owned(),
+                durable: false,
+            }],
+            routing_rules: Vec::new(),
+            persistence_path: None,
+            cluster: None,
+            drain_timeout_ms: 30_000,
+        };
+        let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
+        let supervisor = ConnectionSupervisor::with_services_and_notifier(services, notifier)?;
         let listener = ServerListener::bind(&config, supervisor)?;
         let supervisor = listener.supervisor();
         let address = listener.local_addr();
@@ -551,6 +585,175 @@ fn server_push_does_not_regress_request_reply() -> Result<(), Box<dyn Error>> {
             activity: "still-works".to_owned(),
         }
     );
+
+    drop(push_client);
+    server.shutdown()?;
+    Ok(())
+}
+
+/// Records the worker-registration lifecycle calls a server-side notifier
+/// observes, so an end-to-end test can assert the exact `(pid, registration)` the
+/// hook was handed and the matching deregistration on close.
+#[derive(Debug)]
+struct RecordingNotifier {
+    registered: Mutex<Vec<(u64, WorkerRegistration)>>,
+    unregistered: Mutex<Vec<u64>>,
+    reject_with: Option<String>,
+}
+
+impl RecordingNotifier {
+    const fn accepting() -> Self {
+        Self {
+            registered: Mutex::new(Vec::new()),
+            unregistered: Mutex::new(Vec::new()),
+            reject_with: None,
+        }
+    }
+
+    fn rejecting(reason: &str) -> Self {
+        Self {
+            registered: Mutex::new(Vec::new()),
+            unregistered: Mutex::new(Vec::new()),
+            reject_with: Some(reason.to_owned()),
+        }
+    }
+
+    fn registered_calls(&self) -> Result<Vec<(u64, WorkerRegistration)>, Box<dyn Error>> {
+        Ok(self
+            .registered
+            .lock()
+            .map_err(|error| format!("registration recorder poisoned: {error}"))?
+            .clone())
+    }
+
+    fn unregistered_calls(&self) -> Result<Vec<u64>, Box<dyn Error>> {
+        Ok(self
+            .unregistered
+            .lock()
+            .map_err(|error| format!("deregistration recorder poisoned: {error}"))?
+            .clone())
+    }
+}
+
+impl ConnectionNotifier for RecordingNotifier {
+    fn on_worker_registered(
+        &self,
+        pid: u64,
+        registration: &WorkerRegistration,
+    ) -> Result<(), ServerError> {
+        self.registered
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("registration recorder poisoned: {error}"),
+            })?
+            .push((pid, registration.clone()));
+        self.reject_with.as_ref().map_or(Ok(()), |reason| {
+            Err(ServerError::ListenerAccept {
+                message: reason.clone(),
+            })
+        })
+    }
+
+    fn on_worker_unregistered(&self, pid: u64) {
+        if let Ok(mut unregistered) = self.unregistered.lock() {
+            unregistered.push(pid);
+        }
+    }
+}
+
+fn worker_registration() -> WorkerRegistration {
+    WorkerRegistration {
+        namespaces: vec!["default".to_owned(), "billing".to_owned()],
+        task_queue: "payments".to_owned(),
+        node: Some("node-a".to_owned()),
+        activity_types: vec!["charge".to_owned(), "refund".to_owned()],
+        identity: "worker-7".to_owned(),
+    }
+}
+
+/// LSUB-L2 Stage 1: a worker registers over its existing connection. The server
+/// associates the registration with the connection pid, surfaces it to the
+/// notifier with matching dimensions, acks Accepted (so `connect_with_registration`
+/// returns Ok), and fires `on_worker_unregistered` with the SAME pid on close.
+#[test]
+fn worker_registration_round_trips_and_deregisters_on_close() -> Result<(), Box<dyn Error>> {
+    let notifier = Arc::new(RecordingNotifier::accepting());
+    let server = RunningServer::start_with_notifier(Arc::clone(&notifier) as Arc<_>)?;
+
+    let registration = worker_registration();
+    let push_client =
+        PushClient::connect_with_registration(&server.address().to_string(), registration.clone())?;
+    let pid = server.single_connection_pid()?;
+
+    // The notifier observed exactly one registration, for this connection pid,
+    // carrying the dimensions the worker announced.
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        let calls = notifier.registered_calls()?;
+        if let [(observed_pid, observed)] = calls.as_slice() {
+            assert_eq!(*observed_pid, pid);
+            assert_eq!(*observed, registration);
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("notifier never observed the worker registration".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Closing the worker connection deregisters it, with the same pid.
+    drop(push_client);
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    loop {
+        // The supervisor reaps externally-closed connections lazily; drive it so a
+        // socket close that bypassed the handler's finish path is still observed.
+        let _reaped = server.supervisor.reap_crashed_connections();
+        if notifier.unregistered_calls()?.contains(&pid) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err("notifier never observed the worker deregistration".into());
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// A rejecting notifier makes the server ack Rejected; the SDK
+/// `connect_with_registration` returns a typed `Err` carrying the reason.
+#[test]
+fn worker_registration_rejected_returns_typed_error() -> Result<(), Box<dyn Error>> {
+    let notifier = Arc::new(RecordingNotifier::rejecting("task queue not served"));
+    let server = RunningServer::start_with_notifier(Arc::clone(&notifier) as Arc<_>)?;
+
+    let result =
+        PushClient::connect_with_registration(&server.address().to_string(), worker_registration());
+
+    let error = result.err().ok_or("expected registration to be rejected")?;
+    let message = error.to_string();
+    assert!(
+        message.contains("task queue not served"),
+        "rejection error should carry the server reason, got: {message}"
+    );
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// Standalone liminal (no notifier configured) still accepts a worker
+/// registration over a real socket: `connect_with_registration` returns Ok and the
+/// connection is live, proving the hook is purely additive.
+#[test]
+fn worker_registration_without_notifier_is_accepted() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+
+    let push_client = PushClient::connect_with_registration(
+        &server.address().to_string(),
+        worker_registration(),
+    )?;
+    let _pid = server.single_connection_pid()?;
 
     drop(push_client);
     server.shutdown()?;

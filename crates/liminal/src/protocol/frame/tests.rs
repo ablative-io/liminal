@@ -24,6 +24,10 @@ fn frame_type_discriminants_round_trip() {
         (0x12, FrameType::Reject),
         (0x13, FrameType::Ping),
         (0x14, FrameType::Pong),
+        (0x15, FrameType::Push),
+        (0x16, FrameType::PushReply),
+        (0x17, FrameType::WorkerRegister),
+        (0x18, FrameType::WorkerRegisterAck),
     ];
 
     for (wire, frame_type) in values {

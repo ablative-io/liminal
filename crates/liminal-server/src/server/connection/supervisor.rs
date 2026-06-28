@@ -11,6 +11,9 @@ use beamr::native::native_process::NativeHandlerFactory;
 use beamr::process::ExitReason;
 use beamr::scheduler::{Scheduler, SchedulerConfig};
 
+use liminal::protocol::WorkerRegistration;
+
+use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
 use super::services::{ConnectionServices, LiminalConnectionServices};
 use crate::ServerError;
@@ -51,7 +54,27 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when scheduler startup fails.
     pub fn with_services(services: Arc<dyn ConnectionServices>) -> Result<Self, ServerError> {
-        SupervisorInner::new(services).map(|inner| Self {
+        SupervisorInner::new(services, None).map(|inner| Self {
+            inner: Arc::new(inner),
+        })
+    }
+
+    /// Creates a connection supervisor with an explicit service adapter and a
+    /// connection-keyed worker-registration notifier.
+    ///
+    /// The `notifier` is invoked when a worker registers on a connection and when
+    /// such a connection closes. Supervisors built via [`Self::with_services`],
+    /// [`Self::from_config`], or [`Self::new`] carry no notifier, so liminal still
+    /// runs standalone; a `WorkerRegister` frame is then accepted without any
+    /// application callback.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when scheduler startup fails.
+    pub fn with_services_and_notifier(
+        services: Arc<dyn ConnectionServices>,
+        notifier: Arc<dyn ConnectionNotifier>,
+    ) -> Result<Self, ServerError> {
+        SupervisorInner::new(services, Some(notifier)).map(|inner| Self {
             inner: Arc::new(inner),
         })
     }
@@ -298,7 +321,10 @@ impl std::fmt::Debug for SupervisorInner {
 }
 
 impl SupervisorInner {
-    fn new(services: Arc<dyn ConnectionServices>) -> Result<Self, ServerError> {
+    fn new(
+        services: Arc<dyn ConnectionServices>,
+        notifier: Option<Arc<dyn ConnectionNotifier>>,
+    ) -> Result<Self, ServerError> {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let registry = Arc::new(ModuleRegistry::new());
@@ -315,7 +341,7 @@ impl SupervisorInner {
         })?;
         Ok(Self {
             scheduler: Arc::new(scheduler),
-            runtime: Arc::new(ConnectionRuntime::new(services, control_atom)),
+            runtime: Arc::new(ConnectionRuntime::new(services, control_atom, notifier)),
         })
     }
 
@@ -417,10 +443,18 @@ pub(super) struct ConnectionRuntime {
     /// Monotonic source of push correlation ids. Server-allocated, so it never
     /// collides with a client-chosen id on this connection.
     next_push_id: AtomicU64,
+    /// Optional application hook invoked on worker registration and on the close
+    /// of a connection that had registered. `None` keeps liminal standalone: a
+    /// `WorkerRegister` is accepted with no callback.
+    notifier: Option<Arc<dyn ConnectionNotifier>>,
 }
 
 impl ConnectionRuntime {
-    fn new(services: Arc<dyn ConnectionServices>, control_atom: Atom) -> Self {
+    fn new(
+        services: Arc<dyn ConnectionServices>,
+        control_atom: Atom,
+        notifier: Option<Arc<dyn ConnectionNotifier>>,
+    ) -> Self {
         Self {
             services,
             records: Mutex::new(HashMap::new()),
@@ -428,20 +462,57 @@ impl ConnectionRuntime {
             control_atom,
             push_replies: Mutex::new(HashMap::new()),
             next_push_id: AtomicU64::new(1),
+            notifier,
         }
     }
 
     /// Builds a runtime wrapping `services` for unit tests that exercise
-    /// `apply_frame` without a live scheduler. Uses a fresh interned control atom.
+    /// `apply_frame` without a live scheduler. Uses a fresh interned control atom
+    /// and no notifier.
     #[cfg(test)]
     pub(super) fn for_tests(services: Arc<dyn ConnectionServices>) -> Self {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
-        Self::new(services, control_atom)
+        Self::new(services, control_atom, None)
+    }
+
+    /// Builds a runtime wrapping `services` with a `notifier` for unit tests that
+    /// exercise `apply_frame` and the close path without a live scheduler.
+    #[cfg(test)]
+    pub(super) fn for_tests_with_notifier(
+        services: Arc<dyn ConnectionServices>,
+        notifier: Arc<dyn ConnectionNotifier>,
+    ) -> Self {
+        let atoms = AtomTable::with_common_atoms();
+        let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
+        Self::new(services, control_atom, Some(notifier))
     }
 
     pub(super) fn services(&self) -> &dyn ConnectionServices {
         self.services.as_ref()
+    }
+
+    /// Returns the configured connection-keyed notifier, if any.
+    pub(super) fn notifier(&self) -> Option<&Arc<dyn ConnectionNotifier>> {
+        self.notifier.as_ref()
+    }
+
+    /// Stores `registration` on the connection record for `pid`, so the close
+    /// path can later fire `on_worker_unregistered` for exactly the connections
+    /// that registered. A missing record (the connection already closed) is a
+    /// no-op.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when the connection registry mutex is poisoned.
+    pub(super) fn set_registration(
+        &self,
+        pid: u64,
+        registration: WorkerRegistration,
+    ) -> Result<(), ServerError> {
+        if let Some(record) = lock(&self.records, "connection registry")?.get_mut(&pid) {
+            record.registration = Some(registration);
+        }
+        Ok(())
     }
 
     /// Allocates the next monotonic push correlation id.
@@ -504,12 +575,22 @@ impl ConnectionRuntime {
     /// `reap_crashed`, driven continuously by the listener loop, removes any
     /// record whose pid is absent from the scheduler process table.
     fn register(&self, pid: u64, peer_addr: Option<SocketAddr>) -> Result<(), ServerError> {
-        lock(&self.records, "connection registry")?.insert(pid, ConnectionRecord { peer_addr });
+        lock(&self.records, "connection registry")?.insert(
+            pid,
+            ConnectionRecord {
+                peer_addr,
+                registration: None,
+            },
+        );
         Ok(())
     }
 
     pub(super) fn mark_crashed(&self, pid: u64, reason: ExitReason, peer_addr: Option<SocketAddr>) {
-        let removed = self.remove(pid).unwrap_or(ConnectionRecord { peer_addr });
+        let removed = self.remove(pid).unwrap_or(ConnectionRecord {
+            peer_addr,
+            registration: None,
+        });
+        self.fire_unregistered(pid, &removed);
         tracing::warn!(
             connection_pid = pid,
             peer_addr = ?removed.peer_addr,
@@ -519,7 +600,21 @@ impl ConnectionRuntime {
     }
 
     pub(super) fn finish(&self, pid: u64) {
-        self.remove(pid);
+        if let Some(removed) = self.remove(pid) {
+            self.fire_unregistered(pid, &removed);
+        }
+    }
+
+    /// Invokes `on_worker_unregistered` for a removed connection record that
+    /// carried a worker registration. A record with no registration (a plain
+    /// connection, or a worker connection that never registered) is a no-op, so
+    /// only connections that actually registered deregister.
+    fn fire_unregistered(&self, pid: u64, record: &ConnectionRecord) {
+        if record.registration.is_some() {
+            if let Some(notifier) = self.notifier.as_ref() {
+                notifier.on_worker_unregistered(pid);
+            }
+        }
     }
 
     fn reap_crashed(&self, scheduler: &Scheduler) -> usize {
@@ -534,6 +629,9 @@ impl ConnectionRuntime {
         for pid in pids {
             if scheduler.process_table().get(pid).is_none() {
                 let removed = self.remove(pid);
+                if let Some(record) = removed.as_ref() {
+                    self.fire_unregistered(pid, record);
+                }
                 let peer_addr = removed.and_then(|record| record.peer_addr);
                 // This process exited without ever reaching `mark_crashed`/`finish`
                 // (e.g. the beamr scheduler terminated it externally). beamr records
@@ -613,9 +711,13 @@ impl ConnectionRuntime {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ConnectionRecord {
     peer_addr: Option<SocketAddr>,
+    /// Worker registration declared on this connection, set by `set_registration`
+    /// when a `WorkerRegister` frame is accepted. `Some` marks a connection whose
+    /// close must fire `on_worker_unregistered`.
+    registration: Option<WorkerRegistration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

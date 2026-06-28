@@ -1,6 +1,9 @@
 use crate::protocol::{
     Frame, FrameType, MessageEnvelope, MessageId, ProtocolError, ProtocolVersion, StreamPressure,
-    frame::PUBLISH_IDEMPOTENCY_KEY_FLAG,
+    WorkerRegisterOutcome, WorkerRegistration,
+    frame::{
+        PUBLISH_IDEMPOTENCY_KEY_FLAG, WORKER_REGISTER_ACK_ACCEPTED, WORKER_REGISTER_ACK_REJECTED,
+    },
 };
 
 use super::payload::PayloadReader;
@@ -40,6 +43,8 @@ pub(super) fn decode_known_payload(
         FrameType::Push | FrameType::PushReply => {
             decode_push_payload(frame_type, flags, stream_id, &mut reader)?
         }
+        FrameType::WorkerRegister => decode_worker_register_payload(flags, &mut reader)?,
+        FrameType::WorkerRegisterAck => decode_worker_register_ack_payload(flags, &mut reader)?,
         FrameType::Unknown(type_id) => Frame::Unknown {
             type_id,
             flags,
@@ -259,4 +264,45 @@ fn decode_pressure_payload(
         }),
         _ => Err(ProtocolError::codec("frame type was not a pressure frame")),
     }
+}
+
+fn decode_worker_register_payload(
+    flags: u8,
+    reader: &mut PayloadReader<'_>,
+) -> Result<Frame, ProtocolError> {
+    let namespaces = reader.read_string_vec_field()?;
+    let task_queue = reader.read_string_field()?;
+    // `node` carries a presence byte, so `None` and `Some("")` stay distinct.
+    let node = reader.read_optional_string()?;
+    let activity_types = reader.read_string_vec_field()?;
+    let identity = reader.read_string_field()?;
+    Ok(Frame::WorkerRegister {
+        flags,
+        registration: WorkerRegistration {
+            namespaces,
+            task_queue,
+            node,
+            activity_types,
+            identity,
+        },
+    })
+}
+
+fn decode_worker_register_ack_payload(
+    flags: u8,
+    reader: &mut PayloadReader<'_>,
+) -> Result<Frame, ProtocolError> {
+    let status = reader.read_u8()?;
+    let outcome = match status {
+        WORKER_REGISTER_ACK_ACCEPTED => WorkerRegisterOutcome::Accepted,
+        WORKER_REGISTER_ACK_REJECTED => WorkerRegisterOutcome::Rejected {
+            reason: reader.read_string_field()?,
+        },
+        _ => {
+            return Err(ProtocolError::codec(
+                "worker register ack status byte was invalid",
+            ));
+        }
+    };
+    Ok(Frame::WorkerRegisterAck { flags, outcome })
 }

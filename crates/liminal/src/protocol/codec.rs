@@ -7,13 +7,22 @@ mod tests_support;
 use super::causal::MessageId;
 use super::envelope::SchemaId;
 use super::error::ProtocolError;
-use super::frame::{Frame, FrameType, HEADER_LEN, validate_stream};
+use super::frame::{
+    Frame, FrameType, HEADER_LEN, WORKER_REGISTER_ACK_ACCEPTED, WORKER_REGISTER_ACK_REJECTED,
+    WorkerRegisterOutcome, WorkerRegistration, validate_stream,
+};
 use super::version::ProtocolVersion;
 use known::decode_known_payload;
 use payload::{
     PayloadReader, PayloadWriter, U16_LEN, U32_LEN, U64_LEN, bytes_field_len, checked_u32_len,
-    option_string_len, option_u16_len, schema_ids_field_len, string_field_len, sum_lengths,
+    option_string_len, option_u16_len, schema_ids_field_len, string_field_len,
+    string_vec_field_len, sum_lengths,
 };
+
+/// Wire length of the one-byte fields the worker-registration frames use (the
+/// optional-node presence byte folds into [`option_string_len`]; this covers the
+/// ack's status byte).
+const U8_FIELD_LEN: usize = 1;
 
 /// Return the number of bytes needed to encode a frame.
 ///
@@ -215,6 +224,8 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         Frame::Push { payload, .. } | Frame::PushReply { payload, .. } => {
             sum_lengths(&[U64_LEN, bytes_field_len(payload)?])
         }
+        Frame::WorkerRegister { registration, .. } => worker_register_payload_len(registration),
+        Frame::WorkerRegisterAck { outcome, .. } => worker_register_ack_payload_len(outcome),
         Frame::Unknown { payload, .. } => checked_u32_len(payload.len()).map(|()| payload.len()),
     }
 }
@@ -226,6 +237,27 @@ fn envelope_bytes_field_len(envelope_len: usize) -> Result<usize, ProtocolError>
 
 fn message_id_field_len(message_id: &MessageId) -> Result<usize, ProtocolError> {
     string_field_len(message_id.as_str())
+}
+
+fn worker_register_payload_len(registration: &WorkerRegistration) -> Result<usize, ProtocolError> {
+    sum_lengths(&[
+        string_vec_field_len(&registration.namespaces)?,
+        string_field_len(&registration.task_queue)?,
+        option_string_len(registration.node.as_deref())?,
+        string_vec_field_len(&registration.activity_types)?,
+        string_field_len(&registration.identity)?,
+    ])
+}
+
+fn worker_register_ack_payload_len(
+    outcome: &WorkerRegisterOutcome,
+) -> Result<usize, ProtocolError> {
+    match outcome {
+        WorkerRegisterOutcome::Accepted => Ok(U8_FIELD_LEN),
+        WorkerRegisterOutcome::Rejected { reason } => {
+            sum_lengths(&[U8_FIELD_LEN, string_field_len(reason)?])
+        }
+    }
 }
 
 fn write_handshake_payload(
@@ -326,6 +358,32 @@ fn write_push_payload(frame: &Frame, writer: &mut PayloadWriter<'_>) -> Result<(
     }
 }
 
+fn write_worker_register_payload(
+    registration: &WorkerRegistration,
+    writer: &mut PayloadWriter<'_>,
+) -> Result<(), ProtocolError> {
+    writer.write_string_vec_field(&registration.namespaces)?;
+    writer.write_string_field(&registration.task_queue)?;
+    // `node` is optional locality: a presence byte distinguishes `None` from
+    // `Some("")` so an absent node never collapses to an empty string.
+    writer.write_optional_string(registration.node.as_deref())?;
+    writer.write_string_vec_field(&registration.activity_types)?;
+    writer.write_string_field(&registration.identity)
+}
+
+fn write_worker_register_ack_payload(
+    outcome: &WorkerRegisterOutcome,
+    writer: &mut PayloadWriter<'_>,
+) -> Result<(), ProtocolError> {
+    match outcome {
+        WorkerRegisterOutcome::Accepted => writer.write_u8(WORKER_REGISTER_ACK_ACCEPTED),
+        WorkerRegisterOutcome::Rejected { reason } => {
+            writer.write_u8(WORKER_REGISTER_ACK_REJECTED)?;
+            writer.write_string_field(reason)
+        }
+    }
+}
+
 fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> {
     let mut writer = PayloadWriter::new(buffer);
     match frame {
@@ -415,6 +473,12 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
         }
         Frame::Push { .. } | Frame::PushReply { .. } => {
             write_push_payload(frame, &mut writer)?;
+        }
+        Frame::WorkerRegister { registration, .. } => {
+            write_worker_register_payload(registration, &mut writer)?;
+        }
+        Frame::WorkerRegisterAck { outcome, .. } => {
+            write_worker_register_ack_payload(outcome, &mut writer)?;
         }
         Frame::Unknown { payload, .. } => writer.write_slice(payload)?,
     }

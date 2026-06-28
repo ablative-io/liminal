@@ -1,10 +1,16 @@
 use std::sync::{Arc, Mutex};
 
-use liminal::protocol::{CausalContext, MessageEnvelope, SchemaId};
+use liminal::protocol::{
+    CausalContext, MessageEnvelope, SchemaId, WorkerRegisterOutcome, WorkerRegistration,
+};
 
 use super::*;
 use crate::server::connection::conversation::ConversationResource;
+use crate::server::connection::notifier::ConnectionNotifier;
 use crate::server::connection::services::{PublishOutcome, SubscriptionResource};
+
+/// Fixed connection pid used by the scheduler-free `apply_frame` unit tests.
+const TEST_PID: u64 = 1;
 
 #[derive(Debug, Default)]
 struct RecordingServices {
@@ -152,7 +158,7 @@ fn publish_frame_delegates_to_liminal_services() -> Result<(), ServerError> {
     };
     let mut state = ConnectionProcessState::default();
 
-    let action = apply_frame(&runtime, &mut state, frame);
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
 
     assert!(matches!(
         action,
@@ -189,7 +195,7 @@ fn subscribe_and_unsubscribe_delegate_to_services() -> Result<(), ServerError> {
         max_in_flight: 16,
     };
 
-    let action = apply_frame(&runtime, &mut state, subscribe);
+    let action = apply_frame(TEST_PID, &runtime, &mut state, subscribe);
 
     assert!(matches!(
         action,
@@ -204,7 +210,7 @@ fn subscribe_and_unsubscribe_delegate_to_services() -> Result<(), ServerError> {
         stream_id: 1,
         subscription_id: 7,
     };
-    let action = apply_frame(&runtime, &mut state, unsubscribe);
+    let action = apply_frame(TEST_PID, &runtime, &mut state, unsubscribe);
     assert!(matches!(action, FrameAction::NoResponse));
     assert!(!state.subscriptions.contains_key(&7));
     let first_subscription = {
@@ -219,6 +225,158 @@ fn subscribe_and_unsubscribe_delegate_to_services() -> Result<(), ServerError> {
     };
     assert_eq!(first_subscription, ("orders".to_owned(), 0));
     Ok(())
+}
+
+#[derive(Debug)]
+struct RecordingNotifier {
+    registered: Mutex<Vec<(u64, WorkerRegistration)>>,
+    unregistered: Mutex<Vec<u64>>,
+    reject_with: Option<String>,
+}
+
+impl RecordingNotifier {
+    fn accepting() -> Self {
+        Self {
+            registered: Mutex::new(Vec::new()),
+            unregistered: Mutex::new(Vec::new()),
+            reject_with: None,
+        }
+    }
+
+    fn rejecting(reason: &str) -> Self {
+        Self {
+            registered: Mutex::new(Vec::new()),
+            unregistered: Mutex::new(Vec::new()),
+            reject_with: Some(reason.to_owned()),
+        }
+    }
+}
+
+impl ConnectionNotifier for RecordingNotifier {
+    fn on_worker_registered(
+        &self,
+        pid: u64,
+        registration: &WorkerRegistration,
+    ) -> Result<(), ServerError> {
+        self.registered
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("test notifier registration recorder unavailable: {error}"),
+            })?
+            .push((pid, registration.clone()));
+        self.reject_with.as_ref().map_or(Ok(()), |reason| {
+            Err(ServerError::ListenerAccept {
+                message: reason.clone(),
+            })
+        })
+    }
+
+    fn on_worker_unregistered(&self, pid: u64) {
+        if let Ok(mut unregistered) = self.unregistered.lock() {
+            unregistered.push(pid);
+        }
+    }
+}
+
+fn sample_registration() -> WorkerRegistration {
+    WorkerRegistration {
+        namespaces: vec!["default".to_owned(), "billing".to_owned()],
+        task_queue: "payments".to_owned(),
+        node: Some("node-a".to_owned()),
+        activity_types: vec!["charge".to_owned()],
+        identity: "worker-1".to_owned(),
+    }
+}
+
+#[test]
+fn worker_register_invokes_notifier_and_accepts() -> Result<(), ServerError> {
+    let notifier = Arc::new(RecordingNotifier::accepting());
+    let runtime = ConnectionRuntime::for_tests_with_notifier(
+        Arc::new(RecordingServices::default()),
+        Arc::clone(&notifier) as Arc<_>,
+    );
+    let mut state = ConnectionProcessState::default();
+    let registration = sample_registration();
+    let frame = Frame::WorkerRegister {
+        flags: 0,
+        registration: registration.clone(),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(matches!(
+        action,
+        FrameAction::Respond(Frame::WorkerRegisterAck {
+            outcome: WorkerRegisterOutcome::Accepted,
+            ..
+        })
+    ));
+    let calls = {
+        let guard = notifier
+            .registered
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("test notifier recorder unavailable: {error}"),
+            })?;
+        guard.clone()
+    };
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, TEST_PID);
+    assert_eq!(calls[0].1, registration);
+    Ok(())
+}
+
+#[test]
+fn worker_register_rejection_surfaces_reason() -> Result<(), ServerError> {
+    let notifier = Arc::new(RecordingNotifier::rejecting("task queue not served"));
+    let runtime = ConnectionRuntime::for_tests_with_notifier(
+        Arc::new(RecordingServices::default()),
+        Arc::clone(&notifier) as Arc<_>,
+    );
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::WorkerRegister {
+        flags: 0,
+        registration: sample_registration(),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    let FrameAction::Respond(Frame::WorkerRegisterAck {
+        outcome: WorkerRegisterOutcome::Rejected { reason },
+        ..
+    }) = action
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a rejected ack, got {action:?}"),
+        });
+    };
+    assert!(
+        reason.contains("task queue not served"),
+        "rejection reason should carry the notifier error text, got: {reason}"
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_register_without_notifier_is_accepted() {
+    // Standalone liminal: no notifier configured. The frame must still be
+    // acknowledged Accepted and must not panic.
+    let runtime = ConnectionRuntime::for_tests(Arc::new(RecordingServices::default()));
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::WorkerRegister {
+        flags: 0,
+        registration: sample_registration(),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(matches!(
+        action,
+        FrameAction::Respond(Frame::WorkerRegisterAck {
+            outcome: WorkerRegisterOutcome::Accepted,
+            ..
+        })
+    ));
 }
 
 fn envelope(payload: Vec<u8>) -> MessageEnvelope {

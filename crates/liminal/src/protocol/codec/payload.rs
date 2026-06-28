@@ -56,6 +56,18 @@ pub(super) const fn option_u16_len(value: Option<u16>) -> usize {
     }
 }
 
+/// Encoded length of a count-prefixed vector of length-prefixed strings.
+pub(super) fn string_vec_field_len(values: &[String]) -> Result<usize, ProtocolError> {
+    checked_u32_len(values.len())?;
+    let mut total = U32_LEN;
+    for value in values {
+        total = total
+            .checked_add(string_field_len(value)?)
+            .ok_or_else(|| ProtocolError::codec("string vector length overflowed usize"))?;
+    }
+    Ok(total)
+}
+
 pub(super) struct PayloadWriter<'a> {
     buffer: &'a mut [u8],
     offset: usize,
@@ -121,6 +133,19 @@ impl<'a> PayloadWriter<'a> {
 
     pub(super) fn write_string_field(&mut self, value: &str) -> Result<(), ProtocolError> {
         self.write_bytes_field(value.as_bytes())
+    }
+
+    pub(super) fn write_string_vec_field(
+        &mut self,
+        values: &[String],
+    ) -> Result<(), ProtocolError> {
+        let len = u32::try_from(values.len())
+            .map_err(|_| ProtocolError::codec("string vector count exceeded u32::MAX"))?;
+        self.write_u32(len)?;
+        for value in values {
+            self.write_string_field(value)?;
+        }
+        Ok(())
     }
 
     pub(super) fn write_optional_string(
@@ -250,6 +275,19 @@ impl<'a> PayloadReader<'a> {
         str::from_utf8(&bytes)
             .map(str::to_owned)
             .map_err(|_| ProtocolError::codec("payload string field was not valid utf-8"))
+    }
+
+    pub(super) fn read_string_vec_field(&mut self) -> Result<Vec<String>, ProtocolError> {
+        let count = usize::try_from(self.read_u32()?)
+            .map_err(|_| ProtocolError::codec("string vector count cannot fit usize"))?;
+        let mut values = Vec::new();
+        values
+            .try_reserve(count)
+            .map_err(|_| ProtocolError::codec("string vector allocation failed"))?;
+        for _ in 0..count {
+            values.push(self.read_string_field()?);
+        }
+        Ok(values)
     }
 
     pub(super) fn read_optional_string(&mut self) -> Result<Option<String>, ProtocolError> {
