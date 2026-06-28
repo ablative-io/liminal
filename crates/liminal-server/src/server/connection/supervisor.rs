@@ -286,23 +286,22 @@ impl PushReplyAwaiter {
     /// Blocks up to `timeout` for the client's correlated reply payload.
     ///
     /// # Errors
-    /// Returns [`ServerError`] when no reply arrives within `timeout` or the
-    /// connection process dropped the reply slot (e.g. the connection closed).
+    /// Returns [`ServerError::PushReplyTimeout`] when no reply arrives within
+    /// `timeout` (the worker is connected but slow), or
+    /// [`ServerError::PushReplyDisconnected`] when the connection process dropped
+    /// the reply slot (the connection closed — the prompt worker-death signal).
+    /// The two are distinct variants so callers classify by type, not message.
     pub fn receive(&self, timeout: Duration) -> Result<Vec<u8>, ServerError> {
-        self.receiver.recv_timeout(timeout).map_err(|error| {
-            let detail = match error {
-                RecvTimeoutError::Timeout => "no correlated push reply arrived within the timeout",
-                RecvTimeoutError::Disconnected => {
-                    "the connection closed before sending a correlated push reply"
-                }
-            };
-            ServerError::ListenerAccept {
-                message: format!(
-                    "push correlation {} did not complete: {detail}",
-                    self.correlation_id
-                ),
-            }
-        })
+        self.receiver
+            .recv_timeout(timeout)
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => ServerError::PushReplyTimeout {
+                    correlation_id: self.correlation_id,
+                },
+                RecvTimeoutError::Disconnected => ServerError::PushReplyDisconnected {
+                    correlation_id: self.correlation_id,
+                },
+            })
     }
 }
 

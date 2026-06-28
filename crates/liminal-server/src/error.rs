@@ -25,6 +25,28 @@ pub enum ServerError {
     #[error("listener accept failed: {message}")]
     ListenerAccept { message: String },
 
+    /// A server→client push reply slot was dropped before a correlated reply
+    /// arrived — the connection closed (the prompt worker-death signal). Distinct
+    /// from [`Self::PushReplyTimeout`] so consumers can tell a worker that DIED
+    /// (fast failover) from one that is merely SLOW, by type rather than message.
+    #[error(
+        "push correlation {correlation_id} did not complete: the connection closed before sending a correlated push reply"
+    )]
+    PushReplyDisconnected {
+        /// Correlation id of the push whose reply will never arrive.
+        correlation_id: u64,
+    },
+
+    /// A server→client push reply did not arrive within the awaiter's timeout —
+    /// the worker is still connected but did not reply in time.
+    #[error(
+        "push correlation {correlation_id} did not complete: no correlated push reply arrived within the timeout"
+    )]
+    PushReplyTimeout {
+        /// Correlation id of the push that timed out.
+        correlation_id: u64,
+    },
+
     /// The server could not join the configured beamr distribution cluster.
     #[error("cluster join failed: {message}")]
     ClusterJoin { message: String },

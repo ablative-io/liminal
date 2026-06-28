@@ -231,12 +231,12 @@ fn closing_connection_wakes_outstanding_push_awaiter_promptly()
     let result = awaiter.receive(timeout);
     let elapsed = started.elapsed();
 
-    let Err(crate::ServerError::ListenerAccept { message }) = result else {
-        return Err(format!("expected a disconnected ListenerAccept error, got {result:?}").into());
-    };
     assert!(
-        message.contains("connection closed"),
-        "error should report the connection closed, got: {message}"
+        matches!(
+            result,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "expected a typed PushReplyDisconnected error, got {result:?}"
     );
     assert!(
         elapsed < Duration::from_secs(5),
@@ -263,7 +263,10 @@ fn mark_crashed_wakes_outstanding_push_awaiter_promptly() -> Result<(), Box<dyn 
     let elapsed = started.elapsed();
 
     assert!(
-        matches!(result, Err(crate::ServerError::ListenerAccept { .. })),
+        matches!(
+            result,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
         "crash close must wake the awaiter with a disconnected error, got {result:?}"
     );
     assert!(
@@ -294,7 +297,7 @@ fn closing_one_connection_leaves_other_connections_push_intact()
     assert!(
         matches!(
             closing_result,
-            Err(crate::ServerError::ListenerAccept { .. })
+            Err(crate::ServerError::PushReplyDisconnected { .. })
         ),
         "the closed connection's awaiter must wake disconnected, got {closing_result:?}"
     );
