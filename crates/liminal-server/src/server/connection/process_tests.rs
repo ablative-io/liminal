@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use liminal::protocol::{CausalContext, MessageEnvelope, SchemaId};
 
@@ -130,9 +130,18 @@ impl ConversationResource for TestConversation {
     }
 }
 
+/// Wraps recording services in a runtime so `apply_frame` can be exercised without
+/// a live scheduler, returning both the runtime and a handle to the shared services
+/// for post-call assertions.
+fn runtime_with(services: RecordingServices) -> (ConnectionRuntime, Arc<RecordingServices>) {
+    let services = Arc::new(services);
+    let runtime = ConnectionRuntime::for_tests(Arc::clone(&services) as Arc<_>);
+    (runtime, services)
+}
+
 #[test]
 fn publish_frame_delegates_to_liminal_services() -> Result<(), ServerError> {
-    let services = RecordingServices::default();
+    let (runtime, services) = runtime_with(RecordingServices::default());
     let envelope = envelope(b"hello".to_vec());
     let frame = Frame::Publish {
         flags: 0,
@@ -143,7 +152,7 @@ fn publish_frame_delegates_to_liminal_services() -> Result<(), ServerError> {
     };
     let mut state = ConnectionProcessState::default();
 
-    let action = apply_frame(&services, &mut state, frame);
+    let action = apply_frame(&runtime, &mut state, frame);
 
     assert!(matches!(
         action,
@@ -170,7 +179,7 @@ fn publish_frame_delegates_to_liminal_services() -> Result<(), ServerError> {
 
 #[test]
 fn subscribe_and_unsubscribe_delegate_to_services() -> Result<(), ServerError> {
-    let services = RecordingServices::default();
+    let (runtime, services) = runtime_with(RecordingServices::default());
     let mut state = ConnectionProcessState::default();
     let subscribe = Frame::Subscribe {
         flags: 0,
@@ -180,7 +189,7 @@ fn subscribe_and_unsubscribe_delegate_to_services() -> Result<(), ServerError> {
         max_in_flight: 16,
     };
 
-    let action = apply_frame(&services, &mut state, subscribe);
+    let action = apply_frame(&runtime, &mut state, subscribe);
 
     assert!(matches!(
         action,
@@ -195,7 +204,7 @@ fn subscribe_and_unsubscribe_delegate_to_services() -> Result<(), ServerError> {
         stream_id: 1,
         subscription_id: 7,
     };
-    let action = apply_frame(&services, &mut state, unsubscribe);
+    let action = apply_frame(&runtime, &mut state, unsubscribe);
     assert!(matches!(action, FrameAction::NoResponse));
     assert!(!state.subscriptions.contains_key(&7));
     let first_subscription = {

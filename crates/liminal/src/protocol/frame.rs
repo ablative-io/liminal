@@ -89,6 +89,10 @@ pub enum FrameType {
     Ping,
     /// Connection keepalive pong.
     Pong,
+    /// Server-initiated push of an opaque payload to a connected client.
+    Push,
+    /// Client-initiated correlated reply to a server push.
+    PushReply,
     /// Forward-compatible frame type not known to this implementation.
     Unknown(u8),
 }
@@ -132,6 +136,8 @@ impl From<u8> for FrameType {
             0x12 => Self::Reject,
             0x13 => Self::Ping,
             0x14 => Self::Pong,
+            0x15 => Self::Push,
+            0x16 => Self::PushReply,
             unknown => Self::Unknown(unknown),
         }
     }
@@ -160,6 +166,8 @@ impl From<FrameType> for u8 {
             FrameType::Reject => 0x12,
             FrameType::Ping => 0x13,
             FrameType::Pong => 0x14,
+            FrameType::Push => 0x15,
+            FrameType::PushReply => 0x16,
             FrameType::Unknown(type_id) => type_id,
         }
     }
@@ -315,6 +323,31 @@ pub enum Frame {
     Ping { flags: u8 },
     /// Connection keepalive pong.
     Pong { flags: u8 },
+    /// Server-initiated push carrying a correlation id and an opaque payload.
+    ///
+    /// A server writes this frame to a connected client over the client's existing
+    /// connection (server-to-client, the inverse of every other request frame). The
+    /// `correlation_id` is the key the server uses to match the client's later
+    /// [`Frame::PushReply`] back to this push; the `payload` is opaque application
+    /// bytes the server hands the client. This is an application-stream frame, so
+    /// `stream_id` is non-zero like a publish or conversation message.
+    Push {
+        flags: u8,
+        stream_id: u32,
+        correlation_id: u64,
+        payload: Vec<u8>,
+    },
+    /// Client-initiated correlated reply to a [`Frame::Push`].
+    ///
+    /// After handling a pushed frame the client writes this back on the same
+    /// connection, echoing the push's `correlation_id` so the server can match the
+    /// reply to the originating push. The `payload` is the client's opaque answer.
+    PushReply {
+        flags: u8,
+        stream_id: u32,
+        correlation_id: u64,
+        payload: Vec<u8>,
+    },
     /// Forward-compatible frame preserved after length-delimited skipping.
     Unknown {
         type_id: u8,
@@ -379,6 +412,46 @@ impl Frame {
         })
     }
 
+    /// Construct a server-to-client push frame, enforcing the non-zero
+    /// application-stream invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::InvalidStream`] when `stream_id` is zero.
+    pub fn new_push(
+        stream_id: u32,
+        correlation_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<Self, ProtocolError> {
+        validate_stream(FrameType::Push, stream_id)?;
+        Ok(Self::Push {
+            flags: 0,
+            stream_id,
+            correlation_id,
+            payload,
+        })
+    }
+
+    /// Construct a client-to-server push reply frame, echoing the correlation id of
+    /// the originating push, and enforcing the non-zero application-stream invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::InvalidStream`] when `stream_id` is zero.
+    pub fn new_push_reply(
+        stream_id: u32,
+        correlation_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<Self, ProtocolError> {
+        validate_stream(FrameType::PushReply, stream_id)?;
+        Ok(Self::PushReply {
+            flags: 0,
+            stream_id,
+            correlation_id,
+            payload,
+        })
+    }
+
     /// Return the frame type represented by this frame body.
     #[must_use]
     pub const fn frame_type(&self) -> FrameType {
@@ -403,6 +476,8 @@ impl Frame {
             Self::Reject { .. } => FrameType::Reject,
             Self::Ping { .. } => FrameType::Ping,
             Self::Pong { .. } => FrameType::Pong,
+            Self::Push { .. } => FrameType::Push,
+            Self::PushReply { .. } => FrameType::PushReply,
             Self::Unknown { type_id, .. } => FrameType::Unknown(*type_id),
         }
     }
@@ -431,6 +506,8 @@ impl Frame {
             | Self::Reject { flags, .. }
             | Self::Ping { flags }
             | Self::Pong { flags }
+            | Self::Push { flags, .. }
+            | Self::PushReply { flags, .. }
             | Self::Unknown { flags, .. } => *flags,
         }
     }
@@ -459,6 +536,8 @@ impl Frame {
             | Self::Accept { stream_id, .. }
             | Self::Defer { stream_id, .. }
             | Self::Reject { stream_id, .. }
+            | Self::Push { stream_id, .. }
+            | Self::PushReply { stream_id, .. }
             | Self::Unknown { stream_id, .. } => *stream_id,
         }
     }

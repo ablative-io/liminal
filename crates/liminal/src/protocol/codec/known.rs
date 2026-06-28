@@ -37,6 +37,9 @@ pub(super) fn decode_known_payload(
         FrameType::Accept | FrameType::Defer | FrameType::Reject => {
             decode_pressure_payload(frame_type, flags, stream_id, &mut reader)?
         }
+        FrameType::Push | FrameType::PushReply => {
+            decode_push_payload(frame_type, flags, stream_id, &mut reader)?
+        }
         FrameType::Unknown(type_id) => Frame::Unknown {
             type_id,
             flags,
@@ -202,6 +205,31 @@ fn decode_conversation_payload(
         _ => Err(ProtocolError::codec(
             "frame type was not a conversation frame",
         )),
+    }
+}
+
+fn decode_push_payload(
+    frame_type: FrameType,
+    flags: u8,
+    stream_id: u32,
+    reader: &mut PayloadReader<'_>,
+) -> Result<Frame, ProtocolError> {
+    let correlation_id = reader.read_u64()?;
+    let payload = reader.read_bytes_field()?;
+    match frame_type {
+        FrameType::Push => Ok(Frame::Push {
+            flags,
+            stream_id,
+            correlation_id,
+            payload,
+        }),
+        FrameType::PushReply => Ok(Frame::PushReply {
+            flags,
+            stream_id,
+            correlation_id,
+            payload,
+        }),
+        _ => Err(ProtocolError::codec("frame type was not a push frame")),
     }
 }
 
