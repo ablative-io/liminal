@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use beamr::process::ExitReason;
 use liminal::protocol::{Frame, SchemaId, decode, encode, encoded_len};
 
-use super::ConnectionSupervisor;
+use super::{ConnectionRuntime, ConnectionSupervisor, PushReplyAwaiter};
 use crate::server::connection::services::{ConnectionServices, server_error_from_protocol};
 
 #[test]
@@ -190,6 +190,144 @@ fn flush_durable_state_propagates_shutdown_flush() -> Result<(), Box<dyn std::er
         Err(crate::ServerError::ShutdownFlush { .. })
     ));
     supervisor.shutdown();
+    Ok(())
+}
+
+/// Registers an in-flight server-push reply slot on `runtime` for connection
+/// `pid` and returns the awaiter that would be handed back by
+/// `push_to_connection`, without needing a live scheduler. This mirrors the real
+/// allocate-id / register-slot / build-awaiter sequence so the close-path tests
+/// exercise the same `push_replies` bookkeeping the production path uses.
+fn outstanding_push(
+    runtime: &ConnectionRuntime,
+    pid: u64,
+) -> Result<PushReplyAwaiter, Box<dyn std::error::Error>> {
+    let correlation_id = runtime.next_push_correlation_id();
+    let receiver = runtime.register_push(pid, correlation_id)?;
+    Ok(PushReplyAwaiter {
+        correlation_id,
+        receiver,
+    })
+}
+
+#[test]
+fn closing_connection_wakes_outstanding_push_awaiter_promptly()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Headline: a server push is outstanding (awaiter created, no reply sent), then
+    // the connection closes. The awaiter must wake IMMEDIATELY with a disconnected
+    // error rather than blocking the full push-reply timeout. We pass a 30s timeout
+    // and assert the call returns well under it — proving cancellation, not timeout.
+    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let pid = 7;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+
+    // Drive the close path (the unit-level equivalent of the connection process
+    // exiting). `finish` removes the record and, via `remove`, cancels the slot.
+    runtime.finish(pid);
+
+    let timeout = Duration::from_secs(30);
+    let started = Instant::now();
+    let result = awaiter.receive(timeout);
+    let elapsed = started.elapsed();
+
+    let Err(crate::ServerError::ListenerAccept { message }) = result else {
+        return Err(format!("expected a disconnected ListenerAccept error, got {result:?}").into());
+    };
+    assert!(
+        message.contains("connection closed"),
+        "error should report the connection closed, got: {message}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "awaiter must wake promptly on close, not after the {timeout:?} timeout (took {elapsed:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn mark_crashed_wakes_outstanding_push_awaiter_promptly() -> Result<(), Box<dyn std::error::Error>>
+{
+    // The crash close route must cancel outstanding pushes just like the graceful
+    // `finish` route: a crashing connection is exactly the worker-death case the
+    // prompt signal exists for.
+    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let pid = 11;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+
+    runtime.mark_crashed(pid, ExitReason::Error, None);
+
+    let started = Instant::now();
+    let result = awaiter.receive(Duration::from_secs(30));
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(result, Err(crate::ServerError::ListenerAccept { .. })),
+        "crash close must wake the awaiter with a disconnected error, got {result:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "crash close must wake the awaiter promptly (took {elapsed:?})"
+    );
+    Ok(())
+}
+
+#[test]
+fn closing_one_connection_leaves_other_connections_push_intact()
+-> Result<(), Box<dyn std::error::Error>> {
+    // Per-pid isolation: two connections each hold an outstanding push. Closing one
+    // must wake ONLY its awaiter; the other connection's push still resolves
+    // normally via `resolve_push`.
+    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let closing_pid = 21;
+    let surviving_pid = 22;
+    runtime.register(closing_pid, None)?;
+    runtime.register(surviving_pid, None)?;
+    let closing_awaiter = outstanding_push(&runtime, closing_pid)?;
+    let surviving_awaiter = outstanding_push(&runtime, surviving_pid)?;
+
+    runtime.finish(closing_pid);
+
+    // The closed connection's awaiter wakes disconnected.
+    let closing_result = closing_awaiter.receive(Duration::from_secs(30));
+    assert!(
+        matches!(
+            closing_result,
+            Err(crate::ServerError::ListenerAccept { .. })
+        ),
+        "the closed connection's awaiter must wake disconnected, got {closing_result:?}"
+    );
+
+    // The surviving connection's slot is untouched and still resolves on a reply.
+    let reply = b"surviving-reply".to_vec();
+    runtime.resolve_push(surviving_awaiter.correlation_id(), reply.clone());
+    let surviving_result = surviving_awaiter.receive(Duration::from_secs(2))?;
+    assert_eq!(
+        surviving_result, reply,
+        "the surviving connection's push must still resolve with its reply"
+    );
+    Ok(())
+}
+
+#[test]
+fn resolved_push_then_close_is_a_noop_with_no_double_send() -> Result<(), Box<dyn std::error::Error>>
+{
+    // Resolved-then-close: resolve a push (awaiter gets the reply), THEN close the
+    // connection. The close must not panic or double-send; the already-resolved
+    // correlation id was removed by `resolve_push`, so cancellation is a no-op.
+    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let pid = 31;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+
+    let reply = b"resolved-reply".to_vec();
+    runtime.resolve_push(awaiter.correlation_id(), reply.clone());
+    let received = awaiter.receive(Duration::from_secs(2))?;
+    assert_eq!(received, reply, "the push must resolve with its reply");
+
+    // Closing afterwards is a no-op for the already-resolved slot.
+    runtime.finish(pid);
     Ok(())
 }
 
