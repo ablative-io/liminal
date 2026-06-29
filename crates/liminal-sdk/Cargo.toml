@@ -16,7 +16,7 @@ std = ["thiserror/std", "serde/std", "dep:liminal"]
 
 [dependencies]
 futures-core = { version = "0.3", default-features = false }
-liminal = { path = "../liminal", optional = true }
+liminal = { version = "0.2.0", path = "../liminal", optional = true }
 serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
