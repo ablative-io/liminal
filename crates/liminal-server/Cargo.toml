@@ -23,6 +23,7 @@ toml = "0.8"
 tracing = "0.1"
 
 [dev-dependencies]
+async-trait = "0.1"
 futures-core = "0.3"
 liminal-sdk = { path = "../liminal-sdk" }
 tempfile = "3"

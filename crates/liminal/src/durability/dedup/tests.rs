@@ -203,6 +203,200 @@ fn sweep_keeps_receipt_younger_than_ttl_even_when_claim_is_old() -> Result<(), B
     Ok(())
 }
 
+#[test]
+fn release_claim_tombstones_inflight_and_allows_reclaim() -> Result<(), Box<dyn Error>> {
+    let store = Arc::new(FakeStore::default());
+    let cache = DedupCache::new(store.clone(), "dedup");
+
+    assert_eq!(
+        block_on(cache.claim_or_get("key", 1_000))?,
+        DedupDecision::Claimed
+    );
+    // While in flight, a re-claim is suppressed.
+    assert_eq!(
+        block_on(cache.claim_or_get("key", 1_500))?,
+        DedupDecision::InFlight
+    );
+
+    block_on(cache.release_claim_at("key", 2_000))?;
+
+    // A tombstone was appended (claim + tombstone == 2 records).
+    let stream = store.stream(&cache.stream_key_for("key"))?;
+    assert_eq!(stream.len(), 2);
+    let last = stream.get(1).ok_or("missing tombstone")?;
+    let record = DedupRecord::deserialize(&last.payload)?;
+    assert!(
+        matches!(record, DedupRecord::Tombstone { .. }),
+        "release must append a tombstone"
+    );
+
+    // The key is now re-claimable.
+    assert_eq!(
+        block_on(cache.claim_or_get("key", 3_000))?,
+        DedupDecision::Claimed
+    );
+    Ok(())
+}
+
+#[test]
+fn release_claim_never_clobbers_a_stored_receipt() -> Result<(), Box<dyn Error>> {
+    let store = Arc::new(FakeStore::default());
+    let cache = DedupCache::new(store.clone(), "dedup");
+
+    assert_eq!(
+        block_on(cache.claim_or_get("key", 1_000))?,
+        DedupDecision::Claimed
+    );
+    block_on(cache.complete_receipt_at("key", ProcessingReceipt::new(vec![7, 7]), 2_000))?;
+    let append_count = store.append_count()?;
+
+    // Releasing a completed key is a no-op: no append, receipt preserved.
+    block_on(cache.release_claim_at("key", 3_000))?;
+    assert_eq!(store.append_count()?, append_count);
+
+    assert_eq!(
+        block_on(cache.claim_or_get("key", 4_000))?,
+        DedupDecision::Completed(ProcessingReceipt::new(vec![7, 7]))
+    );
+    Ok(())
+}
+
+#[test]
+fn release_claim_on_absent_key_is_noop() -> Result<(), Box<dyn Error>> {
+    let store = Arc::new(FakeStore::default());
+    let cache = DedupCache::new(store.clone(), "dedup");
+
+    block_on(cache.release_claim_at("never-claimed", 1_000))?;
+
+    assert_eq!(store.append_count()?, 0);
+    assert!(
+        store
+            .stream(&cache.stream_key_for("never-claimed"))?
+            .is_empty()
+    );
+    Ok(())
+}
+
+#[test]
+fn release_claim_is_idempotent_across_double_release() -> Result<(), Box<dyn Error>> {
+    let store = Arc::new(FakeStore::default());
+    let cache = DedupCache::new(store.clone(), "dedup");
+
+    assert_eq!(
+        block_on(cache.claim_or_get("key", 1_000))?,
+        DedupDecision::Claimed
+    );
+    block_on(cache.release_claim_at("key", 2_000))?;
+    let append_count = store.append_count()?;
+
+    // Second release sees a tombstone (not in flight) and is a no-op.
+    block_on(cache.release_claim_at("key", 3_000))?;
+    assert_eq!(store.append_count()?, append_count);
+    Ok(())
+}
+
+#[test]
+fn release_claim_conflict_resolves_against_a_legitimate_reclaim() -> Result<(), Box<dyn Error>> {
+    // Models the CONCURRENT race: a release tombstone and a legitimate re-claim
+    // both target the same `next_seq`. The slow release loses the append CAS
+    // because a real re-claim already wrote a fresh active entry at that slot.
+    // The conflict re-check must NOT clobber that re-claim (would be a lost
+    // delivery), so the release propagates the conflict.
+    let store = Arc::new(FakeStore::default());
+    let cache = DedupCache::new(store.clone(), "dedup");
+    let stream_key = cache.stream_key_for("key");
+
+    // First claim leaves the key in flight (seq 0). next_seq is now 1.
+    assert_eq!(
+        block_on(cache.claim_or_get("key", 1_000))?,
+        DedupDecision::Claimed
+    );
+
+    // Simulate: the in-flight claim was released by a sweep (tombstone at seq 1),
+    // and then a legitimate re-claim wrote a fresh active entry at seq 2 -- so the
+    // stream head is an active, no-receipt entry. A stale release that snapshotted
+    // BEFORE these writes would try to append at seq 1 and lose the CAS.
+    block_on(store.append(
+        &stream_key,
+        DedupRecord::tombstone("key".to_owned(), 1_500).serialize()?,
+        1,
+    ))?;
+    block_on(store.append(
+        &stream_key,
+        DedupEntry::new("key", None, 2_000).serialize()?,
+        2,
+    ))?;
+
+    // Drive the release append against the STALE `next_seq` (1): the append loses
+    // the CAS (real head is at seq 3), so the conflict re-check runs. This mirrors
+    // exactly what `release_claim_at` does internally on a lost append race.
+    let stale = block_on(stale_release_then_recheck(
+        &cache,
+        &stream_key,
+        "key",
+        5_000,
+    ));
+    assert!(
+        matches!(stale, Err(DurabilityError::SequenceConflict { .. })),
+        "a release racing a legitimate re-claim must not clobber it"
+    );
+
+    // The legitimate re-claim is intact: still in flight, receipt safe.
+    assert_eq!(
+        block_on(cache.lookup("key"))?,
+        Some(DedupDecision::InFlight)
+    );
+
+    // Conversely, when the conflict is because a COMPLETION raced ahead, the
+    // release goal (no dangling in-flight) is already met -> treated as Ok.
+    block_on(store.append(
+        &stream_key,
+        DedupEntry::new("key", Some(vec![9]), 6_000).serialize()?,
+        3,
+    ))?;
+    let after_completion = block_on(stale_release_then_recheck(
+        &cache,
+        &stream_key,
+        "key",
+        7_000,
+    ));
+    assert!(
+        after_completion.is_ok(),
+        "a release racing a completion is satisfied (receipt preserved)"
+    );
+    assert_eq!(
+        block_on(cache.lookup("key"))?,
+        Some(DedupDecision::Completed(ProcessingReceipt::new(vec![9])))
+    );
+    Ok(())
+}
+
+/// Drives a release tombstone append at the STALE `expected_seq` 1 so it loses the
+/// CAS, then runs the same conflict re-check `release_claim_at` uses internally.
+/// This exercises [`DedupCache::confirm_release_after_conflict`] deterministically
+/// without a `#[cfg(test)]` seam in the production module.
+async fn stale_release_then_recheck(
+    cache: &DedupCache,
+    stream_key: &str,
+    idempotency_key: &str,
+    timestamp_millis: u64,
+) -> Result<(), DurabilityError> {
+    let tombstone = DedupRecord::tombstone(idempotency_key.to_owned(), timestamp_millis);
+    match cache
+        .store
+        .append(stream_key, tombstone.serialize()?, 1)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(DurabilityError::SequenceConflict { expected, actual }) => {
+            cache
+                .confirm_release_after_conflict(stream_key, idempotency_key, expected, actual)
+                .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Debug, Default)]
 struct FakeStore {
     streams: Mutex<HashMap<String, Vec<StoredEntry>>>,

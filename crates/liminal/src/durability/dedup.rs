@@ -264,6 +264,100 @@ impl DedupCache {
         }
     }
 
+    /// Releases an in-flight claim so the key becomes re-claimable.
+    ///
+    /// Callers use this on the publish failure path: a key was claimed
+    /// ([`DedupDecision::Claimed`]) but the downstream delivery failed before a
+    /// receipt could be recorded, leaving the key dangling [`DedupDecision::InFlight`]
+    /// forever and permanently suppressing every re-publish. Releasing appends a
+    /// tombstone so the next claim succeeds.
+    ///
+    /// This NEVER clobbers a stored receipt: an already-completed key (receipt
+    /// present) and an absent key are both no-ops, preserving the at-most-once
+    /// guarantee. Only a current in-flight entry (active, no receipt) is tombstoned.
+    ///
+    /// # Errors
+    ///
+    /// Propagates store read/append and serialization errors. A [`DurabilityError::SequenceConflict`]
+    /// on the tombstone append is re-checked: if the latest state is now completed
+    /// or already a tombstone the release is treated as successful, otherwise the
+    /// conflict is propagated.
+    pub async fn release_claim(&self, idempotency_key: &str) -> Result<(), DurabilityError> {
+        self.release_claim_at(idempotency_key, current_epoch_millis()?)
+            .await
+    }
+
+    async fn release_claim_at(
+        &self,
+        idempotency_key: &str,
+        timestamp_millis: u64,
+    ) -> Result<(), DurabilityError> {
+        let stream_key = self.stream_key_for(idempotency_key);
+        let snapshot = self.load_snapshot(&stream_key, idempotency_key).await?;
+        // No-op when there is nothing in flight: absent key, or a completed key
+        // whose receipt must never be clobbered (guards at-most-once).
+        let Some(entry) = snapshot.current.as_ref() else {
+            return Ok(());
+        };
+        if entry.receipt().is_some() {
+            return Ok(());
+        }
+
+        let tombstone = DedupRecord::tombstone(idempotency_key.to_owned(), timestamp_millis);
+        match self
+            .store
+            .append(&stream_key, tombstone.serialize()?, snapshot.next_seq)
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(DurabilityError::SequenceConflict { expected, actual }) => {
+                self.confirm_release_after_conflict(&stream_key, idempotency_key, expected, actual)
+                    .await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn confirm_release_after_conflict(
+        &self,
+        stream_key: &str,
+        idempotency_key: &str,
+        expected: u64,
+        actual: u64,
+    ) -> Result<(), DurabilityError> {
+        // A concurrent writer advanced the stream after our snapshot. Re-load and
+        // re-check the latest record directly (not via `into_active`, so a fresh
+        // tombstone is distinguishable): if it is now completed (receipt present)
+        // or already a tombstone, the in-flight claim is gone and the release goal
+        // is met. A still-active no-receipt entry means a legitimate re-claim won
+        // the race, so we must not clobber it -- propagate the conflict.
+        let latest = self.latest_record(stream_key, idempotency_key).await?;
+        match latest {
+            Some(DedupRecord::Tombstone { .. }) => Ok(()),
+            Some(DedupRecord::Active(entry)) if entry.receipt().is_some() => Ok(()),
+            _ => Err(DurabilityError::SequenceConflict { expected, actual }),
+        }
+    }
+
+    async fn latest_record(
+        &self,
+        stream_key: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<DedupRecord>, DurabilityError> {
+        let entries = self.read_stream(stream_key).await?;
+        let mut latest = None;
+        for stored in entries {
+            let record = DedupRecord::deserialize(&stored.payload)?;
+            if record.idempotency_key() != idempotency_key {
+                return Err(DurabilityError::DedupCollision {
+                    key: idempotency_key.to_owned(),
+                });
+            }
+            latest = Some(record);
+        }
+        Ok(latest)
+    }
+
     fn scan_prefix(&self) -> String {
         format!("{}:", self.namespace)
     }

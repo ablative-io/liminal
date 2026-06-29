@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use haematite::{Database, DatabaseConfig, EventStore};
 use liminal::durability::bridge::block_on;
 use liminal::durability::{
-    DurableStore, HaematiteStore, MessageEnvelope as DurableEnvelope, StoredEntry,
+    DurabilityError, DurableStore, HaematiteStore, MessageEnvelope as DurableEnvelope, StoredEntry,
 };
 use liminal::protocol::{CausalContext, MessageEnvelope, SchemaId};
 use tempfile::TempDir;
@@ -154,6 +157,97 @@ fn publish_without_subscriber_reports_not_delivered() -> Result<(), Box<dyn std:
     Ok(())
 }
 
+/// Regression for the "dedup claim leaks `InFlight` forever on publish failure"
+/// bug. A failed `publish_with_delivery` must release the dedup claim it took, so
+/// a re-publish of the same key is DELIVERED, not permanently suppressed.
+///
+/// The failure is injected with a store double that rejects appends to the
+/// durable channel stream (`orders:0`) while letting dedup-namespace appends
+/// through, so the claim succeeds, the durable persist fails, and the release can
+/// still write its tombstone. This test MUST fail without the release fix (the
+/// re-publish would see `InFlight` and report `delivered = false`).
+#[test]
+fn publish_failure_releases_claim_so_reclaim_is_delivered() -> Result<(), Box<dyn std::error::Error>>
+{
+    let (inner, _dir) = disk_store()?;
+    let failing = Arc::new(FailingAppendStore::new(inner, |stream_key| {
+        // Fail the durable-channel append, but never the dedup-namespace append.
+        stream_key == ORDERS_STREAM_KEY
+    }));
+    let store: Arc<dyn DurableStore> = Arc::clone(&failing) as Arc<dyn DurableStore>;
+    let services =
+        LiminalConnectionServices::from_config_with_store(&durable_orders_config()?, store)?;
+
+    // A live subscriber so a successful delivery is genuinely observable.
+    let subscription = services.subscribe_handle_for_test("orders")?;
+    let payload = br#"{"order":1}"#.to_vec();
+
+    // First publish with key "k1": the claim is taken, then the durable persist
+    // fails -> publish returns Err. Without the fix the claim is left InFlight.
+    let first = services.publish("orders", &order_envelope(payload.clone()), Some("k1"));
+    assert!(
+        first.is_err(),
+        "publish must surface the injected durable-append failure"
+    );
+
+    // Re-publish the SAME key "k1" after the failure is cleared. With the claim
+    // released, this is a fresh claim and is genuinely delivered. Without the
+    // release fix this would be suppressed (delivered = false).
+    failing.clear_failure();
+    let retry = services.publish("orders", &order_envelope(payload.clone()), Some("k1"))?;
+    assert!(
+        retry.delivered,
+        "after a failed publish releases its claim, the re-publish must be delivered, not suppressed"
+    );
+
+    // The subscriber receives exactly one copy (the successful retry).
+    let mut received = Vec::new();
+    while let Some(envelope) = subscription.try_next()? {
+        received.push(envelope.payload);
+    }
+    assert_eq!(
+        received,
+        vec![payload],
+        "the retry delivers exactly once; the failed publish delivered nothing"
+    );
+    Ok(())
+}
+
+/// Best-effort release: when `release_claim` ITSELF errors, `publish` still
+/// returns the ORIGINAL publish error (not the release error) and does not panic.
+#[test]
+fn publish_failure_with_failing_release_returns_original_error()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (inner, _dir) = disk_store()?;
+    // The dedup CLAIM (first dedup-stream append) must succeed so the publish path
+    // reaches publish_with_delivery; the channel persist then fails (the ORIGINAL
+    // error) and the release tombstone append (second dedup-stream append) also
+    // fails (so release_claim ITSELF errors). The decorator fails every append
+    // except the very first one per stream, which lets the claim through.
+    let store = Arc::new(FailingAppendStore::fail_after_first_per_stream(inner));
+    let store: Arc<dyn DurableStore> = store;
+    let services =
+        LiminalConnectionServices::from_config_with_store(&durable_orders_config()?, store)?;
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        services.publish(
+            "orders",
+            &order_envelope(br#"{"order":1}"#.to_vec()),
+            Some("k1"),
+        )
+    }));
+    let publish_result = result.map_err(|_| "publish panicked under failing release")?;
+    let error = publish_result
+        .err()
+        .ok_or("publish must surface the original failure")?;
+    let message = error.to_string();
+    assert!(
+        message.contains("liminal publish failed"),
+        "must return the ORIGINAL publish error, got: {message}"
+    );
+    Ok(())
+}
+
 fn ephemeral_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
     Ok(ServerConfig {
         listen_address: "127.0.0.1:0".parse()?,
@@ -207,4 +301,124 @@ fn read_payloads(
         payloads.push(DurableEnvelope::deserialize(&entry.payload)?.payload);
     }
     Ok(payloads)
+}
+
+/// Append-failure strategy for [`FailingAppendStore`].
+enum FailMode {
+    /// Fail every append whose stream key matches the predicate.
+    Predicate(fn(&str) -> bool),
+    /// Fail the durable channel append unconditionally, and fail every dedup-stream
+    /// append EXCEPT the first one per stream. This lets the dedup CLAIM (first
+    /// dedup-stream append) succeed so the publish path reaches the channel persist,
+    /// which fails (the ORIGINAL error), and then the dedup RELEASE tombstone
+    /// (second dedup-stream append) also fails (so `release_claim` ITSELF errors).
+    ChannelAlwaysDedupAfterFirst(Mutex<HashMap<String, u32>>),
+}
+
+/// `DurableStore` decorator that injects append failures for testing the publish
+/// failure path. While armed, an `append` selected by the [`FailMode`] returns a
+/// store error; every other operation delegates to the inner store.
+/// [`Self::clear_failure`] disarms the injection so a retry can succeed.
+#[derive(Debug)]
+struct FailingAppendStore {
+    inner: Arc<dyn DurableStore>,
+    armed: AtomicBool,
+    mode: FailMode,
+}
+
+impl std::fmt::Debug for FailMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Predicate(_) => formatter.write_str("Predicate"),
+            Self::ChannelAlwaysDedupAfterFirst(_) => {
+                formatter.write_str("ChannelAlwaysDedupAfterFirst")
+            }
+        }
+    }
+}
+
+impl FailingAppendStore {
+    fn new(inner: Arc<dyn DurableStore>, should_fail: fn(&str) -> bool) -> Self {
+        Self {
+            inner,
+            armed: AtomicBool::new(true),
+            mode: FailMode::Predicate(should_fail),
+        }
+    }
+
+    fn fail_after_first_per_stream(inner: Arc<dyn DurableStore>) -> Self {
+        Self {
+            inner,
+            armed: AtomicBool::new(true),
+            mode: FailMode::ChannelAlwaysDedupAfterFirst(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn clear_failure(&self) {
+        self.armed.store(false, Ordering::SeqCst);
+    }
+
+    fn should_fail(&self, stream_key: &str) -> Result<bool, DurabilityError> {
+        if !self.armed.load(Ordering::SeqCst) {
+            return Ok(false);
+        }
+        match &self.mode {
+            FailMode::Predicate(predicate) => Ok(predicate(stream_key)),
+            FailMode::ChannelAlwaysDedupAfterFirst(seen) => {
+                if stream_key == ORDERS_STREAM_KEY {
+                    return Ok(true);
+                }
+                let mut seen = seen
+                    .lock()
+                    .map_err(|_| DurabilityError::ConfigError("test lock poisoned".to_owned()))?;
+                let count = seen.entry(stream_key.to_owned()).or_insert(0);
+                let fail = *count > 0;
+                *count += 1;
+                drop(seen);
+                Ok(fail)
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableStore for FailingAppendStore {
+    async fn append(
+        &self,
+        stream_key: &str,
+        payload: Vec<u8>,
+        expected_seq: u64,
+    ) -> Result<u64, DurabilityError> {
+        if self.should_fail(stream_key)? {
+            return Err(DurabilityError::ConfigError(format!(
+                "injected append failure for stream '{stream_key}'"
+            )));
+        }
+        self.inner.append(stream_key, payload, expected_seq).await
+    }
+
+    async fn read_from(
+        &self,
+        stream_key: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner.read_from(stream_key, offset, limit).await
+    }
+
+    async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {
+        self.inner.cas(key, old_value, new_value).await
+    }
+
+    async fn read_value(&self, key: &str) -> Result<Option<u64>, DurabilityError> {
+        self.inner.read_value(key).await
+    }
+
+    async fn scan(&self, prefix: &str) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner.scan(prefix).await
+    }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush().await
+    }
 }
