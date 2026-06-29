@@ -419,6 +419,33 @@ impl LiminalConnectionServices {
             })?;
         Ok(matches!(decision, DedupDecision::Claimed))
     }
+
+    /// Releases a dangling in-flight dedup claim after a failed delivery.
+    ///
+    /// Best-effort: a release failure cannot mask the original publish error, so
+    /// this returns nothing and logs at `error` level instead of surfacing. It is
+    /// never silent — the leak (a permanently suppressed key) must be observable.
+    /// `release_claim` itself never clobbers a stored receipt, so calling it on the
+    /// failure path is safe even if a concurrent completion raced ahead.
+    fn release_claim(&self, key: &str) {
+        match block_on(self.dedup.release_claim(key)) {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::error!(
+                    idempotency_key = key,
+                    %error,
+                    "failed to release dedup claim after publish failure; key may stay suppressed"
+                );
+            }
+            Err(error) => {
+                tracing::error!(
+                    idempotency_key = key,
+                    %error,
+                    "dedup release bridge failed after publish failure; key may stay suppressed"
+                );
+            }
+        }
+    }
 }
 
 /// Returns the current epoch-millis timestamp used as the dedup entry anchor.
@@ -530,9 +557,23 @@ impl ConnectionServices for LiminalConnectionServices {
             liminal::envelope::PublisherId::default(),
             None,
         );
-        let delivery = delivery.map_err(|error| ServerError::ListenerAccept {
-            message: format!("liminal publish failed for channel '{channel}': {error}"),
-        })?;
+        let delivery = match delivery {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                // The claim above appended an `InFlight` entry but the delivery
+                // failed before `complete_receipt` could run. Release the claim so
+                // the key is re-claimable; otherwise every re-publish would see
+                // `InFlight` and be suppressed forever. Best-effort: surface the
+                // ORIGINAL publish error regardless, but never swallow a release
+                // failure silently (it leaves the leak intact).
+                if let Some(key) = idempotency_key {
+                    self.release_claim(key);
+                }
+                return Err(ServerError::ListenerAccept {
+                    message: format!("liminal publish failed for channel '{channel}': {error}"),
+                });
+            }
+        };
 
         // Record the dedup completion AFTER a successful claimed delivery so the
         // claim is not left dangling `InFlight` (which would wrongly defer every
