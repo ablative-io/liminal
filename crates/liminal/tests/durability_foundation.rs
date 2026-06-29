@@ -20,6 +20,8 @@ fn disk_store() -> Result<(HaematiteStore, TempDir), Box<dyn std::error::Error>>
     let database = Database::create(DatabaseConfig {
         data_dir: dir.path().join("db"),
         shard_count: 4,
+        sweep_interval: None,
+        distributed: None,
     })?;
     Ok((
         HaematiteStore::new(Arc::new(EventStore::new(database))),

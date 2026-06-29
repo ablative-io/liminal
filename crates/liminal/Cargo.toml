@@ -1,5 +1,5 @@
 [package]
-name = "liminal"
+name = "liminal-rs"
 version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -8,20 +8,26 @@ repository.workspace = true
 authors.workspace = true
 description = "A conversation-based messaging bus built on beamr"
 
+# Published as `liminal-rs` (the bare `liminal` name is taken on crates.io by an
+# unrelated crate), but the library is imported as `liminal` everywhere — the
+# crate name stays `liminal` and siblings depend on it via `package = "liminal-rs"`.
+[lib]
+name = "liminal"
+
 [dependencies]
-async-trait = "0.1"
-beamr = { version = "0.11.0", features = ["cooperative", "json"] }
-chrono = "0.4.45"
-haematite = "0.1.0"
-jsonschema = { version = "0.46.5", default-features = false }
-rand = "0.10.1"
-serde_json = "1"
-thiserror = "2"
-tracing = "0.1"
-uuid = { version = "1.23.3", features = ["v4"] }
+async-trait = { workspace = true }
+beamr = { workspace = true, features = ["cooperative", "json"] }
+chrono = { workspace = true }
+haematite = { workspace = true }
+jsonschema = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true, features = ["std"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3"
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
