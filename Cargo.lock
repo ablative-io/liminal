@@ -145,34 +145,6 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "beamr"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dfbd8e4b5a5391d907986b8d3b5ca3c26d4a524f35297fd451ef595b54554d4"
-dependencies = [
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "crossbeam-channel",
- "crossbeam-deque",
- "crossbeam-queue",
- "dashmap",
- "flate2",
- "gleam-types",
- "io-uring",
- "libc",
- "md5",
- "num_cpus",
- "rand",
- "rustix",
- "tokio",
- "unicode-segmentation",
- "zstd",
-]
-
-[[package]]
-name = "beamr"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0347be985ae9cc2291819b79f7b2336ec0b2390b6edbbbad57d08239a7f789b6"
@@ -817,18 +789,20 @@ dependencies = [
 
 [[package]]
 name = "haematite"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18dc7a0f86c29c1a2aa3b4ad743393276d48dfb98dea788b0da2cab4be1d186d"
+checksum = "c6f1cfc3c46cb57bd4f3b945a8714ce0c74341ad0ee63a968bb160ba895df5de"
 dependencies = [
- "beamr 0.8.2",
+ "beamr",
  "blake3",
  "crc32fast",
+ "dashmap",
  "log",
  "lru",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "zstd",
 ]
 
@@ -1119,11 +1093,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
-name = "liminal"
+name = "liminal-rs"
 version = "0.2.0"
 dependencies = [
  "async-trait",
- "beamr 0.11.0",
+ "beamr",
  "chrono",
  "haematite",
  "jsonschema",
@@ -1140,7 +1114,7 @@ name = "liminal-sdk"
 version = "0.2.0"
 dependencies = [
  "futures-core",
- "liminal",
+ "liminal-rs",
  "serde",
  "serde_json",
  "spin",
@@ -1153,11 +1127,11 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "beamr 0.11.0",
+ "beamr",
  "clap",
  "futures-core",
  "haematite",
- "liminal",
+ "liminal-rs",
  "liminal-sdk",
  "serde",
  "serde_json",

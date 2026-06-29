@@ -16,6 +16,41 @@ authors = [
     "Tom Whiting <tom@ablative.com.au>",
 ]
 
+# Single source of truth for every dependency version in the workspace. Members
+# inherit with `{ workspace = true }` and layer on per-crate features. The two
+# internal crates carry both a path (for local builds) and a version (what
+# `cargo publish` ships to crates.io). `liminal` is published as `liminal-rs`
+# because the bare name is taken on crates.io, but is imported as `liminal`.
+[workspace.dependencies]
+liminal = { package = "liminal-rs", version = "0.2.0", path = "crates/liminal" }
+liminal-sdk = { version = "0.2.0", path = "crates/liminal-sdk" }
+
+anyhow = "1"
+async-trait = "0.1"
+beamr = "0.11.0"
+chrono = "0.4.45"
+clap = "4"
+# `default-features = false` bases: members add `std`/`alloc` as they need. The
+# `liminal-sdk` crate is `no_std`-capable, so it inherits the lean base and adds
+# only `alloc`; the std crates add `std` explicitly. (Cargo forbids a member from
+# re-enabling default features it disabled, so the lean base is the only base that
+# can satisfy both.)
+futures-core = { version = "0.3", default-features = false }
+haematite = "0.3.0"
+jsonschema = { version = "0.46.5", default-features = false }
+rand = "0.10.1"
+serde = { version = "1", default-features = false, features = ["derive"] }
+serde_json = { version = "1", default-features = false }
+signal-hook = "0.3"
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+tempfile = "3"
+thiserror = { version = "2", default-features = false }
+tokio = "1"
+toml = "0.8"
+tracing = "0.1"
+uuid = { version = "1.23.3", features = ["v4"] }
+wasm-bindgen = "0.2.105"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 

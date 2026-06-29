@@ -209,7 +209,9 @@ impl From<ApiError> for DurabilityError {
         match error {
             ApiError::SequenceConflict(conflict) => conflict.into(),
             ApiError::CasMismatch(mismatch) => mismatch.into(),
-            other @ (ApiError::CorruptEvent(_) | ApiError::Storage(_)) => Self::StoreError(other),
+            other @ (ApiError::CorruptEvent(_)
+            | ApiError::Storage(_)
+            | ApiError::HistoryCompacted(_)) => Self::StoreError(other),
         }
     }
 }

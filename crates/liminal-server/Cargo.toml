@@ -9,24 +9,24 @@ authors.workspace = true
 description = "Standalone server for the liminal messaging bus"
 
 [dependencies]
-anyhow = "1"
-beamr = { version = "0.11.0", features = ["json"] }
-clap = { version = "4", features = ["derive"] }
-haematite = "0.1.0"
-liminal = { version = "0.2.0", path = "../liminal" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-signal-hook = "0.3"
-thiserror = "2"
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time"] }
-toml = "0.8"
-tracing = "0.1"
+anyhow = { workspace = true }
+beamr = { workspace = true, features = ["json"] }
+clap = { workspace = true, features = ["derive"] }
+haematite = { workspace = true }
+liminal = { workspace = true }
+serde = { workspace = true, features = ["std"] }
+serde_json = { workspace = true, features = ["std"] }
+signal-hook = { workspace = true }
+thiserror = { workspace = true, features = ["std"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time"] }
+toml = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-async-trait = "0.1"
-futures-core = "0.3"
-liminal-sdk = { version = "0.2.0", path = "../liminal-sdk" }
-tempfile = "3"
+async-trait = { workspace = true }
+futures-core = { workspace = true, features = ["std"] }
+liminal-sdk = { workspace = true }
+tempfile = { workspace = true }
 
 [lints]
 workspace = true

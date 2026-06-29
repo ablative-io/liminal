@@ -500,6 +500,8 @@ fn open_or_create_database(data_dir: &Path) -> Result<Database, ServerError> {
         Database::create(DatabaseConfig {
             data_dir: data_dir.to_path_buf(),
             shard_count: DEFAULT_SHARD_COUNT,
+            sweep_interval: None,
+            distributed: None,
         })
     };
     result.map_err(|error| ServerError::ConfigValidation {
