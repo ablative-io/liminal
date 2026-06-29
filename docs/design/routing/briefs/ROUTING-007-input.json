@@ -1,0 +1,83 @@
+{
+  "repo_root": "/Users/tom/Developer/ablative/liminal",
+  "clone_url": "https://github.com/ablative-io/liminal.git",
+  "workspace_id": "2d5fdd51-1f25-45a4-8f86-4d4c978d1355",
+  "brief_id": "ROUTING-007",
+  "reviewers": ["Waffles the Terrible"],
+  "base_ref": "main",
+  "placement": "local",
+  "isolation": "worktree",
+  "review_cap": 1,
+  "round_backoff_ms": 2000,
+  "verify_fix_cap": 3,
+  "review_deadline_ms": 7200000,
+  "brief_document": {
+    "id": "ROUTING-007",
+    "cluster": "routing",
+    "title": "Harden the supervised routing executor to REAL beamr supervision (replace the std::thread + catch_unwind shim)",
+    "depends_on": [],
+    "blocked_by": [],
+    "checklist": [],
+    "stories": [],
+    "design_anchor": [],
+    "purpose": "ROUTING-003 added SupervisedExecutor (crates/liminal/src/routing/function/execute.rs) but it is a SHIM: it runs each routing function on a raw std::thread and contains panics with std::panic::catch_unwind, with timeout via a sync_channel recv_timeout. liminal is built on the beamr BEAM-style native runtime (beamr 0.9.0), which provides real process supervision (the Actor trait, spawn_actor, ActorRef/SenderHandle with call/cast, and scheduler-managed crash isolation/restart). Replace the shim with real beamr-supervised execution so each routing-function invocation runs as a supervised beamr process — crash isolation and timeout come from the runtime, not an ad-hoc thread.",
+    "task": "Replace the std::thread + catch_unwind + sync_channel shim in SupervisedExecutor with execution on a real beamr supervised process using beamr's Actor / spawn_actor / SenderHandle::call primitives (see the beamr crate's native actor + supervision modules). Each routing-function invocation SHALL run inside a beamr process supervised by the scheduler; a panic SHALL surface as FunctionError::Crashed (via the process exit/EXIT signal), a timeout as FunctionError::TimedOut, and a spawn failure as FunctionError::SpawnFailed — i.e. preserve the EXACT external behaviour and error mapping. SupervisedExecutor will need a beamr Scheduler handle; thread it through its constructor and update the routing dispatch call site(s) and tests accordingly. Keep the executor's public surface as small as possible. Do NOT change routing semantics, the RoutingDecision result, hot-deploy/in-flight behaviour, or any observable output.",
+    "requirements": [
+      {
+        "id": "R1",
+        "title": "Execute routing functions on supervised beamr processes",
+        "spec": "THE SYSTEM SHALL execute each routing-function invocation inside a beamr process spawned and supervised via beamr's actor/supervision API (spawn_actor + SenderHandle::call or equivalent), NOT via std::thread + catch_unwind. Crash isolation between concurrent invocations SHALL be provided by the beamr runtime.",
+        "acceptance": [
+          "execute.rs no longer uses std::thread::Builder / std::panic::catch_unwind / std::sync::mpsc for running the routing function.",
+          "Each invocation runs in a beamr-supervised process; a panic in the function does not unwind into or corrupt the caller or other concurrent invocations.",
+          "SupervisedExecutor holds/receives a beamr Scheduler handle; the routing dispatch call site and tests are updated to provide it."
+        ],
+        "files": { "create": [], "modify": [], "delete": [] },
+        "checklist": [],
+        "stories": []
+      },
+      {
+        "id": "R2",
+        "title": "Identical error mapping + preserved behaviour",
+        "spec": "The externally observable behaviour SHALL be unchanged: a panicking function maps to FunctionError::Crashed, a function exceeding the timeout maps to FunctionError::TimedOut, a spawn failure maps to FunctionError::SpawnFailed, and a normal function returns its RoutingDecision exactly as before. Hot-deploy / in-flight execution semantics SHALL be preserved.",
+        "acceptance": [
+          "All existing tests in execute.rs pass unchanged in their assertions: returns-decision, message-fields-visible, panic-contained-others-proceed, timeout-terminated-with-error, hot-deploy-does-not-interrupt-in-flight.",
+          "Error variants map exactly as listed (Crashed / TimedOut / SpawnFailed); no new error variants leak into the public API.",
+          "Timeout is enforced (a function that sleeps past the configured timeout still yields TimedOut)."
+        ],
+        "files": { "create": [], "modify": [], "delete": [] },
+        "checklist": [],
+        "stories": []
+      }
+    ],
+    "boundaries": [
+      "SHALL preserve the external behaviour + error mapping of SupervisedExecutor exactly; this is a supervision-mechanism swap, not a semantics change.",
+      "SHALL NOT change routing decisions, RoutingDecision, consumer-state-view handling, or hot-deploy/in-flight semantics.",
+      "SHALL NOT introduce unsafe code (workspace sets unsafe_code = deny).",
+      "SHALL keep no production unwrap()/expect()/panic!() (workspace denies clippy unwrap_used/expect_used/panic); convert all beamr spawn/call errors to FunctionError variants.",
+      "SHALL keep files under 500 lines (extract a submodule if execute.rs approaches the limit).",
+      "Use the real beamr supervision primitives (Actor/spawn_actor/SenderHandle in the beamr native modules); do NOT reintroduce a raw-thread fallback."
+    ],
+    "verification": [
+      "cargo fmt --check clean for changed files (rustfmt edition 2024; --config skip_children=true to avoid reformatting unrelated module children).",
+      "cargo clippy --workspace --all-targets -- -D warnings clean (all/pedantic + unwrap/expect/panic denied).",
+      "cargo test passes in full including all existing execute.rs supervision tests; zero failures.",
+      "The panic and timeout tests genuinely exercise the new beamr path (fail if supervision/timeout is removed).",
+      "No new public API surface beyond the Scheduler handle the executor now requires."
+    ]
+  },
+  "resolved_context": {
+    "adrs": [],
+    "checklist": [],
+    "constraints": [
+      { "id": "CN1", "text": "No file over 500 lines; extract submodules if approaching the limit." },
+      { "id": "CN2", "text": "No panics in production code; unwrap()/expect() only in tests." },
+      { "id": "CN3", "text": "mod.rs contains only pub mod / pub use; no logic." },
+      { "id": "CN4", "text": "All public types implement Debug; all error types implement std::error::Error." }
+    ],
+    "intention": "liminal's supervised routing executor is currently a std::thread + catch_unwind shim (ROUTING-003); harden it to REAL beamr supervision so crash isolation/restart and timeout come from the runtime liminal is built on. The current shim is in crates/liminal/src/routing/function/execute.rs; beamr 0.9.0 provides the Actor/spawn_actor/SenderHandle supervision primitives in its native modules. See ABLATIVE-STACK-ROADMAP.md (liminal: 'Real beamr supervised exec').",
+    "provenance": { "quote": "harden to real beamr supervision", "requested_by": "Tom" },
+    "design_path": "docs/design/routing",
+    "stories": []
+  }
+}
