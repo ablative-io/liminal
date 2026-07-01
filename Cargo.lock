@@ -789,9 +789,9 @@ dependencies = [
 
 [[package]]
 name = "haematite"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6f1cfc3c46cb57bd4f3b945a8714ce0c74341ad0ee63a968bb160ba895df5de"
+checksum = "b4036b108a66180e1fcfbf8802eb570b49def7e96c41f3406d900c37314a001c"
 dependencies = [
  "beamr",
  "blake3",
@@ -1094,7 +1094,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "liminal-rs"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "beamr",
@@ -1111,7 +1111,7 @@ dependencies = [
 
 [[package]]
 name = "liminal-sdk"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "futures-core",
  "liminal-rs",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "liminal-server"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
