@@ -232,6 +232,10 @@ struct RecordingNotifier {
     registered: Mutex<Vec<(u64, WorkerRegistration)>>,
     unregistered: Mutex<Vec<u64>>,
     reject_with: Option<String>,
+    /// The channel this notifier taps out-of-band (consuming publishes to it), if
+    /// any. A publish to this exact channel is recorded and reported consumed.
+    tap_channel: Option<String>,
+    tapped: Mutex<Vec<(u64, String, Vec<u8>)>>,
 }
 
 impl RecordingNotifier {
@@ -240,6 +244,8 @@ impl RecordingNotifier {
             registered: Mutex::new(Vec::new()),
             unregistered: Mutex::new(Vec::new()),
             reject_with: None,
+            tap_channel: None,
+            tapped: Mutex::new(Vec::new()),
         }
     }
 
@@ -248,6 +254,18 @@ impl RecordingNotifier {
             registered: Mutex::new(Vec::new()),
             unregistered: Mutex::new(Vec::new()),
             reject_with: Some(reason.to_owned()),
+            tap_channel: None,
+            tapped: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn tapping(channel: &str) -> Self {
+        Self {
+            registered: Mutex::new(Vec::new()),
+            unregistered: Mutex::new(Vec::new()),
+            reject_with: None,
+            tap_channel: Some(channel.to_owned()),
+            tapped: Mutex::new(Vec::new()),
         }
     }
 }
@@ -275,6 +293,16 @@ impl ConnectionNotifier for RecordingNotifier {
         if let Ok(mut unregistered) = self.unregistered.lock() {
             unregistered.push(pid);
         }
+    }
+
+    fn on_channel_publish(&self, pid: u64, channel: &str, payload: &[u8]) -> bool {
+        if self.tap_channel.as_deref() != Some(channel) {
+            return false;
+        }
+        if let Ok(mut tapped) = self.tapped.lock() {
+            tapped.push((pid, channel.to_owned(), payload.to_vec()));
+        }
+        true
     }
 }
 
@@ -377,6 +405,108 @@ fn worker_register_without_notifier_is_accepted() {
             ..
         })
     ));
+}
+
+/// A publish to a notifier-tapped channel is consumed out-of-band: the connection
+/// process routes it to the notifier and answers with NO wire response, and it NEVER
+/// reaches the normal channel fan-out (`services.publish`). This is the
+/// observability-drain demux the worker->server transcript bus rides.
+#[test]
+fn publish_to_tapped_channel_bypasses_fan_out() -> Result<(), ServerError> {
+    let notifier = Arc::new(RecordingNotifier::tapping("aion.observability.v1"));
+    let services = Arc::new(RecordingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_notifier(
+        Arc::clone(&services) as Arc<_>,
+        Arc::clone(&notifier) as Arc<_>,
+    );
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Publish {
+        flags: 0,
+        stream_id: 3,
+        channel: "aion.observability.v1".to_owned(),
+        envelope: envelope(b"event-bytes".to_vec()),
+        idempotency_key: None,
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    // A tapped publish gets no wire response (one-way notification).
+    assert!(matches!(action, FrameAction::NoResponse));
+    // The notifier recorded it verbatim...
+    let tapped = {
+        let guard = notifier
+            .tapped
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("test notifier tap recorder unavailable: {error}"),
+            })?;
+        guard.clone()
+    };
+    assert_eq!(
+        tapped,
+        vec![(
+            TEST_PID,
+            "aion.observability.v1".to_owned(),
+            b"event-bytes".to_vec()
+        )]
+    );
+    // ...and it NEVER reached the normal channel fan-out.
+    let published_count = {
+        let published = services
+            .publishes
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("test publish recorder unavailable: {error}"),
+            })?;
+        published.len()
+    };
+    assert_eq!(
+        published_count, 0,
+        "a tapped publish must not reach services.publish"
+    );
+    Ok(())
+}
+
+/// A publish to any OTHER channel is untouched by the tap: it flows to the normal
+/// channel fan-out exactly as before (the default-no-op path for a non-tapped
+/// channel, so liminal's general pub/sub is unchanged).
+#[test]
+fn publish_to_untapped_channel_still_fans_out() -> Result<(), ServerError> {
+    let notifier = Arc::new(RecordingNotifier::tapping("aion.observability.v1"));
+    let services = Arc::new(RecordingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_notifier(
+        Arc::clone(&services) as Arc<_>,
+        Arc::clone(&notifier) as Arc<_>,
+    );
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Publish {
+        flags: 0,
+        stream_id: 5,
+        channel: "orders".to_owned(),
+        envelope: envelope(b"order".to_vec()),
+        idempotency_key: None,
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(matches!(
+        action,
+        FrameAction::Respond(Frame::PublishAck { stream_id: 5, .. })
+    ));
+    let published_count = {
+        let published = services
+            .publishes
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("test publish recorder unavailable: {error}"),
+            })?;
+        published.len()
+    };
+    assert_eq!(
+        published_count, 1,
+        "an untapped publish must reach the normal fan-out"
+    );
+    Ok(())
 }
 
 fn envelope(payload: Vec<u8>) -> MessageEnvelope {

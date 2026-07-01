@@ -498,6 +498,17 @@ impl ConnectionRuntime {
         self.notifier.as_ref()
     }
 
+    /// Offers a channel publish to the notifier's observability-drain tap, returning
+    /// `true` when the application consumed it (so the connection process skips the
+    /// normal fan-out). `false` when no notifier is installed (liminal standalone) or
+    /// the notifier did not recognise the channel, so the caller can invoke it
+    /// unconditionally and fall through to the normal publish path.
+    pub(super) fn notifier_channel_publish(&self, pid: u64, channel: &str, payload: &[u8]) -> bool {
+        self.notifier
+            .as_ref()
+            .is_some_and(|notifier| notifier.on_channel_publish(pid, channel, payload))
+    }
+
     /// Stores `registration` on the connection record for `pid`, so the close
     /// path can later fire `on_worker_unregistered` for exactly the connections
     /// that registered. A missing record (the connection already closed) is a

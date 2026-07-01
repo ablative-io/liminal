@@ -303,13 +303,24 @@ pub(super) fn apply_frame(
             envelope,
             idempotency_key,
             ..
-        } => publish_response(
-            services,
-            stream_id,
-            &channel,
-            &envelope,
-            idempotency_key.as_deref(),
-        ),
+        } => {
+            // Offer the publish to the application's observability-drain tap first.
+            // When it consumes the frame (the reserved observability channel), the
+            // event was persisted/fanned-out out-of-band, so it must NOT also flow
+            // through the normal channel machinery (which would reject an undeclared
+            // channel), and the one-way publish gets no wire response.
+            if runtime.notifier_channel_publish(pid, &channel, &envelope.payload) {
+                FrameAction::NoResponse
+            } else {
+                publish_response(
+                    services,
+                    stream_id,
+                    &channel,
+                    &envelope,
+                    idempotency_key.as_deref(),
+                )
+            }
+        }
         Frame::Subscribe {
             stream_id,
             channel,

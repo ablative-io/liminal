@@ -50,4 +50,27 @@ pub trait ConnectionNotifier: std::fmt::Debug + Send + Sync {
     /// perspective: it runs on the close path where there is no peer to report an
     /// error to.
     fn on_worker_unregistered(&self, pid: u64);
+
+    /// Called when the connection identified by `pid` publishes to `channel`,
+    /// carrying the opaque envelope `payload`, BEFORE the normal channel fan-out.
+    ///
+    /// Returns `true` when the application CONSUMED the publish out-of-band (an
+    /// observability-drain tap): the connection process then does NOT route it to the
+    /// channel-fan-out cluster and answers with no wire response, so a tapped channel
+    /// need not be a declared fan-out channel. Returns `false` (the default) to let
+    /// the publish flow through the normal channel machinery unchanged.
+    ///
+    /// This is the observability-drain hook: a worker publishing an agent transcript
+    /// event to the reserved observability channel is consumed here — the hosting
+    /// application (aion) persists and live-fans-out the event without a second
+    /// connection. It is fire-and-forget: a publish is a one-way notification, so
+    /// there is no reply and a failed persist is the application's concern to log.
+    ///
+    /// The default returns `false`, so liminal still runs standalone: with no
+    /// notifier, or a notifier that does not recognise the channel, every publish
+    /// routes to the normal fan-out exactly as before.
+    fn on_channel_publish(&self, pid: u64, channel: &str, payload: &[u8]) -> bool {
+        let _ = (pid, channel, payload);
+        false
+    }
 }

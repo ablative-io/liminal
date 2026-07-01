@@ -17,7 +17,7 @@
 mod connection;
 mod push_client;
 
-pub use push_client::{PushClient, PushedFrame};
+pub use push_client::{OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame};
 
 use alloc::format;
 use alloc::string::ToString;

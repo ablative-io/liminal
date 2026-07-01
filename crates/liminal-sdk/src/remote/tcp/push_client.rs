@@ -34,8 +34,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 
 use liminal::protocol::{
-    Frame, ProtocolError, ProtocolVersion, WorkerRegisterOutcome, WorkerRegistration, decode,
-    encode, encoded_len,
+    CausalContext, Frame, MessageEnvelope, ProtocolError, ProtocolVersion, SchemaId,
+    WorkerRegisterOutcome, WorkerRegistration, decode, encode, encoded_len,
 };
 
 use crate::SdkError;
@@ -56,6 +56,16 @@ const READ_CHUNK_BYTES: usize = 4096;
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Application stream id used for the client's push reply frames.
 const APPLICATION_STREAM_ID: u32 = 1;
+
+/// The reserved channel a worker publishes agent-observability events to over its
+/// existing push connection.
+///
+/// It is NOT a general pub/sub channel: the server routes a publish on this exact
+/// channel name straight to its `ConnectionNotifier` observability hook (bypassing
+/// the channel-fan-out cluster), so a worker never needs a second connection to
+/// stream a transcript. The name is a wire contract shared by the worker publisher
+/// and the server's demux, so it is pinned here as the single source of truth.
+pub const OBSERVABILITY_CHANNEL: &str = "aion.observability.v1";
 
 /// A frame the server pushed to this client.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,6 +212,99 @@ impl PushClient {
     /// Returns [`SdkError::Protocol`] when the reply frame cannot be encoded and
     /// [`SdkError::Connection`] when it cannot be written to the socket or the
     /// writer lock is poisoned.
+    pub fn reply(&self, correlation_id: u64, payload: Vec<u8>) -> Result<(), SdkError> {
+        let frame = Frame::new_push_reply(APPLICATION_STREAM_ID, correlation_id, payload)
+            .map_err(|error| protocol_error(&error))?;
+        let mut writer = self.writer.lock().map_err(|error| SdkError::Connection {
+            description: format!("push writer lock poisoned: {error}"),
+        })?;
+        write_frame(&mut writer, &frame)
+    }
+
+    /// A cheap, cloneable handle to this push connection's write half, for
+    /// background tasks that publish out-of-band frames on the same socket without
+    /// owning the full client (which cannot be cloned — it holds the reader thread
+    /// join handle).
+    ///
+    /// The returned [`PushWriter`] shares the client's `Arc<Mutex<TcpStream>>`, so a
+    /// frame it writes travels the SAME connection the server pushes on. It is the
+    /// worker's observability-drain leg: a drain task holds one and publishes each
+    /// [`OBSERVABILITY_CHANNEL`] event live while the client keeps serving pushes.
+    #[must_use]
+    pub fn writer_handle(&self) -> PushWriter {
+        PushWriter {
+            writer: Arc::clone(&self.writer),
+        }
+    }
+
+    /// Publish `payload` to `channel` over this connection (out-of-band from the
+    /// push/reply round trip).
+    ///
+    /// Convenience shorthand for `self.writer_handle().publish(channel, payload)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Protocol`] when the publish frame cannot be encoded and
+    /// [`SdkError::Connection`] when it cannot be written to the socket or the
+    /// writer lock is poisoned.
+    pub fn publish(&self, channel: &str, payload: Vec<u8>) -> Result<(), SdkError> {
+        self.writer_handle().publish(channel, payload)
+    }
+}
+
+/// A cheap clone of a [`PushClient`]'s write half.
+///
+/// It writes `Frame::Publish` frames on the SAME socket the client receives pushes
+/// on, so a background drain task can stream observability events upstream without a
+/// second connection. Cloning is an `Arc` bump; the underlying socket and its write
+/// lock are shared with the originating [`PushClient`].
+#[derive(Clone, Debug)]
+pub struct PushWriter {
+    writer: Arc<Mutex<TcpStream>>,
+}
+
+impl PushWriter {
+    /// Publish `payload` to `channel` on the shared connection.
+    ///
+    /// Writes a single `Frame::Publish` carrying the opaque bytes verbatim (schema
+    /// id zero, an independent causal context — the server routes the reserved
+    /// observability channel straight to its notifier hook, so no schema negotiation
+    /// or ordering context is required). The write takes the shared writer lock, so
+    /// it never interleaves bytes with a concurrent push reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Protocol`] when the publish frame cannot be encoded and
+    /// [`SdkError::Connection`] when it cannot be written to the socket or the writer
+    /// lock is poisoned.
+    pub fn publish(&self, channel: &str, payload: Vec<u8>) -> Result<(), SdkError> {
+        let envelope = MessageEnvelope::new(
+            SchemaId::new([0_u8; SchemaId::WIRE_LEN]),
+            CausalContext::independent(),
+            payload,
+        );
+        let frame = Frame::new_publish(APPLICATION_STREAM_ID, channel, envelope)
+            .map_err(|error| protocol_error(&error))?;
+        let mut writer = self.writer.lock().map_err(|error| SdkError::Connection {
+            description: format!("push writer lock poisoned: {error}"),
+        })?;
+        write_frame(&mut writer, &frame)
+    }
+
+    /// Send a correlated reply to a server push on the shared connection, echoing the
+    /// push's `correlation_id` so the server matches the reply to its push.
+    ///
+    /// Identical wire effect to [`PushClient::reply`], but issued from a cheap
+    /// [`PushWriter`] clone so a BACKGROUND task (e.g. a long-running agent dispatch)
+    /// can answer its own push after it completes, without holding the full client or
+    /// blocking the serve loop. Shares the writer lock, so it never interleaves bytes
+    /// with a concurrent publish or reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Protocol`] when the reply frame cannot be encoded and
+    /// [`SdkError::Connection`] when it cannot be written to the socket or the writer
+    /// lock is poisoned.
     pub fn reply(&self, correlation_id: u64, payload: Vec<u8>) -> Result<(), SdkError> {
         let frame = Frame::new_push_reply(APPLICATION_STREAM_ID, correlation_id, payload)
             .map_err(|error| protocol_error(&error))?;
@@ -483,6 +586,37 @@ mod tests {
         assert_eq!(frame.correlation_id(), 7);
         assert_eq!(frame.payload(), &[1, 2, 3]);
         assert_eq!(frame.into_payload(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn publish_frame_round_trips_through_codec() -> Result<(), SdkError> {
+        // The observability publish frame the drain leg writes: a Publish on the
+        // reserved channel carrying opaque payload bytes verbatim.
+        let envelope = MessageEnvelope::new(
+            SchemaId::new([0_u8; SchemaId::WIRE_LEN]),
+            CausalContext::independent(),
+            vec![9, 9, 9],
+        );
+        let frame = Frame::new_publish(APPLICATION_STREAM_ID, OBSERVABILITY_CHANNEL, envelope)
+            .map_err(|error| protocol_error(&error))?;
+        let len = encoded_len(&frame).map_err(|error| protocol_error(&error))?;
+        let mut bytes = vec![0_u8; len];
+        let written = encode(&frame, &mut bytes).map_err(|error| protocol_error(&error))?;
+        let (decoded, consumed) =
+            decode(&bytes[..written]).map_err(|error| protocol_error(&error))?;
+        assert_eq!(consumed, written);
+        assert_eq!(decoded.frame_type(), FrameType::Publish);
+        let Frame::Publish {
+            channel, envelope, ..
+        } = decoded
+        else {
+            return Err(SdkError::Protocol {
+                description: "expected a Publish frame".to_string(),
+            });
+        };
+        assert_eq!(channel, OBSERVABILITY_CHANNEL);
+        assert_eq!(envelope.payload, vec![9, 9, 9]);
+        Ok(())
     }
 
     #[test]

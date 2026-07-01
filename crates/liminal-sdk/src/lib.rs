@@ -22,7 +22,7 @@ pub use embedded::{EmbeddedChannelHandle, EmbeddedConfig, EmbeddedConversationHa
 pub use error::SdkError;
 pub use pressure::{DeliveryAck, PressureResponse};
 #[cfg(feature = "std")]
-pub use remote::{PushClient, PushedFrame};
+pub use remote::{OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame};
 pub use remote::{
     RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SdkChannelHandle, SdkConfig,
     SdkConversationHandle, ServerAddress, build_channel_handle, build_conversation_handle,
