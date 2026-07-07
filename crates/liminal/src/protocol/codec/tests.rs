@@ -389,21 +389,69 @@ fn worker_register_ack_invalid_status_byte_is_rejected() {
 
 #[test]
 fn worker_register_discriminants_are_additive_and_unknown_preserved() -> Result<(), ProtocolError> {
-    // The newly assigned discriminants are 0x17 / 0x18; the next free byte (0x19)
-    // must still decode to Frame::Unknown, proving the additions did not consume a
-    // forward-compatibility slot.
-    let input = [0x19, 0x00, 0, 0, 0, 0, 0, 0, 0, 2, 0xAB, 0xCD];
+    // The assigned discriminants now run through 0x19 (Deliver); the next free byte
+    // (0x1A) must still decode to Frame::Unknown, proving the additions did not
+    // consume a forward-compatibility slot.
+    let input = [0x1A, 0x00, 0, 0, 0, 0, 0, 0, 0, 2, 0xAB, 0xCD];
     let (frame, consumed) = decode(&input)?;
     assert_eq!(consumed, input.len());
     assert_eq!(
         frame,
         Frame::Unknown {
-            type_id: 0x19,
+            type_id: 0x1A,
             flags: 0x00,
             stream_id: 0,
             payload: vec![0xAB, 0xCD],
         }
     );
+    Ok(())
+}
+
+/// H1: the server-to-client `Deliver` frame (discriminant 0x19) round-trips its
+/// per-subscription `delivery_seq` and full `MessageEnvelope` payload, and — being
+/// a non-control application-stream frame — is rejected on stream 0. A garbage
+/// payload that is too short for the `delivery_seq` prefix must error, not panic.
+#[test]
+fn deliver_frame_round_trips_seq_and_envelope() -> Result<(), ProtocolError> {
+    let envelope = sample_envelope(vec![0xAA, 0xBB, 0xCC, 0xDD]);
+    let frame = Frame::Deliver {
+        flags: 0,
+        stream_id: 9,
+        delivery_seq: 0x0102_0304_0506_0708,
+        envelope: envelope.clone(),
+    };
+    let decoded = round_trip(&frame)?;
+    assert_eq!(decoded, frame);
+    assert!(matches!(
+        decoded,
+        Frame::Deliver { delivery_seq, envelope: decoded_envelope, .. }
+            if delivery_seq == 0x0102_0304_0506_0708 && decoded_envelope == envelope
+    ));
+
+    // Deliver is an application-stream frame: stream 0 is invalid.
+    let on_control_stream = [u8::from(FrameType::Deliver), 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    assert!(matches!(
+        decode(&on_control_stream),
+        Err(ProtocolError::InvalidStream { .. })
+    ));
+
+    // A payload shorter than the 8-byte delivery_seq prefix must error cleanly.
+    let truncated_seq = [
+        u8::from(FrameType::Deliver),
+        0,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        3,
+        0x01,
+        0x02,
+        0x03,
+    ];
+    assert!(decode(&truncated_seq).is_err());
     Ok(())
 }
 

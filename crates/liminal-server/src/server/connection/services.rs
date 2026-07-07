@@ -37,12 +37,25 @@ pub trait SubscriptionResource: std::fmt::Debug + Send {
     /// # Errors
     /// Returns [`ServerError`] when the liminal library reports an unsubscribe failure.
     fn unsubscribe(self: Box<Self>) -> Result<(), ServerError>;
+
+    /// Attempts to pull the next delivered envelope from the wrapped library
+    /// subscription without blocking.
+    ///
+    /// Returns `None` when the subscriber inbox is empty (or momentarily
+    /// unavailable): the connection process is the delivery pump, so a transient
+    /// empty read is simply "nothing to deliver this slice", never an error.
+    fn try_next(&mut self) -> Option<liminal::envelope::Envelope>;
 }
 
 /// Library subscription resource owned by a single connection process.
 #[derive(Debug)]
 pub struct ConnectionSubscription {
     id: u64,
+    /// Client-chosen application stream the server delivers this subscription's
+    /// messages on (echoed on `SubscribeAck`, carried on every `Deliver`). Set by
+    /// the connection process from the `Subscribe` frame before the subscription is
+    /// stored; `0` only while momentarily unset during construction.
+    stream_id: u32,
     selected_schema: ProtocolSchemaId,
     resource: Box<dyn SubscriptionResource>,
 }
@@ -57,6 +70,7 @@ impl ConnectionSubscription {
     ) -> Self {
         Self {
             id,
+            stream_id: 0,
             selected_schema,
             resource,
         }
@@ -68,10 +82,26 @@ impl ConnectionSubscription {
         self.id
     }
 
+    /// Records the client-chosen delivery stream id for this subscription.
+    pub(super) const fn set_stream_id(&mut self, stream_id: u32) {
+        self.stream_id = stream_id;
+    }
+
+    /// Returns the client-chosen application stream id deliveries ride on.
+    #[must_use]
+    pub(super) const fn stream_id(&self) -> u32 {
+        self.stream_id
+    }
+
     /// Returns the schema selected for this subscription stream.
     #[must_use]
     pub const fn selected_schema(&self) -> ProtocolSchemaId {
         self.selected_schema
+    }
+
+    /// Attempts to pull the next delivered envelope without blocking.
+    pub(super) fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
+        self.resource.try_next()
     }
 
     pub(super) fn unsubscribe(self) -> Result<(), ServerError> {
@@ -751,6 +781,13 @@ impl SubscriptionResource for LiminalSubscriptionResource {
     fn unsubscribe(self: Box<Self>) -> Result<(), ServerError> {
         drop(self.subscription);
         Ok(())
+    }
+
+    fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
+        // A poisoned inbox lock surfaces as `Err`; treat it as "nothing this slice"
+        // rather than tearing the connection down on a transient library read fault.
+        // The subscriber process still holds any queued envelopes for the next slice.
+        self.subscription.try_next().ok().flatten()
     }
 }
 

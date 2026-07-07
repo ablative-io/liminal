@@ -5,7 +5,7 @@ mod payload;
 mod tests_support;
 
 use super::causal::MessageId;
-use super::envelope::SchemaId;
+use super::envelope::{MessageEnvelope, SchemaId};
 use super::error::ProtocolError;
 use super::frame::{
     Frame, FrameType, HEADER_LEN, WORKER_REGISTER_ACK_ACCEPTED, WORKER_REGISTER_ACK_REJECTED,
@@ -189,7 +189,10 @@ fn encoded_payload_len(frame: &Frame) -> Result<usize, ProtocolError> {
         Frame::ConversationOpen { subject, .. } => {
             sum_lengths(&[U64_LEN, string_field_len(subject)?])
         }
-        Frame::ConversationMessage { envelope, .. } => {
+        // Conversation-message and delivery frames share a wire shape: a `u64`
+        // prefix (conversation id / delivery seq) followed by a length-prefixed
+        // envelope.
+        Frame::ConversationMessage { envelope, .. } | Frame::Deliver { envelope, .. } => {
             sum_lengths(&[U64_LEN, envelope_bytes_field_len(envelope.encoded_len()?)?])
         }
         Frame::ConversationClose {
@@ -339,6 +342,17 @@ fn write_publish_payload(
     }
 }
 
+/// Writes a `u64` prefix followed by a length-prefixed serialized envelope — the
+/// shared body of conversation-message and delivery frames.
+fn write_u64_prefixed_envelope(
+    writer: &mut PayloadWriter<'_>,
+    value: u64,
+    envelope: &MessageEnvelope,
+) -> Result<(), ProtocolError> {
+    writer.write_u64(value)?;
+    writer.write_bytes_field(&envelope.serialize()?)
+}
+
 fn write_push_payload(frame: &Frame, writer: &mut PayloadWriter<'_>) -> Result<(), ProtocolError> {
     match frame {
         Frame::Push {
@@ -444,10 +458,7 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
             conversation_id,
             envelope,
             ..
-        } => {
-            writer.write_u64(*conversation_id)?;
-            writer.write_bytes_field(&envelope.serialize()?)?;
-        }
+        } => write_u64_prefixed_envelope(&mut writer, *conversation_id, envelope)?,
         Frame::ConversationClose {
             conversation_id,
             reason_code,
@@ -474,6 +485,11 @@ fn write_payload(frame: &Frame, buffer: &mut [u8]) -> Result<(), ProtocolError> 
         Frame::Push { .. } | Frame::PushReply { .. } => {
             write_push_payload(frame, &mut writer)?;
         }
+        Frame::Deliver {
+            delivery_seq,
+            envelope,
+            ..
+        } => write_u64_prefixed_envelope(&mut writer, *delivery_seq, envelope)?,
         Frame::WorkerRegister { registration, .. } => {
             write_worker_register_payload(registration, &mut writer)?;
         }

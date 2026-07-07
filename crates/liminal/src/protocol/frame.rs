@@ -105,6 +105,8 @@ pub enum FrameType {
     WorkerRegister,
     /// Server acknowledgement of a worker registration (accepted or rejected).
     WorkerRegisterAck,
+    /// Server-to-client delivery of a subscribed channel message.
+    Deliver,
     /// Forward-compatible frame type not known to this implementation.
     Unknown(u8),
 }
@@ -154,6 +156,7 @@ impl From<u8> for FrameType {
             0x16 => Self::PushReply,
             0x17 => Self::WorkerRegister,
             0x18 => Self::WorkerRegisterAck,
+            0x19 => Self::Deliver,
             unknown => Self::Unknown(unknown),
         }
     }
@@ -186,6 +189,7 @@ impl From<FrameType> for u8 {
             FrameType::PushReply => 0x16,
             FrameType::WorkerRegister => 0x17,
             FrameType::WorkerRegisterAck => 0x18,
+            FrameType::Deliver => 0x19,
             FrameType::Unknown(type_id) => type_id,
         }
     }
@@ -422,6 +426,22 @@ pub enum Frame {
         flags: u8,
         outcome: WorkerRegisterOutcome,
     },
+    /// Server-to-client delivery of a message on a subscription the client opened.
+    ///
+    /// The server writes this frame on the subscription's own `stream_id` (the
+    /// non-zero application stream negotiated by the client's `Subscribe`). It is
+    /// the only server-originated delivery frame, and it is only ever sent on a
+    /// subscription the client itself opened, so the forward-compatibility rules
+    /// for unknown frames never surprise an old client with one. `delivery_seq` is
+    /// a per-subscription monotonic counter starting at 1 — the anchor the future
+    /// ack/resume (A1 v2 credit) protocol builds on. The `envelope` reuses the same
+    /// [`MessageEnvelope`] serialization as publish and conversation frames.
+    Deliver {
+        flags: u8,
+        stream_id: u32,
+        delivery_seq: u64,
+        envelope: MessageEnvelope,
+    },
     /// Forward-compatible frame preserved after length-delimited skipping.
     Unknown {
         type_id: u8,
@@ -506,6 +526,26 @@ impl Frame {
         })
     }
 
+    /// Construct a server-to-client delivery frame on a subscription's stream,
+    /// enforcing the non-zero application-stream invariant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtocolError::InvalidStream`] when `stream_id` is zero.
+    pub fn new_deliver(
+        stream_id: u32,
+        delivery_seq: u64,
+        envelope: MessageEnvelope,
+    ) -> Result<Self, ProtocolError> {
+        validate_stream(FrameType::Deliver, stream_id)?;
+        Ok(Self::Deliver {
+            flags: 0,
+            stream_id,
+            delivery_seq,
+            envelope,
+        })
+    }
+
     /// Construct a client-to-server push reply frame, echoing the correlation id of
     /// the originating push, and enforcing the non-zero application-stream invariant.
     ///
@@ -554,6 +594,7 @@ impl Frame {
             Self::PushReply { .. } => FrameType::PushReply,
             Self::WorkerRegister { .. } => FrameType::WorkerRegister,
             Self::WorkerRegisterAck { .. } => FrameType::WorkerRegisterAck,
+            Self::Deliver { .. } => FrameType::Deliver,
             Self::Unknown { type_id, .. } => FrameType::Unknown(*type_id),
         }
     }
@@ -586,6 +627,7 @@ impl Frame {
             | Self::PushReply { flags, .. }
             | Self::WorkerRegister { flags, .. }
             | Self::WorkerRegisterAck { flags, .. }
+            | Self::Deliver { flags, .. }
             | Self::Unknown { flags, .. } => *flags,
         }
     }
@@ -618,6 +660,7 @@ impl Frame {
             | Self::Reject { stream_id, .. }
             | Self::Push { stream_id, .. }
             | Self::PushReply { stream_id, .. }
+            | Self::Deliver { stream_id, .. }
             | Self::Unknown { stream_id, .. } => *stream_id,
         }
     }
