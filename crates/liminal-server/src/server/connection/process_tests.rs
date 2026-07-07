@@ -619,6 +619,153 @@ fn connect_with_prefix_but_wrong_length_is_rejected() {
     ));
 }
 
+/// The auth gate is enforced per frame, not only inside the `Connect` arm: a client
+/// that skips `Connect` entirely and sends a `Publish` against a configured gate is
+/// torn down (`Close`) and the publish never reaches `services.publish`. This is the
+/// bypass the flag closes — without it the `Publish` arm dispatched straight to the
+/// fan-out because the token is only ever read in `connect_response`.
+#[test]
+fn publish_before_connect_against_gate_is_closed() -> Result<(), ServerError> {
+    let services = Arc::new(RecordingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::clone(&services) as Arc<_>,
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Publish {
+        flags: 0,
+        stream_id: 3,
+        channel: "orders".to_owned(),
+        envelope: envelope(b"hello".to_vec()),
+        idempotency_key: None,
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(matches!(action, FrameAction::Close));
+    let published_count = {
+        let published = services
+            .publishes
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("test publish recorder unavailable: {error}"),
+            })?;
+        published.len()
+    };
+    assert_eq!(
+        published_count, 0,
+        "a pre-auth publish must never reach services.publish"
+    );
+    Ok(())
+}
+
+/// `Subscribe` and `WorkerRegister` are gated the same way: neither is honoured
+/// before a successful handshake against a configured gate.
+#[test]
+fn subscribe_and_worker_register_before_connect_are_closed() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    let subscribe = Frame::Subscribe {
+        flags: 0,
+        stream_id: 1,
+        channel: "orders".to_owned(),
+        accepted_schemas: Vec::new(),
+        max_in_flight: 16,
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, subscribe),
+        FrameAction::Close
+    ));
+    assert!(state.subscriptions.is_empty());
+
+    let register = Frame::WorkerRegister {
+        flags: 0,
+        registration: sample_registration(),
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, register),
+        FrameAction::Close
+    ));
+}
+
+/// After a matching `Connect` clears the gate, subsequent application frames on the
+/// same connection are honoured — authentication persists for the connection's life.
+#[test]
+fn publish_after_successful_connect_is_honoured() -> Result<(), ServerError> {
+    let services = Arc::new(RecordingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::clone(&services) as Arc<_>,
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    let connect = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"s3cr3t"));
+    assert!(matches!(
+        connect,
+        FrameAction::Respond(Frame::ConnectAck { .. })
+    ));
+    assert!(state.authenticated);
+
+    let publish = Frame::Publish {
+        flags: 0,
+        stream_id: 3,
+        channel: "orders".to_owned(),
+        envelope: envelope(b"hello".to_vec()),
+        idempotency_key: None,
+    };
+    let action = apply_frame(TEST_PID, &runtime, &mut state, publish);
+    assert!(matches!(
+        action,
+        FrameAction::Respond(Frame::PublishAck { stream_id: 3, .. })
+    ));
+    let published_count = {
+        let published = services
+            .publishes
+            .lock()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("test publish recorder unavailable: {error}"),
+            })?;
+        published.len()
+    };
+    assert_eq!(published_count, 1);
+    Ok(())
+}
+
+/// A rejected handshake (wrong token) does not authenticate the connection: a
+/// follow-up `Publish` on the same state is still closed. Belt-and-braces, since the
+/// rejected handshake also returns `RespondThenClose`.
+#[test]
+fn publish_after_rejected_connect_is_still_closed() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    let connect = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"wrong"));
+    assert!(matches!(
+        connect,
+        FrameAction::RespondThenClose(Frame::ConnectError { .. })
+    ));
+    assert!(!state.authenticated);
+
+    let publish = Frame::Publish {
+        flags: 0,
+        stream_id: 3,
+        channel: "orders".to_owned(),
+        envelope: envelope(b"hello".to_vec()),
+        idempotency_key: None,
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, publish),
+        FrameAction::Close
+    ));
+}
+
 fn envelope(payload: Vec<u8>) -> MessageEnvelope {
     MessageEnvelope::new(schema_id(), CausalContext::independent(), payload)
 }

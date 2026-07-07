@@ -265,6 +265,14 @@ impl NativeHandler for ConnectionProcess {
 #[derive(Debug, Default)]
 pub(super) struct ConnectionProcessState {
     shutdown_notification_attempted: bool,
+    /// Whether this connection has cleared the auth gate. Set once a `Connect`
+    /// frame passes the configured token check (or immediately, when no token is
+    /// configured); consulted by [`apply_frame`] to reject any application frame
+    /// that arrives before a successful handshake. Without this flag a client
+    /// that simply skips `Connect` and sends `Publish`/`Subscribe`/`WorkerRegister`
+    /// would never reach `connect_response` — the only place the token is read —
+    /// and would bypass the gate entirely.
+    authenticated: bool,
     subscriptions: HashMap<u64, ConnectionSubscription>,
     conversations: HashMap<u64, ConnectionConversation>,
 }
@@ -293,6 +301,22 @@ pub(super) fn apply_frame(
     state: &mut ConnectionProcessState,
     frame: Frame,
 ) -> FrameAction {
+    // Auth gate. When a token is configured, the connection must clear the
+    // `Connect` handshake before any other frame is honoured. `Connect` itself is
+    // the frame that authenticates, and `Disconnect` is allowed so a peer can bow
+    // out cleanly; every other frame from an unauthenticated peer tears the
+    // connection down silently. This is the enforcement point that closes the
+    // bypass — the token check lives in `connect_response`, reached only via a
+    // `Connect` frame, so gating solely there would let a client that skips
+    // `Connect` and sends `Publish`/`Subscribe`/`WorkerRegister` straight through.
+    // With no token configured the server is open and this gate is inert, keeping
+    // the pre-auth behaviour byte-identical.
+    if runtime.auth_token().is_some()
+        && !state.authenticated
+        && !matches!(frame, Frame::Connect { .. } | Frame::Disconnect { .. })
+    {
+        return FrameAction::Close;
+    }
     let services = runtime.services();
     match frame {
         Frame::Connect {
@@ -300,7 +324,7 @@ pub(super) fn apply_frame(
             max_version,
             auth_token,
             ..
-        } => connect_response(runtime, min_version, max_version, &auth_token),
+        } => connect_response(runtime, state, min_version, max_version, &auth_token),
         Frame::Disconnect { .. } => FrameAction::Close,
         Frame::Ping { .. } => FrameAction::Respond(Frame::Pong { flags: 0 }),
         Frame::Publish {
@@ -472,6 +496,7 @@ fn process_buffer(
 
 fn connect_response(
     runtime: &ConnectionRuntime,
+    state: &mut ConnectionProcessState,
     min_version: ProtocolVersion,
     max_version: ProtocolVersion,
     auth_token: &[u8],
@@ -492,6 +517,9 @@ fn connect_response(
             });
         }
     }
+    // The token matched (or none is configured): mark the connection authenticated
+    // so the `apply_frame` gate admits subsequent application frames on it.
+    state.authenticated = true;
     match negotiate_version(min_version, max_version, &[SUPPORTED_PROTOCOL]) {
         Ok(selected_version) => FrameAction::Respond(Frame::ConnectAck {
             flags: 0,
