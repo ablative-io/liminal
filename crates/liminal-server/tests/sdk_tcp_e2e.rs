@@ -31,7 +31,7 @@ use liminal_sdk::{
     SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
 };
 use liminal_server::ServerError;
-use liminal_server::config::{ChannelDef, ServerConfig};
+use liminal_server::config::{ChannelDef, LoadedSchema, ServerConfig};
 use liminal_server::server::connection::notifier::ConnectionNotifier;
 use liminal_server::server::connection::{ConnectionSupervisor, LiminalConnectionServices};
 use liminal_server::server::listener::ServerListener;
@@ -65,6 +65,36 @@ struct DispatchRequest {
 impl SchemaValidate for DispatchRequest {
     fn schema_metadata() -> SchemaMetadata {
         SchemaMetadata::new("dispatch.request", "1", br#"{"type":"object"}"#.as_slice())
+    }
+}
+
+/// The JSON Schema written to disk and referenced by a channel's `schema_ref` in
+/// the real-schema e2e test: an object requiring an integer `id` and forbidding
+/// any other property.
+const REAL_SCHEMA: &[u8] = br#"{"type":"object","properties":{"id":{"type":"integer"}},"required":["id"],"additionalProperties":false}"#;
+
+/// A payload that SATISFIES [`REAL_SCHEMA`] (`{"id":1}`).
+#[derive(Serialize, Deserialize)]
+struct SchemaValidEvent {
+    id: u64,
+}
+
+impl SchemaValidate for SchemaValidEvent {
+    fn schema_metadata() -> SchemaMetadata {
+        SchemaMetadata::new("events.real", "1", REAL_SCHEMA)
+    }
+}
+
+/// A payload that VIOLATES [`REAL_SCHEMA`] (`{"name":"..."}`: missing the required
+/// `id` and carrying a forbidden extra property).
+#[derive(Serialize, Deserialize)]
+struct SchemaInvalidEvent {
+    name: String,
+}
+
+impl SchemaValidate for SchemaInvalidEvent {
+    fn schema_metadata() -> SchemaMetadata {
+        SchemaMetadata::new("events.real", "1", REAL_SCHEMA)
     }
 }
 
@@ -127,8 +157,9 @@ impl RunningServer {
             health_listen_address: reserve_loopback_port()?,
             channels: vec![ChannelDef {
                 name: CHANNEL.to_owned(),
-                schema_ref: "schemas/events.json".to_owned(),
+                schema_ref: None,
                 durable: false,
+                loaded_schema: None,
             }],
             routing_rules: Vec::new(),
             persistence_path: None,
@@ -154,8 +185,9 @@ impl RunningServer {
             health_listen_address: reserve_loopback_port()?,
             channels: vec![ChannelDef {
                 name: CHANNEL.to_owned(),
-                schema_ref: "schemas/events.json".to_owned(),
+                schema_ref: None,
                 durable: false,
+                loaded_schema: None,
             }],
             routing_rules: Vec::new(),
             persistence_path: None,
@@ -164,6 +196,41 @@ impl RunningServer {
         };
         let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
         let supervisor = ConnectionSupervisor::with_services_and_notifier(services, notifier)?;
+        let listener = ServerListener::bind(&config, supervisor)?;
+        let supervisor = listener.supervisor();
+        let address = listener.local_addr();
+        Ok(Self {
+            listener: Some(listener),
+            supervisor,
+            address,
+        })
+    }
+
+    /// Starts a server whose single channel carries a real JSON Schema loaded from
+    /// `schema_path`. The schema bytes are read from that file and parsed into a
+    /// [`LoadedSchema`] exactly as config validation would, then the channel is
+    /// built with that real schema. (The listener binds to an ephemeral port, which
+    /// full config `validate` deliberately rejects, so the load step is exercised
+    /// directly here; the validation-driven load path is covered by the config unit
+    /// tests.)
+    fn start_with_schema(schema_path: &std::path::Path) -> Result<Self, Box<dyn Error>> {
+        let bytes = std::fs::read(schema_path)?;
+        let document = serde_json::from_slice(&bytes)?;
+        let config = ServerConfig {
+            listen_address: "127.0.0.1:0".parse()?,
+            health_listen_address: reserve_loopback_port()?,
+            channels: vec![ChannelDef {
+                name: CHANNEL.to_owned(),
+                schema_ref: Some(schema_path.to_path_buf()),
+                durable: false,
+                loaded_schema: Some(LoadedSchema { bytes, document }),
+            }],
+            routing_rules: Vec::new(),
+            persistence_path: None,
+            cluster: None,
+            drain_timeout_ms: 30_000,
+        };
+        let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
         let supervisor = listener.supervisor();
         let address = listener.local_addr();
@@ -587,6 +654,71 @@ fn server_push_does_not_regress_request_reply() -> Result<(), Box<dyn Error>> {
     );
 
     drop(push_client);
+    server.shutdown()?;
+    Ok(())
+}
+
+/// A2 load-bearing proof over the real socket: a channel wired with a real
+/// `schema_ref` (loaded from disk during config validation) actually ENFORCES that
+/// schema on the publish path. A schema-invalid publish is rejected by the server
+/// (surfacing as a `PublishError` the SDK returns as `Err`), and a schema-valid
+/// publish is accepted and genuinely delivered to a subscriber.
+///
+/// Against the pre-A2 server every channel was built with an empty `json!({})`
+/// schema, so the "invalid" publish would have been accepted — this test would
+/// fail to observe a rejection.
+#[test]
+fn sdk_tcp_real_schema_rejects_invalid_and_delivers_valid() -> Result<(), Box<dyn Error>> {
+    let schema_file = tempfile::Builder::new()
+        .prefix("liminal-e2e-schema")
+        .suffix(".json")
+        .tempfile()?;
+    std::fs::write(schema_file.path(), REAL_SCHEMA)?;
+
+    let server = RunningServer::start_with_schema(schema_file.path())?;
+    let config = connect_remote_config(server.address(), CHANNEL, "schema-conversation")?;
+    server.wait_for_connection()?;
+
+    let handle = RemoteChannelHandle::new(&config)?;
+
+    // Register a subscriber so a genuine delivery of the valid publish is
+    // observable through the delivery ack.
+    let subscription = handle.subscribe::<SchemaValidEvent>();
+    let mut subscription = pin!(subscription);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    match subscription.as_mut().poll_next(&mut context) {
+        Poll::Ready(None) => {}
+        Poll::Ready(Some(Err(error))) => {
+            return Err(format!("subscribe surfaced a setup error: {error}").into());
+        }
+        Poll::Ready(Some(Ok(_))) => {
+            return Err("subscribe unexpectedly yielded a buffered message".into());
+        }
+        Poll::Pending => return Err("subscribe stream parked unexpectedly".into()),
+    }
+
+    // A schema-invalid publish must be rejected by the server's channel schema and
+    // surface as an error to the SDK caller.
+    let rejected = handle.publish_with_idempotency_key(
+        &SchemaInvalidEvent {
+            name: "no-id-here".to_owned(),
+        },
+        "invalid-1",
+    );
+    assert!(
+        rejected.is_err(),
+        "a schema-invalid publish must be rejected by the real channel schema, got: {rejected:?}"
+    );
+
+    // A schema-valid publish is accepted and delivered to the live subscriber.
+    let accepted: DeliveryAck =
+        handle.publish_with_idempotency_key(&SchemaValidEvent { id: 1 }, "valid-1")?;
+    assert!(
+        accepted.is_accepted(),
+        "a schema-valid publish with a subscriber must report a genuine delivery ack"
+    );
+
     server.shutdown()?;
     Ok(())
 }

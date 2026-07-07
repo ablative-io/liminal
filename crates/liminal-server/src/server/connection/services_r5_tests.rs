@@ -257,8 +257,9 @@ fn ephemeral_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>>
         drain_timeout_ms: 30_000,
         channels: vec![ChannelDef {
             name: "orders".to_owned(),
-            schema_ref: "schemas/orders.json".to_owned(),
+            schema_ref: None,
             durable: false,
+            loaded_schema: None,
         }],
         routing_rules: Vec::new(),
         persistence_path: None,
@@ -273,8 +274,9 @@ fn durable_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         drain_timeout_ms: 30_000,
         channels: vec![ChannelDef {
             name: "orders".to_owned(),
-            schema_ref: "schemas/orders.json".to_owned(),
+            schema_ref: None,
             durable: true,
+            loaded_schema: None,
         }],
         routing_rules: Vec::new(),
         persistence_path: None,

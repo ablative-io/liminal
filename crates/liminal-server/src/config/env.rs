@@ -183,8 +183,9 @@ mod tests {
             drain_timeout_ms: 30_000,
             channels: vec![ChannelDef {
                 name: "orders".to_owned(),
-                schema_ref: "schemas/orders.json".to_owned(),
+                schema_ref: None,
                 durable: true,
+                loaded_schema: None,
             }],
             routing_rules: vec![RoutingRuleDef {
                 source_channel: "orders".to_owned(),
@@ -435,7 +436,6 @@ persistence_path = "/tmp"
 
 [[channels]]
 name = "orders"
-schema_ref = "schemas/orders.json"
 durable = true
 
 [[routing_rules]]
@@ -444,11 +444,11 @@ target_channel = "orders"
 "#;
         let path = write_temp_config(toml)?;
         let config = load_from_file(&path)?;
-        let config = apply_env_overrides_from(
+        let mut config = apply_env_overrides_from(
             config,
             vec![env_pair("LIMINAL_LISTEN_ADDRESS", "0.0.0.0:9090")],
         )?;
-        validate(&config)?;
+        validate(&mut config, path.parent())?;
         remove_temp_file(&path)?;
 
         assert_eq!(config.listen_address, socket("0.0.0.0:9090")?);

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -18,6 +17,7 @@ use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSche
 
 use super::conversation::{ConnectionConversation, LiminalConversationResource};
 use super::services_cluster::build_channel_cluster;
+use super::services_schema::resolve_channel_schema;
 use crate::ServerError;
 use crate::config::types::ServerConfig;
 
@@ -217,11 +217,16 @@ impl LiminalConnectionServices {
         let cluster = build_channel_cluster(config.cluster.as_ref())?;
         let mut channels = HashMap::new();
         for channel in &config.channels {
-            let schema = Schema::new(serde_json::json!({})).map_err(|error| {
-                ServerError::ConfigValidation {
+            // Resolve the channel's real JSON Schema (loaded from `schema_ref`
+            // during config validation) or the permissive empty schema when the
+            // channel declared none. The protocol schema id advertised at
+            // subscribe time is derived from the SAME schema bytes so an SDK
+            // deriving ids from schema bytes converges on it.
+            let resolved = resolve_channel_schema(channel);
+            let schema =
+                Schema::new(resolved.document).map_err(|error| ServerError::ConfigValidation {
                     message: format!("failed to initialize channel '{}': {error}", channel.name),
-                }
-            })?;
+                })?;
             let channel_config = if channel.durable {
                 ChannelConfig::new(channel.name.clone(), schema, ChannelMode::Durable)
             } else {
@@ -246,7 +251,7 @@ impl LiminalConnectionServices {
                 channel.name.clone(),
                 ConfiguredChannel {
                     handle,
-                    protocol_schema: schema_ref_id(&channel.schema_ref),
+                    protocol_schema: resolved.protocol_id,
                 },
             );
         }
@@ -742,15 +747,4 @@ pub(super) fn server_error_from_protocol(error: &ProtocolError) -> ServerError {
     ServerError::ListenerAccept {
         message: format!("protocol operation failed: {error}"),
     }
-}
-
-fn schema_ref_id(schema_ref: &str) -> ProtocolSchemaId {
-    let mut bytes = [0_u8; ProtocolSchemaId::WIRE_LEN];
-    let mut hash = std::collections::hash_map::DefaultHasher::new();
-    schema_ref.hash(&mut hash);
-    let seed = hash.finish().to_be_bytes();
-    for (index, byte) in bytes.iter_mut().enumerate() {
-        *byte = seed[index % seed.len()];
-    }
-    ProtocolSchemaId::new(bytes)
 }
