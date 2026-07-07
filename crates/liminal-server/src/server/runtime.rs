@@ -25,6 +25,11 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
 
     let config = load_config(config_path)?;
 
+    // Enable metrics for this process before the health server accepts scrapes,
+    // so `/metrics` renders the server families. Standalone liminal library users
+    // never call this, so the registry gate stays off for them.
+    crate::metrics::init();
+
     let readiness = SharedReadinessState::new(ReadinessState::default());
     let health_server = start_health_server(config.health_listen_address, readiness.clone())?;
     let shutdown_handle = ShutdownHandle::new();

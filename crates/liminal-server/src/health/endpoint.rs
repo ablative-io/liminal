@@ -9,8 +9,11 @@ use crate::ServerError;
 
 use super::checks::{SharedReadinessState, health_check, readiness_check};
 
+use super::metrics_route;
+
 const HEALTH_PATH: &str = "/health";
 const READY_PATH: &str = "/ready";
+const METRICS_PATH: &str = "/metrics";
 const APPLICATION_JSON: &str = "application/json";
 const READ_BUFFER_BYTES: usize = 2048;
 
@@ -189,7 +192,14 @@ fn response_for_request(
             };
             json_response(status_code, &status)
         }
-        (_, HEALTH_PATH | READY_PATH) => Ok(empty_response(StatusCode::MethodNotAllowed)),
+        ("GET", METRICS_PATH) => Ok(response(
+            StatusCode::Ok,
+            Some(metrics_route::CONTENT_TYPE),
+            metrics_route::render_body().as_bytes(),
+        )),
+        (_, HEALTH_PATH | READY_PATH | METRICS_PATH) => {
+            Ok(empty_response(StatusCode::MethodNotAllowed))
+        }
         _ => Ok(empty_response(StatusCode::NotFound)),
     }
 }
@@ -454,7 +464,7 @@ mod tests {
     #[test]
     fn unsupported_paths_are_not_served() -> Result<(), Box<dyn std::error::Error>> {
         let readiness = SharedReadinessState::default();
-        let response = response_for_request(b"GET /metrics HTTP/1.1\r\n\r\n", &readiness)?;
+        let response = response_for_request(b"GET /unknown HTTP/1.1\r\n\r\n", &readiness)?;
         let response = String::from_utf8(response)?;
 
         assert_status(&response, 404);
