@@ -135,6 +135,11 @@ impl ConnectionProcess {
         };
         match read_available(stream, &mut self.buffer) {
             Ok(ReadStatus::Closed) => {
+                // Best-effort flush of anything still queued (e.g. WouldBlock residue
+                // from earlier slices to a half-closed peer) before we let the stream
+                // drop, mirroring the ForceClose drain. The buffered-writer refactor
+                // removed this on the EOF path; without it, queued responses are lost.
+                let _ = self.drain_outbound();
                 self.runtime.finish(pid);
                 return SliceStep::Stop(ExitReason::Normal);
             }
@@ -169,6 +174,12 @@ impl ConnectionProcess {
         ) {
             Ok(ProcessStatus::Continue) => SliceStep::Continue,
             Ok(ProcessStatus::Close) => {
+                // A client-initiated close (e.g. a pipelined [Ping, Disconnect] or
+                // [Publish, Disconnect] in one segment) may have enqueued a response
+                // — the Pong/PublishAck — into the outbound buffer just before the
+                // Disconnect returned Close. Drain it best-effort before finishing so
+                // that queued reply is not dropped, mirroring the ForceClose drain.
+                let _ = self.drain_outbound();
                 self.runtime.finish(pid);
                 SliceStep::Stop(ExitReason::Normal)
             }

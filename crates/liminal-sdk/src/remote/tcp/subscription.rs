@@ -132,8 +132,18 @@ impl SubscriptionStream {
         accepted_schemas: Vec<SchemaId>,
     ) -> Result<Self, SdkError> {
         let mut stream = connect_socket(address)?;
-        handshake(&mut stream)?;
-        let subscription_id = subscribe(&mut stream, channel, accepted_schemas)?;
+        // A single buffer threads through the whole synchronous setup so any bytes
+        // the setup reads past the control-frame reply are preserved. The server
+        // may coalesce a `SubscribeAck` with the first `Deliver` frames into one TCP
+        // segment (the delivery pump runs in the same slice that acks the
+        // subscribe), and a socket read pulls up to `READ_CHUNK_BYTES` at once — so
+        // this buffer can hold whole (or partial) `Deliver` frames after the ack.
+        // Handing that residue to the reader thread is what keeps those deliveries
+        // from being dropped and, worse, from desyncing a reader that would
+        // otherwise start mid-frame on a fresh empty buffer.
+        let mut buffer = Vec::new();
+        handshake(&mut stream, &mut buffer)?;
+        let subscription_id = subscribe(&mut stream, &mut buffer, channel, accepted_schemas)?;
 
         let read_stream = stream.try_clone().map_err(|source| SdkError::Protocol {
             description: format!("failed to clone subscription socket for reader thread: {source}"),
@@ -143,7 +153,7 @@ impl SubscriptionStream {
         let reader_stop = Arc::clone(&stop);
         let reader = std::thread::Builder::new()
             .name("liminal-subscription-reader".to_string())
-            .spawn(move || run_reader(read_stream, &sender, &reader_stop))
+            .spawn(move || run_reader(read_stream, buffer, &sender, &reader_stop))
             .map_err(|source| SdkError::Protocol {
                 description: format!("failed to start subscription reader thread: {source}"),
             })?;
@@ -232,7 +242,10 @@ fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
 }
 
 /// Drives the client handshake (`Connect` -> `ConnectAck`) on a fresh socket.
-fn handshake(stream: &mut TcpStream) -> Result<(), SdkError> {
+///
+/// `buffer` carries any residue read past the reply forward to the next setup step
+/// (and ultimately the reader thread) rather than discarding it.
+fn handshake(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<(), SdkError> {
     let connect = Frame::Connect {
         flags: 0,
         min_version: CLIENT_MIN_VERSION,
@@ -240,8 +253,7 @@ fn handshake(stream: &mut TcpStream) -> Result<(), SdkError> {
         auth_token: Vec::new(),
     };
     write_frame(stream, &connect)?;
-    let mut buffer = Vec::new();
-    match read_one_frame(stream, &mut buffer)? {
+    match read_one_frame(stream, buffer)? {
         Frame::ConnectAck { .. } => Ok(()),
         Frame::ConnectError {
             reason_code,
@@ -266,6 +278,7 @@ fn handshake(stream: &mut TcpStream) -> Result<(), SdkError> {
 /// a handshaken socket, returning the server-assigned subscription id.
 fn subscribe(
     stream: &mut TcpStream,
+    buffer: &mut Vec<u8>,
     channel: &str,
     accepted_schemas: Vec<SchemaId>,
 ) -> Result<u64, SdkError> {
@@ -277,8 +290,7 @@ fn subscribe(
         max_in_flight: SUBSCRIBE_MAX_IN_FLIGHT,
     };
     write_frame(stream, &frame)?;
-    let mut buffer = Vec::new();
-    match read_one_frame(stream, &mut buffer)? {
+    match read_one_frame(stream, buffer)? {
         Frame::SubscribeAck {
             subscription_id, ..
         } => Ok(subscription_id),
@@ -307,8 +319,17 @@ fn subscribe(
 /// Returns (ending the thread) when the stop flag is set, the connection closes,
 /// a `Disconnect` arrives, or a fatal decode/IO error occurs. A read timeout is
 /// non-fatal: it just lets the loop re-check the stop flag.
-fn run_reader(mut stream: TcpStream, sender: &Sender<DeliveredMessage>, stop: &AtomicBool) {
-    let mut buffer = Vec::new();
+///
+/// `buffer` is seeded with the setup residue (see [`SubscriptionStream::open`]): any
+/// `Deliver` bytes the synchronous subscribe read past the `SubscribeAck` are
+/// already here, so the loop decodes them first — before its next socket read —
+/// instead of losing them and starting mid-stream.
+fn run_reader(
+    mut stream: TcpStream,
+    mut buffer: Vec<u8>,
+    sender: &Sender<DeliveredMessage>,
+    stop: &AtomicBool,
+) {
     while !stop.load(Ordering::SeqCst) {
         let frame = match next_frame(&mut stream, &mut buffer) {
             Ok(Some(frame)) => frame,
@@ -468,52 +489,5 @@ fn protocol_error(error: &ProtocolError) -> SdkError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use liminal::protocol::{CausalContext, MessageEnvelope};
-
-    #[test]
-    fn delivered_message_exposes_seq_and_payload() {
-        let message = DeliveredMessage {
-            delivery_seq: 3,
-            schema_id: SchemaId::new([1; SchemaId::WIRE_LEN]),
-            payload: vec![9, 8, 7],
-        };
-        assert_eq!(message.delivery_seq(), 3);
-        assert_eq!(message.payload(), &[9, 8, 7]);
-        assert_eq!(message.schema_id(), SchemaId::new([1; SchemaId::WIRE_LEN]));
-        assert_eq!(message.into_payload(), vec![9, 8, 7]);
-    }
-
-    #[test]
-    fn deliver_frame_round_trips_through_codec() -> Result<(), SdkError> {
-        // The exact frame the reader decodes: a Deliver carrying delivery_seq and a
-        // MessageEnvelope whose payload the reader surfaces verbatim.
-        let envelope = MessageEnvelope::new(
-            SchemaId::new([2; SchemaId::WIRE_LEN]),
-            CausalContext::independent(),
-            vec![4, 5, 6],
-        );
-        let frame = Frame::new_deliver(SUBSCRIPTION_STREAM_ID, 1, envelope)
-            .map_err(|error| protocol_error(&error))?;
-        let len = encoded_len(&frame).map_err(|error| protocol_error(&error))?;
-        let mut bytes = vec![0_u8; len];
-        let written = encode(&frame, &mut bytes).map_err(|error| protocol_error(&error))?;
-        let (decoded, consumed) =
-            decode(&bytes[..written]).map_err(|error| protocol_error(&error))?;
-        assert_eq!(consumed, written);
-        let Frame::Deliver {
-            delivery_seq,
-            envelope,
-            ..
-        } = decoded
-        else {
-            return Err(SdkError::Protocol {
-                description: "expected a Deliver frame".to_string(),
-            });
-        };
-        assert_eq!(delivery_seq, 1);
-        assert_eq!(envelope.payload, vec![4, 5, 6]);
-        Ok(())
-    }
-}
+#[path = "subscription_tests.rs"]
+mod tests;

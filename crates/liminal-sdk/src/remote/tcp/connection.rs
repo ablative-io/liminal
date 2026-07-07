@@ -135,9 +135,12 @@ impl Connection {
                         // An unsolicited server `Deliver` on a request/response
                         // connection: in v1, channel deliveries are surfaced only via
                         // the dedicated `SubscriptionStream`, so drain and ignore this
-                        // frame here to keep round-trip framing in sync. (A pooled
-                        // `subscribe` registers a server-side subscriber for the
-                        // delivery-ack signal, but never receives the messages here.)
+                        // frame here to keep round-trip framing in sync. A pooled
+                        // `subscribe` registers a real server-side subscriber for the
+                        // delivery-ack signal, so the server pumps a `Deliver` here for
+                        // every message on the channel; this drain consumes and discards
+                        // them on each round trip (see the teardown caveat on
+                        // `TcpRemoteTransport::subscribe`).
                         continue;
                     }
                     return Ok(frame);

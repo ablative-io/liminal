@@ -104,6 +104,26 @@ impl RemoteTransport for TcpRemoteTransport {
         publish_delivery_response(response)
     }
 
+    /// Subscribes over the shared request/response connection.
+    ///
+    /// # v1 caveat — pooled subscribe registers a delivering subscriber
+    ///
+    /// This registers a *real* server-side subscriber on the shared pool
+    /// connection, which is what lets a subsequent keyed publish observe a genuine
+    /// delivery ack ([`PUBLISH_DELIVERED_FLAG`](liminal::protocol::PUBLISH_DELIVERED_FLAG)).
+    /// The server then pumps a `Deliver` frame for every message on the channel onto
+    /// this connection. Because the connection only reads (and discards) those
+    /// frames during a round trip, an application that subscribes for the ack signal
+    /// and then goes idle on a busy channel lets the server's bounded outbound buffer
+    /// (default 4 MiB) fill; on overflow the server tears the connection down, and
+    /// every later request on this transport then fails through no fault of the
+    /// caller. An actively-used transport is self-limiting (each round trip drains
+    /// the backlog), but a subscribe-then-idle client on a hot channel is at risk.
+    ///
+    /// v1 guidance: consume channel deliveries through a dedicated
+    /// [`SubscriptionStream`] (its own connection with a background reader), and use
+    /// the pooled subscribe only as the delivery-ack signal alongside regular
+    /// traffic. The v2 credit mode removes this by gating and multiplexing delivery.
     fn subscribe(
         &self,
         _server_address: &ServerAddress,
