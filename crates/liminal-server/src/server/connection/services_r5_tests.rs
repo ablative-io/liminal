@@ -84,6 +84,55 @@ fn persisted_durable_state_survives_fresh_services_over_same_store()
     Ok(())
 }
 
+/// H2 (= ledger G1): a durable channel recovers its per-partition next-sequence
+/// counter from the store on restart. Build services over a real persistence
+/// path, publish a keyed and an unkeyed message, drop the services, then rebuild
+/// over the SAME path and publish again. Pre-fix the durable channel starts every
+/// partition sequence at zero, so the first post-restart append collides with the
+/// occupied stream head and fails with a `SequenceConflict`-derived error; post-fix
+/// the sequence derives from the store at construction and the append lands at the
+/// tail. The blessed durable read then shows old + new messages in order.
+#[test]
+fn durable_channel_recovers_sequence_across_restart_over_same_path()
+-> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let config = durable_orders_config_at(dir.path())?;
+
+    // First process lifetime: a keyed publish (drives dedup + channel append) and
+    // an unkeyed publish (channel append only), flushed and dropped.
+    {
+        let services = LiminalConnectionServices::from_config(&config)?;
+        services.publish(
+            "orders",
+            &order_envelope(br#"{"order":1}"#.to_vec()),
+            Some("k1"),
+        )?;
+        services.publish("orders", &order_envelope(br#"{"order":2}"#.to_vec()), None)?;
+        services.flush_durable_state()?;
+    }
+
+    // Restart over the SAME persistence path. The durable channel must derive its
+    // next sequence from the store so this publish appends at the tail rather than
+    // colliding with the occupied head (the pre-fix SequenceConflict).
+    let restarted = LiminalConnectionServices::from_config(&config)?;
+    restarted.publish("orders", &order_envelope(br#"{"order":3}"#.to_vec()), None)?;
+    restarted.flush_durable_state()?;
+
+    // Fresh durable read through the blessed read path: old + new, in order.
+    let persisted = read_payloads(restarted.durable_store().as_ref(), ORDERS_STREAM_KEY)?;
+    assert_eq!(
+        persisted,
+        vec![
+            br#"{"order":1}"#.to_vec(),
+            br#"{"order":2}"#.to_vec(),
+            br#"{"order":3}"#.to_vec(),
+        ],
+        "durable log must hold the pre-restart messages followed by the post-restart message"
+    );
+
+    Ok(())
+}
+
 /// 13-L1 load-bearing: a duplicate publish carrying the SAME idempotency key is
 /// delivered to a live subscriber EXACTLY ONCE (dedup-on-delivery), while the
 /// genuine delivery ack reports `delivered` truthfully on each publish.
@@ -281,6 +330,15 @@ fn durable_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         routing_rules: Vec::new(),
         persistence_path: None,
         cluster: None,
+    })
+}
+
+fn durable_orders_config_at(
+    persistence_path: &std::path::Path,
+) -> Result<ServerConfig, Box<dyn std::error::Error>> {
+    Ok(ServerConfig {
+        persistence_path: Some(persistence_path.to_path_buf()),
+        ..durable_orders_config()?
     })
 }
 
