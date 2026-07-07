@@ -136,3 +136,79 @@ fn per_slice_budget_caps_deliveries() -> Result<(), ServerError> {
     );
     Ok(())
 }
+
+/// A pipelined burst of large frames whose total size far exceeds the 4 MiB
+/// outbound buffer is delivered completely across multiple slices, without ever
+/// tearing down a connection whose client reads normally between slices. This is
+/// the headroom-aware pump regression: before it, one slice enqueued up to the full
+/// 32-frame budget and overflowed the buffer, killing a healthy fast reader.
+#[test]
+fn pipelined_large_burst_is_delivered_without_teardown() -> Result<(), ServerError> {
+    const FRAME_COUNT: usize = 40;
+    const PAYLOAD_LEN: usize = 200 * 1024;
+    // 40 x 200 KiB = 8 MiB of payload through a 4 MiB buffer: no single slice can
+    // hold the whole burst, so the pump must span it across slices.
+    let payloads: Vec<Vec<u8>> = (0..FRAME_COUNT)
+        .map(|index| {
+            let mut payload = vec![0_u8; PAYLOAD_LEN];
+            // Stamp the index in the first byte so arrival order can be verified.
+            if let Some(first) = payload.first_mut() {
+                *first = u8::try_from(index).unwrap_or(0);
+            }
+            payload
+        })
+        .collect();
+    let mut state = ConnectionProcessState::default();
+    state
+        .subscriptions
+        .insert(1, subscription_with(1, 7, payloads));
+    let mut outbound = OutboundWriter::new();
+
+    // A normally-reading client: fully drain (empty) the buffer after each slice.
+    let mut delivered = Vec::new();
+    for _ in 0..(FRAME_COUNT * 4) {
+        service_subscriptions(&mut state, &mut outbound, DELIVERY_SLICE_BUDGET).map_err(
+            |error| ServerError::ListenerAccept {
+                message: format!("headroom-aware pump tore down a healthy connection: {error}"),
+            },
+        )?;
+        delivered.extend(decode_all(&outbound.take_bytes())?);
+        if delivered.len() >= FRAME_COUNT {
+            break;
+        }
+    }
+
+    assert_eq!(
+        delivered.len(),
+        FRAME_COUNT,
+        "every frame in the burst is delivered across slices"
+    );
+    for (index, frame) in delivered.iter().enumerate() {
+        let Frame::Deliver {
+            delivery_seq,
+            envelope,
+            ..
+        } = frame
+        else {
+            return Err(ServerError::ListenerAccept {
+                message: format!("expected a Deliver frame, got {frame:?}"),
+            });
+        };
+        assert_eq!(
+            *delivery_seq,
+            u64::try_from(index).unwrap_or(0) + 1,
+            "monotonic order is preserved across slices"
+        );
+        assert_eq!(
+            envelope.payload.len(),
+            PAYLOAD_LEN,
+            "payload carried verbatim"
+        );
+        assert_eq!(
+            envelope.payload.first().copied().unwrap_or_default(),
+            u8::try_from(index).unwrap_or(0),
+            "frames arrive in the order they were queued"
+        );
+    }
+    Ok(())
+}

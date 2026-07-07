@@ -318,27 +318,30 @@ fn slow_reader_does_not_wedge_other_connections() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// (d) An outbound-buffer overflow tears down ONLY the offending connection. A
-/// silent subscriber is buried under more than its 4 MiB outbound cap; its
-/// connection is closed by the server, while a fresh subscriber and publisher on
-/// other connections keep working.
+/// (d) An outbound-buffer overflow tears down ONLY the offending connection. Since
+/// the headroom-aware pump holds sub-capacity frames back rather than overflowing,
+/// the one remaining overflow is a SINGLE frame larger than the whole 4 MiB buffer:
+/// it can never be queued, so it is fatal. A silent subscriber is sent one such
+/// oversized delivery; its connection is closed by the server, while a fresh
+/// subscriber and publisher on other connections keep working.
 #[test]
 fn outbound_overflow_tears_down_only_the_offending_connection() -> Result<(), Box<dyn Error>> {
     let server = RunningServer::start()?;
 
     let mut silent = raw_silent_subscribe(server.address())?;
 
-    // Publish well over the 4 MiB outbound cap to the silent subscriber: 96 frames
-    // of ~100 KiB each is ~9.6 MiB of deliveries it never reads.
+    // A single message whose Deliver frame exceeds the 4 MiB outbound cap: it cannot
+    // fit even an empty buffer, so the pump falls through to the fatal Overflow (the
+    // spec-inherent per-frame bound) instead of holding it back. A pipelined burst of
+    // sub-capacity frames would NOT overflow — it rides out across slices — so the
+    // oversized single frame is the case that still tears the connection down.
     let mut publisher = raw_connect(server.address())?;
     let mut ack_buffer = Vec::new();
-    for index in 0..96 {
-        raw_publish(
-            &mut publisher,
-            &mut ack_buffer,
-            json_string_payload(b'x', 100 * 1024 + index),
-        )?;
-    }
+    raw_publish(
+        &mut publisher,
+        &mut ack_buffer,
+        json_string_payload(b'x', 4 * 1024 * 1024 + 64 * 1024),
+    )?;
 
     // The server tears the silent connection down: its socket is closed. We now read
     // it (the point is that it did NOT read DURING the flood) and expect EOF within

@@ -8,12 +8,18 @@
 //! frame larger than the socket buffer (~64 KiB) hits mid-write, corrupting or
 //! dropping the stream. Here a [`std::io::Write::write`] loop tracks partial
 //! progress and a `WouldBlock` mid-frame simply leaves the residue queued for the
-//! next slice — the frame streams out across as many slices as the peer's read
-//! rate requires, so an arbitrarily large frame is delivered intact.
+//! next slice — a queued frame streams out across as many slices as the peer's read
+//! rate requires, so the socket send buffer is no longer the size ceiling.
 //!
 //! The buffer is bounded (default [`DEFAULT_OUTBOUND_CAPACITY`]): an enqueue that
 //! would exceed the cap, or an unrecoverable write error, is a fatal condition —
 //! a desynced stream must never survive, so the caller tears the connection down.
+//! The honest delivery bound is therefore the buffer capacity, not the socket send
+//! buffer: any single frame up to [`DEFAULT_OUTBOUND_CAPACITY`] is delivered intact
+//! across as many slices as needed, and the delivery pump uses [`OutboundWriter::
+//! has_room`] to hold a burst's residue back for a later slice rather than overflow.
+//! A single frame *larger than the whole buffer* can never be queued and remains a
+//! fatal overflow that tears the connection down (the spec-inherent per-frame bound).
 
 use std::collections::VecDeque;
 use std::io::Write;
@@ -117,6 +123,24 @@ impl OutboundWriter {
         bytes.truncate(written);
         self.buffer.extend(bytes);
         Ok(())
+    }
+
+    /// The buffer's fixed capacity in bytes.
+    pub(super) const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Whether `needed` more bytes fit within the remaining capacity.
+    ///
+    /// The delivery pump peeks this before enqueuing the next `Deliver` frame: when
+    /// a frame that *would* fit an empty buffer does not fit the current free space,
+    /// the pump holds it back for a later slice (after the drain frees room) instead
+    /// of overflowing — so a pipelined burst never tears down a healthy fast reader.
+    pub(super) fn has_room(&self, needed: usize) -> bool {
+        self.buffer
+            .len()
+            .checked_add(needed)
+            .is_some_and(|projected| projected <= self.capacity)
     }
 
     /// Drains as many queued bytes to `stream` as it will accept without blocking.

@@ -20,7 +20,9 @@
 //! causal models differ, so faithfully bridging them is deferred to the v2 credit
 //! work; payload, schema, and `delivery_seq` are what the pump must carry now.
 
-use liminal::protocol::{CausalContext, Frame, MessageEnvelope, SchemaId as ProtocolSchemaId};
+use liminal::protocol::{
+    CausalContext, Frame, MessageEnvelope, SchemaId as ProtocolSchemaId, encoded_len,
+};
 
 use super::outbound::{OutboundError, OutboundWriter};
 use super::state::ConnectionProcessState;
@@ -42,11 +44,12 @@ pub(super) fn service_subscriptions(
     outbound: &mut OutboundWriter,
     budget: usize,
 ) -> Result<(), OutboundError> {
-    // Destructure so the subscription map and the delivery-sequence map are
-    // borrowed disjointly (both are mutated in the loop).
+    // Destructure so the subscription map, the delivery-sequence map, and the
+    // held-frame map are borrowed disjointly (all are mutated in the loop).
     let ConnectionProcessState {
         subscriptions,
         delivery_seqs,
+        held_deliveries,
         ..
     } = state;
     let mut remaining = budget;
@@ -57,12 +60,32 @@ pub(super) fn service_subscriptions(
         let stream_id = subscription.stream_id();
         let selected_schema = subscription.selected_schema();
         while remaining > 0 {
-            let Some(envelope) = subscription.try_next() else {
-                break;
+            // Flush a frame held back from an earlier slice first (its delivery_seq
+            // is already assigned, so this preserves order), otherwise pull and
+            // frame the next ready envelope.
+            let frame = if let Some(held) = held_deliveries.remove(subscription_id) {
+                held
+            } else {
+                let Some(envelope) = subscription.try_next() else {
+                    break;
+                };
+                let sequence = delivery_seqs.entry(*subscription_id).or_insert(0);
+                *sequence = sequence.saturating_add(1);
+                build_deliver_frame(stream_id, *sequence, selected_schema, envelope)?
             };
-            let sequence = delivery_seqs.entry(*subscription_id).or_insert(0);
-            *sequence = sequence.saturating_add(1);
-            let frame = build_deliver_frame(stream_id, *sequence, selected_schema, envelope)?;
+            let needed = encoded_len(&frame).map_err(OutboundError::Encode)?;
+            // Hold back a frame that fits an empty buffer but not the current free
+            // space: it rides out on a later slice once the outbound drain frees
+            // room, so a pipelined burst is delivered completely without tearing
+            // down a healthy fast-reading connection. Stop the whole slice — the
+            // buffer is full, so no other subscription can enqueue either. A frame
+            // larger than the whole buffer can never fit, so it falls through to
+            // `enqueue_frame` and its fatal Overflow tears the connection down (the
+            // spec-inherent single-frame bound).
+            if needed <= outbound.capacity() && !outbound.has_room(needed) {
+                held_deliveries.insert(*subscription_id, frame);
+                return Ok(());
+            }
             outbound.enqueue_frame(&frame)?;
             remaining -= 1;
         }

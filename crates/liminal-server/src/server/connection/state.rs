@@ -35,6 +35,13 @@ pub(super) struct ConnectionProcessState {
     /// delivery increments. Carried from day one so the future ack/resume (A1 v2
     /// credit) protocol has a stable anchor.
     pub(super) delivery_seqs: HashMap<u64, u64>,
+    /// A `Deliver` frame the pump built but could not enqueue because the outbound
+    /// buffer lacked headroom, keyed by subscription id. Its `delivery_seq` is
+    /// already assigned, so flushing it first on the next slice preserves
+    /// per-subscription order; holding it back (rather than enqueuing past the cap)
+    /// is what lets a pipelined burst ride out across slices without tearing down a
+    /// healthy fast-reading connection.
+    pub(super) held_deliveries: HashMap<u64, Frame>,
 }
 
 /// Whether a decoded inbound frame still leaves the connection open.

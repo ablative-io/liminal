@@ -784,10 +784,28 @@ impl SubscriptionResource for LiminalSubscriptionResource {
     }
 
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
-        // A poisoned inbox lock surfaces as `Err`; treat it as "nothing this slice"
-        // rather than tearing the connection down on a transient library read fault.
-        // The subscriber process still holds any queued envelopes for the next slice.
-        self.subscription.try_next().ok().flatten()
+        match self.subscription.try_next() {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                // A poisoned inbox lock is PERMANENT, not transient: once poisoned it
+                // stays poisoned, so every future `try_next` also returns `Err` and this
+                // subscription goes silent for the rest of its life — no further
+                // deliveries, not "held for the next slice". Poisoning requires a panic
+                // while the lock is held, which the workspace lints forbid
+                // (no unwrap/expect/panic), so this is an accepted low-probability
+                // failure rather than a recoverable one. We keep the connection alive (a
+                // single permanently-silent subscription is less harmful than tearing
+                // down every other subscription and stream the connection multiplexes)
+                // but log loudly so the silence is diagnosable. The log cannot storm:
+                // it can only fire after the one panic that poisoned the lock.
+                tracing::error!(
+                    %error,
+                    "subscription inbox lock is poisoned; this subscription is now \
+                     permanently silent and will deliver no further messages"
+                );
+                None
+            }
+        }
     }
 }
 

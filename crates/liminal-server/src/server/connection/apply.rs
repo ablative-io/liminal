@@ -346,9 +346,11 @@ fn unsubscribe_response(
     subscription_id: u64,
 ) -> FrameAction {
     if let Some(subscription) = state.subscriptions.remove(&subscription_id) {
-        // Drop the delivery-sequence counter with the subscription so a re-subscribe
-        // that reuses the id restarts at 1.
+        // Drop the delivery-sequence counter and any held-back frame with the
+        // subscription so a re-subscribe that reuses the id restarts clean at 1 and
+        // never flushes a stale delivery.
         state.delivery_seqs.remove(&subscription_id);
+        state.held_deliveries.remove(&subscription_id);
         if let Err(error) = services.unsubscribe(subscription) {
             tracing::warn!(subscription_id, %error, "liminal unsubscribe failed");
         }
