@@ -262,6 +262,12 @@ fn apply_delta(membership: &Membership, sync: &ClusterSync, delta: MembershipDel
 /// `resolver` MUST be the same [`ClusterResolver`] handed to the scheduler's
 /// `DistributionConfig` (so handshake-learned names resolve everywhere).
 ///
+/// `on_established` is invoked exactly once, on the success path, at the moment
+/// this node's cluster machinery is up: the listener is bound, the seed-dial pass
+/// has completed under the non-fatal policy above (zero seeds is a valid
+/// single-node bootstrap), and membership plus sync are built and installed. It
+/// signals per-node cluster readiness (G2) and is NOT called on any error path.
+///
 /// # Errors
 /// Returns [`ServerError::ClusterJoin`] when the listener cannot bind or when no
 /// configured seed was reachable.
@@ -270,6 +276,7 @@ pub fn start(
     resolver: Arc<ClusterResolver>,
     config: &ClusterConfig,
     install_observer: impl FnOnce(ClusterSync),
+    on_established: impl FnOnce(),
 ) -> Result<ClusterHandle, ServerError> {
     let connections = scheduler.distribution_connections();
     let atoms = Arc::clone(scheduler.atom_table());
@@ -335,6 +342,12 @@ pub fn start(
         peers = ?membership.peer_names(),
         "cluster membership established"
     );
+
+    // G2: the node's cluster stack is now up (listener bound, seed-dial pass
+    // done, membership + sync installed). Signal established readiness. This is
+    // per-node liveness of the cluster machinery, NOT quorum: a single-node
+    // bootstrap with zero reachable peers is legitimately established.
+    on_established();
 
     let poll = PollLoop::start(membership.clone(), sync);
     Ok(ClusterHandle {

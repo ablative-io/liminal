@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, ChannelSupervisor, Schema};
 use liminal_server::cluster::{self, ClusterHandle};
 use liminal_server::config::types::ClusterConfig;
+use liminal_server::health::{
+    ClusterReadiness, ReadinessState, SharedReadinessState, readiness_check,
+};
 
 const COOKIE: &str = "srv005-loopback-cookie";
 
@@ -49,6 +52,10 @@ struct Node {
     supervisor: ChannelSupervisor,
     handle: ClusterHandle,
     listen_addr: SocketAddr,
+    /// The same readiness handle a real server's health endpoint reads (G2): the
+    /// cluster start flips its membership-established gate through the real
+    /// `on_established` hook, so `/ready` payloads mirror the node's cluster stack.
+    readiness: SharedReadinessState,
 }
 
 impl Node {
@@ -72,18 +79,40 @@ impl Node {
             seed_nodes: seeds,
             cookie: COOKIE.to_owned(),
         };
+        // Start with the cluster gate unmet, exactly as a fresh server does before
+        // its cluster stack comes up; the `on_established` hook flips it on success.
+        let readiness = SharedReadinessState::new(ReadinessState::new(
+            true,
+            true,
+            ClusterReadiness::Configured {
+                membership_established: false,
+            },
+        ));
         let scheduler = supervisor.scheduler();
         let supervisor_for_observer = supervisor.clone();
-        let handle = cluster::start(&scheduler, resolver, &config, move |sync| {
-            supervisor_for_observer.install_observer(Arc::new(sync));
-        })
+        let readiness_for_hook = readiness.clone();
+        let handle = cluster::start(
+            &scheduler,
+            resolver,
+            &config,
+            move |sync| {
+                supervisor_for_observer.install_observer(Arc::new(sync));
+            },
+            move || readiness_for_hook.set_cluster_membership_established(true),
+        )
         .expect("cluster starts");
 
         Self {
             supervisor,
             handle,
             listen_addr,
+            readiness,
         }
+    }
+
+    /// True once this node's `/ready` gate reports the cluster stack established.
+    fn readiness_ready(&self) -> bool {
+        readiness_check(&self.readiness.snapshot()).ready
     }
 
     /// A channel handle on this node's clustered supervisor (empty schema, so any
@@ -114,6 +143,29 @@ fn await_mutual_membership(a: &Node, b: &Node) {
         eventually(Duration::from_secs(10), || a.peer_count() >= 1
             && b.peer_count() >= 1),
         "both nodes should see each other as peers"
+    );
+}
+
+#[test]
+fn cluster_start_flips_node_readiness_to_established() {
+    // Zero-seed single-node bootstrap: no peer is required for this node's cluster
+    // stack to be "established" (G2 semantics — per-node liveness, not quorum). A
+    // successful start must flip /ready from 503 to 200.
+    let addr_a = free_port();
+    let node_a = Node::start("node-a@127.0.0.1", addr_a, vec![]);
+    assert!(
+        node_a.readiness_ready(),
+        "a successful zero-seed cluster start must mark the node ready"
+    );
+
+    // And with two cross-seeded nodes, each independently reaches ready.
+    let addr_b = free_port();
+    let node_b = Node::start("node-b@127.0.0.1", addr_b, vec![addr_a]);
+    await_mutual_membership(&node_a, &node_b);
+    assert!(node_a.readiness_ready(), "node A stays ready");
+    assert!(
+        node_b.readiness_ready(),
+        "node B reaches ready after its own successful start"
     );
 }
 

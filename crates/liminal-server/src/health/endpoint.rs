@@ -389,6 +389,46 @@ mod tests {
     }
 
     #[test]
+    fn clustered_ready_transitions_503_to_200_when_membership_established()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // A clustered server starts with the cluster gate unmet: config loaded and
+        // listener bound, but membership not yet established (G2). /ready is 503.
+        let readiness = SharedReadinessState::new(ReadinessState::new(
+            true,
+            true,
+            ClusterReadiness::Configured {
+                membership_established: false,
+            },
+        ));
+        let server = start_health_server(loopback_ephemeral()?, readiness.clone())?;
+
+        let response = get(server.local_addr(), "/ready")?;
+        assert_status(&response, 503);
+        let body = json_body(&response)?;
+        assert_eq!(body["ready"], false);
+        assert_eq!(
+            body["unmet_conditions"][0],
+            serde_json::to_value(ReadinessCondition::ClusterMembershipEstablished)?
+        );
+
+        // The cluster start's on_established hook flips exactly this flag; once set,
+        // /ready must transition to 200 with no unmet conditions.
+        readiness.set_cluster_membership_established(true);
+        let response = get(server.local_addr(), "/ready")?;
+        server.shutdown()?;
+
+        assert_status(&response, 200);
+        let body = json_body(&response)?;
+        assert_eq!(body["ready"], true);
+        let Some(unmet_conditions) = body["unmet_conditions"].as_array() else {
+            return Err("unmet_conditions should be an array".into());
+        };
+        assert!(unmet_conditions.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
     fn cluster_readiness_is_listed_when_configured_but_not_joined()
     -> Result<(), Box<dyn std::error::Error>> {
         let readiness = SharedReadinessState::new(ReadinessState::new(
