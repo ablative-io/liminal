@@ -144,6 +144,11 @@ DUR-005/006 machinery's first production caller); v2 explicit-credit acks
 
 ## 6. Phase 3 — the storage moat & reach
 Fork-at-hash replay/forensics API (joint design with Apollo — cursor,
-dedup-namespace, and subscriber-state semantics under fork need a doc);
+dedup-namespace, and subscriber-state semantics under fork need a doc).
+Haematite constraint recorded up front (Apollo, 2026-07-07): `fork_at`
+hard-refuses with typed `UnprotectedAnchor` unless the root is pinned by a
+live handle, a named branch record, or a named snapshot — so liminal's
+replay anchors must be snapshot-named or branch-recorded to be legally
+forkable; design the anchor-naming scheme into the API from day one;
 WebSocket transport for the TS SDK (ledger B3, joint framing doc with
 beamr's browser transport); embedded-mode backends (B1, with frame).
