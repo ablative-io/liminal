@@ -25,7 +25,7 @@ use crate::channel::schema::{Schema, SchemaId, SchemaValidationError};
 use crate::channel::subscription::{SubscriptionHandle, SubscriptionPredicate};
 use crate::channel::supervisor::{ChannelSupervisor, shared_supervisor};
 use crate::durability::bridge::block_on;
-use crate::durability::{DurableChannel, DurableStore, MessageEnvelope};
+use crate::durability::{DurableChannel, DurableStore, MessageEnvelope, recover_durable_channel};
 use crate::envelope::{Envelope, PublisherId};
 use crate::error::LiminalError;
 
@@ -197,13 +197,7 @@ impl ChannelHandle {
         config: ChannelConfig,
         store: Arc<dyn DurableStore>,
     ) -> Result<Self, LiminalError> {
-        let durable = DurableChannel::new(config.name.clone(), RUNTIME_DURABLE_PARTITIONS, store)
-            .map_err(|error| LiminalError::PublishFailed {
-            message: format!(
-                "failed to initialize durable channel '{}': {error}",
-                config.name
-            ),
-        })?;
+        let durable = recover_durable(&config.name, store)?;
         let supervisor = shared_supervisor()?;
         Ok(Self {
             config,
@@ -229,13 +223,7 @@ impl ChannelHandle {
         store: Arc<dyn DurableStore>,
         supervisor: ChannelSupervisor,
     ) -> Result<Self, LiminalError> {
-        let durable = DurableChannel::new(config.name.clone(), RUNTIME_DURABLE_PARTITIONS, store)
-            .map_err(|error| LiminalError::PublishFailed {
-            message: format!(
-                "failed to initialize durable channel '{}': {error}",
-                config.name
-            ),
-        })?;
+        let durable = recover_durable(&config.name, store)?;
         Ok(Self {
             config,
             actor: Arc::new(ChannelActorState::new(Ok(supervisor))),
@@ -539,6 +527,33 @@ impl ChannelHandle {
     pub(crate) fn scheduler(&self) -> Result<Arc<beamr::scheduler::Scheduler>, LiminalError> {
         Ok(Arc::clone(self.core()?.scheduler()))
     }
+}
+
+/// Reconstructs a durable channel over `store`, deriving each partition's next
+/// sequence from the persisted log so a restart over an existing stream appends at
+/// the tail rather than colliding with the occupied head (H2 / ledger G1). On a
+/// fresh store, recovery yields zeroed sequences — identical to a first-boot
+/// channel — so this is the single durable-construction path for both cold start
+/// and restart.
+///
+/// The async recovery is driven to completion through the synchronous
+/// [`block_on`] bridge, exactly as the durable publish/flush paths do: the
+/// haematite store completes on its first poll, so no executor is needed.
+fn recover_durable(
+    channel_name: &str,
+    store: Arc<dyn DurableStore>,
+) -> Result<DurableChannel, LiminalError> {
+    block_on(recover_durable_channel(
+        channel_name.to_owned(),
+        RUNTIME_DURABLE_PARTITIONS,
+        store,
+    ))
+    .map_err(|error| LiminalError::PublishFailed {
+        message: format!("durable recovery bridge for channel '{channel_name}' failed: {error}"),
+    })?
+    .map_err(|error| LiminalError::PublishFailed {
+        message: format!("failed to recover durable channel '{channel_name}': {error}"),
+    })
 }
 
 /// Returns the current epoch milliseconds, saturating to zero before the epoch.
