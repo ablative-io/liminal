@@ -1,7 +1,13 @@
+#[path = "connection/apply.rs"]
+mod apply;
 #[path = "connection/conversation.rs"]
 mod conversation;
+#[path = "connection/delivery.rs"]
+mod delivery;
 #[path = "connection/notifier.rs"]
 pub mod notifier;
+#[path = "connection/outbound.rs"]
+mod outbound;
 #[path = "connection/process.rs"]
 mod process;
 #[path = "connection/services.rs"]
@@ -13,6 +19,8 @@ mod services_cluster;
 mod services_r5_tests;
 #[path = "connection/services_schema.rs"]
 mod services_schema;
+#[path = "connection/state.rs"]
+mod state;
 #[path = "connection/supervisor.rs"]
 mod supervisor;
 

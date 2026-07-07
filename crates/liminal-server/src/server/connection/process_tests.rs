@@ -5,9 +5,12 @@ use liminal::protocol::{
 };
 
 use super::*;
+use crate::ServerError;
 use crate::server::connection::conversation::ConversationResource;
 use crate::server::connection::notifier::ConnectionNotifier;
-use crate::server::connection::services::{PublishOutcome, SubscriptionResource};
+use crate::server::connection::services::{
+    ConnectionSubscription, PublishOutcome, SubscriptionResource,
+};
 
 /// Fixed connection pid used by the scheduler-free `apply_frame` unit tests.
 const TEST_PID: u64 = 1;
@@ -97,6 +100,10 @@ struct TestSubscription;
 impl SubscriptionResource for TestSubscription {
     fn unsubscribe(self: Box<Self>) -> Result<(), ServerError> {
         Ok(())
+    }
+
+    fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
+        None
     }
 }
 

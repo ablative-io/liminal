@@ -45,6 +45,7 @@ pub(super) fn decode_known_payload(
         }
         FrameType::WorkerRegister => decode_worker_register_payload(flags, &mut reader)?,
         FrameType::WorkerRegisterAck => decode_worker_register_ack_payload(flags, &mut reader)?,
+        FrameType::Deliver => decode_deliver_payload(flags, stream_id, &mut reader)?,
         FrameType::Unknown(type_id) => Frame::Unknown {
             type_id,
             flags,
@@ -236,6 +237,21 @@ fn decode_push_payload(
         }),
         _ => Err(ProtocolError::codec("frame type was not a push frame")),
     }
+}
+
+fn decode_deliver_payload(
+    flags: u8,
+    stream_id: u32,
+    reader: &mut PayloadReader<'_>,
+) -> Result<Frame, ProtocolError> {
+    let delivery_seq = reader.read_u64()?;
+    let envelope = MessageEnvelope::deserialize(&reader.read_bytes_field()?)?;
+    Ok(Frame::Deliver {
+        flags,
+        stream_id,
+        delivery_seq,
+        envelope,
+    })
 }
 
 fn decode_pressure_payload(

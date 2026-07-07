@@ -28,6 +28,7 @@ fn frame_type_discriminants_round_trip() {
         (0x16, FrameType::PushReply),
         (0x17, FrameType::WorkerRegister),
         (0x18, FrameType::WorkerRegisterAck),
+        (0x19, FrameType::Deliver),
     ];
 
     for (wire, frame_type) in values {
@@ -52,6 +53,12 @@ fn constructors_validate_streams() {
         Err(ProtocolError::InvalidStream { .. })
     ));
     assert!(validate_stream(FrameType::Accept, 2).is_ok());
+    let deliver_envelope = sample_envelope();
+    assert!(Frame::new_deliver(1, 1, deliver_envelope.clone()).is_ok());
+    assert!(matches!(
+        Frame::new_deliver(0, 1, deliver_envelope),
+        Err(ProtocolError::InvalidStream { .. })
+    ));
 }
 
 fn sample_envelope() -> MessageEnvelope {

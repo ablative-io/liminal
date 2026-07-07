@@ -23,7 +23,25 @@ pub(super) fn sample_frames() -> Vec<Frame> {
     frames.extend(pressure_frames());
     frames.extend(push_frames());
     frames.extend(worker_register_frames());
+    frames.extend(deliver_frames());
     frames
+}
+
+pub(super) fn deliver_frames() -> [Frame; 2] {
+    [
+        Frame::Deliver {
+            flags: 0,
+            stream_id: 6,
+            delivery_seq: 1,
+            envelope: sample_envelope(vec![0xD0, 0xD1, 0xD2]),
+        },
+        Frame::Deliver {
+            flags: 0x24,
+            stream_id: 6,
+            delivery_seq: 0xFFFF_FFFF_FFFF_FFFF,
+            envelope: sample_envelope(Vec::new()),
+        },
+    ]
 }
 
 pub(super) fn worker_register_frames() -> [Frame; 4] {

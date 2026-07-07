@@ -16,8 +16,10 @@
 
 mod connection;
 mod push_client;
+mod subscription;
 
 pub use push_client::{OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame};
+pub use subscription::{DeliveredMessage, SubscriptionStream};
 
 use alloc::format;
 use alloc::string::ToString;

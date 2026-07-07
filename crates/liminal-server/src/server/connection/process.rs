@@ -1,28 +1,23 @@
-use std::collections::HashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use beamr::atom::Atom;
 use beamr::native::native_process::{NativeContext, NativeHandler, NativeOutcome};
 use beamr::process::ExitReason;
 use beamr::term::Term;
 
-use liminal::protocol::{
-    CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG,
-    ProtocolError, ProtocolVersion, SchemaId as ProtocolSchemaId, WorkerRegisterOutcome,
-    WorkerRegistration, decode, encode, encoded_len, negotiate_version,
-};
+use liminal::protocol::{Frame, ProtocolError, decode};
 
-use super::conversation::ConnectionConversation;
-use super::services::{ConnectionServices, ConnectionSubscription, server_error_from_protocol};
+use super::apply::apply_frame;
+use super::delivery::{DELIVERY_SLICE_BUDGET, service_subscriptions};
+use super::outbound::OutboundWriter;
+use super::services::server_error_from_protocol;
+use super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
 use crate::ServerError;
 
 const READ_BUFFER_BYTES: usize = 8192;
-const SERVER_ERROR_CODE: u16 = 0xFFFF;
-const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
 /// Application stream id used for server-initiated push frames. Push is an
 /// application-stream frame (non-zero stream id), like publish and conversation.
 const PUSH_STREAM_ID: u32 = 1;
@@ -34,6 +29,19 @@ pub(super) struct ConnectionProcess {
     stream: Option<TcpStream>,
     buffer: Vec<u8>,
     state: ConnectionProcessState,
+    /// Per-connection outbound byte buffer. EVERY server-originated frame (acks,
+    /// errors, `Push`, `Disconnect`, `Pong`, `Deliver`, ...) is enqueued here and
+    /// drained cooperatively on the slice loop with partial-write tracking, so a
+    /// frame larger than the socket send buffer streams out across slices instead
+    /// of failing a `write_all` on the non-blocking socket (ledger G4).
+    outbound: OutboundWriter,
+}
+
+/// Whether a connection slice's socket/inbound servicing leaves the connection
+/// running or has already resolved its lifecycle.
+enum SliceStep {
+    Continue,
+    Stop(ExitReason),
 }
 
 impl ConnectionProcess {
@@ -71,60 +79,114 @@ impl ConnectionProcess {
             stream,
             buffer: Vec::new(),
             state: ConnectionProcessState::default(),
+            outbound: OutboundWriter::new(),
         }
     }
 
-    fn handle_stream(&mut self, pid: u64) -> NativeOutcome {
-        let Some(stream) = self.stream.as_mut() else {
+    /// Runs one connection scheduler slice: service inbound socket/control work,
+    /// then service subscriptions into the outbound buffer, then drain the
+    /// outbound buffer to the socket.
+    ///
+    /// The ordering is load-bearing (subscriptions are pumped AFTER socket/control
+    /// work), and the whole slice preserves the no-sleep `Continue` discipline: a
+    /// slice never parks a scheduler thread, it re-queues the process to poll again.
+    fn handle_slice(&mut self, pid: u64) -> NativeOutcome {
+        match self.service_socket(pid) {
+            SliceStep::Stop(reason) => return NativeOutcome::Stop(reason),
+            SliceStep::Continue => {}
+        }
+        // Pump subscriptions into the outbound buffer. An overflow (or an encode
+        // fault) is fatal: a dropped or truncated delivery would desync the stream,
+        // so the connection is torn down rather than allowed to continue desynced.
+        if let Err(error) =
+            service_subscriptions(&mut self.state, &mut self.outbound, DELIVERY_SLICE_BUDGET)
+        {
+            tracing::warn!(
+                connection_pid = pid,
+                %error,
+                "outbound overflow while delivering; tearing down the connection"
+            );
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return NativeOutcome::Stop(ExitReason::Error);
+        }
+        // Drain queued outbound bytes with partial-write tracking. A hard write
+        // error (or overflow surfaced here) tears the connection down.
+        if let Err(error) = self.drain_outbound() {
+            tracing::warn!(
+                connection_pid = pid,
+                %error,
+                "outbound drain failed; tearing down the connection"
+            );
+            self.runtime
+                .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+            return NativeOutcome::Stop(ExitReason::Error);
+        }
+        NativeOutcome::Continue
+    }
+
+    /// Services the inbound half of a slice: reads available bytes and applies any
+    /// complete frames, enqueuing responses into the outbound buffer.
+    fn service_socket(&mut self, pid: u64) -> SliceStep {
+        let Some(stream) = self.stream.as_mut() else {
+            self.runtime
+                .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+            return SliceStep::Stop(ExitReason::Error);
         };
         match read_available(stream, &mut self.buffer) {
             Ok(ReadStatus::Closed) => {
                 self.runtime.finish(pid);
-                return NativeOutcome::Stop(ExitReason::Normal);
+                return SliceStep::Stop(ExitReason::Normal);
             }
             Ok(ReadStatus::WouldBlock) => {
                 // No bytes ready on this non-blocking socket right now. Do NOT
                 // sleep: that would block a beamr scheduler worker thread (the
                 // supervisor runs `CONNECTION_SCHEDULER_THREADS`) on every idle
-                // poll and starve every other connection process sharing it.
-                // `NativeOutcome::Continue` maps to `SliceOutcome::Requeue`,
-                // which re-queues this pid behind every other runnable process
-                // (cooperative round-robin) and reschedules us to poll again —
-                // yielding the thread without parking. `Wait` is wrong here:
-                // it parks until a *message* arrives, but socket readiness does
-                // not enqueue a message, so the connection would hang forever.
-                return NativeOutcome::Continue;
+                // poll and starve every other connection process sharing it. The
+                // caller returns `NativeOutcome::Continue` (mapping to
+                // `SliceOutcome::Requeue`), which re-queues this pid behind every
+                // other runnable process (cooperative round-robin) and reschedules
+                // us to poll — and, crucially, to drain any queued outbound bytes —
+                // without parking. `Wait` is wrong here: it parks until a *message*
+                // arrives, but socket readiness does not enqueue a message, so the
+                // connection would hang forever.
+                return SliceStep::Continue;
             }
             Ok(ReadStatus::Read) => {}
             Err(error) => {
                 tracing::warn!(connection_pid = pid, %error, "connection read failed");
                 self.runtime
                     .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-                return NativeOutcome::Stop(ExitReason::Error);
+                return SliceStep::Stop(ExitReason::Error);
             }
         }
         match process_buffer(
             pid,
-            stream,
             &self.runtime,
             &mut self.state,
             &mut self.buffer,
+            &mut self.outbound,
         ) {
-            Ok(ProcessStatus::Continue) => NativeOutcome::Continue,
+            Ok(ProcessStatus::Continue) => SliceStep::Continue,
             Ok(ProcessStatus::Close) => {
                 self.runtime.finish(pid);
-                NativeOutcome::Stop(ExitReason::Normal)
+                SliceStep::Stop(ExitReason::Normal)
             }
             Err(error) => {
                 tracing::warn!(connection_pid = pid, %error, "connection process failed");
                 self.runtime
                     .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-                NativeOutcome::Stop(ExitReason::Error)
+                SliceStep::Stop(ExitReason::Error)
             }
         }
+    }
+
+    /// Drains queued outbound bytes to the socket, if the stream is still present.
+    fn drain_outbound(&mut self) -> Result<(), super::outbound::OutboundError> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(());
+        };
+        self.outbound.drain(stream)
     }
 
     fn handle_control(&mut self, pid: u64, control: ConnectionControl) -> Option<NativeOutcome> {
@@ -135,6 +197,9 @@ impl ConnectionProcess {
             }
             ConnectionControl::ForceClose => {
                 self.notify_shutdown(pid, false);
+                // Flush the enqueued `Disconnect` (and any residue) before the
+                // stream is dropped; best-effort, since we are stopping regardless.
+                let _ = self.drain_outbound();
                 self.stream.take();
                 self.runtime.finish(pid);
                 Some(NativeOutcome::Stop(ExitReason::Normal))
@@ -149,14 +214,15 @@ impl ConnectionProcess {
         }
     }
 
-    /// Writes a server-initiated [`Frame::Push`] out on this connection's stream.
+    /// Enqueues a server-initiated [`Frame::Push`] into the outbound buffer.
     ///
-    /// This is the only place the server originates a frame to the client. A write
-    /// failure (or an encode failure, or a missing stream) is logged and the slot
-    /// is cancelled so the awaiter does not block forever on a reply that can never
-    /// arrive; the connection itself is left to its normal read-side lifecycle.
+    /// The frame is flushed by the slice's outbound drain (this control message is
+    /// handled at the start of the slice, before `handle_slice` runs). A missing
+    /// stream, an encode failure, or an outbound overflow cancels the push slot so
+    /// the awaiter does not block forever on a reply that can never arrive; the
+    /// connection itself is left to its normal lifecycle.
     fn write_push(&mut self, pid: u64, correlation_id: u64, payload: Vec<u8>) {
-        let Some(stream) = self.stream.as_mut() else {
+        if self.stream.is_none() {
             tracing::warn!(
                 connection_pid = pid,
                 correlation_id,
@@ -164,7 +230,7 @@ impl ConnectionProcess {
             );
             self.runtime.cancel_push(correlation_id);
             return;
-        };
+        }
         let frame = match Frame::new_push(PUSH_STREAM_ID, correlation_id, payload) {
             Ok(frame) => frame,
             Err(error) => {
@@ -178,12 +244,12 @@ impl ConnectionProcess {
                 return;
             }
         };
-        if let Err(error) = write_frame(stream, &frame) {
+        if let Err(error) = self.outbound.enqueue_frame(&frame) {
             tracing::warn!(
                 connection_pid = pid,
                 correlation_id,
                 %error,
-                "server push write failed; the push reply slot is cancelled"
+                "server push could not be enqueued; the push reply slot is cancelled"
             );
             self.runtime.cancel_push(correlation_id);
         }
@@ -198,22 +264,22 @@ impl ConnectionProcess {
         }
 
         self.state.shutdown_notification_attempted = true;
-        let Some(stream) = self.stream.as_mut() else {
+        if self.stream.is_none() {
             tracing::warn!(
                 connection_pid = pid,
                 peer_addr = ?self.peer_addr,
                 "shutdown notification skipped because connection stream is unavailable"
             );
             return;
-        };
+        }
 
-        match write_frame(stream, &Frame::Disconnect { flags: 0 }) {
+        match self.outbound.enqueue_frame(&Frame::Disconnect { flags: 0 }) {
             Ok(()) => {
                 tracing::debug!(
                     connection_pid = pid,
                     peer_addr = ?self.peer_addr,
                     subscriber_count = self.state.subscriptions.len(),
-                    "sent shutdown notification to connection"
+                    "enqueued shutdown notification to connection"
                 );
             }
             Err(error) => {
@@ -221,7 +287,7 @@ impl ConnectionProcess {
                     connection_pid = pid,
                     peer_addr = ?self.peer_addr,
                     %error,
-                    "shutdown notification failed; connection will not be retried"
+                    "shutdown notification could not be enqueued; connection will not be retried"
                 );
             }
         }
@@ -258,185 +324,16 @@ impl NativeHandler for ConnectionProcess {
                 return outcome;
             }
         }
-        self.handle_stream(pid)
+        self.handle_slice(pid)
     }
-}
-
-#[derive(Debug, Default)]
-pub(super) struct ConnectionProcessState {
-    shutdown_notification_attempted: bool,
-    subscriptions: HashMap<u64, ConnectionSubscription>,
-    conversations: HashMap<u64, ConnectionConversation>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ProcessStatus {
-    Continue,
-    Close,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum FrameAction {
-    Respond(Frame),
-    NoResponse,
-    Close,
-}
-
-pub(super) fn apply_frame(
-    pid: u64,
-    runtime: &ConnectionRuntime,
-    state: &mut ConnectionProcessState,
-    frame: Frame,
-) -> FrameAction {
-    let services = runtime.services();
-    match frame {
-        Frame::Connect {
-            min_version,
-            max_version,
-            ..
-        } => connect_response(min_version, max_version),
-        Frame::Disconnect { .. } => FrameAction::Close,
-        Frame::Ping { .. } => FrameAction::Respond(Frame::Pong { flags: 0 }),
-        Frame::Publish {
-            stream_id,
-            channel,
-            envelope,
-            idempotency_key,
-            ..
-        } => {
-            // Offer the publish to the application's observability-drain tap first.
-            // When it consumes the frame (the reserved observability channel), the
-            // event was persisted/fanned-out out-of-band, so it must NOT also flow
-            // through the normal channel machinery (which would reject an undeclared
-            // channel), and the one-way publish gets no wire response.
-            if runtime.notifier_channel_publish(pid, &channel, &envelope.payload) {
-                FrameAction::NoResponse
-            } else {
-                publish_response(
-                    services,
-                    stream_id,
-                    &channel,
-                    &envelope,
-                    idempotency_key.as_deref(),
-                )
-            }
-        }
-        Frame::Subscribe {
-            stream_id,
-            channel,
-            accepted_schemas,
-            ..
-        } => subscribe_response(services, state, stream_id, &channel, &accepted_schemas),
-        Frame::Unsubscribe {
-            subscription_id, ..
-        } => unsubscribe_response(services, state, subscription_id),
-        Frame::ConversationOpen {
-            conversation_id,
-            subject,
-            ..
-        } => conversation_open(services, state, conversation_id, &subject),
-        Frame::ConversationMessage {
-            flags,
-            stream_id,
-            conversation_id,
-            envelope,
-        } => conversation_message(
-            services,
-            state,
-            flags,
-            stream_id,
-            conversation_id,
-            &envelope,
-        ),
-        Frame::ConversationClose {
-            conversation_id, ..
-        } => conversation_close(services, state, conversation_id),
-        Frame::PushReply {
-            correlation_id,
-            payload,
-            ..
-        } => {
-            // The client answered a server-initiated push: resolve the matching
-            // one-shot reply slot so the server-side `PushReplyAwaiter` wakes with
-            // the correlated payload. The server stays silent on the wire — the
-            // reply terminates the push round trip.
-            runtime.resolve_push(correlation_id, payload);
-            FrameAction::NoResponse
-        }
-        Frame::WorkerRegister { registration, .. } => {
-            worker_register_response(pid, runtime, registration)
-        }
-        // `Push` is server-to-client only; a client must never originate one.
-        // `WorkerRegisterAck` is likewise server-to-client. Ignore these rather
-        // than treating them as a fatal protocol error so a confused or malicious
-        // client cannot tear the connection down with a stray inbound frame.
-        Frame::Push { .. }
-        | Frame::WorkerRegisterAck { .. }
-        | Frame::Unknown { .. }
-        | Frame::ConnectAck { .. }
-        | Frame::ConnectError { .. }
-        | Frame::SubscribeAck { .. }
-        | Frame::SubscribeError { .. }
-        | Frame::PublishAck { .. }
-        | Frame::PublishError { .. }
-        | Frame::ConversationError { .. }
-        | Frame::Accept { .. }
-        | Frame::Defer { .. }
-        | Frame::Reject { .. }
-        | Frame::Pong { .. } => FrameAction::NoResponse,
-    }
-}
-
-/// Associates a worker registration with this connection and invokes the
-/// configured connection notifier.
-///
-/// The notifier is consulted FIRST: only after the application accepts (or when
-/// no notifier is configured) is the registration stored on the connection
-/// record, so the close-path `on_worker_unregistered` fires for exactly the
-/// connections the application accepted — a rejected worker leaves no record and
-/// triggers no later deregistration. The ack is synchronous: a notifier error
-/// yields a `Rejected` ack carrying the reason so the worker never believes it is
-/// registered after the application declined it. With no notifier configured the
-/// registration is accepted unconditionally, keeping liminal usable standalone.
-fn worker_register_response(
-    pid: u64,
-    runtime: &ConnectionRuntime,
-    registration: WorkerRegistration,
-) -> FrameAction {
-    if let Some(notifier) = runtime.notifier() {
-        if let Err(error) = notifier.on_worker_registered(pid, &registration) {
-            return worker_register_rejected(error.to_string());
-        }
-    }
-    // Store only after acceptance. A poisoned-registry error here means the
-    // accepted registration cannot be tracked for deregistration, so reject the
-    // worker (and undo the application-side registration) rather than leave a
-    // silent, never-deregistered association.
-    if let Err(error) = runtime.set_registration(pid, registration) {
-        if let Some(notifier) = runtime.notifier() {
-            notifier.on_worker_unregistered(pid);
-        }
-        return worker_register_rejected(error.to_string());
-    }
-    FrameAction::Respond(Frame::WorkerRegisterAck {
-        flags: 0,
-        outcome: WorkerRegisterOutcome::Accepted,
-    })
-}
-
-const fn worker_register_rejected(reason: String) -> FrameAction {
-    FrameAction::Respond(Frame::WorkerRegisterAck {
-        flags: 0,
-        outcome: WorkerRegisterOutcome::Rejected { reason },
-    })
 }
 
 fn process_buffer(
     pid: u64,
-    stream: &mut TcpStream,
     runtime: &ConnectionRuntime,
     state: &mut ConnectionProcessState,
     buffer: &mut Vec<u8>,
+    outbound: &mut OutboundWriter,
 ) -> Result<ProcessStatus, ServerError> {
     loop {
         let (frame, consumed) = match decode(buffer) {
@@ -450,197 +347,17 @@ fn process_buffer(
         };
         buffer.drain(..consumed);
         match apply_frame(pid, runtime, state, frame) {
-            FrameAction::Respond(response) => write_frame(stream, &response)?,
+            FrameAction::Respond(response) => {
+                outbound
+                    .enqueue_frame(&response)
+                    .map_err(|error| ServerError::ListenerAccept {
+                        message: format!("failed to enqueue connection response: {error}"),
+                    })?;
+            }
             FrameAction::NoResponse => {}
             FrameAction::Close => return Ok(ProcessStatus::Close),
         }
     }
-}
-
-fn connect_response(min_version: ProtocolVersion, max_version: ProtocolVersion) -> FrameAction {
-    match negotiate_version(min_version, max_version, &[SUPPORTED_PROTOCOL]) {
-        Ok(selected_version) => FrameAction::Respond(Frame::ConnectAck {
-            flags: 0,
-            selected_version,
-            capabilities: 0,
-        }),
-        Err(error) => FrameAction::Respond(Frame::ConnectError {
-            flags: 0,
-            reason_code: error.reason_code(),
-            message: error.message().map(str::to_owned),
-        }),
-    }
-}
-
-fn publish_response(
-    services: &dyn ConnectionServices,
-    stream_id: u32,
-    channel: &str,
-    envelope: &MessageEnvelope,
-    idempotency_key: Option<&str>,
-) -> FrameAction {
-    match services.publish(channel, envelope, idempotency_key) {
-        Ok(outcome) => FrameAction::Respond(Frame::PublishAck {
-            // Set the genuine-delivery flag only when the publish was accepted by
-            // at least one subscriber. The ack is always sent on success (the
-            // backpressure contract is unchanged); the flag bit is the additive
-            // delivery-ack signal the caller can observe.
-            flags: if outcome.delivered {
-                PUBLISH_DELIVERED_FLAG
-            } else {
-                0
-            },
-            stream_id,
-            message_id: outcome.message_id,
-        }),
-        Err(error) => FrameAction::Respond(Frame::PublishError {
-            flags: 0,
-            stream_id,
-            reason_code: SERVER_ERROR_CODE,
-            message: Some(error.to_string()),
-        }),
-    }
-}
-
-fn subscribe_response(
-    services: &dyn ConnectionServices,
-    state: &mut ConnectionProcessState,
-    stream_id: u32,
-    channel: &str,
-    accepted_schemas: &[ProtocolSchemaId],
-) -> FrameAction {
-    match services.subscribe(channel, accepted_schemas) {
-        Ok(subscription) => {
-            let subscription_id = subscription.id();
-            let selected_schema = subscription.selected_schema();
-            state.subscriptions.insert(subscription_id, subscription);
-            FrameAction::Respond(Frame::SubscribeAck {
-                flags: 0,
-                stream_id,
-                subscription_id,
-                selected_schema,
-            })
-        }
-        Err(error) => FrameAction::Respond(Frame::SubscribeError {
-            flags: 0,
-            stream_id,
-            reason_code: SERVER_ERROR_CODE,
-            message: Some(error.to_string()),
-        }),
-    }
-}
-
-fn unsubscribe_response(
-    services: &dyn ConnectionServices,
-    state: &mut ConnectionProcessState,
-    subscription_id: u64,
-) -> FrameAction {
-    if let Some(subscription) = state.subscriptions.remove(&subscription_id) {
-        if let Err(error) = services.unsubscribe(subscription) {
-            tracing::warn!(subscription_id, %error, "liminal unsubscribe failed");
-        }
-    }
-    FrameAction::NoResponse
-}
-
-fn conversation_open(
-    services: &dyn ConnectionServices,
-    state: &mut ConnectionProcessState,
-    conversation_id: u64,
-    subject: &str,
-) -> FrameAction {
-    match services.open_conversation(conversation_id, subject) {
-        Ok(conversation) => {
-            state.conversations.insert(conversation_id, conversation);
-            FrameAction::NoResponse
-        }
-        Err(error) => FrameAction::Respond(Frame::ConversationError {
-            flags: 0,
-            stream_id: 1,
-            conversation_id,
-            reason_code: SERVER_ERROR_CODE,
-            message: Some(error.to_string()),
-        }),
-    }
-}
-
-/// Bounds how long the server waits for the participant's reply on the
-/// request-reply path before reporting a `ConversationError` back to the caller.
-/// The participant processes the forwarded message on a beamr scheduler slice, so
-/// a reply is normally available promptly; this only guards against a stuck or
-/// non-replying participant so the connection thread never blocks indefinitely.
-const CONVERSATION_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-
-fn conversation_message(
-    services: &dyn ConnectionServices,
-    state: &ConnectionProcessState,
-    flags: u8,
-    stream_id: u32,
-    conversation_id: u64,
-    envelope: &MessageEnvelope,
-) -> FrameAction {
-    let Some(conversation) = state.conversations.get(&conversation_id) else {
-        return conversation_error(
-            stream_id,
-            conversation_id,
-            "conversation is not open on this connection",
-        );
-    };
-    if let Err(error) = services.conversation_message(conversation, envelope) {
-        return conversation_error(stream_id, conversation_id, &error.to_string());
-    }
-    // Pre-existing fire-and-forget semantics: without the reply-requested flag the
-    // server stays silent on success, exactly as before. The reply leg is purely
-    // additive and only runs when the client explicitly asked for a correlated
-    // reply on this frame.
-    if flags & CONVERSATION_REPLY_REQUESTED_FLAG == 0 {
-        return FrameAction::NoResponse;
-    }
-    conversation_reply(conversation, stream_id, conversation_id)
-}
-
-/// Drains the participant's correlated reply and frames it back to the caller.
-///
-/// The reply carries the same `conversation_id` (the correlation key) and the
-/// reply-requested flag so the client read path can recognise it as the answer to
-/// its request rather than an unrelated server-initiated frame.
-fn conversation_reply(
-    conversation: &ConnectionConversation,
-    stream_id: u32,
-    conversation_id: u64,
-) -> FrameAction {
-    match conversation.receive_reply(CONVERSATION_REPLY_TIMEOUT) {
-        Ok(reply) => FrameAction::Respond(Frame::ConversationMessage {
-            flags: CONVERSATION_REPLY_REQUESTED_FLAG,
-            stream_id,
-            conversation_id,
-            envelope: reply,
-        }),
-        Err(error) => conversation_error(stream_id, conversation_id, &error.to_string()),
-    }
-}
-
-fn conversation_error(stream_id: u32, conversation_id: u64, message: &str) -> FrameAction {
-    FrameAction::Respond(Frame::ConversationError {
-        flags: 0,
-        stream_id,
-        conversation_id,
-        reason_code: SERVER_ERROR_CODE,
-        message: Some(message.to_owned()),
-    })
-}
-
-fn conversation_close(
-    services: &dyn ConnectionServices,
-    state: &mut ConnectionProcessState,
-    conversation_id: u64,
-) -> FrameAction {
-    if let Some(conversation) = state.conversations.remove(&conversation_id) {
-        if let Err(error) = services.close_conversation(conversation) {
-            tracing::warn!(conversation_id, %error, "liminal conversation close failed");
-        }
-    }
-    FrameAction::NoResponse
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -655,7 +372,7 @@ fn read_available(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<ReadSt
     match stream.read(&mut chunk) {
         Ok(0) => Ok(ReadStatus::Closed),
         Ok(bytes_read) => {
-            buffer.extend_from_slice(&chunk[..bytes_read]);
+            buffer.extend_from_slice(chunk.get(..bytes_read).unwrap_or(&[]));
             Ok(ReadStatus::Read)
         }
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(ReadStatus::WouldBlock),
@@ -665,23 +382,3 @@ fn read_available(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<ReadSt
         }),
     }
 }
-
-fn write_frame(stream: &mut TcpStream, frame: &Frame) -> Result<(), ServerError> {
-    let frame_len = encoded_len(frame).map_err(|error| server_error_from_protocol(&error))?;
-    let mut bytes = vec![0_u8; frame_len];
-    let written = encode(frame, &mut bytes).map_err(|error| server_error_from_protocol(&error))?;
-    let Some(encoded) = bytes.get(..written) else {
-        return Err(ServerError::ListenerAccept {
-            message: "protocol encoder returned an invalid byte count".to_owned(),
-        });
-    };
-    stream
-        .write_all(encoded)
-        .map_err(|error| ServerError::ListenerAccept {
-            message: format!("failed to write connection response: {error}"),
-        })
-}
-
-#[cfg(test)]
-#[path = "process_tests.rs"]
-mod tests;

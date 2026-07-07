@@ -131,6 +131,15 @@ impl Connection {
             match decode(&self.buffer) {
                 Ok((frame, consumed)) => {
                     self.buffer.drain(..consumed);
+                    if matches!(frame, Frame::Deliver { .. }) {
+                        // An unsolicited server `Deliver` on a request/response
+                        // connection: in v1, channel deliveries are surfaced only via
+                        // the dedicated `SubscriptionStream`, so drain and ignore this
+                        // frame here to keep round-trip framing in sync. (A pooled
+                        // `subscribe` registers a server-side subscriber for the
+                        // delivery-ack signal, but never receives the messages here.)
+                        continue;
+                    }
                     return Ok(frame);
                 }
                 Err(
@@ -325,6 +334,11 @@ impl Connection {
             match decode(&self.buffer) {
                 Ok((frame, consumed)) => {
                     self.buffer.drain(..consumed);
+                    if matches!(frame, Frame::Deliver { .. }) {
+                        // Skip unsolicited server deliveries (see `receive`): they are
+                        // not the correlated reply this drain is looking for.
+                        continue;
+                    }
                     return Ok(Some(frame));
                 }
                 Err(

@@ -5,7 +5,10 @@ mod protocol;
 mod tcp;
 
 #[cfg(feature = "std")]
-pub use tcp::{OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame, TcpRemoteTransport};
+pub use tcp::{
+    DeliveredMessage, OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame,
+    SubscriptionStream, TcpRemoteTransport,
+};
 
 pub use config::{SdkConfig, build_channel_handle, build_conversation_handle};
 pub use handles::{
