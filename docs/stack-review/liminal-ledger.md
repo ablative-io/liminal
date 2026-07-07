@@ -178,6 +178,13 @@ beamr `d147fc6` + `9710912` (FIFO owner pop + regression tests), merged
 2026-07-07, unpublished. Pin bump targets **0.12.1 ≥ 9710912** (Artemis
 preparing; publish gated on Tom). Do not pin crates.io 0.12.0.
 
+## H. Server direction (2026-07-07)
+
+Product scoping + phase-1 build plan live in `docs/design/SERVER-DIRECTION.md`
+(thesis: the runtime supervises your consumers). H1 = delivery pump + G4
+outbound writer; H2 = G1 pulled forward; H3 = /metrics; H4 = auth-token
+table stakes. Post-0.12.1 tail: A1-1 -> A1-2/3/4 -> A3.
+
 ## Cross-domain synergies
 
 1. **Backpressure × aion worker dispatch**: Defer signals reaching aion's
