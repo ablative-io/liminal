@@ -16,7 +16,7 @@ The wire-level Defer frames and the decision rule both exist. **Unlocks:**
 frame F-3a's acceptance criterion; honest protocol-level backpressure
 instead of an aspirational README claim.
 
-### A2. Server schema wiring (S: 1–2 briefs)
+### A2. Server schema wiring — DONE 2026-07-07 (5ee2062 + bddc9c9)
 Read `schema_ref` from channel config, load the JSON Schema, build channels
 with it (today: `Schema::new(json!({}))`). The validation engine
 (jsonschema, defaults, additive evolution) works — the server just never
@@ -123,7 +123,7 @@ All four verified against code; none fixed yet. G1 and G4 carry
 coordination commitments: ping Vesper (aion) before either fix lands so
 the aion cross-node failover proofs re-run.*
 
-### G1. Durable-channel restart sequence conflict (S, fix + failing test)
+### G1. Durable-channel restart sequence conflict (S, fix + failing test) — OPEN (queued behind 0.12.1 bump)
 `liminal-server` rebuilds durable channels with `next_sequences = [0]`
 (`services.rs:230-241` → `channel/storage.rs:198`) instead of calling
 `recover_durable_channel` (`recovery.rs:46-55`, exists, tested, never
@@ -135,14 +135,14 @@ memory. The restart test (`services_r5_tests.rs:62-86`) only reads.
 0.12.1 bump), then wire recovery; the A1 defer-semantics doc designs
 against the recovered contract, not the accidental one.
 
-### G2. Clustered readiness never ready (S)
+### G2. Clustered readiness never ready — FIXED 2026-07-07 (50b53eb)
 `set_cluster_membership_established(true)` has no production caller —
 only `set_cluster_configured(true)` runs (`runtime.rs:52`); the setter is
 exercised solely by a unit test (`checks.rs:344-345`). Any server with a
 `[cluster]` section serves 503 on `/ready` forever. Wire membership's
 first-peer (or zero-seed bootstrap) signal into `SharedReadinessState`.
 
-### G3. Conversation boot links dead participants (S)
+### G3. Conversation boot links dead participants — FIXED 2026-07-07 (e2b8769)
 Conversation-actor boot errors if *any* configured participant pid is dead
 (`conversation/actor/beam.rs:128-154`), unlike channel boot which prunes
 dead subscribers (`channel/actor/mod.rs:294-316`). A conversation that
