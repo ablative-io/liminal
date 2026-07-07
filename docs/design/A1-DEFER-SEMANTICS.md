@@ -127,8 +127,14 @@ way.
    (defaults 25ms/250ms, per-channel config). The bus never blocks a
    producer and never lies; ignoring hints leads to Reject (ephemeral) or
    growing delays and eventually watermark-Reject (durable, §4).
-2. The producer MUST NOT re-send a Deferred message — it is admitted.
-   (Accidental keyed re-sends are suppressed by dedup, §5.)
+2. The producer MUST NOT re-publish a Deferred message **with a fresh
+   idempotency key** — that bypasses the receipt and double-delivers
+   alongside the still-buffered original. Re-publishing **with the same key
+   is safe and is suppressed** while the bus owns the message (§5), and is
+   the blessed at-least-once pattern for must-execute producers (§7): a
+   same-incarnation retry is a no-op; a post-crash retry on an ephemeral
+   channel re-claims and re-delivers exactly because the incarnation-scoped
+   receipt died with the message.
 3. Reject means *shed, delivered to nobody*: the producer owns the retry
    decision, with its own backoff (aion #197 territory, §7).
 
@@ -154,9 +160,25 @@ matching-capable subscriber's total bound), the publish is **Rejected before
 anything is appended** — honest, because nothing was persisted. This check
 is deliberately coarse (it may reject a message whose target subscriber is
 fast); the imprecision is documented and the precise per-cursor lag bound is
-the v2 once live consumer cursors exist (C2/DUR-003 wiring). Note the WAL
-flush itself (~17–20ms per publish) already imposes a natural producer rate
-ceiling per channel.
+the v2 once live consumer cursors exist (C2/DUR-003 wiring). The WAL flush
+(~17–20ms per publish) is a natural producer rate ceiling **on macOS only**
+(F_FULLFSYNC); on Linux PLP NVMe the same commit is ~100× cheaper, so the
+hard watermark carries the entire bound in production — do not tune the
+default against macOS pacing (Apollo review, 2026-07-07).
+
+**Append failure is a third outcome, distinct from Reject.** The append
+itself can fail (I/O error, or `SequenceConflict` if anything else ever
+writes the stream): nothing was persisted, so the mapping is
+`release_claim` + a producer-visible *error* (`PublishError`/`SdkError`),
+never a pressure signal — the producer's deliberate retry can re-claim
+exactly as after a Reject.
+
+**TTL rule: durable channel streams never append with TTL.** Liminal does
+not use `append_with_ttl` on channel partitions today and this design keeps
+that invariant, so a shed range can never *expire* out from under a lagging
+subscriber's replay — replay via blessed reads always finds the full range.
+(If a TTL'd durable class is ever introduced, expiry during a lag window
+must be specified as intentional disappearance, not loss.)
 
 **Auto-catch-up (graft §0.4).** A `lagging` durable subscriber converges
 without manual re-subscribe: when its inbox drains below a low watermark
@@ -166,9 +188,12 @@ replays the shed range from the durable log via the blessed
 `replay_from`/EventStore read paths, refilling through the same bounded
 admission. In-order delivery is preserved per subscriber because live pushes
 stay shed while `lagging` is set; the flag clears when replay reaches the
-log head. This is the one place A1 wires the (today orphaned) replay module
-into live delivery — scoped to a refill helper, not a delivery-model
-rewrite.
+log head, evaluated **loop-until-caught-up**: the head can move under
+concurrent appends, so refill re-reads the head each batch and loops — the
+chase is bounded because the pre-append watermark throttles producers while
+any subscriber lags. This is the one place A1 wires the (today orphaned)
+replay module into live delivery — scoped to a refill helper, not a
+delivery-model rewrite.
 
 **Replay/cursor interaction.** Replayed messages enter through the same
 bounded inbox admission as live pushes; replay batches size themselves to
@@ -204,6 +229,14 @@ re-claims and re-delivers (at-least-once, which is exactly ephemeral's
 contract). **Durable** channels keep the persisted namespace — there the
 message also survived, so the surviving receipt is truthful. This changes no
 dedup API; it changes only the namespace string the server composes.
+
+**Incarnation garbage (Apollo review):** a per-boot namespace strands the
+previous incarnation's receipt keyspace forever if left alone (engine-side
+tombstone GC is deferred). Ephemeral-namespace dedup records are therefore
+written with the engine's native TTL (`append_with_ttl`, bound to the
+channel's `dedup_ttl`) so stranded incarnations age out; the existing
+`DedupSweeper` remains the belt-and-braces path once scheduled. Durable
+namespaces are unaffected.
 
 ## 6. Wire & SDK mapping
 
@@ -255,16 +288,37 @@ What an aion worker sees on a deferred publish
 (`RemoteChannelHandle::publish_with_idempotency_key`):
 `Ok(DeliveryAck { pressure: Defer{delay}, accepted: false })`.
 
-Joint contract for Vesper's #197:
-- **Defer is not a retry trigger.** The bus owns the message. The dispatcher
-  MUST NOT re-enqueue; it SHOULD apply `delay` as a dispatch-rate signal —
-  slow down instead of queueing blind. A `DeliveryAck::is_admitted()`
-  accessor (`Accept | Defer`) makes outbox completion ("done when admitted")
-  one call, distinct from `is_accepted()` ("a subscriber genuinely received
-  it").
+Joint contract for Vesper's #197 (revised per Vesper review, 2026-07-07):
+- **Defer is a dispatch-rate signal, not a re-enqueue trigger** — apply
+  `delay` before the next dispatch to that channel/queue; slow down instead
+  of queueing blind.
+- **Completion policy is chosen by message class, because v1 emits no later
+  delivered/settled signal for a deferred message** (that is the v2
+  explicit-credit territory, §2/§6):
+  - *Fire-and-forget publishes* (events, telemetry): complete on
+    `is_admitted()` (`Accept | Defer`) — a new `DeliveryAck` accessor,
+    distinct from `is_accepted()` ("a subscriber genuinely received it").
+  - *Must-execute dispatches on ephemeral channels*: **complete on Accept
+    only.** On Defer, hold the outbox row open, apply `delay`, and retry
+    **with the same idempotency key**: a same-incarnation retry is
+    suppressed by the receipt (the bus still owns the message — no
+    double-delivery); a post-crash retry re-claims and re-delivers because
+    the incarnation-scoped receipt died with the message (§5). At-least-once
+    with zero double-delivery, derived entirely from §5's semantics.
+  - *Must-execute dispatches on durable channels*: complete on
+    `is_admitted()` — a Deferred message is already in the log and survives
+    crashes, so holding the row open buys nothing.
 - **Reject is the retry trigger.** Delivered-to-nobody and claim-released
-  (§5), so aion's existing backoff with the same idempotency key is exactly
-  right and cannot double-deliver.
+  (§5); backoff and retry with the same key cannot double-deliver.
+- **REQUIRED consumer change (aion): per-logical-message idempotency keys.**
+  Aion's outbox currently mints per-attempt keys (a deliberate pre-C1
+  honest-ack discipline). Under A1 that is dangerous on the Defer path: a
+  fresh-key retry of a deferred message bypasses the receipt and
+  double-delivers alongside the still-buffered original. Within one logical
+  message, Defer-path retries MUST reuse the key; Reject-path retries may
+  also reuse it (claim released, re-claim works). Vesper aligns aion's key
+  minting to per-logical-message as part of #197 — recorded here so the
+  change is not silent.
 - No new frames needed for aion; the vNext responses plus the flag bit cover
   new and old aion SDK pins.
 
@@ -299,7 +353,7 @@ the inbox the remote frame lands in.
 | Channel actor command queue | `ChannelActorCore` | ≤ concurrent callers (each blocks on a rendezvous reply); hard cap `MAX_PENDING_COMMANDS = 4096` as defense | enqueue error → `DeliveryFailed` → `PublishError` | error, not pressure |
 | Channel actor beamr mailbox | beamr | atoms only, paired 1:1 with command queue | n/a | n/a |
 | Subscriber beamr mailbox | beamr | local: wakeups/EXITs only; remote frames drained each wakeup into the bounded inbox | drain-and-shed at inbox | remote shed counter |
-| Durable channel log | haematite | pre-append hard watermark (§4) + disk/compaction (C2); WAL flush is a natural rate ceiling | pre-append Reject | Defer w/ max hint, then Reject |
+| Durable channel log | haematite | pre-append hard watermark (§4) + disk/compaction (C2); WAL flush is a rate ceiling on macOS only; watermark carries the bound on Linux | pre-append Reject | Defer w/ max hint, then Reject |
 | Dedup InFlight claims | haematite streams | one per in-flight key; every outcome completes or releases; TTL sweep | tombstone | n/a |
 | Server connection read buffer | `process.rs` | existing frame-size limits, unchanged | decode error | n/a |
 | `PressureMonitor` maps | channel-level enforcer | #channels × #consumers; entry removed on unsubscribe/EXIT (new cleanup, brief 4) | n/a | n/a |
