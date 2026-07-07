@@ -116,6 +116,67 @@ idempotency); snapshot/compaction story for long conversation logs
   notifier tap) is the template for cross-layer taps — extract the pattern
   into a doc before frame copies it ad hoc.
 
+## G. Confirmed defects (2026-07-07 orientation pass, Hermes Crumpet)
+
+*Appended per stack-devs agreement — existing item ids above are stable.
+All four verified against code; none fixed yet. G1 and G4 carry
+coordination commitments: ping Vesper (aion) before either fix lands so
+the aion cross-node failover proofs re-run.*
+
+### G1. Durable-channel restart sequence conflict (S, fix + failing test)
+`liminal-server` rebuilds durable channels with `next_sequences = [0]`
+(`services.rs:230-241` → `channel/storage.rs:198`) instead of calling
+`recover_durable_channel` (`recovery.rs:46-55`, exists, tested, never
+wired). Against an existing `persistence_path`, haematite's OCC refuses
+the first post-restart publish with `SequenceConflict` — deterministic,
+per Apollo: `expected_seq` must derive from the store, never process
+memory. The restart test (`services_r5_tests.rs:62-86`) only reads.
+**Order:** pin with a failing restart-then-publish test first (after the
+0.12.1 bump), then wire recovery; the A1 defer-semantics doc designs
+against the recovered contract, not the accidental one.
+
+### G2. Clustered readiness never ready (S)
+`set_cluster_membership_established(true)` has no production caller —
+only `set_cluster_configured(true)` runs (`runtime.rs:52`); the setter is
+exercised solely by a unit test (`checks.rs:344-345`). Any server with a
+`[cluster]` section serves 503 on `/ready` forever. Wire membership's
+first-peer (or zero-seed bootstrap) signal into `SharedReadinessState`.
+
+### G3. Conversation boot links dead participants (S)
+Conversation-actor boot errors if *any* configured participant pid is dead
+(`conversation/actor/beam.rs:128-154`), unlike channel boot which prunes
+dead subscribers (`channel/actor/mod.rs:294-316`). A conversation that
+survived a participant crash under a non-`Fail` policy cannot restart its
+own actor. Fix direction: prune-and-record, matching channel semantics.
+
+### G4. Non-blocking `write_all` truncates large frames → permanent
+connection desync (M — root-caused from aion live report)
+`write_frame` calls `write_all` on the connection socket
+(`process.rs:669-683`) that the listener sets non-blocking
+(`listener.rs:100`). `write_all` aborts on `WouldBlock` *after a partial
+write*: any server-originated frame exceeding free kernel sndbuf
+(~73KB delivered / ~96KB lost, empirically — boundary moves with buffer
+state) goes out truncated. Server warns + cancels the push slot; the
+client decoder waits on the declared `payload_length` and then consumes
+all subsequent frames as continuation bytes — the connection silently
+ghosts until "worker lost" timeout and sweeper deregistration. Affects
+every server-originated frame path; pushes are where it bites (aion
+transcript drains). **Fix shape:** per-connection outbound buffer drained
+cooperatively in the slice loop; tear the connection down on
+unrecoverable partial write; loud max-frame error at enqueue time.
+**Interim mitigation (aion-side, communicated):** keep push payloads well
+under ~64KB or chunk transcript events.
+
+### G0. Substrate constraint (transient, blocks G1's test + A1 load tests)
+crates.io beamr 0.11.0 **and** 0.12.0 ship LIFO owner run-queues
+(beamr `run_queue.rs:47-50`): a `Continue`-spinning native starves
+co-resident pids. `ConnectionProcess` busy-polls by design
+(`process.rs:88-100`) on a shared 4-thread scheduler → **liminal-server on
+published beamr is unreliable beyond 4 concurrent connections.** Fix is
+beamr `d147fc6` + `9710912` (FIFO owner pop + regression tests), merged
+2026-07-07, unpublished. Pin bump targets **0.12.1 ≥ 9710912** (Artemis
+preparing; publish gated on Tom). Do not pin crates.io 0.12.0.
+
 ## Cross-domain synergies
 
 1. **Backpressure × aion worker dispatch**: Defer signals reaching aion's

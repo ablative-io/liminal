@@ -8,7 +8,7 @@ A messaging system where conversations — not individual messages — are the f
 
 ## Status
 
-**v0.2.0.** Core messaging, channels, backpressure, schema validation, durable mailboxes, routing, and Aion integration are implemented and tested.
+**v0.2.2.** Core messaging, channels, schema validation, durable mailboxes, and the wire protocol are implemented and tested. Backpressure and predicate routing exist as tested subsystems not yet wired into the delivery path; the Aion integration is a set of protocol-level seams (worker registration, push dispatch, observability drain) consumed by the external `aion` crates. See `docs/stack-review/` for the honest state map.
 
 ## Install
 
@@ -16,7 +16,7 @@ The crate is published on crates.io as **`liminal-rs`** (the bare `liminal` name
 
 ```toml
 [dependencies]
-liminal = { package = "liminal-rs", version = "0.2.0" }
+liminal = { package = "liminal-rs", version = "0.2.2" }
 ```
 
 ```rust
@@ -59,14 +59,13 @@ crates/liminal/src/
 ├── protocol/      — wire protocol
 ├── causal/        — causal ordering metadata
 ├── metrics/       — metrics registry
-├── tracing/       — trace context propagation
-└── aion/          — Aion workflow-engine integration
+└── tracing/       — trace context propagation
 ```
 
 ## Requirements
 
 - Rust 1.85+
-- Depends on beamr 0.11.0 and haematite 0.3.0
+- Depends on beamr 0.11.0 and haematite 0.4.0
 
 ## License
 
