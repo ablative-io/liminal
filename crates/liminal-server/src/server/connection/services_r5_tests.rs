@@ -264,6 +264,7 @@ fn ephemeral_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>>
         routing_rules: Vec::new(),
         persistence_path: None,
         cluster: None,
+        auth: None,
     })
 }
 
@@ -281,6 +282,7 @@ fn durable_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         routing_rules: Vec::new(),
         persistence_path: None,
         cluster: None,
+        auth: None,
     })
 }
 

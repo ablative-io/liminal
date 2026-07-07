@@ -377,6 +377,7 @@ fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std:
         routing_rules: Vec::new(),
         persistence_path: None,
         cluster: None,
+        auth: None,
     };
     Ok(ConnectionSupervisor::from_config(&config)?)
 }

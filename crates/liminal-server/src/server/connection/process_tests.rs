@@ -509,6 +509,116 @@ fn publish_to_untapped_channel_still_fans_out() -> Result<(), ServerError> {
     Ok(())
 }
 
+/// Builds a `Connect` frame carrying `auth_token`, mirroring the client handshake.
+fn connect_frame(auth_token: &[u8]) -> Frame {
+    Frame::Connect {
+        flags: 0,
+        min_version: ProtocolVersion::new(1, 0),
+        max_version: ProtocolVersion::new(1, 0),
+        auth_token: auth_token.to_vec(),
+    }
+}
+
+/// With no `[auth]` token configured the handshake is open: any token (including an
+/// empty one) is accepted and answered with `ConnectAck`, byte-identical to the
+/// pre-auth behaviour.
+#[test]
+fn connect_without_configured_token_accepts_any_token() {
+    let (runtime, _services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState::default();
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[]));
+    assert!(matches!(
+        action,
+        FrameAction::Respond(Frame::ConnectAck { .. })
+    ));
+
+    // A non-empty token is likewise ignored when no gate is configured.
+    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"anything"));
+    assert!(matches!(
+        action,
+        FrameAction::Respond(Frame::ConnectAck { .. })
+    ));
+}
+
+/// With a token configured, a matching handshake token is accepted with a
+/// `ConnectAck` (and the connection stays open for subsequent frames).
+#[test]
+fn connect_with_matching_token_is_accepted() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"s3cr3t"));
+
+    assert!(matches!(
+        action,
+        FrameAction::Respond(Frame::ConnectAck { .. })
+    ));
+}
+
+/// A wrong token is rejected with a `ConnectError` carrying the authentication
+/// reason code, and the connection is torn down (`RespondThenClose`).
+#[test]
+fn connect_with_wrong_token_is_rejected_and_closed() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"wrong"));
+
+    assert!(matches!(
+        action,
+        FrameAction::RespondThenClose(Frame::ConnectError {
+            reason_code,
+            ..
+        }) if reason_code == liminal::protocol::ProtocolError::AUTHENTICATION_FAILURE_CODE
+    ));
+}
+
+/// An absent token (empty handshake) against a configured gate is rejected and
+/// closed just like a wrong token: absence is not a bypass.
+#[test]
+fn connect_with_absent_token_against_gate_is_rejected_and_closed() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[]));
+
+    assert!(matches!(
+        action,
+        FrameAction::RespondThenClose(Frame::ConnectError {
+            reason_code,
+            ..
+        }) if reason_code == liminal::protocol::ProtocolError::AUTHENTICATION_FAILURE_CODE
+    ));
+}
+
+/// A token that shares a prefix with the configured secret but differs in length is
+/// rejected: the length-difference fold means a prefix match is not accepted.
+#[test]
+fn connect_with_prefix_but_wrong_length_is_rejected() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"s3cr3"));
+
+    assert!(matches!(
+        action,
+        FrameAction::RespondThenClose(Frame::ConnectError { .. })
+    ));
+}
+
 fn envelope(payload: Vec<u8>) -> MessageEnvelope {
     MessageEnvelope::new(schema_id(), CausalContext::independent(), payload)
 }

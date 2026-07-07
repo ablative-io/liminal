@@ -51,6 +51,16 @@ pub(super) struct Connection {
 
 impl Connection {
     pub(super) fn connect(address: &str) -> Result<Self, SdkError> {
+        // Open access: an empty auth token is byte-identical to the pre-auth
+        // handshake a server with no `[auth]` section expects.
+        Self::connect_with_auth(address, &[])
+    }
+
+    /// Connects and completes the handshake carrying `auth_token`, for a server
+    /// gated by an `[auth]` section. An empty slice is equivalent to [`connect`].
+    ///
+    /// [`connect`]: Self::connect
+    pub(super) fn connect_with_auth(address: &str, auth_token: &[u8]) -> Result<Self, SdkError> {
         let stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
             description: format!("failed to connect to {address}: {source}"),
         })?;
@@ -75,7 +85,7 @@ impl Connection {
             buffer: Vec::new(),
             open_conversations: BTreeSet::new(),
         };
-        connection.handshake()?;
+        connection.handshake(auth_token)?;
         Ok(connection)
     }
 
@@ -85,12 +95,12 @@ impl Connection {
         self.receive()
     }
 
-    fn handshake(&mut self) -> Result<(), SdkError> {
+    fn handshake(&mut self, auth_token: &[u8]) -> Result<(), SdkError> {
         let connect = Frame::Connect {
             flags: 0,
             min_version: CLIENT_MIN_VERSION,
             max_version: CLIENT_MAX_VERSION,
-            auth_token: Vec::new(),
+            auth_token: auth_token.to_vec(),
         };
         self.send(&connect)?;
         match self.receive()? {

@@ -279,6 +279,11 @@ pub(super) enum ProcessStatus {
 pub(super) enum FrameAction {
     Respond(Frame),
     NoResponse,
+    /// Write `response` to the client, then tear the connection down. Used by the
+    /// auth gate: a rejected handshake must both inform the client (a `ConnectError`
+    /// carrying the auth reason code) and close, unlike a bare [`Self::Close`] that
+    /// stays silent or a [`Self::Respond`] that leaves the connection open.
+    RespondThenClose(Frame),
     Close,
 }
 
@@ -293,8 +298,9 @@ pub(super) fn apply_frame(
         Frame::Connect {
             min_version,
             max_version,
+            auth_token,
             ..
-        } => connect_response(min_version, max_version),
+        } => connect_response(runtime, min_version, max_version, &auth_token),
         Frame::Disconnect { .. } => FrameAction::Close,
         Frame::Ping { .. } => FrameAction::Respond(Frame::Pong { flags: 0 }),
         Frame::Publish {
@@ -452,12 +458,40 @@ fn process_buffer(
         match apply_frame(pid, runtime, state, frame) {
             FrameAction::Respond(response) => write_frame(stream, &response)?,
             FrameAction::NoResponse => {}
+            FrameAction::RespondThenClose(response) => {
+                // Best-effort deliver the rejection frame, then close regardless of
+                // whether the write succeeded — a rejected connection must not
+                // survive even if the client already went away.
+                write_frame(stream, &response)?;
+                return Ok(ProcessStatus::Close);
+            }
             FrameAction::Close => return Ok(ProcessStatus::Close),
         }
     }
 }
 
-fn connect_response(min_version: ProtocolVersion, max_version: ProtocolVersion) -> FrameAction {
+fn connect_response(
+    runtime: &ConnectionRuntime,
+    min_version: ProtocolVersion,
+    max_version: ProtocolVersion,
+    auth_token: &[u8],
+) -> FrameAction {
+    // The auth gate runs before version negotiation: an unauthenticated peer learns
+    // nothing about the negotiated protocol. When no token is configured the server
+    // is open and this check is skipped entirely, keeping the handshake byte-identical
+    // to the pre-auth behaviour.
+    if let Some(expected) = runtime.auth_token() {
+        if !constant_time_eq(expected, auth_token) {
+            let error = ProtocolError::AuthenticationFailure {
+                message: Some("connection authentication token rejected".to_owned()),
+            };
+            return FrameAction::RespondThenClose(Frame::ConnectError {
+                flags: 0,
+                reason_code: error.reason_code(),
+                message: error.message().map(str::to_owned),
+            });
+        }
+    }
     match negotiate_version(min_version, max_version, &[SUPPORTED_PROTOCOL]) {
         Ok(selected_version) => FrameAction::Respond(Frame::ConnectAck {
             flags: 0,
@@ -470,6 +504,27 @@ fn connect_response(min_version: ProtocolVersion, max_version: ProtocolVersion) 
             message: error.message().map(str::to_owned),
         }),
     }
+}
+
+/// Constant-time byte-slice equality for the connection auth token.
+///
+/// A short-circuiting `==` returns as soon as it hits the first differing byte, so
+/// its running time leaks how many leading bytes a guess got right — the classic
+/// timing side channel that lets an attacker recover a secret one byte at a time.
+/// This folds an XOR of every overlapping byte pair into a single accumulator and
+/// never returns early, so the loop's work depends only on the input lengths, not
+/// on where (or whether) the first mismatch occurs. A length difference is folded
+/// in up front so unequal-length inputs still traverse the whole overlap and always
+/// report unequal. Implemented locally rather than pulling a crate: the only
+/// constant-time-compare dependency in the tree (`constant_time_eq`, transitively
+/// via blake3) is not a direct workspace dependency, and this five-line fold is the
+/// spec-sanctioned shape.
+fn constant_time_eq(expected: &[u8], candidate: &[u8]) -> bool {
+    let mut difference = u8::from(expected.len() != candidate.len());
+    for (left, right) in expected.iter().zip(candidate.iter()) {
+        difference |= left ^ right;
+    }
+    difference == 0
 }
 
 fn publish_response(
