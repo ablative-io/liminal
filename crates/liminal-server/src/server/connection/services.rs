@@ -552,6 +552,10 @@ impl ConnectionServices for LiminalConnectionServices {
         // the at-most-once guarantee the aion outbox relies on.
         if let Some(key) = idempotency_key {
             if !self.claim_delivery(key)? {
+                // A dedup-suppressed re-publish is still an accepted publish (it is
+                // assigned a message id), but it reaches no subscriber, so it counts
+                // toward publishes and not deliveries.
+                crate::metrics::publish_accepted();
                 return Ok(PublishOutcome {
                     message_id: self.next_message_id.fetch_add(1, Ordering::Relaxed),
                     delivered: false,
@@ -598,6 +602,13 @@ impl ConnectionServices for LiminalConnectionServices {
                 message: format!("dedup receipt write failed for key '{key}': {error}"),
             })?;
         }
+
+        // Record the accepted publish and its genuine subscriber deliveries. The
+        // delivered count (0 for an empty channel) is the same signal the delivery
+        // ack is derived from.
+        crate::metrics::publish_accepted();
+        let delivered_count = u64::try_from(delivery.delivered_count()).unwrap_or(u64::MAX);
+        crate::metrics::deliveries_recorded(delivered_count);
 
         Ok(PublishOutcome {
             message_id: self.next_message_id.fetch_add(1, Ordering::Relaxed),

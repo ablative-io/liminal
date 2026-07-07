@@ -614,6 +614,10 @@ impl ConnectionRuntime {
                 registration: None,
             },
         );
+        // Single-writer insert (see doc above) pairs one gauge increment with the
+        // decrement in `remove`, keeping `liminal_connections_active` equal to the
+        // live record count on every teardown route.
+        crate::metrics::connection_spawned();
         Ok(())
     }
 
@@ -743,10 +747,17 @@ impl ConnectionRuntime {
     /// registered a worker, so a plain push target is covered too.
     fn remove(&self, pid: u64) -> Option<ConnectionRecord> {
         self.cancel_pushes_for_connection(pid);
-        self.records
+        let removed = self
+            .records
             .lock()
             .ok()
-            .and_then(|mut records| records.remove(&pid))
+            .and_then(|mut records| records.remove(&pid));
+        // Decrement only when a record was actually present so a double-remove
+        // (e.g. `finish` after `reap_crashed`) cannot drive the gauge negative.
+        if removed.is_some() {
+            crate::metrics::connection_closed();
+        }
+        removed
     }
 }
 
