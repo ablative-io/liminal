@@ -79,14 +79,24 @@ fn resolve_schema_path(schema_ref: &Path, base_dir: Option<&Path>) -> PathBuf {
     base_dir.map_or_else(|| schema_ref.to_path_buf(), |dir| dir.join(schema_ref))
 }
 
-/// Reads and JSON-parses a schema file, returning the loaded document or a
-/// human-readable reason on failure (missing/unreadable file, or invalid JSON).
+/// Reads, JSON-parses, and schema-compiles a schema file, returning the loaded
+/// document or a human-readable reason on failure (missing/unreadable file,
+/// invalid JSON, or valid JSON that is not a compilable JSON Schema). The
+/// compile check runs here so every schema problem surfaces in the accumulated
+/// validation pass instead of deferring to a different error class at channel
+/// construction.
 fn load_schema_document(path: &Path) -> Result<LoadedSchema, String> {
     let bytes = std::fs::read(path)
         .map_err(|error| format!("schema file '{}' is unreadable: {error}", path.display()))?;
-    let document = serde_json::from_slice(&bytes).map_err(|error| {
+    let document: serde_json::Value = serde_json::from_slice(&bytes).map_err(|error| {
         format!(
             "schema file '{}' is not valid JSON: {error}",
+            path.display()
+        )
+    })?;
+    liminal::channel::Schema::new(document.clone()).map_err(|error| {
+        format!(
+            "schema file '{}' is not a valid JSON Schema: {error}",
             path.display()
         )
     })?;
@@ -555,6 +565,24 @@ mod tests {
 
         assert!(message.contains("schema_ref"));
         assert!(message.contains("not valid JSON"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn valid_json_invalid_schema_ref_reports_validation_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Valid JSON that is not a compilable JSON Schema: a schema document
+        // must be an object, so a bare array parses but fails compilation.
+        let schema_path = write_temp_schema("bad-schema", "[]")?;
+        let mut config = sample_config()?;
+        config.channels[0].schema_ref = Some(schema_path.clone());
+
+        let message = config_validation_message(validate(&mut config, None));
+        fs::remove_file(&schema_path)?;
+
+        assert!(message.contains("schema_ref"));
+        assert!(message.contains("not a valid JSON Schema"));
 
         Ok(())
     }
