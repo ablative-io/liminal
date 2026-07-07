@@ -75,6 +75,27 @@ impl TcpRemoteTransport {
         })
     }
 
+    /// Connects and handshakes carrying `auth_token`, for a server gated by an
+    /// `[auth]` section. Additive to [`connect`]; an empty token is equivalent to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the TCP connection cannot be
+    /// established or the server rejects the token (a `ConnectError` closes the
+    /// socket), and [`SdkError::Protocol`] when the handshake frames cannot be
+    /// encoded or sent.
+    ///
+    /// [`connect`]: Self::connect
+    pub fn connect_with_auth(
+        server_address: &ServerAddress,
+        auth_token: &[u8],
+    ) -> Result<Self, SdkError> {
+        let connection = Connection::connect_with_auth(server_address.as_str(), auth_token)?;
+        Ok(Self {
+            connection: Arc::new(Mutex::new(connection)),
+        })
+    }
+
     fn round_trip(&self, request: &Frame) -> Result<Frame, SdkError> {
         let mut connection = self.connection.lock();
         connection.round_trip(request)

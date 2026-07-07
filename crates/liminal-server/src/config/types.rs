@@ -20,6 +20,13 @@ pub struct ServerConfig {
     pub persistence_path: Option<PathBuf>,
     /// Optional beamr distribution cluster membership configuration.
     pub cluster: Option<ClusterConfig>,
+    /// Optional connection authentication configuration.
+    ///
+    /// When present, every client `Connect` handshake must carry a matching
+    /// `auth_token`; when absent the server is open (byte-identical to the
+    /// pre-auth behaviour). Not an ACL system — a single shared bearer token.
+    #[serde(default)]
+    pub auth: Option<AuthConfig>,
 }
 
 impl ServerConfig {
@@ -112,4 +119,19 @@ pub struct ClusterConfig {
 
 fn default_cookie() -> String {
     DEFAULT_COOKIE.to_owned()
+}
+
+/// Connection authentication configuration.
+///
+/// A single shared bearer token compared (constant-time) against the `auth_token`
+/// carried on every client `Connect` handshake. This is the table-stakes access
+/// gate, not an ACL system: one token grants full access, its absence (no `[auth]`
+/// section) leaves the server open.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthConfig {
+    /// Shared secret token a client must present in its `Connect` handshake. Must
+    /// be non-empty when the `[auth]` section is present (an empty token is a
+    /// config validation error, since it would gate nothing).
+    pub token: String,
 }

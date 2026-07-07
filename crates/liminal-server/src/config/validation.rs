@@ -35,6 +35,7 @@ pub fn validate(config: &mut ServerConfig, base_dir: Option<&Path>) -> Result<()
     validate_routing_rules(config, &mut errors);
     validate_persistence_path(config, &mut errors);
     validate_cluster(config, &mut errors);
+    validate_auth(config, &mut errors);
     load_channel_schemas(config, base_dir, &mut errors);
 
     if errors.is_empty() {
@@ -264,6 +265,21 @@ fn validate_cluster(config: &ServerConfig, errors: &mut Vec<String>) {
     }
 }
 
+/// Validates the optional `[auth]` section. When present its token must be
+/// non-empty: an empty token would gate nothing (every client's empty `auth_token`
+/// would match), so it is rejected rather than silently leaving the server open.
+/// The token is not trimmed — a shared secret may legitimately contain leading or
+/// trailing whitespace.
+fn validate_auth(config: &ServerConfig, errors: &mut Vec<String>) {
+    let Some(auth) = config.auth.as_ref() else {
+        return;
+    };
+
+    if auth.token.is_empty() {
+        errors.push("auth.token: authentication token must not be empty".to_owned());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -274,7 +290,9 @@ mod tests {
     use crate::ServerError;
 
     use super::validate;
-    use crate::config::types::{ChannelDef, ClusterConfig, RoutingRuleDef, ServerConfig};
+    use crate::config::types::{
+        AuthConfig, ChannelDef, ClusterConfig, RoutingRuleDef, ServerConfig,
+    };
 
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -305,6 +323,7 @@ mod tests {
                 seed_nodes: vec![socket("127.0.0.1:9001")?],
                 cookie: "test-cookie".to_owned(),
             }),
+            auth: None,
         })
     }
 
@@ -583,6 +602,43 @@ mod tests {
 
         assert!(message.contains("schema_ref"));
         assert!(message.contains("not a valid JSON Schema"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn present_non_empty_auth_token_passes_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.auth = Some(AuthConfig {
+            token: "s3cr3t".to_owned(),
+        });
+
+        validate(&mut config, None)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn empty_auth_token_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.auth = Some(AuthConfig {
+            token: String::new(),
+        });
+
+        let message = config_validation_message(validate(&mut config, None));
+
+        assert!(message.contains("auth.token"));
+        assert!(message.contains("must not be empty"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn absent_auth_section_passes_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.auth = None;
+
+        validate(&mut config, None)?;
 
         Ok(())
     }

@@ -38,7 +38,17 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when channel initialization or scheduler startup fails.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
-        Self::with_services(Arc::new(LiminalConnectionServices::from_config(config)?))
+        let services = Arc::new(LiminalConnectionServices::from_config(config)?);
+        // The configured token (if any) is carried opaquely as bytes for a
+        // constant-time comparison against the handshake's `auth_token`. Absent
+        // `[auth]` leaves it `None`, so the connection stays open-access.
+        let auth_token = config
+            .auth
+            .as_ref()
+            .map(|auth| auth.token.clone().into_bytes());
+        SupervisorInner::new(services, None, auth_token).map(|inner| Self {
+            inner: Arc::new(inner),
+        })
     }
 
     /// Creates a connection supervisor with no configured channels.
@@ -54,7 +64,7 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when scheduler startup fails.
     pub fn with_services(services: Arc<dyn ConnectionServices>) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, None).map(|inner| Self {
+        SupervisorInner::new(services, None, None).map(|inner| Self {
             inner: Arc::new(inner),
         })
     }
@@ -74,7 +84,7 @@ impl ConnectionSupervisor {
         services: Arc<dyn ConnectionServices>,
         notifier: Arc<dyn ConnectionNotifier>,
     ) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, Some(notifier)).map(|inner| Self {
+        SupervisorInner::new(services, Some(notifier), None).map(|inner| Self {
             inner: Arc::new(inner),
         })
     }
@@ -323,6 +333,7 @@ impl SupervisorInner {
     fn new(
         services: Arc<dyn ConnectionServices>,
         notifier: Option<Arc<dyn ConnectionNotifier>>,
+        auth_token: Option<Vec<u8>>,
     ) -> Result<Self, ServerError> {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
@@ -340,7 +351,12 @@ impl SupervisorInner {
         })?;
         Ok(Self {
             scheduler: Arc::new(scheduler),
-            runtime: Arc::new(ConnectionRuntime::new(services, control_atom, notifier)),
+            runtime: Arc::new(ConnectionRuntime::new(
+                services,
+                control_atom,
+                notifier,
+                auth_token,
+            )),
         })
     }
 
@@ -448,6 +464,11 @@ pub(super) struct ConnectionRuntime {
     /// of a connection that had registered. `None` keeps liminal standalone: a
     /// `WorkerRegister` is accepted with no callback.
     notifier: Option<Arc<dyn ConnectionNotifier>>,
+    /// Configured connection auth token (the `[auth]` section's token as opaque
+    /// bytes). `Some` gates the `Connect` handshake — the frame's `auth_token` must
+    /// match under a constant-time comparison; `None` leaves the server open-access,
+    /// byte-identical to the pre-auth behaviour.
+    auth_token: Option<Vec<u8>>,
 }
 
 impl ConnectionRuntime {
@@ -455,6 +476,7 @@ impl ConnectionRuntime {
         services: Arc<dyn ConnectionServices>,
         control_atom: Atom,
         notifier: Option<Arc<dyn ConnectionNotifier>>,
+        auth_token: Option<Vec<u8>>,
     ) -> Self {
         Self {
             services,
@@ -464,6 +486,7 @@ impl ConnectionRuntime {
             push_replies: Mutex::new(HashMap::new()),
             next_push_id: AtomicU64::new(1),
             notifier,
+            auth_token,
         }
     }
 
@@ -474,7 +497,20 @@ impl ConnectionRuntime {
     pub(super) fn for_tests(services: Arc<dyn ConnectionServices>) -> Self {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
-        Self::new(services, control_atom, None)
+        Self::new(services, control_atom, None, None)
+    }
+
+    /// Builds a runtime wrapping `services` with a configured auth `token` for unit
+    /// tests that exercise the `Connect` handshake enforcement without a live
+    /// scheduler. Uses a fresh interned control atom and no notifier.
+    #[cfg(test)]
+    pub(super) fn for_tests_with_auth_token(
+        services: Arc<dyn ConnectionServices>,
+        token: Vec<u8>,
+    ) -> Self {
+        let atoms = AtomTable::with_common_atoms();
+        let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
+        Self::new(services, control_atom, None, Some(token))
     }
 
     /// Builds a runtime wrapping `services` with a `notifier` for unit tests that
@@ -486,11 +522,17 @@ impl ConnectionRuntime {
     ) -> Self {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
-        Self::new(services, control_atom, Some(notifier))
+        Self::new(services, control_atom, Some(notifier), None)
     }
 
     pub(super) fn services(&self) -> &dyn ConnectionServices {
         self.services.as_ref()
+    }
+
+    /// Returns the configured connection auth token as opaque bytes, or `None` when
+    /// no `[auth]` section was configured (open access).
+    pub(super) fn auth_token(&self) -> Option<&[u8]> {
+        self.auth_token.as_deref()
     }
 
     /// Returns the configured connection-keyed notifier, if any.

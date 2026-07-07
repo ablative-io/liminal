@@ -315,6 +315,7 @@ mod tests {
             routing_rules: Vec::new(),
             persistence_path: None,
             cluster: None,
+            auth: None,
         })
     }
 }

@@ -15,6 +15,7 @@ const CLUSTER_NODE_NAME: &str = "LIMINAL_CLUSTER_NODE_NAME";
 const CLUSTER_SEED_NODES: &str = "LIMINAL_CLUSTER_SEED_NODES";
 const CLUSTER_LISTEN_ADDRESS: &str = "LIMINAL_CLUSTER_LISTEN_ADDRESS";
 const CLUSTER_COOKIE: &str = "LIMINAL_CLUSTER_COOKIE";
+const AUTH_TOKEN: &str = "LIMINAL_AUTH_TOKEN";
 
 /// Applies supported `LIMINAL_` environment variable overrides to a config.
 ///
@@ -22,7 +23,17 @@ const CLUSTER_COOKIE: &str = "LIMINAL_CLUSTER_COOKIE";
 /// variables are `LIMINAL_LISTEN_ADDRESS`, `LIMINAL_HEALTH_LISTEN_ADDRESS`,
 /// `LIMINAL_DRAIN_TIMEOUT_MS`, `LIMINAL_PERSISTENCE_PATH`,
 /// `LIMINAL_CLUSTER_NODE_NAME`, `LIMINAL_CLUSTER_SEED_NODES`,
-/// `LIMINAL_CLUSTER_LISTEN_ADDRESS`, and `LIMINAL_CLUSTER_COOKIE`.
+/// `LIMINAL_CLUSTER_LISTEN_ADDRESS`, `LIMINAL_CLUSTER_COOKIE`, and
+/// `LIMINAL_AUTH_TOKEN`.
+///
+/// Unlike the cluster overrides — which refuse to fabricate a `[cluster]` section
+/// that the file did not declare (a partially-specified cluster is unsafe) —
+/// `LIMINAL_AUTH_TOKEN` MAY create the `[auth]` section when the file omits it.
+/// The auth section is a single scalar secret with no other required fields, so a
+/// deployment can inject the token purely from the environment (the idiomatic way
+/// to supply a secret) without also pinning it in a committed config file; an empty
+/// value still fails the later non-empty validation, so this cannot silently create
+/// a no-op gate.
 ///
 /// # Errors
 ///
@@ -77,6 +88,14 @@ where
             CLUSTER_COOKIE => {
                 let cookie = env_string(CLUSTER_COOKIE, &value)?;
                 cluster_required(&mut config, CLUSTER_COOKIE)?.cookie = cookie;
+            }
+            AUTH_TOKEN => {
+                // A single scalar secret is allowed to create the `[auth]` section
+                // even when the file omits it (see the module-level note); an empty
+                // value is left to fail the non-empty auth validation, not rejected
+                // here, so precedence and error reporting stay uniform.
+                let token = env_string(AUTH_TOKEN, &value)?;
+                config.auth = Some(super::types::AuthConfig { token });
             }
             _ => {}
         }
@@ -199,6 +218,7 @@ mod tests {
                 seed_nodes: vec![socket("127.0.0.1:9001")?],
                 cookie: "test-cookie".to_owned(),
             }),
+            auth: None,
         })
     }
 
@@ -334,6 +354,38 @@ mod tests {
         );
 
         assert!(matches!(result, Err(ServerError::ConfigValidation { .. })));
+
+        Ok(())
+    }
+
+    #[test]
+    fn auth_token_override_replaces_existing_token() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.auth = Some(crate::config::types::AuthConfig {
+            token: "file-token".to_owned(),
+        });
+
+        let config =
+            apply_env_overrides_from(config, vec![env_pair("LIMINAL_AUTH_TOKEN", "env-token")])?;
+
+        let auth = config.auth.ok_or("auth section should remain present")?;
+        assert_eq!(auth.token, "env-token");
+
+        Ok(())
+    }
+
+    #[test]
+    fn auth_token_override_creates_missing_auth_section() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut config = sample_config()?;
+        config.auth = None;
+
+        let config =
+            apply_env_overrides_from(config, vec![env_pair("LIMINAL_AUTH_TOKEN", "env-token")])?;
+
+        // Unlike cluster overrides, a scalar auth secret MAY fabricate the section.
+        let auth = config.auth.ok_or("auth section should have been created")?;
+        assert_eq!(auth.token, "env-token");
 
         Ok(())
     }

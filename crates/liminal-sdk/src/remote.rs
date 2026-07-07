@@ -111,6 +111,28 @@ impl RemoteConfig {
         self.transport = Arc::new(transport);
         Ok(self)
     }
+
+    /// Opens a real TCP connection whose handshake carries `auth_token`, for a
+    /// server gated by an `[auth]` section, and installs the live wire transport.
+    ///
+    /// Additive to [`connect_tcp`]: an empty token behaves identically to it. The
+    /// server compares the token during the handshake and closes the connection on
+    /// a mismatch, which surfaces here as [`SdkError::Connection`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the TCP connection cannot be
+    /// established or the token is rejected, and [`SdkError::Protocol`] when the
+    /// handshake frames cannot be encoded or sent.
+    ///
+    /// [`connect_tcp`]: Self::connect_tcp
+    #[cfg(feature = "std")]
+    pub fn connect_tcp_with_auth(mut self, auth_token: &[u8]) -> Result<Self, SdkError> {
+        let transport =
+            self::tcp::TcpRemoteTransport::connect_with_auth(&self.server_address, auth_token)?;
+        self.transport = Arc::new(transport);
+        Ok(self)
+    }
 }
 
 /// Deterministic jitter source for lifecycle integration tests and explicit reconnect calls.

@@ -124,8 +124,25 @@ impl PushClient {
     /// configuration fails, and [`SdkError::Protocol`] when the handshake is
     /// rejected or the socket cannot be cloned for the reader thread.
     pub fn connect(address: &str) -> Result<Self, SdkError> {
+        // Open access: an empty token is byte-identical to the pre-auth handshake.
+        Self::connect_with_auth(address, &[])
+    }
+
+    /// Connects and handshakes carrying `auth_token`, then starts the background
+    /// reader, for a server gated by an `[auth]` section. Additive to [`connect`];
+    /// an empty token is equivalent to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the TCP connection or socket
+    /// configuration fails or the server rejects the token, and
+    /// [`SdkError::Protocol`] when the handshake is otherwise rejected or the socket
+    /// cannot be cloned for the reader thread.
+    ///
+    /// [`connect`]: Self::connect
+    pub fn connect_with_auth(address: &str, auth_token: &[u8]) -> Result<Self, SdkError> {
         let mut stream = connect_socket(address)?;
-        handshake(&mut stream)?;
+        handshake(&mut stream, auth_token)?;
         Self::start_reader(stream)
     }
 
@@ -151,8 +168,29 @@ impl PushClient {
         address: &str,
         registration: WorkerRegistration,
     ) -> Result<Self, SdkError> {
+        Self::connect_with_registration_and_auth(address, registration, &[])
+    }
+
+    /// Connects, handshakes carrying `auth_token`, registers the worker, then starts
+    /// the reader — the auth-gated variant of [`connect_with_registration`]. Additive;
+    /// an empty token is equivalent to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the TCP connection or socket
+    /// configuration fails or the server rejects the token, and
+    /// [`SdkError::Protocol`] when the handshake is otherwise rejected, the server
+    /// rejects the registration (the reason is carried in the error), or the socket
+    /// cannot be cloned for the reader thread.
+    ///
+    /// [`connect_with_registration`]: Self::connect_with_registration
+    pub fn connect_with_registration_and_auth(
+        address: &str,
+        registration: WorkerRegistration,
+        auth_token: &[u8],
+    ) -> Result<Self, SdkError> {
         let mut stream = connect_socket(address)?;
-        handshake(&mut stream)?;
+        handshake(&mut stream, auth_token)?;
         register(&mut stream, registration)?;
         Self::start_reader(stream)
     }
@@ -386,13 +424,14 @@ fn register(stream: &mut TcpStream, registration: WorkerRegistration) -> Result<
     }
 }
 
-/// Drives the client handshake (`Connect` -> `ConnectAck`) on a fresh socket.
-fn handshake(stream: &mut TcpStream) -> Result<(), SdkError> {
+/// Drives the client handshake (`Connect` -> `ConnectAck`) on a fresh socket,
+/// carrying `auth_token` (empty for an open, non-auth server).
+fn handshake(stream: &mut TcpStream, auth_token: &[u8]) -> Result<(), SdkError> {
     let connect = Frame::Connect {
         flags: 0,
         min_version: CLIENT_MIN_VERSION,
         max_version: CLIENT_MAX_VERSION,
-        auth_token: Vec::new(),
+        auth_token: auth_token.to_vec(),
     };
     write_frame(stream, &connect)?;
     let mut buffer = Vec::new();

@@ -31,7 +31,7 @@ use liminal_sdk::{
     SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
 };
 use liminal_server::ServerError;
-use liminal_server::config::{ChannelDef, LoadedSchema, ServerConfig};
+use liminal_server::config::{AuthConfig, ChannelDef, LoadedSchema, ServerConfig};
 use liminal_server::server::connection::notifier::ConnectionNotifier;
 use liminal_server::server::connection::{ConnectionSupervisor, LiminalConnectionServices};
 use liminal_server::server::listener::ServerListener;
@@ -164,6 +164,38 @@ impl RunningServer {
             routing_rules: Vec::new(),
             persistence_path: None,
             cluster: None,
+            auth: None,
+            drain_timeout_ms: 30_000,
+        };
+        let supervisor = ConnectionSupervisor::from_config(&config)?;
+        let listener = ServerListener::bind(&config, supervisor)?;
+        let supervisor = listener.supervisor();
+        let address = listener.local_addr();
+        Ok(Self {
+            listener: Some(listener),
+            supervisor,
+            address,
+        })
+    }
+
+    /// Starts a server whose `Connect` handshake is gated by `token`: every client
+    /// must present a matching `auth_token` or the server closes the connection.
+    fn start_with_auth_token(token: &str) -> Result<Self, Box<dyn Error>> {
+        let config = ServerConfig {
+            listen_address: "127.0.0.1:0".parse()?,
+            health_listen_address: reserve_loopback_port()?,
+            channels: vec![ChannelDef {
+                name: CHANNEL.to_owned(),
+                schema_ref: None,
+                durable: false,
+                loaded_schema: None,
+            }],
+            routing_rules: Vec::new(),
+            persistence_path: None,
+            cluster: None,
+            auth: Some(AuthConfig {
+                token: token.to_owned(),
+            }),
             drain_timeout_ms: 30_000,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
@@ -192,6 +224,7 @@ impl RunningServer {
             routing_rules: Vec::new(),
             persistence_path: None,
             cluster: None,
+            auth: None,
             drain_timeout_ms: 30_000,
         };
         let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
@@ -228,6 +261,7 @@ impl RunningServer {
             routing_rules: Vec::new(),
             persistence_path: None,
             cluster: None,
+            auth: None,
             drain_timeout_ms: 30_000,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
@@ -718,6 +752,146 @@ fn sdk_tcp_real_schema_rejects_invalid_and_delivers_valid() -> Result<(), Box<dy
         accepted.is_accepted(),
         "a schema-valid publish with a subscriber must report a genuine delivery ack"
     );
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// Shared secret used by the auth-gate e2e tests.
+const AUTH_TOKEN: &str = "correct-horse-battery-staple";
+
+/// Builds a TCP-connected `RemoteConfig` whose handshake carries `token`, retrying
+/// the connect until the listener is accepting (mirroring `connect_remote_config`).
+/// A persistent auth rejection is surfaced as the returned error after the deadline.
+fn connect_remote_config_with_auth(
+    address: SocketAddr,
+    channel: &str,
+    conversation: &str,
+    token: &[u8],
+) -> Result<RemoteConfig, Box<dyn Error>> {
+    let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let mut last_error = None;
+    while Instant::now() < deadline {
+        let config = RemoteConfig::new(
+            address.to_string(),
+            channel,
+            conversation.to_owned(),
+            ConnectionPoolConfig::new(1, 10, 16),
+        )?;
+        match config.connect_tcp_with_auth(token) {
+            Ok(connected) => return Ok(connected),
+            Err(error) => {
+                last_error = Some(error);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+    Err(last_error.map_or_else(
+        || "client never connected within timeout".into(),
+        |error| format!("client never connected within timeout: {error}").into(),
+    ))
+}
+
+/// A client presenting the correct token connects over the real socket and can
+/// publish: the auth gate lets an authenticated client through unchanged.
+#[test]
+fn sdk_tcp_correct_token_connects_and_publishes() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start_with_auth_token(AUTH_TOKEN)?;
+    let config = connect_remote_config_with_auth(
+        server.address(),
+        CHANNEL,
+        "auth-ok",
+        AUTH_TOKEN.as_bytes(),
+    )?;
+    server.wait_for_connection()?;
+
+    let handle = RemoteChannelHandle::new(&config)?;
+    let response = handle.publish(OrderPlaced { id: 1 })?;
+    assert_eq!(response, PressureResponse::Accept);
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// A client presenting the WRONG token is rejected by the server's `ConnectError`
+/// and the connection is closed, so the handshake (`connect_tcp_with_auth`) fails
+/// and the client never reaches a state where it could publish.
+#[test]
+fn sdk_tcp_wrong_token_is_rejected() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start_with_auth_token(AUTH_TOKEN)?;
+
+    // Confirm the listener is accepting first (a correct-token connect that we then
+    // drop), so a subsequent wrong-token failure is unambiguously the auth gate and
+    // not a listener-still-starting connection-refused.
+    let warmup = connect_remote_config_with_auth(
+        server.address(),
+        CHANNEL,
+        "auth-warmup",
+        AUTH_TOKEN.as_bytes(),
+    )?;
+    drop(warmup);
+
+    let config = RemoteConfig::new(
+        server.address().to_string(),
+        CHANNEL,
+        "auth-wrong",
+        ConnectionPoolConfig::new(1, 10, 16),
+    )?;
+    let result = config.connect_tcp_with_auth(b"not-the-token");
+    assert!(
+        result.is_err(),
+        "a wrong auth token must be rejected by the server handshake"
+    );
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// A client presenting NO token (the pre-auth open handshake) against a gated
+/// server is rejected exactly like a wrong token: absence is not a bypass.
+#[test]
+fn sdk_tcp_missing_token_is_rejected() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start_with_auth_token(AUTH_TOKEN)?;
+
+    // Confirm the listener is accepting first, as in the wrong-token test, so a
+    // missing-token failure is the auth gate and not a startup race.
+    let warmup = connect_remote_config_with_auth(
+        server.address(),
+        CHANNEL,
+        "auth-warmup",
+        AUTH_TOKEN.as_bytes(),
+    )?;
+    drop(warmup);
+
+    let config = RemoteConfig::new(
+        server.address().to_string(),
+        CHANNEL,
+        "auth-missing",
+        ConnectionPoolConfig::new(1, 10, 16),
+    )?;
+    // `connect_tcp` sends an empty auth token — the open-access handshake.
+    let result = config.connect_tcp();
+    assert!(
+        result.is_err(),
+        "a missing auth token against a gated server must be rejected"
+    );
+
+    server.shutdown()?;
+    Ok(())
+}
+
+/// The auth gate is opt-in: a server with no `[auth]` section behaves exactly as
+/// before — a plain `connect_tcp` (empty token) connects and publishes. This is the
+/// byte-identical-to-today guarantee for the un-gated deployment.
+#[test]
+fn sdk_tcp_no_auth_section_behaves_as_before() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let client = connect_client(server.address())?;
+    server.wait_for_connection()?;
+
+    let handle = build_channel_handle(&client)?;
+    let response = handle.publish(OrderPlaced { id: 2 })?;
+    assert_eq!(response, PressureResponse::Accept);
 
     server.shutdown()?;
     Ok(())
