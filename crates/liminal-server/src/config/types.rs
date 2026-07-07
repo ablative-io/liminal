@@ -36,10 +36,41 @@ impl ServerConfig {
 pub struct ChannelDef {
     /// Unique channel name used by routing rules and operators.
     pub name: String,
-    /// Schema reference used to validate messages for this channel.
-    pub schema_ref: String,
+    /// Filesystem path to a JSON Schema document that validates every message
+    /// published to this channel.
+    ///
+    /// The path is resolved relative to the directory containing the config file
+    /// (absolute paths are used verbatim). Config validation reads and parses the
+    /// referenced document and stores the result in [`Self::loaded_schema`]; a
+    /// missing file, an unreadable file, or a file that is not valid JSON is an
+    /// accumulated validation error that stops startup.
+    ///
+    /// `None` means the channel has no schema: it keeps the permissive empty
+    /// schema (`{}`) that accepts any JSON payload.
+    #[serde(default)]
+    pub schema_ref: Option<PathBuf>,
     /// Whether this channel requires durable persistence.
     pub durable: bool,
+    /// Schema document loaded and parsed from [`Self::schema_ref`] during config
+    /// validation. Populated only by [`crate::config::validate`]; a directly
+    /// constructed [`ChannelDef`] that skips validation carries `None` here and is
+    /// therefore built with the permissive empty schema regardless of
+    /// [`Self::schema_ref`]. Never deserialized from the config file.
+    #[serde(skip)]
+    pub loaded_schema: Option<LoadedSchema>,
+}
+
+/// A channel's JSON Schema document as loaded from disk during config validation.
+///
+/// Carries both the parsed document (fed to the validation engine when the channel
+/// is built) and the raw file bytes (hashed into the protocol schema id advertised
+/// at subscribe time, so an SDK deriving ids from the same schema bytes converges).
+#[derive(Debug, Clone)]
+pub struct LoadedSchema {
+    /// Raw bytes of the schema file, hashed to derive the protocol schema id.
+    pub bytes: Vec<u8>,
+    /// Parsed JSON Schema document, fed to the channel's validation engine.
+    pub document: serde_json::Value,
 }
 
 /// Declarative routing rule definition loaded from server configuration.

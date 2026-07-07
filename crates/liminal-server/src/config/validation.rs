@@ -1,20 +1,31 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use crate::ServerError;
 
-use super::types::ServerConfig;
+use super::types::{LoadedSchema, ServerConfig};
 
 /// Validates a fully loaded server configuration before startup.
 ///
 /// Validation is intentionally limited to deterministic semantic checks and
-/// filesystem metadata inspection. It does not bind sockets, connect to peers,
-/// or perform any other network I/O.
+/// filesystem inspection. It does not bind sockets, connect to peers, or perform
+/// any other network I/O. Beyond the semantic checks it also resolves and loads
+/// each channel's `schema_ref` from disk (relative to `base_dir`, or verbatim for
+/// absolute paths), parses the JSON Schema document, and stores it on the channel
+/// so the channel can later be built with a real schema. A missing, unreadable, or
+/// non-JSON schema file is an accumulated validation error like any other.
+///
+/// `base_dir` is the directory the config file was loaded from; relative
+/// `schema_ref` paths resolve against it. When it is `None` (e.g. a config
+/// assembled in memory), relative paths resolve against the process working
+/// directory, so callers that construct a config directly should use absolute
+/// `schema_ref` paths.
 ///
 /// # Errors
 ///
 /// Returns [`ServerError::ConfigValidation`] containing all discovered validation
 /// errors when the configuration is not safe to use for startup.
-pub fn validate(config: &ServerConfig) -> Result<(), ServerError> {
+pub fn validate(config: &mut ServerConfig, base_dir: Option<&Path>) -> Result<(), ServerError> {
     let mut errors = Vec::new();
 
     validate_listen_address(config, &mut errors);
@@ -24,6 +35,7 @@ pub fn validate(config: &ServerConfig) -> Result<(), ServerError> {
     validate_routing_rules(config, &mut errors);
     validate_persistence_path(config, &mut errors);
     validate_cluster(config, &mut errors);
+    load_channel_schemas(config, base_dir, &mut errors);
 
     if errors.is_empty() {
         Ok(())
@@ -32,6 +44,53 @@ pub fn validate(config: &ServerConfig) -> Result<(), ServerError> {
             message: errors.join("; "),
         })
     }
+}
+
+/// Resolves, reads, and parses each channel's `schema_ref`, storing the loaded
+/// document on the channel. Follows the same deterministic-local-FS discipline as
+/// [`validate_persistence_path`]: every failure is accumulated rather than
+/// short-circuiting, so an operator sees all schema problems at once.
+fn load_channel_schemas(
+    config: &mut ServerConfig,
+    base_dir: Option<&Path>,
+    errors: &mut Vec<String>,
+) {
+    for channel in &mut config.channels {
+        let Some(schema_ref) = channel.schema_ref.as_ref() else {
+            continue;
+        };
+        let path = resolve_schema_path(schema_ref, base_dir);
+        match load_schema_document(&path) {
+            Ok(loaded) => channel.loaded_schema = Some(loaded),
+            Err(reason) => errors.push(format!(
+                "channels.schema_ref '{}': {reason}",
+                schema_ref.display()
+            )),
+        }
+    }
+}
+
+/// Resolves a `schema_ref` to a concrete path: absolute refs are used verbatim,
+/// relative refs are joined onto `base_dir` (or the working directory when there
+/// is no base directory).
+fn resolve_schema_path(schema_ref: &Path, base_dir: Option<&Path>) -> PathBuf {
+    // `Path::join` returns `schema_ref` unchanged when it is absolute, so the
+    // base-dir arm covers both the absolute and relative cases.
+    base_dir.map_or_else(|| schema_ref.to_path_buf(), |dir| dir.join(schema_ref))
+}
+
+/// Reads and JSON-parses a schema file, returning the loaded document or a
+/// human-readable reason on failure (missing/unreadable file, or invalid JSON).
+fn load_schema_document(path: &Path) -> Result<LoadedSchema, String> {
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("schema file '{}' is unreadable: {error}", path.display()))?;
+    let document = serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "schema file '{}' is not valid JSON: {error}",
+            path.display()
+        )
+    })?;
+    Ok(LoadedSchema { bytes, document })
 }
 
 fn validate_listen_address(config: &ServerConfig, errors: &mut Vec<String>) {
@@ -220,8 +279,9 @@ mod tests {
             drain_timeout_ms: 30_000,
             channels: vec![ChannelDef {
                 name: "orders".to_owned(),
-                schema_ref: "schemas/orders.json".to_owned(),
+                schema_ref: None,
                 durable: true,
+                loaded_schema: None,
             }],
             routing_rules: vec![RoutingRuleDef {
                 source_channel: "orders".to_owned(),
@@ -255,9 +315,9 @@ mod tests {
 
     #[test]
     fn valid_config_passes_validation() -> Result<(), Box<dyn std::error::Error>> {
-        let config = sample_config()?;
+        let mut config = sample_config()?;
 
-        validate(&config)?;
+        validate(&mut config, None)?;
 
         Ok(())
     }
@@ -267,7 +327,7 @@ mod tests {
         let mut config = sample_config()?;
         config.listen_address = socket("127.0.0.1:0")?;
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("listen_address"));
         assert!(message.contains("port"));
@@ -281,7 +341,7 @@ mod tests {
         let mut config = sample_config()?;
         config.health_listen_address = socket("127.0.0.1:0")?;
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("health_listen_address"));
         assert!(message.contains("port"));
@@ -295,7 +355,7 @@ mod tests {
         let mut config = sample_config()?;
         config.health_listen_address = config.listen_address;
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("health_listen_address"));
         assert!(message.contains("listen_address"));
@@ -309,7 +369,7 @@ mod tests {
         let mut config = sample_config()?;
         config.health_listen_address = socket("0.0.0.0:8080")?;
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("health_listen_address"));
         assert!(message.contains("port"));
@@ -322,7 +382,7 @@ mod tests {
         let mut config = sample_config()?;
         config.drain_timeout_ms = 0;
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("drain_timeout_ms"));
         assert!(message.contains("greater than zero"));
@@ -335,11 +395,12 @@ mod tests {
         let mut config = sample_config()?;
         config.channels.push(ChannelDef {
             name: "orders".to_owned(),
-            schema_ref: "schemas/orders-v2.json".to_owned(),
+            schema_ref: None,
             durable: false,
+            loaded_schema: None,
         });
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("duplicate"));
         assert!(message.contains("orders"));
@@ -353,7 +414,7 @@ mod tests {
         let path = unique_temp_dir("missing");
         config.persistence_path = Some(path.clone());
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("persistence_path"));
         assert!(message.contains(&path.display().to_string()));
@@ -368,7 +429,7 @@ mod tests {
         fs::write(&path, "not a directory")?;
         config.persistence_path = Some(path.clone());
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
         fs::remove_file(&path)?;
 
         assert!(message.contains("persistence_path"));
@@ -385,12 +446,13 @@ mod tests {
         config.listen_address = socket("127.0.0.1:0")?;
         config.channels.push(ChannelDef {
             name: "orders".to_owned(),
-            schema_ref: "schemas/orders-v2.json".to_owned(),
+            schema_ref: None,
             durable: false,
+            loaded_schema: None,
         });
         config.persistence_path = Some(missing_path.clone());
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("listen_address"));
         assert!(message.contains("duplicate channel names: orders"));
@@ -404,10 +466,95 @@ mod tests {
         let mut config = sample_config()?;
         config.routing_rules[0].target_channel = "unknown".to_owned();
 
-        let message = config_validation_message(validate(&config));
+        let message = config_validation_message(validate(&mut config, None));
 
         assert!(message.contains("routing_rules[0].target_channel"));
         assert!(message.contains("unknown"));
+
+        Ok(())
+    }
+
+    /// Writes `contents` to a fresh uniquely-named temp file and returns its path.
+    fn write_temp_schema(
+        label: &str,
+        contents: &str,
+    ) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let path = unique_temp_dir(label).with_extension("json");
+        fs::write(&path, contents)?;
+        Ok(path)
+    }
+
+    #[test]
+    fn absolute_schema_ref_is_loaded_and_parsed() -> Result<(), Box<dyn std::error::Error>> {
+        let schema = r#"{"type":"object","properties":{"id":{"type":"integer"}}}"#;
+        let schema_path = write_temp_schema("load-ok", schema)?;
+        let mut config = sample_config()?;
+        config.channels[0].schema_ref = Some(schema_path.clone());
+
+        let result = validate(&mut config, None);
+        fs::remove_file(&schema_path)?;
+        result?;
+
+        let loaded = config.channels[0]
+            .loaded_schema
+            .as_ref()
+            .ok_or("schema should have been loaded onto the channel")?;
+        assert_eq!(loaded.bytes, schema.as_bytes());
+        assert_eq!(
+            loaded.document.get("type").and_then(|t| t.as_str()),
+            Some("object")
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn relative_schema_ref_resolves_against_base_dir() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = unique_temp_dir("relative-base");
+        fs::create_dir_all(&dir)?;
+        let schema = r#"{"type":"object"}"#;
+        fs::write(dir.join("orders.json"), schema)?;
+
+        let mut config = sample_config()?;
+        config.channels[0].schema_ref = Some(PathBuf::from("orders.json"));
+
+        let result = validate(&mut config, Some(&dir));
+        fs::remove_dir_all(&dir)?;
+        result?;
+
+        assert!(config.channels[0].loaded_schema.is_some());
+
+        Ok(())
+    }
+
+    #[test]
+    fn missing_schema_ref_file_reports_validation_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let missing = unique_temp_dir("missing-schema").with_extension("json");
+        let mut config = sample_config()?;
+        config.channels[0].schema_ref = Some(missing.clone());
+
+        let message = config_validation_message(validate(&mut config, None));
+
+        assert!(message.contains("schema_ref"));
+        assert!(message.contains(&missing.display().to_string()));
+        assert!(message.contains("unreadable"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_json_schema_ref_reports_validation_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let schema_path = write_temp_schema("bad-json", "{ this is not json")?;
+        let mut config = sample_config()?;
+        config.channels[0].schema_ref = Some(schema_path.clone());
+
+        let message = config_validation_message(validate(&mut config, None));
+        fs::remove_file(&schema_path)?;
+
+        assert!(message.contains("schema_ref"));
+        assert!(message.contains("not valid JSON"));
 
         Ok(())
     }

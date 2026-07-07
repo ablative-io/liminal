@@ -30,9 +30,12 @@ pub fn load_from_file(path: impl AsRef<Path>) -> Result<ServerConfig, ServerErro
 }
 
 pub(crate) fn load_config(path: impl AsRef<Path>) -> Result<ServerConfig, ServerError> {
+    let path = path.as_ref();
     let config = load_from_file(path)?;
-    let config = apply_env_overrides(config)?;
-    validate(&config)?;
+    let mut config = apply_env_overrides(config)?;
+    // Channel `schema_ref` paths are resolved relative to the directory holding
+    // the config file, so validation loads each schema from there.
+    validate(&mut config, path.parent())?;
     Ok(config)
 }
 

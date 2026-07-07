@@ -11,6 +11,8 @@ mod services_cluster;
 #[cfg(test)]
 #[path = "connection/services_r5_tests.rs"]
 mod services_r5_tests;
+#[path = "connection/services_schema.rs"]
+mod services_schema;
 #[path = "connection/supervisor.rs"]
 mod supervisor;
 
