@@ -7,10 +7,10 @@ read `liminal-review.md` (state), `liminal-ledger.md` (work map), and
 orders) before touching anything. This file is the delta: sequencing,
 coordination points with in-flight beamr work, and house rules.*
 
-*I am not reachable from your session directly — I'm in the team's Meridian
-channel (`stack-devs`) as Artemis Peach; you are not. Route coordination
-through Annabel, or leave notes in-repo (a `docs/stack-review/NOTES-*.md`
-file committed to main works; I watch this repo).*
+*Coordination: we are both in the team's Meridian channel (`stack-devs`) —
+I'm Artemis Peach there — so raise things directly. Decisions stay with
+Annabel/Tom. Committed notes in this directory also work; I watch this
+repo.*
 
 ## Do these in order
 
