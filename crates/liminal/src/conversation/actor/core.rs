@@ -20,7 +20,8 @@ use super::queue::{QueuedCommand, QueuedCommandKind};
 use super::sync::{self, lock, send_reply, wait_for};
 use super::{ParticipantChannel, SupervisorInner};
 use crate::conversation::types::{
-    ConversationConfig, ConversationPhase, ConversationState, CrashPolicy, ParticipantPid,
+    ConversationConfig, ConversationPhase, ConversationState, CrashPolicy, ParticipantHealth,
+    ParticipantPid,
 };
 use crate::envelope::Envelope;
 use crate::error::LiminalError;
@@ -367,9 +368,37 @@ impl ActorCore {
     ) -> Result<(), LiminalError> {
         // Capture the link-fire instant first: the real detection moment,
         // propagated to blocked dispatchers as the start of reroute latency.
-        let observed_at = Instant::now();
+        self.record_participant_exit(participant, Instant::now())
+    }
+
+    /// Returns whether `participant`'s process is still present in the
+    /// scheduler's process table. Used by boot to prune (and record) a
+    /// participant that died while no actor was linked to it, instead of
+    /// failing the restart on an impossible link.
+    pub(super) fn participant_process_is_live(&self, participant: ParticipantPid) -> bool {
+        self.supervisor
+            .scheduler
+            .process_table()
+            .get(participant.get())
+            .is_some()
+    }
+
+    /// Records `participant`'s death observed at `observed_at` and applies the
+    /// configured crash policy. This is the single host-side recording path,
+    /// shared by the live trapped-EXIT handler and boot's dead-pid pruning.
+    ///
+    /// Recording is exactly-once: a participant already marked Dead (its crash
+    /// was recorded before the actor process itself died — host-side state
+    /// survives actor restarts) is skipped without a duplicate context entry,
+    /// notifier signal, or `exited_at` restamp.
+    pub(super) fn record_participant_exit(
+        &self,
+        participant: ParticipantPid,
+        observed_at: Instant,
+    ) -> Result<(), LiminalError> {
         // Drop any participant runtime registration so a dead pid stops draining
         // a queue (and so its pid can be safely reused by the scheduler later).
+        // Idempotent, so a replayed recording attempt is harmless here.
         self.supervisor.participant_runtime.deregister(participant);
         // Record the crash and signal notifiers under the SAME state lock that
         // `register_exit_notifier` holds, so a registrant can never observe the
@@ -378,6 +407,12 @@ impl ActorCore {
         // Dead first (then it replays the recorded instant): exactly one wakeup.
         let failed = {
             let mut state = lock(&self.state, "conversation state")?;
+            let already_recorded = state.participants.iter().any(|status| {
+                status.participant == participant && status.health == ParticipantHealth::Dead
+            });
+            if already_recorded {
+                return Ok(());
+            }
             state.record_participant_crash(participant, self.config.on_crash, observed_at);
             self.exit_notifiers.signal(participant, observed_at)?;
             if self.config.on_crash == CrashPolicy::Fail {

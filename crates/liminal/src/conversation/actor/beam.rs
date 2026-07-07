@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Instant;
 
 use beamr::atom::Atom;
 use beamr::constant_pool::ConstantPool;
@@ -125,6 +126,15 @@ pub(super) fn actor_module(
 /// Establishes a beamr process link from the conversation actor to each of its
 /// configured participants. Called during boot, before any message is forwarded,
 /// so the link delivering EXIT signals exists before the consumer can crash.
+///
+/// A participant whose process no longer exists cannot be linked; failing boot
+/// on it would make the conversation unrestartable after a crash under a
+/// non-Fail policy. Instead the dead pid is pruned from linking and its death
+/// is routed through the same host-side recording path as a trapped EXIT
+/// ([`ActorCore::record_participant_exit`]) — a no-op when the crash was
+/// already recorded before the previous actor process died, so nothing is
+/// double-recorded or double-signalled. This mirrors the channel actor's boot,
+/// which prunes dead subscribers rather than failing.
 pub(super) fn link_participants(
     core: &ActorCore,
     context: &ProcessContext<'_>,
@@ -141,6 +151,10 @@ pub(super) fn link_participants(
                 message: "beamr link facility is unavailable".to_owned(),
             })?;
     for participant in &core.config.participants {
+        if !core.participant_process_is_live(*participant) {
+            core.record_participant_exit(*participant, Instant::now())?;
+            continue;
+        }
         link_facility
             .link(actor_pid, participant.get())
             .map_err(|error| LiminalError::ParticipantCrashed {
