@@ -189,10 +189,18 @@ impl ChannelHandle {
     /// Creates a durable handle that persists every accepted publish to `store`
     /// before fanning it out to subscribers.
     ///
+    /// Construction reads the store: every partition's next-sequence counter is
+    /// recovered from the existing stream head, so a handle rebuilt over a
+    /// previously used store resumes appending where the log left off instead
+    /// of conflicting at sequence zero. A fresh store recovers to zero, which is
+    /// identical to cold start. This makes construction O(stream length) in
+    /// store reads and adds store read errors to the failure modes below.
+    ///
     /// # Errors
     ///
     /// Returns [`LiminalError::PublishFailed`] when the durable channel cannot be
-    /// initialized over `store`.
+    /// initialized over `store`, including when recovering the per-partition
+    /// sequence counters from the store fails.
     pub fn new_durable(
         config: ChannelConfig,
         store: Arc<dyn DurableStore>,
@@ -214,10 +222,15 @@ impl ChannelHandle {
     /// joined to a channel's distributed process group must live on the same
     /// scheduler that owns the distribution links.
     ///
+    /// Like [`Self::new_durable`], construction recovers each partition's
+    /// next-sequence counter from the store, so restarting over an existing
+    /// persistence path resumes the log instead of conflicting at sequence zero.
+    ///
     /// # Errors
     ///
     /// Returns [`LiminalError::PublishFailed`] when the durable channel cannot be
-    /// initialized over `store`.
+    /// initialized over `store`, including when recovering the per-partition
+    /// sequence counters from the store fails.
     pub fn new_durable_with_supervisor(
         config: ChannelConfig,
         store: Arc<dyn DurableStore>,
