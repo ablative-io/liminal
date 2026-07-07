@@ -119,9 +119,10 @@ idempotency); snapshot/compaction story for long conversation logs
 ## G. Confirmed defects (2026-07-07 orientation pass, Hermes Crumpet)
 
 *Appended per stack-devs agreement — existing item ids above are stable.
-All four verified against code; none fixed yet. G1 and G4 carry
-coordination commitments: ping Vesper (aion) before either fix lands so
-the aion cross-node failover proofs re-run.*
+All four verified against code. G2/G3 fixed 2026-07-07; G1 queued behind
+the 0.12.1 bump; G4 open. G1 and G4 carry coordination commitments: ping
+Vesper (aion) before either fix lands so the aion cross-node failover
+proofs re-run.*
 
 ### G1. Durable-channel restart sequence conflict (S, fix + failing test) — OPEN (queued behind 0.12.1 bump)
 `liminal-server` rebuilds durable channels with `next_sequences = [0]`
