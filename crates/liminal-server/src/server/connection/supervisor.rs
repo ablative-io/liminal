@@ -69,6 +69,26 @@ impl ConnectionSupervisor {
         })
     }
 
+    /// Creates a connection supervisor with an explicit service adapter and the
+    /// configured connection auth token.
+    ///
+    /// This is the production constructor for callers that build services
+    /// themselves (the runtime needs the shared channel cluster before the
+    /// supervisor takes ownership) and therefore cannot use
+    /// [`Self::from_config`]: without it the configured `[auth]` token would be
+    /// silently dropped and the server would run open-access.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when scheduler startup fails.
+    pub fn with_services_and_auth(
+        services: Arc<dyn ConnectionServices>,
+        auth_token: Option<Vec<u8>>,
+    ) -> Result<Self, ServerError> {
+        SupervisorInner::new(services, None, auth_token).map(|inner| Self {
+            inner: Arc::new(inner),
+        })
+    }
+
     /// Creates a connection supervisor with an explicit service adapter and a
     /// connection-keyed worker-registration notifier.
     ///

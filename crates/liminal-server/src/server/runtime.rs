@@ -40,7 +40,14 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
     // ownership of the services as a trait object.
     let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
     let channel_cluster = services.channel_cluster().clone();
-    let connection_supervisor = ConnectionSupervisor::with_services(services)?;
+    // The configured [auth] token must ride along here: this call site builds
+    // services itself (to reach the shared channel cluster first) and so cannot
+    // use from_config, which is the only other place the token is wired.
+    let auth_token = config
+        .auth
+        .as_ref()
+        .map(|auth| auth.token.clone().into_bytes());
+    let connection_supervisor = ConnectionSupervisor::with_services_and_auth(services, auth_token)?;
 
     // SRV-005: start clustering on the channel-supervisor scheduler when a
     // [cluster] section is configured. The returned handle owns the inbound
