@@ -119,12 +119,11 @@ idempotency); snapshot/compaction story for long conversation logs
 ## G. Confirmed defects (2026-07-07 orientation pass, Hermes Crumpet)
 
 *Appended per stack-devs agreement — existing item ids above are stable.
-All four verified against code. G2/G3 fixed 2026-07-07; G1 queued behind
-the 0.12.1 bump; G4 open. G1 and G4 carry coordination commitments: ping
+All four verified against code. ALL FOUR FIXED 2026-07-07: G1 (fb9985a), G2 (50b53eb), G3 (e2b8769), G4 (e1b847d — absorbed into the H1 outbound writer). G1 and G4 carry coordination commitments: ping
 Vesper (aion) before either fix lands so the aion cross-node failover
 proofs re-run.*
 
-### G1. Durable-channel restart sequence conflict (S, fix + failing test) — OPEN (queued behind 0.12.1 bump)
+### G1. Durable-channel restart sequence conflict — FIXED 2026-07-07 (fb9985a; test-first, pre-fix SequenceConflict observed verbatim)
 `liminal-server` rebuilds durable channels with `next_sequences = [0]`
 (`services.rs:230-241` → `channel/storage.rs:198`) instead of calling
 `recover_durable_channel` (`recovery.rs:46-55`, exists, tested, never
@@ -150,7 +149,7 @@ dead subscribers (`channel/actor/mod.rs:294-316`). A conversation that
 survived a participant crash under a non-`Fail` policy cannot restart its
 own actor. Fix direction: prune-and-record, matching channel semantics.
 
-### G4. Non-blocking `write_all` truncates large frames → permanent
+### G4. Non-blocking `write_all` truncates large frames — FIXED 2026-07-07 (e1b847d, H1 outbound writer) → was: permanent
 connection desync (M — root-caused from aion live report)
 `write_frame` calls `write_all` on the connection socket
 (`process.rs:669-683`) that the listener sets non-blocking
@@ -181,9 +180,17 @@ preparing; publish gated on Tom). Do not pin crates.io 0.12.0.
 ## H. Server direction (2026-07-07)
 
 Product scoping + phase-1 build plan live in `docs/design/SERVER-DIRECTION.md`
-(thesis: the runtime supervises your consumers). H1 = delivery pump + G4
-outbound writer; H2 = G1 pulled forward; H3 = /metrics; H4 = auth-token
-table stakes. Post-0.12.1 tail: A1-1 -> A1-2/3/4 -> A3.
+(thesis: the runtime supervises your consumers). H-wave LANDED 2026-07-07
+(9f869b3..5b43f6e): H1 delivery pump + G4 outbound writer (Frame::Deliver
+0x19, headroom-aware pump, SDK SubscriptionStream), H2/G1 restart recovery,
+H3 /metrics, H4 auth token (gate on every frame + production wiring).
+Deferred minors recorded from Fable review: greedy per-slice budget in
+HashMap order (latent, v1 = one sub per connection); per-skipped-frame
+timeout re-arm in try_receive_once on shared transports; single frame
+> 4 MiB outbound buffer = teardown (spec-inherent; publish-side size cap is
+a candidate follow-up); Deliver envelope carries payload+schema+seq only
+(causal metadata + publisher identity deferred, documented). Post-0.12.1
+tail: pin bump -> A1-1 -> A1-2/3/4 -> A3.
 
 ## Cross-domain synergies
 
