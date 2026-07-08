@@ -22,12 +22,12 @@ authors = [
 # `cargo publish` ships to crates.io). `liminal` is published as `liminal-rs`
 # because the bare name is taken on crates.io, but is imported as `liminal`.
 [workspace.dependencies]
-liminal = { package = "liminal-rs", version = "0.2.2", path = "crates/liminal" }
-liminal-sdk = { version = "0.2.2", path = "crates/liminal-sdk" }
+liminal = { package = "liminal-rs", version = "0.2.3", path = "crates/liminal" }
+liminal-sdk = { version = "0.2.3", path = "crates/liminal-sdk" }
 
 anyhow = "1"
 async-trait = "0.1"
-beamr = "0.11.0"
+beamr = "0.13.0"
 chrono = "0.4.45"
 clap = "4"
 # `default-features = false` bases: members add `std`/`alloc` as they need. The
@@ -36,7 +36,7 @@ clap = "4"
 # re-enabling default features it disabled, so the lean base is the only base that
 # can satisfy both.)
 futures-core = { version = "0.3", default-features = false }
-haematite = "0.4.0"
+haematite = "0.4.1"
 jsonschema = { version = "0.46.5", default-features = false }
 rand = "0.10.1"
 serde = { version = "1", default-features = false, features = ["derive"] }
