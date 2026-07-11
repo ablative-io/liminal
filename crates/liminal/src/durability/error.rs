@@ -38,6 +38,14 @@ pub enum DurabilityError {
     #[error("configuration error: {0}")]
     ConfigError(String),
 
+    /// An ephemeral durable store could not be opened on disk.
+    ///
+    /// Raised only on the construction path of a self-owned ephemeral store
+    /// (see [`super::store::open_ephemeral`]); the guarding temporary directory
+    /// is already removed by the time this surfaces.
+    #[error("ephemeral store open failed: {0}")]
+    EphemeralStoreOpen(String),
+
     /// Persisted envelope bytes could not be encoded or decoded.
     #[error("envelope serialization error: {0}")]
     EnvelopeError(String),

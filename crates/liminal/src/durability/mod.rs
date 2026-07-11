@@ -30,6 +30,8 @@ pub use recovery::{
 
 pub use replay::replay_from;
 
-pub use store::{DurableStore, HaematiteStore, StoredEntry};
+pub use store::{
+    DurableStore, EphemeralHaematiteStore, HaematiteStore, StoredEntry, open_ephemeral,
+};
 
 pub mod bridge;

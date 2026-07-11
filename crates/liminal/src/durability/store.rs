@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use haematite::{ApiError, Event, EventStore};
+use haematite::{ApiError, Database, DatabaseConfig, Event, EventStore};
+use tempfile::TempDir;
 
 use super::DurabilityError;
 
@@ -189,6 +190,135 @@ impl DurableStore for HaematiteStore {
     }
 }
 
+/// Exclusive-ownership ephemeral durable store: the sole owner of both the
+/// haematite database and the temporary directory that backs it.
+///
+/// [`HaematiteStore::new`] takes a *caller-supplied* `Arc<EventStore>`, so a
+/// clone of that inner handle can outlive any guard placed merely beside it —
+/// field declaration order proves nothing across that `Arc` boundary. This
+/// wrapper instead owns the database outright: [`open_ephemeral`] constructs the
+/// inner `Arc` itself, this type never exposes it (no getter) and is deliberately
+/// **not `Clone`**, so the only handle a caller can hold is an
+/// `Arc<dyn DurableStore>` over the whole wrapper. When the last such clone
+/// drops, `store` drops FIRST — the database closes, its shard actors join and
+/// the data-dir writer lock releases on fd close — and only THEN does
+/// `_ephemeral_dir` drop and remove the directory. Field declaration order is
+/// load-bearing and must not be reordered.
+#[derive(Debug)]
+pub struct EphemeralHaematiteStore {
+    store: HaematiteStore,
+    _ephemeral_dir: Option<TempDir>,
+}
+
+impl EphemeralHaematiteStore {
+    /// Takes an already-open ephemeral `Database` and the temporary directory it
+    /// was opened under, becoming their single exclusive owner.
+    ///
+    /// The inner `Arc<EventStore>` is created here and never leaves this type, so
+    /// no caller-supplied clone of it can exist to defeat the drop ordering.
+    /// `ephemeral_dir` must be the directory `database` lives in and must have
+    /// been created before the database was opened (so a failed open removed it
+    /// via the guard's `Drop`, before this constructor was ever reached).
+    fn new(database: Database, ephemeral_dir: TempDir) -> Self {
+        Self {
+            store: HaematiteStore::new(Arc::new(EventStore::new(database))),
+            _ephemeral_dir: Some(ephemeral_dir),
+        }
+    }
+
+    /// Path of the guarding temporary directory, for lifecycle assertions only.
+    ///
+    /// The field carries an underscore because its sole production role is to be
+    /// dropped last; this test-only reader is the one place it is observed.
+    #[cfg(test)]
+    #[allow(clippy::used_underscore_binding)]
+    pub(crate) fn ephemeral_dir_path(&self) -> Option<&std::path::Path> {
+        self._ephemeral_dir.as_ref().map(TempDir::path)
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableStore for EphemeralHaematiteStore {
+    async fn append(
+        &self,
+        stream_key: &str,
+        payload: Vec<u8>,
+        expected_seq: u64,
+    ) -> Result<u64, DurabilityError> {
+        self.store.append(stream_key, payload, expected_seq).await
+    }
+
+    async fn read_from(
+        &self,
+        stream_key: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.store.read_from(stream_key, offset, limit).await
+    }
+
+    async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {
+        self.store.cas(key, old_value, new_value).await
+    }
+
+    async fn read_value(&self, key: &str) -> Result<Option<u64>, DurabilityError> {
+        self.store.read_value(key).await
+    }
+
+    async fn scan(&self, prefix: &str) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.store.scan(prefix).await
+    }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        self.store.flush().await
+    }
+}
+
+/// Opens a self-owning ephemeral haematite store under a fresh temporary
+/// directory.
+///
+/// The directory is created BEFORE [`Database::create`], so every failure path —
+/// including a haematite open/create error — removes it when the guard drops on
+/// the error return; the returned store owns the guard on success. The database
+/// is created directly in the (empty) temporary directory: haematite's `create`
+/// accepts an existing empty dir and, on failure, removes only a directory *it*
+/// created, never this pre-existing guard dir (haematite 0.4.1
+/// `db/startup.rs`), so the `TempDir` is the sole owner of directory lifetime on
+/// every path.
+///
+/// # Errors
+/// Returns [`DurabilityError::EphemeralStoreOpen`] if haematite cannot create the
+/// database; the temporary directory is already removed when this returns.
+pub fn open_ephemeral(shard_count: usize) -> Result<EphemeralHaematiteStore, DurabilityError> {
+    let ephemeral_dir = tempfile::Builder::new()
+        .prefix("liminal-durability-")
+        .tempdir()
+        .map_err(|error| {
+            DurabilityError::EphemeralStoreOpen(format!(
+                "could not create temporary directory: {error}"
+            ))
+        })?;
+    open_ephemeral_in(ephemeral_dir, shard_count)
+}
+
+/// Opens an ephemeral store inside an already-created guard directory.
+///
+/// Split out so the guard exists before `Database::create` and so lifecycle
+/// tests can inject an open failure into a directory they pre-populated.
+fn open_ephemeral_in(
+    ephemeral_dir: TempDir,
+    shard_count: usize,
+) -> Result<EphemeralHaematiteStore, DurabilityError> {
+    let database = Database::create(DatabaseConfig {
+        data_dir: ephemeral_dir.path().to_path_buf(),
+        shard_count,
+        sweep_interval: None,
+        distributed: None,
+    })
+    .map_err(|error| DurabilityError::EphemeralStoreOpen(error.to_string()))?;
+    Ok(EphemeralHaematiteStore::new(database, ephemeral_dir))
+}
+
 impl From<Event> for StoredEntry {
     fn from(event: Event) -> Self {
         Self {
@@ -212,6 +342,144 @@ impl From<ApiError> for DurabilityError {
             other @ (ApiError::CorruptEvent(_)
             | ApiError::Storage(_)
             | ApiError::HistoryCompacted(_)) => Self::StoreError(other),
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod ephemeral_lifecycle_tests {
+    //! D3 §9 lifecycle gate. Each test names the gate it pins; all are permanent
+    //! rule-1 assertions that the ephemeral store's directory has an enforced
+    //! owner across every teardown path.
+
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use super::super::bridge::block_on;
+    use super::{DurableStore, open_ephemeral, open_ephemeral_in};
+
+    const TEST_SHARD_COUNT: usize = 2;
+
+    /// Materialises shard directories and fds so the drop path actually has a
+    /// live database to close before the guard removes the directory.
+    fn write_one_event(store: &dyn DurableStore) {
+        block_on(store.append("lifecycle/probe", b"payload".to_vec(), 0))
+            .expect("bridge completes synchronously")
+            .expect("append to a fresh ephemeral stream succeeds");
+        block_on(store.flush())
+            .expect("bridge completes synchronously")
+            .expect("flush of a live ephemeral store succeeds");
+    }
+
+    /// §9 gate — normal drop: the directory is removed once the last (here, only)
+    /// handle drops.
+    #[test]
+    fn ephemeral_dir_removed_after_last_handle_drops() {
+        let store = open_ephemeral(TEST_SHARD_COUNT).expect("ephemeral open succeeds");
+        let dir = store
+            .ephemeral_dir_path()
+            .expect("ephemeral store carries a guard dir")
+            .to_path_buf();
+        assert!(
+            dir.exists(),
+            "the guard directory exists while the store is live"
+        );
+
+        write_one_event(&store);
+        drop(store);
+
+        assert!(
+            !dir.exists(),
+            "the guard directory is removed on normal drop"
+        );
+    }
+
+    /// §9 gate — teardown with store-handle clones alive: the directory survives
+    /// until the LAST `Arc<dyn DurableStore>` clone drops, then is removed. This
+    /// is the `Arc`-shared-into-channel-handles case: clones share one wrapper,
+    /// so none can close the database early.
+    #[test]
+    fn ephemeral_dir_survives_until_last_store_clone_drops() {
+        let store = open_ephemeral(TEST_SHARD_COUNT).expect("ephemeral open succeeds");
+        let dir = store
+            .ephemeral_dir_path()
+            .expect("ephemeral store carries a guard dir")
+            .to_path_buf();
+        write_one_event(&store);
+
+        let erased: Arc<dyn DurableStore> = Arc::new(store);
+        let clone_a = Arc::clone(&erased);
+        let clone_b = Arc::clone(&erased);
+
+        drop(erased);
+        assert!(
+            dir.exists(),
+            "directory survives while store clones remain alive"
+        );
+        drop(clone_a);
+        assert!(
+            dir.exists(),
+            "directory survives while one store clone remains alive"
+        );
+
+        drop(clone_b);
+        assert!(
+            !dir.exists(),
+            "the last store clone dropping removes the directory"
+        );
+    }
+
+    /// §9 gate — startup rollback: an injected haematite open failure (a
+    /// conflicting `config.json` pre-seeded into the guard dir) makes the
+    /// constructor return `Err` AND leaves zero residue — the guard removes the
+    /// directory independently of haematite's own cleanup.
+    #[test]
+    fn ephemeral_open_failure_rolls_back_directory() {
+        let seeded = tempfile::Builder::new()
+            .prefix("liminal-durability-test-")
+            .tempdir()
+            .expect("test can create a temp dir");
+        let dir = seeded.path().to_path_buf();
+        // A pre-existing `config.json` makes haematite refuse the create with
+        // `DataDirAlreadyInitialised`; because the dir pre-existed the create,
+        // haematite never removes it — only the guard does.
+        std::fs::write(dir.join("config.json"), b"not-a-valid-config")
+            .expect("test can seed a conflicting config");
+
+        let result = open_ephemeral_in(seeded, TEST_SHARD_COUNT);
+
+        assert!(result.is_err(), "an injected open failure returns Err");
+        assert!(
+            !dir.exists(),
+            "the guard removes the directory on open failure — zero residue"
+        );
+    }
+
+    /// §9 gate — repeated start/stop: each cycle owns a distinct directory and
+    /// leaves zero residue after it drops.
+    #[test]
+    fn repeated_ephemeral_cycles_each_own_distinct_dir_zero_residue() {
+        let mut seen: Vec<PathBuf> = Vec::new();
+        for _ in 0..5 {
+            let store = open_ephemeral(TEST_SHARD_COUNT).expect("ephemeral open succeeds");
+            let dir = store
+                .ephemeral_dir_path()
+                .expect("ephemeral store carries a guard dir")
+                .to_path_buf();
+            assert!(
+                dir.exists(),
+                "the cycle's directory exists while its store is live"
+            );
+            assert!(!seen.contains(&dir), "each cycle owns a distinct directory");
+            seen.push(dir.clone());
+
+            write_one_event(&store);
+            drop(store);
+            assert!(
+                !dir.exists(),
+                "the cycle's directory is removed after its store drops"
+            );
         }
     }
 }
