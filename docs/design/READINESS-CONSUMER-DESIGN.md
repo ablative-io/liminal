@@ -262,8 +262,13 @@ a pinned ceiling in §7 either way.
 
 ## 7. Idle/resource-cost lens answers (v1.1)
 
-- **Parked connection (D1):** Q1 — zero CPU, zero slices (R7 counter
-  static); memory = buffers + registration entry + pending-reply table +
+- **Parked connection (D1):** Q1 — zero *marginal* CPU and zero slices (R7
+  counter static): a parked connection adds nothing above the VM's idle
+  floor, but that floor itself is a real, signed cost owned by the
+  composition lane (the 5 ms tick bound) — "costs nothing" without that
+  qualifier would let a signed bound masquerade as zero, which is the
+  distinction T1's delta methodology exists to keep honest; memory =
+  buffers + registration entry + pending-reply table +
   subscription inboxes, every component bounded by a named §5 cap (inbox
   depth and reply table included — no unbounded queue survives this doc);
   pending-reply timers are bounded by the same table cap and cancelled on
