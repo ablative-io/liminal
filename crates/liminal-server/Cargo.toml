@@ -25,6 +25,10 @@ tracing = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 futures-core = { workspace = true, features = ["std"] }
+# Test-gated construction seams (rooted ephemeral stores); the normal
+# dependency entry above stays feature-free so the production graph never
+# carries them.
+liminal = { workspace = true, features = ["test-support"] }
 liminal-sdk = { workspace = true }
 tempfile = { workspace = true }
 

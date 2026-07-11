@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
@@ -11,7 +11,8 @@ use liminal::conversation::{
 };
 use liminal::durability::bridge::block_on;
 use liminal::durability::{
-    DedupCache, DedupDecision, DurableStore, HaematiteStore, ProcessingReceipt,
+    DedupCache, DedupDecision, DurabilityError, DurableStore, EphemeralHaematiteStore,
+    HaematiteStore, ProcessingReceipt, open_ephemeral,
 };
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
@@ -509,18 +510,40 @@ const DEFAULT_SHARD_COUNT: usize = 8;
 /// keys from colliding with any other haematite streams in the shared store.
 const DELIVERY_DEDUP_NAMESPACE: &str = "liminal:delivery-dedup";
 
-/// Builds the on-disk haematite-backed durable store.
+/// Builds the haematite-backed durable store.
 ///
 /// When `persistence_path` is `Some`, the database lives there and survives
 /// process restarts: an existing database directory is reopened, a fresh one is
 /// created. When it is `None` (no durable path configured, or the channel-free
-/// `empty()` services used by tests), an ephemeral per-instance directory under
-/// the system temp dir is created instead — it still persists to disk for the
-/// lifetime of the process, but is not a stable restart location.
+/// `empty()` services used by tests), a self-owning ephemeral store is opened
+/// instead: its temporary directory is created and removed by the store itself
+/// (D3), so it leaves no residue once the last store handle drops. The two paths
+/// return distinct concrete stores on purpose — only the ephemeral one carries a
+/// directory guard; the persistent path is untouched.
 fn build_durable_store(
     persistence_path: Option<&Path>,
 ) -> Result<Arc<dyn DurableStore>, ServerError> {
-    let data_dir = persistence_path.map_or_else(ephemeral_data_dir, |path| path.join("durability"));
+    build_durable_store_with(persistence_path, || open_ephemeral(DEFAULT_SHARD_COUNT))
+}
+
+/// [`build_durable_store`] with the ephemeral factory injected.
+///
+/// The split exists for the D3 construction gates: the SAME branch logic runs
+/// in production and tests, and only the factory closure differs — tests root
+/// the ephemeral store in an isolated directory (via liminal's test-gated
+/// rooted factory) so "no ephemeral directory was created" is a real assertion
+/// rather than a scan of the shared system temp dir.
+fn build_durable_store_with(
+    persistence_path: Option<&Path>,
+    make_ephemeral: impl FnOnce() -> Result<EphemeralHaematiteStore, DurabilityError>,
+) -> Result<Arc<dyn DurableStore>, ServerError> {
+    let Some(path) = persistence_path else {
+        let store = make_ephemeral().map_err(|error| ServerError::ConfigValidation {
+            message: format!("failed to open ephemeral durable store: {error}"),
+        })?;
+        return Ok(Arc::new(store));
+    };
+    let data_dir = path.join("durability");
     let database = open_or_create_database(&data_dir)?;
     let event_store = EventStore::new(database);
     Ok(Arc::new(HaematiteStore::new(Arc::new(event_store))))
@@ -545,19 +568,6 @@ fn open_or_create_database(data_dir: &Path) -> Result<Database, ServerError> {
             data_dir.display()
         ),
     })
-}
-
-/// Produces a unique on-disk directory under the system temp dir.
-///
-/// The pid plus a monotonic counter keep concurrent servers and parallel tests
-/// from sharing a database directory.
-fn ephemeral_data_dir() -> PathBuf {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!(
-        "liminal-durability-{}-{unique}",
-        std::process::id()
-    ))
 }
 
 impl ConnectionServices for LiminalConnectionServices {
@@ -812,5 +822,81 @@ impl SubscriptionResource for LiminalSubscriptionResource {
 pub(super) fn server_error_from_protocol(error: &ProtocolError) -> ServerError {
     ServerError::ListenerAccept {
         message: format!("protocol operation failed: {error}"),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod durable_store_tests {
+    use liminal::durability::open_ephemeral_rooted;
+
+    use super::{DEFAULT_SHARD_COUNT, build_durable_store_with};
+
+    /// Counts directory entries under `root`, for the empty/one-dir assertions
+    /// on an injected ephemeral root.
+    fn entry_count(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("ephemeral root is readable")
+            .count()
+    }
+
+    /// §9 D3 construction gate (persistent half): requesting a *persistent* store
+    /// creates its database under the configured path and NO ephemeral directory.
+    ///
+    /// Exercises `build_durable_store_with` — the same branch logic production
+    /// runs — with only the ephemeral factory swapped to root in an isolated
+    /// directory. That root is where any ephemeral directory would have to
+    /// appear, so "the root stays empty" is a real negative assertion — a
+    /// regression that constructs an ephemeral store on the persistent branch
+    /// lands its directory here and fails this test.
+    #[test]
+    fn persistent_store_uses_configured_path_and_creates_no_temp_dir() {
+        let home = tempfile::tempdir().expect("test can create a temp dir");
+        let ephemeral_root = tempfile::tempdir().expect("test can create an ephemeral root");
+
+        let store = build_durable_store_with(Some(home.path()), || {
+            open_ephemeral_rooted(ephemeral_root.path(), DEFAULT_SHARD_COUNT)
+        })
+        .expect("persistent store builds");
+
+        assert!(
+            home.path().join("durability").join("config.json").exists(),
+            "the persistent database is created under the configured path"
+        );
+        assert_eq!(
+            entry_count(ephemeral_root.path()),
+            0,
+            "the persistent branch creates no ephemeral guard directory"
+        );
+
+        drop(store);
+    }
+
+    /// Pins the wiring seam: the ephemeral (`None`) branch of the shared build
+    /// logic goes through the guarded constructor — exactly one directory
+    /// appears under the injected root while the store lives, and zero residue
+    /// remains after the last handle drops.
+    #[test]
+    fn ephemeral_store_directory_is_owned_through_the_build_seam() {
+        let ephemeral_root = tempfile::tempdir().expect("test can create an ephemeral root");
+
+        let store = build_durable_store_with(None, || {
+            open_ephemeral_rooted(ephemeral_root.path(), DEFAULT_SHARD_COUNT)
+        })
+        .expect("ephemeral store builds");
+
+        assert_eq!(
+            entry_count(ephemeral_root.path()),
+            1,
+            "the ephemeral branch creates exactly one guard directory"
+        );
+
+        drop(store);
+
+        assert_eq!(
+            entry_count(ephemeral_root.path()),
+            0,
+            "dropping the last store handle removes the guard directory — zero residue"
+        );
     }
 }
