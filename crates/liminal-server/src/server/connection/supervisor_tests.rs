@@ -516,6 +516,8 @@ fn externally_terminated_connection_with_open_conversations_returns_to_baseline(
 fn connection_cleanup_after_conversation_scheduler_shutdown_is_prompt()
 -> Result<(), Box<dyn std::error::Error>> {
     let services = std::sync::Arc::new(LiminalConnectionServices::empty()?);
+    let conv_scheduler = services.conversation_supervisor().scheduler();
+    let baseline = conv_scheduler.process_table().len();
     let supervisor = ConnectionSupervisor::with_services(services.clone())?;
     let (client, server) = tcp_pair()?;
     let handle = supervisor.spawn_connection(server)?;
@@ -549,21 +551,24 @@ fn connection_cleanup_after_conversation_scheduler_shutdown_is_prompt()
         .join()
         .map_err(|_| "teardown watchdog thread panicked")?;
 
-    // Finalization deregisters everything with no conversation-scheduler help;
-    // the handler `Drop` that runs it lands at the busy-looping connection
-    // slice's store-back, so the wait is deadline-bounded rather than instant.
-    // (The process table itself is not asserted here: the stopped scheduler
-    // never runs the watcher's final slice.)
+    // Finalization deregisters everything AND terminates the actor, the
+    // participant, and the exit watcher directly (scheduler tombstone writes),
+    // so the process table returns to BASELINE even though the stopped
+    // scheduler never runs another slice. The handler `Drop` that runs it lands
+    // at the busy-looping connection slice's store-back, so the wait is
+    // deadline-bounded rather than instant.
     let deadline = Instant::now() + Duration::from_secs(5);
     while conversation_supervisor.registered_actor_count() != 0
         || conversation_supervisor.registered_participant_count() != 0
+        || conv_scheduler.process_table().len() != baseline
     {
         if Instant::now() > deadline {
             return Err(format!(
-                "registries not released against a stopped conversation scheduler: \
-                 actors={} participants={}",
+                "residue against a stopped conversation scheduler: actors={} \
+                 participants={} table={} (baseline {baseline})",
                 conversation_supervisor.registered_actor_count(),
-                conversation_supervisor.registered_participant_count()
+                conversation_supervisor.registered_participant_count(),
+                conv_scheduler.process_table().len()
             )
             .into());
         }

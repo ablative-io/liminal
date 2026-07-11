@@ -27,6 +27,20 @@ use crate::conversation::types::{
 use crate::envelope::Envelope;
 use crate::error::LiminalError;
 
+/// Bounds the wait for the actor's boot slice. Boot is a construction-time
+/// round trip (the boot slice links participants and the exit watcher); an
+/// actor that dies between the command enqueue and its first slice would
+/// otherwise never reply, and the spawner would hold the lifecycle gate
+/// forever. On expiry the queued command is purged and the whole spawn attempt
+/// is rolled back by the caller.
+const BOOT_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn closed_error() -> LiminalError {
+    LiminalError::ConversationFailed {
+        message: "conversation is closed".to_owned(),
+    }
+}
+
 pub struct ActorCore {
     supervisor: Arc<SupervisorInner>,
     pub(super) config: ConversationConfig,
@@ -137,9 +151,25 @@ impl ActorCore {
     }
 
     pub(super) fn boot(self: &Arc<Self>, pid: ParticipantPid) -> Result<(), LiminalError> {
+        self.boot_with_timeout(pid, BOOT_REPLY_TIMEOUT)
+    }
+
+    /// Boot with an explicit reply bound. On any failure after the command was
+    /// admitted, the still-queued command is purged so it cannot linger for a
+    /// later actor incarnation (a purge after the command was already popped is
+    /// a harmless no-op; its late reply lands in a dropped receiver).
+    pub(super) fn boot_with_timeout(
+        self: &Arc<Self>,
+        pid: ParticipantPid,
+        timeout: std::time::Duration,
+    ) -> Result<(), LiminalError> {
         let (reply, response) = mpsc::sync_channel(1);
-        self.enqueue_for_pid(pid, QueuedCommandKind::Boot { reply })?;
-        wait_for(&response, "conversation actor boot")
+        let command_id = self.enqueue_for_pid(pid, QueuedCommandKind::Boot { reply })?;
+        let result = sync::wait_for_timeout(&response, "conversation actor boot", timeout);
+        if result.is_err() {
+            self.remove_command(command_id)?;
+        }
+        result
     }
 
     pub(super) fn submit_send(self: &Arc<Self>, message: Envelope) -> Result<(), LiminalError> {
@@ -186,19 +216,33 @@ impl ActorCore {
         wait_for(&response, "conversation state query")
     }
 
-    fn enqueue_for_pid(
+    /// Admits a command, returning its id (used by boot to purge on timeout).
+    ///
+    /// Admission and terminal publication share the command-queue lock: the
+    /// finalized flag is set inside a command-lock critical section that also
+    /// drains the queue (see [`Self::mark_finalized_and_drain_commands`]), so a
+    /// command is either admitted before finalization — and drained with the
+    /// typed error — or rejected here. There is no interleaving in which a
+    /// caller blocks on a command finalization can no longer see.
+    pub(super) fn enqueue_for_pid(
         &self,
         pid: ParticipantPid,
         kind: QueuedCommandKind,
-    ) -> Result<(), LiminalError> {
+    ) -> Result<u64, LiminalError> {
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
-        lock(&self.commands, "actor command queue")?.push_back(QueuedCommand { id, kind });
+        {
+            let mut commands = lock(&self.commands, "actor command queue")?;
+            if self.is_finalized() {
+                return Err(closed_error());
+            }
+            commands.push_back(QueuedCommand { id, kind });
+        }
         if self
             .supervisor
             .scheduler
             .enqueue_atom_message(pid.get(), self.supervisor.runtime.command_atom())
         {
-            Ok(())
+            Ok(id)
         } else {
             self.remove_command(id)?;
             Err(LiminalError::DeliveryFailed {
@@ -346,7 +390,19 @@ impl ActorCore {
             send_reply(&reply, Ok(envelope));
         } else {
             match lock(&self.pending_receives, "pending receives") {
-                Ok(mut pending) => pending.push_back(reply),
+                // Recheck finalization under the pending-queue lock before
+                // publishing the waiter: this receive was popped from the command
+                // queue before finalization drained it, so a plain push here
+                // could land AFTER finalization's own pending drain and block its
+                // caller forever. The mutex orders the check against the drain —
+                // whichever runs second sees the other's work.
+                Ok(mut pending) => {
+                    if self.is_finalized() {
+                        send_reply(&reply, Err(closed_error()));
+                    } else {
+                        pending.push_back(reply);
+                    }
+                }
                 Err(error) => send_reply(&reply, Err(error)),
             }
         }
@@ -356,12 +412,15 @@ impl ActorCore {
         {
             let mut state = lock(&self.state, "conversation state")?;
             // A conversation that already failed is terminal and does not transition
-            // to Closed; it still falls through to release its participants and drop
-            // the actor's registration below, which the failure path itself does not
-            // do (without this, a failed conversation leaks its actor and registry
-            // entry forever). Failed stays Failed: the phase is the diagnostic
-            // record, finalization is the `finalized` flag.
-            if state.current_phase != ConversationPhase::Failed {
+            // to Closed (Failed stays Failed: the phase is the diagnostic record,
+            // finalization is the `finalized` flag); one already Closed was
+            // finalized by a concurrent teardown while this Close was in flight.
+            // Both still fall through to release participants and registrations —
+            // every step below is idempotent.
+            if !matches!(
+                state.current_phase,
+                ConversationPhase::Failed | ConversationPhase::Closed
+            ) {
                 if state.current_phase == ConversationPhase::Created {
                     state.activate()?;
                 }
@@ -369,10 +428,9 @@ impl ActorCore {
                 state.close()?;
             }
         }
-        // Monotonic terminal marker: from here no handle operation may respawn
-        // the actor (checked by `ensure_running`), so close cannot be undone by
-        // a retained handle.
-        self.finalized.store(true, Ordering::Release);
+        // The interactive close publishes the terminal marker and drains queued
+        // commands exactly as `finalize` does, in the same one atomic step.
+        self.mark_finalized_and_drain_commands();
         self.drain_pending_receives();
         // Close terminates every real participant process and drops both the
         // participant and this actor's runtime registration: a closed conversation
@@ -383,20 +441,38 @@ impl ActorCore {
         if let Some(pid) = current_pid {
             self.supervisor.runtime.deregister_owned(pid, self);
         }
+        // The watcher's job (observing this actor's exit) is done; terminate it
+        // directly rather than relying on its self-stop slice, so close leaves no
+        // process behind even when the scheduler never runs the watcher again.
+        // Idempotent when the watcher already self-stopped.
+        if let Some(watcher) = self.watcher_pid() {
+            self.supervisor
+                .scheduler
+                .terminate_process(watcher.get(), ExitReason::Normal);
+        }
         Ok(())
     }
 
     /// Finalizes the conversation without requiring its actor process to run:
-    /// bounded, non-blocking, and idempotent. Marks the core finalized, moves a
-    /// non-Failed phase to Closed (Failed is kept as the diagnostic outcome),
-    /// fails pending receives and queued commands with the typed closed error,
-    /// terminates every participant and the actor process directly (a scheduler
-    /// tombstone write, not a request into the actor's command loop), and drops
-    /// both runtime registrations. This is the teardown-path entry point — a
+    /// bounded, non-blocking on the conversation scheduler, and idempotent.
+    /// Marks the core finalized, moves a non-Failed phase to Closed (Failed is
+    /// kept as the diagnostic outcome), fails pending receives and queued
+    /// commands with the typed closed error, terminates every participant, the
+    /// actor process, and its exit watcher directly (scheduler tombstone
+    /// writes, not requests into the actor's command loop), and drops both
+    /// runtime registrations. This is the teardown-path entry point — a
     /// connection releasing its conversations must never wait on the
     /// conversation scheduler being live or responsive.
     pub(crate) fn finalize(&self) {
-        if self.finalized.swap(true, Ordering::AcqRel) {
+        // Same lifecycle gate as `ensure_running`: finalization serializes with
+        // any in-progress spawn, so it can never observe a half-published actor
+        // (and a spawn that completes after finalization is rolled back by the
+        // spawner's own post-boot recheck). The hold is bounded — the gate is
+        // held across spawn's bounded arm/boot waits, never an unbounded one. A
+        // poisoned gate (a panicking spawner, denied workspace-wide) degrades to
+        // ungated finalization rather than leaking the conversation.
+        let _restart_guard = self.restart_lock.lock().ok();
+        if self.mark_finalized_and_drain_commands() {
             return;
         }
         if let Ok(mut state) = self.state.lock() {
@@ -405,7 +481,6 @@ impl ActorCore {
             }
         }
         self.drain_pending_receives();
-        self.drain_queued_commands();
         self.release_participants();
         let current_pid = self.current_pid.lock().ok().and_then(|pid| *pid);
         if let Some(pid) = current_pid {
@@ -414,6 +489,34 @@ impl ActorCore {
                 .terminate_process(pid.get(), ExitReason::Normal);
             self.supervisor.runtime.deregister_owned(pid, self);
         }
+        // Directly terminate the watcher too: on a stopped scheduler its
+        // self-stop slice never runs, and a retained (parked) watcher body per
+        // conversation is exactly the class of residue this repair removes.
+        if let Some(watcher) = self.watcher_pid() {
+            self.supervisor
+                .scheduler
+                .terminate_process(watcher.get(), ExitReason::Normal);
+        }
+    }
+
+    /// Publishes the terminal marker and drains the command queue in ONE
+    /// command-lock critical section, returning whether the core was already
+    /// finalized. Pairing the flag-set with the drain under the same lock that
+    /// admission holds makes the terminal transition atomic with command
+    /// admission: everything admitted before it is drained with the typed
+    /// error, everything after is rejected at [`Self::enqueue_for_pid`]. Lock
+    /// poisoning is tolerated (marker still set): finalization must complete.
+    fn mark_finalized_and_drain_commands(&self) -> bool {
+        let Ok(mut commands) = self.commands.lock() else {
+            return self.finalized.swap(true, Ordering::AcqRel);
+        };
+        let already = self.finalized.swap(true, Ordering::AcqRel);
+        if !already {
+            for command in commands.drain(..) {
+                fail_command(command.kind);
+            }
+        }
+        already
     }
 
     /// Fails every pending receive with the typed closed error. Lock poisoning is
@@ -428,28 +531,6 @@ impl ActorCore {
                         message: message.clone(),
                     }),
                 );
-            }
-        }
-    }
-
-    /// Fails every still-queued command with the typed closed error, so a caller
-    /// blocked on a command the terminated actor will never process is woken
-    /// instead of waiting forever.
-    fn drain_queued_commands(&self) {
-        let Ok(mut commands) = self.commands.lock() else {
-            return;
-        };
-        for command in commands.drain(..) {
-            let error = || LiminalError::ConversationFailed {
-                message: "conversation is closed".to_owned(),
-            };
-            match command.kind {
-                QueuedCommandKind::Boot { reply } | QueuedCommandKind::Send { reply, .. } => {
-                    send_reply(&reply, Err(error()));
-                }
-                QueuedCommandKind::Receive { reply } => send_reply(&reply, Err(error())),
-                QueuedCommandKind::Close { reply } => send_reply(&reply, Err(error())),
-                QueuedCommandKind::QueryState { reply } => send_reply(&reply, Err(error())),
             }
         }
     }
@@ -639,5 +720,31 @@ impl ActorCore {
             lock(&self.state, "conversation state")?.current_phase,
             ConversationPhase::Closed
         ))
+    }
+
+    /// Number of commands currently queued (lifecycle-gate observability).
+    #[cfg(test)]
+    pub(super) fn queued_command_count(&self) -> usize {
+        self.commands.lock().map_or(0, |commands| commands.len())
+    }
+
+    /// Number of receive waiters currently parked (lifecycle-gate observability).
+    #[cfg(test)]
+    pub(super) fn pending_receive_count(&self) -> usize {
+        self.pending_receives
+            .lock()
+            .map_or(0, |pending| pending.len())
+    }
+}
+
+/// Fails one drained command with the typed closed error, waking its caller.
+fn fail_command(kind: QueuedCommandKind) {
+    match kind {
+        QueuedCommandKind::Boot { reply } | QueuedCommandKind::Send { reply, .. } => {
+            send_reply(&reply, Err(closed_error()));
+        }
+        QueuedCommandKind::Receive { reply } => send_reply(&reply, Err(closed_error())),
+        QueuedCommandKind::Close { reply } => send_reply(&reply, Err(closed_error())),
+        QueuedCommandKind::QueryState { reply } => send_reply(&reply, Err(closed_error())),
     }
 }

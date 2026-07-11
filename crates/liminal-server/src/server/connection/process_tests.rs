@@ -141,6 +141,10 @@ impl ConversationResource for TestConversation {
     fn close(self: Box<Self>) -> Result<(), ServerError> {
         Ok(())
     }
+
+    fn finalize(self: Box<Self>) {
+        drop(self);
+    }
 }
 
 /// Wraps recording services in a runtime so `apply_frame` can be exercised without

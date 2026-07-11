@@ -17,6 +17,10 @@ use super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
 use crate::ServerError;
 
+#[cfg(test)]
+#[path = "process_teardown_tests.rs"]
+mod teardown_tests;
+
 const READ_BUFFER_BYTES: usize = 8192;
 /// Application stream id used for server-initiated push frames. Push is an
 /// application-stream frame (non-zero stream id), like publish and conversation.

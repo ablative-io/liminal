@@ -72,10 +72,12 @@ pub trait ConversationResource: std::fmt::Debug + Send {
     /// [`Self::close`] — `close` is a request/reply round trip into the
     /// conversation scheduler, and a teardown that waits on another scheduler
     /// being live re-creates the wedged-worker failure this repair removes.
-    /// The default suits resources with no live process behind them.
-    fn finalize(self: Box<Self>) {
-        drop(self);
-    }
+    /// Deliberately required, not defaulted: every resource author must decide
+    /// what teardown-safe release means for their live state (a defaulted
+    /// no-op would let a resource that needs real cleanup leak silently). A
+    /// resource with no live process behind it implements this as a plain
+    /// `drop(self)`.
+    fn finalize(self: Box<Self>);
 }
 
 /// Library conversation resource owned by a single connection process.

@@ -91,6 +91,30 @@ impl std::fmt::Debug for ActorExitWatcher {
 }
 
 impl NativeHandler for ActorExitWatcher {
+    /// One watcher slice, shaped by the readiness contract's C1/C4
+    /// install-before-final-recheck discipline pointed at process observation.
+    /// In order, never separated across slices:
+    ///
+    /// 1. **Arm** (first slice only): enable trap-exit — the observation
+    ///    channel — before anything can be missed, and only then signal the
+    ///    spawner, which links the actor to this watcher strictly afterwards
+    ///    (arm-before-install, so the link can never cascade-kill an untrapping
+    ///    watcher).
+    /// 2. **Drain**: consume every delivered message; a trapped
+    ///    `{EXIT, actor, _}` is the observation firing.
+    /// 3. **Final probe, inseparable from parking**: if no EXIT was drained,
+    ///    re-check the target's liveness in the process table in this same
+    ///    slice, immediately before returning `Wait`. A target that died while
+    ///    unlinked (before the boot slice installed the link) delivers no EXIT,
+    ///    so parking on the drain alone would sleep through its death; the
+    ///    probe converts any wake after that death into cleanup. A death after
+    ///    a truthful probe is covered either by the installed link (trapped
+    ///    EXIT enqueued and re-woken by beamr even against a mid-park slice) or
+    ///    by the construction rollback, which terminates this watcher directly
+    ///    when the boot that would have linked it fails.
+    ///
+    /// The watcher therefore never parks with its observation unarmed and
+    /// never parks over an already-dead target.
     fn handle(&mut self, ctx: &mut NativeContext<'_>) -> NativeOutcome {
         if let Some(armed) = self.armed.take() {
             ctx.set_trap_exit(true);
@@ -106,9 +130,6 @@ impl NativeHandler for ActorExitWatcher {
                 }
             }
         }
-        // The liveness re-check covers the window before the boot slice created
-        // the link: an actor that died unlinked delivers no EXIT, but any wake
-        // of this watcher after that death still observes the empty table slot.
         if actor_exited || self.actor_process_gone() {
             self.cleanup();
             return NativeOutcome::Stop(ExitReason::Normal);

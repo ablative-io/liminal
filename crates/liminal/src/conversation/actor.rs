@@ -105,7 +105,16 @@ impl ConversationSupervisor {
             behaviour,
             Arc::downgrade(&core),
         )?;
-        self.inner.spawn_actor_for(&core)?;
+        // The participant belongs to this construction attempt: a failed actor
+        // spawn rolls it back too (terminate + deregister), so no path out of a
+        // failed open leaves a parked participant behind.
+        if let Err(error) = self.inner.spawn_actor_for(&core) {
+            self.inner
+                .scheduler
+                .terminate_process(participant.get(), beamr::process::ExitReason::Normal);
+            self.inner.participant_runtime.deregister(participant);
+            return Err(error);
+        }
         let handle = ConversationHandle::new(Arc::new(ActorBackend {
             core: Arc::clone(&core),
         }));
@@ -214,6 +223,13 @@ impl ConversationActor {
     }
 }
 
+/// Test-only rendezvous installed at the arm→boot seam of one spawn attempt:
+/// the spawner sends the fresh actor pid and blocks until the test signals it
+/// to proceed, letting construction-ordering tests inject events (e.g. an
+/// actor kill) at an exact point instead of sleeping.
+#[cfg(test)]
+type BootBarrier = (mpsc::Sender<ParticipantPid>, mpsc::Receiver<()>);
+
 struct SupervisorInner {
     scheduler: Arc<Scheduler>,
     runtime: Arc<ActorRuntime>,
@@ -221,6 +237,8 @@ struct SupervisorInner {
     participant_wakeup_atom: Atom,
     module_name: Atom,
     entry_function: Atom,
+    #[cfg(test)]
+    boot_barrier: Mutex<Option<BootBarrier>>,
 }
 
 impl std::fmt::Debug for SupervisorInner {
@@ -263,7 +281,18 @@ impl SupervisorInner {
             participant_wakeup_atom,
             module_name,
             entry_function,
+            #[cfg(test)]
+            boot_barrier: Mutex::new(None),
         })
+    }
+
+    /// Installs the one-shot arm→boot rendezvous consumed by the next spawn
+    /// attempt; see [`BootBarrier`].
+    #[cfg(test)]
+    fn install_boot_barrier(&self, barrier: BootBarrier) {
+        if let Ok(mut slot) = self.boot_barrier.lock() {
+            *slot = Some(barrier);
+        }
     }
 
     /// Spawns a real participant native process running `behaviour`, registers it
@@ -288,31 +317,102 @@ impl SupervisorInner {
         Ok(ParticipantChannel::new(participant, inbox))
     }
 
+    /// Spawns and boots one actor incarnation as a rollback-safe transaction:
+    /// on ANY failure after the actor process exists, every process this
+    /// attempt created is terminated, the registration is removed, and the
+    /// queued boot command is purged (inside the bounded `boot`), so a failed
+    /// spawn leaves nothing behind. Finalization is rechecked immediately
+    /// before publishing the actor and again after boot: a spawn that loses to
+    /// a concurrent close/finalize rolls itself back rather than returning a
+    /// fresh actor nobody will ever clean up.
     fn spawn_actor_for(
         self: &Arc<Self>,
         core: &Arc<ActorCore>,
     ) -> Result<ParticipantPid, LiminalError> {
+        if core.is_finalized() {
+            return Err(LiminalError::ConversationFailed {
+                message: "conversation is closed".to_owned(),
+            });
+        }
         let pid = self
             .scheduler
             .spawn_trap_exit(self.module_name, self.entry_function, Vec::new())
             .map_err(|error| LiminalError::ConversationFailed {
                 message: format!("failed to spawn conversation actor: {error}"),
             })?;
-        let participant = ParticipantPid::new(pid);
-        self.runtime.register(participant, Arc::downgrade(core))?;
-        let watcher = self.spawn_watcher(core, participant)?;
-        core.set_watcher_pid(watcher)?;
-        core.set_current_pid(participant)?;
-        if let Err(error) = core.boot(participant) {
-            // Boot never linked the actor to its watcher, so the watcher would
-            // park forever and the registration would outlive the failed spawn:
-            // roll both back before surfacing the error.
-            self.scheduler
-                .terminate_process(watcher.get(), beamr::process::ExitReason::Normal);
-            self.runtime.deregister_owned(participant, core);
+        let actor = ParticipantPid::new(pid);
+        if let Err(error) = self.runtime.register(actor, Arc::downgrade(core)) {
+            self.rollback_actor_attempt(core, actor, None);
             return Err(error);
         }
-        Ok(participant)
+        let watcher = match self.spawn_watcher(core, actor) {
+            Ok(watcher) => watcher,
+            // `spawn_watcher` already terminated its own watcher on failure.
+            Err(error) => {
+                self.rollback_actor_attempt(core, actor, None);
+                return Err(error);
+            }
+        };
+        if let Err(error) = core
+            .set_watcher_pid(watcher)
+            .and_then(|()| core.set_current_pid(actor))
+        {
+            self.rollback_actor_attempt(core, actor, Some(watcher));
+            return Err(error);
+        }
+        #[cfg(test)]
+        self.boot_barrier_rendezvous(actor);
+        if let Err(error) = core.boot(actor) {
+            self.rollback_actor_attempt(core, actor, Some(watcher));
+            return Err(error);
+        }
+        // A close/finalize that could not take the lifecycle gate (the actor's
+        // own Close slice) may have finalized the core while boot was in
+        // flight; a success return here would publish an actor nobody cleans.
+        if core.is_finalized() {
+            self.rollback_actor_attempt(core, actor, Some(watcher));
+            return Err(LiminalError::ConversationFailed {
+                message: "conversation is closed".to_owned(),
+            });
+        }
+        Ok(actor)
+    }
+
+    /// Aborts one spawn attempt: terminates every process the attempt created
+    /// and removes the actor registration. Idempotent — each step tolerates
+    /// already-dead pids and already-removed entries, so it composes with the
+    /// watcher's own cleanup and with a concurrent finalize.
+    fn rollback_actor_attempt(
+        &self,
+        core: &ActorCore,
+        actor: ParticipantPid,
+        watcher: Option<ParticipantPid>,
+    ) {
+        if let Some(watcher) = watcher {
+            self.scheduler
+                .terminate_process(watcher.get(), beamr::process::ExitReason::Normal);
+        }
+        self.scheduler
+            .terminate_process(actor.get(), beamr::process::ExitReason::Normal);
+        self.runtime.deregister_owned(actor, core);
+    }
+
+    /// Blocks the spawning thread at the arm→boot seam when a test installed a
+    /// rendezvous, handing it the actor pid and waiting for its proceed signal.
+    /// This is the held-gap injection point for the construction-ordering pins
+    /// (actor killed after watcher arm, before the boot enqueue); it does not
+    /// exist outside tests.
+    #[cfg(test)]
+    fn boot_barrier_rendezvous(&self, actor: ParticipantPid) {
+        let barrier = self
+            .boot_barrier
+            .lock()
+            .ok()
+            .and_then(|mut barrier| barrier.take());
+        if let Some((notify, proceed)) = barrier {
+            let _ = notify.send(actor);
+            let _ = proceed.recv();
+        }
     }
 
     /// Spawns the exit watcher for a freshly spawned actor process and waits
