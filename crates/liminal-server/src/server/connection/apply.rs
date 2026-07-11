@@ -87,10 +87,11 @@ pub(super) fn apply_frame(
             ..
         } => unsubscribe_response(services, state, stream_id, subscription_id),
         Frame::ConversationOpen {
+            stream_id,
             conversation_id,
             subject,
             ..
-        } => conversation_open(pid, runtime, state, conversation_id, &subject),
+        } => conversation_open(pid, runtime, state, stream_id, conversation_id, &subject),
         Frame::ConversationMessage {
             flags,
             stream_id,
@@ -464,10 +465,15 @@ fn unsubscribe_response(
     }
 }
 
+// Every `ConversationError` this function emits rides the REQUEST'S stream id
+// (Sol round 2): a client that opened on stream 17 must see its typed refusal on
+// stream 17 — a refusal on a hard-coded stream would leave the client's actual
+// stream silent, turning the fail-closed refusals into a silent-timeout shape.
 fn conversation_open(
     pid: u64,
     runtime: &ConnectionRuntime,
     state: &mut ConnectionProcessState,
+    stream_id: u32,
     conversation_id: u64,
     subject: &str,
 ) -> FrameAction {
@@ -483,7 +489,7 @@ fn conversation_open(
     // error: close the conversation first, or use a fresh id.
     if state.conversations.contains_key(&conversation_id) {
         return conversation_error(
-            1,
+            stream_id,
             conversation_id,
             "conversation id is already open on this connection; close it before \
              reopening or use a fresh id",
@@ -495,7 +501,7 @@ fn conversation_open(
     // above, so every admission here is a distinct live conversation.
     if state.conversations.len() >= max_conversations {
         return conversation_error(
-            1,
+            stream_id,
             conversation_id,
             &ServerError::ConnectionCapReached {
                 operation: "conversation open".to_owned(),
@@ -529,7 +535,7 @@ fn conversation_open(
         }
         Err(error) => FrameAction::Respond(Frame::ConversationError {
             flags: 0,
-            stream_id: 1,
+            stream_id,
             conversation_id,
             reason_code: SERVER_ERROR_CODE,
             message: Some(error.to_string()),

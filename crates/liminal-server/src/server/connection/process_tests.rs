@@ -1298,6 +1298,7 @@ fn conversation_cap_refuses_past_the_limit_with_a_typed_error() -> Result<(), Se
 struct ForwardCountingServices {
     forwards: std::sync::atomic::AtomicUsize,
     fail_forwards: std::sync::atomic::AtomicBool,
+    fail_opens: std::sync::atomic::AtomicBool,
 }
 
 impl ForwardCountingServices {
@@ -1307,6 +1308,11 @@ impl ForwardCountingServices {
 
     fn fail_next_forwards(&self, fail: bool) {
         self.fail_forwards
+            .store(fail, std::sync::atomic::Ordering::Release);
+    }
+
+    fn fail_next_opens(&self, fail: bool) {
+        self.fail_opens
             .store(fail, std::sync::atomic::Ordering::Release);
     }
 }
@@ -1344,6 +1350,11 @@ impl ConnectionServices for ForwardCountingServices {
         _conversation_id: u64,
         _subject: &str,
     ) -> Result<ConnectionConversation, ServerError> {
+        if self.fail_opens.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ServerError::ListenerAccept {
+                message: "open failed under test".to_owned(),
+            });
+        }
         Ok(ConnectionConversation::new(Box::new(TestConversation)))
     }
 
@@ -1727,5 +1738,113 @@ fn duplicate_open_of_a_live_conversation_is_refused() -> Result<(), ServerError>
         opens, 1,
         "the services adapter never constructed a second instance"
     );
+    Ok(())
+}
+
+/// A `ConversationOpen` on a caller-chosen (non-default) stream.
+fn open_frame_on(stream_id: u32, conversation_id: u64) -> Frame {
+    Frame::ConversationOpen {
+        flags: 0,
+        stream_id,
+        conversation_id,
+        subject: "s".to_owned(),
+    }
+}
+
+/// Extracts the `(stream_id, message)` from an expected `ConversationError`
+/// response, or reports what was actually returned.
+fn conversation_error_parts(action: FrameAction) -> Result<(u32, String), ServerError> {
+    let FrameAction::Respond(Frame::ConversationError {
+        stream_id,
+        message: Some(message),
+        ..
+    }) = action
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a ConversationError, got {action:?}"),
+        });
+    };
+    Ok((stream_id, message))
+}
+
+/// Sol round 2: every `ConversationOpen` refusal rides the REQUEST'S stream id,
+/// never a hard-coded stream. A client that opened on stream 17 must see its
+/// typed refusal on stream 17 — all three refusal paths (duplicate-open, the
+/// `max_conversations` cap, and an adapter open error) are pinned here.
+#[test]
+fn open_refusals_preserve_the_request_stream_id() -> Result<(), ServerError> {
+    const OPEN_STREAM: u32 = 17;
+    let services = Arc::new(ForwardCountingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::clone(&services) as Arc<_>,
+        limits_with(|l| l.max_conversations_per_connection = 1),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    // A successful open on stream 17 (fills the cap of 1).
+    assert!(matches!(
+        apply_frame(
+            TEST_PID,
+            &runtime,
+            &mut state,
+            open_frame_on(OPEN_STREAM, 1)
+        ),
+        FrameAction::NoResponse
+    ));
+
+    // Refusal path 1 — duplicate open of the live id: refusal on stream 17.
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        open_frame_on(OPEN_STREAM, 1),
+    );
+    let (stream, message) = conversation_error_parts(action)?;
+    assert_eq!(
+        stream, OPEN_STREAM,
+        "the duplicate-open refusal rides the request's stream"
+    );
+    assert!(message.contains("already open"));
+
+    // Refusal path 2 — the max_conversations cap: refusal on stream 17.
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        open_frame_on(OPEN_STREAM, 2),
+    );
+    let (stream, message) = conversation_error_parts(action)?;
+    assert_eq!(
+        stream, OPEN_STREAM,
+        "the cap refusal rides the request's stream"
+    );
+    assert!(message.contains("max_conversations_per_connection"));
+
+    // Refusal path 3 — the services adapter's open error: refusal on stream 17.
+    // Free the cap first so the adapter is actually reached.
+    let close = Frame::ConversationClose {
+        flags: 0,
+        stream_id: OPEN_STREAM,
+        conversation_id: 1,
+        reason_code: None,
+        message: None,
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, close),
+        FrameAction::NoResponse
+    ));
+    services.fail_next_opens(true);
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        open_frame_on(OPEN_STREAM, 3),
+    );
+    let (stream, message) = conversation_error_parts(action)?;
+    assert_eq!(
+        stream, OPEN_STREAM,
+        "the adapter open error rides the request's stream"
+    );
+    assert!(message.contains("open failed under test"));
     Ok(())
 }
