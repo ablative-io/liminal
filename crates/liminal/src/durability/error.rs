@@ -46,6 +46,17 @@ pub enum DurabilityError {
     #[error("ephemeral store open failed: {0}")]
     EphemeralStoreOpen(String),
 
+    /// An operation reached an ephemeral store whose backing database was
+    /// already detached by teardown.
+    ///
+    /// Unreachable by construction: the store is detached only inside the
+    /// ephemeral guard's `Drop`, which cannot overlap a live handle's call.
+    /// The variant exists because that detachment is expressed through an
+    /// `Option` the compiler cannot see through, and the fallback must be a
+    /// typed refusal rather than a panic.
+    #[error("ephemeral store already detached by teardown")]
+    EphemeralStoreDetached,
+
     /// Persisted envelope bytes could not be encoded or decoded.
     #[error("envelope serialization error: {0}")]
     EnvelopeError(String),

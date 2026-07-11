@@ -12,6 +12,7 @@ use liminal::conversation::{
 use liminal::durability::bridge::block_on;
 use liminal::durability::{
     DedupCache, DedupDecision, DurableStore, HaematiteStore, ProcessingReceipt, open_ephemeral,
+    open_ephemeral_rooted,
 };
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
@@ -225,7 +226,7 @@ impl LiminalConnectionServices {
     /// # Errors
     /// Returns [`ServerError`] when a configured channel cannot be initialized.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
-        let store = build_durable_store(config.persistence_path.as_deref())?;
+        let store = build_durable_store(config.persistence_path.as_deref(), None)?;
         Self::from_config_with_store(config, store)
     }
 
@@ -313,7 +314,7 @@ impl LiminalConnectionServices {
                 message: format!("failed to start conversation supervisor: {error}"),
             }
         })?);
-        let durable_store = build_durable_store(None)?;
+        let durable_store = build_durable_store(None, None)?;
         let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
         Ok(Self {
             channels: HashMap::new(),
@@ -519,12 +520,22 @@ const DELIVERY_DEDUP_NAMESPACE: &str = "liminal:delivery-dedup";
 /// (D3), so it leaves no residue once the last store handle drops. The two paths
 /// return distinct concrete stores on purpose — only the ephemeral one carries a
 /// directory guard; the persistent path is untouched.
+///
+/// `ephemeral_root` relocates the ephemeral directory from the system temp dir
+/// to the given root. Production callers pass `None`; the D3 construction gate
+/// passes an isolated root so "no ephemeral directory was created" is a real
+/// assertion rather than a scan of the shared temp dir.
 fn build_durable_store(
     persistence_path: Option<&Path>,
+    ephemeral_root: Option<&Path>,
 ) -> Result<Arc<dyn DurableStore>, ServerError> {
     let Some(path) = persistence_path else {
-        let store =
-            open_ephemeral(DEFAULT_SHARD_COUNT).map_err(|error| ServerError::ConfigValidation {
+        let store = ephemeral_root
+            .map_or_else(
+                || open_ephemeral(DEFAULT_SHARD_COUNT),
+                |root| open_ephemeral_rooted(root, DEFAULT_SHARD_COUNT),
+            )
+            .map_err(|error| ServerError::ConfigValidation {
                 message: format!("failed to open ephemeral durable store: {error}"),
             })?;
         return Ok(Arc::new(store));
@@ -816,37 +827,65 @@ pub(super) fn server_error_from_protocol(error: &ProtocolError) -> ServerError {
 mod durable_store_tests {
     use super::build_durable_store;
 
+    /// Counts directory entries under `root`, for the empty/one-dir assertions
+    /// on an injected ephemeral root.
+    fn entry_count(root: &std::path::Path) -> usize {
+        std::fs::read_dir(root)
+            .expect("ephemeral root is readable")
+            .count()
+    }
+
     /// §9 D3 construction gate (persistent half): requesting a *persistent* store
-    /// creates its database under the configured path and no temporary directory.
+    /// creates its database under the configured path and NO ephemeral directory.
     ///
-    /// Asserting against the configured tree rather than scanning the system temp
-    /// dir keeps this race-free under parallel tests: the persistent branch never
-    /// reaches the ephemeral temp-dir constructor, so its only on-disk residue is
-    /// the configured `durability/` subtree.
+    /// The injected ephemeral root is where any ephemeral directory would have
+    /// to appear, so "the root stays empty" is a real negative assertion — a
+    /// regression that constructs an ephemeral store on the persistent branch
+    /// lands its directory here and fails this test.
     #[test]
     fn persistent_store_uses_configured_path_and_creates_no_temp_dir() {
         let home = tempfile::tempdir().expect("test can create a temp dir");
+        let ephemeral_root = tempfile::tempdir().expect("test can create an ephemeral root");
 
-        let store = build_durable_store(Some(home.path())).expect("persistent store builds");
+        let store = build_durable_store(Some(home.path()), Some(ephemeral_root.path()))
+            .expect("persistent store builds");
 
         assert!(
             home.path().join("durability").join("config.json").exists(),
             "the persistent database is created under the configured path"
         );
-        let stray_temp_dir = std::fs::read_dir(home.path())
-            .expect("configured path is readable")
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("liminal-durability-")
-            });
-        assert!(
-            !stray_temp_dir,
+        assert_eq!(
+            entry_count(ephemeral_root.path()),
+            0,
             "the persistent branch creates no ephemeral guard directory"
         );
 
         drop(store);
+    }
+
+    /// Pins the wiring seam: the ephemeral branch of `build_durable_store` goes
+    /// through the guarded constructor — exactly one directory appears under the
+    /// injected root while the store lives, and zero residue remains after the
+    /// last handle drops.
+    #[test]
+    fn ephemeral_store_directory_is_owned_through_the_build_seam() {
+        let ephemeral_root = tempfile::tempdir().expect("test can create an ephemeral root");
+
+        let store =
+            build_durable_store(None, Some(ephemeral_root.path())).expect("ephemeral store builds");
+
+        assert_eq!(
+            entry_count(ephemeral_root.path()),
+            1,
+            "the ephemeral branch creates exactly one guard directory"
+        );
+
+        drop(store);
+
+        assert_eq!(
+            entry_count(ephemeral_root.path()),
+            0,
+            "dropping the last store handle removes the guard directory — zero residue"
+        );
     }
 }

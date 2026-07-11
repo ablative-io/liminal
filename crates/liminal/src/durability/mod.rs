@@ -32,6 +32,7 @@ pub use replay::replay_from;
 
 pub use store::{
     DurableStore, EphemeralHaematiteStore, HaematiteStore, StoredEntry, open_ephemeral,
+    open_ephemeral_rooted,
 };
 
 pub mod bridge;
