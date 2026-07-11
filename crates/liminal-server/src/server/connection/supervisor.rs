@@ -16,8 +16,8 @@ use liminal::protocol::WorkerRegistration;
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
 use super::services::{
-    ConnectionServices, ConstructionCensus, LiminalConnectionServices,
-    build_connection_services_censused, no_census,
+    ConnectionServices, LiminalConnectionServices, ProductionSubsystems, SubsystemFactory,
+    build_connection_services_via,
 };
 use crate::ServerError;
 use crate::config::types::ServerConfig;
@@ -46,19 +46,20 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when service construction or scheduler startup fails.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
-        Self::from_config_censused(config, &no_census)
+        Self::from_config_via(config, &ProductionSubsystems)
     }
 
-    /// [`Self::from_config`] with the §9 D2 scheduler census attached.
+    /// [`Self::from_config`] with the §9 D2 subsystem factory injected.
     ///
-    /// The census observes every scheduler-owning subsystem the services
-    /// construction builds; the connection scheduler itself (built below for BOTH
+    /// The factory is the only route to every scheduler-owning subsystem the
+    /// services construction builds, so a recording factory observes exactly what
+    /// was constructed; the connection scheduler itself (built below for BOTH
     /// profiles) is the census baseline, not a census entry.
-    fn from_config_censused(
+    fn from_config_via(
         config: &ServerConfig,
-        census: ConstructionCensus<'_>,
+        subsystems: &dyn SubsystemFactory,
     ) -> Result<Self, ServerError> {
-        let services = build_connection_services_censused(config, census)?;
+        let services = build_connection_services_via(config, subsystems)?;
         // The configured token (if any) is carried opaquely as bytes for a
         // constant-time comparison against the handshake's `auth_token`. Absent
         // `[auth]` leaves it `None`, so the connection stays open-access.

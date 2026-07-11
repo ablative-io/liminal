@@ -138,10 +138,11 @@ mod tests {
     /// `Result`; this returning a bare `Self` is the in-language signal that no
     /// beamr scheduler is created by the adapter itself.
     ///
-    /// The thread half of the §9 gate is the SEAM CENSUS, not this test: the
-    /// scheduler-construction census threaded through the profile-aware
-    /// construction path (`services::SchedulerSubsystem`, asserted with a
-    /// full-profile positive control in
+    /// The thread half of the §9 gate is the record-by-construction SEAM CENSUS,
+    /// not this test: the profile-aware construction path reaches every
+    /// scheduler-owning subsystem only through `services::SubsystemFactory`, whose
+    /// recording test implementation cannot skip a record without also failing to
+    /// construct (asserted with a full-profile positive control in
     /// `services::durable_store_tests` and `supervisor::tests`). A true OS-level
     /// thread census still belongs to the beamr composition lane's upcoming
     /// scheduler-inventory API; the census assertions upgrade to it when it lands.
