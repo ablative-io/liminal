@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use beamr::process::ExitReason;
 use beamr::process::registry::ProcessHandle;
 
 use crate::channel::ChannelMode;
@@ -202,6 +203,11 @@ pub struct ParticipantStatus {
     /// participant is marked dead. Replayed to a late exit-notifier registrant
     /// so a crash that lands before registration is not lost.
     pub exited_at: Option<Instant>,
+    /// EXIT reason carried by the participant's trapped exit signal, set when
+    /// the participant is marked dead. `None` while alive, or when the death
+    /// was discovered without a signal (boot pruning a pid that died while no
+    /// actor was linked to it).
+    pub exit_reason: Option<ExitReason>,
 }
 
 impl ParticipantStatus {
@@ -212,13 +218,17 @@ impl ParticipantStatus {
             participant,
             health: ParticipantHealth::Alive,
             exited_at: None,
+            exit_reason: None,
         }
     }
 
-    /// Marks this participant dead, recording the instant its EXIT was observed.
-    pub const fn mark_dead_at(&mut self, at: Instant) {
+    /// Marks this participant dead, recording the instant its EXIT was observed
+    /// and the reason its exit signal carried (`None` when the death was
+    /// discovered without a signal).
+    pub const fn mark_dead_at(&mut self, at: Instant, reason: Option<ExitReason>) {
         self.health = ParticipantHealth::Dead;
         self.exited_at = Some(at);
+        self.exit_reason = reason;
     }
 }
 
@@ -235,6 +245,16 @@ pub enum ConversationContextEntry {
         participant: ParticipantPid,
         /// Policy applied by the actor.
         policy: CrashPolicy,
+    },
+    /// The conversation's supervision structure was violated: its exit watcher
+    /// died while the conversation was live (nothing legitimate terminates the
+    /// watcher externally). The conversation is failed and finalized in
+    /// response, never continued unobserved.
+    SupervisionFailed {
+        /// The dead watcher's PID.
+        watcher: ParticipantPid,
+        /// EXIT reason carried by the watcher's exit signal, when one was.
+        reason: Option<ExitReason>,
     },
 }
 
@@ -339,16 +359,18 @@ impl ConversationState {
     }
 
     /// Records participant crash handling and marks that participant dead,
-    /// stamping `exited_at` as the instant the EXIT signal was observed.
+    /// stamping `exited_at` as the instant the EXIT signal was observed and
+    /// `reason` as the signal's exit reason (when one was carried).
     pub fn record_participant_crash(
         &mut self,
         participant: ParticipantPid,
         policy: CrashPolicy,
         exited_at: Instant,
+        reason: Option<ExitReason>,
     ) {
         for status in &mut self.participants {
             if status.participant == participant {
-                status.mark_dead_at(exited_at);
+                status.mark_dead_at(exited_at, reason);
             }
         }
         self.context

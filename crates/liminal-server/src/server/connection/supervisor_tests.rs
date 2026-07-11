@@ -7,7 +7,9 @@ use beamr::process::ExitReason;
 use liminal::protocol::{Frame, SchemaId, decode, encode, encoded_len};
 
 use super::{ConnectionRuntime, ConnectionSupervisor, PushReplyAwaiter};
-use crate::server::connection::services::{ConnectionServices, server_error_from_protocol};
+use crate::server::connection::services::{
+    ConnectionServices, LiminalConnectionServices, server_error_from_protocol,
+};
 
 #[test]
 fn spawning_connections_creates_distinct_beamr_processes() -> Result<(), Box<dyn std::error::Error>>
@@ -199,7 +201,7 @@ fn flush_durable_state_propagates_shutdown_flush() -> Result<(), Box<dyn std::er
 /// allocate-id / register-slot / build-awaiter sequence so the close-path tests
 /// exercise the same `push_replies` bookkeeping the production path uses.
 fn outstanding_push(
-    runtime: &ConnectionRuntime,
+    runtime: &std::sync::Arc<ConnectionRuntime>,
     pid: u64,
 ) -> Result<PushReplyAwaiter, Box<dyn std::error::Error>> {
     let correlation_id = runtime.next_push_correlation_id();
@@ -207,7 +209,35 @@ fn outstanding_push(
     Ok(PushReplyAwaiter {
         correlation_id,
         receiver,
+        runtime: std::sync::Arc::downgrade(runtime),
     })
+}
+
+#[test]
+fn timed_out_push_cancels_its_reply_slot() -> Result<(), Box<dyn std::error::Error>> {
+    // D4 push-slot leak: a reserved slot whose reply never arrives must be released
+    // when its deadline passes, not left until connection close. The connection
+    // stays open (no `finish`/`mark_crashed`), so only the deadline can free it.
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 41;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+    assert_eq!(runtime.pending_push_count(), 1, "the slot is reserved");
+
+    let result = awaiter.receive(Duration::from_millis(50));
+
+    assert!(
+        matches!(result, Err(crate::ServerError::PushReplyTimeout { .. })),
+        "a slow-but-connected worker must yield a typed timeout, got {result:?}"
+    );
+    assert_eq!(
+        runtime.pending_push_count(),
+        0,
+        "the timed-out slot must be cancelled, not leaked until connection close"
+    );
+    Ok(())
 }
 
 #[test]
@@ -217,7 +247,9 @@ fn closing_connection_wakes_outstanding_push_awaiter_promptly()
     // the connection closes. The awaiter must wake IMMEDIATELY with a disconnected
     // error rather than blocking the full push-reply timeout. We pass a 30s timeout
     // and assert the call returns well under it — proving cancellation, not timeout.
-    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
     let pid = 7;
     runtime.register(pid, None)?;
     let awaiter = outstanding_push(&runtime, pid)?;
@@ -251,7 +283,9 @@ fn mark_crashed_wakes_outstanding_push_awaiter_promptly() -> Result<(), Box<dyn 
     // The crash close route must cancel outstanding pushes just like the graceful
     // `finish` route: a crashing connection is exactly the worker-death case the
     // prompt signal exists for.
-    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
     let pid = 11;
     runtime.register(pid, None)?;
     let awaiter = outstanding_push(&runtime, pid)?;
@@ -282,7 +316,9 @@ fn closing_one_connection_leaves_other_connections_push_intact()
     // Per-pid isolation: two connections each hold an outstanding push. Closing one
     // must wake ONLY its awaiter; the other connection's push still resolves
     // normally via `resolve_push`.
-    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
     let closing_pid = 21;
     let surviving_pid = 22;
     runtime.register(closing_pid, None)?;
@@ -319,7 +355,9 @@ fn resolved_push_then_close_is_a_noop_with_no_double_send() -> Result<(), Box<dy
     // Resolved-then-close: resolve a push (awaiter gets the reply), THEN close the
     // connection. The close must not panic or double-send; the already-resolved
     // correlation id was removed by `resolve_push`, so cancellation is a no-op.
-    let runtime = ConnectionRuntime::for_tests(std::sync::Arc::new(FlushFailingServices));
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
     let pid = 31;
     runtime.register(pid, None)?;
     let awaiter = outstanding_push(&runtime, pid)?;
@@ -332,6 +370,328 @@ fn resolved_push_then_close_is_a_noop_with_no_double_send() -> Result<(), Box<dy
     // Closing afterwards is a no-op for the already-resolved slot.
     runtime.finish(pid);
     Ok(())
+}
+
+/// D4: a connection torn down with conversations still open must close them so no
+/// conversation actor or participant leaks. The connection here dies by EOF
+/// (client dropped) with two conversations open; the teardown path must return the
+/// conversation supervisor's scheduler to its pre-open process count.
+#[test]
+fn connection_teardown_closes_open_conversations() -> Result<(), Box<dyn std::error::Error>> {
+    let services = std::sync::Arc::new(LiminalConnectionServices::empty()?);
+    let conv_scheduler = services.conversation_supervisor().scheduler();
+    let baseline = conv_scheduler.process_table().len();
+
+    let supervisor = ConnectionSupervisor::with_services(services.clone())?;
+    let (client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+
+    // Open two conversations over the connection; each spawns an actor, a
+    // participant, and an exit watcher, so the conversation scheduler gains six
+    // processes.
+    let mut writer = client;
+    write_frame(&mut writer, &conversation_open_frame(1, "subject-1"))?;
+    write_frame(&mut writer, &conversation_open_frame(2, "subject-2"))?;
+    wait_for_process_count(&conv_scheduler, baseline + 6)?;
+
+    // Abrupt teardown: drop the client so the connection reads EOF and finalizes.
+    drop(writer);
+    wait_for_cleanup(&supervisor, handle.pid())?;
+
+    // Teardown must have finalized both conversations: zero leaked
+    // actors/participants in the process table AND in both lifecycle registries.
+    wait_for_process_count(&conv_scheduler, baseline)?;
+    assert_eq!(
+        services.conversation_supervisor().registered_actor_count(),
+        0
+    );
+    assert_eq!(
+        services
+            .conversation_supervisor()
+            .registered_participant_count(),
+        0
+    );
+    assert_eq!(supervisor.active_connection_count(), 0);
+
+    supervisor.shutdown();
+    services.conversation_supervisor().shutdown();
+    Ok(())
+}
+
+/// D4 churn gate (connections): repeated connect / open-conversation / abrupt-close
+/// cycles must leave the conversation scheduler bounded — every cycle returns to
+/// baseline rather than accumulating leaked actors/participants.
+#[test]
+fn connection_open_close_churn_pins_bounded_conversation_processes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let services = std::sync::Arc::new(LiminalConnectionServices::empty()?);
+    let conv_scheduler = services.conversation_supervisor().scheduler();
+    let baseline = conv_scheduler.process_table().len();
+    let supervisor = ConnectionSupervisor::with_services(services.clone())?;
+
+    for cycle in 0..8 {
+        let (client, server) = tcp_pair()?;
+        let handle = supervisor.spawn_connection(server)?;
+        let mut writer = client;
+        write_frame(
+            &mut writer,
+            &conversation_open_frame(cycle, "churn-subject"),
+        )?;
+        wait_for_process_count(&conv_scheduler, baseline + 3)?;
+        drop(writer);
+        wait_for_cleanup(&supervisor, handle.pid())?;
+        wait_for_process_count(&conv_scheduler, baseline)?;
+    }
+
+    assert_eq!(conv_scheduler.process_table().len(), baseline);
+    assert_eq!(
+        services.conversation_supervisor().registered_actor_count(),
+        0
+    );
+    assert_eq!(
+        services
+            .conversation_supervisor()
+            .registered_participant_count(),
+        0
+    );
+    assert_eq!(supervisor.active_connection_count(), 0);
+
+    supervisor.shutdown();
+    services.conversation_supervisor().shutdown();
+    Ok(())
+}
+
+/// D4 rework minor-2(a): a connection terminated EXTERNALLY (never running
+/// another slice — the reap-class route, covered by the handler's `Drop`
+/// backstop) with conversations open must still return the conversation
+/// scheduler's process table AND both lifecycle registries to baseline. All
+/// waits are deadline-bounded, so a hang fails instead of wedging CI.
+#[test]
+fn externally_terminated_connection_with_open_conversations_returns_to_baseline()
+-> Result<(), Box<dyn std::error::Error>> {
+    let services = std::sync::Arc::new(LiminalConnectionServices::empty()?);
+    let conv_scheduler = services.conversation_supervisor().scheduler();
+    let baseline = conv_scheduler.process_table().len();
+    let supervisor = ConnectionSupervisor::with_services(services.clone())?;
+    let (client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+
+    let mut writer = client;
+    write_frame(&mut writer, &conversation_open_frame(1, "ext-subject-1"))?;
+    write_frame(&mut writer, &conversation_open_frame(2, "ext-subject-2"))?;
+    wait_for_process_count(&conv_scheduler, baseline + 6)?;
+
+    // External termination: beamr cleans the process up outside the handler's
+    // slice path; only the Drop backstop can release the conversations.
+    supervisor
+        .scheduler()
+        .terminate_process(handle.pid(), ExitReason::Error);
+    wait_for_cleanup(&supervisor, handle.pid())?;
+
+    wait_for_process_count(&conv_scheduler, baseline)?;
+    assert_eq!(
+        services.conversation_supervisor().registered_actor_count(),
+        0
+    );
+    assert_eq!(
+        services
+            .conversation_supervisor()
+            .registered_participant_count(),
+        0
+    );
+
+    drop(writer);
+    supervisor.shutdown();
+    services.conversation_supervisor().shutdown();
+    Ok(())
+}
+
+/// D4 rework minor-2(b) — the blocker's sharpest consequence pinned: releasing a
+/// connection's conversations AFTER the conversation scheduler has stopped must
+/// return promptly. Finalization terminates processes and clears registries
+/// through direct scheduler-state writes, never a request into a conversation
+/// slice, so a stopped (or wedged) conversation scheduler cannot hang connection
+/// teardown. A watchdog bounds the whole release; a hang FAILS the test.
+#[test]
+fn connection_cleanup_after_conversation_scheduler_shutdown_is_prompt()
+-> Result<(), Box<dyn std::error::Error>> {
+    let services = std::sync::Arc::new(LiminalConnectionServices::empty()?);
+    let conv_scheduler = services.conversation_supervisor().scheduler();
+    let baseline = conv_scheduler.process_table().len();
+    let supervisor = ConnectionSupervisor::with_services(services.clone())?;
+    let (client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+
+    let mut writer = client;
+    write_frame(&mut writer, &conversation_open_frame(7, "stopped-subject"))?;
+    let conversation_supervisor = services.conversation_supervisor();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while conversation_supervisor.registered_actor_count() < 1 {
+        if Instant::now() > deadline {
+            return Err("conversation was not opened in time".into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    // Stop the conversation scheduler FIRST, then tear the connection down. The
+    // release must not depend on any conversation slice ever running again.
+    conversation_supervisor.shutdown();
+
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let scheduler = supervisor.scheduler();
+    let pid = handle.pid();
+    let watchdog = thread::spawn(move || {
+        scheduler.terminate_process(pid, ExitReason::Error);
+        done_tx.send(()).ok();
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|_| "connection teardown hung against a stopped conversation scheduler")?;
+    watchdog
+        .join()
+        .map_err(|_| "teardown watchdog thread panicked")?;
+
+    // Finalization deregisters everything AND terminates the actor, the
+    // participant, and the exit watcher directly (scheduler tombstone writes),
+    // so the process table returns to BASELINE even though the stopped
+    // scheduler never runs another slice. The handler `Drop` that runs it lands
+    // at the busy-looping connection slice's store-back, so the wait is
+    // deadline-bounded rather than instant.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while conversation_supervisor.registered_actor_count() != 0
+        || conversation_supervisor.registered_participant_count() != 0
+        || conv_scheduler.process_table().len() != baseline
+    {
+        if Instant::now() > deadline {
+            return Err(format!(
+                "residue against a stopped conversation scheduler: actors={} \
+                 participants={} table={} (baseline {baseline})",
+                conversation_supervisor.registered_actor_count(),
+                conversation_supervisor.registered_participant_count(),
+                conv_scheduler.process_table().len()
+            )
+            .into());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    drop(writer);
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 rework minor-1 pin: the push resolve/timeout race, staged deterministically
+/// with the slot-registry mutex as the barrier. The awaiter's deadline expires
+/// while the resolver holds the registry lock; the resolver then wins the
+/// resolved-vs-cancelled transition (remove + send under the lock, exactly what
+/// `resolve_push` does) before releasing it. The awaiter must return the reply —
+/// not report a timeout for an answer that arrived — and the slot must be gone.
+#[test]
+fn resolver_winning_the_timeout_race_delivers_the_reply() -> Result<(), Box<dyn std::error::Error>>
+{
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 51;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+    let correlation_id = awaiter.correlation_id();
+    let reply = b"late-but-won".to_vec();
+
+    // Hold the slot-registry lock: the awaiter's post-timeout `cancel_push`
+    // cannot proceed until the resolver below has finished, so the interleaving
+    // is enforced by the mutex, not by sleeps.
+    let mut slots = runtime
+        .push_replies
+        .lock()
+        .map_err(|error| format!("slot registry lock poisoned: {error}"))?;
+
+    let awaiter_thread = thread::spawn(move || awaiter.receive(Duration::from_millis(20)));
+
+    // Let the awaiter's deadline expire; it then blocks on the held lock. (The
+    // sleep only makes the block observable — the outcome is lock-ordered and
+    // identical even if the awaiter arrives later.)
+    thread::sleep(Duration::from_millis(100));
+
+    // The resolver's winning transition, under the same lock `resolve_push`
+    // uses: remove the slot, send the payload before releasing.
+    let pending = slots
+        .remove(&correlation_id)
+        .ok_or("the reserved slot must still be present")?;
+    pending.sender.send(reply.clone()).ok();
+    drop(slots);
+
+    let received = awaiter_thread
+        .join()
+        .map_err(|_| "awaiter thread panicked")?
+        .map_err(|error| format!("awaiter must return the delivered reply, got {error}"))?;
+    assert_eq!(received, reply);
+    assert_eq!(runtime.pending_push_count(), 0, "the slot must be gone");
+    Ok(())
+}
+
+/// The other side of the minor-1 transition: when the timeout WINS (slot removed
+/// by the awaiter), a late resolve is a discard — the reply is never delivered,
+/// not even to a retried receive.
+#[test]
+fn timeout_winning_the_race_discards_the_late_reply() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 52;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+
+    let result = awaiter.receive(Duration::from_millis(20));
+    assert!(
+        matches!(result, Err(crate::ServerError::PushReplyTimeout { .. })),
+        "with no reply the deadline expiry must report a typed timeout, got {result:?}"
+    );
+    assert_eq!(
+        runtime.pending_push_count(),
+        0,
+        "the timeout freed the slot"
+    );
+
+    // A very late reply finds no slot: discarded, and a retried receive reports
+    // the dropped sender (disconnected), never the stale payload.
+    runtime.resolve_push(awaiter.correlation_id(), b"too-late".to_vec());
+    let retried = awaiter.receive(Duration::from_millis(20));
+    assert!(
+        matches!(
+            retried,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "a late reply must be discarded, got {retried:?}"
+    );
+    Ok(())
+}
+
+fn conversation_open_frame(conversation_id: u64, subject: &str) -> Frame {
+    Frame::ConversationOpen {
+        flags: 0,
+        stream_id: 1,
+        conversation_id,
+        subject: subject.to_owned(),
+    }
+}
+
+fn wait_for_process_count(
+    scheduler: &beamr::scheduler::Scheduler,
+    target: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if scheduler.process_table().len() == target {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Err(format!(
+        "conversation scheduler process count did not reach {target} (now {})",
+        scheduler.process_table().len()
+    )
+    .into())
 }
 
 fn wait_for_cleanup(

@@ -65,6 +65,19 @@ pub trait ConversationResource: std::fmt::Debug + Send {
     /// # Errors
     /// Returns [`ServerError`] when the liminal library reports a close failure.
     fn close(self: Box<Self>) -> Result<(), ServerError>;
+
+    /// Releases the resource without requiring its backing actor to run:
+    /// bounded, non-blocking, and idempotent. Connection teardown paths (and
+    /// the teardown `Drop` backstop) MUST use this instead of
+    /// [`Self::close`] — `close` is a request/reply round trip into the
+    /// conversation scheduler, and a teardown that waits on another scheduler
+    /// being live re-creates the wedged-worker failure this repair removes.
+    /// Deliberately required, not defaulted: every resource author must decide
+    /// what teardown-safe release means for their live state (a defaulted
+    /// no-op would let a resource that needs real cleanup leak silently). A
+    /// resource with no live process behind it implements this as a plain
+    /// `drop(self)`.
+    fn finalize(self: Box<Self>);
 }
 
 /// Library conversation resource owned by a single connection process.
@@ -115,6 +128,11 @@ impl ConnectionConversation {
 
     pub(super) fn close(self) -> Result<(), ServerError> {
         self.resource.close()
+    }
+
+    /// Non-blocking teardown release; see [`ConversationResource::finalize`].
+    pub(super) fn finalize(self) {
+        self.resource.finalize();
     }
 }
 
@@ -263,5 +281,9 @@ impl ConversationResource for LiminalConversationResource {
             .map_err(|error| ServerError::ListenerAccept {
                 message: format!("conversation close failed: {error}"),
             })
+    }
+
+    fn finalize(self: Box<Self>) {
+        self.actor.finalize();
     }
 }

@@ -118,6 +118,30 @@ impl ParticipantRuntime {
         }
     }
 
+    /// Drops every registration whose owning actor core is gone, terminating the
+    /// registered participant process first so an unreachable conversation (core
+    /// dropped without close) cannot leave its participants parked. Called from
+    /// the actor-exit watcher, so removal is exit-driven, not touch-driven.
+    pub(super) fn reap_orphans(&self, scheduler: &Scheduler) {
+        if let Ok(mut registrations) = self.registrations.lock() {
+            registrations.retain(|&pid, registration| {
+                if registration.core.strong_count() > 0 {
+                    return true;
+                }
+                scheduler.terminate_process(pid, beamr::process::ExitReason::Normal);
+                false
+            });
+        }
+    }
+
+    /// Number of live participant registrations. A closed conversation must leave
+    /// none, so the churn gate pins this bounded across open/close cycles.
+    pub(super) fn registration_count(&self) -> usize {
+        self.registrations
+            .lock()
+            .map_or(0, |registrations| registrations.len())
+    }
+
     /// Drains and processes every request currently queued for `pid`, delivering
     /// each produced reply back into the owning conversation. Returns the number
     /// of requests processed this slice.

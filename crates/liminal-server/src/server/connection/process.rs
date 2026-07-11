@@ -17,6 +17,10 @@ use super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
 use crate::ServerError;
 
+#[cfg(test)]
+#[path = "process_teardown_tests.rs"]
+mod teardown_tests;
+
 const READ_BUFFER_BYTES: usize = 8192;
 /// Application stream id used for server-initiated push frames. Push is an
 /// application-stream frame (non-zero stream id), like publish and conversation.
@@ -106,6 +110,7 @@ impl ConnectionProcess {
                 %error,
                 "outbound overflow while delivering; tearing down the connection"
             );
+            self.release_conversations();
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return NativeOutcome::Stop(ExitReason::Error);
@@ -118,6 +123,7 @@ impl ConnectionProcess {
                 %error,
                 "outbound drain failed; tearing down the connection"
             );
+            self.release_conversations();
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return NativeOutcome::Stop(ExitReason::Error);
@@ -128,9 +134,15 @@ impl ConnectionProcess {
     /// Services the inbound half of a slice: reads available bytes and applies any
     /// complete frames, enqueuing responses into the outbound buffer.
     fn service_socket(&mut self, pid: u64) -> SliceStep {
-        let Some(stream) = self.stream.as_mut() else {
+        if self.stream.is_none() {
+            self.release_conversations();
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+            return SliceStep::Stop(ExitReason::Error);
+        }
+        let Some(stream) = self.stream.as_mut() else {
+            // Unreachable: the `is_none` guard above already handled a missing
+            // stream. Kept as a total match so `stream` binds without an unwrap.
             return SliceStep::Stop(ExitReason::Error);
         };
         match read_available(stream, &mut self.buffer) {
@@ -140,6 +152,7 @@ impl ConnectionProcess {
                 // drop, mirroring the ForceClose drain. The buffered-writer refactor
                 // removed this on the EOF path; without it, queued responses are lost.
                 let _ = self.drain_outbound();
+                self.release_conversations();
                 self.runtime.finish(pid);
                 return SliceStep::Stop(ExitReason::Normal);
             }
@@ -160,6 +173,7 @@ impl ConnectionProcess {
             Ok(ReadStatus::Read) => {}
             Err(error) => {
                 tracing::warn!(connection_pid = pid, %error, "connection read failed");
+                self.release_conversations();
                 self.runtime
                     .mark_crashed(pid, ExitReason::Error, self.peer_addr);
                 return SliceStep::Stop(ExitReason::Error);
@@ -180,15 +194,37 @@ impl ConnectionProcess {
                 // Disconnect returned Close. Drain it best-effort before finishing so
                 // that queued reply is not dropped, mirroring the ForceClose drain.
                 let _ = self.drain_outbound();
+                self.release_conversations();
                 self.runtime.finish(pid);
                 SliceStep::Stop(ExitReason::Normal)
             }
             Err(error) => {
                 tracing::warn!(connection_pid = pid, %error, "connection process failed");
+                self.release_conversations();
                 self.runtime
                     .mark_crashed(pid, ExitReason::Error, self.peer_addr);
                 SliceStep::Stop(ExitReason::Error)
             }
+        }
+    }
+
+    /// Releases every conversation this connection opened, finalizing each so its
+    /// supervised actor and participant are terminated and their runtime
+    /// registrations dropped — an abrupt connection teardown never leaks them.
+    /// Finalization is bounded, non-blocking, and does not require the
+    /// conversation scheduler to run a slice (or even be live): teardown runs on
+    /// a connection scheduler worker and inside `Drop`, where waiting on another
+    /// scheduler would wedge the worker or hang reap/shutdown. The interactive
+    /// close round trip stays exclusively on the client-requested
+    /// `ConversationClose` frame path. Every in-handler termination path (EOF,
+    /// client `Close`, `ForceClose`, and each crash route) calls this before the
+    /// runtime teardown; the `Drop` backstop covers the external-termination/reap
+    /// and scheduler-shutdown paths that never run another slice. The
+    /// conversation map is drained, so a second call finds nothing — the explicit
+    /// paths and the backstop cannot double-finalize.
+    fn release_conversations(&mut self) {
+        for (_conversation_id, conversation) in std::mem::take(&mut self.state.conversations) {
+            conversation.finalize();
         }
     }
 
@@ -212,6 +248,7 @@ impl ConnectionProcess {
                 // stream is dropped; best-effort, since we are stopping regardless.
                 let _ = self.drain_outbound();
                 self.stream.take();
+                self.release_conversations();
                 self.runtime.finish(pid);
                 Some(NativeOutcome::Stop(ExitReason::Normal))
             }
@@ -306,6 +343,7 @@ impl ConnectionProcess {
 
     fn handle_message(&mut self, pid: u64, message: Term) -> Option<NativeOutcome> {
         if message == Term::atom(Atom::ERROR) {
+            self.release_conversations();
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return Some(NativeOutcome::Stop(ExitReason::Error));
@@ -336,6 +374,17 @@ impl NativeHandler for ConnectionProcess {
             }
         }
         self.handle_slice(pid)
+    }
+}
+
+impl Drop for ConnectionProcess {
+    fn drop(&mut self) {
+        // Backstop for termination paths that never run another handler slice:
+        // external termination (a `reap_crashed` target killed via the scheduler)
+        // and scheduler shutdown drop the handler directly. On the explicit
+        // in-handler teardown paths the conversation map is already drained, so
+        // this is a no-op there.
+        self.release_conversations();
     }
 }
 

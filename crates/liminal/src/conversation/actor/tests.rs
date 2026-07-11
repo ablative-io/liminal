@@ -2,8 +2,11 @@ use std::error::Error;
 
 use beamr::process::ExitReason;
 
+use std::sync::Arc;
+
 use super::{ConversationActor, ConversationSupervisor};
 use crate::channel::ChannelMode;
+use crate::conversation::participant::EchoBehaviour;
 use crate::conversation::types::{
     ConversationConfig, ConversationContextEntry, ConversationPhase, CrashPolicy,
     ParticipantHealth, ParticipantPid,
@@ -409,6 +412,848 @@ fn boot_discovered_death_under_fail_policy_fails_conversation_honestly()
         matches!(received, Err(LiminalError::ParticipantCrashed { .. })),
         "receive against the failed conversation must report the crash, got {received:?}"
     );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 rule-1: closing a conversation must leave NO parked participant — its
+/// process is terminated and its runtime registration is dropped — and the
+/// actor's own registration is dropped too. Before the fix, close stopped only
+/// the actor: the participant stayed parked and registered forever.
+#[test]
+fn closing_conversation_terminates_and_deregisters_participant() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let actor_pid = actor.pid()?;
+
+    // Registered and live before close.
+    assert_eq!(supervisor.registered_participant_count(), 1);
+    assert!(scheduler.process_table().get(participant.get()).is_some());
+
+    actor.handle().close()?;
+
+    // Close deregisters the participant AND the actor synchronously (the reply is
+    // sent only after `apply_close` runs).
+    assert_eq!(
+        supervisor.registered_participant_count(),
+        0,
+        "close must deregister the participant"
+    );
+    assert_eq!(
+        supervisor.registered_actor_count(),
+        0,
+        "close must deregister the actor"
+    );
+    // Both processes are terminated: no parked participant or actor survives.
+    wait_until_process_gone(&scheduler, participant.get())?;
+    wait_until_process_gone(&scheduler, actor_pid.get())?;
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 churn gate: repeated open/close cycles must pin BOUNDED registry size. An
+/// unbounded leak (the pre-fix behaviour, where neither the participant nor the
+/// actor key was ever removed) fails this assertion because the counts grow with
+/// the cycle count instead of returning to zero.
+#[test]
+fn repeated_open_close_pins_bounded_registries() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+
+    for _ in 0..25 {
+        let (actor, participant) = supervisor.spawn_with_participant(
+            Arc::new(EchoBehaviour),
+            None,
+            ChannelMode::Ephemeral,
+            CrashPolicy::Fail,
+        )?;
+        actor.pid()?;
+        actor.handle().close()?;
+        // Drive each participant fully out of the process table before the next
+        // cycle so the scheduler table is bounded too, not just the registries.
+        wait_until_process_gone(&scheduler, participant.get())?;
+    }
+
+    assert_eq!(
+        supervisor.registered_participant_count(),
+        0,
+        "participant registry must not grow with open/close churn"
+    );
+    assert_eq!(
+        supervisor.registered_actor_count(),
+        0,
+        "actor registry must not grow with open/close churn"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Deadline-bounded wait until both lifecycle registries are empty, so a missed
+/// exit-driven cleanup FAILS the test instead of wedging it.
+fn wait_until_registries_empty(supervisor: &ConversationSupervisor) -> Result<(), Box<dyn Error>> {
+    for _ in 0..1_000 {
+        if supervisor.registered_actor_count() == 0
+            && supervisor.registered_participant_count() == 0
+        {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    Err(format!(
+        "registries did not empty: actors={} participants={}",
+        supervisor.registered_actor_count(),
+        supervisor.registered_participant_count()
+    )
+    .into())
+}
+
+/// D4 rework major-2 pin: a BARE actor exit — the actor process terminated with
+/// the core handle retained and NO later restart, close, or any other handle
+/// touch — must still remove both registrations, exit-driven (the watcher), not
+/// touch-driven. Before the fix the registrations lingered until the next
+/// registry touch, which never comes here.
+#[test]
+fn bare_actor_exit_removes_registrations_without_restart_or_close() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let actor_pid = actor.pid()?;
+    assert_eq!(supervisor.registered_actor_count(), 1);
+    assert_eq!(supervisor.registered_participant_count(), 1);
+
+    scheduler.terminate_process(actor_pid.get(), ExitReason::Error);
+
+    // No handle operation after the kill: cleanup must be driven by the exit
+    // itself. The actor handle stays retained (alive) for the whole wait.
+    wait_until_registries_empty(&supervisor)?;
+    wait_until_process_gone(&scheduler, participant.get())?;
+
+    drop(actor);
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 rework major-3 pin: close on a FAILED conversation is terminal. The close
+/// succeeds, the Failed phase is preserved as the diagnostic outcome, and every
+/// subsequent handle operation is refused with the typed error — none may
+/// respawn the actor through `ensure_running`.
+#[test]
+fn finalized_conversation_refuses_all_operations_without_respawn() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let baseline = scheduler.process_table().len();
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let actor_pid = actor.pid()?;
+
+    // Fail the conversation via a genuine participant crash.
+    scheduler.terminate_process(participant.get(), ExitReason::Error);
+    let state = state_after_trapped_participant_death(&actor)?;
+    assert_eq!(state.current_phase, ConversationPhase::Failed);
+
+    // Closing the failed conversation succeeds and is terminal.
+    actor.handle().close()?;
+
+    // The diagnostic outcome is preserved: state queries still answer from the
+    // host-side snapshot and the phase remains Failed, not erased to Closed.
+    let state = actor.state()?;
+    assert_eq!(state.current_phase, ConversationPhase::Failed);
+    assert_eq!(state.participants[0].health, ParticipantHealth::Dead);
+
+    // Every operation that would need a live actor is refused with the typed
+    // error; none respawns.
+    let handle = actor.handle();
+    assert!(matches!(
+        handle.send(test_envelope(b"late")),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+    assert!(matches!(
+        handle.receive(),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+    assert!(matches!(
+        handle.close(),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+    assert!(matches!(
+        actor.pid(),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+
+    // No respawn happened: the old actor process winds down and the scheduler
+    // table returns to its pre-spawn baseline (actor, participant, and watcher
+    // all gone; nothing new appeared).
+    wait_until_process_gone(&scheduler, actor_pid.get())?;
+    wait_until_registries_empty(&supervisor)?;
+    for _ in 0..1_000 {
+        if scheduler.process_table().len() == baseline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        scheduler.process_table().len(),
+        baseline,
+        "a finalized conversation must not respawn any process"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 round-3 blocker pin (construction ordering, held-gap rendezvous — no
+/// sleeps): the actor is killed at the EXACT seam between the watcher arming
+/// and the boot enqueue. The spawn attempt must fail with a typed error and
+/// roll back EVERYTHING it created — actor, watcher, participant, both
+/// registrations, and the (never-admitted or purged) boot command — leaving
+/// the scheduler table at baseline. Before the fix this window parked the
+/// watcher forever and leaked the registered participant.
+#[test]
+fn spawn_rolls_back_when_actor_dies_between_watcher_arm_and_boot() -> Result<(), Box<dyn Error>> {
+    use std::sync::mpsc;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let baseline = scheduler.process_table().len();
+
+    let (actor_tx, actor_rx) = mpsc::channel();
+    let (proceed_tx, proceed_rx) = mpsc::channel();
+    supervisor
+        .inner
+        .install_boot_barrier((actor_tx, proceed_rx));
+
+    let spawner = {
+        let supervisor = supervisor.clone();
+        std::thread::spawn(move || {
+            supervisor.spawn_with_participant(
+                Arc::new(EchoBehaviour),
+                None,
+                ChannelMode::Ephemeral,
+                CrashPolicy::Fail,
+            )
+        })
+    };
+
+    // Rendezvous: the spawner is now blocked after the watcher armed, before
+    // the boot enqueue — the exact window under test. Kill the actor there.
+    let actor_pid = actor_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "spawner never reached the arm->boot seam")?;
+    scheduler.terminate_process(actor_pid.get(), ExitReason::Error);
+    wait_until_process_gone(&scheduler, actor_pid.get())?;
+    proceed_tx
+        .send(())
+        .map_err(|_| "spawner abandoned the barrier")?;
+
+    let spawn_result = spawner.join().map_err(|_| "spawner thread panicked")?;
+    assert!(
+        spawn_result.is_err(),
+        "boot against the killed actor must fail the spawn, got Ok"
+    );
+
+    // Full transactional rollback: nothing the attempt created survives.
+    wait_until_registries_empty(&supervisor)?;
+    for _ in 0..1_000 {
+        if scheduler.process_table().len() == baseline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        scheduler.process_table().len(),
+        baseline,
+        "rollback must terminate every process the failed attempt created"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 round-3 blocker pin (a): the boot reply wait is bounded, fails with the
+/// typed timeout error, and purges the queued command so it cannot linger for a
+/// later actor incarnation. The target is a live-but-inert process, so the
+/// enqueue succeeds and ONLY the bound can end the wait.
+#[test]
+fn boot_wait_is_bounded_and_purges_the_queued_command() -> Result<(), Box<dyn Error>> {
+    use super::core::ActorCore;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let inert = ParticipantPid::new(scheduler.spawn_test_process(false));
+    let core = Arc::new(ActorCore::new(
+        Arc::clone(&supervisor.inner),
+        ConversationConfig::new(Vec::new(), None, ChannelMode::Ephemeral, CrashPolicy::Fail),
+        Vec::new(),
+    ));
+
+    let result = core.boot_with_timeout(inert, std::time::Duration::from_millis(100));
+
+    assert!(
+        matches!(result, Err(LiminalError::ConversationTimeout { .. })),
+        "an unanswered boot must fail with the typed timeout, got {result:?}"
+    );
+    assert_eq!(
+        core.queued_command_count(),
+        0,
+        "the timed-out boot command must be purged, not left queued"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 round-3 blocker pin (c, first slice): a watcher spawned for an
+/// ALREADY-DEAD target must not park — its armed first slice takes the final
+/// liveness probe, observes the empty table slot, cleans up (the dead pid's
+/// registration removed), and self-terminates.
+#[test]
+fn watcher_probe_reaps_already_dead_target_instead_of_parking() -> Result<(), Box<dyn Error>> {
+    use super::core::ActorCore;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let target = ParticipantPid::new(scheduler.spawn_test_process(false));
+    let core = Arc::new(ActorCore::new(
+        Arc::clone(&supervisor.inner),
+        ConversationConfig::new(Vec::new(), None, ChannelMode::Ephemeral, CrashPolicy::Fail),
+        Vec::new(),
+    ));
+    supervisor
+        .inner
+        .runtime
+        .register(target, Arc::downgrade(&core))?;
+
+    // The target dies BEFORE the watcher exists: no link, no EXIT, only the
+    // first-slice probe can observe the death.
+    scheduler.terminate_process(target.get(), ExitReason::Error);
+    wait_until_process_gone(&scheduler, target.get())?;
+
+    let watcher = supervisor.inner.spawn_watcher(&core, target)?;
+
+    wait_until_process_gone(&scheduler, watcher.get())?;
+    wait_until_registries_empty(&supervisor)?;
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 round-3 blocker pin (c, parked): a watcher parked over an UNLINKED live
+/// target (the pre-boot-link window) whose target then dies silently must run
+/// the same probe on its next wake and self-terminate instead of re-parking —
+/// the probe is inseparable from parking on every slice, not just the first.
+#[test]
+fn parked_unlinked_watcher_wake_probes_and_self_terminates() -> Result<(), Box<dyn Error>> {
+    use super::core::ActorCore;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let target = ParticipantPid::new(scheduler.spawn_test_process(false));
+    let core = Arc::new(ActorCore::new(
+        Arc::clone(&supervisor.inner),
+        ConversationConfig::new(Vec::new(), None, ChannelMode::Ephemeral, CrashPolicy::Fail),
+        Vec::new(),
+    ));
+    supervisor
+        .inner
+        .runtime
+        .register(target, Arc::downgrade(&core))?;
+
+    // Live target at arm time: the watcher's first-slice probe passes and it
+    // parks, unlinked (no boot ran, so no link exists).
+    let watcher = supervisor.inner.spawn_watcher(&core, target)?;
+
+    // Silent death: without a link there is no EXIT signal and no wake.
+    scheduler.terminate_process(target.get(), ExitReason::Error);
+    wait_until_process_gone(&scheduler, target.get())?;
+
+    // Any wake now reaches the probe; a non-EXIT message stands in for the
+    // stray wakes a real system produces.
+    assert!(
+        scheduler.enqueue_atom_message(watcher.get(), supervisor.inner.participant_wakeup_atom),
+        "the parked watcher must be wakeable"
+    );
+
+    wait_until_process_gone(&scheduler, watcher.get())?;
+    wait_until_registries_empty(&supervisor)?;
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Construction-ordering pin: after a successful open, the actor is genuinely
+/// linked to its (already-armed) exit watcher — the observation is installed.
+#[test]
+fn watcher_is_linked_to_actor_after_open() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let (actor, _participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let actor_pid = actor.pid()?;
+    let watcher = actor
+        .core
+        .watcher_pid()
+        .ok_or("a booted actor must have a recorded watcher")?;
+
+    assert!(
+        scheduler.is_linked(actor_pid.get(), watcher.get()),
+        "boot must link the actor to its armed watcher"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 round-3 major-2 pin: finalize racing a respawn. The respawn holds the
+/// lifecycle gate through boot (blocked at the test barrier); finalize blocks
+/// on that same gate, then cleans up the freshly published actor and watcher —
+/// the spawn cannot slip a live pair past a finalization that already returned.
+#[test]
+fn finalize_racing_respawn_leaves_no_processes_or_registrations() -> Result<(), Box<dyn Error>> {
+    use std::sync::mpsc;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let baseline = scheduler.process_table().len();
+    let actor = supervisor.spawn(ConversationConfig::new(
+        Vec::new(),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    ))?;
+    let first_pid = actor.pid()?;
+
+    // Kill the actor so the next handle operation must respawn.
+    scheduler.terminate_process(first_pid.get(), ExitReason::Error);
+    wait_until_process_gone(&scheduler, first_pid.get())?;
+
+    let (actor_tx, actor_rx) = mpsc::channel();
+    let (proceed_tx, proceed_rx) = mpsc::channel();
+    supervisor
+        .inner
+        .install_boot_barrier((actor_tx, proceed_rx));
+
+    let respawner = {
+        let actor = actor.clone();
+        std::thread::spawn(move || actor.pid())
+    };
+    // The respawner is inside the gate, blocked at the barrier.
+    actor_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "respawner never reached the arm->boot seam")?;
+
+    // Finalize concurrently: it must block on the SAME gate the respawner
+    // holds, then clean up whatever the respawn published.
+    let finalizer = {
+        let actor = actor.clone();
+        std::thread::spawn(move || actor.finalize())
+    };
+    proceed_tx
+        .send(())
+        .map_err(|_| "respawner abandoned the barrier")?;
+    respawner
+        .join()
+        .map_err(|_| "respawner thread panicked")?
+        .ok();
+    finalizer.join().map_err(|_| "finalizer thread panicked")?;
+
+    // Whatever the interleaving published, finalization wins: no registrations,
+    // no processes, and the handle is terminally refused.
+    wait_until_registries_empty(&supervisor)?;
+    for _ in 0..1_000 {
+        if scheduler.process_table().len() == baseline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        scheduler.process_table().len(),
+        baseline,
+        "finalize must clean up an actor published by a racing respawn"
+    );
+    assert!(matches!(
+        actor.pid(),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 round-3 major-3 pin (admission): a command enqueued after finalization —
+/// the interleaving where a caller passed `ensure_running` before finalize ran
+/// — is rejected at admission with the typed error, never silently queued for
+/// an actor that will not process it.
+#[test]
+fn command_enqueued_after_finalize_is_rejected() -> Result<(), Box<dyn Error>> {
+    use std::sync::mpsc;
+
+    use super::queue::QueuedCommandKind;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let actor = supervisor.spawn(ConversationConfig::new(
+        Vec::new(),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    ))?;
+    let pid = actor.pid()?;
+    actor.finalize();
+
+    let (reply, response) = mpsc::sync_channel(1);
+    let admitted = actor
+        .core
+        .enqueue_for_pid(pid, QueuedCommandKind::Receive { reply });
+
+    assert!(
+        matches!(admitted, Err(LiminalError::ConversationFailed { .. })),
+        "post-finalize admission must be refused with the typed error, got {admitted:?}"
+    );
+    assert_eq!(actor.core.queued_command_count(), 0);
+    drop(response);
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 round-3 major-3 pin (in-flight receive): a receive waiter already parked
+/// in the pending queue — its command was popped before finalization — is woken
+/// by finalize with the typed error. This pins the UNBOUNDED `receive` path:
+/// without the drain (and the publication recheck in `apply_receive`) the
+/// caller would block forever.
+#[test]
+fn blocked_receive_is_released_by_finalize() -> Result<(), Box<dyn Error>> {
+    use std::sync::mpsc;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let actor = supervisor.spawn(ConversationConfig::new(
+        Vec::new(),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    ))?;
+    // Activate with a buffered message, then drain it so the next receive
+    // genuinely parks in the pending queue.
+    actor.handle().send(test_envelope(b"warm-up"))?;
+    assert_eq!(actor.handle().receive()?.payload, b"warm-up");
+
+    let (result_tx, result_rx) = mpsc::channel();
+    let receiver_thread = {
+        let handle = actor.handle();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(handle.receive());
+        })
+    };
+    // Deterministic staging: wait (bounded) until the waiter is genuinely
+    // parked in the pending queue before finalizing.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while actor.core.pending_receive_count() == 0 {
+        if std::time::Instant::now() > deadline {
+            return Err("receive waiter never parked".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    actor.finalize();
+
+    let received = result_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| "finalize must wake the blocked receive, not leave it parked")?;
+    assert!(
+        matches!(received, Err(LiminalError::ConversationFailed { .. })),
+        "the released receive must carry the typed closed error, got {received:?}"
+    );
+    receiver_thread
+        .join()
+        .map_err(|_| "receiver thread panicked")?;
+    supervisor.shutdown();
+    Ok(())
+}
+
+fn supervision_failed_entries(
+    state: &crate::conversation::types::ConversationState,
+) -> Vec<(ParticipantPid, Option<ExitReason>)> {
+    state
+        .context
+        .iter()
+        .filter_map(|entry| match entry {
+            ConversationContextEntry::SupervisionFailed { watcher, reason } => {
+                Some((*watcher, *reason))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// D4 round-4 pin (both EXIT reasons): an externally terminated CURRENT
+/// watcher — post-link, mid-life — is a supervision-integrity failure. The
+/// conversation is failed and finalized from the actor's own slice: diagnostic
+/// recorded with the watcher's real exit reason, participants terminated,
+/// registrations removed, every operation terminally refused, and the actor
+/// stops itself — a later external actor terminate (no handle touch) finds
+/// nothing left, with the process table and both registries at baseline.
+/// Before the fix the watcher EXIT was silently filtered, leaving the actor
+/// running unobserved and re-opening the bare-exit leak.
+#[test]
+fn external_watcher_kill_fails_and_finalizes_conversation() -> Result<(), Box<dyn Error>> {
+    for kill_reason in [ExitReason::Normal, ExitReason::Error] {
+        let supervisor = ConversationSupervisor::new()?;
+        let scheduler = supervisor.scheduler();
+        let baseline = scheduler.process_table().len();
+        let (actor, participant) = supervisor.spawn_with_participant(
+            Arc::new(EchoBehaviour),
+            None,
+            ChannelMode::Ephemeral,
+            CrashPolicy::Fail,
+        )?;
+        let actor_pid = actor.pid()?;
+        let watcher = actor
+            .core
+            .watcher_pid()
+            .ok_or("a booted actor must have a recorded watcher")?;
+        assert!(scheduler.is_linked(actor_pid.get(), watcher.get()));
+
+        scheduler.terminate_process(watcher.get(), kill_reason);
+
+        // The actor's slice observes the EXIT, fails + finalizes, and stops
+        // itself; the diagnostic carries the watcher's real reason. A state
+        // query admitted while finalization is mid-drain gets the typed closed
+        // error — keep polling: once finalized, queries answer from the
+        // host-side snapshot.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Ok(state) = actor.state() {
+                let failures = supervision_failed_entries(&state);
+                if state.current_phase == ConversationPhase::Failed && !failures.is_empty() {
+                    assert_eq!(
+                        failures,
+                        vec![(watcher, Some(kill_reason))],
+                        "the diagnostic must carry the dead watcher and its real reason"
+                    );
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                return Err(format!(
+                    "watcher death ({kill_reason:?}) was not recorded as a supervision failure"
+                )
+                .into());
+            }
+            std::thread::yield_now();
+        }
+
+        // Terminally refused, participants gone, registries empty.
+        assert!(matches!(
+            actor.handle().send(test_envelope(b"late")),
+            Err(LiminalError::ConversationFailed { .. })
+        ));
+        assert!(matches!(
+            actor.pid(),
+            Err(LiminalError::ConversationFailed { .. })
+        ));
+        wait_until_process_gone(&scheduler, participant.get())?;
+        wait_until_registries_empty(&supervisor)?;
+
+        // No handle touch beyond the asserts above: the actor stopped itself,
+        // and an external terminate is an idempotent no-op on its tombstone.
+        wait_until_process_gone(&scheduler, actor_pid.get())?;
+        scheduler.terminate_process(actor_pid.get(), ExitReason::Error);
+        for _ in 0..1_000 {
+            if scheduler.process_table().len() == baseline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(
+            scheduler.process_table().len(),
+            baseline,
+            "watcher-death finalization must leave no process behind ({kill_reason:?})"
+        );
+        supervisor.shutdown();
+    }
+    Ok(())
+}
+
+/// The suppression half of the round-4 ruling: the watcher's EXIT on a
+/// legitimate close (and on a teardown finalize) is the close's own doing —
+/// the finalized marker is the token — so no spurious supervision failure is
+/// recorded. Asserted after the actor process is fully gone, the deterministic
+/// point past which no further slice can add entries.
+#[test]
+fn close_and_finalize_suppress_expected_watcher_exit() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+
+    // Interactive close path.
+    let (closed_actor, _participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let closed_pid = closed_actor.pid()?;
+    closed_actor.handle().close()?;
+    wait_until_process_gone(&scheduler, closed_pid.get())?;
+    let state = closed_actor.state()?;
+    assert_eq!(state.current_phase, ConversationPhase::Closed);
+    assert!(
+        supervision_failed_entries(&state).is_empty(),
+        "close's own watcher termination must not read as a supervision failure"
+    );
+
+    // Teardown finalize path.
+    let (finalized_actor, _participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let finalized_pid = finalized_actor.pid()?;
+    finalized_actor.finalize();
+    wait_until_process_gone(&scheduler, finalized_pid.get())?;
+    let state = finalized_actor.state()?;
+    assert_eq!(state.current_phase, ConversationPhase::Closed);
+    assert!(
+        supervision_failed_entries(&state).is_empty(),
+        "finalize's own watcher termination must not read as a supervision failure"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// The generation half of the round-4 ruling: a RETIRED watcher's late EXIT —
+/// its pid no longer the recorded current watcher after a restart replaced it —
+/// is ignored by the identity check: no failure recorded, the conversation
+/// stays usable, and a fresh conversation on the same supervisor is untouched.
+#[test]
+fn stale_watcher_exit_is_ignored_by_identity_check() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let actor = supervisor.spawn(ConversationConfig::new(
+        Vec::new(),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    ))?;
+    let first_pid = actor.pid()?;
+    let retired_watcher = actor
+        .core
+        .watcher_pid()
+        .ok_or("a booted actor must have a recorded watcher")?;
+
+    // Crash + restart: the watcher record is replaced under the lifecycle gate.
+    scheduler.terminate_process(first_pid.get(), ExitReason::Error);
+    wait_until_process_gone(&scheduler, first_pid.get())?;
+    let restarted_pid = actor.pid()?;
+    assert_ne!(restarted_pid, first_pid);
+    let current_watcher = actor
+        .core
+        .watcher_pid()
+        .ok_or("a restarted actor must have a recorded watcher")?;
+    assert_ne!(current_watcher, retired_watcher);
+
+    // The retired watcher's late EXIT, staged through the same host-side path
+    // the actor's EXIT handling uses: identity mismatch, so it must be ignored.
+    assert!(
+        !actor
+            .core
+            .handle_watcher_exit(retired_watcher, Some(ExitReason::Error)),
+        "a retired watcher's late EXIT must not stop the actor"
+    );
+    let state = actor.state()?;
+    assert_ne!(state.current_phase, ConversationPhase::Failed);
+    assert!(supervision_failed_entries(&state).is_empty());
+
+    // The conversation remains fully usable, and a subsequent conversation on
+    // the same supervisor is unaffected.
+    actor.handle().send(test_envelope(b"still-alive"))?;
+    assert_eq!(actor.handle().receive()?.payload, b"still-alive");
+    let (fresh, _participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    fresh.handle().send(test_envelope(b"fresh"))?;
+    fresh.handle().close()?;
+    actor.handle().close()?;
+    wait_until_registries_empty(&supervisor)?;
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 rework major-4 pin: the close-initiated Normal termination of a
+/// participant is suppressed as the close's own doing, but an ABNORMAL exit
+/// racing the close is recorded with its real reason — and the recorded crash
+/// does not reopen the closed conversation (precedence ruling: once close has
+/// succeeded, the terminal phase stands).
+#[test]
+fn abnormal_exit_racing_close_is_recorded_without_reopening_phase() -> Result<(), Box<dyn Error>> {
+    use std::time::Instant;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    actor.pid()?;
+    actor.handle().close()?;
+
+    // Suppression half: the close's own Normal termination of the participant is
+    // not a crash. Whether or not the actor processed the EXIT before stopping,
+    // no crash may be recorded for it.
+    let state = actor.state()?;
+    assert_eq!(state.current_phase, ConversationPhase::Closed);
+    assert_eq!(
+        participant_crash_entries(&state),
+        0,
+        "the close-initiated Normal exit must be suppressed, not recorded as a crash"
+    );
+
+    // Racing-crash half, staged deterministically through the host-side
+    // recording path the trapped-EXIT handler uses: the participant genuinely
+    // crashed (Error) while the close was in flight, so its EXIT carries Error,
+    // not the close's Normal.
+    actor
+        .core
+        .record_participant_exit(participant, Instant::now(), Some(ExitReason::Error))?;
+
+    let state = actor.state()?;
+    assert_eq!(
+        state.current_phase,
+        ConversationPhase::Closed,
+        "an abnormal exit racing close must not flip the terminal phase"
+    );
+    assert_eq!(state.participants[0].health, ParticipantHealth::Dead);
+    assert_eq!(
+        state.participants[0].exit_reason,
+        Some(ExitReason::Error),
+        "the abnormal exit's real reason must be preserved"
+    );
+    assert_eq!(
+        participant_crash_entries(&state),
+        1,
+        "the racing crash is recorded exactly once"
+    );
+
     supervisor.shutdown();
     Ok(())
 }
