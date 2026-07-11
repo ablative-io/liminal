@@ -108,7 +108,13 @@ never a gated suspension (C2 scope) — asserted by test.
    once; release every subscription (removing inbox notifiers before drop);
    close/terminate every conversation actor AND participant (D4); remove
    runtime registry entries. A final sweep at shutdown catches force-close
-   misses (closes the scout's "records merely logged" gap).
+   misses (closes the scout's "records merely logged" gap). This
+   consumer-side deregistration and the readiness service's own
+   dead-scheduler sweep (composition spec advisory 2) are **deliberate
+   redundancy, not duplication**: neither side depends on the other's
+   diligence — the consumer deregisters per connection on every termination
+   path, and the service sweeps whatever a wedged consumer leaves behind.
+   The contract records the same statement at R4/T5.
 6. **Quiescence instrumentation (R7).** Test-only per-connection slice
    counter; parked counters must not advance without an event. Permanent
    rule-1 assertion.
@@ -183,10 +189,26 @@ haematite's contract) → guard removes the directory. The existing public
 `HaematiteStore::new` remains for persistent/unguarded stores only. This
 covers normal drop, abrupt-but-orderly teardown, and — because the guard is
 created before `Database::open` — partial startup failure *on the liminal
-side*; haematite's own cleanup after a partially failed
-`Database::create/open` (resources acquired, then error) must be either
-cited from haematite's contract or pinned by an injected-failure test
-before the partial-startup claim is certified — flagged to Apollo Biscuit.
+side*. Haematite's failed-startup semantics are now cited from source
+(Apollo Biscuit, 2026-07-11, contract doc-comment
+`haematite/src/db/startup.rs:67-98`, v0.4.1): a failed `create`/`open`
+leaves the writer lock **free** (released on the error return) and the
+directory either intact-as-found or — only when that `create` call itself
+created it — wholly removed under the still-held lock; a pre-existing
+directory is never removed. Under this design the guard's directory
+pre-exists `create`, so haematite never competes with the guard for
+removal: the `TempDir` is the sole owner of directory lifetime on every
+failure path. The never-delete-pre-existing half is pinned in haematite
+today; the removes-what-it-created half lands as a permanent rule-1
+injected-failure assertion in Apollo's doc-4 (recovery/boot hardening)
+plan. Certification of this design does not wait on that pin (Vesper's
+ordering ruling: a source-verified doc-comment contract with one half
+already pinned is enough for a design to stand on), but the pin must be
+green before any consumer code relying on the removes-what-it-created half
+merges — the same contract-test-before-consumer-merge sequencing as
+readiness §2.5. Liminal's own §9 gate additionally injects open failure at
+this layer and asserts zero residue via the guard, independent of
+haematite's internal cleanup.
 Lifecycle tests run with channel/store handle clones alive at teardown,
 with startup failure injected, and across the final last-handle drop.
 Repeated start/stop cycles each own distinct directories. Persistent-path
