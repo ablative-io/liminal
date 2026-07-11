@@ -17,6 +17,8 @@ use liminal::protocol::{
     CausalContext, Frame, MessageEnvelope, ProtocolVersion, SchemaId, decode, encode, encoded_len,
 };
 use liminal_sdk::SubscriptionStream;
+use socket2::{Domain, Socket, Type};
+
 use liminal_server::config::{ChannelDef, LimitsConfig, ServerConfig, ServicesConfig};
 use liminal_server::server::connection::ConnectionSupervisor;
 use liminal_server::server::listener::ServerListener;
@@ -400,6 +402,182 @@ fn inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_conn
     assert_eq!(message.payload(), json_string_payload(b'y', 16).as_slice());
 
     drop(healthy);
+    server.shutdown()?;
+    Ok(())
+}
+
+// ---- G4 oversize-frame WouldBlock-boundary regression ----
+
+/// Client receive-buffer size for the G4 regression subscriber. Shrunk to 16 KiB
+/// BEFORE connect so a subscriber that never reads during the flood advertises a
+/// tiny, never-reopening receive window. The server can then only park a bounded
+/// amount of the oversize delivery in the kernel (its own send buffer plus this
+/// window) before `write()` returns `WouldBlock` with the frame still partly
+/// queued — the exact G4 partial-write condition, made certain by construction
+/// (an integration test cannot observe the server's private `DrainOutcome`, so the
+/// socket configuration is what guarantees the boundary is crossed).
+const G4_CLIENT_RCVBUF: usize = 16 * 1024;
+
+/// Total wire size of the oversize G4 delivery payload (512 KiB). This is 5x+ the
+/// ~96 KiB empirical old-loss boundary and 2x the 256 KiB task floor, yet
+/// comfortably under both the 4 MiB outbound-writer capacity and the 4 MiB §5
+/// inbox byte budget (so the frame is admitted and buffered, never shed or
+/// overflow-torn-down). Larger than any default TCP send buffer, so with the
+/// shrunk client window above the server's drain cannot complete without a
+/// `WouldBlock`-with-residue.
+const G4_OVERSIZE_PAYLOAD: usize = 512 * 1024;
+
+/// Subscribes on a raw socket whose `SO_RCVBUF` is shrunk to [`G4_CLIENT_RCVBUF`]
+/// before connect, then returns the socket WITHOUT reading past the
+/// `SubscribeAck` — a silent subscriber with a deliberately tiny receive window.
+///
+/// This mirrors [`raw_silent_subscribe`] but constructs the socket via `socket2`
+/// so the receive buffer can be set prior to connect (needed for the window to be
+/// negotiated small). The shrink is the mechanism that makes the server-side
+/// outbound `WouldBlock`-with-residue certain for the oversize delivery.
+fn raw_silent_subscribe_small_rcvbuf(address: SocketAddr) -> Result<TcpStream, Box<dyn Error>> {
+    let socket = Socket::new(Domain::for_address(address), Type::STREAM, None)?;
+    socket.set_recv_buffer_size(G4_CLIENT_RCVBUF)?;
+    socket.connect(&address.into())?;
+    let mut stream: TcpStream = socket.into();
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+    // Connect -> ConnectAck.
+    write_frame(
+        &mut stream,
+        &Frame::Connect {
+            flags: 0,
+            min_version: ProtocolVersion::new(1, 0),
+            max_version: ProtocolVersion::new(1, 0),
+            auth_token: Vec::new(),
+        },
+    )?;
+    let mut buffer = Vec::new();
+    match read_frame(&mut stream, &mut buffer)? {
+        Frame::ConnectAck { .. } => {}
+        other => return Err(format!("expected ConnectAck, got {:?}", other.frame_type()).into()),
+    }
+
+    // Subscribe -> SubscribeAck, then read nothing further: deliveries pile up on
+    // this connection's server-side outbound buffer.
+    write_frame(
+        &mut stream,
+        &Frame::Subscribe {
+            flags: 0,
+            stream_id: 1,
+            channel: CHANNEL.to_owned(),
+            accepted_schemas: Vec::new(),
+            max_in_flight: 1024,
+        },
+    )?;
+    match read_frame(&mut stream, &mut buffer)? {
+        // Nothing is published until this returns, so `buffer` holds no trailing
+        // bytes past the SubscribeAck and can be discarded safely.
+        Frame::SubscribeAck { .. } => Ok(stream),
+        other => Err(format!("expected SubscribeAck, got {:?}", other.frame_type()).into()),
+    }
+}
+
+/// Extracts `(delivery_seq, payload)` from a `Deliver` frame, or fails the test
+/// with the unexpected frame type — a truncated/desynced stream surfaces here as a
+/// decode error or a non-`Deliver` frame rather than a silent wrong answer.
+fn expect_deliver(frame: Frame) -> Result<(u64, Vec<u8>), Box<dyn Error>> {
+    match frame {
+        Frame::Deliver {
+            delivery_seq,
+            envelope,
+            ..
+        } => Ok((delivery_seq, envelope.payload)),
+        other => Err(format!("expected Deliver, got {:?}", other.frame_type()).into()),
+    }
+}
+
+/// G4 regression (docs/stack-review/liminal-ledger.md §G4): the pre-fix
+/// `write_frame` called `write_all` on the NON-BLOCKING connection socket, so a
+/// server-originated frame larger than the free kernel send buffer (~73 KiB
+/// delivered / ~96 KiB lost, empirically — the boundary moved with buffer state)
+/// was truncated at the first `WouldBlock` after a partial write. The client
+/// decoder then blocked on the declared `payload_length` and consumed every
+/// SUBSEQUENT frame as continuation bytes — a permanent, silent desync until the
+/// "worker lost" timeout swept the connection. Pushes were where it bit.
+///
+/// The fix (2026-07-07, e1b847d, H1 outbound writer:
+/// crates/liminal-server/src/server/connection/outbound.rs) buffers each frame in
+/// a bounded per-connection `OutboundWriter` and drains it cooperatively across
+/// scheduler slices, so a mid-frame `WouldBlock` merely re-queues the residue for
+/// the next slice. This boundary had NO regression coverage; this test pins it.
+///
+/// Construction of the WouldBlock-with-residue (see
+/// [`raw_silent_subscribe_small_rcvbuf`]): the subscriber shrinks its receive
+/// buffer to 16 KiB and never reads during the flood, so the total in-flight
+/// window is capped ~2 orders of magnitude below the 512 KiB delivery — the
+/// server's drain CANNOT complete the frame in one pass and is guaranteed to hit
+/// `WouldBlock` with residue queued. The test then reads everything and asserts
+/// (a) the oversize frame decodes byte-exact and (b) a subsequent normal frame on
+/// the same connection also decodes cleanly — the no-desync half, which is the
+/// half that made G4 catastrophic. On the pre-fix code the oversize `Deliver`
+/// would be truncated on the wire and this test would fail by construction: (a)
+/// the first frame never completes (decode blocks / times out) and (b) the
+/// follow-up frame is swallowed as continuation bytes.
+#[test]
+fn oversize_frame_survives_wouldblock_boundary_and_no_desync() -> Result<(), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+
+    // Silent subscriber with a 16 KiB receive window that it never drains during
+    // the flood: this is what forces the server-side outbound WouldBlock-with-residue.
+    let mut subscriber = raw_silent_subscribe_small_rcvbuf(server.address())?;
+
+    let mut publisher = raw_connect(server.address())?;
+    let mut ack_buffer = Vec::new();
+
+    // The oversize server-originated frame: 512 KiB, well past the ~96 KiB old-loss
+    // boundary and the 256 KiB floor, under the 4 MiB caps.
+    let oversize = json_string_payload(b'Z', G4_OVERSIZE_PAYLOAD);
+    raw_publish(&mut publisher, &mut ack_buffer, oversize.clone())?;
+
+    // A SECOND, small publish enqueued strictly AFTER the oversize delivery on the
+    // same subscriber connection, BEFORE the subscriber reads anything. Under the
+    // old truncating path its bytes would be consumed as continuation of the
+    // truncated oversize frame — the head-of-line desync G4 caused.
+    let follow = json_string_payload(b'y', 32);
+    raw_publish(&mut publisher, &mut ack_buffer, follow.clone())?;
+
+    // Now drain the subscriber. read_frame reads in 8 KiB chunks and blocks on a
+    // complete frame, reopening the shrunk window a little at a time so the whole
+    // 512 KiB streams out across many cooperative drain slices.
+    let mut sub_buffer = Vec::new();
+
+    // (a) The oversize frame decodes byte-exact: full length and identical bytes,
+    // proving the frame survived the WouldBlock-with-residue drain intact.
+    let (seq, payload) = expect_deliver(read_frame(&mut subscriber, &mut sub_buffer)?)?;
+    assert_eq!(seq, 1, "the oversize delivery is delivery_seq 1");
+    assert_eq!(
+        payload.len(),
+        oversize.len(),
+        "the full oversize payload length survives the WouldBlock boundary"
+    );
+    assert_eq!(
+        payload, oversize,
+        "the oversize payload is delivered byte-for-byte intact across the WouldBlock boundary"
+    );
+
+    // (b) The subsequent normal frame decodes cleanly on the SAME connection: the
+    // stream stayed framed, no continuation-byte desync. This is the half that made
+    // G4 catastrophic.
+    let (seq2, payload2) = expect_deliver(read_frame(&mut subscriber, &mut sub_buffer)?)?;
+    assert_eq!(
+        seq2, 2,
+        "the follow-up delivery is delivery_seq 2 — the stream stayed in frame"
+    );
+    assert_eq!(
+        payload2, follow,
+        "the follow-up frame decodes byte-exact — no head-of-line desync after the oversize frame"
+    );
+
+    drop(subscriber);
+    drop(publisher);
     server.shutdown()?;
     Ok(())
 }
