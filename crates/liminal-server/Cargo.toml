@@ -30,6 +30,10 @@ futures-core = { workspace = true, features = ["std"] }
 # carries them.
 liminal = { workspace = true, features = ["test-support"] }
 liminal-sdk = { workspace = true }
+# Test-only: shrink the client socket's SO_RCVBUF so a never-reading subscriber
+# caps the in-flight TCP window far below an oversize frame, making the server's
+# outbound WouldBlock-with-residue certain by construction (G4 regression).
+socket2 = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]
