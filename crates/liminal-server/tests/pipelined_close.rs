@@ -15,7 +15,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use liminal::protocol::{Frame, ProtocolError, ProtocolVersion, decode, encode, encoded_len};
-use liminal_server::config::{ChannelDef, ServerConfig};
+use liminal_server::config::{ChannelDef, ServerConfig, ServicesConfig};
 use liminal_server::server::connection::ConnectionSupervisor;
 use liminal_server::server::listener::ServerListener;
 
@@ -47,6 +47,7 @@ impl RunningServer {
             cluster: None,
             auth: None,
             drain_timeout_ms: 30_000,
+            services: ServicesConfig::default(),
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;

@@ -81,8 +81,10 @@ pub(super) fn apply_frame(
             ..
         } => subscribe_response(services, state, stream_id, &channel, &accepted_schemas),
         Frame::Unsubscribe {
-            subscription_id, ..
-        } => unsubscribe_response(services, state, subscription_id),
+            stream_id,
+            subscription_id,
+            ..
+        } => unsubscribe_response(services, state, stream_id, subscription_id),
         Frame::ConversationOpen {
             conversation_id,
             subject,
@@ -102,8 +104,10 @@ pub(super) fn apply_frame(
             &envelope,
         ),
         Frame::ConversationClose {
-            conversation_id, ..
-        } => conversation_close(services, state, conversation_id),
+            stream_id,
+            conversation_id,
+            ..
+        } => conversation_close(services, state, stream_id, conversation_id),
         Frame::PushReply {
             correlation_id,
             payload,
@@ -343,6 +347,7 @@ fn subscribe_response(
 fn unsubscribe_response(
     services: &dyn ConnectionServices,
     state: &mut ConnectionProcessState,
+    stream_id: u32,
     subscription_id: u64,
 ) -> FrameAction {
     if let Some(subscription) = state.subscriptions.remove(&subscription_id) {
@@ -354,8 +359,27 @@ fn unsubscribe_response(
         if let Err(error) = services.unsubscribe(subscription) {
             tracing::warn!(subscription_id, %error, "liminal unsubscribe failed");
         }
+        return FrameAction::NoResponse;
     }
-    FrameAction::NoResponse
+    // No such subscription on this connection. Full mode keeps the idempotent no-op
+    // (unsubscribing an unknown id is harmless). A capability-scoped adapter that
+    // serves no channels never issued a subscription, so this frame targets an
+    // operation the profile does not support: reject it explicitly rather than
+    // silently accept it. There is no dedicated `UnsubscribeError` frame in the
+    // vocabulary, so the closest honest fit — `SubscribeError`, the subscription
+    // error channel — carries the rejection.
+    if services.supports_channel_operations() {
+        FrameAction::NoResponse
+    } else {
+        FrameAction::Respond(Frame::SubscribeError {
+            flags: 0,
+            stream_id,
+            reason_code: SERVER_ERROR_CODE,
+            message: Some(
+                "unsubscribe is not supported by the worker-front-door services profile".to_owned(),
+            ),
+        })
+    }
 }
 
 fn conversation_open(
@@ -394,6 +418,16 @@ fn conversation_message(
     conversation_id: u64,
     envelope: &MessageEnvelope,
 ) -> FrameAction {
+    // A capability-scoped adapter serves no conversations, so a conversation could
+    // never have been opened: reject with a clear "not supported" message rather
+    // than the misleading "not open" one. Full mode keeps the existing path.
+    if !services.supports_channel_operations() {
+        return conversation_error(
+            stream_id,
+            conversation_id,
+            "conversations are not supported by the worker-front-door services profile",
+        );
+    }
     let Some(conversation) = state.conversations.get(&conversation_id) else {
         return conversation_error(
             stream_id,
@@ -448,14 +482,27 @@ fn conversation_error(stream_id: u32, conversation_id: u64, message: &str) -> Fr
 fn conversation_close(
     services: &dyn ConnectionServices,
     state: &mut ConnectionProcessState,
+    stream_id: u32,
     conversation_id: u64,
 ) -> FrameAction {
     if let Some(conversation) = state.conversations.remove(&conversation_id) {
         if let Err(error) = services.close_conversation(conversation) {
             tracing::warn!(conversation_id, %error, "liminal conversation close failed");
         }
+        return FrameAction::NoResponse;
     }
-    FrameAction::NoResponse
+    // No such conversation on this connection. Full mode keeps the idempotent
+    // no-op; the worker front door serves no conversations, so a close targets an
+    // unsupported operation — reject it explicitly rather than swallow it.
+    if services.supports_channel_operations() {
+        FrameAction::NoResponse
+    } else {
+        conversation_error(
+            stream_id,
+            conversation_id,
+            "conversations are not supported by the worker-front-door services profile",
+        )
+    }
 }
 
 #[cfg(test)]

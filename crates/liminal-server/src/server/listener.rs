@@ -316,6 +316,7 @@ mod tests {
             persistence_path: None,
             cluster: None,
             auth: None,
+            services: crate::config::types::ServicesConfig::default(),
         })
     }
 }

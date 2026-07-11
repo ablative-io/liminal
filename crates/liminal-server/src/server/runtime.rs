@@ -4,10 +4,12 @@ use std::sync::Arc;
 use crate::ServerError;
 use crate::cluster::{self, ClusterHandle};
 use crate::config::file::load_config;
-use crate::config::types::ClusterConfig;
+use crate::config::types::{ClusterConfig, ServiceProfile};
 use crate::health::{ReadinessState, SharedReadinessState, start_health_server};
 use crate::server::connection::ConnectionSupervisor;
-use crate::server::connection::services::{ChannelCluster, LiminalConnectionServices};
+use crate::server::connection::services::{
+    ChannelCluster, LiminalConnectionServices, build_connection_services,
+};
 use crate::server::listener::ServerListener;
 use crate::server::shutdown::{ShutdownHandle, register_signal_handlers, run_shutdown_sequence};
 
@@ -35,28 +37,49 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
     let shutdown_handle = ShutdownHandle::new();
     let signal_registration = register_signal_handlers(shutdown_handle.clone())?;
 
-    // Build the library-backed services once so we can reach the shared (possibly
-    // clustered) channel supervisor before the connection supervisor takes
-    // ownership of the services as a trait object.
-    let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
-    let channel_cluster = services.channel_cluster().clone();
-    // The configured [auth] token must ride along here: this call site builds
-    // services itself (to reach the shared channel cluster first) and so cannot
-    // use from_config, which is the only other place the token is wired.
+    // The configured [auth] token must ride along here: these call sites build
+    // services themselves (full mode reaches the shared channel cluster first;
+    // the worker front door builds no cluster at all) and so cannot use
+    // `from_config`, which is the only other place the token is wired.
     let auth_token = config
         .auth
         .as_ref()
         .map(|auth| auth.token.clone().into_bytes());
-    let connection_supervisor = ConnectionSupervisor::with_services_and_auth(services, auth_token)?;
 
-    // SRV-005: start clustering on the channel-supervisor scheduler when a
-    // [cluster] section is configured. The returned handle owns the inbound
-    // distribution listener and the membership poll loop; it must outlive the
-    // server and is torn down in the shutdown sequence below.
-    readiness.set_cluster_configured(config.cluster.is_some());
-    let cluster_handle = match config.cluster.as_ref() {
-        Some(cluster_config) => Some(start_cluster(&channel_cluster, cluster_config, &readiness)?),
-        None => None,
+    // D2: the service profile selects which connection-services stack is built.
+    // Full mode is byte-for-byte the previous construction path (build services,
+    // reach the shared channel cluster, start clustering when configured). The
+    // worker front door constructs the connection supervisor over the
+    // capability-scoped adapter and NOTHING else — no channel/conversation/haematite
+    // services, and therefore no distribution cluster (config validation rejects a
+    // `[cluster]` section under this profile, so none can be present here).
+    let (connection_supervisor, cluster_handle) = match config.services.profile()? {
+        ServiceProfile::Full => {
+            let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
+            let channel_cluster = services.channel_cluster().clone();
+            let connection_supervisor =
+                ConnectionSupervisor::with_services_and_auth(services, auth_token)?;
+
+            // SRV-005: start clustering on the channel-supervisor scheduler when a
+            // [cluster] section is configured. The returned handle owns the inbound
+            // distribution listener and the membership poll loop; it must outlive the
+            // server and is torn down in the shutdown sequence below.
+            readiness.set_cluster_configured(config.cluster.is_some());
+            let cluster_handle = match config.cluster.as_ref() {
+                Some(cluster_config) => {
+                    Some(start_cluster(&channel_cluster, cluster_config, &readiness)?)
+                }
+                None => None,
+            };
+            (connection_supervisor, cluster_handle)
+        }
+        ServiceProfile::WorkerFrontDoor => {
+            let services = build_connection_services(&config)?;
+            let connection_supervisor =
+                ConnectionSupervisor::with_services_and_auth(services, auth_token)?;
+            readiness.set_cluster_configured(false);
+            (connection_supervisor, None)
+        }
     };
 
     let mut listener = ServerListener::bind(&config, connection_supervisor)?;

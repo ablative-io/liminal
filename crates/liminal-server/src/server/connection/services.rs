@@ -19,8 +19,9 @@ use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSche
 use super::conversation::{ConnectionConversation, LiminalConversationResource};
 use super::services_cluster::build_channel_cluster;
 use super::services_schema::resolve_channel_schema;
+use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
-use crate::config::types::ServerConfig;
+use crate::config::types::{ServerConfig, ServiceProfile};
 
 pub use super::services_cluster::ChannelCluster;
 
@@ -189,6 +190,22 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns [`ServerError`] when the liminal channel flush operation fails.
     fn flush_durable_state(&self) -> Result<(), ServerError>;
+
+    /// Whether this adapter backs ordinary channel and conversation operations.
+    ///
+    /// The default is `true` — the full-service adapter serves publish, subscribe,
+    /// and conversation frames, so full mode is byte-for-byte unchanged. The
+    /// capability-scoped worker front door overrides this to `false`, letting
+    /// [`super::apply`] reject the channel/conversation frames it short-circuits on
+    /// empty connection state (`Unsubscribe`, `ConversationMessage`,
+    /// `ConversationClose`) with a typed error frame instead of silently swallowing
+    /// an operation for a resource that could never have been created in this
+    /// profile. Frames that always reach a service method (`Publish`, `Subscribe`,
+    /// `ConversationOpen`) are rejected by the front door's own method bodies and do
+    /// not consult this flag.
+    fn supports_channel_operations(&self) -> bool {
+        true
+    }
 }
 
 /// Default adapter from server wire frames to liminal channel/conversation APIs.
@@ -510,6 +527,50 @@ const DEFAULT_SHARD_COUNT: usize = 8;
 /// keys from colliding with any other haematite streams in the shared store.
 const DELIVERY_DEDUP_NAMESPACE: &str = "liminal:delivery-dedup";
 
+/// Builds the connection-services adapter selected by `config`'s service profile.
+///
+/// `Full` builds [`LiminalConnectionServices`] (channels, conversations, durable
+/// store, dedup cache) exactly as today. `WorkerFrontDoor` builds
+/// [`WorkerFrontDoorServices`], which constructs none of that machinery. This is the
+/// single profile-dispatch authority; the standalone runtime uses it for the
+/// worker-front-door path (full mode stays on the explicit
+/// [`LiminalConnectionServices::from_config`] path because it also needs the shared
+/// channel cluster, which the trait object does not expose).
+///
+/// # Errors
+/// Returns [`ServerError`] when the selected adapter cannot be constructed or the
+/// configured profile value is not recognised.
+pub fn build_connection_services(
+    config: &ServerConfig,
+) -> Result<Arc<dyn ConnectionServices>, ServerError> {
+    build_connection_services_with(config, || open_ephemeral(DEFAULT_SHARD_COUNT))
+}
+
+/// [`build_connection_services`] with the ephemeral store factory injected.
+///
+/// The §9 D2 construction gate uses this to prove the worker-front-door branch never
+/// touches the durable-store factory: it passes a factory rooted in an isolated
+/// directory and asserts that root stays empty — the same "isolated injected root
+/// staying empty" negative assertion the D3 gate uses. Only the `Full` branch threads
+/// the factory through [`build_durable_store_with`]; the `WorkerFrontDoor` branch
+/// drops it unused because the front door owns no store, so a regression that gave
+/// the front door a store would land a directory in that root and fail the gate.
+fn build_connection_services_with(
+    config: &ServerConfig,
+    make_ephemeral: impl FnOnce() -> Result<EphemeralHaematiteStore, DurabilityError>,
+) -> Result<Arc<dyn ConnectionServices>, ServerError> {
+    match config.services.profile()? {
+        ServiceProfile::Full => {
+            let store =
+                build_durable_store_with(config.persistence_path.as_deref(), make_ephemeral)?;
+            Ok(Arc::new(LiminalConnectionServices::from_config_with_store(
+                config, store,
+            )?))
+        }
+        ServiceProfile::WorkerFrontDoor => Ok(Arc::new(WorkerFrontDoorServices::new())),
+    }
+}
+
 /// Builds the haematite-backed durable store.
 ///
 /// When `persistence_path` is `Some`, the database lives there and survives
@@ -830,7 +891,11 @@ pub(super) fn server_error_from_protocol(error: &ProtocolError) -> ServerError {
 mod durable_store_tests {
     use liminal::durability::open_ephemeral_rooted;
 
-    use super::{DEFAULT_SHARD_COUNT, build_durable_store_with};
+    use super::{
+        ConnectionServices, DEFAULT_SHARD_COUNT, build_connection_services_with,
+        build_durable_store_with,
+    };
+    use crate::config::types::{ServerConfig, ServicesConfig};
 
     /// Counts directory entries under `root`, for the empty/one-dir assertions
     /// on an injected ephemeral root.
@@ -838,6 +903,74 @@ mod durable_store_tests {
         std::fs::read_dir(root)
             .expect("ephemeral root is readable")
             .count()
+    }
+
+    /// A minimal channel-free config with the given service `profile`. No channels,
+    /// routing, persistence, or cluster — the shape both profiles accept (the full
+    /// profile simply builds an empty channel set; the worker-front-door profile
+    /// requires exactly this shape).
+    fn config_with_profile(profile: &str) -> ServerConfig {
+        ServerConfig {
+            listen_address: "127.0.0.1:0".parse().expect("valid socket addr"),
+            health_listen_address: "127.0.0.1:1".parse().expect("valid socket addr"),
+            drain_timeout_ms: 30_000,
+            channels: Vec::new(),
+            routing_rules: Vec::new(),
+            persistence_path: None,
+            cluster: None,
+            auth: None,
+            services: ServicesConfig {
+                profile: profile.to_owned(),
+            },
+        }
+    }
+
+    /// §9 D2 front-door construction gate (fs half): building the worker-front-door
+    /// services creates NO haematite store and NO temp dir, while the full profile
+    /// over the SAME injected ephemeral root DOES create exactly one store directory.
+    ///
+    /// The injected root is the only place an ephemeral store directory can appear
+    /// (the factory is rooted there), so "the root stays empty on the front-door
+    /// branch" is a real negative assertion: a regression that gave the front door a
+    /// store would land its directory here and fail this test. The full-profile arm
+    /// is the positive control proving the seam genuinely constructs a store when the
+    /// profile asks for one.
+    #[test]
+    fn worker_front_door_builds_no_store_and_no_temp_dir() {
+        let front_door_root = tempfile::tempdir().expect("test can create an ephemeral root");
+        let full_root = tempfile::tempdir().expect("test can create an ephemeral root");
+
+        let front_door: std::sync::Arc<dyn ConnectionServices> =
+            build_connection_services_with(&config_with_profile("worker-front-door"), || {
+                open_ephemeral_rooted(front_door_root.path(), DEFAULT_SHARD_COUNT)
+            })
+            .expect("worker-front-door services build");
+        assert!(
+            !front_door.supports_channel_operations(),
+            "the worker front door serves no channel operations"
+        );
+        assert_eq!(
+            entry_count(front_door_root.path()),
+            0,
+            "the worker front door creates no ephemeral store directory (no haematite, no temp dir)"
+        );
+
+        let full = build_connection_services_with(&config_with_profile("full"), || {
+            open_ephemeral_rooted(full_root.path(), DEFAULT_SHARD_COUNT)
+        })
+        .expect("full services build");
+        assert!(
+            full.supports_channel_operations(),
+            "full mode serves channel operations"
+        );
+        assert_eq!(
+            entry_count(full_root.path()),
+            1,
+            "full mode with no persistence path builds exactly one ephemeral store directory"
+        );
+
+        drop(front_door);
+        drop(full);
     }
 
     /// §9 D3 construction gate (persistent half): requesting a *persistent* store

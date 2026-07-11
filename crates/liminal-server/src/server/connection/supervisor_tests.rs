@@ -362,7 +362,7 @@ fn loopback_ephemeral() -> Result<SocketAddr, Box<dyn std::error::Error>> {
 }
 
 fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std::error::Error>> {
-    use crate::config::types::{ChannelDef, ServerConfig};
+    use crate::config::types::{ChannelDef, ServerConfig, ServicesConfig};
 
     let config = ServerConfig {
         listen_address: "127.0.0.1:0".parse()?,
@@ -378,6 +378,7 @@ fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std:
         persistence_path: None,
         cluster: None,
         auth: None,
+        services: ServicesConfig::default(),
     };
     Ok(ConnectionSupervisor::from_config(&config)?)
 }

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ServerError;
 
-use super::types::{LoadedSchema, ServerConfig};
+use super::types::{LoadedSchema, ServerConfig, ServiceProfile};
 
 /// Validates a fully loaded server configuration before startup.
 ///
@@ -36,6 +36,7 @@ pub fn validate(config: &mut ServerConfig, base_dir: Option<&Path>) -> Result<()
     validate_persistence_path(config, &mut errors);
     validate_cluster(config, &mut errors);
     validate_auth(config, &mut errors);
+    validate_services(config, &mut errors);
     load_channel_schemas(config, base_dir, &mut errors);
 
     if errors.is_empty() {
@@ -280,6 +281,63 @@ fn validate_auth(config: &ServerConfig, errors: &mut Vec<String>) {
     }
 }
 
+/// Validates the `[services]` profile selection.
+///
+/// An unrecognised `profile` value is a typed config validation error. When the
+/// profile is `worker-front-door`, config that asks for machinery the profile does
+/// not build — channels, routing rules, a persistence path, or a cluster — is
+/// rejected rather than silently ignored: the front door constructs no channel,
+/// conversation, haematite, or distribution services, so honouring any of those
+/// keys is impossible and accepting them quietly would be a silent tradeoff.
+fn validate_services(config: &ServerConfig, errors: &mut Vec<String>) {
+    let profile = match config.services.profile() {
+        Ok(profile) => profile,
+        Err(error) => {
+            // `profile()` only ever yields a `ConfigValidation` carrying the bare
+            // field message; surface it directly so it reads like every other
+            // accumulated error rather than the wrapped `Display` prefix.
+            match error {
+                crate::ServerError::ConfigValidation { message } => errors.push(message),
+                other => errors.push(other.to_string()),
+            }
+            return;
+        }
+    };
+
+    if profile != ServiceProfile::WorkerFrontDoor {
+        return;
+    }
+
+    if !config.channels.is_empty() {
+        errors.push(
+            "services.profile: \"worker-front-door\" builds no channels; remove the \
+             [[channels]] entries or use profile = \"full\""
+                .to_owned(),
+        );
+    }
+    if !config.routing_rules.is_empty() {
+        errors.push(
+            "services.profile: \"worker-front-door\" builds no channels to route between; \
+             remove the [[routing_rules]] entries or use profile = \"full\""
+                .to_owned(),
+        );
+    }
+    if config.persistence_path.is_some() {
+        errors.push(
+            "services.profile: \"worker-front-door\" builds no durable store; remove \
+             persistence_path or use profile = \"full\""
+                .to_owned(),
+        );
+    }
+    if config.cluster.is_some() {
+        errors.push(
+            "services.profile: \"worker-front-door\" builds no channel cluster; remove the \
+             [cluster] section or use profile = \"full\""
+                .to_owned(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -291,7 +349,7 @@ mod tests {
 
     use super::validate;
     use crate::config::types::{
-        AuthConfig, ChannelDef, ClusterConfig, RoutingRuleDef, ServerConfig,
+        AuthConfig, ChannelDef, ClusterConfig, RoutingRuleDef, ServerConfig, ServicesConfig,
     };
 
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
@@ -324,6 +382,22 @@ mod tests {
                 cookie: "test-cookie".to_owned(),
             }),
             auth: None,
+            services: ServicesConfig::default(),
+        })
+    }
+
+    /// A worker-front-door config: no channels, routing, persistence, or cluster —
+    /// the shape the front-door profile requires.
+    fn worker_front_door_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
+        Ok(ServerConfig {
+            channels: Vec::new(),
+            routing_rules: Vec::new(),
+            persistence_path: None,
+            cluster: None,
+            services: ServicesConfig {
+                profile: "worker-front-door".to_owned(),
+            },
+            ..sample_config()?
         })
     }
 
@@ -639,6 +713,70 @@ mod tests {
         config.auth = None;
 
         validate(&mut config, None)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn default_profile_is_full_and_passes_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+
+        // The default services config resolves to the full profile.
+        assert_eq!(
+            config.services.profile()?,
+            crate::config::types::ServiceProfile::Full
+        );
+        validate(&mut config, None)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_profile_is_a_validation_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.services = ServicesConfig {
+            profile: "banana".to_owned(),
+        };
+
+        let message = config_validation_message(validate(&mut config, None));
+
+        assert!(message.contains("services.profile"));
+        assert!(message.contains("banana"));
+        assert!(message.contains("worker-front-door"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn worker_front_door_profile_with_empty_topology_passes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = worker_front_door_config()?;
+
+        assert_eq!(
+            config.services.profile()?,
+            crate::config::types::ServiceProfile::WorkerFrontDoor
+        );
+        validate(&mut config, None)?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn worker_front_door_profile_rejects_channels_persistence_and_cluster()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Start from the full sample (channels + cluster present) but flip only the
+        // profile: every full-mode-only knob must be rejected, not silently ignored.
+        let mut config = sample_config()?;
+        config.services = ServicesConfig {
+            profile: "worker-front-door".to_owned(),
+        };
+        config.persistence_path = Some(PathBuf::from("/tmp"));
+
+        let message = config_validation_message(validate(&mut config, None));
+
+        assert!(message.contains("builds no channels"));
+        assert!(message.contains("builds no durable store"));
+        assert!(message.contains("builds no channel cluster"));
 
         Ok(())
     }
