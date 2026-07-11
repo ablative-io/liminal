@@ -412,8 +412,17 @@ a pinned ceiling in §7 either way.
   the disk-quota record above is the open Q4 item.
 - **Conversation machinery (D4):** Q1 — parked actors/participants are
   memory-only (verified: they park correctly today; the defect is
-  lifecycle, not CPU). Q2 — bounded by §5 caps + registry-removal churn
-  test. Q3 — the D4 churn test fails on any registry growth without bound.
+  lifecycle, not CPU). The implementation adds one **exit watcher** per
+  live conversation (supervision-integrity observer, added at review to
+  close the bare-actor-exit leak): also a parked, memory-only native
+  process — each live conversation carries three parked processes (actor,
+  participant, watcher), all torn down by the same finalization. The
+  watcher parks only via the arm→drain→final-liveness-probe slice (the
+  contract C1/C4 discipline applied to process observation — the
+  first shipped instance of the pattern D1 will use for connections).
+  Q2 — bounded by §5 caps + registry-removal churn test; the watcher adds
+  a constant factor (3 not 2 processes per conversation), no new axis.
+  Q3 — the D4 churn test fails on any registry growth without bound.
   Q4 — none.
 - **Listener (D5):** Q1 today — ~100 wakes/s + O(connections) scan,
   recorded as the pinned ceiling pending D5 measurement. Q2 — exactly one.
