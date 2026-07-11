@@ -116,7 +116,18 @@ never a gated suspension (C2 scope) — asserted by test.
    tombstone capacity only matters when a new request needs admission, and
    a new request is itself a wake, so expired tombstones are reclaimed
    before cap admission in the same slice. Tombstones count against the
-   table cap while present, so the TTL is what returns capacity. The connection finalizer (§1.2(5))
+   table cap while present, so the TTL is what returns capacity.
+   **TTL reclamation guard (Vesper's final condition):** reclamation is
+   permitted only for tombstones with NO younger pending entry in the same
+   conversation — otherwise reclaiming tombstone-1 lets a very-late reply
+   to op-1 FIFO-match pending entry-2, resurrecting exactly the
+   mis-correlation the tombstone exists to prevent. The guard is
+   self-clearing (every pending entry resolves to completion or tombstone
+   in bounded time, so a fully-tombstoned conversation becomes reclaimable
+   end-to-end), and a table full of guarded tombstones is the existing
+   typed cap refusal, not a new mechanism. Test: a late reply arriving
+   after the TTL window with a younger pending entry on the same
+   conversation is discarded, never matched. The connection finalizer (§1.2(5))
    cancels every entry, notifier, and timer **before** conversation actors
    are closed. The table is capped by
    `max_pending_conversation_replies_per_connection` (§5 — distinct from
@@ -306,21 +317,27 @@ typed error, each cap a config key):
 - `max_pending_conversation_replies_per_connection` = **32** — symmetric
   with pushes; entries are small and timers cancel on completion, so the
   cap exists for the tombstone/wedge case, not memory.
-- `max_subscription_inbox_depth` = **256** envelopes per inbox — deep
-  enough to absorb a publish burst while a subscriber parks and wakes,
-  shallow enough that shedding fires long before memory matters. **Open
-  certification question, stated rather than chosen silently:** this cap
-  is count-denominated; a byte-denominated variant (e.g. 4 MiB, mirroring
-  the outbound bound) makes the Q2 arithmetic exact at the cost of
-  per-envelope size accounting — the pair picks the denomination.
+- `max_connection_inbox_bytes` = **4 MiB** — one shared inbox-byte budget
+  per connection, spent across ALL that connection's subscription inboxes,
+  deliberately mirroring the outbound 4 MiB bound (a connection gets 4 MiB
+  of buffering in each direction, full stop). **Denomination ruled by the
+  pair (both halves, 2026-07-11):** count caps bound a variable the design
+  doesn't control (envelope size), and per-inbox byte caps re-create the
+  same disease one level down — connection-scoped bytes is the only
+  denomination whose signed product is exact. **Accounting unit, named so
+  the signed number cannot drift (Waffles' refinement, adopted):**
+  serialized envelope bytes as admitted — charged at enqueue, released at
+  dequeue; not capacity, not payload-only, not an estimate. Overflow sheds
+  the offending subscription with a typed error frame, as above.
+- Per-inbox **256-envelope count** retained as a secondary fairness trip
+  only — it stops one subscription starving its siblings inside the shared
+  budget; it is no longer load-bearing for the signed bound.
 
-Worst-case aggregate (lens Q2, stated so the numbers can be tuned against
-it): 256 connections × 32 inboxes × 256 envelopes is the memory-dominant
-product — at a nominal 1 KiB envelope that is a ~2 GiB theoretical
-ceiling, reached only if every connection maxes every cap simultaneously
-with every subscriber parked; the certifying pair signs the defaults
-against this product, not against the per-cap numbers in isolation.
-Unlimited-by-silence is no longer a legal state.
+Worst-case aggregate (lens Q2): 256 connections × (4 MiB in + 4 MiB out +
+the small tables) ≈ **2 GiB, exact and envelope-size-independent** — no
+nominal envelope size doing load-bearing work. The certifying pair signs
+the defaults against this product, not against the per-cap numbers in
+isolation. Unlimited-by-silence is no longer a legal state.
 
 ## 6. D5 — Listener/health polling (evidence-gated)
 
@@ -343,8 +360,9 @@ a pinned ceiling in §7 either way.
   qualifier would let a signed bound masquerade as zero, which is the
   distinction T1's delta methodology exists to keep honest; memory =
   buffers + registration entry + pending-reply table +
-  subscription inboxes, every component bounded by a named §5 cap (inbox
-  depth and reply table included — no unbounded queue survives this doc);
+  subscription inboxes, every component bounded by a named §5 cap (the
+  connection-scoped inbox byte budget and reply table included — no
+  unbounded queue survives this doc);
   pending-reply timers are bounded by the same table cap and cancelled on
   completion/finalization. Q2 — aggregate bounded by `max_connections` ×
   the per-connection caps. Q3 — T1 delta + T2 matrix + R7 counters; they
