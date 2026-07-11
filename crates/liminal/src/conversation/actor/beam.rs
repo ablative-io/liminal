@@ -236,12 +236,19 @@ fn process_command_nif(args: &[Term], context: &mut ProcessContext<'_>) -> Resul
         return core.process_next_command(context);
     }
     if let Some((source, reason)) = exit_source(*message) {
-        // Only configured participants are recorded: the actor is also linked to
-        // its exit watcher, whose EXIT (or any other stray link's) must not be
-        // recorded as a participant crash or trip the crash policy.
         if core.config.participants.contains(&source) {
+            // A configured participant's EXIT is recorded as a participant
+            // crash under the configured policy.
             core.handle_participant_exit(source, reason)
                 .map_err(|_| badarg())?;
+        } else if core.handle_watcher_exit(source, reason) {
+            // The CURRENT watcher died while the conversation was live: a
+            // supervision-integrity failure. The core has failed and finalized
+            // the conversation (participants terminated, registrations
+            // removed); this actor stops itself as the final step. Any other
+            // stray EXIT — including a retired watcher's late one — is ignored
+            // by the identity/finalized checks inside `handle_watcher_exit`.
+            context.request_shutdown();
         }
     }
     Ok(Term::atom(Atom::OK))

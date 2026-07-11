@@ -472,6 +472,17 @@ impl ActorCore {
         // poisoned gate (a panicking spawner, denied workspace-wide) degrades to
         // ungated finalization rather than leaking the conversation.
         let _restart_guard = self.restart_lock.lock().ok();
+        self.finalize_with(true);
+    }
+
+    /// Finalization body, parameterized on who stops the actor process.
+    /// `terminate_actor` is false only when the caller IS the actor's own
+    /// executing slice (the watcher-death path): the cleanup runs here and the
+    /// slice then stops itself through beamr's ordinary shutdown request,
+    /// instead of writing an external tombstone under a process that is
+    /// currently checked out and executing. Every step tolerates the other
+    /// disposition having already run.
+    fn finalize_with(&self, terminate_actor: bool) {
         if self.mark_finalized_and_drain_commands() {
             return;
         }
@@ -484,9 +495,11 @@ impl ActorCore {
         self.release_participants();
         let current_pid = self.current_pid.lock().ok().and_then(|pid| *pid);
         if let Some(pid) = current_pid {
-            self.supervisor
-                .scheduler
-                .terminate_process(pid.get(), ExitReason::Normal);
+            if terminate_actor {
+                self.supervisor
+                    .scheduler
+                    .terminate_process(pid.get(), ExitReason::Normal);
+            }
             self.supervisor.runtime.deregister_owned(pid, self);
         }
         // Directly terminate the watcher too: on a stopped scheduler its
@@ -497,6 +510,62 @@ impl ActorCore {
                 .scheduler
                 .terminate_process(watcher.get(), ExitReason::Normal);
         }
+    }
+
+    /// Handles an EXIT whose source is a watcher pid, returning whether the
+    /// actor's slice should stop itself (the conversation was failed and
+    /// finalized here).
+    ///
+    /// An unexpected watcher death is a supervision-integrity failure, and the
+    /// response is to FAIL and finalize the conversation — never to respawn a
+    /// replacement watcher (certifying ruling). Nothing legitimate terminates
+    /// the watcher externally: it is internal supervision infrastructure, so
+    /// its death means the supervision structure was violated (a bug, an
+    /// administrative kill, or tampering), and the campaign's bias is
+    /// refuse-loudly over limp-cleverly. A mid-life replacement would also
+    /// re-open the whole construction surface the spawn transaction exists to
+    /// close — arm/link/probe ordering, rollback, and the quiet-conversation
+    /// gap where the actor may never run another slice to install the
+    /// replacement's link — buying that risk back for a conversation whose
+    /// integrity is already broken.
+    ///
+    /// Two suppressions keep this precise: a pid that is not the CURRENT
+    /// recorded watcher (a retired incarnation's late EXIT — the record is
+    /// replaced under the lifecycle gate on every spawn, and pids are
+    /// monotonic) is ignored; and once the core is finalized, the watcher's
+    /// death is the close/finalize path's own doing — the finalized marker is
+    /// the suppression token.
+    pub(super) fn handle_watcher_exit(
+        &self,
+        watcher: ParticipantPid,
+        reason: Option<ExitReason>,
+    ) -> bool {
+        if self.watcher_pid() != Some(watcher) {
+            return false;
+        }
+        if self.is_finalized() {
+            return false;
+        }
+        if let Ok(mut state) = self.state.lock() {
+            state.context.push(
+                crate::conversation::types::ConversationContextEntry::SupervisionFailed {
+                    watcher,
+                    reason,
+                },
+            );
+            state.fail();
+        }
+        tracing::warn!(
+            watcher = watcher.get(),
+            ?reason,
+            "conversation exit watcher died while the conversation was live; \
+             supervision integrity is broken — failing and finalizing the conversation"
+        );
+        // The caller is the actor's own slice: clean up everything else here and
+        // let the slice stop itself (finalize's actor-terminate stays idempotent
+        // against that self-stop for every other caller).
+        self.finalize_with(false);
+        true
     }
 
     /// Publishes the terminal marker and drains the command queue in ONE

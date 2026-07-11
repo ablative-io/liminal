@@ -246,6 +246,16 @@ pub enum ConversationContextEntry {
         /// Policy applied by the actor.
         policy: CrashPolicy,
     },
+    /// The conversation's supervision structure was violated: its exit watcher
+    /// died while the conversation was live (nothing legitimate terminates the
+    /// watcher externally). The conversation is failed and finalized in
+    /// response, never continued unobserved.
+    SupervisionFailed {
+        /// The dead watcher's PID.
+        watcher: ParticipantPid,
+        /// EXIT reason carried by the watcher's exit signal, when one was.
+        reason: Option<ExitReason>,
+    },
 }
 
 /// Queryable state snapshot owned by a conversation actor.
