@@ -2,11 +2,16 @@
 
 *2026-07-11, Hermes Crumpet. The liminal half of the aion host resource
 incident fix. Normative dependencies: beamr `docs/READINESS-CONTRACT-SPEC.md`
-(branch readiness-contract-draft @ 3fe7d47 — clauses C1–C4, consumer
+(branch readiness-contract-draft @ 4916161 — clauses C1–C4, consumer
 requirements R1–R8, churn gates T1–T7) and
 `docs/stack-review/AION-HOST-RESOURCE-INCIDENT-2026-07-11.md`. Evidence base:
 Sol scout session 02468176 (envelope retained), verified against liminal main
-@ 218a378 / 0.2.3. Status: DRAFT — routes through the review chain (norn
+@ 218a378 / 0.2.3. Sol architecture review session
+44a6c465-8fb9-4f14-844d-06b09a6ae19b returned `not_ready` with five major
+findings against the first revision; all five verified against source and
+folded here (reply seam + pending-reply state machine, shape-(a) ownership
+carve-out, D3 exclusive-ownership constructor, lens-answer repairs, stale
+contract pin). Status: DRAFT — routes through the review chain (norn
 passes → Vesper Lynd review → independent certification by Vesper Lynd +
 Waffles the Terrible) before any code. No code exists yet; the liminal
 consumer merges only after beamr's §2.5 pinning suite is green on main.*
@@ -54,13 +59,40 @@ never a gated suspension (C2 scope) — asserted by test.
    ordering closes the publish-vs-park race consumer-side (C1 closes it
    VM-side). The `delivery.rs:1-9` every-slice assumption is deleted.
 3. **Pending-reply continuation (R1(vi)).** The in-slice 5 s reply drain for
-   reply-requested `ConversationMessage` frames is removed. The connection
-   records a pending-reply continuation; `deliver_participant_reply` fires
-   the connection marker; the next slice writes the correlated reply frame
-   (or a timeout error frame when the deadline passes — deadline checked on
-   wake and via a beamr timer, not by blocking). Removes the last
-   bounded-blocking wait from the slice path and the four-concurrent-replies
-   scheduler wedge.
+   reply-requested `ConversationMessage` frames is removed. Two library-side
+   pieces are part of D1, not implementation detail:
+
+   **(a) Reply-availability seam.** The conversation core today exposes only
+   a blocking `receive_timeout`; there is no notifier API, so R1(vi) has no
+   seam to fire through. D1 adds a reply-availability notifier registration
+   on the conversation core (mirror of the subscription-inbox notifier):
+   installed **before** the reply-requested message is forwarded to the
+   actor (or permanently at conversation open), fired on the reply queue's
+   empty→non-empty transition and on terminal actor error, and included in
+   the slice's final post-arm probe (C4) so a reply that lands between drain
+   and park is never lost. The notifier is removed at conversation close;
+   markers arriving after close or carrying a stale connection generation
+   are discarded (R5). A deterministic race test injects a reply between
+   notifier install and the final probe, and between the probe and `Wait` —
+   not only an eventual end-to-end test.
+
+   **(b) Pending-reply state machine.** Removing the blocking drain removes
+   the serialization it accidentally provided, so pending replies need real
+   bookkeeping: one bounded table per connection, keyed by a monotonic
+   internal operation id, each entry carrying conversation id, stream id,
+   correlation id, deadline, timer reference, and terminal state. Matching
+   is FIFO within a conversation. On completion the entry's timer is
+   cancelled; on timeout the entry becomes a tombstone (a late reply is
+   discarded, not mis-correlated to a newer request) and the timeout error
+   frame is written on the next wake. The connection finalizer (§1.2(5))
+   cancels every entry, notifier, and timer **before** conversation actors
+   are closed. The table is capped by
+   `max_pending_conversation_replies_per_connection` (§5 — distinct from
+   server-push slots). Tests: multiple pipelined reply-requested frames on
+   one and on several conversations; timeout followed by a late reply and a
+   new request on the same conversation; crash/close with entries pending;
+   reply arriving after finalization. Removes the last bounded-blocking wait
+   from the slice path and the four-concurrent-replies scheduler wedge.
 4. **Single idempotent marker (R6).** One `READY` atom per connection; any
    marker triggers one full slice servicing all sources. Marker coalescing
    and duplicates are structurally harmless.
@@ -71,8 +103,9 @@ never a gated suspension (C2 scope) — asserted by test.
    `reap_crashed` (dereg must not require the dead process to run — the
    supervisor/reaper calls finalization), spawn rollback, and scheduler
    shutdown. Finalization: deregister readiness; purge queued controls for
-   the pid; cancel all pending push slots; fire worker-unregistration once;
-   release every subscription (removing inbox notifiers before drop);
+   the pid; cancel all pending push slots; cancel every pending-reply
+   entry, reply notifier, and timer (§1.2(3b)); fire worker-unregistration
+   once; release every subscription (removing inbox notifiers before drop);
    close/terminate every conversation actor AND participant (D4); remove
    runtime registry entries. A final sweep at shutdown catches force-close
    misses (closes the scout's "records merely logged" gap).
@@ -91,7 +124,21 @@ D1 consumes the readiness service per the joint contract: shape (b) primary
 (beamr-owned service; liminal holds tokens and obeys R4/R5), shape (a)
 fallback (liminal owns the reactor thread; same slice shape, same
 requirements; reactor thread inventoried through liminal's lens answers).
-Nothing in §1.2 changes between shapes.
+
+The slice shape (§1.2(1)–(4), (6), (7)) is shape-invariant. The R4/R5
+registration mechanics are **not**: under shape (a), if the connection
+process owns its socket, process death (`reap_crashed`, external kill) can
+drop the last fd handle before the reactor deregisters — and a reused fd
+number could then deliver another connection's events against a stale
+registration. Shape (a) therefore keeps fd/stream lifetime in the
+`(pid, generation)` registration record itself (reactor/supervisor-owned
+close guard): the reaper deregisters and receives the acknowledgement
+before the record — and with it the fd — is released. If that guard proves
+impractical, a beamr process-exit hook becomes an explicit shape-(a)
+prerequisite, not an assumed given. An externally-killed-pid test proves
+deregister-ACK precedes fd close and reuse. Under shape (b) this ordering
+is the service's obligation (contract §3.3); the test still runs as the
+consumer-side pin (T5).
 
 ## 2. D2 — Capability-scoped worker front door
 
@@ -118,15 +165,32 @@ correlated push/reply, and notifier-consumed reserved publishes ONLY:
 Ownership-graph finding (from the July 7 exchange with Apollo Biscuit,
 confirmed by the scout): the store is `Arc`-shared into channel handles, so a
 guard owned by `LiminalConnectionServices` cannot guarantee the
-database-drops-first rule on every path. Design: **the cleanup owner lives
-inside the shared store wrapper itself** — the struct holding the
-`EventStore`/`Database` gains `_ephemeral_dir: Option<TempDir>` declared
-AFTER the store field. Rust's declaration-order drop means: last `Arc` clone
-drops → database closes (shard actors join, `writer.lock` releases on fd
-close per haematite's contract) → guard removes the directory. This covers
-normal drop, abrupt-but-orderly teardown, and — because the guard is created
-before `Database::open` — partial startup failure. Repeated start/stop cycles
-each own distinct directories. Persistent-path stores are untouched.
+database-drops-first rule on every path. And a guard placed merely *beside*
+an `Arc<EventStore>` field is not enough either: today's construction is
+nested — `Arc<HaematiteStore>` wrapping a **caller-supplied**
+`Arc<EventStore>` (`HaematiteStore::new` is public,
+`durability/store.rs:71`) — so the inner store can outlive any wrapper that
+holds a clone of it, and field declaration order proves nothing across that
+boundary. Design: **the guard lives with exclusive ownership of the
+database.** A private ephemeral constructor takes the
+`Database`/`EventStore` **by value**, creates the inner `Arc` internally,
+and returns a non-`Clone` guarded wrapper that never exposes the inner
+`Arc` (no getter, no caller-supplied clones possible). Drop order inside
+that single owner — store field first, `_ephemeral_dir: Option<TempDir>`
+declared after it — then genuinely means: last handle drops → database
+closes (shard actors join, `writer.lock` releases on fd close per
+haematite's contract) → guard removes the directory. The existing public
+`HaematiteStore::new` remains for persistent/unguarded stores only. This
+covers normal drop, abrupt-but-orderly teardown, and — because the guard is
+created before `Database::open` — partial startup failure *on the liminal
+side*; haematite's own cleanup after a partially failed
+`Database::create/open` (resources acquired, then error) must be either
+cited from haematite's contract or pinned by an injected-failure test
+before the partial-startup claim is certified — flagged to Apollo Biscuit.
+Lifecycle tests run with channel/store handle clones alive at teardown,
+with startup failure injected, and across the final last-handle drop.
+Repeated start/stop cycles each own distinct directories. Persistent-path
+stores are untouched.
 `ReadOnlyDatabase` observers are never handed an ephemeral dir (per Apollo's
 deletion-safety note). If certification wants deterministic removal at
 shutdown rather than at last-drop, Apollo's offered `close_and_remove()`
@@ -151,10 +215,16 @@ Scout-found leak class (independent of readiness, same resource axis):
 Config gains explicit bounds, each with a pinning test and a
 certifying-pair-signed number: `max_connections` (listener refuses beyond),
 `max_subscriptions_per_connection`, `max_conversations_per_connection`,
-`max_pending_pushes_per_connection`. Durable disk quota is deferred to the
-haematite GC lane (Apollo's workstream) with a pointer, not duplicated here.
-Defaults proposed at review time; unlimited-by-silence is no longer a legal
-state.
+`max_pending_pushes_per_connection`,
+`max_pending_conversation_replies_per_connection` (§1.2(3b) table), and
+`max_subscription_inbox_depth` — the shared inbox is an unbounded
+`VecDeque` today (`channel/subscription.rs:33`); it gains a per-inbox depth
+cap, and on overflow the subscription is released with an explicit error
+frame to the subscriber, mirroring the outbound 4 MiB overflow policy (a
+slow consumer sheds its own subscription; it cannot grow server memory
+without bound). Durable disk quota is deferred to the haematite GC lane
+(Apollo's workstream) with a pointer, not duplicated here. Defaults
+proposed at review time; unlimited-by-silence is no longer a legal state.
 
 ## 6. D5 — Listener/health polling (evidence-gated)
 
@@ -171,11 +241,15 @@ a pinned ceiling in §7 either way.
 ## 7. Idle/resource-cost lens answers (v1.1)
 
 - **Parked connection (D1):** Q1 — zero CPU, zero slices (R7 counter
-  static); memory = buffers + registration entry, bounded by §5 caps.
-  Q2 — aggregate bounded by `max_connections`. Q3 — T1 delta + T2 matrix +
-  R7 counters; they fail on any regression to permanent-runnable. Q4 — the
-  4 MiB outbound bound (existing, signed via this doc's certification); no
-  other by-design idle cost remains.
+  static); memory = buffers + registration entry + pending-reply table +
+  subscription inboxes, every component bounded by a named §5 cap (inbox
+  depth and reply table included — no unbounded queue survives this doc);
+  pending-reply timers are bounded by the same table cap and cancelled on
+  completion/finalization. Q2 — aggregate bounded by `max_connections` ×
+  the per-connection caps. Q3 — T1 delta + T2 matrix + R7 counters; they
+  fail on any regression to permanent-runnable. Q4 — the 4 MiB outbound
+  bound (existing, signed via this doc's certification); no other by-design
+  idle cost remains.
 - **Readiness consumption:** shape (b): zero liminal threads (the service's
   thread is beamr-inventoried); shape (a): exactly one reactor thread,
   inventoried, with its own soak assertion. Q3 — T4/T5 churn gates.
@@ -183,20 +257,33 @@ a pinned ceiling in §7 either way.
   workers + beamr per-scheduler residents (floor owned by composition
   lane). Q2 — one scheduler per server instance, no hidden N. Q3 — the
   front-door gate: constructing it creates no channel/conversation/haematite
-  scheduler, no store, no temp dir (thread + fs assertions). Q4 — none.
+  scheduler, no store, no temp dir (thread + fs assertions). Q4 — the
+  four-thread connection scheduler itself is the accepted by-design
+  resident cost: bound = fixed worker count pinned by the thread assertion,
+  sign-off via this doc's certification; the per-scheduler idle floor is
+  the composition lane's Q4, cited not duplicated.
 - **Ephemeral store (D3):** Q1 — while live: haematite's documented cost;
-  disk bounded by what's written. Q2 — one dir per store instance, removed
-  at last drop; leak test asserts zero residue across repeated start/stop.
-  Q3 — the D3 lifecycle tests. Q4 — none (removal is unconditional).
+  disk growth has **no liminal-side quota** — that is a by-design gap,
+  recorded here as a Q4 item, not waved through: either an ephemeral-store
+  byte quota lands with D3, or the unbounded (write-amplified) disk cost is
+  explicitly signed by the certifying pair with the haematite GC lane
+  pointer as the remediation owner. Q2 — one dir per store instance,
+  removed at last drop; leak test asserts zero residue across repeated
+  start/stop. Q3 — the D3 lifecycle tests. Q4 — removal is unconditional;
+  the disk-quota record above is the open Q4 item.
 - **Conversation machinery (D4):** Q1 — parked actors/participants are
   memory-only (verified: they park correctly today; the defect is
   lifecycle, not CPU). Q2 — bounded by §5 caps + registry-removal churn
   test. Q3 — the D4 churn test fails on any registry growth without bound.
   Q4 — none.
-- **Listener (D6/D5):** Q1 today — ~100 wakes/s + O(connections) scan,
+- **Listener (D5):** Q1 today — ~100 wakes/s + O(connections) scan,
   recorded as the pinned ceiling pending D5 measurement. Q2 — exactly one.
-  Q3 — T1's baseline measurement captures it. Q4 — if D5 is deferred, the
-  ceiling + this doc's sign-off IS the rule-2 record.
+  Q3 — a dedicated test-only listener wake/scan counter with a hard numeric
+  ceiling (or an OS-visible soak of the listener alone). T1 cannot serve
+  here: it is a *delta* over a baseline that contains the listener on both
+  sides, so it is structurally blind to listener cost — the listener needs
+  its own assertion that fails independently of T1. Q4 — if D5 is deferred,
+  the ceiling + certifying-pair sign-off IS the rule-2 record.
 
 ## 8. How the original shipped (rule 3)
 
@@ -218,12 +305,18 @@ design both times.
 ## 9. Acceptance gates
 
 Contract §6 T1–T7 in full (T1 as the certified delta assertion with recorded
-methodology), plus: D2 front-door construction gate (thread/fs assertions +
-explicit rejection of unsupported frames); D3 lifecycle gate (removal on
-normal drop, startup rollback, and a repeated start/stop cycle — zero
-residue); D4 churn gate (no parked participant after close; registries
-bounded; push slots cancelled on timeout); §5 cap-refusal tests; C2-scope
-assertion (connections never park gated). All are permanent rule-1
+methodology), plus: D1 reply gates (deterministic reply-vs-park race
+injection per §1.2(3a); multi-flight/timeout/late-reply/reply-after-
+finalization state-machine tests per §1.2(3b)); the externally-killed-pid
+dereg-ACK-before-close test (§1.3 — consumer-side pin under both shapes);
+D2 front-door construction gate (thread/fs assertions + explicit rejection
+of unsupported frames); D3 lifecycle gate (removal on normal drop, startup
+rollback including injected haematite-open failure, repeated start/stop,
+and teardown with store-handle clones still alive — zero residue); D4 churn
+gate (no parked participant after close; registries bounded; push slots
+cancelled on timeout); §5 cap-refusal tests including inbox-overflow shed;
+listener wake-counter ceiling (§7, independent of T1); C2-scope assertion
+(connections never park gated). All are permanent rule-1
 assertions. Nothing re-enables under launchd on the incident host until T1
 passes at the certified delta.
 
