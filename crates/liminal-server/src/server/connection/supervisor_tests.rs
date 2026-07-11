@@ -131,6 +131,7 @@ impl ConnectionServices for FlushFailingServices {
         &self,
         channel: &str,
         accepted_schemas: &[SchemaId],
+        _install: Option<liminal::channel::InboxInstall>,
     ) -> Result<crate::server::connection::ConnectionSubscription, crate::ServerError> {
         let _ = (channel, accepted_schemas);
         Err(crate::ServerError::ListenerAccept {
@@ -943,6 +944,119 @@ fn max_connections_refuses_past_the_cap() -> Result<(), Box<dyn std::error::Erro
         }
         other => return Err(format!("expected ConnectionLimitReached, got {other:?}").into()),
     }
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Review round 1 item 7: the §5 `max_connections` bound holds under CONCURRENT
+/// spawns — an atomic admission reservation means N callers racing for the last
+/// slot admit EXACTLY one; the rest get the typed `ConnectionLimitReached`. A
+/// signed bound that can be transiently exceeded is not a bound.
+#[test]
+fn concurrent_spawns_at_the_limit_admit_exactly_one() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
+
+    let config = ServerConfig {
+        listen_address: "127.0.0.1:0".parse()?,
+        health_listen_address: "127.0.0.1:1".parse()?,
+        drain_timeout_ms: 30_000,
+        channels: Vec::new(),
+        routing_rules: Vec::new(),
+        persistence_path: None,
+        cluster: None,
+        auth: None,
+        services: ServicesConfig::default(),
+        limits: LimitsConfig {
+            max_connections: 2,
+            ..LimitsConfig::default()
+        },
+    };
+    let supervisor = ConnectionSupervisor::from_config(&config)?;
+
+    // Fill all but the last slot.
+    let (_hold_client, hold_server) = tcp_pair()?;
+    let _held = supervisor.spawn_connection(hold_server)?;
+
+    // Race N threads for the single remaining slot, released by one barrier.
+    let racers: usize = 4;
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(racers));
+    let mut workers = Vec::new();
+    for _ in 0..racers {
+        let supervisor = supervisor.clone();
+        let barrier = std::sync::Arc::clone(&barrier);
+        let (client, server) = tcp_pair()?;
+        workers.push(thread::spawn(move || {
+            // Keep the client half alive across the spawn attempt.
+            let _client = client;
+            barrier.wait();
+            supervisor
+                .spawn_connection(server)
+                .map(|handle| handle.pid())
+        }));
+    }
+    let mut admitted = 0_usize;
+    let mut refused = 0_usize;
+    for worker in workers {
+        match worker.join() {
+            Ok(Ok(_pid)) => admitted += 1,
+            Ok(Err(crate::ServerError::ConnectionLimitReached { limit })) => {
+                assert_eq!(limit, 2, "the refusal reports the configured cap");
+                refused += 1;
+            }
+            Ok(Err(other)) => return Err(format!("unexpected spawn error: {other}").into()),
+            Err(_) => return Err("racer thread panicked".into()),
+        }
+    }
+    assert_eq!(admitted, 1, "exactly one racer wins the last slot");
+    assert_eq!(refused, racers - 1, "every other racer is refused");
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Review round 1 item 7 (release pairing): a closed connection releases its
+/// admission slot, so the cap is a bound on LIVE connections, not a
+/// once-per-process quota — spawn at limit 1, close, spawn again succeeds.
+#[test]
+fn closed_connection_releases_its_admission_slot() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
+
+    let config = ServerConfig {
+        listen_address: "127.0.0.1:0".parse()?,
+        health_listen_address: "127.0.0.1:1".parse()?,
+        drain_timeout_ms: 30_000,
+        channels: Vec::new(),
+        routing_rules: Vec::new(),
+        persistence_path: None,
+        cluster: None,
+        auth: None,
+        services: ServicesConfig::default(),
+        limits: LimitsConfig {
+            max_connections: 1,
+            ..LimitsConfig::default()
+        },
+    };
+    let supervisor = ConnectionSupervisor::from_config(&config)?;
+
+    let (_client_one, server_one) = tcp_pair()?;
+    let first = supervisor.spawn_connection(server_one)?;
+    // The slot is held: a second spawn is refused.
+    let (_client_two, server_two) = tcp_pair()?;
+    assert!(matches!(
+        supervisor.spawn_connection(server_two),
+        Err(crate::ServerError::ConnectionLimitReached { .. })
+    ));
+
+    // Close the first connection and wait for its record to go away.
+    supervisor.force_close_active_connections();
+    wait_for_cleanup(&supervisor, first.pid())?;
+
+    // The released slot admits a fresh connection.
+    let (_client_three, server_three) = tcp_pair()?;
+    let second = supervisor.spawn_connection(server_three);
+    assert!(
+        second.is_ok(),
+        "the admission slot released by the close admits a new connection: {second:?}"
+    );
     supervisor.shutdown();
     Ok(())
 }

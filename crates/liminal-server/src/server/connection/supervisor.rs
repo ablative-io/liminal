@@ -468,18 +468,19 @@ impl SupervisorInner {
         self: &Arc<Self>,
         stream: TcpStream,
     ) -> Result<ConnectionHandle, ServerError> {
-        // §5 `max_connections`: refuse before spawning any process so an
-        // over-cap accept costs nothing (the caller — the listener — drops the
-        // returned stream on error, refusing the connection). Enforced here in
-        // the single spawn path so every caller (listener and tests) is bounded,
-        // not just the accept loop. The check-then-register window is benign: the
-        // cap is an admission bound, not a hard invariant, and a transient
-        // one-over under a burst is corrected as connections close.
-        let active = self.runtime.active_count();
-        let limit = self.runtime.limits().max_connections;
-        if active >= limit {
-            return Err(ServerError::ConnectionLimitReached { limit });
-        }
+        // §5 `max_connections`: ATOMIC admission reservation acquired BEFORE any
+        // process construction (review round 1 item 7 — a signed bound must not
+        // be exceedable by concurrent callers; check-then-spawn across an
+        // unlocked window was). The CAS reservation is released on every failure
+        // path below and converts into the connection record at `register`;
+        // thereafter the single record-removal path (`remove`) releases it. An
+        // over-cap accept therefore costs nothing and the bound holds under any
+        // concurrency.
+        self.runtime.try_reserve_admission()?;
+        let reservation = AdmissionReservation {
+            runtime: &self.runtime,
+            armed: true,
+        };
         stream
             .set_nonblocking(true)
             .map_err(|error| ServerError::ListenerAccept {
@@ -503,6 +504,10 @@ impl SupervisorInner {
                     message: format!("failed to spawn connection process: {error}"),
                 })?;
         self.runtime.register(pid, peer_addr)?;
+        // The reservation is now owned by the registered record: `remove` (the
+        // single record-removal path — finish/mark_crashed/reap all funnel
+        // through it) releases the admission when the record goes away.
+        reservation.convert();
         Ok(ConnectionHandle {
             pid,
             peer_addr,
@@ -539,6 +544,34 @@ impl SupervisorInner {
         } else {
             self.runtime.remove_control(pid, &removal_key);
             false
+        }
+    }
+}
+
+/// RAII guard for one §5 `max_connections` admission reservation.
+///
+/// Acquired (via [`ConnectionRuntime::try_reserve_admission`]) before any process
+/// construction in `spawn_connection`; every early-return failure path releases
+/// it through `Drop`, and a successful `register` converts it into the
+/// connection record (whose removal releases the admission instead). RAII means
+/// no failure path — present or future — can leak a reservation.
+struct AdmissionReservation<'a> {
+    runtime: &'a ConnectionRuntime,
+    armed: bool,
+}
+
+impl AdmissionReservation<'_> {
+    /// Converts the reservation into record ownership: `Drop` no longer releases
+    /// it, because the registered record's removal will.
+    fn convert(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AdmissionReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.runtime.release_admission();
         }
     }
 }
@@ -589,6 +622,12 @@ pub(super) struct ConnectionRuntime {
     /// Monotonic source of push correlation ids. Server-allocated, so it never
     /// collides with a client-chosen id on this connection.
     next_push_id: AtomicU64,
+    /// §5 `max_connections` admission counter. Incremented atomically (CAS
+    /// against the limit) BEFORE a connection process is constructed and
+    /// decremented on every spawn-failure path and on final record removal, so
+    /// the signed bound holds under concurrent spawns — admission is never
+    /// derived from the records-map length across an unlocked window.
+    admissions: AtomicU64,
     /// Optional application hook invoked on worker registration and on the close
     /// of a connection that had registered. `None` keeps liminal standalone: a
     /// `WorkerRegister` is accepted with no callback.
@@ -626,9 +665,57 @@ impl ConnectionRuntime {
             slice_counts: Mutex::new(HashMap::new()),
             push_replies: Mutex::new(HashMap::new()),
             next_push_id: AtomicU64::new(1),
+            admissions: AtomicU64::new(0),
             notifier,
             auth_token,
             limits,
+        }
+    }
+
+    /// Atomically reserves one §5 `max_connections` admission slot: a CAS loop
+    /// against the configured limit, so N concurrent callers racing for the last
+    /// slot admit EXACTLY one — the bound cannot be transiently exceeded.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ConnectionLimitReached`] when every slot is taken.
+    fn try_reserve_admission(&self) -> Result<(), ServerError> {
+        let limit = self.limits.max_connections as u64;
+        let mut current = self.admissions.load(Ordering::Acquire);
+        loop {
+            if current >= limit {
+                return Err(ServerError::ConnectionLimitReached {
+                    limit: self.limits.max_connections,
+                });
+            }
+            match self.admissions.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Releases one admission slot. Called by the spawn failure paths (via the
+    /// [`AdmissionReservation`] guard) and by [`Self::remove`] when a registered
+    /// record is removed — exactly one release per reservation. Saturating so a
+    /// spurious release can never wrap the counter.
+    fn release_admission(&self) {
+        let mut current = self.admissions.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(1);
+            match self.admissions.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -1064,8 +1151,12 @@ impl ConnectionRuntime {
             .and_then(|mut records| records.remove(&pid));
         // Decrement only when a record was actually present so a double-remove
         // (e.g. `finish` after `reap_crashed`) cannot drive the gauge negative.
+        // The §5 admission slot is released on the same guard: the reservation
+        // acquired in `spawn_connection` converted into this record at
+        // `register`, so its removal is exactly one release per reservation.
         if removed.is_some() {
             crate::metrics::connection_closed();
+            self.release_admission();
         }
         removed
     }

@@ -277,3 +277,79 @@ fn overflowed_subscription_is_shed_with_a_typed_error() -> Result<(), ServerErro
     );
     Ok(())
 }
+
+/// Review round 1 item 6: the shed path must never itself tear the connection
+/// down under outbound pressure. When the outbound buffer's free space cannot
+/// hold the shed's `SubscribeError` frame, the shed is DEFERRED (the subscription
+/// stays marked, delivery stays skipped) and retried once the drain frees room —
+/// the connection survives, drains, reports the error, and sheds exactly one
+/// subscription.
+#[test]
+fn shed_error_frame_defers_under_outbound_pressure() -> Result<(), ServerError> {
+    let mut state = ConnectionProcessState::default();
+    state.subscriptions.insert(1, overflowed_subscription(1, 7));
+
+    // A small-capacity outbound buffer pre-filled so LESS than one SubscribeError
+    // of room remains.
+    let mut outbound = OutboundWriter::with_capacity(160);
+    outbound
+        .enqueue_frame(&deliver_frame_for_test(vec![0_u8; 96]))
+        .map_err(|error| ServerError::ListenerAccept {
+            message: format!("pre-fill failed: {error}"),
+        })?;
+    let residue = outbound.queued_len();
+    assert!(residue > 0);
+
+    // Under pressure: the shed is deferred, NOT fatal, and nothing is removed.
+    let shed = service_subscriptions(&mut state, &mut outbound, DELIVERY_SLICE_BUDGET).map_err(
+        |error| ServerError::ListenerAccept {
+            message: format!("the deferred shed must not be fatal: {error}"),
+        },
+    )?;
+    assert!(
+        shed.is_empty(),
+        "the shed is deferred while no room remains"
+    );
+    assert!(
+        state.subscriptions.contains_key(&1),
+        "the subscription stays (marked) until its error frame is enqueued"
+    );
+    assert_eq!(
+        outbound.queued_len(),
+        residue,
+        "nothing was enqueued under pressure"
+    );
+
+    // The drain frees room (simulated by taking the queued bytes): the retry on
+    // the next slice enqueues the typed error and sheds exactly this subscription.
+    let _ = outbound.take_bytes();
+    let shed = service_subscriptions(&mut state, &mut outbound, DELIVERY_SLICE_BUDGET).map_err(
+        |error| ServerError::ListenerAccept {
+            message: format!("the retried shed failed: {error}"),
+        },
+    )?;
+    assert_eq!(shed, vec![1], "the shed lands once room exists");
+    let frames = decode_all(&outbound.take_bytes())?;
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            Frame::SubscribeError { stream_id: 7, message: Some(m), .. } if m.contains("shed")
+        )),
+        "the typed shed error is reported after the deferral: {frames:?}"
+    );
+    Ok(())
+}
+
+/// Builds a deliver frame with an arbitrary payload for buffer pre-filling.
+fn deliver_frame_for_test(payload: Vec<u8>) -> Frame {
+    Frame::Deliver {
+        flags: 0,
+        stream_id: 3,
+        delivery_seq: 1,
+        envelope: liminal::protocol::MessageEnvelope::new(
+            ProtocolSchemaId::new([9; ProtocolSchemaId::WIRE_LEN]),
+            liminal::protocol::CausalContext::independent(),
+            payload,
+        ),
+    }
+}

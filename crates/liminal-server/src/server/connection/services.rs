@@ -48,22 +48,6 @@ pub trait SubscriptionResource: std::fmt::Debug + Send {
     /// empty read is simply "nothing to deliver this slice", never an error.
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope>;
 
-    /// Installs the R3 wake notifier onto the underlying inbox (§1.2(2)). The
-    /// server passes a callback that fires the connection scheduler's `READY`
-    /// marker on the inbox's empty→non-empty edge. Defaulted to a no-op: a
-    /// resource with no wakeable inbox (test stand-ins, front-door) ignores it.
-    fn install_wake_notifier(&self, _notifier: liminal::channel::InboxNotifier) {}
-
-    /// Installs the §5 shared connection byte budget and per-inbox fairness cap
-    /// onto the underlying inbox. Defaulted to a no-op (unbounded) for resources
-    /// with no real inbox.
-    fn install_inbox_budget(
-        &self,
-        _budget: std::sync::Arc<liminal::channel::ConnectionInboxBudget>,
-        _depth_cap: usize,
-    ) {
-    }
-
     /// Whether an overflow has marked this subscription for shedding (§5). The
     /// delivery pump sheds an overflowed subscription with a typed error frame.
     /// Defaulted to `false`: a resource with no bounded inbox never overflows.
@@ -129,20 +113,6 @@ impl ConnectionSubscription {
         self.resource.try_next()
     }
 
-    /// Installs the R3 wake notifier onto this subscription's inbox (§1.2(2)).
-    pub(super) fn install_wake_notifier(&self, notifier: liminal::channel::InboxNotifier) {
-        self.resource.install_wake_notifier(notifier);
-    }
-
-    /// Installs the §5 shared byte budget and per-inbox fairness cap.
-    pub(super) fn install_inbox_budget(
-        &self,
-        budget: std::sync::Arc<liminal::channel::ConnectionInboxBudget>,
-        depth_cap: usize,
-    ) {
-        self.resource.install_inbox_budget(budget, depth_cap);
-    }
-
     /// Whether this subscription has been shed by an inbox overflow (§5).
     pub(super) fn is_overflowed(&self) -> bool {
         self.resource.is_overflowed()
@@ -187,12 +157,22 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
 
     /// Delegates a subscribe request to the liminal library.
     ///
+    /// `install`, when `Some`, carries the connection's §5 shared inbox byte
+    /// budget, per-inbox fairness cap, and R3 wake notifier. The implementation
+    /// MUST install it on the subscription's inbox BEFORE the registration is
+    /// published to the channel actor (i.e. before any envelope can be
+    /// delivered), so no envelope is ever admitted uncharged, past the depth
+    /// cap, or without a wake. Implementations with no real inbox (test
+    /// stand-ins, capability-scoped profiles that refuse subscribe) may ignore
+    /// it.
+    ///
     /// # Errors
     /// Returns [`ServerError`] when the liminal subscribe operation fails.
     fn subscribe(
         &self,
         channel: &str,
         accepted_schemas: &[ProtocolSchemaId],
+        install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError>;
 
     /// Delegates unsubscribe to the liminal library.
@@ -990,6 +970,7 @@ impl ConnectionServices for LiminalConnectionServices {
         &self,
         channel: &str,
         accepted_schemas: &[ProtocolSchemaId],
+        install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError> {
         let configured = self
             .channels
@@ -1003,13 +984,18 @@ impl ConnectionServices for LiminalConnectionServices {
             liminal::protocol::negotiate_schema(configured.protocol_schema, accepted_schemas)
                 .map_err(|error| server_error_from_protocol(&error))?
         };
-        let subscription =
-            configured
-                .handle
-                .subscribe()
-                .map_err(|error| ServerError::ListenerAccept {
-                    message: format!("liminal subscribe failed for channel '{channel}': {error}"),
-                })?;
+        // `subscribe_with_install` installs the §5 budget/fairness cap and the R3
+        // wake notifier on the inbox at construction — strictly before the
+        // registration is published to the channel actor — so there is no window
+        // in which a publish can land uncharged or without a wake.
+        let subscription = install
+            .map_or_else(
+                || configured.handle.subscribe(),
+                |install| configured.handle.subscribe_with_install(install),
+            )
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("liminal subscribe failed for channel '{channel}': {error}"),
+            })?;
         let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         Ok(ConnectionSubscription::new(
             id,
@@ -1121,18 +1107,6 @@ impl SubscriptionResource for LiminalSubscriptionResource {
     fn unsubscribe(self: Box<Self>) -> Result<(), ServerError> {
         drop(self.subscription);
         Ok(())
-    }
-
-    fn install_wake_notifier(&self, notifier: liminal::channel::InboxNotifier) {
-        self.subscription.install_wake_notifier(notifier);
-    }
-
-    fn install_inbox_budget(
-        &self,
-        budget: std::sync::Arc<liminal::channel::ConnectionInboxBudget>,
-        depth_cap: usize,
-    ) {
-        self.subscription.install_inbox_budget(budget, depth_cap);
     }
 
     fn is_overflowed(&self) -> bool {

@@ -77,6 +77,7 @@ impl ConnectionServices for NoopServices {
         &self,
         _channel: &str,
         _accepted_schemas: &[liminal::protocol::SchemaId],
+        _install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError> {
         Err(ServerError::ListenerAccept {
             message: "noop services do not subscribe".to_owned(),

@@ -117,12 +117,43 @@ impl ConnectionInboxBudget {
     }
 }
 
+/// Everything a server connection installs onto a subscription's inbox.
+///
+/// Carries the shared §5 byte budget, the per-inbox fairness cap, and the R3
+/// wake notifier. Passed INTO the subscribe call so the installation happens at
+/// inbox construction — strictly BEFORE the registration is published to the
+/// channel actor — closing the pre-install window in which envelopes could be
+/// admitted uncharged or without a wake.
+pub struct InboxInstall {
+    /// Shared per-connection byte budget (§5).
+    pub budget: Arc<ConnectionInboxBudget>,
+    /// Per-inbox envelope-count fairness trip (§5).
+    pub depth_cap: usize,
+    /// R3 wake notifier fired on the inbox's empty→non-empty transition. `None`
+    /// when the caller has no waker (scheduler-free unit tests).
+    pub notifier: Option<InboxNotifier>,
+}
+
+impl std::fmt::Debug for InboxInstall {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InboxInstall")
+            .field("depth_cap", &self.depth_cap)
+            .field("has_notifier", &self.notifier.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Mutable inbox state guarded by one lock: the queued envelopes (each carrying
-/// the exact byte count admitted for it, so release is symmetric with charge),
-/// the installed shared budget and per-inbox fairness cap, and the wake notifier.
+/// the exact bytes CHARGED for it, so release is symmetric with charge), the
+/// installed shared budget and per-inbox fairness cap, the wake notifier, and
+/// the closed marker.
 struct InboxState {
-    /// Each entry is `(envelope, admitted_bytes)` — the byte count charged at
-    /// enqueue, released verbatim at dequeue so charge/release is exact.
+    /// Each entry is `(envelope, charged_bytes)` — the amount actually charged to
+    /// the shared budget at enqueue (0 when no budget was installed at admit
+    /// time), released verbatim at dequeue/close. Storing the CHARGE, not the
+    /// size, makes release byte-identical to charge on every entry even across a
+    /// budget install, so the budget can never under- or over-release.
     queue: VecDeque<(Envelope, usize)>,
     /// Shared per-connection byte budget (§5). `None` = unbounded (standalone
     /// library use / tests), preserving the pre-bounding behaviour exactly.
@@ -132,6 +163,13 @@ struct InboxState {
     depth_cap: usize,
     /// Wake callback (R3). `None` until the connection installs one.
     notifier: Option<InboxNotifier>,
+    /// Terminal marker set by [`SubscriptionInbox::close`]: admissions are refused
+    /// WITHOUT charging, and all queued charges have been released. Closing is the
+    /// release-by-construction seam — every teardown path (explicit unsubscribe,
+    /// overflow shed, connection teardown, and the `Drop` backstop) funnels
+    /// through it, so queued bytes can never be stranded on the connection-lifetime
+    /// budget.
+    closed: bool,
 }
 
 /// The shared subscription inbox (R3 + §5). Replaces the bare
@@ -157,8 +195,9 @@ impl std::fmt::Debug for SubscriptionInbox {
     }
 }
 
-/// Why an inbox admission was refused (§5). Both refusals set the sticky overflow
-/// marker and drop the envelope rather than growing memory.
+/// Why an inbox admission was refused (§5). The budget/fairness refusals set the
+/// sticky overflow marker and drop the envelope rather than growing memory; a
+/// closed inbox refuses without charging and without marking.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InboxAdmission {
     /// The envelope was admitted (and, when it made the inbox non-empty, the wake
@@ -169,12 +208,16 @@ pub(crate) enum InboxAdmission {
     BudgetExceeded,
     /// The per-inbox fairness trip (§5) is full; the subscription is shed.
     FairnessTripped,
+    /// The inbox was closed (unsubscribe/shed/teardown): the envelope is dropped
+    /// without charging the budget — a closed inbox can never re-accumulate cost.
+    Closed,
 }
 
 impl SubscriptionInbox {
     /// Creates an unbounded, notifier-less inbox — the standalone/default shape,
-    /// byte-identical to the pre-bounding behaviour. The server installs the
-    /// budget, fairness cap, and notifier after subscribe.
+    /// byte-identical to the pre-bounding behaviour. A server connection passes an
+    /// [`InboxInstall`] through subscribe so budget/cap/notifier are installed at
+    /// construction instead.
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(InboxState {
@@ -182,13 +225,16 @@ impl SubscriptionInbox {
                 budget: None,
                 depth_cap: usize::MAX,
                 notifier: None,
+                closed: false,
             }),
             overflowed: AtomicBool::new(false),
         })
     }
 
     /// Installs the connection's shared byte budget and per-inbox fairness cap
-    /// (§5). Called once at subscribe time, before delivery begins.
+    /// (§5). Runs at inbox construction (via [`InboxInstall`]) — before the
+    /// registration is published to the channel actor — so no envelope can be
+    /// admitted uncharged.
     pub(crate) fn install_budget(&self, budget: Arc<ConnectionInboxBudget>, depth_cap: usize) {
         if let Ok(mut state) = self.state.lock() {
             state.budget = Some(budget);
@@ -196,26 +242,43 @@ impl SubscriptionInbox {
         }
     }
 
-    /// Installs the wake notifier (R3), fired on the empty→non-empty transition.
-    /// Called once at subscribe time, capturing the connection scheduler's enqueue
-    /// handle (§1.2(2)).
+    /// Installs the wake notifier (R3), fired on the empty→non-empty transition,
+    /// capturing the connection scheduler's enqueue handle (§1.2(2)).
+    ///
+    /// Defensive invariant: the install RECHECKS non-emptiness under the lock and
+    /// fires the notifier (outside the lock) when envelopes are already queued —
+    /// an install onto an already-non-empty inbox produces the wake whose edge was
+    /// consumed before the notifier existed, so a wake can never be lost to
+    /// install ordering. On the normal construction path the queue is empty and
+    /// this is a no-op.
     pub(crate) fn install_notifier(&self, notifier: InboxNotifier) {
-        if let Ok(mut state) = self.state.lock() {
+        let fire = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            let pending = !state.queue.is_empty();
+            let handle = notifier.clone();
             state.notifier = Some(notifier);
+            pending.then_some(handle)
+        };
+        if let Some(notifier) = fire {
+            notifier();
         }
     }
 
     /// Admits `envelope` under the byte budget and fairness trip, charging the
     /// serialized bytes as admitted and firing the wake notifier on the
-    /// empty→non-empty transition. On refusal the sticky overflow marker is set
-    /// and the envelope dropped (memory never grows past the bound).
+    /// empty→non-empty transition. On budget/fairness refusal the sticky overflow
+    /// marker is set and the envelope dropped (memory never grows past the
+    /// bound); a closed inbox refuses without charging or marking.
     ///
     /// The notifier fires OUTSIDE the state lock so the publishing actor's slice
     /// never holds the inbox lock across the scheduler enqueue.
     pub(crate) fn admit(&self, envelope: Envelope) -> InboxAdmission {
         // Serialize once, before the lock: the admitted byte count is the wire
-        // size (§5 denomination), stored with the entry so dequeue releases
-        // exactly what enqueue charged.
+        // size (§5 denomination). The entry stores the amount actually CHARGED
+        // (0 when no budget is installed), so dequeue/close releases exactly
+        // what enqueue charged.
         let bytes = encode_envelope(&envelope).len();
         let notifier = {
             let Ok(mut state) = self.state.lock() else {
@@ -224,18 +287,25 @@ impl SubscriptionInbox {
                 self.overflowed.store(true, Ordering::Release);
                 return InboxAdmission::BudgetExceeded;
             };
+            if state.closed {
+                return InboxAdmission::Closed;
+            }
             if state.queue.len() >= state.depth_cap {
                 self.overflowed.store(true, Ordering::Release);
                 return InboxAdmission::FairnessTripped;
             }
-            if let Some(budget) = state.budget.as_ref() {
-                if !budget.try_charge(bytes) {
-                    self.overflowed.store(true, Ordering::Release);
-                    return InboxAdmission::BudgetExceeded;
+            let charged = match state.budget.as_ref() {
+                Some(budget) => {
+                    if !budget.try_charge(bytes) {
+                        self.overflowed.store(true, Ordering::Release);
+                        return InboxAdmission::BudgetExceeded;
+                    }
+                    bytes
                 }
-            }
+                None => 0,
+            };
             let was_empty = state.queue.is_empty();
-            state.queue.push_back((envelope, bytes));
+            state.queue.push_back((envelope, charged));
             // Fire only on the empty→non-empty edge: a parked connection needs one
             // wake to drain the whole burst, and coalescing is harmless (R6).
             if was_empty {
@@ -250,20 +320,53 @@ impl SubscriptionInbox {
         InboxAdmission::Admitted
     }
 
-    /// Removes and returns the next envelope, releasing its admitted bytes back to
+    /// Removes and returns the next envelope, releasing its CHARGED bytes back to
     /// the shared budget (exact charge/release symmetry).
     pub(crate) fn pop(&self) -> Option<Envelope> {
-        let (envelope, bytes, budget) = {
+        let (envelope, charged, budget) = {
             let mut state = self.state.lock().ok()?;
-            let (envelope, bytes) = state.queue.pop_front()?;
-            (envelope, bytes, state.budget.clone())
+            let (envelope, charged) = state.queue.pop_front()?;
+            (envelope, charged, state.budget.clone())
         };
-        // Release the admitted bytes AFTER dropping the state lock so the shared
+        // Release the charged bytes AFTER dropping the state lock so the shared
         // budget's atomic is never touched while the inbox lock is held.
         if let Some(budget) = budget {
-            budget.release(bytes);
+            budget.release(charged);
         }
         Some(envelope)
+    }
+
+    /// Atomically closes the inbox, releasing every queued charge back to the
+    /// shared budget: under the lock it marks the inbox closed, drains all
+    /// entries, and detaches the notifier and budget; the summed release happens
+    /// outside the lock. Idempotent. Admissions after close are refused without
+    /// charging ([`InboxAdmission::Closed`]).
+    ///
+    /// This is the release-by-construction seam: explicit unsubscribe, overflow
+    /// shed, and connection teardown ALL reach it through the subscription
+    /// handle's drop (see [`SubscriptionInner::drop`]), and the inbox's own `Drop`
+    /// is the final backstop — no teardown path can strand queued bytes on the
+    /// connection-lifetime budget.
+    pub(crate) fn close(&self) {
+        let (released, budget) = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            let released: usize = state
+                .queue
+                .drain(..)
+                .map(|(_envelope, charged)| charged)
+                .sum();
+            state.notifier = None;
+            (released, state.budget.take())
+        };
+        if let Some(budget) = budget {
+            budget.release(released);
+        }
     }
 
     /// Whether this subscription has been marked for shedding by an overflow.
@@ -275,6 +378,15 @@ impl SubscriptionInbox {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.state.lock().map_or(0, |state| state.queue.len())
+    }
+}
+
+impl Drop for SubscriptionInbox {
+    fn drop(&mut self) {
+        // Backstop: if no teardown path ever called `close`, release the queued
+        // charges here so the last Arc dropping can never strand budget bytes.
+        // Idempotent against an earlier close (the closed marker short-circuits).
+        self.close();
     }
 }
 
@@ -356,10 +468,11 @@ impl SubscriberRegistration {
     }
 
     /// Delivers `envelope` to this subscriber when its predicate accepts it (or
-    /// it has no predicate). Returns `Ok(true)` when the envelope was pushed onto
-    /// the inbox, `Ok(false)` when a predicate filtered it out, and `Err` only
-    /// when the inbox lock is poisoned. The boolean lets the channel actor count
-    /// genuine deliveries for the delivery-ack signal.
+    /// it has no predicate). Returns `true` when the envelope was pushed onto
+    /// the inbox, `false` when a predicate filtered it out, the inbox refused it
+    /// (§5 overflow — the subscription is then marked for shedding), or the inbox
+    /// is closed. The boolean lets the channel actor count genuine deliveries for
+    /// the delivery-ack signal.
     pub(crate) fn deliver(&self, envelope: &Envelope) -> bool {
         if let Some(predicate) = self.predicate.as_ref() {
             if !predicate(envelope) {
@@ -412,8 +525,19 @@ impl SubscriptionHandle {
     pub(crate) fn spawn(
         scheduler: &Arc<Scheduler>,
         predicate: Option<SubscriptionPredicate>,
+        install: Option<InboxInstall>,
     ) -> Result<(Self, SubscriberRegistration), LiminalError> {
         let inbox: SubscriberInbox = SubscriptionInbox::new();
+        // Install the §5 budget/fairness cap and the R3 wake notifier AT
+        // CONSTRUCTION — strictly before the registration is handed to the
+        // channel actor — so there is no window in which a publish can be
+        // admitted uncharged, past the depth cap, or without a wake.
+        if let Some(install) = install {
+            inbox.install_budget(install.budget, install.depth_cap);
+            if let Some(notifier) = install.notifier {
+                inbox.install_notifier(notifier);
+            }
+        }
         let process_inbox = Arc::clone(&inbox);
         let factory = Box::new(move || {
             Box::new(SubscriberProcess {
@@ -470,20 +594,6 @@ impl SubscriptionHandle {
         Ok(self.inner.inbox.pop())
     }
 
-    /// Installs the connection's shared inbox byte budget and per-inbox fairness
-    /// cap (§5). Called by the server once at subscribe time; before this the
-    /// inbox is unbounded (standalone library behaviour).
-    pub fn install_inbox_budget(&self, budget: Arc<ConnectionInboxBudget>, depth_cap: usize) {
-        self.inner.inbox.install_budget(budget, depth_cap);
-    }
-
-    /// Installs the R3 wake notifier, fired on the inbox's empty→non-empty
-    /// transition. The server installs one carrying the connection scheduler's
-    /// `READY` enqueue handle (§1.2(2)).
-    pub fn install_wake_notifier(&self, notifier: InboxNotifier) {
-        self.inner.inbox.install_notifier(notifier);
-    }
-
     /// Whether an overflow has marked this subscription for shedding (§5).
     #[must_use]
     pub fn is_overflowed(&self) -> bool {
@@ -502,6 +612,13 @@ impl std::fmt::Debug for SubscriptionHandle {
 
 impl Drop for SubscriptionInner {
     fn drop(&mut self) {
+        // Close the inbox FIRST: atomically mark it closed, drain queued entries,
+        // and release every charged byte back to the shared connection budget
+        // (§5 — queued bytes must never be stranded on the connection-lifetime
+        // budget by unsubscribe, shed, or teardown; all of them funnel through
+        // this drop). Post-close deliveries from the channel actor (whose EXIT
+        // prune below is asynchronous) are refused without charging.
+        self.inbox.close();
         // Terminating the subscriber process fires the bidirectional link to the
         // channel actor, which traps the EXIT and removes this subscriber from
         // its fan-out list. This is the real-beamr unsubscribe-on-drop path.
@@ -808,5 +925,166 @@ mod inbox_bounding {
             0,
             "every admitted byte is released on dequeue — exact symmetry"
         );
+    }
+
+    /// Review round 1 item 4: closing an inbox with a QUEUED backlog (the shed
+    /// shape — an overflowed inbox is near-full by construction) releases every
+    /// charged byte back to the shared budget, so a sibling subscription can
+    /// admit again. Without the close-release, one shed strands its whole share
+    /// of the 4 MiB budget forever.
+    #[test]
+    fn close_releases_queued_charges_so_siblings_recover() {
+        // Budget sized so inbox A can queue a 256-envelope backlog (the §5
+        // fairness-cap depth) and exhaust the shared budget doing it.
+        let one = envelope(b"backlog-envelope-payload");
+        let unit = admitted_bytes(&one);
+        let budget = ConnectionInboxBudget::new(unit * 256);
+
+        let inbox_a = SubscriptionInbox::new();
+        let inbox_b = SubscriptionInbox::new();
+        inbox_a.install_budget(Arc::clone(&budget), usize::MAX);
+        inbox_b.install_budget(Arc::clone(&budget), usize::MAX);
+
+        // Queue the full 256-envelope backlog on A, consuming the whole budget.
+        for _ in 0..256 {
+            assert_eq!(inbox_a.admit(one.clone()), InboxAdmission::Admitted);
+        }
+        assert_eq!(budget.used(), unit * 256, "the backlog holds the budget");
+        // The sibling is starved (the shed trigger condition).
+        assert_eq!(inbox_b.admit(one.clone()), InboxAdmission::BudgetExceeded);
+
+        // Shed/unsubscribe/teardown all funnel through close: EVERY queued charge
+        // returns to the shared budget in one atomic close.
+        inbox_a.close();
+        assert_eq!(
+            budget.used(),
+            0,
+            "close releases the entire queued backlog back to the shared budget"
+        );
+        // The sibling recovers: it can admit again.
+        assert_eq!(
+            inbox_b.admit(one),
+            InboxAdmission::Admitted,
+            "a sibling admits again after the other inbox is shed"
+        );
+    }
+
+    /// Review round 1 item 4: a closed inbox refuses admissions WITHOUT charging
+    /// the budget, so a shed subscription can never re-accumulate cost while the
+    /// channel actor's asynchronous EXIT prune is still in flight.
+    #[test]
+    fn closed_inbox_refuses_without_charging() {
+        let env = envelope(b"post-close");
+        let budget = ConnectionInboxBudget::new(1024 * 1024);
+        let inbox = SubscriptionInbox::new();
+        inbox.install_budget(Arc::clone(&budget), usize::MAX);
+
+        inbox.close();
+        assert_eq!(inbox.admit(env), InboxAdmission::Closed);
+        assert_eq!(budget.used(), 0, "a closed inbox never charges the budget");
+        assert_eq!(inbox.len(), 0, "a closed inbox never queues");
+    }
+
+    /// Review round 1 item 4: the `Drop` backstop — if no teardown path ever
+    /// called `close`, the last handle dropping still releases the queued charges
+    /// (release-by-construction: a release that cannot be omitted).
+    #[test]
+    fn drop_backstop_releases_queued_charges() {
+        let env = envelope(b"dropped-while-queued");
+        let unit = admitted_bytes(&env);
+        let budget = ConnectionInboxBudget::new(1024 * 1024);
+        {
+            let inbox = SubscriptionInbox::new();
+            inbox.install_budget(Arc::clone(&budget), usize::MAX);
+            assert_eq!(inbox.admit(env.clone()), InboxAdmission::Admitted);
+            assert_eq!(inbox.admit(env), InboxAdmission::Admitted);
+            assert_eq!(budget.used(), unit * 2);
+            // No close() call: the Arc drops here.
+        }
+        assert_eq!(
+            budget.used(),
+            0,
+            "dropping the last inbox handle releases every queued charge"
+        );
+    }
+
+    /// Review round 1 item 4: close is idempotent, and pop-after-close finds
+    /// nothing (the queue was drained into the release).
+    #[test]
+    fn close_is_idempotent_and_drains_the_queue() {
+        let env = envelope(b"x");
+        let budget = ConnectionInboxBudget::new(1024 * 1024);
+        let inbox = SubscriptionInbox::new();
+        inbox.install_budget(Arc::clone(&budget), usize::MAX);
+        assert_eq!(inbox.admit(env), InboxAdmission::Admitted);
+
+        inbox.close();
+        inbox.close(); // second close is a no-op, not a double release
+        assert_eq!(budget.used(), 0);
+        assert!(inbox.pop().is_none(), "a closed inbox holds nothing");
+    }
+
+    /// Review round 1 item 5 (charge ownership): an envelope admitted BEFORE the
+    /// budget was installed carries a charge of 0 — its dequeue releases exactly
+    /// 0 against the later-installed budget, never bytes it did not charge. The
+    /// production subscribe path installs the budget at inbox construction so
+    /// this window is structurally closed; this pins the defensive invariant
+    /// that makes release byte-identical to charge on EVERY entry regardless.
+    #[test]
+    fn per_entry_charge_ownership_survives_budget_install() {
+        let uncharged = envelope(b"admitted-before-budget-install");
+        let charged = envelope(b"admitted-after-budget-install");
+        let inbox = SubscriptionInbox::new();
+
+        // Admitted with no budget installed: charge ownership 0.
+        assert_eq!(inbox.admit(uncharged), InboxAdmission::Admitted);
+
+        let budget = ConnectionInboxBudget::new(1024 * 1024);
+        inbox.install_budget(Arc::clone(&budget), usize::MAX);
+        let unit = admitted_bytes(&charged);
+        assert_eq!(inbox.admit(charged), InboxAdmission::Admitted);
+        assert_eq!(budget.used(), unit, "only the post-install entry charged");
+
+        // Popping the uncharged entry releases exactly 0 — the budget cannot
+        // under-count (over-admitting past the signed 4 MiB) by releasing bytes
+        // that were never charged.
+        assert!(inbox.pop().is_some());
+        assert_eq!(budget.used(), unit, "the uncharged entry released nothing");
+        assert!(inbox.pop().is_some());
+        assert_eq!(
+            budget.used(),
+            0,
+            "the charged entry released its exact charge"
+        );
+    }
+
+    /// Review round 1 item 5 (install recheck): installing a notifier onto an
+    /// ALREADY-NON-EMPTY inbox fires it exactly once — the wake whose
+    /// empty→non-empty edge was consumed before the notifier existed is
+    /// regenerated at install, so a wake can never be lost to install ordering.
+    /// (The production subscribe path installs at construction, when the queue is
+    /// guaranteed empty; this pins the defensive invariant.)
+    #[test]
+    fn notifier_install_onto_non_empty_inbox_fires_once() {
+        let inbox = SubscriptionInbox::new();
+        assert_eq!(
+            inbox.admit(envelope(b"pre-install")),
+            InboxAdmission::Admitted
+        );
+
+        let fires = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&fires);
+        inbox.install_notifier(Arc::new(move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }));
+        assert_eq!(
+            fires.load(Ordering::Relaxed),
+            1,
+            "install onto a non-empty inbox regenerates exactly one wake"
+        );
+
+        // A subsequent admit onto the still-non-empty inbox does not re-fire.
+        assert_eq!(inbox.admit(envelope(b"second")), InboxAdmission::Admitted);
+        assert_eq!(fires.load(Ordering::Relaxed), 1);
     }
 }

@@ -129,7 +129,15 @@ impl PendingReplyTable {
     }
 
     /// Admits a reply-requested operation on `conversation_id`/`stream_id`,
-    /// deadlined at `now + reply_timeout`. Enforces both §5 caps.
+    /// deadlined at `now + reply_timeout`, returning the reserved operation id.
+    ///
+    /// Admission is a RESERVATION made BEFORE the message is forwarded to the
+    /// participant (cap-before-mutation): a cap-refused operation must never
+    /// reach the services adapter — a refused-but-forwarded request would
+    /// produce an orphan reply with no table entry, which could later
+    /// FIFO-match a younger admitted operation (wrong-reply delivery). A caller
+    /// whose forward fails AFTER admission rolls back the exact reservation via
+    /// [`Self::cancel`].
     ///
     /// # Errors
     /// Returns [`ServerError::ConnectionCapReached`] when the per-conversation
@@ -141,7 +149,7 @@ impl PendingReplyTable {
         conversation_id: u64,
         stream_id: u32,
         now: Instant,
-    ) -> Result<(), ServerError> {
+    ) -> Result<u64, ServerError> {
         // Sub-cap: pending + tombstones for THIS conversation.
         let per_conversation = self
             .entries
@@ -177,7 +185,16 @@ impl PendingReplyTable {
             deadline: now + self.reply_timeout,
             state: EntryState::Pending,
         });
-        Ok(())
+        Ok(op_id)
+    }
+
+    /// Rolls back exactly one reservation made by [`Self::admit`]: the entry with
+    /// `op_id` is removed regardless of state. Used when the forward that followed
+    /// a successful admission fails — the operation never reached the participant,
+    /// so no reply can ever arrive for it and the reservation must not linger to
+    /// time out into a spurious tombstone.
+    pub(super) fn cancel(&mut self, op_id: u64) {
+        self.entries.retain(|entry| entry.op_id != op_id);
     }
 
     /// Correlates a reply that became available for `conversation_id` against the

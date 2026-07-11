@@ -79,9 +79,20 @@ pub(super) fn service_subscriptions(
         // subscription is released with an explicit typed error frame to the
         // subscriber, mirroring the outbound overflow policy (a slow consumer
         // sheds its own subscription; it cannot grow server memory without bound).
-        // Enqueue the error frame and mark it for removal, skipping delivery.
+        //
+        // The shed must never itself tear the connection down under outbound
+        // pressure (review round 1 item 6 — the promise is shed-NOT-teardown, and
+        // it must hold exactly under the pressure that causes sheds): a shed frame
+        // that fits an empty buffer but not the CURRENT free space is DEFERRED
+        // work, not a fatal overflow. The subscription stays marked (the sticky
+        // overflow flag; delivery below is skipped by this same branch) and the
+        // typed error retries on a later slice once the drain frees room. The
+        // subscription is removed/released only AFTER its error frame is
+        // successfully enqueued. Only a frame that cannot fit an EMPTY buffer
+        // falls through to the fatal overflow (the spec-inherent single-frame
+        // bound) — unreachable for this small fixed-text frame in practice.
         if subscription.is_overflowed() {
-            outbound.enqueue_frame(&Frame::SubscribeError {
+            let frame = Frame::SubscribeError {
                 flags: 0,
                 stream_id,
                 reason_code: SERVER_ERROR_CODE,
@@ -90,7 +101,13 @@ pub(super) fn service_subscriptions(
                      limit exceeded"
                         .to_owned(),
                 ),
-            })?;
+            };
+            let needed = encoded_len(&frame).map_err(OutboundError::Encode)?;
+            if needed <= outbound.capacity() && !outbound.has_room(needed) {
+                // Deferred: retry the shed notification next slice.
+                continue;
+            }
+            outbound.enqueue_frame(&frame)?;
             shed.push(*subscription_id);
             continue;
         }
