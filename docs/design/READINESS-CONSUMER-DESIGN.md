@@ -279,7 +279,9 @@ a pinned ceiling in §7 either way.
 - **Listener (D5):** Q1 today — ~100 wakes/s + O(connections) scan,
   recorded as the pinned ceiling pending D5 measurement. Q2 — exactly one.
   Q3 — a dedicated test-only listener wake/scan counter with a hard numeric
-  ceiling (or an OS-visible soak of the listener alone). T1 cannot serve
+  ceiling (or an OS-visible soak of the listener alone), its methodology
+  recorded to the same standard as T1 (environment, duration, measurement
+  source — reproducible, not anecdotal). T1 cannot serve
   here: it is a *delta* over a baseline that contains the listener on both
   sides, so it is structurally blind to listener cost — the listener needs
   its own assertion that fails independently of T1. Q4 — if D5 is deferred,
