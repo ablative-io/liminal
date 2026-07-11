@@ -11,9 +11,13 @@ Sol scout session 02468176 (envelope retained), verified against liminal main
 findings against the first revision; all five verified against source and
 folded here (reply seam + pending-reply state machine, shape-(a) ownership
 carve-out, D3 exclusive-ownership constructor, lens-answer repairs, stale
-contract pin). Status: DRAFT — routes through the review chain (norn
-passes → Vesper Lynd review → independent certification by Vesper Lynd +
-Waffles the Terrible) before any code. No code exists yet; the liminal
+contract pin). Status: **APPROVED by both halves of the certifying pair,
+2026-07-11** — Vesper Lynd (three advisories + §5 defaults request) and
+Waffles the Terrible (seventh wake source: reply-deadline expiry; §1.2(7)
+shutdown-completion clarification), all six consolidated fold items folded
+at this revision. Per §10 sequencing: D2/D3/D4 unblocked for focused
+branches; D1 waits on beamr §2.5 pinning suite green on main. No code
+before that gate. No code exists yet; the liminal
 consumer merges only after beamr's §2.5 pinning suite is green on main.*
 
 ## 0. Principle and scope
@@ -54,7 +58,11 @@ never a gated suspension (C2 scope) — asserted by test.
    (`channel/subscription.rs`) gains a notifier slot installed at subscribe
    time: on empty→non-empty it calls `enqueue_atom_message(conn_pid,
    READY)` — cheap, non-blocking, safe on the publishing actor's slice.
-   Both legs fire it: local `SubscriberRegistration::deliver` and remote
+   The slot captures the **connection scheduler's** enqueue handle at
+   install time — the channel actor fires from its own scheduler's slice,
+   and an enqueue routed to the firing caller's ambient scheduler is a
+   silently lost wake (Vesper advisory 3). Both legs fire it: local
+   `SubscriberRegistration::deliver` and remote
    `SubscriberProcess::accept_remote_frame`. Install-before-final-recheck
    ordering closes the publish-vs-park race consumer-side (C1 closes it
    VM-side). The `delivery.rs:1-9` every-slice assumption is deleted.
@@ -66,15 +74,24 @@ never a gated suspension (C2 scope) — asserted by test.
    a blocking `receive_timeout`; there is no notifier API, so R1(vi) has no
    seam to fire through. D1 adds a reply-availability notifier registration
    on the conversation core (mirror of the subscription-inbox notifier):
-   installed **before** the reply-requested message is forwarded to the
-   actor (or permanently at conversation open), fired on the reply queue's
-   empty→non-empty transition and on terminal actor error, and included in
-   the slice's final post-arm probe (C4) so a reply that lands between drain
-   and park is never lost. The notifier is removed at conversation close;
+   installed **permanently at conversation open** — normative, not a
+   choice; per-message install under pipelining would need refcounted
+   notifiers with per-operation removal, and the pending-reply table
+   already does the per-operation correlation, so the notifier's lifecycle
+   is simply the conversation's (Vesper advisory 1). It fires on the reply
+   queue's empty→non-empty transition and on terminal actor error, and is
+   included in the slice's final post-arm probe (C4) so a reply that lands
+   between drain and park is never lost. Because the conversation core runs
+   on another scheduler's slice, the notifier slot captures the
+   **connection scheduler's** enqueue handle at install, never the firing
+   caller's ambient one — a misrouted enqueue is a silently lost wake
+   (Vesper advisory 3; the VM-side twin is the composition spec's
+   Shared-delivery gate). The notifier is removed at conversation close;
    markers arriving after close or carrying a stale connection generation
    are discarded (R5). A deterministic race test injects a reply between
-   notifier install and the final probe, and between the probe and `Wait` —
-   not only an eventual end-to-end test.
+   notifier install and the final probe, and between the probe and `Wait`,
+   including a cross-scheduler-publish case — not only an eventual
+   end-to-end test.
 
    **(b) Pending-reply state machine.** Removing the blocking drain removes
    the serialization it accidentally provided, so pending replies need real
@@ -83,15 +100,34 @@ never a gated suspension (C2 scope) — asserted by test.
    correlation id, deadline, timer reference, and terminal state. Matching
    is FIFO within a conversation. On completion the entry's timer is
    cancelled; on timeout the entry becomes a tombstone (a late reply is
-   discarded, not mis-correlated to a newer request) and the timeout error
-   frame is written on the next wake. The connection finalizer (§1.2(5))
+   discarded, not mis-correlated to a newer request) and **the timer's
+   expiry itself delivers the connection's READY marker** — reply-deadline
+   expiry is a wake source in its own right (R1(vi) extended, Waffles'
+   finding: nothing else guarantees a wake, so without this clause a
+   parked connection whose pending reply expires under zero other traffic
+   never wakes, and the client waits indefinitely for a timeout error the
+   connection believes it handled). The timeout error frame is then
+   written in the woken slice. **Tombstone reclamation is explicit**
+   (Vesper advisory 2 — without it the cap becomes a denial mechanism on a
+   long-lived connection accumulating timeouts): a tombstone is reclaimed
+   when its late reply arrives and is discarded, swept when its
+   conversation closes, and otherwise expires under a bounded tombstone
+   TTL — a deadline evaluated at slice entry, **not** a second timer:
+   tombstone capacity only matters when a new request needs admission, and
+   a new request is itself a wake, so expired tombstones are reclaimed
+   before cap admission in the same slice. Tombstones count against the
+   table cap while present, so the TTL is what returns capacity. The connection finalizer (§1.2(5))
    cancels every entry, notifier, and timer **before** conversation actors
    are closed. The table is capped by
    `max_pending_conversation_replies_per_connection` (§5 — distinct from
    server-push slots). Tests: multiple pipelined reply-requested frames on
    one and on several conversations; timeout followed by a late reply and a
-   new request on the same conversation; crash/close with entries pending;
-   reply arriving after finalization. Removes the last bounded-blocking wait
+   new request on the same conversation; a table filled entirely with
+   tombstones recovering capacity via TTL and via conversation close;
+   **a reply that times out while the connection is parked with zero other
+   traffic — the timeout error frame still reaches the client promptly**
+   (the seventh-wake-source gate); crash/close with entries pending; reply
+   arriving after finalization. Removes the last bounded-blocking wait
    from the slice path and the four-concurrent-replies scheduler wedge.
 4. **Single idempotent marker (R6).** One `READY` atom per connection; any
    marker triggers one full slice servicing all sources. Marker coalescing
@@ -122,7 +158,13 @@ never a gated suspension (C2 scope) — asserted by test.
    `NotifyShutdown` broadcasts to ALL live connections, not just subscribed
    ones — the control atom already wakes parked processes (C1); woken
    connections write `Disconnect`, drain best-effort, finalize.
-   ForceClose-after-deadline backstop unchanged.
+   ForceClose-after-deadline backstop unchanged. To be explicit against
+   contract T5 (which forbids shutdown depending on parked processes
+   running a final slice): the broadcast wake is a **courtesy**, the
+   ForceClose deadline is the **guarantee** — shutdown COMPLETION never
+   depends on any woken slice actually running; the supervisor/reaper-owned
+   teardown of T5 completes regardless. The two documents describe the same
+   design, not a contradiction (Waffles' reading note).
 
 ### 1.3 Shape dependency
 
@@ -245,8 +287,40 @@ cap, and on overflow the subscription is released with an explicit error
 frame to the subscriber, mirroring the outbound 4 MiB overflow policy (a
 slow consumer sheds its own subscription; it cannot grow server memory
 without bound). Durable disk quota is deferred to the haematite GC lane
-(Apollo's workstream) with a pointer, not duplicated here. Defaults
-proposed at review time; unlimited-by-silence is no longer a legal state.
+(Apollo's workstream) with a pointer, not duplicated here.
+
+Proposed defaults (certifying pair signs or adjusts; each refusal is a
+typed error, each cap a config key):
+
+- `max_connections` = **256** — liminal is a worker-bus, not an internet
+  broker: an order of magnitude above any observed fleet (the incident
+  host ran 11), while keeping every worst-case product below meaningful.
+- `max_subscriptions_per_connection` = **32** — observed workers hold a
+  handful of taps (observability, liveness, capability); 32 is generous
+  headroom without letting one connection fan out unboundedly.
+- `max_conversations_per_connection` = **32** — same shape as
+  subscriptions: correlated request/reply surfaces per worker are few.
+- `max_pending_pushes_per_connection` = **32** — in-flight correlated
+  pushes are latency-bound and timeout-guarded; 32 outstanding per worker
+  exceeds any observed dispatch depth.
+- `max_pending_conversation_replies_per_connection` = **32** — symmetric
+  with pushes; entries are small and timers cancel on completion, so the
+  cap exists for the tombstone/wedge case, not memory.
+- `max_subscription_inbox_depth` = **256** envelopes per inbox — deep
+  enough to absorb a publish burst while a subscriber parks and wakes,
+  shallow enough that shedding fires long before memory matters. **Open
+  certification question, stated rather than chosen silently:** this cap
+  is count-denominated; a byte-denominated variant (e.g. 4 MiB, mirroring
+  the outbound bound) makes the Q2 arithmetic exact at the cost of
+  per-envelope size accounting — the pair picks the denomination.
+
+Worst-case aggregate (lens Q2, stated so the numbers can be tuned against
+it): 256 connections × 32 inboxes × 256 envelopes is the memory-dominant
+product — at a nominal 1 KiB envelope that is a ~2 GiB theoretical
+ceiling, reached only if every connection maxes every cap simultaneously
+with every subscriber parked; the certifying pair signs the defaults
+against this product, not against the per-cap numbers in isolation.
+Unlimited-by-silence is no longer a legal state.
 
 ## 6. D5 — Listener/health polling (evidence-gated)
 
