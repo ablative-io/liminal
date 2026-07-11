@@ -204,24 +204,23 @@ impl ConnectionProcess {
         }
     }
 
-    /// Releases every conversation this connection opened: closing each terminates
-    /// its supervised actor and participant and drops their runtime registrations,
-    /// so an abrupt connection teardown never leaks them. Every in-handler
-    /// termination path (EOF, client `Close`, `ForceClose`, and each crash route)
-    /// calls this before the runtime teardown; the `Drop` backstop covers the
-    /// external-termination/reap and scheduler-shutdown paths that never run
-    /// another slice. The conversation map is drained, so a second call finds
-    /// nothing — the explicit paths and the backstop cannot double-close.
+    /// Releases every conversation this connection opened, finalizing each so its
+    /// supervised actor and participant are terminated and their runtime
+    /// registrations dropped — an abrupt connection teardown never leaks them.
+    /// Finalization is bounded, non-blocking, and does not require the
+    /// conversation scheduler to run a slice (or even be live): teardown runs on
+    /// a connection scheduler worker and inside `Drop`, where waiting on another
+    /// scheduler would wedge the worker or hang reap/shutdown. The interactive
+    /// close round trip stays exclusively on the client-requested
+    /// `ConversationClose` frame path. Every in-handler termination path (EOF,
+    /// client `Close`, `ForceClose`, and each crash route) calls this before the
+    /// runtime teardown; the `Drop` backstop covers the external-termination/reap
+    /// and scheduler-shutdown paths that never run another slice. The
+    /// conversation map is drained, so a second call finds nothing — the explicit
+    /// paths and the backstop cannot double-finalize.
     fn release_conversations(&mut self) {
-        for (conversation_id, conversation) in std::mem::take(&mut self.state.conversations) {
-            if let Err(error) = conversation.close() {
-                tracing::warn!(
-                    peer_addr = ?self.peer_addr,
-                    conversation_id,
-                    %error,
-                    "conversation close during connection teardown failed"
-                );
-            }
+        for (_conversation_id, conversation) in std::mem::take(&mut self.state.conversations) {
+            conversation.finalize();
         }
     }
 

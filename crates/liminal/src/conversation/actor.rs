@@ -13,6 +13,7 @@ mod core;
 mod exit;
 mod queue;
 mod sync;
+mod watcher;
 
 use crate::conversation::participant::{
     ParticipantBehaviour, ParticipantChannel, ParticipantProcess, ParticipantRuntime,
@@ -117,6 +118,23 @@ impl ConversationSupervisor {
         Arc::clone(&self.inner.scheduler)
     }
 
+    /// Number of actor registrations currently held by this supervisor's
+    /// runtime. Lifecycle observability for the leak/churn gates: every closed
+    /// or torn-down conversation must have removed its entry, so this count is
+    /// pinned bounded across open/close cycles.
+    #[must_use]
+    pub fn registered_actor_count(&self) -> usize {
+        self.inner.runtime.registration_count()
+    }
+
+    /// Number of participant registrations currently held by this supervisor's
+    /// runtime. Same lifecycle-gate role as
+    /// [`Self::registered_actor_count`].
+    #[must_use]
+    pub fn registered_participant_count(&self) -> usize {
+        self.inner.participant_runtime.registration_count()
+    }
+
     /// Stops the underlying scheduler.
     pub fn shutdown(&self) {
         self.inner.scheduler.shutdown();
@@ -162,6 +180,20 @@ impl ConversationActor {
     /// Returns [`LiminalError`] on timeout, participant crash, or actor failure.
     pub fn receive_timeout(&self, timeout: std::time::Duration) -> Result<Envelope, LiminalError> {
         self.core.submit_receive_timeout(timeout)
+    }
+
+    /// Finalizes the conversation without requiring its actor process to run:
+    /// bounded, non-blocking, and idempotent. Terminates the actor and every
+    /// participant directly (scheduler tombstone writes, not requests into the
+    /// actor's command loop), fails pending receives and queued commands with
+    /// the typed closed error, and removes both runtime registrations. This is
+    /// the teardown-path counterpart to [`ConversationHandle::close`]: a caller
+    /// releasing a conversation during ITS OWN teardown must never block on the
+    /// conversation scheduler being live or responsive.
+    ///
+    /// [`ConversationHandle::close`]: crate::conversation::ConversationHandle::close
+    pub fn finalize(&self) {
+        self.core.finalize();
     }
 
     /// Registers a one-shot notifier fired the instant `participant`'s trapped
@@ -256,7 +288,10 @@ impl SupervisorInner {
         Ok(ParticipantChannel::new(participant, inbox))
     }
 
-    fn spawn_actor_for(&self, core: &Arc<ActorCore>) -> Result<ParticipantPid, LiminalError> {
+    fn spawn_actor_for(
+        self: &Arc<Self>,
+        core: &Arc<ActorCore>,
+    ) -> Result<ParticipantPid, LiminalError> {
         let pid = self
             .scheduler
             .spawn_trap_exit(self.module_name, self.entry_function, Vec::new())
@@ -265,8 +300,60 @@ impl SupervisorInner {
             })?;
         let participant = ParticipantPid::new(pid);
         self.runtime.register(participant, Arc::downgrade(core))?;
+        let watcher = self.spawn_watcher(core, participant)?;
+        core.set_watcher_pid(watcher)?;
         core.set_current_pid(participant)?;
-        core.boot(participant)?;
+        if let Err(error) = core.boot(participant) {
+            // Boot never linked the actor to its watcher, so the watcher would
+            // park forever and the registration would outlive the failed spawn:
+            // roll both back before surfacing the error.
+            self.scheduler
+                .terminate_process(watcher.get(), beamr::process::ExitReason::Normal);
+            self.runtime.deregister_owned(participant, core);
+            return Err(error);
+        }
         Ok(participant)
+    }
+
+    /// Spawns the exit watcher for a freshly spawned actor process and waits
+    /// (bounded) for its first slice to arm trap-exit. The wait is what makes
+    /// the later boot-slice link race-free: a link created before the trap is
+    /// armed would let an abnormal actor exit cascade-kill the watcher
+    /// unobserved. Construction is already a blocking path (boot itself is a
+    /// command round trip); teardown paths never wait on the watcher.
+    fn spawn_watcher(
+        self: &Arc<Self>,
+        core: &Arc<ActorCore>,
+        actor: ParticipantPid,
+    ) -> Result<ParticipantPid, LiminalError> {
+        let (armed_tx, armed_rx) = mpsc::sync_channel::<()>(1);
+        let watcher_core = Arc::downgrade(core);
+        let watcher_supervisor = Arc::downgrade(self);
+        let factory = Box::new(move || {
+            Box::new(watcher::ActorExitWatcher::new(
+                watcher_core.clone(),
+                watcher_supervisor.clone(),
+                actor,
+                armed_tx.clone(),
+            )) as Box<dyn beamr::native::native_process::NativeHandler>
+        });
+        let watcher_pid = self.scheduler.spawn_native(factory).map_err(|error| {
+            LiminalError::ConversationFailed {
+                message: format!("failed to spawn conversation exit watcher: {error}"),
+            }
+        })?;
+        // One scheduler slice away; the generous bound only guards a wedged
+        // scheduler at construction time.
+        if armed_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .is_err()
+        {
+            self.scheduler
+                .terminate_process(watcher_pid, beamr::process::ExitReason::Normal);
+            return Err(LiminalError::ConversationFailed {
+                message: "conversation exit watcher failed to arm".to_owned(),
+            });
+        }
+        Ok(ParticipantPid::new(watcher_pid))
     }
 }

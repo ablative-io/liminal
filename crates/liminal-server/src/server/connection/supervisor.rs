@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
@@ -328,25 +328,43 @@ impl PushReplyAwaiter {
     /// the reply slot (the connection closed — the prompt worker-death signal).
     /// The two are distinct variants so callers classify by type, not message.
     pub fn receive(&self, timeout: Duration) -> Result<Vec<u8>, ServerError> {
-        self.receiver
-            .recv_timeout(timeout)
-            .map_err(|error| match error {
-                RecvTimeoutError::Timeout => {
-                    // The reply deadline passed: cancel the reserved slot now so it
-                    // does not leak until connection close. A slot the connection
-                    // already resolved or cancelled is gone, so this is a no-op then;
-                    // a late reply arriving afterwards finds no slot and is discarded.
-                    if let Some(runtime) = self.runtime.upgrade() {
-                        runtime.cancel_push(self.correlation_id);
-                    }
-                    ServerError::PushReplyTimeout {
-                        correlation_id: self.correlation_id,
-                    }
-                }
-                RecvTimeoutError::Disconnected => ServerError::PushReplyDisconnected {
-                    correlation_id: self.correlation_id,
-                },
-            })
+        match self.receiver.recv_timeout(timeout) {
+            Ok(payload) => Ok(payload),
+            Err(RecvTimeoutError::Timeout) => self.resolve_timeout(),
+            Err(RecvTimeoutError::Disconnected) => Err(ServerError::PushReplyDisconnected {
+                correlation_id: self.correlation_id,
+            }),
+        }
+    }
+
+    /// Settles a deadline expiry against the slot's atomic resolved-vs-cancelled
+    /// transition (removal under the registry mutex). Winning the transition
+    /// frees the reserved slot immediately — a timed-out push must not hold its
+    /// slot until connection close — and any later reply finds no slot and is
+    /// discarded. Losing it means the resolver already delivered (its send
+    /// happens under the same lock, so the payload is present now — return it
+    /// rather than a timeout for an answer that arrived) or the connection
+    /// closed (sender dropped, disconnected).
+    fn resolve_timeout(&self) -> Result<Vec<u8>, ServerError> {
+        let timeout_error = || ServerError::PushReplyTimeout {
+            correlation_id: self.correlation_id,
+        };
+        let Some(runtime) = self.runtime.upgrade() else {
+            // The runtime is gone, and the slot map with it.
+            return Err(timeout_error());
+        };
+        if runtime.cancel_push(self.correlation_id) {
+            return Err(timeout_error());
+        }
+        match self.receiver.try_recv() {
+            Ok(payload) => Ok(payload),
+            Err(TryRecvError::Disconnected) => Err(ServerError::PushReplyDisconnected {
+                correlation_id: self.correlation_id,
+            }),
+            // Unreachable by construction (a removed slot either sent under the
+            // lock or dropped its sender); honest fallback rather than a panic.
+            Err(TryRecvError::Empty) => Err(timeout_error()),
+        }
     }
 }
 
@@ -628,12 +646,20 @@ impl ConnectionRuntime {
     }
 
     /// Drops a registered reply slot without resolving it (the push could not be
-    /// delivered, so no reply can ever arrive). Dropping the slot's `Sender` wakes
-    /// the awaiter with a disconnected error.
-    pub(super) fn cancel_push(&self, correlation_id: u64) {
-        if let Ok(mut slots) = self.push_replies.lock() {
-            slots.remove(&correlation_id);
-        }
+    /// delivered, or its reply deadline passed). Dropping the slot's `Sender`
+    /// wakes a still-waiting awaiter with a disconnected error.
+    ///
+    /// Returns whether THIS call removed the slot. Removal under the registry
+    /// mutex is the atomic resolved-vs-cancelled transition: `false` means
+    /// another path won — [`resolve_push`](Self::resolve_push) already sent the
+    /// reply (its send happens under the same lock, so the payload is already in
+    /// the channel when this returns), or the connection's close path dropped
+    /// the slot (sender gone, channel disconnected). The timed-out awaiter
+    /// disambiguates the two with a non-blocking receive.
+    pub(super) fn cancel_push(&self, correlation_id: u64) -> bool {
+        self.push_replies
+            .lock()
+            .is_ok_and(|mut slots| slots.remove(&correlation_id).is_some())
     }
 
     /// Drops every reply slot owned by connection `pid`, waking each awaiter with a
@@ -658,16 +684,21 @@ impl ConnectionRuntime {
     /// Resolves the reply slot for `correlation_id` with the client's reply
     /// payload, waking the [`PushReplyAwaiter`]. Called by the connection process
     /// when a correlated `PushReply` frame arrives. A missing slot (already
-    /// resolved, cancelled, or unknown id) is ignored.
+    /// resolved, cancelled, or unknown id) is ignored — a reply that lost the
+    /// resolved-vs-timed-out transition is discarded, never delivered late.
     pub(super) fn resolve_push(&self, correlation_id: u64, payload: Vec<u8>) {
-        let pending = self
-            .push_replies
-            .lock()
-            .ok()
-            .and_then(|mut slots| slots.remove(&correlation_id));
-        if let Some(pending) = pending {
-            // The receiver may already be gone if the awaiter timed out; a failed
-            // send is benign (the reply is simply discarded).
+        let Ok(mut slots) = self.push_replies.lock() else {
+            return;
+        };
+        if let Some(pending) = slots.remove(&correlation_id) {
+            // The send stays under the registry lock so removal and delivery are
+            // one atomic step: a timed-out awaiter that observes the slot gone
+            // (its `cancel_push` returned false) is then GUARANTEED to find the
+            // payload already in the channel — without this ordering the awaiter
+            // could see the removal, find the channel still empty, and report a
+            // timeout for a reply that was about to land. The send itself never
+            // blocks (unbounded channel), and a receiver dropped after an
+            // abandoned wait makes it a benign discard.
             pending.sender.send(payload).ok();
         }
     }

@@ -8,6 +8,7 @@ use beamr::loader::Instruction;
 use beamr::loader::decode::Operand;
 use beamr::module::{Module, ModuleOrigin, ResolvedImport, ResolvedImportTarget};
 use beamr::native::{Capability, NativeEntry, ProcessContext};
+use beamr::process::ExitReason;
 use beamr::term::Term;
 use beamr::term::boxed::Tuple;
 
@@ -59,18 +60,37 @@ impl ActorRuntime {
         Ok(())
     }
 
-    /// Drops the registration for a specific actor pid (called from the close and
-    /// restart paths, where the owning core outlives the dead pid so the
-    /// strong-count prune in `register` cannot remove it).
-    pub(super) fn deregister(&self, pid: ParticipantPid) {
+    /// Drops the registration for `pid` only when it is owned by `owner` (called
+    /// from the close, finalize, restart, and watcher paths, where the owning
+    /// core outlives the dead pid so the strong-count prune in `register` cannot
+    /// remove it). The identity check makes removal generation-safe: a reused pid
+    /// registered by a different core is never removed by a stale caller.
+    pub(super) fn deregister_owned(&self, pid: ParticipantPid, owner: &ActorCore) {
         if let Ok(mut actors) = self.actors.lock() {
-            actors.remove(&pid.get());
+            if let Some(registered) = actors.get(&pid.get()) {
+                if std::ptr::eq(registered.as_ptr(), owner) {
+                    actors.remove(&pid.get());
+                }
+            }
+        }
+    }
+
+    /// Drops the registration for `pid` only when its owning core is already
+    /// gone. The watcher's fallback when it outlives the core: with no owner
+    /// left to identity-check against, a dead `Weak` is itself the proof that
+    /// the entry cannot belong to any live conversation.
+    pub(super) fn deregister_dead(&self, pid: ParticipantPid) {
+        if let Ok(mut actors) = self.actors.lock() {
+            if let Some(registered) = actors.get(&pid.get()) {
+                if registered.strong_count() == 0 {
+                    actors.remove(&pid.get());
+                }
+            }
         }
     }
 
     /// Number of live actor registrations. Pinned bounded by the churn gate across
     /// open/close cycles.
-    #[cfg(test)]
     pub(super) fn registration_count(&self) -> usize {
         self.actors.lock().map_or(0, |actors| actors.len())
     }
@@ -174,7 +194,9 @@ pub(super) fn link_participants(
             })?;
     for participant in &core.config.participants {
         if !core.participant_process_is_live(*participant) {
-            core.record_participant_exit(*participant, Instant::now())?;
+            // Boot-discovered death: no EXIT signal was observed, so no reason
+            // is available to record.
+            core.record_participant_exit(*participant, Instant::now(), None)?;
             continue;
         }
         link_facility
@@ -183,6 +205,20 @@ pub(super) fn link_participants(
                 message: format!(
                     "failed to link actor {actor_pid} to participant {}: {error}",
                     participant.get()
+                ),
+            })?;
+    }
+    // Link the actor to its exit watcher, completing the arm-then-link ordering
+    // the watcher's cleanup depends on (the watcher armed trap-exit before this
+    // actor was booted). The watcher is filtered out of participant-EXIT
+    // handling by the config-membership check in the command NIF.
+    if let Some(watcher) = core.watcher_pid() {
+        link_facility
+            .link(actor_pid, watcher.get())
+            .map_err(|error| LiminalError::ConversationFailed {
+                message: format!(
+                    "failed to link actor {actor_pid} to exit watcher {}: {error}",
+                    watcher.get()
                 ),
             })?;
     }
@@ -199,9 +235,14 @@ fn process_command_nif(args: &[Term], context: &mut ProcessContext<'_>) -> Resul
     if message.as_atom() == Some(runtime.command_atom) {
         return core.process_next_command(context);
     }
-    if let Some(participant) = exit_source(*message) {
-        core.handle_participant_exit(participant)
-            .map_err(|_| badarg())?;
+    if let Some((source, reason)) = exit_source(*message) {
+        // Only configured participants are recorded: the actor is also linked to
+        // its exit watcher, whose EXIT (or any other stray link's) must not be
+        // recorded as a participant crash or trip the crash policy.
+        if core.config.participants.contains(&source) {
+            core.handle_participant_exit(source, reason)
+                .map_err(|_| badarg())?;
+        }
     }
     Ok(Term::atom(Atom::OK))
 }
@@ -211,12 +252,31 @@ fn runtime(context: &ProcessContext<'_>) -> Result<Arc<ActorRuntime>, Term> {
     Arc::downcast::<ActorRuntime>(Arc::clone(data)).map_err(|_| badarg())
 }
 
-fn exit_source(message: Term) -> Option<ParticipantPid> {
+/// Parses a trapped `{EXIT, SourcePid, Reason}` tuple into the source pid and
+/// the exit reason its reason atom maps to (`None` for a reason term outside
+/// beamr's `ExitReason` atom set). Shared by the actor NIF and the exit watcher.
+pub(super) fn exit_source(message: Term) -> Option<(ParticipantPid, Option<ExitReason>)> {
     let tuple = Tuple::new(message)?;
     if tuple.arity() == 3 && tuple.get(0) == Some(Term::atom(Atom::EXIT)) {
-        tuple.get(1)?.as_pid().map(ParticipantPid::new)
+        let source = tuple.get(1)?.as_pid().map(ParticipantPid::new)?;
+        let reason = tuple.get(2).and_then(exit_reason_from_atom);
+        Some((source, reason))
     } else {
         None
+    }
+}
+
+/// Maps an EXIT reason term back to the `ExitReason` it was emitted from
+/// (the inverse of `ExitReason::as_term`).
+fn exit_reason_from_atom(reason: Term) -> Option<ExitReason> {
+    match reason.as_atom()? {
+        Atom::NORMAL => Some(ExitReason::Normal),
+        Atom::KILL => Some(ExitReason::Kill),
+        Atom::KILLED => Some(ExitReason::Killed),
+        Atom::ERROR => Some(ExitReason::Error),
+        Atom::NOCONNECTION => Some(ExitReason::NoConnection),
+        Atom::NOPROC => Some(ExitReason::NoProc),
+        _ => None,
     }
 }
 

@@ -433,7 +433,7 @@ fn closing_conversation_terminates_and_deregisters_participant() -> Result<(), B
     let actor_pid = actor.pid()?;
 
     // Registered and live before close.
-    assert_eq!(supervisor.inner.participant_runtime.registration_count(), 1);
+    assert_eq!(supervisor.registered_participant_count(), 1);
     assert!(scheduler.process_table().get(participant.get()).is_some());
 
     actor.handle().close()?;
@@ -441,12 +441,12 @@ fn closing_conversation_terminates_and_deregisters_participant() -> Result<(), B
     // Close deregisters the participant AND the actor synchronously (the reply is
     // sent only after `apply_close` runs).
     assert_eq!(
-        supervisor.inner.participant_runtime.registration_count(),
+        supervisor.registered_participant_count(),
         0,
         "close must deregister the participant"
     );
     assert_eq!(
-        supervisor.inner.runtime.registration_count(),
+        supervisor.registered_actor_count(),
         0,
         "close must deregister the actor"
     );
@@ -482,14 +482,196 @@ fn repeated_open_close_pins_bounded_registries() -> Result<(), Box<dyn Error>> {
     }
 
     assert_eq!(
-        supervisor.inner.participant_runtime.registration_count(),
+        supervisor.registered_participant_count(),
         0,
         "participant registry must not grow with open/close churn"
     );
     assert_eq!(
-        supervisor.inner.runtime.registration_count(),
+        supervisor.registered_actor_count(),
         0,
         "actor registry must not grow with open/close churn"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Deadline-bounded wait until both lifecycle registries are empty, so a missed
+/// exit-driven cleanup FAILS the test instead of wedging it.
+fn wait_until_registries_empty(supervisor: &ConversationSupervisor) -> Result<(), Box<dyn Error>> {
+    for _ in 0..1_000 {
+        if supervisor.registered_actor_count() == 0
+            && supervisor.registered_participant_count() == 0
+        {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    Err(format!(
+        "registries did not empty: actors={} participants={}",
+        supervisor.registered_actor_count(),
+        supervisor.registered_participant_count()
+    )
+    .into())
+}
+
+/// D4 rework major-2 pin: a BARE actor exit — the actor process terminated with
+/// the core handle retained and NO later restart, close, or any other handle
+/// touch — must still remove both registrations, exit-driven (the watcher), not
+/// touch-driven. Before the fix the registrations lingered until the next
+/// registry touch, which never comes here.
+#[test]
+fn bare_actor_exit_removes_registrations_without_restart_or_close() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let actor_pid = actor.pid()?;
+    assert_eq!(supervisor.registered_actor_count(), 1);
+    assert_eq!(supervisor.registered_participant_count(), 1);
+
+    scheduler.terminate_process(actor_pid.get(), ExitReason::Error);
+
+    // No handle operation after the kill: cleanup must be driven by the exit
+    // itself. The actor handle stays retained (alive) for the whole wait.
+    wait_until_registries_empty(&supervisor)?;
+    wait_until_process_gone(&scheduler, participant.get())?;
+
+    drop(actor);
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 rework major-3 pin: close on a FAILED conversation is terminal. The close
+/// succeeds, the Failed phase is preserved as the diagnostic outcome, and every
+/// subsequent handle operation is refused with the typed error — none may
+/// respawn the actor through `ensure_running`.
+#[test]
+fn finalized_conversation_refuses_all_operations_without_respawn() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let baseline = scheduler.process_table().len();
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let actor_pid = actor.pid()?;
+
+    // Fail the conversation via a genuine participant crash.
+    scheduler.terminate_process(participant.get(), ExitReason::Error);
+    let state = state_after_trapped_participant_death(&actor)?;
+    assert_eq!(state.current_phase, ConversationPhase::Failed);
+
+    // Closing the failed conversation succeeds and is terminal.
+    actor.handle().close()?;
+
+    // The diagnostic outcome is preserved: state queries still answer from the
+    // host-side snapshot and the phase remains Failed, not erased to Closed.
+    let state = actor.state()?;
+    assert_eq!(state.current_phase, ConversationPhase::Failed);
+    assert_eq!(state.participants[0].health, ParticipantHealth::Dead);
+
+    // Every operation that would need a live actor is refused with the typed
+    // error; none respawns.
+    let handle = actor.handle();
+    assert!(matches!(
+        handle.send(test_envelope(b"late")),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+    assert!(matches!(
+        handle.receive(),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+    assert!(matches!(
+        handle.close(),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+    assert!(matches!(
+        actor.pid(),
+        Err(LiminalError::ConversationFailed { .. })
+    ));
+
+    // No respawn happened: the old actor process winds down and the scheduler
+    // table returns to its pre-spawn baseline (actor, participant, and watcher
+    // all gone; nothing new appeared).
+    wait_until_process_gone(&scheduler, actor_pid.get())?;
+    wait_until_registries_empty(&supervisor)?;
+    for _ in 0..1_000 {
+        if scheduler.process_table().len() == baseline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert_eq!(
+        scheduler.process_table().len(),
+        baseline,
+        "a finalized conversation must not respawn any process"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 rework major-4 pin: the close-initiated Normal termination of a
+/// participant is suppressed as the close's own doing, but an ABNORMAL exit
+/// racing the close is recorded with its real reason — and the recorded crash
+/// does not reopen the closed conversation (precedence ruling: once close has
+/// succeeded, the terminal phase stands).
+#[test]
+fn abnormal_exit_racing_close_is_recorded_without_reopening_phase() -> Result<(), Box<dyn Error>> {
+    use std::time::Instant;
+
+    let supervisor = ConversationSupervisor::new()?;
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    actor.pid()?;
+    actor.handle().close()?;
+
+    // Suppression half: the close's own Normal termination of the participant is
+    // not a crash. Whether or not the actor processed the EXIT before stopping,
+    // no crash may be recorded for it.
+    let state = actor.state()?;
+    assert_eq!(state.current_phase, ConversationPhase::Closed);
+    assert_eq!(
+        participant_crash_entries(&state),
+        0,
+        "the close-initiated Normal exit must be suppressed, not recorded as a crash"
+    );
+
+    // Racing-crash half, staged deterministically through the host-side
+    // recording path the trapped-EXIT handler uses: the participant genuinely
+    // crashed (Error) while the close was in flight, so its EXIT carries Error,
+    // not the close's Normal.
+    actor
+        .core
+        .record_participant_exit(participant, Instant::now(), Some(ExitReason::Error))?;
+
+    let state = actor.state()?;
+    assert_eq!(
+        state.current_phase,
+        ConversationPhase::Closed,
+        "an abnormal exit racing close must not flip the terminal phase"
+    );
+    assert_eq!(state.participants[0].health, ParticipantHealth::Dead);
+    assert_eq!(
+        state.participants[0].exit_reason,
+        Some(ExitReason::Error),
+        "the abnormal exit's real reason must be preserved"
+    );
+    assert_eq!(
+        participant_crash_entries(&state),
+        1,
+        "the racing crash is recorded exactly once"
     );
 
     supervisor.shutdown();
