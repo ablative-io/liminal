@@ -79,4 +79,29 @@ pub enum ServerError {
     /// The health endpoint failed to start or serve requests.
     #[error("health endpoint failed: {message}")]
     HealthEndpoint { message: String },
+
+    /// A new connection was refused because the configured `max_connections`
+    /// cap (§5) is already reached. The listener drops the freshly accepted
+    /// stream, refusing the connection, rather than admitting an unbounded fleet.
+    #[error(
+        "connection refused: the configured max_connections limit of {limit} live connections is reached"
+    )]
+    ConnectionLimitReached {
+        /// The configured `max_connections` cap that was hit.
+        limit: usize,
+    },
+
+    /// An admission-time per-connection cap (§5) refused an operation: too many
+    /// subscriptions, conversations, in-flight pushes, or pending conversation
+    /// replies on one connection. The connection process renders it as the
+    /// operation's existing typed error frame with this text as the message.
+    #[error("{operation} refused: the per-connection {cap} limit of {limit} is reached")]
+    ConnectionCapReached {
+        /// Human-readable description of the refused operation.
+        operation: String,
+        /// The name of the cap that refused it (a `limits.*` config key).
+        cap: &'static str,
+        /// The configured cap value that was hit.
+        limit: usize,
+    },
 }

@@ -4,9 +4,16 @@
 //! the connection process drains its subscriptions here: for every subscription
 //! it owns, it pulls ready envelopes (non-blocking) up to a per-slice budget and
 //! encodes each as a [`Frame::Deliver`] into the connection's [`OutboundWriter`],
-//! on that subscription's own application stream. No new wakeup plumbing is
-//! required: the connection process already runs every slice, so a message that
-//! lands in a subscriber inbox is picked up on the next poll.
+//! on that subscription's own application stream.
+//!
+//! PARK-FLIP (R3, §1.2(2)): this pump currently relies on the every-slice busy
+//! loop — the connection process already runs every slice, so a message that lands
+//! in a subscriber inbox is picked up on the next poll. That every-slice assumption
+//! IS the permanent-runnable cost being removed. The R3 subscription-inbox notifier
+//! (installed at subscribe time — see `apply::subscribe_response`) already fires the
+//! connection's `READY` marker on the inbox's empty→non-empty edge; the park-flip
+//! commit DELETES this every-slice assumption and drives the pump from that marker.
+//! Until then the marker is redundant but harmless.
 //!
 //! # Envelope bridging
 //!
@@ -32,6 +39,11 @@ use super::state::ConnectionProcessState;
 /// fast producer cannot starve other connections sharing the scheduler thread.
 pub(super) const DELIVERY_SLICE_BUDGET: usize = 32;
 
+/// Reason code carried on the `SubscribeError` frame that sheds an overflowed
+/// subscription (§5). Matches the server-error code the subscribe/pressure paths
+/// use, so a shed reads as a server-side subscription failure to the client.
+const SERVER_ERROR_CODE: u16 = 0xFFFF;
+
 /// Drains ready envelopes from this connection's subscriptions into `outbound`,
 /// encoding each as a `Deliver` frame, up to `budget` frames total this slice.
 ///
@@ -43,7 +55,7 @@ pub(super) fn service_subscriptions(
     state: &mut ConnectionProcessState,
     outbound: &mut OutboundWriter,
     budget: usize,
-) -> Result<(), OutboundError> {
+) -> Result<Vec<u64>, OutboundError> {
     // Destructure so the subscription map, the delivery-sequence map, and the
     // held-frame map are borrowed disjointly (all are mutated in the loop).
     let ConnectionProcessState {
@@ -53,12 +65,35 @@ pub(super) fn service_subscriptions(
         ..
     } = state;
     let mut remaining = budget;
+    // §5 shed: subscriptions whose inbox overflowed the connection byte budget or
+    // the fairness trip. Each is sent a typed `SubscribeError` here and removed by
+    // the caller after the loop (a subscription cannot be removed mid-iteration).
+    let mut shed = Vec::new();
     for (subscription_id, subscription) in subscriptions.iter_mut() {
         if remaining == 0 {
             break;
         }
         let stream_id = subscription.stream_id();
         let selected_schema = subscription.selected_schema();
+        // §5: a subscription whose inbox overflowed is shed — the offending
+        // subscription is released with an explicit typed error frame to the
+        // subscriber, mirroring the outbound overflow policy (a slow consumer
+        // sheds its own subscription; it cannot grow server memory without bound).
+        // Enqueue the error frame and mark it for removal, skipping delivery.
+        if subscription.is_overflowed() {
+            outbound.enqueue_frame(&Frame::SubscribeError {
+                flags: 0,
+                stream_id,
+                reason_code: SERVER_ERROR_CODE,
+                message: Some(
+                    "subscription shed: connection inbox byte budget or per-inbox fairness \
+                     limit exceeded"
+                        .to_owned(),
+                ),
+            })?;
+            shed.push(*subscription_id);
+            continue;
+        }
         while remaining > 0 {
             // Flush a frame held back from an earlier slice first (its delivery_seq
             // is already assigned, so this preserves order), otherwise pull and
@@ -84,13 +119,13 @@ pub(super) fn service_subscriptions(
             // spec-inherent single-frame bound).
             if needed <= outbound.capacity() && !outbound.has_room(needed) {
                 held_deliveries.insert(*subscription_id, frame);
-                return Ok(());
+                return Ok(shed);
             }
             outbound.enqueue_frame(&frame)?;
             remaining -= 1;
         }
     }
-    Ok(())
+    Ok(shed)
 }
 
 /// Builds a `Deliver` frame from a drained core envelope: the protocol envelope

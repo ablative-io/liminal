@@ -339,7 +339,10 @@ impl ChannelActorCore {
         let subscribers = lock(&self.subscribers)?;
         let mut delivered_count = 0;
         for subscriber in subscribers.iter() {
-            if subscriber.deliver(&envelope)? {
+            // `deliver` is infallible now (R3: an inbox overflow marks the
+            // subscription for shedding and returns `false` rather than erroring),
+            // so a non-delivered envelope simply is not counted.
+            if subscriber.deliver(&envelope) {
                 delivered_count += 1;
             }
         }

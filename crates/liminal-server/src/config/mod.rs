@@ -6,7 +6,7 @@ pub mod validation;
 pub use env::apply_env_overrides;
 pub use file::load_from_file;
 pub use types::{
-    AuthConfig, ChannelDef, ClusterConfig, LoadedSchema, RoutingRuleDef, ServerConfig,
-    ServiceProfile, ServicesConfig,
+    AuthConfig, ChannelDef, ClusterConfig, LimitsConfig, LoadedSchema, RoutingRuleDef,
+    ServerConfig, ServiceProfile, ServicesConfig,
 };
 pub use validation::validate;

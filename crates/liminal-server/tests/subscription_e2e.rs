@@ -17,7 +17,7 @@ use liminal::protocol::{
     CausalContext, Frame, MessageEnvelope, ProtocolVersion, SchemaId, decode, encode, encoded_len,
 };
 use liminal_sdk::SubscriptionStream;
-use liminal_server::config::{ChannelDef, ServerConfig, ServicesConfig};
+use liminal_server::config::{ChannelDef, LimitsConfig, ServerConfig, ServicesConfig};
 use liminal_server::server::connection::ConnectionSupervisor;
 use liminal_server::server::listener::ServerListener;
 
@@ -48,6 +48,7 @@ impl RunningServer {
             auth: None,
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
+            limits: LimitsConfig::default(),
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
@@ -319,23 +320,28 @@ fn slow_reader_does_not_wedge_other_connections() -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-/// (d) An outbound-buffer overflow tears down ONLY the offending connection. Since
-/// the headroom-aware pump holds sub-capacity frames back rather than overflowing,
-/// the one remaining overflow is a SINGLE frame larger than the whole 4 MiB buffer:
-/// it can never be queued, so it is fatal. A silent subscriber is sent one such
-/// oversized delivery; its connection is closed by the server, while a fresh
-/// subscriber and publisher on other connections keep working.
+/// (d) §5 inbox-overflow SHED (behaviour change from R3, flagged): an envelope that
+/// cannot fit the connection's 4 MiB shared inbox byte budget is shed at the inbox —
+/// the OFFENDING SUBSCRIPTION is released with a typed error frame — rather than
+/// buffered until the outbound buffer overflows and the whole connection is torn
+/// down. Before R3, a single Deliver frame larger than the 4 MiB outbound buffer was
+/// the fatal per-frame overflow that tore the connection down; now the same oversized
+/// delivery is refused admission to the inbox first (it exceeds the whole 4 MiB
+/// inbox budget), so the subscription is shed and the CONNECTION SURVIVES. This is
+/// the §5 policy — "a slow consumer sheds its own subscription; it cannot grow server
+/// memory without bound" — superseding the old connection-teardown for this class.
+/// Other connections remain unaffected either way.
 #[test]
-fn outbound_overflow_tears_down_only_the_offending_connection() -> Result<(), Box<dyn Error>> {
+fn inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection()
+-> Result<(), Box<dyn Error>> {
     let server = RunningServer::start()?;
 
     let mut silent = raw_silent_subscribe(server.address())?;
 
-    // A single message whose Deliver frame exceeds the 4 MiB outbound cap: it cannot
-    // fit even an empty buffer, so the pump falls through to the fatal Overflow (the
-    // spec-inherent per-frame bound) instead of holding it back. A pipelined burst of
-    // sub-capacity frames would NOT overflow — it rides out across slices — so the
-    // oversized single frame is the case that still tears the connection down.
+    // A single message whose serialized envelope exceeds the 4 MiB shared inbox byte
+    // budget: it can never be admitted to the inbox, so the subscription is shed with
+    // a typed SubscribeError and the envelope dropped — memory never grows past the
+    // §5 bound.
     let mut publisher = raw_connect(server.address())?;
     let mut ack_buffer = Vec::new();
     raw_publish(
@@ -344,12 +350,13 @@ fn outbound_overflow_tears_down_only_the_offending_connection() -> Result<(), Bo
         json_string_payload(b'x', 4 * 1024 * 1024 + 64 * 1024),
     )?;
 
-    // The server tears the silent connection down: its socket is closed. We now read
-    // it (the point is that it did NOT read DURING the flood) and expect EOF within
-    // the deadline.
+    // The silent connection is NOT torn down: it survives the shed. We read it (it did
+    // NOT read DURING the flood) and must observe live bytes (the shed SubscribeError),
+    // never an EOF, within the window.
     silent.set_read_timeout(Some(Duration::from_millis(200)))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(5);
     let mut closed = false;
+    let mut saw_bytes = false;
     let mut scratch = vec![0_u8; 65536];
     while Instant::now() < deadline {
         match silent.read(&mut scratch) {
@@ -357,7 +364,10 @@ fn outbound_overflow_tears_down_only_the_offending_connection() -> Result<(), Bo
                 closed = true;
                 break;
             }
-            Ok(_) => {}
+            Ok(_) => {
+                saw_bytes = true;
+                break;
+            }
             Err(error)
                 if matches!(
                     error.kind(),
@@ -370,12 +380,16 @@ fn outbound_overflow_tears_down_only_the_offending_connection() -> Result<(), Bo
         }
     }
     assert!(
-        closed,
-        "the overflowing connection must be torn down by the server"
+        !closed,
+        "the connection must SURVIVE the inbox-overflow shed (§5), not be torn down"
+    );
+    assert!(
+        saw_bytes,
+        "the shed subscription must receive a typed error frame on its connection"
     );
 
     // Other connections are unaffected: a fresh subscriber still receives a fresh
-    // publish, proving only the offending connection died.
+    // publish, proving the shed was confined to the offending subscription.
     let healthy = SubscriptionStream::open(&server.address().to_string(), CHANNEL, Vec::new())?;
     raw_publish(
         &mut publisher,

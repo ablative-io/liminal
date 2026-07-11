@@ -722,7 +722,7 @@ fn loopback_ephemeral() -> Result<SocketAddr, Box<dyn std::error::Error>> {
 }
 
 fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std::error::Error>> {
-    use crate::config::types::{ChannelDef, ServerConfig, ServicesConfig};
+    use crate::config::types::{ChannelDef, LimitsConfig, ServerConfig, ServicesConfig};
 
     let config = ServerConfig {
         listen_address: "127.0.0.1:0".parse()?,
@@ -739,6 +739,7 @@ fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std:
         cluster: None,
         auth: None,
         services: ServicesConfig::default(),
+        limits: LimitsConfig::default(),
     };
     Ok(ConnectionSupervisor::from_config(&config)?)
 }
@@ -748,7 +749,7 @@ fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std:
 fn channel_free_config_with_profile(
     profile: &str,
 ) -> Result<crate::config::types::ServerConfig, Box<dyn std::error::Error>> {
-    use crate::config::types::{ServerConfig, ServicesConfig};
+    use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
 
     Ok(ServerConfig {
         listen_address: "127.0.0.1:0".parse()?,
@@ -762,6 +763,7 @@ fn channel_free_config_with_profile(
         services: ServicesConfig {
             profile: profile.to_owned(),
         },
+        limits: LimitsConfig::default(),
     })
 }
 
@@ -900,4 +902,47 @@ fn read_frame(stream: &mut TcpStream) -> Result<Frame, Box<dyn std::error::Error
         }
     }
     Err("timed out waiting for frame".into())
+}
+
+/// §5 cap-refusal (behavioural): `max_connections` refuses the connection PAST
+/// the cap with the typed [`ServerError::ConnectionLimitReached`] — the listener
+/// then drops the accepted stream, so an over-cap peer is refused, not admitted.
+#[test]
+fn max_connections_refuses_past_the_cap() -> Result<(), Box<dyn std::error::Error>> {
+    use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
+
+    let config = ServerConfig {
+        listen_address: "127.0.0.1:0".parse()?,
+        health_listen_address: "127.0.0.1:1".parse()?,
+        drain_timeout_ms: 30_000,
+        channels: Vec::new(),
+        routing_rules: Vec::new(),
+        persistence_path: None,
+        cluster: None,
+        auth: None,
+        services: ServicesConfig::default(),
+        limits: LimitsConfig {
+            max_connections: 1,
+            ..LimitsConfig::default()
+        },
+    };
+    let supervisor = ConnectionSupervisor::from_config(&config)?;
+
+    let (_c1, s1) = tcp_pair()?;
+    let first = supervisor.spawn_connection(s1);
+    assert!(
+        first.is_ok(),
+        "the first connection is admitted under the cap"
+    );
+
+    let (_c2, s2) = tcp_pair()?;
+    let second = supervisor.spawn_connection(s2);
+    match second {
+        Err(crate::ServerError::ConnectionLimitReached { limit }) => {
+            assert_eq!(limit, 1, "the refusal reports the configured cap");
+        }
+        other => return Err(format!("expected ConnectionLimitReached, got {other:?}").into()),
+    }
+    supervisor.shutdown();
+    Ok(())
 }

@@ -47,6 +47,29 @@ pub trait SubscriptionResource: std::fmt::Debug + Send {
     /// unavailable): the connection process is the delivery pump, so a transient
     /// empty read is simply "nothing to deliver this slice", never an error.
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope>;
+
+    /// Installs the R3 wake notifier onto the underlying inbox (§1.2(2)). The
+    /// server passes a callback that fires the connection scheduler's `READY`
+    /// marker on the inbox's empty→non-empty edge. Defaulted to a no-op: a
+    /// resource with no wakeable inbox (test stand-ins, front-door) ignores it.
+    fn install_wake_notifier(&self, _notifier: liminal::channel::InboxNotifier) {}
+
+    /// Installs the §5 shared connection byte budget and per-inbox fairness cap
+    /// onto the underlying inbox. Defaulted to a no-op (unbounded) for resources
+    /// with no real inbox.
+    fn install_inbox_budget(
+        &self,
+        _budget: std::sync::Arc<liminal::channel::ConnectionInboxBudget>,
+        _depth_cap: usize,
+    ) {
+    }
+
+    /// Whether an overflow has marked this subscription for shedding (§5). The
+    /// delivery pump sheds an overflowed subscription with a typed error frame.
+    /// Defaulted to `false`: a resource with no bounded inbox never overflows.
+    fn is_overflowed(&self) -> bool {
+        false
+    }
 }
 
 /// Library subscription resource owned by a single connection process.
@@ -104,6 +127,25 @@ impl ConnectionSubscription {
     /// Attempts to pull the next delivered envelope without blocking.
     pub(super) fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
         self.resource.try_next()
+    }
+
+    /// Installs the R3 wake notifier onto this subscription's inbox (§1.2(2)).
+    pub(super) fn install_wake_notifier(&self, notifier: liminal::channel::InboxNotifier) {
+        self.resource.install_wake_notifier(notifier);
+    }
+
+    /// Installs the §5 shared byte budget and per-inbox fairness cap.
+    pub(super) fn install_inbox_budget(
+        &self,
+        budget: std::sync::Arc<liminal::channel::ConnectionInboxBudget>,
+        depth_cap: usize,
+    ) {
+        self.resource.install_inbox_budget(budget, depth_cap);
+    }
+
+    /// Whether this subscription has been shed by an inbox overflow (§5).
+    pub(super) fn is_overflowed(&self) -> bool {
+        self.resource.is_overflowed()
     }
 
     pub(super) fn unsubscribe(self) -> Result<(), ServerError> {
@@ -1081,6 +1123,22 @@ impl SubscriptionResource for LiminalSubscriptionResource {
         Ok(())
     }
 
+    fn install_wake_notifier(&self, notifier: liminal::channel::InboxNotifier) {
+        self.subscription.install_wake_notifier(notifier);
+    }
+
+    fn install_inbox_budget(
+        &self,
+        budget: std::sync::Arc<liminal::channel::ConnectionInboxBudget>,
+        depth_cap: usize,
+    ) {
+        self.subscription.install_inbox_budget(budget, depth_cap);
+    }
+
+    fn is_overflowed(&self) -> bool {
+        self.subscription.is_overflowed()
+    }
+
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
         match self.subscription.try_next() {
             Ok(envelope) => envelope,
@@ -1124,7 +1182,7 @@ mod durable_store_tests {
         build_connection_services, build_connection_services_via, build_durable_store_with,
     };
     use crate::ServerError;
-    use crate::config::types::{ServerConfig, ServicesConfig};
+    use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
 
     /// Counts directory entries under `root`, for the empty/one-dir assertions
     /// on an injected ephemeral root.
@@ -1151,6 +1209,7 @@ mod durable_store_tests {
             services: ServicesConfig {
                 profile: profile.to_owned(),
             },
+            limits: LimitsConfig::default(),
         }
     }
 

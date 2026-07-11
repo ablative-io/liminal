@@ -6,7 +6,7 @@ use liminal::protocol::{
 
 use super::*;
 use crate::ServerError;
-use crate::server::connection::conversation::ConversationResource;
+use crate::server::connection::conversation::{ConnectionConversation, ConversationResource};
 use crate::server::connection::notifier::ConnectionNotifier;
 use crate::server::connection::services::{
     ConnectionSubscription, PublishOutcome, SubscriptionResource,
@@ -1206,4 +1206,85 @@ fn envelope(payload: Vec<u8>) -> MessageEnvelope {
 
 fn schema_id() -> SchemaId {
     SchemaId::new([1; SchemaId::WIRE_LEN])
+}
+
+/// §5 cap-refusal (behavioural half). A [`LimitsConfig`] with a single named cap
+/// squeezed to one, everything else at its signed default.
+fn limits_with(
+    mutate: impl FnOnce(&mut crate::config::types::LimitsConfig),
+) -> crate::config::types::LimitsConfig {
+    let mut limits = crate::config::types::LimitsConfig::default();
+    mutate(&mut limits);
+    limits
+}
+
+#[test]
+fn subscription_cap_refuses_past_the_limit_with_a_typed_error() -> Result<(), ServerError> {
+    // One subscription allowed; the second is refused BEFORE the services adapter
+    // is touched, on the subscription error channel carrying the typed cap message.
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::new(RecordingServices::default()),
+        limits_with(|l| l.max_subscriptions_per_connection = 1),
+    );
+    let mut state = ConnectionProcessState::default();
+    let frame = || Frame::Subscribe {
+        flags: 0,
+        stream_id: 5,
+        channel: "orders".to_owned(),
+        accepted_schemas: Vec::new(),
+        max_in_flight: 16,
+    };
+    let first = apply_frame(TEST_PID, &runtime, &mut state, frame());
+    assert!(
+        matches!(first, FrameAction::Respond(Frame::SubscribeAck { .. })),
+        "the first subscription is admitted under the cap"
+    );
+    let second = apply_frame(TEST_PID, &runtime, &mut state, frame());
+    let FrameAction::Respond(Frame::SubscribeError {
+        message: Some(m), ..
+    }) = second
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a typed SubscribeError past the cap, got {second:?}"),
+        });
+    };
+    assert!(
+        m.contains("max_subscriptions_per_connection"),
+        "the refusal names the cap: {m}"
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_cap_refuses_past_the_limit_with_a_typed_error() -> Result<(), ServerError> {
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::new(RecordingServices::default()),
+        limits_with(|l| l.max_conversations_per_connection = 1),
+    );
+    let mut state = ConnectionProcessState::default();
+    let open = |id: u64| Frame::ConversationOpen {
+        flags: 0,
+        stream_id: 1,
+        conversation_id: id,
+        subject: "s".to_owned(),
+    };
+    let first = apply_frame(TEST_PID, &runtime, &mut state, open(100));
+    assert!(
+        matches!(first, FrameAction::NoResponse),
+        "the first conversation opens under the cap"
+    );
+    let second = apply_frame(TEST_PID, &runtime, &mut state, open(200));
+    let FrameAction::Respond(Frame::ConversationError {
+        message: Some(m), ..
+    }) = second
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a typed ConversationError past the cap, got {second:?}"),
+        });
+    };
+    assert!(
+        m.contains("max_conversations_per_connection"),
+        "the refusal names the cap: {m}"
+    );
+    Ok(())
 }

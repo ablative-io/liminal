@@ -3,7 +3,9 @@
 //! ([`super::apply`]), and the delivery pump ([`super::delivery`]).
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
+use liminal::channel::ConnectionInboxBudget;
 use liminal::protocol::Frame;
 
 use super::conversation::ConnectionConversation;
@@ -42,6 +44,18 @@ pub(super) struct ConnectionProcessState {
     /// is what lets a pipelined burst ride out across slices without tearing down a
     /// healthy fast-reading connection.
     pub(super) held_deliveries: HashMap<u64, Frame>,
+    /// The connection's ONE shared subscription-inbox byte budget (§5), spent
+    /// across ALL its subscription inboxes. Created lazily on the first subscribe
+    /// (so a connection that never subscribes allocates nothing) and installed
+    /// into every subscription's inbox, so the signed 4 MiB product is
+    /// connection-scoped and exact.
+    pub(super) inbox_budget: Option<Arc<ConnectionInboxBudget>>,
+    /// R1(vi) (§1.2(3b)) per-connection pending-reply table. Reply-requested
+    /// conversation frames admit an entry here instead of blocking the slice on a
+    /// 5 s drain; the slice checks deadlines and drains correlated replies. The
+    /// connection replaces the default-capped table with one built from the
+    /// runtime's configured §5 limits at construction.
+    pub(super) pending_replies: super::pending_reply::PendingReplyTable,
 }
 
 /// Whether a decoded inbound frame still leaves the connection open.

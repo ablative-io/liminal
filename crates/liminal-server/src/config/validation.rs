@@ -37,6 +37,7 @@ pub fn validate(config: &mut ServerConfig, base_dir: Option<&Path>) -> Result<()
     validate_cluster(config, &mut errors);
     validate_auth(config, &mut errors);
     validate_services(config, &mut errors);
+    config.limits.collect_errors(&mut errors);
     load_channel_schemas(config, base_dir, &mut errors);
 
     if errors.is_empty() {
@@ -362,7 +363,8 @@ mod tests {
 
     use super::validate;
     use crate::config::types::{
-        AuthConfig, ChannelDef, ClusterConfig, RoutingRuleDef, ServerConfig, ServicesConfig,
+        AuthConfig, ChannelDef, ClusterConfig, LimitsConfig, RoutingRuleDef, ServerConfig,
+        ServicesConfig,
     };
 
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
@@ -396,6 +398,7 @@ mod tests {
             }),
             auth: None,
             services: ServicesConfig::default(),
+            limits: LimitsConfig::default(),
         })
     }
 
@@ -791,6 +794,73 @@ mod tests {
         assert!(message.contains("builds no durable store"));
         assert!(message.contains("builds no channel cluster"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn default_limits_pass_validation_and_carry_signed_numbers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        // The signed §5 defaults resolve from an absent `[limits]` section.
+        assert_eq!(config.limits.max_connections, 256);
+        assert_eq!(config.limits.max_subscriptions_per_connection, 32);
+        assert_eq!(config.limits.max_conversations_per_connection, 32);
+        assert_eq!(config.limits.max_pending_pushes_per_connection, 32);
+        assert_eq!(
+            config
+                .limits
+                .max_pending_conversation_replies_per_connection,
+            32
+        );
+        assert_eq!(config.limits.max_pending_replies_per_conversation, 8);
+        assert_eq!(config.limits.max_connection_inbox_bytes, 4 * 1024 * 1024);
+        assert_eq!(config.limits.max_subscription_inbox_depth, 256);
+        validate(&mut config, None)?;
+        Ok(())
+    }
+
+    /// §5 cap-refusal (config half): every zero cap is a typed config validation
+    /// error — the unlimited-by-silence state §5 outlaws — reported by field name.
+    #[test]
+    fn zero_limits_are_typed_config_errors() -> Result<(), Box<dyn std::error::Error>> {
+        type LimitMutator = (&'static str, fn(&mut ServerConfig));
+        let mutators: [LimitMutator; 8] = [
+            ("max_connections", |c| c.limits.max_connections = 0),
+            ("max_subscriptions_per_connection", |c| {
+                c.limits.max_subscriptions_per_connection = 0;
+            }),
+            ("max_conversations_per_connection", |c| {
+                c.limits.max_conversations_per_connection = 0;
+            }),
+            ("max_pending_pushes_per_connection", |c| {
+                c.limits.max_pending_pushes_per_connection = 0;
+            }),
+            ("max_pending_conversation_replies_per_connection", |c| {
+                c.limits.max_pending_conversation_replies_per_connection = 0;
+            }),
+            ("max_pending_replies_per_conversation", |c| {
+                c.limits.max_pending_replies_per_conversation = 0;
+            }),
+            ("max_connection_inbox_bytes", |c| {
+                c.limits.max_connection_inbox_bytes = 0;
+            }),
+            ("max_subscription_inbox_depth", |c| {
+                c.limits.max_subscription_inbox_depth = 0;
+            }),
+        ];
+        for (field, mutate) in mutators {
+            let mut config = sample_config()?;
+            mutate(&mut config);
+            let message = config_validation_message(validate(&mut config, None));
+            assert!(
+                message.contains(&format!("limits.{field}")),
+                "zero {field} must report a typed limits.{field} error, got: {message}"
+            );
+            assert!(
+                message.contains("greater than zero"),
+                "the {field} refusal must say why: {message}"
+            );
+        }
         Ok(())
     }
 }

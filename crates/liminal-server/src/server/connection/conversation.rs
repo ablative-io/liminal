@@ -60,6 +60,21 @@ pub trait ConversationResource: std::fmt::Debug + Send {
     /// participant crashed, or the conversation is unavailable.
     fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError>;
 
+    /// R1(vi)(a): non-blocking drain of one buffered participant reply, if any.
+    ///
+    /// Replaces the removed in-slice BLOCKING `receive_reply` on the request-reply
+    /// path: the connection polls this on its own slice and correlates the reply
+    /// through its pending-reply table. Defaulted to `None` for resources with no
+    /// live reply queue (trace-only / test stand-ins).
+    fn try_receive_reply(&self) -> Option<MessageEnvelope> {
+        None
+    }
+
+    /// R1(vi)(a): installs the reply-availability notifier (fired on the reply
+    /// queue's empty→non-empty transition and on terminal actor error), captured at
+    /// conversation open. Defaulted to a no-op for resources with no reply queue.
+    fn register_reply_notifier(&self, _notifier: std::sync::Arc<dyn Fn() + Send + Sync>) {}
+
     /// Releases or finishes the library conversation resource.
     ///
     /// # Errors
@@ -124,6 +139,16 @@ impl ConnectionConversation {
     /// is unavailable.
     pub fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError> {
         self.resource.receive_reply(timeout)
+    }
+
+    /// R1(vi)(a): non-blocking drain of one buffered participant reply.
+    pub(super) fn try_receive_reply(&self) -> Option<MessageEnvelope> {
+        self.resource.try_receive_reply()
+    }
+
+    /// R1(vi)(a): installs the reply-availability notifier at conversation open.
+    pub(super) fn register_reply_notifier(&self, notifier: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.resource.register_reply_notifier(notifier);
     }
 
     pub(super) fn close(self) -> Result<(), ServerError> {
@@ -262,6 +287,22 @@ impl ConversationResource for LiminalConversationResource {
             ProtocolCausalContext::independent(),
             reply.payload,
         ))
+    }
+
+    fn try_receive_reply(&self) -> Option<MessageEnvelope> {
+        // Non-blocking host-side drain of one buffered participant reply, framed
+        // as the wire reply envelope (schema/causal metadata are not bridged in
+        // v1, matching the removed blocking `receive_reply`).
+        let reply = self.actor.try_take_reply()?;
+        Some(MessageEnvelope::new(
+            ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
+            ProtocolCausalContext::independent(),
+            reply.payload,
+        ))
+    }
+
+    fn register_reply_notifier(&self, notifier: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.actor.register_reply_notifier(notifier);
     }
 
     fn close(self: Box<Self>) -> Result<(), ServerError> {
