@@ -383,6 +383,95 @@ fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std:
     Ok(ConnectionSupervisor::from_config(&config)?)
 }
 
+/// A channel-free config carrying the given `[services]` profile, for the
+/// profile-dispatch tests on the public config constructor.
+fn channel_free_config_with_profile(
+    profile: &str,
+) -> Result<crate::config::types::ServerConfig, Box<dyn std::error::Error>> {
+    use crate::config::types::{ServerConfig, ServicesConfig};
+
+    Ok(ServerConfig {
+        listen_address: "127.0.0.1:0".parse()?,
+        health_listen_address: "127.0.0.1:0".parse()?,
+        drain_timeout_ms: 30_000,
+        channels: Vec::new(),
+        routing_rules: Vec::new(),
+        persistence_path: None,
+        cluster: None,
+        auth: None,
+        services: ServicesConfig {
+            profile: profile.to_owned(),
+        },
+    })
+}
+
+/// §9 D2 gate on the PUBLIC config constructor (MAJOR-1 + seam census): a
+/// worker-profile config through `ConnectionSupervisor::from_config` builds the
+/// front door — the scheduler census records ZERO extra subsystems and the
+/// installed services serve no channel operations — so no full service can be
+/// created through this constructor under the worker profile. The connection
+/// scheduler itself is built for BOTH profiles (the supervisor owns it), so an
+/// empty census means the worker profile constructs EXACTLY that one scheduler.
+/// The full-profile arm is the positive control: the SAME instrument through the
+/// SAME constructor records the channel/conversation/haematite schedulers.
+#[test]
+fn from_config_worker_profile_builds_front_door_with_no_extra_schedulers()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::cell::RefCell;
+
+    use crate::server::connection::services::SchedulerSubsystem;
+
+    let worker_census = RefCell::new(Vec::new());
+    let record_worker = |subsystem: SchedulerSubsystem| worker_census.borrow_mut().push(subsystem);
+    let supervisor = ConnectionSupervisor::from_config_censused(
+        &channel_free_config_with_profile("worker-front-door")?,
+        &record_worker,
+    )?;
+    assert!(
+        worker_census.borrow().is_empty(),
+        "the worker profile must construct no scheduler beyond the connection supervisor's own"
+    );
+    assert!(
+        !supervisor
+            .inner
+            .runtime
+            .services()
+            .supports_channel_operations(),
+        "the worker profile must install the front-door services, not the full stack"
+    );
+    assert_eq!(supervisor.active_connection_count(), 0);
+    supervisor.shutdown();
+
+    let full_census = RefCell::new(Vec::new());
+    let record_full = |subsystem: SchedulerSubsystem| full_census.borrow_mut().push(subsystem);
+    let full_supervisor = ConnectionSupervisor::from_config_censused(
+        &channel_free_config_with_profile("full")?,
+        &record_full,
+    )?;
+    let mut recorded = full_census.borrow().clone();
+    recorded.sort();
+    assert_eq!(
+        recorded,
+        vec![
+            SchedulerSubsystem::ChannelSupervisor,
+            SchedulerSubsystem::ConversationSupervisor,
+            SchedulerSubsystem::HaematiteStore,
+        ],
+        "the full profile through the same constructor constructs every subsystem — \
+         the positive control proving the census detects them"
+    );
+    assert!(
+        full_supervisor
+            .inner
+            .runtime
+            .services()
+            .supports_channel_operations(),
+        "the full profile must install the full services"
+    );
+    full_supervisor.shutdown();
+    Ok(())
+}
+
 fn send_subscribe(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {
     let frame = Frame::Subscribe {
         flags: 0,

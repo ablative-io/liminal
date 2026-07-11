@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use liminal::protocol::{
-    CausalContext, MessageEnvelope, SchemaId, WorkerRegisterOutcome, WorkerRegistration,
+    CausalContext, MessageEnvelope, MessageId, SchemaId, WorkerRegisterOutcome, WorkerRegistration,
 };
 
 use super::*;
@@ -542,7 +542,7 @@ fn worker_front_door_runtime(tap_channel: &str) -> (ConnectionRuntime, Arc<Recor
 }
 
 #[test]
-fn worker_front_door_rejects_ordinary_publish_with_publish_error() {
+fn worker_front_door_rejects_ordinary_publish_with_publish_error() -> Result<(), ServerError> {
     let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
     let mut state = ConnectionProcessState::default();
     let frame = Frame::Publish {
@@ -555,12 +555,168 @@ fn worker_front_door_rejects_ordinary_publish_with_publish_error() {
 
     let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
 
+    let FrameAction::Respond(Frame::PublishError {
+        stream_id: 4,
+        message: Some(message),
+        ..
+    }) = action
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!(
+                "an ordinary publish must be rejected with a PublishError, got {action:?}"
+            ),
+        });
+    };
+    // Pins the `ServerError::UnsupportedOperation` rendering: the client sees the
+    // honest refusal text, not the repurposed listener-accept prefix.
+    assert!(
+        message.contains("is not supported by the worker-front-door services profile"),
+        "rejection must carry the unsupported-operation text, got: {message}"
+    );
+    assert!(
+        !message.contains("listener accept failed"),
+        "rejection must not carry the listener-accept prefix, got: {message}"
+    );
+    Ok(())
+}
+
+/// MAJOR-3: backpressure signals (`Accept`/`Defer`/`Reject`) act on subscription
+/// delivery state the front door does not serve, so each is rejected with a typed
+/// `SubscribeError` on the incoming stream — never silently accepted.
+#[test]
+fn worker_front_door_rejects_accept_pressure_frame_with_subscribe_error() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Accept {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-1"),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
     assert!(
         matches!(
             action,
-            FrameAction::Respond(Frame::PublishError { stream_id: 4, .. })
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 6, .. })
         ),
-        "an ordinary publish must be rejected with a PublishError, got {action:?}"
+        "an Accept pressure frame must be rejected with a SubscribeError, got {action:?}"
+    );
+}
+
+#[test]
+fn worker_front_door_rejects_defer_pressure_frame_with_subscribe_error() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Defer {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-2"),
+        reason: Some("buffering".to_owned()),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 6, .. })
+        ),
+        "a Defer pressure frame must be rejected with a SubscribeError, got {action:?}"
+    );
+}
+
+#[test]
+fn worker_front_door_rejects_reject_pressure_frame_with_subscribe_error() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Reject {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-3"),
+        reason: Some("shedding".to_owned()),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 6, .. })
+        ),
+        "a Reject pressure frame must be rejected with a SubscribeError, got {action:?}"
+    );
+}
+
+/// MAJOR-3 full-mode regression: pressure frames stay `NoResponse` in full mode,
+/// exactly as before the front-door split.
+#[test]
+fn pressure_frames_remain_no_response_in_full_mode() {
+    let (runtime, _services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState::default();
+    let frames = [
+        Frame::Accept {
+            flags: 0,
+            stream_id: 6,
+            referenced_message_id: MessageId::new("m-1"),
+        },
+        Frame::Defer {
+            flags: 0,
+            stream_id: 6,
+            referenced_message_id: MessageId::new("m-2"),
+            reason: None,
+        },
+        Frame::Reject {
+            flags: 0,
+            stream_id: 6,
+            referenced_message_id: MessageId::new("m-3"),
+            reason: None,
+        },
+    ];
+
+    for frame in frames {
+        let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+        assert!(
+            matches!(action, FrameAction::NoResponse),
+            "full mode must keep consuming pressure frames silently, got {action:?}"
+        );
+    }
+}
+
+/// MAJOR-3 auth gating: pressure frames are application frames, so with a token
+/// configured an UNAUTHED session can no longer send them freely (the gate closes
+/// the connection), while an authed session keeps today's silent consumption.
+#[test]
+fn pressure_frames_are_auth_gated_when_token_configured() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+    let accept_frame = || Frame::Accept {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-1"),
+    };
+
+    // Pre-auth: the gate tears the connection down.
+    let action = apply_frame(TEST_PID, &runtime, &mut state, accept_frame());
+    assert!(
+        matches!(action, FrameAction::Close),
+        "an unauthenticated pressure frame must close the connection, got {action:?}"
+    );
+
+    // Post-auth: full-mode semantics are unchanged (silent consumption).
+    let mut state = ConnectionProcessState::default();
+    let connect = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"s3cr3t"));
+    assert!(matches!(
+        connect,
+        FrameAction::Respond(Frame::ConnectAck { .. })
+    ));
+    let action = apply_frame(TEST_PID, &runtime, &mut state, accept_frame());
+    assert!(
+        matches!(action, FrameAction::NoResponse),
+        "an authenticated pressure frame keeps full-mode NoResponse, got {action:?}"
     );
 }
 

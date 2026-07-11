@@ -285,10 +285,7 @@ fn validate_auth(config: &ServerConfig, errors: &mut Vec<String>) {
 ///
 /// An unrecognised `profile` value is a typed config validation error. When the
 /// profile is `worker-front-door`, config that asks for machinery the profile does
-/// not build — channels, routing rules, a persistence path, or a cluster — is
-/// rejected rather than silently ignored: the front door constructs no channel,
-/// conversation, haematite, or distribution services, so honouring any of those
-/// keys is impossible and accepting them quietly would be a silent tradeoff.
+/// not build is rejected via [`worker_front_door_field_errors`].
 fn validate_services(config: &ServerConfig, errors: &mut Vec<String>) {
     let profile = match config.services.profile() {
         Ok(profile) => profile,
@@ -304,10 +301,25 @@ fn validate_services(config: &ServerConfig, errors: &mut Vec<String>) {
         }
     };
 
-    if profile != ServiceProfile::WorkerFrontDoor {
-        return;
+    if profile == ServiceProfile::WorkerFrontDoor {
+        errors.extend(worker_front_door_field_errors(config));
     }
+}
 
+/// Cross-field checks for the worker-front-door profile: config that asks for
+/// machinery the profile does not build — channels, routing rules, a persistence
+/// path, or a cluster — is rejected rather than silently ignored. The front door
+/// constructs no channel, conversation, haematite, or distribution services, so
+/// honouring any of those keys is impossible and accepting them quietly would be a
+/// silent tradeoff.
+///
+/// Called from BOTH the file-loading validation pass ([`validate_services`]) and
+/// the runtime construction path
+/// ([`build_connection_services`](crate::server::connection::build_connection_services)),
+/// so a directly-constructed `ServerConfig` that skips file validation still cannot
+/// combine the worker profile with full-only machinery.
+pub(crate) fn worker_front_door_field_errors(config: &ServerConfig) -> Vec<String> {
+    let mut errors = Vec::new();
     if !config.channels.is_empty() {
         errors.push(
             "services.profile: \"worker-front-door\" builds no channels; remove the \
@@ -336,6 +348,7 @@ fn validate_services(config: &ServerConfig, errors: &mut Vec<String>) {
                 .to_owned(),
         );
     }
+    errors
 }
 
 #[cfg(test)]

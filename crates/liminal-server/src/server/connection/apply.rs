@@ -15,6 +15,8 @@ use super::conversation::ConnectionConversation;
 use super::services::ConnectionServices;
 use super::state::{ConnectionProcessState, FrameAction};
 use super::supervisor::ConnectionRuntime;
+use crate::ServerError;
+use crate::config::types::ServiceProfile;
 
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -123,6 +125,13 @@ pub(super) fn apply_frame(
         Frame::WorkerRegister { registration, .. } => {
             worker_register_response(pid, runtime, registration)
         }
+        // Client backpressure signals ride the subscription delivery machinery, so
+        // they are application frames: gated by auth (they are NOT on the pre-auth
+        // allowlist) and refused by a services profile that serves no
+        // subscriptions.
+        Frame::Accept { stream_id, .. }
+        | Frame::Defer { stream_id, .. }
+        | Frame::Reject { stream_id, .. } => pressure_response(services, stream_id),
         // `Push`/`Deliver`/`WorkerRegisterAck` are server-to-client only; a client
         // must never originate one. Ignore these (and any stray/unknown inbound
         // frame) rather than treating them as fatal so a confused or malicious
@@ -138,11 +147,38 @@ pub(super) fn apply_frame(
         | Frame::PublishAck { .. }
         | Frame::PublishError { .. }
         | Frame::ConversationError { .. }
-        | Frame::Accept { .. }
-        | Frame::Defer { .. }
-        | Frame::Reject { .. }
         | Frame::Pong { .. } => FrameAction::NoResponse,
     }
+}
+
+/// Client backpressure signals (`Accept`/`Defer`/`Reject`). Full mode consumes
+/// them with no wire response, exactly as before. The worker front door serves no
+/// subscriptions — no delivery can exist for a client to signal pressure on — so
+/// the frame is rejected on the subscription error channel (`SubscribeError`, the
+/// same closest-honest-fit vocabulary as the unsubscribe rejection).
+fn pressure_response(services: &dyn ConnectionServices, stream_id: u32) -> FrameAction {
+    if services.supports_channel_operations() {
+        FrameAction::NoResponse
+    } else {
+        FrameAction::Respond(Frame::SubscribeError {
+            flags: 0,
+            stream_id,
+            reason_code: SERVER_ERROR_CODE,
+            message: Some(unsupported_by_front_door("backpressure signaling")),
+        })
+    }
+}
+
+/// Renders the worker-front-door refusal text for `operation` from the typed
+/// [`ServerError::UnsupportedOperation`] variant, so every front-door rejection —
+/// whether raised in the services adapter or short-circuited here — speaks the one
+/// error vocabulary.
+fn unsupported_by_front_door(operation: &str) -> String {
+    ServerError::UnsupportedOperation {
+        operation: operation.to_owned(),
+        profile: ServiceProfile::WORKER_FRONT_DOOR,
+    }
+    .to_string()
 }
 
 /// Associates a worker registration with this connection and invokes the
@@ -195,8 +231,9 @@ const fn worker_register_rejected(reason: String) -> FrameAction {
 /// `Ping`, and the frames the server ignores unconditionally (server-to-client and
 /// unknown kinds, which return `NoResponse` regardless) are admitted. Every
 /// application frame — publish, subscribe, unsubscribe, conversation, worker-register,
-/// push-reply — is held back until a successful `Connect`, so a newly added frame is
-/// gated by default until it is explicitly listed here.
+/// push-reply, and the `Accept`/`Defer`/`Reject` backpressure signals (which act on
+/// subscription delivery state) — is held back until a successful `Connect`, so a
+/// newly added frame is gated by default until it is explicitly listed here.
 const fn permitted_before_auth(frame: &Frame) -> bool {
     matches!(
         frame,
@@ -214,9 +251,6 @@ const fn permitted_before_auth(frame: &Frame) -> bool {
             | Frame::PublishAck { .. }
             | Frame::PublishError { .. }
             | Frame::ConversationError { .. }
-            | Frame::Accept { .. }
-            | Frame::Defer { .. }
-            | Frame::Reject { .. }
             | Frame::Pong { .. }
     )
 }
@@ -375,9 +409,7 @@ fn unsubscribe_response(
             flags: 0,
             stream_id,
             reason_code: SERVER_ERROR_CODE,
-            message: Some(
-                "unsubscribe is not supported by the worker-front-door services profile".to_owned(),
-            ),
+            message: Some(unsupported_by_front_door("unsubscribe")),
         })
     }
 }
@@ -425,7 +457,7 @@ fn conversation_message(
         return conversation_error(
             stream_id,
             conversation_id,
-            "conversations are not supported by the worker-front-door services profile",
+            &unsupported_by_front_door("conversation messaging"),
         );
     }
     let Some(conversation) = state.conversations.get(&conversation_id) else {
@@ -500,7 +532,7 @@ fn conversation_close(
         conversation_error(
             stream_id,
             conversation_id,
-            "conversations are not supported by the worker-front-door services profile",
+            &unsupported_by_front_door("conversation close"),
         )
     }
 }

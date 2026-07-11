@@ -240,9 +240,16 @@ impl LiminalConnectionServices {
     /// their publishes are persisted and survive the graceful-shutdown flush;
     /// ephemeral channels carry no store.
     ///
+    /// Full-only: a config selecting the worker-front-door profile is rejected at
+    /// entry (before any store is built), so this constructor can never build full
+    /// services for a profile that forbids them. Profile-aware callers go through
+    /// [`build_connection_services`] instead.
+    ///
     /// # Errors
-    /// Returns [`ServerError`] when a configured channel cannot be initialized.
+    /// Returns [`ServerError`] when the config selects a non-full profile or a
+    /// configured channel cannot be initialized.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
+        require_full_profile(config)?;
         let store = build_durable_store(config.persistence_path.as_deref())?;
         Self::from_config_with_store(config, store)
     }
@@ -252,17 +259,39 @@ impl LiminalConnectionServices {
     /// Used by tests that need to inspect persisted state through the same store
     /// handle the durable channels write to.
     ///
+    /// Full-only: rejects a worker-front-door profile at entry, exactly like
+    /// [`Self::from_config`].
+    ///
     /// # Errors
-    /// Returns [`ServerError`] when a configured channel cannot be initialized.
+    /// Returns [`ServerError`] when the config selects a non-full profile or a
+    /// configured channel cannot be initialized.
     pub fn from_config_with_store(
         config: &ServerConfig,
         durable_store: Arc<dyn DurableStore>,
+    ) -> Result<Self, ServerError> {
+        require_full_profile(config)?;
+        Self::from_config_with_store_censused(config, durable_store, &no_census)
+    }
+
+    /// [`Self::from_config_with_store`] with the scheduler census threaded through.
+    ///
+    /// The census fires at the REAL construction points of the two scheduler-owning
+    /// subsystems this constructor builds — the shared channel supervisor and the
+    /// conversation supervisor — so the §9 D2 seam census observes genuine
+    /// construction, not a description of it. No profile check here: the caller
+    /// (the public wrapper or the profile dispatch in
+    /// [`build_connection_services`]) has already established the full profile.
+    fn from_config_with_store_censused(
+        config: &ServerConfig,
+        durable_store: Arc<dyn DurableStore>,
+        census: ConstructionCensus<'_>,
     ) -> Result<Self, ServerError> {
         // Build ONE shared channel supervisor for the whole server. When a
         // [cluster] section is present it is distribution-enabled, so every
         // channel actor and subscriber shares the clustered scheduler the cluster
         // attaches its process-group transport to (SRV-005, Constraint B).
         let cluster = build_channel_cluster(config.cluster.as_ref())?;
+        census(SchedulerSubsystem::ChannelSupervisor);
         let mut channels = HashMap::new();
         for channel in &config.channels {
             // Resolve the channel's real JSON Schema (loaded from `schema_ref`
@@ -308,6 +337,7 @@ impl LiminalConnectionServices {
                 message: format!("failed to start conversation supervisor: {error}"),
             }
         })?);
+        census(SchedulerSubsystem::ConversationSupervisor);
         let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
         Ok(Self {
             channels,
@@ -527,47 +557,127 @@ const DEFAULT_SHARD_COUNT: usize = 8;
 /// keys from colliding with any other haematite streams in the shared store.
 const DELIVERY_DEDUP_NAMESPACE: &str = "liminal:delivery-dedup";
 
+/// Beamr-scheduler-owning subsystems the full-service construction path builds
+/// beyond the connection supervisor's own scheduler. The §9 D2 seam census counts
+/// these: the worker-front-door profile must construct NONE of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum SchedulerSubsystem {
+    /// The shared channel supervisor (its own beamr scheduler).
+    ChannelSupervisor,
+    /// The conversation supervisor (its own beamr scheduler).
+    ConversationSupervisor,
+    /// The haematite store's database (its shard-actor scheduler).
+    HaematiteStore,
+}
+
+/// Census hook fired at each [`SchedulerSubsystem`] construction point on the
+/// profile-aware construction path. Production passes [`no_census`]; the §9 D2
+/// gate passes a recorder and asserts the worker profile fires it zero times while
+/// the full profile fires it for every subsystem (the positive control proving the
+/// instrument detects what it is supposed to detect).
+pub(super) type ConstructionCensus<'a> = &'a dyn Fn(SchedulerSubsystem);
+
+/// The production census: records nothing.
+pub(super) const fn no_census(_subsystem: SchedulerSubsystem) {}
+
+/// Full-only constructor guard: rejects a config whose profile is not `Full`.
+///
+/// [`LiminalConnectionServices`]' config-based constructors call this at entry so
+/// the full service stack can never be built for a worker-front-door config —
+/// profile enforcement holds on every public construction path, not only the
+/// file-loading pipeline.
+fn require_full_profile(config: &ServerConfig) -> Result<(), ServerError> {
+    match config.services.profile()? {
+        ServiceProfile::Full => Ok(()),
+        ServiceProfile::WorkerFrontDoor => Err(ServerError::ConfigValidation {
+            message: format!(
+                "services.profile: \"{}\" cannot construct the full LiminalConnectionServices; \
+                 build profile-selected services via build_connection_services",
+                ServiceProfile::WORKER_FRONT_DOOR
+            ),
+        }),
+    }
+}
+
 /// Builds the connection-services adapter selected by `config`'s service profile.
 ///
 /// `Full` builds [`LiminalConnectionServices`] (channels, conversations, durable
 /// store, dedup cache) exactly as today. `WorkerFrontDoor` builds
 /// [`WorkerFrontDoorServices`], which constructs none of that machinery. This is the
-/// single profile-dispatch authority; the standalone runtime uses it for the
-/// worker-front-door path (full mode stays on the explicit
+/// single profile-dispatch authority: [`super::supervisor::ConnectionSupervisor`]'s
+/// config constructor and the standalone runtime's worker arm both route through it
+/// (the runtime's full arm stays on the explicit
 /// [`LiminalConnectionServices::from_config`] path because it also needs the shared
-/// channel cluster, which the trait object does not expose).
+/// channel cluster, which the trait object does not expose — that path is guarded
+/// full-only at entry).
 ///
 /// # Errors
-/// Returns [`ServerError`] when the selected adapter cannot be constructed or the
-/// configured profile value is not recognised.
+/// Returns [`ServerError`] when the selected adapter cannot be constructed, the
+/// configured profile value is not recognised, or the worker-front-door profile is
+/// combined with full-only config fields.
 pub fn build_connection_services(
     config: &ServerConfig,
 ) -> Result<Arc<dyn ConnectionServices>, ServerError> {
-    build_connection_services_with(config, || open_ephemeral(DEFAULT_SHARD_COUNT))
+    build_connection_services_censused(config, &no_census)
 }
 
-/// [`build_connection_services`] with the ephemeral store factory injected.
+/// [`build_connection_services`] with the scheduler census attached.
+pub(super) fn build_connection_services_censused(
+    config: &ServerConfig,
+    census: ConstructionCensus<'_>,
+) -> Result<Arc<dyn ConnectionServices>, ServerError> {
+    build_connection_services_seamed(config, || open_ephemeral(DEFAULT_SHARD_COUNT), census)
+}
+
+/// [`build_connection_services`] with both §9 D2 gate seams injected: the ephemeral
+/// store factory (fs half) and the scheduler census (thread half, at today's
+/// honesty level — see [`ConstructionCensus`]).
 ///
-/// The §9 D2 construction gate uses this to prove the worker-front-door branch never
-/// touches the durable-store factory: it passes a factory rooted in an isolated
-/// directory and asserts that root stays empty — the same "isolated injected root
-/// staying empty" negative assertion the D3 gate uses. Only the `Full` branch threads
-/// the factory through [`build_durable_store_with`]; the `WorkerFrontDoor` branch
-/// drops it unused because the front door owns no store, so a regression that gave
-/// the front door a store would land a directory in that root and fail the gate.
-fn build_connection_services_with(
+/// Fs half: the gate passes a factory rooted in an isolated directory and asserts
+/// that root stays empty — the same "isolated injected root staying empty" negative
+/// assertion as the D3 gate. Only the `Full` branch threads the factory through
+/// [`build_durable_store_with`]; the `WorkerFrontDoor` branch drops it unused, so a
+/// regression that gave the front door a store would land a directory in that root
+/// and fail the gate.
+///
+/// The census wraps the ephemeral factory so [`SchedulerSubsystem::HaematiteStore`]
+/// fires only when a store is genuinely constructed through the seam; a persistent
+/// path (full-only — the worker profile rejects `persistence_path` below) fires it
+/// after the on-disk database opens.
+///
+/// The worker branch re-runs the cross-field checks here, not only in file-loading
+/// validation, so a directly-constructed config cannot smuggle full-only machinery
+/// past the profile.
+fn build_connection_services_seamed(
     config: &ServerConfig,
     make_ephemeral: impl FnOnce() -> Result<EphemeralHaematiteStore, DurabilityError>,
+    census: ConstructionCensus<'_>,
 ) -> Result<Arc<dyn ConnectionServices>, ServerError> {
     match config.services.profile()? {
         ServiceProfile::Full => {
+            let censused_ephemeral = || {
+                let store = make_ephemeral()?;
+                census(SchedulerSubsystem::HaematiteStore);
+                Ok(store)
+            };
             let store =
-                build_durable_store_with(config.persistence_path.as_deref(), make_ephemeral)?;
-            Ok(Arc::new(LiminalConnectionServices::from_config_with_store(
-                config, store,
-            )?))
+                build_durable_store_with(config.persistence_path.as_deref(), censused_ephemeral)?;
+            if config.persistence_path.is_some() {
+                census(SchedulerSubsystem::HaematiteStore);
+            }
+            Ok(Arc::new(
+                LiminalConnectionServices::from_config_with_store_censused(config, store, census)?,
+            ))
         }
-        ServiceProfile::WorkerFrontDoor => Ok(Arc::new(WorkerFrontDoorServices::new())),
+        ServiceProfile::WorkerFrontDoor => {
+            let errors = crate::config::validation::worker_front_door_field_errors(config);
+            if !errors.is_empty() {
+                return Err(ServerError::ConfigValidation {
+                    message: errors.join("; "),
+                });
+            }
+            Ok(Arc::new(WorkerFrontDoorServices::new()))
+        }
     }
 }
 
@@ -892,9 +1002,11 @@ mod durable_store_tests {
     use liminal::durability::open_ephemeral_rooted;
 
     use super::{
-        ConnectionServices, DEFAULT_SHARD_COUNT, build_connection_services_with,
-        build_durable_store_with,
+        ConnectionServices, DEFAULT_SHARD_COUNT, LiminalConnectionServices, SchedulerSubsystem,
+        build_connection_services, build_connection_services_seamed, build_durable_store_with,
+        no_census,
     };
+    use crate::ServerError;
     use crate::config::types::{ServerConfig, ServicesConfig};
 
     /// Counts directory entries under `root`, for the empty/one-dir assertions
@@ -940,11 +1052,12 @@ mod durable_store_tests {
         let front_door_root = tempfile::tempdir().expect("test can create an ephemeral root");
         let full_root = tempfile::tempdir().expect("test can create an ephemeral root");
 
-        let front_door: std::sync::Arc<dyn ConnectionServices> =
-            build_connection_services_with(&config_with_profile("worker-front-door"), || {
-                open_ephemeral_rooted(front_door_root.path(), DEFAULT_SHARD_COUNT)
-            })
-            .expect("worker-front-door services build");
+        let front_door: std::sync::Arc<dyn ConnectionServices> = build_connection_services_seamed(
+            &config_with_profile("worker-front-door"),
+            || open_ephemeral_rooted(front_door_root.path(), DEFAULT_SHARD_COUNT),
+            &no_census,
+        )
+        .expect("worker-front-door services build");
         assert!(
             !front_door.supports_channel_operations(),
             "the worker front door serves no channel operations"
@@ -955,9 +1068,11 @@ mod durable_store_tests {
             "the worker front door creates no ephemeral store directory (no haematite, no temp dir)"
         );
 
-        let full = build_connection_services_with(&config_with_profile("full"), || {
-            open_ephemeral_rooted(full_root.path(), DEFAULT_SHARD_COUNT)
-        })
+        let full = build_connection_services_seamed(
+            &config_with_profile("full"),
+            || open_ephemeral_rooted(full_root.path(), DEFAULT_SHARD_COUNT),
+            &no_census,
+        )
         .expect("full services build");
         assert!(
             full.supports_channel_operations(),
@@ -971,6 +1086,113 @@ mod durable_store_tests {
 
         drop(front_door);
         drop(full);
+    }
+
+    /// §9 D2 front-door construction gate (thread half — seam census): the worker
+    /// profile constructs NO channel-supervisor, conversation-supervisor, or
+    /// haematite scheduler (census fires zero times), while the SAME instrument
+    /// over the full profile records all three — the positive control proving the
+    /// census detects the extra schedulers, so an empty census on the worker branch
+    /// is a real observation, not a decoration. The connection supervisor's own
+    /// scheduler is the shared baseline of both profiles and is asserted at the
+    /// supervisor level (`supervisor::tests`); an OS-level thread census upgrades
+    /// this when the beamr composition lane's scheduler-inventory API lands.
+    #[test]
+    fn worker_profile_census_is_empty_and_full_profile_records_all_schedulers() {
+        let worker_root = tempfile::tempdir().expect("test can create an ephemeral root");
+        let full_root = tempfile::tempdir().expect("test can create an ephemeral root");
+
+        let worker_census = std::cell::RefCell::new(Vec::new());
+        let record_worker =
+            |subsystem: SchedulerSubsystem| worker_census.borrow_mut().push(subsystem);
+        let front_door = build_connection_services_seamed(
+            &config_with_profile("worker-front-door"),
+            || open_ephemeral_rooted(worker_root.path(), DEFAULT_SHARD_COUNT),
+            &record_worker,
+        )
+        .expect("worker-front-door services build");
+        assert_eq!(
+            *worker_census.borrow(),
+            Vec::<SchedulerSubsystem>::new(),
+            "the worker front door constructs no scheduler-owning subsystem"
+        );
+
+        let full_census = std::cell::RefCell::new(Vec::new());
+        let record_full = |subsystem: SchedulerSubsystem| full_census.borrow_mut().push(subsystem);
+        let full = build_connection_services_seamed(
+            &config_with_profile("full"),
+            || open_ephemeral_rooted(full_root.path(), DEFAULT_SHARD_COUNT),
+            &record_full,
+        )
+        .expect("full services build");
+        let mut recorded = full_census.borrow().clone();
+        recorded.sort();
+        assert_eq!(
+            recorded,
+            vec![
+                SchedulerSubsystem::ChannelSupervisor,
+                SchedulerSubsystem::ConversationSupervisor,
+                SchedulerSubsystem::HaematiteStore,
+            ],
+            "the full profile constructs every scheduler-owning subsystem, once each — \
+             the positive control proving the census instrument detects them"
+        );
+
+        drop(front_door);
+        drop(full);
+    }
+
+    /// MAJOR-1 regression: the full-only constructors reject a worker-front-door
+    /// config with a typed `ConfigValidation` error AT ENTRY — no full service can
+    /// be created through any public config-based constructor under that profile.
+    #[test]
+    fn full_only_constructors_reject_worker_profile() {
+        let config = config_with_profile("worker-front-door");
+
+        let from_config = LiminalConnectionServices::from_config(&config);
+        assert!(
+            matches!(from_config, Err(ServerError::ConfigValidation { .. })),
+            "from_config must reject a worker-front-door profile with ConfigValidation, got {from_config:?}"
+        );
+
+        let root = tempfile::tempdir().expect("test can create an ephemeral root");
+        let store = open_ephemeral_rooted(root.path(), DEFAULT_SHARD_COUNT)
+            .expect("test store for the rejection check builds");
+        let from_config_with_store =
+            LiminalConnectionServices::from_config_with_store(&config, std::sync::Arc::new(store));
+        assert!(
+            matches!(
+                from_config_with_store,
+                Err(ServerError::ConfigValidation { .. })
+            ),
+            "from_config_with_store must reject a worker-front-door profile with ConfigValidation"
+        );
+    }
+
+    /// MAJOR-1 regression: the profile-aware factory itself re-runs the
+    /// worker-front-door cross-field checks, so a directly-constructed config (one
+    /// that never passed file-loading validation) combining the worker profile with
+    /// full-only machinery is refused with the same typed `ConfigValidation` errors.
+    #[test]
+    fn build_connection_services_rejects_worker_profile_with_full_only_fields() {
+        let mut config = config_with_profile("worker-front-door");
+        config.channels = vec![crate::config::types::ChannelDef {
+            name: "orders".to_owned(),
+            schema_ref: None,
+            durable: false,
+            loaded_schema: None,
+        }];
+        config.persistence_path = Some(std::path::PathBuf::from("/tmp"));
+
+        let result = build_connection_services(&config);
+        let Err(ServerError::ConfigValidation { message }) = result else {
+            panic!("expected ConfigValidation for worker profile with full-only fields");
+        };
+        assert!(message.contains("builds no channels"), "got: {message}");
+        assert!(
+            message.contains("builds no durable store"),
+            "got: {message}"
+        );
     }
 
     /// §9 D3 construction gate (persistent half): requesting a *persistent* store

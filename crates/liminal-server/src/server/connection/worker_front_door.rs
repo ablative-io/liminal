@@ -21,6 +21,7 @@ use liminal::protocol::{MessageEnvelope, SchemaId as ProtocolSchemaId};
 use super::conversation::ConnectionConversation;
 use super::services::{ConnectionServices, ConnectionSubscription, PublishOutcome};
 use crate::ServerError;
+use crate::config::types::ServiceProfile;
 
 /// [`ConnectionServices`] for the worker front door: registration, correlated
 /// push/reply, and notifier-consumed reserved publishes only.
@@ -45,10 +46,9 @@ impl WorkerFrontDoorServices {
     /// Builds the typed rejection returned for an unsupported channel/conversation
     /// operation. Rendered by [`super::apply`] as the operation's typed error frame.
     fn unsupported(operation: &str) -> ServerError {
-        ServerError::ListenerAccept {
-            message: format!(
-                "{operation} is not supported by the worker-front-door services profile"
-            ),
+        ServerError::UnsupportedOperation {
+            operation: operation.to_owned(),
+            profile: ServiceProfile::WORKER_FRONT_DOOR,
         }
     }
 }
@@ -132,17 +132,20 @@ mod tests {
     use super::WorkerFrontDoorServices;
     use crate::server::connection::services::ConnectionServices;
 
-    /// §9 D2 gate (structural, thread census — honest version): the front-door
-    /// adapter constructs nothing, so its constructor is infallible and starts no
-    /// scheduler. A `Scheduler::new` (channel/conversation/haematite) is fallible and
-    /// returns `Result`; this returning a bare `Self` is the strongest in-language
-    /// signal available today that no beamr scheduler is created on this path.
+    /// Structural adjunct to the §9 D2 gate: the front-door adapter constructs
+    /// nothing, so its constructor is infallible and starts no scheduler. A
+    /// `Scheduler::new` (channel/conversation/haematite) is fallible and returns
+    /// `Result`; this returning a bare `Self` is the in-language signal that no
+    /// beamr scheduler is created by the adapter itself.
     ///
-    /// A true OS-level thread census belongs to the beamr composition lane's
-    /// upcoming scheduler-inventory API (see the readiness-consumer design §7 "Worker
-    /// front door (D2)": "thread + fs assertions", deferred to the composition lane);
-    /// this assertion must be upgraded to count live schedulers/threads once that API
-    /// lands. It is deliberately NOT faked with a platform-specific OS thread count.
+    /// The thread half of the §9 gate is the SEAM CENSUS, not this test: the
+    /// scheduler-construction census threaded through the profile-aware
+    /// construction path (`services::SchedulerSubsystem`, asserted with a
+    /// full-profile positive control in
+    /// `services::durable_store_tests` and `supervisor::tests`). A true OS-level
+    /// thread census still belongs to the beamr composition lane's upcoming
+    /// scheduler-inventory API; the census assertions upgrade to it when it lands.
+    /// It is deliberately NOT faked with a platform-specific OS thread count.
     #[test]
     fn construction_is_infallible_and_starts_no_scheduler() {
         let services = WorkerFrontDoorServices::new();
