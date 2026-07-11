@@ -123,3 +123,60 @@ well. Written for dispatch through the norn/aion pipeline. Companion to
 6. The `aion.observability.v1` tap pattern (pinned channel constant +
    default-false notifier method) is the approved shape for new
    cross-layer taps — copy it, don't invent.
+
+## 6. Idle/resource-cost review lens (canonical text v1.1 — SOURCE OF TRUTH)
+
+*Ratified campaign-wide 2026-07-11 (stack-devs; all seats adopted explicitly).
+This file is the canonical source: haematite ASSETS.md, beamr's review assets,
+Meridian brief templates/review-lead skills, and the aion/AWL panel prompts
+quote the block below byte-identically with a source note pointing here. The
+core never forks; each adopting repo may append AT MOST ONE clearly-marked
+domain extension question that names the failure mode it exists to catch.*
+
+---
+
+IDLE/RESOURCE-COST REVIEW LENS (canonical text v1.1 — adopt verbatim; do not
+paraphrase)
+
+Apply to any change that introduces or modifies something resident: a process,
+thread, loop, poller, watcher, timer, connection handler, scheduler,
+projection, or emitted runtime code. For each, answer all four. "Not
+applicable" must be argued, not assumed.
+
+Q1. IDLE COST: What does this consume when completely idle — CPU, threads,
+memory growth, disk growth, fsyncs, wakeups? State the pinned ceiling.
+"Nothing" is a claim requiring a test (see Q3).
+
+Q2. AGGREGATE CEILING: What bounds the SUM across instances — per connection,
+per channel, per shard, per scheduler, per node? A cost reasonable once may be
+shipped N times by code that never sees N. Name the aggregate bound and what
+enforces it.
+
+Q3. QUIESCENCE TEST: Which test asserts this component goes quiet — and would
+that test FAIL on this diff if the answer to Q1 or Q2 were wrong? A quiescence
+assertion that predates the diff and cannot observe its cost does not count.
+
+Q4. BY-DESIGN COSTS: If any idle or per-operation cost is accepted "by
+design", cite all three: the explicit bound in the design doc, the test
+pinning that bound, and sign-off on the number by the certifying pair
+(Vesper Lynd + Waffles the Terrible), with Tom briefed on anything that shapes
+behavior or cost he would notice. A comment explaining why the cost exists is
+documentation of a defect, not authorization for it.
+
+EXTENSION SLOT: each adopting repo may append AT MOST ONE clearly-marked
+domain extension question below the core. The core text above never forks.
+Registered extensions — haematite Q5 (write amplification: bytes persisted per
+logical byte changed, what reclaims superseded state, pinned growth ceiling
+for an idle-but-mutating workload). beamr tooling note: where a
+thread-inventory API exists, Q3's assertion should be a mechanical check
+against the inventory, not a reviewer estimate.
+
+Provenance: aion host incident, 2026-07-11 — five correctness lenses caught
+six bugs in one week and missed the defect that consumed four cores for five
+days, because no lens asked what anything costs when idle.
+
+---
+
+*Liminal registers NO extension question: its sharpest local failure modes
+(the busy-poll, unbounded inboxes) are covered by the core as worded — per the
+Meridian precedent, an empty extension slot is the signal the core is right.*
