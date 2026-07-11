@@ -22,7 +22,7 @@ use crate::causal::CausalContext;
 use crate::channel::actor::{ChannelActorCore, predicate_from};
 use crate::channel::observer::ClusterObserver;
 use crate::channel::schema::{Schema, SchemaId, SchemaValidationError};
-use crate::channel::subscription::{SubscriptionHandle, SubscriptionPredicate};
+use crate::channel::subscription::{InboxInstall, SubscriptionHandle, SubscriptionPredicate};
 use crate::channel::supervisor::{ChannelSupervisor, shared_supervisor};
 use crate::durability::bridge::block_on;
 use crate::durability::{DurableChannel, DurableStore, MessageEnvelope, recover_durable_channel};
@@ -408,7 +408,24 @@ impl ChannelHandle {
     ///
     /// Returns a [`LiminalError`] when a subscription cannot be created.
     pub fn subscribe(&self) -> Result<SubscriptionHandle, LiminalError> {
-        self.subscribe_inner(None)
+        self.subscribe_inner(None, None)
+    }
+
+    /// Subscribes with a server-connection [`InboxInstall`]: the §5 shared byte
+    /// budget, per-inbox fairness cap, and R3 wake notifier are installed on the
+    /// inbox AT CONSTRUCTION — strictly before the registration is published to
+    /// the channel actor — so no envelope can be admitted uncharged, past the
+    /// depth cap, or without a wake (the pre-install window is structurally
+    /// closed, not merely narrowed).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`LiminalError`] when a subscription cannot be created.
+    pub fn subscribe_with_install(
+        &self,
+        install: InboxInstall,
+    ) -> Result<SubscriptionHandle, LiminalError> {
+        self.subscribe_inner(None, Some(install))
     }
 
     /// Subscribes with a delivery predicate: only messages for which `predicate`
@@ -431,15 +448,17 @@ impl ChannelHandle {
     where
         F: Fn(&Envelope) -> bool + Send + Sync + 'static,
     {
-        self.subscribe_inner(Some(predicate_from(predicate)))
+        self.subscribe_inner(Some(predicate_from(predicate)), None)
     }
 
     fn subscribe_inner(
         &self,
         predicate: Option<SubscriptionPredicate>,
+        install: Option<InboxInstall>,
     ) -> Result<SubscriptionHandle, LiminalError> {
         let core = self.core()?;
-        let (handle, registration) = SubscriptionHandle::spawn(core.scheduler(), predicate)?;
+        let (handle, registration) =
+            SubscriptionHandle::spawn(core.scheduler(), predicate, install)?;
         let pid = registration.pid();
         core.subscribe(registration)?;
         // SRV-005: tell the cluster a local subscriber joined this channel so it

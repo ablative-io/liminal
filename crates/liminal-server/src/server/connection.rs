@@ -8,6 +8,8 @@ mod delivery;
 pub mod notifier;
 #[path = "connection/outbound.rs"]
 mod outbound;
+#[path = "connection/pending_reply.rs"]
+mod pending_reply;
 #[path = "connection/process.rs"]
 mod process;
 #[path = "connection/services.rs"]
@@ -23,6 +25,8 @@ mod services_schema;
 mod state;
 #[path = "connection/supervisor.rs"]
 mod supervisor;
+#[path = "connection/wake.rs"]
+mod wake;
 #[path = "connection/worker_front_door.rs"]
 mod worker_front_door;
 

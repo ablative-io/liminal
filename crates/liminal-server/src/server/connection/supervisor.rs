@@ -20,10 +20,13 @@ use super::services::{
     build_connection_services_via,
 };
 use crate::ServerError;
-use crate::config::types::ServerConfig;
+use crate::config::types::{LimitsConfig, ServerConfig};
 
 const CONNECTION_SCHEDULER_THREADS: usize = 4;
 const CONNECTION_SHUTDOWN_CONTROL_ATOM: &str = "liminal_server_connection_shutdown_control";
+/// R6 (§1.2(4)): the single `READY` wake vocabulary for a connection. One atom;
+/// any marker (or N coalesced) triggers one full slice servicing all sources.
+const CONNECTION_READY_ATOM: &str = "liminal_server_connection_ready";
 
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
@@ -67,7 +70,7 @@ impl ConnectionSupervisor {
             .auth
             .as_ref()
             .map(|auth| auth.token.clone().into_bytes());
-        SupervisorInner::new(services, None, auth_token).map(|inner| Self {
+        SupervisorInner::new(services, None, auth_token, config.limits).map(|inner| Self {
             inner: Arc::new(inner),
         })
     }
@@ -85,7 +88,7 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when scheduler startup fails.
     pub fn with_services(services: Arc<dyn ConnectionServices>) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, None, None).map(|inner| Self {
+        SupervisorInner::new(services, None, None, LimitsConfig::default()).map(|inner| Self {
             inner: Arc::new(inner),
         })
     }
@@ -105,8 +108,10 @@ impl ConnectionSupervisor {
         services: Arc<dyn ConnectionServices>,
         auth_token: Option<Vec<u8>>,
     ) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, None, auth_token).map(|inner| Self {
-            inner: Arc::new(inner),
+        SupervisorInner::new(services, None, auth_token, LimitsConfig::default()).map(|inner| {
+            Self {
+                inner: Arc::new(inner),
+            }
         })
     }
 
@@ -125,8 +130,10 @@ impl ConnectionSupervisor {
         services: Arc<dyn ConnectionServices>,
         notifier: Arc<dyn ConnectionNotifier>,
     ) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, Some(notifier), None).map(|inner| Self {
-            inner: Arc::new(inner),
+        SupervisorInner::new(services, Some(notifier), None, LimitsConfig::default()).map(|inner| {
+            Self {
+                inner: Arc::new(inner),
+            }
         })
     }
 
@@ -263,6 +270,19 @@ impl ConnectionSupervisor {
     /// Stops the beamr scheduler used by connection processes.
     pub fn shutdown(&self) {
         self.inner.scheduler.shutdown();
+    }
+
+    /// R7 test instrument: slices serviced by connection `pid` since spawn.
+    #[cfg(test)]
+    pub(super) fn slice_count(&self, pid: u64) -> u64 {
+        self.inner.runtime.slice_count(pid)
+    }
+
+    /// R6 test seam: a [`ReadyWaker`](super::wake::ReadyWaker) for `pid` — the same
+    /// handle a subscription-inbox or reply-availability notifier fires.
+    #[cfg(test)]
+    pub(super) fn ready_waker(&self, pid: u64) -> Option<super::wake::ReadyWaker> {
+        self.inner.runtime.ready_waker(pid)
     }
 }
 
@@ -408,6 +428,7 @@ impl SupervisorInner {
         services: Arc<dyn ConnectionServices>,
         notifier: Option<Arc<dyn ConnectionNotifier>>,
         auth_token: Option<Vec<u8>>,
+        limits: LimitsConfig,
     ) -> Result<Self, ServerError> {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
@@ -423,14 +444,23 @@ impl SupervisorInner {
         .map_err(|message| ServerError::ListenerAccept {
             message: format!("failed to start connection scheduler: {message}"),
         })?;
+        let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
+        let scheduler = Arc::new(scheduler);
+        // The runtime captures a WEAK handle to the connection scheduler so
+        // notifier wakes (R3/R1(vi)) can be fired from another actor's slice
+        // without a strong scheduler↔process↔runtime cycle that would leak the
+        // whole connection scheduler.
         Ok(Self {
-            scheduler: Arc::new(scheduler),
             runtime: Arc::new(ConnectionRuntime::new(
                 services,
                 control_atom,
+                ready_atom,
+                Arc::downgrade(&scheduler),
                 notifier,
                 auth_token,
+                limits,
             )),
+            scheduler,
         })
     }
 
@@ -438,6 +468,19 @@ impl SupervisorInner {
         self: &Arc<Self>,
         stream: TcpStream,
     ) -> Result<ConnectionHandle, ServerError> {
+        // §5 `max_connections`: ATOMIC admission reservation acquired BEFORE any
+        // process construction (review round 1 item 7 — a signed bound must not
+        // be exceedable by concurrent callers; check-then-spawn across an
+        // unlocked window was). The CAS reservation is released on every failure
+        // path below and converts into the connection record at `register`;
+        // thereafter the single record-removal path (`remove`) releases it. An
+        // over-cap accept therefore costs nothing and the bound holds under any
+        // concurrency.
+        self.runtime.try_reserve_admission()?;
+        let reservation = AdmissionReservation {
+            runtime: &self.runtime,
+            armed: true,
+        };
         stream
             .set_nonblocking(true)
             .map_err(|error| ServerError::ListenerAccept {
@@ -461,6 +504,10 @@ impl SupervisorInner {
                     message: format!("failed to spawn connection process: {error}"),
                 })?;
         self.runtime.register(pid, peer_addr)?;
+        // The reservation is now owned by the registered record: `remove` (the
+        // single record-removal path — finish/mark_crashed/reap all funnel
+        // through it) releases the admission when the record goes away.
+        reservation.convert();
         Ok(ConnectionHandle {
             pid,
             peer_addr,
@@ -501,6 +548,34 @@ impl SupervisorInner {
     }
 }
 
+/// RAII guard for one §5 `max_connections` admission reservation.
+///
+/// Acquired (via [`ConnectionRuntime::try_reserve_admission`]) before any process
+/// construction in `spawn_connection`; every early-return failure path releases
+/// it through `Drop`, and a successful `register` converts it into the
+/// connection record (whose removal releases the admission instead). RAII means
+/// no failure path — present or future — can leak a reservation.
+struct AdmissionReservation<'a> {
+    runtime: &'a ConnectionRuntime,
+    armed: bool,
+}
+
+impl AdmissionReservation<'_> {
+    /// Converts the reservation into record ownership: `Drop` no longer releases
+    /// it, because the registered record's removal will.
+    fn convert(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AdmissionReservation<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.runtime.release_admission();
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ConnectionControl {
     NotifyShutdown,
@@ -525,6 +600,19 @@ pub(super) struct ConnectionRuntime {
     records: Mutex<HashMap<u64, ConnectionRecord>>,
     controls: Mutex<Vec<QueuedConnectionControl>>,
     control_atom: Atom,
+    /// R6 single `READY` wake atom for this connection scheduler. Fired by every
+    /// wake source's notifier (R3/R1(vi)); coalescing and duplicates are harmless.
+    ready_atom: Atom,
+    /// Weak handle to the connection scheduler, used to build [`ReadyWaker`]s a
+    /// notifier fires from another actor's slice. Weak so it never keeps the
+    /// scheduler alive (the scheduler owns the processes that own this runtime).
+    scheduler: Weak<Scheduler>,
+    /// R7 (§1.2(6)) test-only per-connection slice counter, keyed by pid. Bumped
+    /// once at the head of every serviced slice. The park-flip's permanent rule-1
+    /// assertion (a parked connection's counter must not advance without an event)
+    /// reads this; the instrument lands now with a test proving it counts slices.
+    #[cfg(test)]
+    slice_counts: Mutex<HashMap<u64, u64>>,
     /// One-shot reply slots for in-flight server pushes, keyed by correlation id.
     /// The supervisor registers a slot in `push_to_connection`; the connection
     /// process resolves it when the matching `PushReply` frame arrives. Each slot
@@ -534,6 +622,12 @@ pub(super) struct ConnectionRuntime {
     /// Monotonic source of push correlation ids. Server-allocated, so it never
     /// collides with a client-chosen id on this connection.
     next_push_id: AtomicU64,
+    /// §5 `max_connections` admission counter. Incremented atomically (CAS
+    /// against the limit) BEFORE a connection process is constructed and
+    /// decremented on every spawn-failure path and on final record removal, so
+    /// the signed bound holds under concurrent spawns — admission is never
+    /// derived from the records-map length across an unlocked window.
+    admissions: AtomicU64,
     /// Optional application hook invoked on worker registration and on the close
     /// of a connection that had registered. `None` keeps liminal standalone: a
     /// `WorkerRegister` is accepted with no callback.
@@ -543,25 +637,128 @@ pub(super) struct ConnectionRuntime {
     /// match under a constant-time comparison; `None` leaves the server open-access,
     /// byte-identical to the pre-auth behaviour.
     auth_token: Option<Vec<u8>>,
+    /// Operational caps (§5). Enforced with typed refusals at admission:
+    /// per-connection subscription, conversation, push, and pending-reply counts,
+    /// plus the shared inbox byte budget. Non-config constructors carry the signed
+    /// defaults ([`LimitsConfig::default`]).
+    limits: LimitsConfig,
 }
 
 impl ConnectionRuntime {
     fn new(
         services: Arc<dyn ConnectionServices>,
         control_atom: Atom,
+        ready_atom: Atom,
+        scheduler: Weak<Scheduler>,
         notifier: Option<Arc<dyn ConnectionNotifier>>,
         auth_token: Option<Vec<u8>>,
+        limits: LimitsConfig,
     ) -> Self {
         Self {
             services,
             records: Mutex::new(HashMap::new()),
             controls: Mutex::new(Vec::new()),
             control_atom,
+            ready_atom,
+            scheduler,
+            #[cfg(test)]
+            slice_counts: Mutex::new(HashMap::new()),
             push_replies: Mutex::new(HashMap::new()),
             next_push_id: AtomicU64::new(1),
+            admissions: AtomicU64::new(0),
             notifier,
             auth_token,
+            limits,
         }
+    }
+
+    /// Atomically reserves one §5 `max_connections` admission slot: a CAS loop
+    /// against the configured limit, so N concurrent callers racing for the last
+    /// slot admit EXACTLY one — the bound cannot be transiently exceeded.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ConnectionLimitReached`] when every slot is taken.
+    fn try_reserve_admission(&self) -> Result<(), ServerError> {
+        let limit = self.limits.max_connections as u64;
+        let mut current = self.admissions.load(Ordering::Acquire);
+        loop {
+            if current >= limit {
+                return Err(ServerError::ConnectionLimitReached {
+                    limit: self.limits.max_connections,
+                });
+            }
+            match self.admissions.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// Releases one admission slot. Called by the spawn failure paths (via the
+    /// [`AdmissionReservation`] guard) and by [`Self::remove`] when a registered
+    /// record is removed — exactly one release per reservation. Saturating so a
+    /// spurious release can never wrap the counter.
+    fn release_admission(&self) {
+        let mut current = self.admissions.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_sub(1);
+            match self.admissions.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    /// The operational caps (§5) this runtime enforces.
+    pub(super) const fn limits(&self) -> &LimitsConfig {
+        &self.limits
+    }
+
+    /// The connection's single R6 `READY` wake atom.
+    pub(super) const fn ready_atom(&self) -> Atom {
+        self.ready_atom
+    }
+
+    /// Builds a [`ReadyWaker`] targeting `pid` on the connection scheduler, if the
+    /// scheduler is still live. `None` when the scheduler is gone (teardown) or in
+    /// scheduler-free unit tests — a notifier with no waker simply never wakes,
+    /// which under the busy loop is redundant anyway (the every-slice pump still
+    /// services the source). This is the seam every wake source installs its
+    /// notifier through (R3/R1(vi)).
+    pub(super) fn ready_waker(&self, pid: u64) -> Option<super::wake::ReadyWaker> {
+        let scheduler = self.scheduler.upgrade()?;
+        Some(super::wake::ReadyWaker::new(
+            &scheduler,
+            pid,
+            self.ready_atom,
+        ))
+    }
+
+    /// R7: records one serviced slice for `pid`. Bumped at the head of every
+    /// slice; the park-flip's quiescence assertion reads [`Self::slice_count`].
+    #[cfg(test)]
+    pub(super) fn record_slice(&self, pid: u64) {
+        if let Ok(mut counts) = self.slice_counts.lock() {
+            *counts.entry(pid).or_insert(0) += 1;
+        }
+    }
+
+    /// R7: slices serviced by connection `pid` since spawn (test instrument).
+    #[cfg(test)]
+    pub(super) fn slice_count(&self, pid: u64) -> u64 {
+        self.slice_counts
+            .lock()
+            .map_or(0, |counts| counts.get(&pid).copied().unwrap_or(0))
     }
 
     /// Builds a runtime wrapping `services` for unit tests that exercise
@@ -571,7 +768,37 @@ impl ConnectionRuntime {
     pub(super) fn for_tests(services: Arc<dyn ConnectionServices>) -> Self {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
-        Self::new(services, control_atom, None, None)
+        let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
+        Self::new(
+            services,
+            control_atom,
+            ready_atom,
+            Weak::new(),
+            None,
+            None,
+            LimitsConfig::default(),
+        )
+    }
+
+    /// Builds a runtime wrapping `services` with explicit `limits` for unit tests
+    /// that exercise the §5 admission caps without a live scheduler.
+    #[cfg(test)]
+    pub(super) fn for_tests_with_limits(
+        services: Arc<dyn ConnectionServices>,
+        limits: LimitsConfig,
+    ) -> Self {
+        let atoms = AtomTable::with_common_atoms();
+        let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
+        let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
+        Self::new(
+            services,
+            control_atom,
+            ready_atom,
+            Weak::new(),
+            None,
+            None,
+            limits,
+        )
     }
 
     /// Builds a runtime wrapping `services` with a configured auth `token` for unit
@@ -584,7 +811,16 @@ impl ConnectionRuntime {
     ) -> Self {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
-        Self::new(services, control_atom, None, Some(token))
+        let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
+        Self::new(
+            services,
+            control_atom,
+            ready_atom,
+            Weak::new(),
+            None,
+            Some(token),
+            LimitsConfig::default(),
+        )
     }
 
     /// Builds a runtime wrapping `services` with a `notifier` for unit tests that
@@ -596,7 +832,16 @@ impl ConnectionRuntime {
     ) -> Self {
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
-        Self::new(services, control_atom, Some(notifier), None)
+        let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
+        Self::new(
+            services,
+            control_atom,
+            ready_atom,
+            Weak::new(),
+            Some(notifier),
+            None,
+            LimitsConfig::default(),
+        )
     }
 
     pub(super) fn services(&self) -> &dyn ConnectionServices {
@@ -661,8 +906,24 @@ impl ConnectionRuntime {
         correlation_id: u64,
     ) -> Result<Receiver<Vec<u8>>, ServerError> {
         let (sender, receiver) = channel();
-        lock(&self.push_replies, "push correlation registry")?
-            .insert(correlation_id, PendingPush { pid, sender });
+        let limit = self.limits.max_pending_pushes_per_connection;
+        {
+            let mut slots = lock(&self.push_replies, "push correlation registry")?;
+            // §5 `max_pending_pushes_per_connection`: refuse a new in-flight push
+            // once this connection already holds the cap. Counted per owning pid so
+            // one connection cannot exhaust the shared registry; slots free on
+            // reply, timeout, or connection close. The count-and-insert stays under
+            // the one lock so the cap is enforced atomically.
+            let outstanding = slots.values().filter(|pending| pending.pid == pid).count();
+            if outstanding >= limit {
+                return Err(ServerError::ConnectionCapReached {
+                    operation: "server push".to_owned(),
+                    cap: "max_pending_pushes_per_connection",
+                    limit,
+                });
+            }
+            slots.insert(correlation_id, PendingPush { pid, sender });
+        }
         Ok(receiver)
     }
 
@@ -890,8 +1151,12 @@ impl ConnectionRuntime {
             .and_then(|mut records| records.remove(&pid));
         // Decrement only when a record was actually present so a double-remove
         // (e.g. `finish` after `reap_crashed`) cannot drive the gauge negative.
+        // The §5 admission slot is released on the same guard: the reservation
+        // acquired in `spawn_connection` converted into this record at
+        // `register`, so its removal is exactly one release per reservation.
         if removed.is_some() {
             crate::metrics::connection_closed();
+            self.release_admission();
         }
         removed
     }

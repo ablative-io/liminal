@@ -3,7 +3,7 @@
 //! library through [`ConnectionServices`]. Split out of [`super::process`] so the
 //! connection handler there stays focused on socket IO and the slice pump.
 
-use std::time::Duration;
+use std::time::Instant;
 
 use liminal::protocol::{
     CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG,
@@ -11,7 +11,6 @@ use liminal::protocol::{
     WorkerRegistration, negotiate_version,
 };
 
-use super::conversation::ConnectionConversation;
 use super::services::ConnectionServices;
 use super::state::{ConnectionProcessState, FrameAction};
 use super::supervisor::ConnectionRuntime;
@@ -81,17 +80,18 @@ pub(super) fn apply_frame(
             channel,
             accepted_schemas,
             ..
-        } => subscribe_response(services, state, stream_id, &channel, &accepted_schemas),
+        } => subscribe_response(pid, runtime, state, stream_id, &channel, &accepted_schemas),
         Frame::Unsubscribe {
             stream_id,
             subscription_id,
             ..
         } => unsubscribe_response(services, state, stream_id, subscription_id),
         Frame::ConversationOpen {
+            stream_id,
             conversation_id,
             subject,
             ..
-        } => conversation_open(services, state, conversation_id, &subject),
+        } => conversation_open(pid, runtime, state, stream_id, conversation_id, &subject),
         Frame::ConversationMessage {
             flags,
             stream_id,
@@ -347,13 +347,64 @@ fn publish_response(
 }
 
 fn subscribe_response(
-    services: &dyn ConnectionServices,
+    pid: u64,
+    runtime: &ConnectionRuntime,
     state: &mut ConnectionProcessState,
     stream_id: u32,
     channel: &str,
     accepted_schemas: &[ProtocolSchemaId],
 ) -> FrameAction {
-    match services.subscribe(channel, accepted_schemas) {
+    let limits = runtime.limits();
+    let max_subscriptions = limits.max_subscriptions_per_connection;
+    // §5 `max_subscriptions_per_connection`: refuse a subscription past the cap
+    // with the subscription error channel (the same vocabulary an unsupported or
+    // failed subscribe uses), before touching the services adapter so an over-cap
+    // subscribe never spawns a subscriber process.
+    if state.subscriptions.len() >= max_subscriptions {
+        return FrameAction::Respond(Frame::SubscribeError {
+            flags: 0,
+            stream_id,
+            reason_code: SERVER_ERROR_CODE,
+            message: Some(
+                ServerError::ConnectionCapReached {
+                    operation: "subscribe".to_owned(),
+                    cap: "max_subscriptions_per_connection",
+                    limit: max_subscriptions,
+                }
+                .to_string(),
+            ),
+        });
+    }
+    // R3 + §5: build the install spec CARRIED INTO subscribe, so the shared
+    // connection byte budget, per-inbox fairness cap, and wake notifier are
+    // installed on the inbox at construction — strictly BEFORE the registration
+    // is published to the channel actor. There is no pre-install window: no
+    // envelope can be admitted uncharged, past the depth cap, or without a wake.
+    // The budget is created lazily on the first subscribe and shared across
+    // every later subscription, so the 4 MiB is one connection-scoped pool. The
+    // notifier captures the CONNECTION scheduler's `READY` enqueue handle here
+    // (§1.2(2), Vesper advisory 3); under the busy loop the wake is redundant
+    // (the every-slice pump still drains the inbox), so a missing waker —
+    // scheduler-free unit tests — is harmless. PARK-FLIP: this is the wake that
+    // replaces the delivery pump's every-slice assumption.
+    let budget = state
+        .inbox_budget
+        .get_or_insert_with(|| {
+            liminal::channel::ConnectionInboxBudget::new(limits.max_connection_inbox_bytes)
+        })
+        .clone();
+    let notifier: Option<liminal::channel::InboxNotifier> = runtime.ready_waker(pid).map(|waker| {
+        std::sync::Arc::new(move || {
+            waker.fire();
+        }) as liminal::channel::InboxNotifier
+    });
+    let install = liminal::channel::InboxInstall {
+        budget,
+        depth_cap: limits.max_subscription_inbox_depth,
+        notifier,
+    };
+    let services = runtime.services();
+    match services.subscribe(channel, accepted_schemas, Some(install)) {
         Ok(mut subscription) => {
             // Record the client-chosen delivery stream so the pump can address
             // every `Deliver` to the stream the client is reading this subscription
@@ -414,20 +465,77 @@ fn unsubscribe_response(
     }
 }
 
+// Every `ConversationError` this function emits rides the REQUEST'S stream id
+// (Sol round 2): a client that opened on stream 17 must see its typed refusal on
+// stream 17 — a refusal on a hard-coded stream would leave the client's actual
+// stream silent, turning the fail-closed refusals into a silent-timeout shape.
 fn conversation_open(
-    services: &dyn ConnectionServices,
+    pid: u64,
+    runtime: &ConnectionRuntime,
     state: &mut ConnectionProcessState,
+    stream_id: u32,
     conversation_id: u64,
     subject: &str,
 ) -> FrameAction {
-    match services.open_conversation(conversation_id, subject) {
+    // Duplicate open of a LIVE conversation id is refused fail-closed (review
+    // ruling, round 1 item 3): an insert-replace would drop the old resource
+    // without close/finalize (violating the D4 every-teardown-path-finalizes
+    // discipline) and leave its pending/tombstone reply entries to FIFO-correlate
+    // against the NEW instance's replies — cross-instance mis-correlation, the
+    // corruption class the tombstone ruling exists to kill. Nothing sanctions
+    // re-open-as-replace: the SDK explicitly guards against re-sending
+    // `ConversationOpen` for an open id and calls a duplicate a defect
+    // (`liminal-sdk/src/remote/tcp/connection.rs:48`). The remedy is named in the
+    // error: close the conversation first, or use a fresh id.
+    if state.conversations.contains_key(&conversation_id) {
+        return conversation_error(
+            stream_id,
+            conversation_id,
+            "conversation id is already open on this connection; close it before \
+             reopening or use a fresh id",
+        );
+    }
+    let max_conversations = runtime.limits().max_conversations_per_connection;
+    // §5 `max_conversations_per_connection`: refuse opening past the cap before
+    // constructing any supervised conversation actor. Duplicate ids were refused
+    // above, so every admission here is a distinct live conversation.
+    if state.conversations.len() >= max_conversations {
+        return conversation_error(
+            stream_id,
+            conversation_id,
+            &ServerError::ConnectionCapReached {
+                operation: "conversation open".to_owned(),
+                cap: "max_conversations_per_connection",
+                limit: max_conversations,
+            }
+            .to_string(),
+        );
+    }
+    match runtime
+        .services()
+        .open_conversation(conversation_id, subject)
+    {
         Ok(conversation) => {
+            // R1(vi)(a): install the reply-availability notifier PERMANENTLY at
+            // conversation open (normative — not per-message). It fires the
+            // connection's `READY` marker on the reply queue's empty→non-empty edge
+            // and on terminal actor error, capturing the CONNECTION scheduler's
+            // enqueue handle here at install. Under the busy loop the wake is
+            // redundant (the slice polls pending conversations every slice); it is
+            // the park-flip wake source. The notifier is cleared by the
+            // conversation core at close/finalize, so a marker never fires after
+            // teardown.
+            if let Some(waker) = runtime.ready_waker(pid) {
+                conversation.register_reply_notifier(std::sync::Arc::new(move || {
+                    waker.fire();
+                }));
+            }
             state.conversations.insert(conversation_id, conversation);
             FrameAction::NoResponse
         }
         Err(error) => FrameAction::Respond(Frame::ConversationError {
             flags: 0,
-            stream_id: 1,
+            stream_id,
             conversation_id,
             reason_code: SERVER_ERROR_CODE,
             message: Some(error.to_string()),
@@ -435,16 +543,9 @@ fn conversation_open(
     }
 }
 
-/// Bounds how long the server waits for the participant's reply on the
-/// request-reply path before reporting a `ConversationError` back to the caller.
-/// The participant processes the forwarded message on a beamr scheduler slice, so
-/// a reply is normally available promptly; this only guards against a stuck or
-/// non-replying participant so the connection thread never blocks indefinitely.
-const CONVERSATION_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
-
 fn conversation_message(
     services: &dyn ConnectionServices,
-    state: &ConnectionProcessState,
+    state: &mut ConnectionProcessState,
     flags: u8,
     stream_id: u32,
     conversation_id: u64,
@@ -467,38 +568,49 @@ fn conversation_message(
             "conversation is not open on this connection",
         );
     };
-    if let Err(error) = services.conversation_message(conversation, envelope) {
-        return conversation_error(stream_id, conversation_id, &error.to_string());
-    }
     // Pre-existing fire-and-forget semantics: without the reply-requested flag the
-    // server stays silent on success, exactly as before. The reply leg is purely
-    // additive and only runs when the client explicitly asked for a correlated
-    // reply on this frame.
+    // message is forwarded and the server stays silent on success, exactly as
+    // before. The reply leg is purely additive and only runs when the client
+    // explicitly asked for a correlated reply on this frame.
     if flags & CONVERSATION_REPLY_REQUESTED_FLAG == 0 {
+        if let Err(error) = services.conversation_message(conversation, envelope) {
+            return conversation_error(stream_id, conversation_id, &error.to_string());
+        }
         return FrameAction::NoResponse;
     }
-    conversation_reply(conversation, stream_id, conversation_id)
-}
-
-/// Drains the participant's correlated reply and frames it back to the caller.
-///
-/// The reply carries the same `conversation_id` (the correlation key) and the
-/// reply-requested flag so the client read path can recognise it as the answer to
-/// its request rather than an unrelated server-initiated frame.
-fn conversation_reply(
-    conversation: &ConnectionConversation,
-    stream_id: u32,
-    conversation_id: u64,
-) -> FrameAction {
-    match conversation.receive_reply(CONVERSATION_REPLY_TIMEOUT) {
-        Ok(reply) => FrameAction::Respond(Frame::ConversationMessage {
-            flags: CONVERSATION_REPLY_REQUESTED_FLAG,
-            stream_id,
-            conversation_id,
-            envelope: reply,
-        }),
-        Err(error) => conversation_error(stream_id, conversation_id, &error.to_string()),
+    // R1(vi) (§1.2(3b)) — THE LIVE BEHAVIOR CHANGE. The old path BLOCKED the
+    // connection slice for up to 5 s draining the participant's reply
+    // (`receive_reply`); now the reply-requested operation rides the bounded
+    // per-connection pending-reply table and the slice returns immediately.
+    //
+    // ADMISSION COMES FIRST (cap-before-mutation, review round 1 item 1): the
+    // reservation is made BEFORE the message is forwarded, so a cap-refused
+    // request — including the tombstone self-wedge — NEVER reaches the
+    // participant. A refused-but-forwarded request would produce an orphan
+    // reply with no table entry, which could later FIFO-match a younger
+    // admitted operation on the same conversation: wrong-reply delivery, the
+    // corruption class the tombstone ruling kills. If the forward itself fails
+    // after admission, the exact reservation is rolled back (no reply can ever
+    // arrive for a message the participant never received, so the entry must
+    // not linger to time out into a spurious tombstone).
+    let op_id = match state
+        .pending_replies
+        .admit(conversation_id, stream_id, Instant::now())
+    {
+        Ok(op_id) => op_id,
+        Err(error) => {
+            return FrameAction::Respond(super::pending_reply::cap_refusal_frame(
+                stream_id,
+                conversation_id,
+                &error,
+            ));
+        }
+    };
+    if let Err(error) = services.conversation_message(conversation, envelope) {
+        state.pending_replies.cancel(op_id);
+        return conversation_error(stream_id, conversation_id, &error.to_string());
     }
+    FrameAction::NoResponse
 }
 
 fn conversation_error(stream_id: u32, conversation_id: u64, message: &str) -> FrameAction {
@@ -518,6 +630,15 @@ fn conversation_close(
     conversation_id: u64,
 ) -> FrameAction {
     if let Some(conversation) = state.conversations.remove(&conversation_id) {
+        // §1.2(3b) close sweep — one of only TWO sanctioned tombstone-reclamation
+        // triggers (review round 1 item 2): synchronously remove EVERY pending and
+        // tombstone entry for this conversation, IN the close transaction, before
+        // the actor close/finalize below and before any same-id reopen can be
+        // applied from the same buffer. Without this, a tombstone-only
+        // conversation's entries linger to connection teardown (the lazy
+        // service_pending_replies sweep only visits conversations with PENDING
+        // entries) and could FIFO-correlate against a reopened id's replies.
+        state.pending_replies.remove_conversation(conversation_id);
         if let Err(error) = services.close_conversation(conversation) {
             tracing::warn!(conversation_id, %error, "liminal conversation close failed");
         }

@@ -6,7 +6,7 @@ use liminal::protocol::{
 
 use super::*;
 use crate::ServerError;
-use crate::server::connection::conversation::ConversationResource;
+use crate::server::connection::conversation::{ConnectionConversation, ConversationResource};
 use crate::server::connection::notifier::ConnectionNotifier;
 use crate::server::connection::services::{
     ConnectionSubscription, PublishOutcome, SubscriptionResource,
@@ -46,6 +46,7 @@ impl ConnectionServices for RecordingServices {
         &self,
         channel: &str,
         accepted_schemas: &[ProtocolSchemaId],
+        _install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError> {
         self.subscriptions
             .lock()
@@ -1206,4 +1207,644 @@ fn envelope(payload: Vec<u8>) -> MessageEnvelope {
 
 fn schema_id() -> SchemaId {
     SchemaId::new([1; SchemaId::WIRE_LEN])
+}
+
+/// §5 cap-refusal (behavioural half). A [`LimitsConfig`] with a single named cap
+/// squeezed to one, everything else at its signed default.
+fn limits_with(
+    mutate: impl FnOnce(&mut crate::config::types::LimitsConfig),
+) -> crate::config::types::LimitsConfig {
+    let mut limits = crate::config::types::LimitsConfig::default();
+    mutate(&mut limits);
+    limits
+}
+
+#[test]
+fn subscription_cap_refuses_past_the_limit_with_a_typed_error() -> Result<(), ServerError> {
+    // One subscription allowed; the second is refused BEFORE the services adapter
+    // is touched, on the subscription error channel carrying the typed cap message.
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::new(RecordingServices::default()),
+        limits_with(|l| l.max_subscriptions_per_connection = 1),
+    );
+    let mut state = ConnectionProcessState::default();
+    let frame = || Frame::Subscribe {
+        flags: 0,
+        stream_id: 5,
+        channel: "orders".to_owned(),
+        accepted_schemas: Vec::new(),
+        max_in_flight: 16,
+    };
+    let first = apply_frame(TEST_PID, &runtime, &mut state, frame());
+    assert!(
+        matches!(first, FrameAction::Respond(Frame::SubscribeAck { .. })),
+        "the first subscription is admitted under the cap"
+    );
+    let second = apply_frame(TEST_PID, &runtime, &mut state, frame());
+    let FrameAction::Respond(Frame::SubscribeError {
+        message: Some(m), ..
+    }) = second
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a typed SubscribeError past the cap, got {second:?}"),
+        });
+    };
+    assert!(
+        m.contains("max_subscriptions_per_connection"),
+        "the refusal names the cap: {m}"
+    );
+    Ok(())
+}
+
+#[test]
+fn conversation_cap_refuses_past_the_limit_with_a_typed_error() -> Result<(), ServerError> {
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::new(RecordingServices::default()),
+        limits_with(|l| l.max_conversations_per_connection = 1),
+    );
+    let mut state = ConnectionProcessState::default();
+    let open = |id: u64| Frame::ConversationOpen {
+        flags: 0,
+        stream_id: 1,
+        conversation_id: id,
+        subject: "s".to_owned(),
+    };
+    let first = apply_frame(TEST_PID, &runtime, &mut state, open(100));
+    assert!(
+        matches!(first, FrameAction::NoResponse),
+        "the first conversation opens under the cap"
+    );
+    let second = apply_frame(TEST_PID, &runtime, &mut state, open(200));
+    let FrameAction::Respond(Frame::ConversationError {
+        message: Some(m), ..
+    }) = second
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a typed ConversationError past the cap, got {second:?}"),
+        });
+    };
+    assert!(
+        m.contains("max_conversations_per_connection"),
+        "the refusal names the cap: {m}"
+    );
+    Ok(())
+}
+
+/// Services whose `conversation_message` counts forwards and can be set to fail,
+/// so the admit-before-forward discipline (review round 1 item 1) is observable:
+/// a cap-refused request must NEVER reach the participant, and a forward failure
+/// must roll back its exact reservation.
+#[derive(Debug, Default)]
+struct ForwardCountingServices {
+    forwards: std::sync::atomic::AtomicUsize,
+    fail_forwards: std::sync::atomic::AtomicBool,
+    fail_opens: std::sync::atomic::AtomicBool,
+}
+
+impl ForwardCountingServices {
+    fn forwards(&self) -> usize {
+        self.forwards.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn fail_next_forwards(&self, fail: bool) {
+        self.fail_forwards
+            .store(fail, std::sync::atomic::Ordering::Release);
+    }
+
+    fn fail_next_opens(&self, fail: bool) {
+        self.fail_opens
+            .store(fail, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl ConnectionServices for ForwardCountingServices {
+    fn publish(
+        &self,
+        _channel: &str,
+        _envelope: &MessageEnvelope,
+        _idempotency_key: Option<&str>,
+    ) -> Result<PublishOutcome, ServerError> {
+        Ok(PublishOutcome {
+            message_id: 1,
+            delivered: false,
+        })
+    }
+
+    fn subscribe(
+        &self,
+        _channel: &str,
+        _accepted_schemas: &[ProtocolSchemaId],
+        _install: Option<liminal::channel::InboxInstall>,
+    ) -> Result<ConnectionSubscription, ServerError> {
+        Err(ServerError::ListenerAccept {
+            message: "not under test".to_owned(),
+        })
+    }
+
+    fn unsubscribe(&self, _subscription: ConnectionSubscription) -> Result<(), ServerError> {
+        Ok(())
+    }
+
+    fn open_conversation(
+        &self,
+        _conversation_id: u64,
+        _subject: &str,
+    ) -> Result<ConnectionConversation, ServerError> {
+        if self.fail_opens.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ServerError::ListenerAccept {
+                message: "open failed under test".to_owned(),
+            });
+        }
+        Ok(ConnectionConversation::new(Box::new(TestConversation)))
+    }
+
+    fn conversation_message(
+        &self,
+        _conversation: &ConnectionConversation,
+        _envelope: &MessageEnvelope,
+    ) -> Result<(), ServerError> {
+        if self
+            .fail_forwards
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ServerError::ListenerAccept {
+                message: "forward failed under test".to_owned(),
+            });
+        }
+        self.forwards
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        Ok(())
+    }
+
+    fn close_conversation(&self, conversation: ConnectionConversation) -> Result<(), ServerError> {
+        conversation.close()
+    }
+
+    fn flush_durable_state(&self) -> Result<(), ServerError> {
+        Ok(())
+    }
+}
+
+fn reply_requested_message(conversation_id: u64, stream_id: u32) -> Frame {
+    Frame::ConversationMessage {
+        flags: liminal::protocol::CONVERSATION_REPLY_REQUESTED_FLAG,
+        stream_id,
+        conversation_id,
+        envelope: envelope(b"request".to_vec()),
+    }
+}
+
+fn open_frame(conversation_id: u64) -> Frame {
+    Frame::ConversationOpen {
+        flags: 0,
+        stream_id: 1,
+        conversation_id,
+        subject: "s".to_owned(),
+    }
+}
+
+/// Review round 1 item 1 (BLOCKER): admission comes BEFORE the forward. A
+/// reply-requested request refused by the per-conversation sub-cap (here: the
+/// tombstone self-wedge shape, cap 1) never reaches the participant, so no
+/// orphan reply can exist; after capacity frees, a new request's reply matches
+/// the NEW operation, never anything stale.
+#[test]
+fn cap_refused_request_never_reaches_the_participant() -> Result<(), ServerError> {
+    let services = Arc::new(ForwardCountingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::clone(&services) as Arc<_>,
+        limits_with(|l| l.max_pending_replies_per_conversation = 1),
+    );
+    let mut state = ConnectionProcessState {
+        pending_replies: crate::server::connection::pending_reply::PendingReplyTable::new(
+            1,
+            32,
+            crate::server::connection::pending_reply::DEFAULT_REPLY_TIMEOUT,
+        ),
+        ..ConnectionProcessState::default()
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(1)),
+        FrameAction::NoResponse
+    ));
+
+    // First request: admitted then forwarded.
+    let first = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        reply_requested_message(1, 10),
+    );
+    assert!(matches!(first, FrameAction::NoResponse));
+    assert_eq!(services.forwards(), 1);
+
+    // Second request: refused at the sub-cap. It must NOT have been forwarded —
+    // a refused-but-forwarded request would produce an orphan reply able to
+    // FIFO-match a younger admitted operation.
+    let second = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        reply_requested_message(1, 11),
+    );
+    let FrameAction::Respond(Frame::ConversationError {
+        message: Some(m), ..
+    }) = second
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a typed cap refusal, got {second:?}"),
+        });
+    };
+    assert!(m.contains("max_pending_replies_per_conversation"));
+    assert_eq!(
+        services.forwards(),
+        1,
+        "the refused request never reached the participant"
+    );
+
+    // Free capacity: the first operation's reply arrives and matches stream 10.
+    let matched = state
+        .pending_replies
+        .match_reply(
+            1,
+            crate::server::connection::pending_reply::test_reply_envelope(b"r1"),
+        )
+        .ok_or_else(|| ServerError::ListenerAccept {
+            message: "the pending operation must match its reply".to_owned(),
+        })?;
+    assert!(matches!(
+        matched,
+        Frame::ConversationMessage { stream_id: 10, .. }
+    ));
+
+    // A NEW request is admitted and forwarded; its reply matches the NEW
+    // operation's stream — no stale/orphan reply exists to mis-correlate,
+    // because the refused request never ran.
+    let third = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        reply_requested_message(1, 12),
+    );
+    assert!(matches!(third, FrameAction::NoResponse));
+    assert_eq!(services.forwards(), 2);
+    let matched = state
+        .pending_replies
+        .match_reply(
+            1,
+            crate::server::connection::pending_reply::test_reply_envelope(b"r3"),
+        )
+        .ok_or_else(|| ServerError::ListenerAccept {
+            message: "the new operation must match its reply".to_owned(),
+        })?;
+    assert!(matches!(
+        matched,
+        Frame::ConversationMessage { stream_id: 12, .. }
+    ));
+    Ok(())
+}
+
+/// Review round 1 item 1 (connection-cap leg): a request refused by the
+/// per-connection pending table is not forwarded either — cap-before-mutation
+/// holds for BOTH caps.
+#[test]
+fn connection_cap_refused_request_never_reaches_the_participant() -> Result<(), ServerError> {
+    let services = Arc::new(ForwardCountingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::clone(&services) as Arc<_>,
+        limits_with(|l| l.max_pending_conversation_replies_per_connection = 1),
+    );
+    let mut state = ConnectionProcessState {
+        pending_replies: crate::server::connection::pending_reply::PendingReplyTable::new(
+            8,
+            1,
+            crate::server::connection::pending_reply::DEFAULT_REPLY_TIMEOUT,
+        ),
+        ..ConnectionProcessState::default()
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(1)),
+        FrameAction::NoResponse
+    ));
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(2)),
+        FrameAction::NoResponse
+    ));
+
+    let first = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        reply_requested_message(1, 10),
+    );
+    assert!(matches!(first, FrameAction::NoResponse));
+    assert_eq!(services.forwards(), 1);
+
+    // The connection table is full: conversation 2's request is refused and
+    // never forwarded.
+    let second = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        reply_requested_message(2, 20),
+    );
+    let FrameAction::Respond(Frame::ConversationError {
+        message: Some(m), ..
+    }) = second
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a typed cap refusal, got {second:?}"),
+        });
+    };
+    assert!(m.contains("max_pending_conversation_replies_per_connection"));
+    assert_eq!(services.forwards(), 1);
+    Ok(())
+}
+
+/// Review round 1 item 1 (rollback leg): a forward that fails AFTER admission
+/// rolls back its exact reservation — the entry must not linger to time out into
+/// a spurious tombstone for a message the participant never received.
+#[test]
+fn failed_forward_rolls_back_its_reservation() {
+    let services = Arc::new(ForwardCountingServices::default());
+    let runtime = ConnectionRuntime::for_tests(Arc::clone(&services) as Arc<_>);
+    let mut state = ConnectionProcessState::default();
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(1)),
+        FrameAction::NoResponse
+    ));
+
+    services.fail_next_forwards(true);
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        reply_requested_message(1, 10),
+    );
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::ConversationError { .. })
+        ),
+        "the forward failure surfaces as a conversation error"
+    );
+    assert_eq!(
+        state.pending_replies.len(),
+        0,
+        "the reservation was rolled back — no entry lingers to tombstone"
+    );
+}
+
+/// Review round 1 item 2: an explicit `ConversationClose` synchronously sweeps the
+/// pending-reply table — the close sweep is one of the only two sanctioned
+/// tombstone-reclamation triggers. A tombstone-only conversation reclaims its
+/// sub-cap slots at close, and a pipelined Close/Open/Message sequence carries
+/// no stale reply state (a reply after the reopen matches the NEW operation).
+#[test]
+fn conversation_close_sweeps_pending_and_tombstone_entries() -> Result<(), ServerError> {
+    let services = Arc::new(ForwardCountingServices::default());
+    let runtime = ConnectionRuntime::for_tests(Arc::clone(&services) as Arc<_>);
+    let mut state = ConnectionProcessState {
+        pending_replies: crate::server::connection::pending_reply::PendingReplyTable::new(
+            2,
+            32,
+            std::time::Duration::from_millis(1),
+        ),
+        ..ConnectionProcessState::default()
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(1)),
+        FrameAction::NoResponse
+    ));
+
+    // Two requests, both timed out into tombstones: the conversation is wedged.
+    assert!(matches!(
+        apply_frame(
+            TEST_PID,
+            &runtime,
+            &mut state,
+            reply_requested_message(1, 10)
+        ),
+        FrameAction::NoResponse
+    ));
+    assert!(matches!(
+        apply_frame(
+            TEST_PID,
+            &runtime,
+            &mut state,
+            reply_requested_message(1, 11)
+        ),
+        FrameAction::NoResponse
+    ));
+    let expired = state
+        .pending_replies
+        .expire_due(std::time::Instant::now() + std::time::Duration::from_secs(1));
+    assert_eq!(expired.len(), 2, "both entries tombstone");
+    assert_eq!(state.pending_replies.len(), 2);
+
+    // Pipelined Close/Open/Message: the close sweep reclaims the tombstones
+    // synchronously, the reopen admits, and the new request's reply matches the
+    // NEW operation — no stale state survives the sequence.
+    let close = Frame::ConversationClose {
+        flags: 0,
+        stream_id: 1,
+        conversation_id: 1,
+        reason_code: None,
+        message: None,
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, close),
+        FrameAction::NoResponse
+    ));
+    assert_eq!(
+        state.pending_replies.len(),
+        0,
+        "the close sweep reclaims every pending and tombstone entry"
+    );
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(1)),
+        FrameAction::NoResponse
+    ));
+    assert!(matches!(
+        apply_frame(
+            TEST_PID,
+            &runtime,
+            &mut state,
+            reply_requested_message(1, 12)
+        ),
+        FrameAction::NoResponse
+    ));
+    let matched = state
+        .pending_replies
+        .match_reply(
+            1,
+            crate::server::connection::pending_reply::test_reply_envelope(b"fresh"),
+        )
+        .ok_or_else(|| ServerError::ListenerAccept {
+            message: "the reopened conversation's request must match its reply".to_owned(),
+        })?;
+    assert!(matches!(
+        matched,
+        Frame::ConversationMessage { stream_id: 12, .. }
+    ));
+    Ok(())
+}
+
+/// Review round 1 item 3 (ruling: fail-closed): a duplicate open of a LIVE
+/// conversation id is refused with a typed error naming the remedy; the original
+/// conversation instance stays live and usable, and the services adapter is
+/// never asked to construct a second instance.
+#[test]
+fn duplicate_open_of_a_live_conversation_is_refused() -> Result<(), ServerError> {
+    let (runtime, services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState::default();
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, open_frame(7)),
+        FrameAction::NoResponse
+    ));
+
+    let duplicate = apply_frame(TEST_PID, &runtime, &mut state, open_frame(7));
+    let FrameAction::Respond(Frame::ConversationError {
+        conversation_id: 7,
+        message: Some(m),
+        ..
+    }) = duplicate
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a typed duplicate-open refusal, got {duplicate:?}"),
+        });
+    };
+    assert!(
+        m.contains("already open"),
+        "the refusal names the condition: {m}"
+    );
+    assert!(
+        m.contains("close it before") || m.contains("fresh id"),
+        "the refusal names the remedy: {m}"
+    );
+
+    // The original instance is untouched and still live.
+    assert!(state.conversations.contains_key(&7));
+    let opens = services
+        .conversations
+        .lock()
+        .map_err(|error| ServerError::ListenerAccept {
+            message: format!("test recorder unavailable: {error}"),
+        })?
+        .len();
+    assert_eq!(
+        opens, 1,
+        "the services adapter never constructed a second instance"
+    );
+    Ok(())
+}
+
+/// A `ConversationOpen` on a caller-chosen (non-default) stream.
+fn open_frame_on(stream_id: u32, conversation_id: u64) -> Frame {
+    Frame::ConversationOpen {
+        flags: 0,
+        stream_id,
+        conversation_id,
+        subject: "s".to_owned(),
+    }
+}
+
+/// Extracts the `(stream_id, message)` from an expected `ConversationError`
+/// response, or reports what was actually returned.
+fn conversation_error_parts(action: FrameAction) -> Result<(u32, String), ServerError> {
+    let FrameAction::Respond(Frame::ConversationError {
+        stream_id,
+        message: Some(message),
+        ..
+    }) = action
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!("expected a ConversationError, got {action:?}"),
+        });
+    };
+    Ok((stream_id, message))
+}
+
+/// Sol round 2: every `ConversationOpen` refusal rides the REQUEST'S stream id,
+/// never a hard-coded stream. A client that opened on stream 17 must see its
+/// typed refusal on stream 17 — all three refusal paths (duplicate-open, the
+/// `max_conversations` cap, and an adapter open error) are pinned here.
+#[test]
+fn open_refusals_preserve_the_request_stream_id() -> Result<(), ServerError> {
+    const OPEN_STREAM: u32 = 17;
+    let services = Arc::new(ForwardCountingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_limits(
+        Arc::clone(&services) as Arc<_>,
+        limits_with(|l| l.max_conversations_per_connection = 1),
+    );
+    let mut state = ConnectionProcessState::default();
+
+    // A successful open on stream 17 (fills the cap of 1).
+    assert!(matches!(
+        apply_frame(
+            TEST_PID,
+            &runtime,
+            &mut state,
+            open_frame_on(OPEN_STREAM, 1)
+        ),
+        FrameAction::NoResponse
+    ));
+
+    // Refusal path 1 — duplicate open of the live id: refusal on stream 17.
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        open_frame_on(OPEN_STREAM, 1),
+    );
+    let (stream, message) = conversation_error_parts(action)?;
+    assert_eq!(
+        stream, OPEN_STREAM,
+        "the duplicate-open refusal rides the request's stream"
+    );
+    assert!(message.contains("already open"));
+
+    // Refusal path 2 — the max_conversations cap: refusal on stream 17.
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        open_frame_on(OPEN_STREAM, 2),
+    );
+    let (stream, message) = conversation_error_parts(action)?;
+    assert_eq!(
+        stream, OPEN_STREAM,
+        "the cap refusal rides the request's stream"
+    );
+    assert!(message.contains("max_conversations_per_connection"));
+
+    // Refusal path 3 — the services adapter's open error: refusal on stream 17.
+    // Free the cap first so the adapter is actually reached.
+    let close = Frame::ConversationClose {
+        flags: 0,
+        stream_id: OPEN_STREAM,
+        conversation_id: 1,
+        reason_code: None,
+        message: None,
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, close),
+        FrameAction::NoResponse
+    ));
+    services.fail_next_opens(true);
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        open_frame_on(OPEN_STREAM, 3),
+    );
+    let (stream, message) = conversation_error_parts(action)?;
+    assert_eq!(
+        stream, OPEN_STREAM,
+        "the adapter open error rides the request's stream"
+    );
+    assert!(message.contains("open failed under test"));
+    Ok(())
 }

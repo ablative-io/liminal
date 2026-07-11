@@ -74,6 +74,7 @@ impl ConnectionServices for WorkerFrontDoorServices {
         &self,
         channel: &str,
         _accepted_schemas: &[ProtocolSchemaId],
+        _install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError> {
         Err(Self::unsupported(&format!(
             "subscribe to channel '{channel}'"

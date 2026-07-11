@@ -11,10 +11,12 @@ use crate::server::connection::services::{ConnectionSubscription, SubscriptionRe
 use crate::server::connection::state::ConnectionProcessState;
 
 /// A subscription resource that hands out preset envelopes in order, standing in
-/// for a live subscriber inbox.
+/// for a live subscriber inbox. `overflowed` stands in for a §5 inbox overflow so
+/// the delivery pump's shed path can be exercised without a live channel.
 #[derive(Debug)]
 struct FakeResource {
     queue: VecDeque<Envelope>,
+    overflowed: bool,
 }
 
 impl SubscriptionResource for FakeResource {
@@ -24,6 +26,10 @@ impl SubscriptionResource for FakeResource {
 
     fn try_next(&mut self) -> Option<Envelope> {
         self.queue.pop_front()
+    }
+
+    fn is_overflowed(&self) -> bool {
+        self.overflowed
     }
 }
 
@@ -36,7 +42,25 @@ fn subscription_with(id: u64, stream_id: u32, payloads: Vec<Vec<u8>>) -> Connect
     let mut subscription = ConnectionSubscription::new(
         id,
         ProtocolSchemaId::new([9; ProtocolSchemaId::WIRE_LEN]),
-        Box::new(FakeResource { queue }),
+        Box::new(FakeResource {
+            queue,
+            overflowed: false,
+        }),
+    );
+    subscription.set_stream_id(stream_id);
+    subscription
+}
+
+/// An overflowed subscription (its inbox tripped the §5 byte budget or fairness
+/// cap), which the pump must shed with a typed `SubscribeError`.
+fn overflowed_subscription(id: u64, stream_id: u32) -> ConnectionSubscription {
+    let mut subscription = ConnectionSubscription::new(
+        id,
+        ProtocolSchemaId::new([9; ProtocolSchemaId::WIRE_LEN]),
+        Box::new(FakeResource {
+            queue: VecDeque::new(),
+            overflowed: true,
+        }),
     );
     subscription.set_stream_id(stream_id);
     subscription
@@ -211,4 +235,121 @@ fn pipelined_large_burst_is_delivered_without_teardown() -> Result<(), ServerErr
         );
     }
     Ok(())
+}
+
+/// §5 shed (server half): the delivery pump sheds an overflowed subscription with
+/// a typed `SubscribeError` on its stream and reports its id for removal, while a
+/// healthy sibling subscription continues to deliver normally.
+#[test]
+fn overflowed_subscription_is_shed_with_a_typed_error() -> Result<(), ServerError> {
+    let mut state = ConnectionProcessState::default();
+    state.subscriptions.insert(1, overflowed_subscription(1, 7));
+    state
+        .subscriptions
+        .insert(2, subscription_with(2, 9, vec![b"ok".to_vec()]));
+    let mut outbound = OutboundWriter::new();
+
+    let shed = service_subscriptions(&mut state, &mut outbound, DELIVERY_SLICE_BUDGET).map_err(
+        |error| ServerError::ListenerAccept {
+            message: format!("delivery drain failed: {error}"),
+        },
+    )?;
+
+    assert_eq!(
+        shed,
+        vec![1],
+        "the overflowed subscription is reported for shed"
+    );
+    let frames = decode_all(&outbound.take_bytes())?;
+    // A SubscribeError on stream 7 (the shed) and a Deliver on stream 9 (healthy).
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            Frame::SubscribeError { stream_id: 7, message: Some(m), .. } if m.contains("shed")
+        )),
+        "the shed subscription gets a typed SubscribeError naming the shed: {frames:?}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, Frame::Deliver { stream_id: 9, .. })),
+        "the healthy sibling subscription still delivers: {frames:?}"
+    );
+    Ok(())
+}
+
+/// Review round 1 item 6: the shed path must never itself tear the connection
+/// down under outbound pressure. When the outbound buffer's free space cannot
+/// hold the shed's `SubscribeError` frame, the shed is DEFERRED (the subscription
+/// stays marked, delivery stays skipped) and retried once the drain frees room —
+/// the connection survives, drains, reports the error, and sheds exactly one
+/// subscription.
+#[test]
+fn shed_error_frame_defers_under_outbound_pressure() -> Result<(), ServerError> {
+    let mut state = ConnectionProcessState::default();
+    state.subscriptions.insert(1, overflowed_subscription(1, 7));
+
+    // A small-capacity outbound buffer pre-filled so LESS than one SubscribeError
+    // of room remains.
+    let mut outbound = OutboundWriter::with_capacity(160);
+    outbound
+        .enqueue_frame(&deliver_frame_for_test(vec![0_u8; 96]))
+        .map_err(|error| ServerError::ListenerAccept {
+            message: format!("pre-fill failed: {error}"),
+        })?;
+    let residue = outbound.queued_len();
+    assert!(residue > 0);
+
+    // Under pressure: the shed is deferred, NOT fatal, and nothing is removed.
+    let shed = service_subscriptions(&mut state, &mut outbound, DELIVERY_SLICE_BUDGET).map_err(
+        |error| ServerError::ListenerAccept {
+            message: format!("the deferred shed must not be fatal: {error}"),
+        },
+    )?;
+    assert!(
+        shed.is_empty(),
+        "the shed is deferred while no room remains"
+    );
+    assert!(
+        state.subscriptions.contains_key(&1),
+        "the subscription stays (marked) until its error frame is enqueued"
+    );
+    assert_eq!(
+        outbound.queued_len(),
+        residue,
+        "nothing was enqueued under pressure"
+    );
+
+    // The drain frees room (simulated by taking the queued bytes): the retry on
+    // the next slice enqueues the typed error and sheds exactly this subscription.
+    let _ = outbound.take_bytes();
+    let shed = service_subscriptions(&mut state, &mut outbound, DELIVERY_SLICE_BUDGET).map_err(
+        |error| ServerError::ListenerAccept {
+            message: format!("the retried shed failed: {error}"),
+        },
+    )?;
+    assert_eq!(shed, vec![1], "the shed lands once room exists");
+    let frames = decode_all(&outbound.take_bytes())?;
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            Frame::SubscribeError { stream_id: 7, message: Some(m), .. } if m.contains("shed")
+        )),
+        "the typed shed error is reported after the deferral: {frames:?}"
+    );
+    Ok(())
+}
+
+/// Builds a deliver frame with an arbitrary payload for buffer pre-filling.
+fn deliver_frame_for_test(payload: Vec<u8>) -> Frame {
+    Frame::Deliver {
+        flags: 0,
+        stream_id: 3,
+        delivery_seq: 1,
+        envelope: liminal::protocol::MessageEnvelope::new(
+            ProtocolSchemaId::new([9; ProtocolSchemaId::WIRE_LEN]),
+            liminal::protocol::CausalContext::independent(),
+            payload,
+        ),
+    }
 }

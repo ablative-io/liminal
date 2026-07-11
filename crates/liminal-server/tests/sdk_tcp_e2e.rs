@@ -31,7 +31,9 @@ use liminal_sdk::{
     SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
 };
 use liminal_server::ServerError;
-use liminal_server::config::{AuthConfig, ChannelDef, LoadedSchema, ServerConfig, ServicesConfig};
+use liminal_server::config::{
+    AuthConfig, ChannelDef, LimitsConfig, LoadedSchema, ServerConfig, ServicesConfig,
+};
 use liminal_server::server::connection::notifier::ConnectionNotifier;
 use liminal_server::server::connection::{ConnectionSupervisor, LiminalConnectionServices};
 use liminal_server::server::listener::ServerListener;
@@ -167,6 +169,7 @@ impl RunningServer {
             auth: None,
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
+            limits: LimitsConfig::default(),
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
@@ -199,6 +202,7 @@ impl RunningServer {
             }),
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
+            limits: LimitsConfig::default(),
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
@@ -229,6 +233,7 @@ impl RunningServer {
             auth: None,
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
+            limits: LimitsConfig::default(),
         };
         let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
         let supervisor = ConnectionSupervisor::with_services_and_notifier(services, notifier)?;
@@ -267,6 +272,7 @@ impl RunningServer {
             auth: None,
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
+            limits: LimitsConfig::default(),
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;

@@ -21,6 +21,10 @@ use crate::ServerError;
 #[path = "process_teardown_tests.rs"]
 mod teardown_tests;
 
+#[cfg(test)]
+#[path = "process_wake_tests.rs"]
+mod wake_tests;
+
 const READ_BUFFER_BYTES: usize = 8192;
 /// Application stream id used for server-initiated push frames. Push is an
 /// application-stream frame (non-zero stream id), like publish and conversation.
@@ -77,12 +81,25 @@ impl ConnectionProcess {
                 None
             }
         };
+        // Build the pending-reply table from the runtime's configured §5 caps
+        // (R1(vi), §1.2(3b)). The default table carries the signed defaults; this
+        // uses the connection's actual limits.
+        let limits = runtime.limits();
+        let pending_replies = super::pending_reply::PendingReplyTable::new(
+            limits.max_pending_replies_per_conversation,
+            limits.max_pending_conversation_replies_per_connection,
+            super::pending_reply::DEFAULT_REPLY_TIMEOUT,
+        );
+        let state = ConnectionProcessState {
+            pending_replies,
+            ..ConnectionProcessState::default()
+        };
         Self {
             runtime,
             peer_addr,
             stream,
             buffer: Vec::new(),
-            state: ConnectionProcessState::default(),
+            state,
             outbound: OutboundWriter::new(),
         }
     }
@@ -95,25 +112,47 @@ impl ConnectionProcess {
     /// work), and the whole slice preserves the no-sleep `Continue` discipline: a
     /// slice never parks a scheduler thread, it re-queues the process to poll again.
     fn handle_slice(&mut self, pid: u64) -> NativeOutcome {
+        // R7 (§1.2(6)): count this serviced slice. The park-flip's permanent
+        // rule-1 quiescence assertion — a parked connection's counter must not
+        // advance without an event — reads this; under the busy loop the counter
+        // advances every slice, and the instrument proves it counts.
+        #[cfg(test)]
+        self.runtime.record_slice(pid);
         match self.service_socket(pid) {
             SliceStep::Stop(reason) => return NativeOutcome::Stop(reason),
             SliceStep::Continue => {}
         }
-        // Pump subscriptions into the outbound buffer. An overflow (or an encode
-        // fault) is fatal: a dropped or truncated delivery would desync the stream,
-        // so the connection is torn down rather than allowed to continue desynced.
-        if let Err(error) =
-            service_subscriptions(&mut self.state, &mut self.outbound, DELIVERY_SLICE_BUDGET)
-        {
+        // R1(vi) (§1.2(3b)): service the pending-reply table each slice — expire
+        // due deadlines (writing timeout frames) and drain/correlate any replies
+        // the participants produced. A fatal outbound condition here tears the
+        // connection down, matching the delivery path.
+        if let Err(error) = self.service_pending_replies() {
             tracing::warn!(
                 connection_pid = pid,
                 %error,
-                "outbound overflow while delivering; tearing down the connection"
+                "outbound overflow while writing conversation replies; tearing down"
             );
             self.release_conversations();
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return NativeOutcome::Stop(ExitReason::Error);
+        }
+        // Pump subscriptions into the outbound buffer. An overflow (or an encode
+        // fault) is fatal: a dropped or truncated delivery would desync the stream,
+        // so the connection is torn down rather than allowed to continue desynced.
+        match service_subscriptions(&mut self.state, &mut self.outbound, DELIVERY_SLICE_BUDGET) {
+            Ok(shed) => self.shed_subscriptions(shed),
+            Err(error) => {
+                tracing::warn!(
+                    connection_pid = pid,
+                    %error,
+                    "outbound overflow while delivering; tearing down the connection"
+                );
+                self.release_conversations();
+                self.runtime
+                    .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+                return NativeOutcome::Stop(ExitReason::Error);
+            }
         }
         // Drain queued outbound bytes with partial-write tracking. A hard write
         // error (or overflow surfaced here) tears the connection down.
@@ -223,17 +262,111 @@ impl ConnectionProcess {
     /// conversation map is drained, so a second call finds nothing — the explicit
     /// paths and the backstop cannot double-finalize.
     fn release_conversations(&mut self) {
+        // R1(vi)/§1.2(5): cancel every pending-reply entry BEFORE the conversation
+        // actors are torn down, so no entry (and no timeout write) outlives its
+        // connection. Finalizing each conversation below clears its reply notifier
+        // in the conversation core, so no marker fires after teardown.
+        self.state.pending_replies.cancel_all();
         for (_conversation_id, conversation) in std::mem::take(&mut self.state.conversations) {
             conversation.finalize();
         }
     }
 
+    /// R1(vi) (§1.2(3b)): services the pending-reply table for this slice.
+    ///
+    /// 1. DEADLINE-CHECK SEAM: expire every pending entry whose deadline passed,
+    ///    tombstoning it and enqueuing its timeout error frame. Under the busy loop
+    ///    this runs every slice; PARK-FLIP adds a timer-driven `READY` wake at each
+    ///    entry's deadline (contract R1(vi) as amended) so a parked connection with
+    ///    zero other traffic still wakes to write the timeout — that wake feeds this
+    ///    same seam.
+    /// 2. Drain and correlate: for each conversation still awaiting a reply, pull
+    ///    buffered participant replies non-blocking and match them FIFO, enqueuing
+    ///    each correlated reply frame. A conversation gone from the map (closed) is
+    ///    swept from the table so its entries do not linger.
+    ///
+    /// # Errors
+    /// Returns [`OutboundError`](super::outbound::OutboundError) when a reply or
+    /// timeout frame cannot be enqueued (a fatal outbound condition).
+    fn service_pending_replies(&mut self) -> Result<(), super::outbound::OutboundError> {
+        let now = std::time::Instant::now();
+        for frame in self.state.pending_replies.expire_due(now) {
+            self.outbound.enqueue_frame(&frame)?;
+        }
+        for conversation_id in self.state.pending_replies.conversations_awaiting_reply() {
+            let Some(conversation) = self.state.conversations.get(&conversation_id) else {
+                // The conversation closed while entries were pending: sweep them
+                // (the close-sweep tombstone-reclamation trigger) rather than poll a
+                // conversation that no longer exists.
+                self.state
+                    .pending_replies
+                    .remove_conversation(conversation_id);
+                continue;
+            };
+            // Drain every buffered reply for this conversation this slice, matching
+            // each FIFO. `try_receive_reply` is non-blocking, so an empty queue ends
+            // the loop immediately (no slice is ever blocked).
+            while let Some(reply) = conversation.try_receive_reply() {
+                if let Some(frame) = self
+                    .state
+                    .pending_replies
+                    .match_reply(conversation_id, reply)
+                {
+                    self.outbound.enqueue_frame(&frame)?;
+                } else {
+                    // The reply consumed a tombstone (or found nothing to
+                    // correlate): discarded, never delivered late. Keep draining in
+                    // case more replies are buffered.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Removes and releases subscriptions the delivery pump shed on inbox overflow
+    /// (§5). The pump has already enqueued each subscription's typed `SubscribeError`
+    /// frame; here the subscription is dropped from connection state (its
+    /// delivery-sequence counter and any held frame with it, so a re-subscribe that
+    /// reuses the id starts clean) and released through the services adapter, the
+    /// same teardown path an explicit `Unsubscribe` uses. A slow consumer thus sheds
+    /// its own subscription without growing server memory or tearing down the
+    /// connection's other streams.
+    fn shed_subscriptions(&mut self, shed: Vec<u64>) {
+        for subscription_id in shed {
+            self.state.delivery_seqs.remove(&subscription_id);
+            self.state.held_deliveries.remove(&subscription_id);
+            if let Some(subscription) = self.state.subscriptions.remove(&subscription_id) {
+                if let Err(error) = self.runtime.services().unsubscribe(subscription) {
+                    tracing::warn!(
+                        subscription_id,
+                        %error,
+                        "releasing a shed (inbox-overflowed) subscription failed"
+                    );
+                }
+            }
+        }
+    }
+
     /// Drains queued outbound bytes to the socket, if the stream is still present.
-    fn drain_outbound(&mut self) -> Result<(), super::outbound::OutboundError> {
+    ///
+    /// Returns the [`DrainOutcome`](super::outbound::DrainOutcome) tri-state. Under
+    /// the busy loop every caller ignores the distinction and re-services on the
+    /// next slice; the value is reported so the seam is honest.
+    ///
+    /// PARK-FLIP SEAM (R2, §1.2(1)): when this returns
+    /// `Ok(DrainOutcome::WouldBlockWithResidue)` the park-flip commit arms writable
+    /// readiness interest for this connection's socket (and only then), so the
+    /// connection re-wakes when the kernel send buffer drains instead of parking
+    /// with unflushed residue. `Drained`/`Progress` arm nothing. A `None` budget is
+    /// passed so live per-slice throughput is unchanged; the park-flip supplies a
+    /// byte budget here.
+    fn drain_outbound(
+        &mut self,
+    ) -> Result<super::outbound::DrainOutcome, super::outbound::OutboundError> {
         let Some(stream) = self.stream.as_mut() else {
-            return Ok(());
+            return Ok(super::outbound::DrainOutcome::Drained);
         };
-        self.outbound.drain(stream)
+        self.outbound.drain(stream, None)
     }
 
     fn handle_control(&mut self, pid: u64, control: ConnectionControl) -> Option<NativeOutcome> {
@@ -354,6 +487,18 @@ impl ConnectionProcess {
                     return Some(outcome);
                 }
             }
+        }
+        // R6 (§1.2(4)): a `READY` marker (from any wake source — subscription
+        // inbox R3, reply availability R1(vi), reply-deadline expiry) is a bare
+        // wake with no payload. It carries no lifecycle decision: the sole action
+        // is that ONE full slice runs, which the caller (`handle`) does exactly
+        // once after draining the whole mailbox — so N coalesced markers, or a
+        // duplicate marker, collapse to one slice and never double-apply work.
+        // Recognised explicitly (rather than falling through) so the discipline is
+        // legible and the park-flip inherits it unchanged. Returning `None` lets
+        // the drain continue and the single post-drain slice service every source.
+        if message.as_atom() == Some(self.runtime.ready_atom()) {
+            return None;
         }
         None
     }

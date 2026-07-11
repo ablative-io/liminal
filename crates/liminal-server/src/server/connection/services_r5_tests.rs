@@ -315,6 +315,7 @@ fn ephemeral_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>>
         cluster: None,
         auth: None,
         services: crate::config::types::ServicesConfig::default(),
+        limits: crate::config::types::LimitsConfig::default(),
     })
 }
 
@@ -334,6 +335,7 @@ fn durable_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         cluster: None,
         auth: None,
         services: crate::config::types::ServicesConfig::default(),
+        limits: crate::config::types::LimitsConfig::default(),
     })
 }
 

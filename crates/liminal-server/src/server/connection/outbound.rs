@@ -70,6 +70,34 @@ impl std::fmt::Display for OutboundError {
 
 impl std::error::Error for OutboundError {}
 
+/// The tri-state result of one [`OutboundWriter::drain`] (R2, §1.2(1)).
+///
+/// The distinction is dark under the current busy loop — every caller re-services
+/// the connection on the next scheduler slice regardless — but it is the exact
+/// signal the park-flip consumes: writable readiness interest is armed **iff**
+/// [`Self::WouldBlockWithResidue`], and only then. `Drained` and `Progress` never
+/// arm writable interest (there is nothing to wait for, or the socket last
+/// accepted a write so it is presumed writable and the next slice re-services).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DrainOutcome {
+    /// The buffer was fully emptied; no residue is queued.
+    Drained,
+    /// Partial progress: the per-drain byte budget was exhausted with residue
+    /// still queued, and the last socket write SUCCEEDED — so the socket is, as
+    /// far as this drain observed, still writable. Reachable only when a caller
+    /// passes an explicit budget; the busy-loop live path passes `None` and so
+    /// never yields this. The park-flip does NOT arm writable interest here — it
+    /// re-services on the next slice — but the state is distinct so the park-flip
+    /// can bound per-slice outbound work without conflating it with a full send
+    /// buffer.
+    Progress,
+    /// A socket write returned `WouldBlock` with residue still queued: the kernel
+    /// send buffer is full. This is the ONLY state on which the park-flip arms
+    /// writable readiness interest, so the connection re-wakes when the send
+    /// buffer drains rather than busy-polling.
+    WouldBlockWithResidue,
+}
+
 /// A bounded, per-connection outbound byte queue drained with partial-write
 /// tracking on the connection's scheduler slice.
 #[derive(Debug)]
@@ -143,21 +171,51 @@ impl OutboundWriter {
             .is_some_and(|projected| projected <= self.capacity)
     }
 
-    /// Drains as many queued bytes to `stream` as it will accept without blocking.
+    /// Drains queued bytes to `stream`, reporting the [`DrainOutcome`] tri-state.
     ///
     /// Writes proceed from the front of the queue with a `write()` loop that
     /// tracks partial progress; a `WouldBlock` (the non-blocking socket's send
-    /// buffer is full) returns `Ok(())` with the residue left queued for the next
-    /// slice. `Interrupted` retries. Any other error — or a zero-length write,
-    /// which means the peer is gone — is fatal.
+    /// buffer is full) leaves the residue queued for the next slice and returns
+    /// [`DrainOutcome::WouldBlockWithResidue`]. `Interrupted` retries. Any other
+    /// error — or a zero-length write, which means the peer is gone — is fatal.
+    ///
+    /// `budget` optionally bounds how many bytes this single drain writes: once
+    /// that many bytes have been written and residue still remains, the drain
+    /// stops and returns [`DrainOutcome::Progress`] (the last write succeeded, so
+    /// the socket is presumed writable). The live busy-loop path passes `None` —
+    /// byte-for-byte identical to the pre-tri-state behaviour, yielding only
+    /// `Drained` or `WouldBlockWithResidue`. The budget seam exists so the
+    /// park-flip can bound per-slice outbound work; it is NOT wired live here to
+    /// avoid a silent change to per-slice throughput (only the return type is
+    /// enriched now).
     ///
     /// # Errors
     /// Returns [`OutboundError::Write`] on an unrecoverable socket write error.
-    pub(super) fn drain(&mut self, stream: &mut TcpStream) -> Result<(), OutboundError> {
+    pub(super) fn drain(
+        &mut self,
+        stream: &mut TcpStream,
+        budget: Option<usize>,
+    ) -> Result<DrainOutcome, OutboundError> {
+        let mut written_total: usize = 0;
         while !self.buffer.is_empty() {
+            // Stop on the byte budget BEFORE the next write: the budget bounds
+            // bytes written this drain, and residue remaining means the caller
+            // (park-flip) re-services next slice — the socket last accepted a
+            // write, so it is presumed writable (`Progress`, not a WouldBlock).
+            let remaining_budget = match budget {
+                Some(limit) if written_total >= limit => return Ok(DrainOutcome::Progress),
+                Some(limit) => Some(limit - written_total),
+                None => None,
+            };
             // `as_slices().0` is the front contiguous run; a wrapped queue drains in
-            // two passes across loop iterations, so no reallocation is forced.
+            // two passes across loop iterations, so no reallocation is forced. When a
+            // budget is set, the write is capped to the remaining budget so the drain
+            // stops after exactly `budget` bytes rather than after the first
+            // whole-buffer-accepting write (which would never observe the budget).
             let front = self.buffer.as_slices().0;
+            let front = remaining_budget.map_or(front, |limit| {
+                front.get(..limit.min(front.len())).unwrap_or(front)
+            });
             match stream.write(front) {
                 Ok(0) => {
                     return Err(OutboundError::Write(std::io::Error::new(
@@ -167,13 +225,16 @@ impl OutboundWriter {
                 }
                 Ok(written) => {
                     self.buffer.drain(..written);
+                    written_total = written_total.saturating_add(written);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    return Ok(DrainOutcome::WouldBlockWithResidue);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(OutboundError::Write(error)),
             }
         }
-        Ok(())
+        Ok(DrainOutcome::Drained)
     }
 
     /// Number of bytes currently queued and not yet drained.

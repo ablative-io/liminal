@@ -70,6 +70,15 @@ pub struct ActorCore {
     /// linked to it during boot so actor death is observed even when no handle
     /// operation ever runs again.
     watcher_pid: Mutex<Option<ParticipantPid>>,
+    /// R1(vi)(a) reply-availability notifier, installed PERMANENTLY at conversation
+    /// open (not per-message). Fired on the reply queue's (inbox's) empty→non-empty
+    /// transition and on terminal actor error, so a parked connection wakes to
+    /// drain a reply that landed on another scheduler's slice. `None` until the
+    /// connection installs it; removed at close/finalize so a marker never fires
+    /// after teardown. It captures the CONNECTION scheduler's enqueue handle
+    /// (§1.2(3a), Vesper advisory 3) — the connection installs a closure that fires
+    /// its own `READY` marker, never this (conversation) scheduler's.
+    reply_notifier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl std::fmt::Debug for ActorCore {
@@ -104,6 +113,53 @@ impl ActorCore {
             finalized: AtomicBool::new(false),
             close_terminations: Mutex::new(HashSet::new()),
             watcher_pid: Mutex::new(None),
+            reply_notifier: Mutex::new(None),
+        }
+    }
+
+    /// Installs the R1(vi)(a) reply-availability notifier, fired on the reply
+    /// queue's empty→non-empty transition and on terminal actor error. Installed
+    /// permanently at conversation open; cleared at close/finalize.
+    pub(crate) fn register_reply_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) {
+        if let Ok(mut slot) = self.reply_notifier.lock() {
+            *slot = Some(notifier);
+        }
+    }
+
+    /// Non-blocking host-side drain of one buffered participant reply, if any.
+    ///
+    /// Replaces the removed in-slice BLOCKING `receive_timeout` on the
+    /// request-reply path (§1.2(3b)): the connection polls this on its own slice
+    /// (woken by the reply-availability notifier at park-flip) and correlates the
+    /// reply through its pending-reply table, so the connection thread never blocks
+    /// waiting on the conversation scheduler. Pops directly from the buffered
+    /// inbox, symmetric with how [`Self::deliver_participant_reply`] pushes to it
+    /// host-side; a finalized conversation drains nothing.
+    pub(crate) fn try_take_reply(&self) -> Option<Envelope> {
+        if self.is_finalized() {
+            return None;
+        }
+        self.inbox.lock().ok()?.pop_front()
+    }
+
+    /// Fires the reply-availability notifier once, if installed. Called on the
+    /// reply-queue empty→non-empty edge and on terminal actor error.
+    fn fire_reply_notifier(&self) {
+        let notifier = self
+            .reply_notifier
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(notifier) = notifier {
+            notifier();
+        }
+    }
+
+    /// Clears the reply notifier at close/finalize so no marker fires after
+    /// teardown (§1.2(3a): markers arriving after close are discarded).
+    fn clear_reply_notifier(&self) {
+        if let Ok(mut slot) = self.reply_notifier.lock() {
+            *slot = None;
         }
     }
 
@@ -344,7 +400,19 @@ impl ActorCore {
         if let Some(waiter) = waiter {
             send_reply(&waiter, Ok(reply));
         } else {
-            lock(&self.inbox, "conversation inbox")?.push_back(reply);
+            // R1(vi)(a): fire the reply-availability notifier on the reply queue's
+            // empty→non-empty edge (only when this reply is the first buffered one
+            // — coalescing is R6-harmless), so a parked connection wakes to drain
+            // it. A reply that satisfied a waiter directly needs no wake.
+            let fire = {
+                let mut inbox = lock(&self.inbox, "conversation inbox")?;
+                let was_empty = inbox.is_empty();
+                inbox.push_back(reply);
+                was_empty
+            };
+            if fire {
+                self.fire_reply_notifier();
+            }
         }
         Ok(())
     }
@@ -584,6 +652,9 @@ impl ActorCore {
             for command in commands.drain(..) {
                 fail_command(command.kind);
             }
+            // R1(vi)(a): the notifier is removed at close/finalize so a reply
+            // landing after teardown never fires a marker into a dead connection.
+            self.clear_reply_notifier();
         }
         already
     }
@@ -780,6 +851,10 @@ impl ActorCore {
                     }),
                 );
             }
+            // R1(vi)(a): a terminal actor error is a reply-availability event in its
+            // own right — the connection must wake to fail/time-out the pending
+            // reply entries this conversation can no longer satisfy.
+            self.fire_reply_notifier();
         }
         Ok(())
     }

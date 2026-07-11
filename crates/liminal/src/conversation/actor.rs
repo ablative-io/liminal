@@ -191,6 +191,21 @@ impl ConversationActor {
         self.core.submit_receive_timeout(timeout)
     }
 
+    /// R1(vi)(a): non-blocking drain of one buffered participant reply, if any.
+    /// The connection polls this on its own slice (woken by the reply-availability
+    /// notifier) instead of blocking the slice on `receive_timeout`.
+    #[must_use]
+    pub fn try_take_reply(&self) -> Option<Envelope> {
+        self.core.try_take_reply()
+    }
+
+    /// R1(vi)(a): installs the reply-availability notifier, fired on the reply
+    /// queue's empty→non-empty transition and on terminal actor error. Installed
+    /// permanently at conversation open; cleared at close/finalize.
+    pub fn register_reply_notifier(&self, notifier: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.core.register_reply_notifier(notifier);
+    }
+
     /// Finalizes the conversation without requiring its actor process to run:
     /// bounded, non-blocking, and idempotent. Terminates the actor and every
     /// participant directly (scheduler tombstone writes, not requests into the

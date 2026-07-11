@@ -47,6 +47,13 @@ pub trait SubscriptionResource: std::fmt::Debug + Send {
     /// unavailable): the connection process is the delivery pump, so a transient
     /// empty read is simply "nothing to deliver this slice", never an error.
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope>;
+
+    /// Whether an overflow has marked this subscription for shedding (§5). The
+    /// delivery pump sheds an overflowed subscription with a typed error frame.
+    /// Defaulted to `false`: a resource with no bounded inbox never overflows.
+    fn is_overflowed(&self) -> bool {
+        false
+    }
 }
 
 /// Library subscription resource owned by a single connection process.
@@ -106,6 +113,11 @@ impl ConnectionSubscription {
         self.resource.try_next()
     }
 
+    /// Whether this subscription has been shed by an inbox overflow (§5).
+    pub(super) fn is_overflowed(&self) -> bool {
+        self.resource.is_overflowed()
+    }
+
     pub(super) fn unsubscribe(self) -> Result<(), ServerError> {
         self.resource.unsubscribe()
     }
@@ -145,12 +157,22 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
 
     /// Delegates a subscribe request to the liminal library.
     ///
+    /// `install`, when `Some`, carries the connection's §5 shared inbox byte
+    /// budget, per-inbox fairness cap, and R3 wake notifier. The implementation
+    /// MUST install it on the subscription's inbox BEFORE the registration is
+    /// published to the channel actor (i.e. before any envelope can be
+    /// delivered), so no envelope is ever admitted uncharged, past the depth
+    /// cap, or without a wake. Implementations with no real inbox (test
+    /// stand-ins, capability-scoped profiles that refuse subscribe) may ignore
+    /// it.
+    ///
     /// # Errors
     /// Returns [`ServerError`] when the liminal subscribe operation fails.
     fn subscribe(
         &self,
         channel: &str,
         accepted_schemas: &[ProtocolSchemaId],
+        install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError>;
 
     /// Delegates unsubscribe to the liminal library.
@@ -948,6 +970,7 @@ impl ConnectionServices for LiminalConnectionServices {
         &self,
         channel: &str,
         accepted_schemas: &[ProtocolSchemaId],
+        install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError> {
         let configured = self
             .channels
@@ -961,13 +984,18 @@ impl ConnectionServices for LiminalConnectionServices {
             liminal::protocol::negotiate_schema(configured.protocol_schema, accepted_schemas)
                 .map_err(|error| server_error_from_protocol(&error))?
         };
-        let subscription =
-            configured
-                .handle
-                .subscribe()
-                .map_err(|error| ServerError::ListenerAccept {
-                    message: format!("liminal subscribe failed for channel '{channel}': {error}"),
-                })?;
+        // `subscribe_with_install` installs the §5 budget/fairness cap and the R3
+        // wake notifier on the inbox at construction — strictly before the
+        // registration is published to the channel actor — so there is no window
+        // in which a publish can land uncharged or without a wake.
+        let subscription = install
+            .map_or_else(
+                || configured.handle.subscribe(),
+                |install| configured.handle.subscribe_with_install(install),
+            )
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("liminal subscribe failed for channel '{channel}': {error}"),
+            })?;
         let id = self.next_subscription_id.fetch_add(1, Ordering::Relaxed);
         Ok(ConnectionSubscription::new(
             id,
@@ -1081,6 +1109,10 @@ impl SubscriptionResource for LiminalSubscriptionResource {
         Ok(())
     }
 
+    fn is_overflowed(&self) -> bool {
+        self.subscription.is_overflowed()
+    }
+
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
         match self.subscription.try_next() {
             Ok(envelope) => envelope,
@@ -1124,7 +1156,7 @@ mod durable_store_tests {
         build_connection_services, build_connection_services_via, build_durable_store_with,
     };
     use crate::ServerError;
-    use crate::config::types::{ServerConfig, ServicesConfig};
+    use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
 
     /// Counts directory entries under `root`, for the empty/one-dir assertions
     /// on an injected ephemeral root.
@@ -1151,6 +1183,7 @@ mod durable_store_tests {
             services: ServicesConfig {
                 profile: profile.to_owned(),
             },
+            limits: LimitsConfig::default(),
         }
     }
 
