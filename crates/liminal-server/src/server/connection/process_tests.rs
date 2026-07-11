@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use liminal::protocol::{
-    CausalContext, MessageEnvelope, SchemaId, WorkerRegisterOutcome, WorkerRegistration,
+    CausalContext, MessageEnvelope, MessageId, SchemaId, WorkerRegisterOutcome, WorkerRegistration,
 };
 
 use super::*;
@@ -11,6 +11,7 @@ use crate::server::connection::notifier::ConnectionNotifier;
 use crate::server::connection::services::{
     ConnectionSubscription, PublishOutcome, SubscriptionResource,
 };
+use crate::server::connection::worker_front_door::WorkerFrontDoorServices;
 
 /// Fixed connection pid used by the scheduler-free `apply_frame` unit tests.
 const TEST_PID: u64 = 1;
@@ -517,6 +518,428 @@ fn publish_to_untapped_channel_still_fans_out() -> Result<(), ServerError> {
         published_count, 1,
         "an untapped publish must reach the normal fan-out"
     );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// §9 D2 front-door construction gate: explicit rejection of unsupported frames.
+//
+// Each unsupported channel/conversation frame applied against the worker front
+// door must produce the matching typed error frame, and the connection must stay
+// healthy (a rejection is a `Respond(...Error)`, never a `Close`). The reserved
+// observability tap, worker registration, and correlated push-reply frames must
+// keep working in the SAME session, proving the front door serves its capability
+// set unchanged while refusing everything else. The fs/thread half of this gate
+// lives in `services::durable_store_tests` and `worker_front_door::tests`.
+// ---------------------------------------------------------------------------
+
+/// Builds a runtime backed by the worker front door adapter and a notifier that
+/// accepts worker registration and taps `tap_channel` out-of-band — the exact
+/// capability surface an aion-style worker host uses.
+fn worker_front_door_runtime(tap_channel: &str) -> (ConnectionRuntime, Arc<RecordingNotifier>) {
+    let notifier = Arc::new(RecordingNotifier::tapping(tap_channel));
+    let runtime = ConnectionRuntime::for_tests_with_notifier(
+        Arc::new(WorkerFrontDoorServices::new()),
+        Arc::clone(&notifier) as Arc<_>,
+    );
+    (runtime, notifier)
+}
+
+#[test]
+fn worker_front_door_rejects_ordinary_publish_with_publish_error() -> Result<(), ServerError> {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Publish {
+        flags: 0,
+        stream_id: 4,
+        channel: "orders".to_owned(),
+        envelope: envelope(b"order".to_vec()),
+        idempotency_key: None,
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    let FrameAction::Respond(Frame::PublishError {
+        stream_id: 4,
+        message: Some(message),
+        ..
+    }) = action
+    else {
+        return Err(ServerError::ListenerAccept {
+            message: format!(
+                "an ordinary publish must be rejected with a PublishError, got {action:?}"
+            ),
+        });
+    };
+    // Pins the `ServerError::UnsupportedOperation` rendering: the client sees the
+    // honest refusal text, not the repurposed listener-accept prefix.
+    assert!(
+        message.contains("is not supported by the worker-front-door services profile"),
+        "rejection must carry the unsupported-operation text, got: {message}"
+    );
+    assert!(
+        !message.contains("listener accept failed"),
+        "rejection must not carry the listener-accept prefix, got: {message}"
+    );
+    Ok(())
+}
+
+/// MAJOR-3: backpressure signals (`Accept`/`Defer`/`Reject`) act on subscription
+/// delivery state the front door does not serve, so each is rejected with a typed
+/// `SubscribeError` on the incoming stream — never silently accepted.
+#[test]
+fn worker_front_door_rejects_accept_pressure_frame_with_subscribe_error() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Accept {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-1"),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 6, .. })
+        ),
+        "an Accept pressure frame must be rejected with a SubscribeError, got {action:?}"
+    );
+}
+
+#[test]
+fn worker_front_door_rejects_defer_pressure_frame_with_subscribe_error() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Defer {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-2"),
+        reason: Some("buffering".to_owned()),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 6, .. })
+        ),
+        "a Defer pressure frame must be rejected with a SubscribeError, got {action:?}"
+    );
+}
+
+#[test]
+fn worker_front_door_rejects_reject_pressure_frame_with_subscribe_error() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Reject {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-3"),
+        reason: Some("shedding".to_owned()),
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 6, .. })
+        ),
+        "a Reject pressure frame must be rejected with a SubscribeError, got {action:?}"
+    );
+}
+
+/// MAJOR-3 full-mode regression: pressure frames stay `NoResponse` in full mode,
+/// exactly as before the front-door split.
+#[test]
+fn pressure_frames_remain_no_response_in_full_mode() {
+    let (runtime, _services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState::default();
+    let frames = [
+        Frame::Accept {
+            flags: 0,
+            stream_id: 6,
+            referenced_message_id: MessageId::new("m-1"),
+        },
+        Frame::Defer {
+            flags: 0,
+            stream_id: 6,
+            referenced_message_id: MessageId::new("m-2"),
+            reason: None,
+        },
+        Frame::Reject {
+            flags: 0,
+            stream_id: 6,
+            referenced_message_id: MessageId::new("m-3"),
+            reason: None,
+        },
+    ];
+
+    for frame in frames {
+        let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+        assert!(
+            matches!(action, FrameAction::NoResponse),
+            "full mode must keep consuming pressure frames silently, got {action:?}"
+        );
+    }
+}
+
+/// MAJOR-3 auth gating: pressure frames are application frames, so with a token
+/// configured an UNAUTHED session can no longer send them freely (the gate closes
+/// the connection), while an authed session keeps today's silent consumption.
+#[test]
+fn pressure_frames_are_auth_gated_when_token_configured() {
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::new(RecordingServices::default()),
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+    let accept_frame = || Frame::Accept {
+        flags: 0,
+        stream_id: 6,
+        referenced_message_id: MessageId::new("m-1"),
+    };
+
+    // Pre-auth: the gate tears the connection down.
+    let action = apply_frame(TEST_PID, &runtime, &mut state, accept_frame());
+    assert!(
+        matches!(action, FrameAction::Close),
+        "an unauthenticated pressure frame must close the connection, got {action:?}"
+    );
+
+    // Post-auth: full-mode semantics are unchanged (silent consumption).
+    let mut state = ConnectionProcessState::default();
+    let connect = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"s3cr3t"));
+    assert!(matches!(
+        connect,
+        FrameAction::Respond(Frame::ConnectAck { .. })
+    ));
+    let action = apply_frame(TEST_PID, &runtime, &mut state, accept_frame());
+    assert!(
+        matches!(action, FrameAction::NoResponse),
+        "an authenticated pressure frame keeps full-mode NoResponse, got {action:?}"
+    );
+}
+
+#[test]
+fn worker_front_door_rejects_subscribe_with_subscribe_error() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Subscribe {
+        flags: 0,
+        stream_id: 2,
+        channel: "orders".to_owned(),
+        accepted_schemas: Vec::new(),
+        max_in_flight: 16,
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 2, .. })
+        ),
+        "a subscribe must be rejected with a SubscribeError, got {action:?}"
+    );
+    // No subscription was recorded on the connection: a rejected subscribe leaves
+    // no local state behind.
+    assert!(state.subscriptions.is_empty());
+}
+
+#[test]
+fn worker_front_door_rejects_unsubscribe_with_subscribe_error() {
+    // No dedicated `UnsubscribeError` frame exists, so the front door rejects an
+    // unsubscribe of a never-existent subscription via `SubscribeError` (the closest
+    // honest fit) rather than swallowing it as full mode's idempotent no-op would.
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+    let frame = Frame::Unsubscribe {
+        flags: 0,
+        stream_id: 2,
+        subscription_id: 99,
+    };
+
+    let action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+
+    assert!(
+        matches!(
+            action,
+            FrameAction::Respond(Frame::SubscribeError { stream_id: 2, .. })
+        ),
+        "an unsubscribe must be rejected with a SubscribeError, got {action:?}"
+    );
+}
+
+#[test]
+fn worker_front_door_rejects_conversation_open_message_and_close() {
+    let (runtime, _notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+
+    let open = Frame::ConversationOpen {
+        flags: 0,
+        stream_id: 1,
+        conversation_id: 7,
+        subject: "charge".to_owned(),
+    };
+    let open_action = apply_frame(TEST_PID, &runtime, &mut state, open);
+    assert!(
+        matches!(
+            open_action,
+            FrameAction::Respond(Frame::ConversationError {
+                conversation_id: 7,
+                ..
+            })
+        ),
+        "conversation open must be rejected with a ConversationError, got {open_action:?}"
+    );
+    assert!(
+        state.conversations.is_empty(),
+        "a rejected open leaves no conversation on the connection"
+    );
+
+    let message = Frame::ConversationMessage {
+        flags: 0,
+        stream_id: 1,
+        conversation_id: 7,
+        envelope: envelope(b"do-work".to_vec()),
+    };
+    let message_action = apply_frame(TEST_PID, &runtime, &mut state, message);
+    assert!(
+        matches!(
+            message_action,
+            FrameAction::Respond(Frame::ConversationError {
+                conversation_id: 7,
+                ..
+            })
+        ),
+        "conversation message must be rejected with a ConversationError, got {message_action:?}"
+    );
+
+    let close = Frame::ConversationClose {
+        flags: 0,
+        stream_id: 1,
+        conversation_id: 7,
+        reason_code: None,
+        message: None,
+    };
+    let close_action = apply_frame(TEST_PID, &runtime, &mut state, close);
+    assert!(
+        matches!(
+            close_action,
+            FrameAction::Respond(Frame::ConversationError {
+                conversation_id: 7,
+                ..
+            })
+        ),
+        "conversation close must be rejected with a ConversationError, got {close_action:?}"
+    );
+}
+
+/// The load-bearing in-session assertion: the front door's supported capabilities —
+/// worker registration, the notifier-consumed reserved publish, and correlated
+/// push-reply — keep working across a rejected ordinary publish, and none of the
+/// rejections tears the connection down.
+#[test]
+fn worker_front_door_serves_its_capabilities_across_rejections() -> Result<(), ServerError> {
+    let (runtime, notifier) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+
+    // 1. An ordinary publish is rejected (typed error), but stays open.
+    let rejected = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        Frame::Publish {
+            flags: 0,
+            stream_id: 9,
+            channel: "orders".to_owned(),
+            envelope: envelope(b"order".to_vec()),
+            idempotency_key: None,
+        },
+    );
+    assert!(
+        matches!(rejected, FrameAction::Respond(Frame::PublishError { .. })),
+        "ordinary publish rejected, connection stays open (not a Close): {rejected:?}"
+    );
+
+    // 2. Worker registration still works — served by the notifier, not the services.
+    let register = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        Frame::WorkerRegister {
+            flags: 0,
+            registration: sample_registration(),
+        },
+    );
+    assert!(
+        matches!(
+            register,
+            FrameAction::Respond(Frame::WorkerRegisterAck {
+                outcome: WorkerRegisterOutcome::Accepted,
+                ..
+            })
+        ),
+        "worker registration must still be accepted, got {register:?}"
+    );
+
+    // 3. A reserved-channel publish is consumed by the tap out-of-band (no wire
+    //    response), exactly as in full mode — it never reaches services.publish.
+    let reserved = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        Frame::Publish {
+            flags: 0,
+            stream_id: 3,
+            channel: "aion.observability.v1".to_owned(),
+            envelope: envelope(b"event".to_vec()),
+            idempotency_key: None,
+        },
+    );
+    assert!(
+        matches!(reserved, FrameAction::NoResponse),
+        "a reserved-channel publish is consumed by the tap (no wire response), got {reserved:?}"
+    );
+    let tapped = notifier
+        .tapped
+        .lock()
+        .map_err(|error| ServerError::ListenerAccept {
+            message: format!("test notifier tap recorder unavailable: {error}"),
+        })?
+        .clone();
+    assert_eq!(
+        tapped,
+        vec![(
+            TEST_PID,
+            "aion.observability.v1".to_owned(),
+            b"event".to_vec()
+        )],
+        "the reserved publish reached the notifier tap verbatim"
+    );
+
+    // 4. A correlated push-reply frame is handled (resolves its slot, no wire
+    //    response); an unknown correlation id is a harmless no-op, never a reject.
+    let push_reply = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut state,
+        Frame::PushReply {
+            flags: 0,
+            stream_id: 1,
+            correlation_id: 1,
+            payload: b"reply".to_vec(),
+        },
+    );
+    assert!(
+        matches!(push_reply, FrameAction::NoResponse),
+        "a push reply is handled with no wire response, got {push_reply:?}"
+    );
+
     Ok(())
 }
 

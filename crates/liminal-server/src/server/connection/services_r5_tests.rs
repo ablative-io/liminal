@@ -314,6 +314,7 @@ fn ephemeral_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>>
         persistence_path: None,
         cluster: None,
         auth: None,
+        services: crate::config::types::ServicesConfig::default(),
     })
 }
 
@@ -332,6 +333,7 @@ fn durable_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         persistence_path: None,
         cluster: None,
         auth: None,
+        services: crate::config::types::ServicesConfig::default(),
     })
 }
 

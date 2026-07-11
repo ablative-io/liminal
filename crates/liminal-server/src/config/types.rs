@@ -2,6 +2,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::ServerError;
+
 /// Declarative configuration for the standalone liminal server wrapper.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -27,6 +29,11 @@ pub struct ServerConfig {
     /// pre-auth behaviour). Not an ACL system — a single shared bearer token.
     #[serde(default)]
     pub auth: Option<AuthConfig>,
+    /// Service construction profile. Absent `[services]` (or an absent `profile`
+    /// key within it) defaults to `"full"`, so existing deployments build exactly
+    /// what they build today.
+    #[serde(default)]
+    pub services: ServicesConfig,
 }
 
 impl ServerConfig {
@@ -134,4 +141,83 @@ pub struct AuthConfig {
     /// be non-empty when the `[auth]` section is present (an empty token is a
     /// config validation error, since it would gate nothing).
     pub token: String,
+}
+
+/// Service construction profile selection (D2).
+///
+/// The `profile` value is carried as a raw string here rather than a typed enum so
+/// an unrecognised value is a config *validation* error with a helpful message
+/// (via [`Self::profile`]) rather than an opaque deserialization failure — matching
+/// how every other semantic config check surfaces. Absent `profile` defaults to
+/// `"full"`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServicesConfig {
+    /// Construction profile: `"full"` (the default, unchanged behaviour) or
+    /// `"worker-front-door"` (capability-scoped worker deployments).
+    #[serde(default = "default_service_profile")]
+    pub profile: String,
+}
+
+impl Default for ServicesConfig {
+    fn default() -> Self {
+        Self {
+            profile: default_service_profile(),
+        }
+    }
+}
+
+impl ServicesConfig {
+    /// Resolves the raw `profile` string into a typed [`ServiceProfile`].
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ConfigValidation`] when the value is not a recognised
+    /// profile.
+    pub fn profile(&self) -> Result<ServiceProfile, ServerError> {
+        ServiceProfile::parse(&self.profile)
+    }
+}
+
+fn default_service_profile() -> String {
+    ServiceProfile::FULL.to_owned()
+}
+
+/// Which connection-services adapter the server constructs (D2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceProfile {
+    /// Full channel/conversation/durability services — the default. Constructs the
+    /// haematite store, channel supervisor, conversation supervisor, and dedup
+    /// cache exactly as before.
+    Full,
+    /// Capability-scoped worker front door: the connection supervisor only, with no
+    /// channel/conversation/haematite machinery. Backs worker registration,
+    /// correlated push/reply, and notifier-consumed reserved publishes; ordinary
+    /// channel and conversation frames are rejected with a typed error frame.
+    WorkerFrontDoor,
+}
+
+impl ServiceProfile {
+    /// Config value selecting the full-service profile.
+    pub const FULL: &'static str = "full";
+    /// Config value selecting the worker-front-door profile.
+    pub const WORKER_FRONT_DOOR: &'static str = "worker-front-door";
+
+    /// Parses a `[services] profile` value into a typed profile.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ConfigValidation`] for any value other than
+    /// [`Self::FULL`] or [`Self::WORKER_FRONT_DOOR`].
+    pub fn parse(value: &str) -> Result<Self, ServerError> {
+        match value {
+            Self::FULL => Ok(Self::Full),
+            Self::WORKER_FRONT_DOOR => Ok(Self::WorkerFrontDoor),
+            other => Err(ServerError::ConfigValidation {
+                message: format!(
+                    "services.profile: unknown profile '{other}'; expected \"{}\" or \"{}\"",
+                    Self::FULL,
+                    Self::WORKER_FRONT_DOOR
+                ),
+            }),
+        }
+    }
 }

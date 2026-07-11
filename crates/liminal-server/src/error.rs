@@ -25,6 +25,19 @@ pub enum ServerError {
     #[error("listener accept failed: {message}")]
     ListenerAccept { message: String },
 
+    /// A frame requested an operation the configured services profile does not
+    /// serve (e.g. ordinary publish/subscribe/conversation traffic against the
+    /// capability-scoped worker front door). Server-internal taxonomy, not wire
+    /// vocabulary: the connection process renders it as the operation's existing
+    /// typed error frame with this error's text as the message.
+    #[error("{operation} is not supported by the {profile} services profile")]
+    UnsupportedOperation {
+        /// Human-readable description of the refused operation.
+        operation: String,
+        /// The configured services profile that refused it.
+        profile: &'static str,
+    },
+
     /// A server→client push reply slot was dropped before a correlated reply
     /// arrived — the connection closed (the prompt worker-death signal). Distinct
     /// from [`Self::PushReplyTimeout`] so consumers can tell a worker that DIED

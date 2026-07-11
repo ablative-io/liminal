@@ -15,6 +15,8 @@ use super::conversation::ConnectionConversation;
 use super::services::ConnectionServices;
 use super::state::{ConnectionProcessState, FrameAction};
 use super::supervisor::ConnectionRuntime;
+use crate::ServerError;
+use crate::config::types::ServiceProfile;
 
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -81,8 +83,10 @@ pub(super) fn apply_frame(
             ..
         } => subscribe_response(services, state, stream_id, &channel, &accepted_schemas),
         Frame::Unsubscribe {
-            subscription_id, ..
-        } => unsubscribe_response(services, state, subscription_id),
+            stream_id,
+            subscription_id,
+            ..
+        } => unsubscribe_response(services, state, stream_id, subscription_id),
         Frame::ConversationOpen {
             conversation_id,
             subject,
@@ -102,8 +106,10 @@ pub(super) fn apply_frame(
             &envelope,
         ),
         Frame::ConversationClose {
-            conversation_id, ..
-        } => conversation_close(services, state, conversation_id),
+            stream_id,
+            conversation_id,
+            ..
+        } => conversation_close(services, state, stream_id, conversation_id),
         Frame::PushReply {
             correlation_id,
             payload,
@@ -119,6 +125,13 @@ pub(super) fn apply_frame(
         Frame::WorkerRegister { registration, .. } => {
             worker_register_response(pid, runtime, registration)
         }
+        // Client backpressure signals ride the subscription delivery machinery, so
+        // they are application frames: gated by auth (they are NOT on the pre-auth
+        // allowlist) and refused by a services profile that serves no
+        // subscriptions.
+        Frame::Accept { stream_id, .. }
+        | Frame::Defer { stream_id, .. }
+        | Frame::Reject { stream_id, .. } => pressure_response(services, stream_id),
         // `Push`/`Deliver`/`WorkerRegisterAck` are server-to-client only; a client
         // must never originate one. Ignore these (and any stray/unknown inbound
         // frame) rather than treating them as fatal so a confused or malicious
@@ -134,11 +147,38 @@ pub(super) fn apply_frame(
         | Frame::PublishAck { .. }
         | Frame::PublishError { .. }
         | Frame::ConversationError { .. }
-        | Frame::Accept { .. }
-        | Frame::Defer { .. }
-        | Frame::Reject { .. }
         | Frame::Pong { .. } => FrameAction::NoResponse,
     }
+}
+
+/// Client backpressure signals (`Accept`/`Defer`/`Reject`). Full mode consumes
+/// them with no wire response, exactly as before. The worker front door serves no
+/// subscriptions — no delivery can exist for a client to signal pressure on — so
+/// the frame is rejected on the subscription error channel (`SubscribeError`, the
+/// same closest-honest-fit vocabulary as the unsubscribe rejection).
+fn pressure_response(services: &dyn ConnectionServices, stream_id: u32) -> FrameAction {
+    if services.supports_channel_operations() {
+        FrameAction::NoResponse
+    } else {
+        FrameAction::Respond(Frame::SubscribeError {
+            flags: 0,
+            stream_id,
+            reason_code: SERVER_ERROR_CODE,
+            message: Some(unsupported_by_front_door("backpressure signaling")),
+        })
+    }
+}
+
+/// Renders the worker-front-door refusal text for `operation` from the typed
+/// [`ServerError::UnsupportedOperation`] variant, so every front-door rejection —
+/// whether raised in the services adapter or short-circuited here — speaks the one
+/// error vocabulary.
+fn unsupported_by_front_door(operation: &str) -> String {
+    ServerError::UnsupportedOperation {
+        operation: operation.to_owned(),
+        profile: ServiceProfile::WORKER_FRONT_DOOR,
+    }
+    .to_string()
 }
 
 /// Associates a worker registration with this connection and invokes the
@@ -191,8 +231,9 @@ const fn worker_register_rejected(reason: String) -> FrameAction {
 /// `Ping`, and the frames the server ignores unconditionally (server-to-client and
 /// unknown kinds, which return `NoResponse` regardless) are admitted. Every
 /// application frame — publish, subscribe, unsubscribe, conversation, worker-register,
-/// push-reply — is held back until a successful `Connect`, so a newly added frame is
-/// gated by default until it is explicitly listed here.
+/// push-reply, and the `Accept`/`Defer`/`Reject` backpressure signals (which act on
+/// subscription delivery state) — is held back until a successful `Connect`, so a
+/// newly added frame is gated by default until it is explicitly listed here.
 const fn permitted_before_auth(frame: &Frame) -> bool {
     matches!(
         frame,
@@ -210,9 +251,6 @@ const fn permitted_before_auth(frame: &Frame) -> bool {
             | Frame::PublishAck { .. }
             | Frame::PublishError { .. }
             | Frame::ConversationError { .. }
-            | Frame::Accept { .. }
-            | Frame::Defer { .. }
-            | Frame::Reject { .. }
             | Frame::Pong { .. }
     )
 }
@@ -343,6 +381,7 @@ fn subscribe_response(
 fn unsubscribe_response(
     services: &dyn ConnectionServices,
     state: &mut ConnectionProcessState,
+    stream_id: u32,
     subscription_id: u64,
 ) -> FrameAction {
     if let Some(subscription) = state.subscriptions.remove(&subscription_id) {
@@ -354,8 +393,25 @@ fn unsubscribe_response(
         if let Err(error) = services.unsubscribe(subscription) {
             tracing::warn!(subscription_id, %error, "liminal unsubscribe failed");
         }
+        return FrameAction::NoResponse;
     }
-    FrameAction::NoResponse
+    // No such subscription on this connection. Full mode keeps the idempotent no-op
+    // (unsubscribing an unknown id is harmless). A capability-scoped adapter that
+    // serves no channels never issued a subscription, so this frame targets an
+    // operation the profile does not support: reject it explicitly rather than
+    // silently accept it. There is no dedicated `UnsubscribeError` frame in the
+    // vocabulary, so the closest honest fit — `SubscribeError`, the subscription
+    // error channel — carries the rejection.
+    if services.supports_channel_operations() {
+        FrameAction::NoResponse
+    } else {
+        FrameAction::Respond(Frame::SubscribeError {
+            flags: 0,
+            stream_id,
+            reason_code: SERVER_ERROR_CODE,
+            message: Some(unsupported_by_front_door("unsubscribe")),
+        })
+    }
 }
 
 fn conversation_open(
@@ -394,6 +450,16 @@ fn conversation_message(
     conversation_id: u64,
     envelope: &MessageEnvelope,
 ) -> FrameAction {
+    // A capability-scoped adapter serves no conversations, so a conversation could
+    // never have been opened: reject with a clear "not supported" message rather
+    // than the misleading "not open" one. Full mode keeps the existing path.
+    if !services.supports_channel_operations() {
+        return conversation_error(
+            stream_id,
+            conversation_id,
+            &unsupported_by_front_door("conversation messaging"),
+        );
+    }
     let Some(conversation) = state.conversations.get(&conversation_id) else {
         return conversation_error(
             stream_id,
@@ -448,14 +514,27 @@ fn conversation_error(stream_id: u32, conversation_id: u64, message: &str) -> Fr
 fn conversation_close(
     services: &dyn ConnectionServices,
     state: &mut ConnectionProcessState,
+    stream_id: u32,
     conversation_id: u64,
 ) -> FrameAction {
     if let Some(conversation) = state.conversations.remove(&conversation_id) {
         if let Err(error) = services.close_conversation(conversation) {
             tracing::warn!(conversation_id, %error, "liminal conversation close failed");
         }
+        return FrameAction::NoResponse;
     }
-    FrameAction::NoResponse
+    // No such conversation on this connection. Full mode keeps the idempotent
+    // no-op; the worker front door serves no conversations, so a close targets an
+    // unsupported operation — reject it explicitly rather than swallow it.
+    if services.supports_channel_operations() {
+        FrameAction::NoResponse
+    } else {
+        conversation_error(
+            stream_id,
+            conversation_id,
+            &unsupported_by_front_door("conversation close"),
+        )
+    }
 }
 
 #[cfg(test)]

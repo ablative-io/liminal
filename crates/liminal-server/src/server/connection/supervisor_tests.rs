@@ -722,7 +722,7 @@ fn loopback_ephemeral() -> Result<SocketAddr, Box<dyn std::error::Error>> {
 }
 
 fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std::error::Error>> {
-    use crate::config::types::{ChannelDef, ServerConfig};
+    use crate::config::types::{ChannelDef, ServerConfig, ServicesConfig};
 
     let config = ServerConfig {
         listen_address: "127.0.0.1:0".parse()?,
@@ -738,8 +738,108 @@ fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std:
         persistence_path: None,
         cluster: None,
         auth: None,
+        services: ServicesConfig::default(),
     };
     Ok(ConnectionSupervisor::from_config(&config)?)
+}
+
+/// A channel-free config carrying the given `[services]` profile, for the
+/// profile-dispatch tests on the public config constructor.
+fn channel_free_config_with_profile(
+    profile: &str,
+) -> Result<crate::config::types::ServerConfig, Box<dyn std::error::Error>> {
+    use crate::config::types::{ServerConfig, ServicesConfig};
+
+    Ok(ServerConfig {
+        listen_address: "127.0.0.1:0".parse()?,
+        health_listen_address: "127.0.0.1:0".parse()?,
+        drain_timeout_ms: 30_000,
+        channels: Vec::new(),
+        routing_rules: Vec::new(),
+        persistence_path: None,
+        cluster: None,
+        auth: None,
+        services: ServicesConfig {
+            profile: profile.to_owned(),
+        },
+    })
+}
+
+/// §9 D2 gate on the PUBLIC config constructor (record-by-construction census):
+/// a worker-profile config through `ConnectionSupervisor::from_config` builds the
+/// front door — the subsystem factory records ZERO extra subsystems and the
+/// installed services serve no channel operations — so no full service can be
+/// created through this constructor under the worker profile. The recording
+/// happens INSIDE the factory that is the construction path's only route to those
+/// constructors (a bypass would be a code-review-visible structural violation of
+/// the factory seam, not a silently-missing side call). The connection scheduler
+/// itself is built for BOTH profiles (the supervisor owns it), so worker mode is
+/// EXACTLY that one scheduler with its fixed worker count — asserted against the
+/// live scheduler's configured thread count. The full-profile arm is the positive
+/// control: the SAME instrument through the SAME constructor records the
+/// channel/conversation/haematite schedulers. An OS-level thread census upgrades
+/// this when the beamr composition lane's scheduler-inventory API (currently on
+/// their branch, not yet consumable from liminal) lands.
+#[test]
+fn from_config_worker_profile_builds_front_door_with_no_extra_schedulers()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::server::connection::services::SchedulerSubsystem;
+    use crate::server::connection::services::subsystem_census::RecordingSubsystems;
+
+    let worker_root = tempfile::tempdir()?;
+    let worker_subsystems = RecordingSubsystems::rooted(worker_root.path());
+    let supervisor = ConnectionSupervisor::from_config_via(
+        &channel_free_config_with_profile("worker-front-door")?,
+        &worker_subsystems,
+    )?;
+    assert!(
+        worker_subsystems.recorded().is_empty(),
+        "the worker profile must construct no scheduler beyond the connection supervisor's own"
+    );
+    // The retained connection scheduler runs exactly its fixed worker complement:
+    // worker mode = this one scheduler, at this size, and nothing else.
+    assert_eq!(
+        supervisor.scheduler().thread_count(),
+        super::CONNECTION_SCHEDULER_THREADS,
+        "the connection scheduler must carry exactly its fixed worker count"
+    );
+    assert!(
+        !supervisor
+            .inner
+            .runtime
+            .services()
+            .supports_channel_operations(),
+        "the worker profile must install the front-door services, not the full stack"
+    );
+    assert_eq!(supervisor.active_connection_count(), 0);
+    supervisor.shutdown();
+
+    let full_root = tempfile::tempdir()?;
+    let full_subsystems = RecordingSubsystems::rooted(full_root.path());
+    let full_supervisor = ConnectionSupervisor::from_config_via(
+        &channel_free_config_with_profile("full")?,
+        &full_subsystems,
+    )?;
+    assert_eq!(
+        full_subsystems.recorded(),
+        vec![
+            SchedulerSubsystem::ChannelSupervisor,
+            SchedulerSubsystem::ConversationSupervisor,
+            SchedulerSubsystem::HaematiteStore,
+        ],
+        "the full profile through the same constructor constructs every subsystem — \
+         the positive control proving the census detects them"
+    );
+    assert!(
+        full_supervisor
+            .inner
+            .runtime
+            .services()
+            .supports_channel_operations(),
+        "the full profile must install the full services"
+    );
+    full_supervisor.shutdown();
+    Ok(())
 }
 
 fn send_subscribe(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {

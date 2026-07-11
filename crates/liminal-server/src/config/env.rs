@@ -219,6 +219,7 @@ mod tests {
                 cookie: "test-cookie".to_owned(),
             }),
             auth: None,
+            services: crate::config::types::ServicesConfig::default(),
         })
     }
 

@@ -15,7 +15,10 @@ use liminal::protocol::WorkerRegistration;
 
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
-use super::services::{ConnectionServices, LiminalConnectionServices};
+use super::services::{
+    ConnectionServices, LiminalConnectionServices, ProductionSubsystems, SubsystemFactory,
+    build_connection_services_via,
+};
 use crate::ServerError;
 use crate::config::types::ServerConfig;
 
@@ -33,12 +36,30 @@ pub struct ConnectionSupervisor {
 }
 
 impl ConnectionSupervisor {
-    /// Creates a connection supervisor backed by the configured liminal channels.
+    /// Creates a connection supervisor backed by the services the config's
+    /// `[services]` profile selects: the full liminal channel/conversation stack
+    /// (the default) or the capability-scoped worker front door. Profile
+    /// enforcement is [`build_connection_services`](super::services::build_connection_services)'s,
+    /// so this constructor can never build full services for a worker-front-door
+    /// config.
     ///
     /// # Errors
-    /// Returns [`ServerError`] when channel initialization or scheduler startup fails.
+    /// Returns [`ServerError`] when service construction or scheduler startup fails.
     pub fn from_config(config: &ServerConfig) -> Result<Self, ServerError> {
-        let services = Arc::new(LiminalConnectionServices::from_config(config)?);
+        Self::from_config_via(config, &ProductionSubsystems)
+    }
+
+    /// [`Self::from_config`] with the §9 D2 subsystem factory injected.
+    ///
+    /// The factory is the only route to every scheduler-owning subsystem the
+    /// services construction builds, so a recording factory observes exactly what
+    /// was constructed; the connection scheduler itself (built below for BOTH
+    /// profiles) is the census baseline, not a census entry.
+    fn from_config_via(
+        config: &ServerConfig,
+        subsystems: &dyn SubsystemFactory,
+    ) -> Result<Self, ServerError> {
+        let services = build_connection_services_via(config, subsystems)?;
         // The configured token (if any) is carried opaquely as bytes for a
         // constant-time comparison against the handshake's `auth_token`. Absent
         // `[auth]` leaves it `None`, so the connection stays open-access.

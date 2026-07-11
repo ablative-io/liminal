@@ -23,11 +23,14 @@ mod services_schema;
 mod state;
 #[path = "connection/supervisor.rs"]
 mod supervisor;
+#[path = "connection/worker_front_door.rs"]
+mod worker_front_door;
 
 pub use conversation::{ConnectionConversation, ConversationResource};
 pub use notifier::ConnectionNotifier;
 pub use services::{
     ChannelCluster, ConnectionServices, ConnectionSubscription, LiminalConnectionServices,
-    PublishOutcome,
+    PublishOutcome, build_connection_services,
 };
 pub use supervisor::{ConnectionHandle, ConnectionSupervisor, PushReplyAwaiter};
+pub use worker_front_door::WorkerFrontDoorServices;
