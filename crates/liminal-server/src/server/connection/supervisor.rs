@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 
 use beamr::atom::{Atom, AtomTable};
@@ -219,6 +219,7 @@ impl ConnectionSupervisor {
             Ok(PushReplyAwaiter {
                 correlation_id,
                 receiver,
+                runtime: Arc::downgrade(&self.inner.runtime),
             })
         } else {
             // The process is gone; drop the now-unreachable reply slot so it cannot
@@ -304,6 +305,11 @@ impl ConnectionHandle {
 pub struct PushReplyAwaiter {
     correlation_id: u64,
     receiver: Receiver<Vec<u8>>,
+    /// Weak handle to the owning runtime, used to cancel this awaiter's reserved
+    /// reply slot the moment its deadline passes so a timed-out push does not leak
+    /// the slot until connection close. `Weak` so the awaiter never keeps the
+    /// runtime alive; if it is already gone, the slot is gone with it.
+    runtime: Weak<ConnectionRuntime>,
 }
 
 impl PushReplyAwaiter {
@@ -325,9 +331,18 @@ impl PushReplyAwaiter {
         self.receiver
             .recv_timeout(timeout)
             .map_err(|error| match error {
-                RecvTimeoutError::Timeout => ServerError::PushReplyTimeout {
-                    correlation_id: self.correlation_id,
-                },
+                RecvTimeoutError::Timeout => {
+                    // The reply deadline passed: cancel the reserved slot now so it
+                    // does not leak until connection close. A slot the connection
+                    // already resolved or cancelled is gone, so this is a no-op then;
+                    // a late reply arriving afterwards finds no slot and is discarded.
+                    if let Some(runtime) = self.runtime.upgrade() {
+                        runtime.cancel_push(self.correlation_id);
+                    }
+                    ServerError::PushReplyTimeout {
+                        correlation_id: self.correlation_id,
+                    }
+                }
                 RecvTimeoutError::Disconnected => ServerError::PushReplyDisconnected {
                     correlation_id: self.correlation_id,
                 },
@@ -631,6 +646,13 @@ impl ConnectionRuntime {
         if let Ok(mut slots) = self.push_replies.lock() {
             slots.retain(|_correlation_id, pending| pending.pid != pid);
         }
+    }
+
+    /// Number of reserved push reply slots outstanding. A timed-out push must
+    /// release its slot, so the D4 gate pins this back to zero after a timeout.
+    #[cfg(test)]
+    pub(super) fn pending_push_count(&self) -> usize {
+        self.push_replies.lock().map_or(0, |slots| slots.len())
     }
 
     /// Resolves the reply slot for `correlation_id` with the client's reply

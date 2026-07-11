@@ -118,6 +118,15 @@ impl ParticipantRuntime {
         }
     }
 
+    /// Number of live participant registrations. A closed conversation must leave
+    /// none, so the churn gate pins this bounded across open/close cycles.
+    #[cfg(test)]
+    pub(super) fn registration_count(&self) -> usize {
+        self.registrations
+            .lock()
+            .map_or(0, |registrations| registrations.len())
+    }
+
     /// Drains and processes every request currently queued for `pid`, delivering
     /// each produced reply back into the owning conversation. Returns the number
     /// of requests processed this slice.

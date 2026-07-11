@@ -2,8 +2,11 @@ use std::error::Error;
 
 use beamr::process::ExitReason;
 
+use std::sync::Arc;
+
 use super::{ConversationActor, ConversationSupervisor};
 use crate::channel::ChannelMode;
+use crate::conversation::participant::EchoBehaviour;
 use crate::conversation::types::{
     ConversationConfig, ConversationContextEntry, ConversationPhase, CrashPolicy,
     ParticipantHealth, ParticipantPid,
@@ -409,6 +412,86 @@ fn boot_discovered_death_under_fail_policy_fails_conversation_honestly()
         matches!(received, Err(LiminalError::ParticipantCrashed { .. })),
         "receive against the failed conversation must report the crash, got {received:?}"
     );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 rule-1: closing a conversation must leave NO parked participant — its
+/// process is terminated and its runtime registration is dropped — and the
+/// actor's own registration is dropped too. Before the fix, close stopped only
+/// the actor: the participant stayed parked and registered forever.
+#[test]
+fn closing_conversation_terminates_and_deregisters_participant() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+    let (actor, participant) = supervisor.spawn_with_participant(
+        Arc::new(EchoBehaviour),
+        None,
+        ChannelMode::Ephemeral,
+        CrashPolicy::Fail,
+    )?;
+    let actor_pid = actor.pid()?;
+
+    // Registered and live before close.
+    assert_eq!(supervisor.inner.participant_runtime.registration_count(), 1);
+    assert!(scheduler.process_table().get(participant.get()).is_some());
+
+    actor.handle().close()?;
+
+    // Close deregisters the participant AND the actor synchronously (the reply is
+    // sent only after `apply_close` runs).
+    assert_eq!(
+        supervisor.inner.participant_runtime.registration_count(),
+        0,
+        "close must deregister the participant"
+    );
+    assert_eq!(
+        supervisor.inner.runtime.registration_count(),
+        0,
+        "close must deregister the actor"
+    );
+    // Both processes are terminated: no parked participant or actor survives.
+    wait_until_process_gone(&scheduler, participant.get())?;
+    wait_until_process_gone(&scheduler, actor_pid.get())?;
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// D4 churn gate: repeated open/close cycles must pin BOUNDED registry size. An
+/// unbounded leak (the pre-fix behaviour, where neither the participant nor the
+/// actor key was ever removed) fails this assertion because the counts grow with
+/// the cycle count instead of returning to zero.
+#[test]
+fn repeated_open_close_pins_bounded_registries() -> Result<(), Box<dyn Error>> {
+    let supervisor = ConversationSupervisor::new()?;
+    let scheduler = supervisor.scheduler();
+
+    for _ in 0..25 {
+        let (actor, participant) = supervisor.spawn_with_participant(
+            Arc::new(EchoBehaviour),
+            None,
+            ChannelMode::Ephemeral,
+            CrashPolicy::Fail,
+        )?;
+        actor.pid()?;
+        actor.handle().close()?;
+        // Drive each participant fully out of the process table before the next
+        // cycle so the scheduler table is bounded too, not just the registries.
+        wait_until_process_gone(&scheduler, participant.get())?;
+    }
+
+    assert_eq!(
+        supervisor.inner.participant_runtime.registration_count(),
+        0,
+        "participant registry must not grow with open/close churn"
+    );
+    assert_eq!(
+        supervisor.inner.runtime.registration_count(),
+        0,
+        "actor registry must not grow with open/close churn"
+    );
+
     supervisor.shutdown();
     Ok(())
 }

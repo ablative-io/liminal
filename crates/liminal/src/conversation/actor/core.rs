@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use beamr::atom::Atom;
 use beamr::native::ProcessContext;
+use beamr::process::ExitReason;
 use beamr::term::Term;
 
 use super::beam;
@@ -93,6 +94,11 @@ impl ActorCore {
             {
                 return Ok(pid);
             }
+            // The current actor process is gone; drop its stale registry entry
+            // before spawning a replacement so restarts never accumulate dead
+            // actor keys (the owning core survives the restart, so the
+            // strong-count prune in `ActorRuntime::register` cannot catch it).
+            self.supervisor.runtime.deregister(pid);
         }
         let pid = self.supervisor.spawn_actor_for(self);
         drop(restart_guard);
@@ -320,11 +326,18 @@ impl ActorCore {
     fn apply_close(&self) -> Result<(), LiminalError> {
         {
             let mut state = lock(&self.state, "conversation state")?;
-            if state.current_phase == ConversationPhase::Created {
-                state.activate()?;
+            // A conversation that already failed is terminal and does not transition
+            // to Closed; it still falls through to release its participants and drop
+            // the actor's registration below, which the failure path itself does not
+            // do (without this, a failed conversation leaks its actor and registry
+            // entry forever).
+            if state.current_phase != ConversationPhase::Failed {
+                if state.current_phase == ConversationPhase::Created {
+                    state.activate()?;
+                }
+                state.begin_completing()?;
+                state.close()?;
             }
-            state.begin_completing()?;
-            state.close()?;
         }
         let message = "conversation closed before receive completed".to_owned();
         for reply in lock(&self.pending_receives, "pending receives")?.drain(..) {
@@ -335,7 +348,32 @@ impl ActorCore {
                 }),
             );
         }
+        // Close terminates every real participant process and drops both the
+        // participant and this actor's runtime registration: a closed conversation
+        // must leave nothing parked or registered behind it (the actor process
+        // itself is stopped by the caller via `request_shutdown`).
+        self.release_participants();
+        let current_pid = *lock(&self.current_pid, "actor pid")?;
+        if let Some(pid) = current_pid {
+            self.supervisor.runtime.deregister(pid);
+        }
         Ok(())
+    }
+
+    /// Terminates every real participant process this conversation forwards to and
+    /// drops its runtime registration. Idempotent per participant: terminating an
+    /// already-dead pid and deregistering an absent one are both no-ops, so a
+    /// Failed conversation (participant already gone) closes cleanly too. The
+    /// participant is exited `Normal`, so the actor's trapped-EXIT handler treats
+    /// it as an expected close, not a crash (see `record_participant_exit`).
+    fn release_participants(&self) {
+        for channel in &self.participant_channels {
+            let participant = channel.pid();
+            self.supervisor
+                .scheduler
+                .terminate_process(participant.get(), ExitReason::Normal);
+            self.supervisor.participant_runtime.deregister(participant);
+        }
     }
 
     fn snapshot(&self) -> Result<ConversationState, LiminalError> {
@@ -407,6 +445,13 @@ impl ActorCore {
         // Dead first (then it replays the recorded instant): exactly one wakeup.
         let failed = {
             let mut state = lock(&self.state, "conversation state")?;
+            // A participant EXIT observed after the conversation has already closed
+            // is the expected consequence of close terminating it (see
+            // `release_participants`), not a crash: it is deregistered above, but no
+            // crash is recorded and the closed state is left untouched.
+            if matches!(state.current_phase, ConversationPhase::Closed) {
+                return Ok(());
+            }
             let already_recorded = state.participants.iter().any(|status| {
                 status.participant == participant && status.health == ParticipantHealth::Dead
             });

@@ -49,8 +49,30 @@ impl ActorRuntime {
         pid: ParticipantPid,
         core: Weak<ActorCore>,
     ) -> Result<(), LiminalError> {
-        lock(&self.actors, "actor runtime")?.insert(pid.get(), core);
+        let mut actors = lock(&self.actors, "actor runtime")?;
+        // Drop keys whose actor core is already gone before inserting, so an actor
+        // that exited without a close/restart deregistering it (e.g. a bare actor
+        // that crashed) cannot accumulate a dead key across spawns.
+        actors.retain(|_, weak| weak.strong_count() > 0);
+        actors.insert(pid.get(), core);
+        drop(actors);
         Ok(())
+    }
+
+    /// Drops the registration for a specific actor pid (called from the close and
+    /// restart paths, where the owning core outlives the dead pid so the
+    /// strong-count prune in `register` cannot remove it).
+    pub(super) fn deregister(&self, pid: ParticipantPid) {
+        if let Ok(mut actors) = self.actors.lock() {
+            actors.remove(&pid.get());
+        }
+    }
+
+    /// Number of live actor registrations. Pinned bounded by the churn gate across
+    /// open/close cycles.
+    #[cfg(test)]
+    pub(super) fn registration_count(&self) -> usize {
+        self.actors.lock().map_or(0, |actors| actors.len())
     }
 
     fn actor(&self, pid: u64) -> Option<Arc<ActorCore>> {
