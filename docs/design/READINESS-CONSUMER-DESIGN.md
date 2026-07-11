@@ -11,13 +11,17 @@ Sol scout session 02468176 (envelope retained), verified against liminal main
 findings against the first revision; all five verified against source and
 folded here (reply seam + pending-reply state machine, shape-(a) ownership
 carve-out, D3 exclusive-ownership constructor, lens-answer repairs, stale
-contract pin). Status: **APPROVED by both halves of the certifying pair,
+contract pin). Status: **COMPLETE APPROVAL by the certifying pair,
 2026-07-11** — Vesper Lynd (three advisories + §5 defaults request) and
 Waffles the Terrible (seventh wake source: reply-deadline expiry; §1.2(7)
-shutdown-completion clarification), all six consolidated fold items folded
-at this revision. Per §10 sequencing: D2/D3/D4 unblocked for focused
-branches; D1 waits on beamr §2.5 pinning suite green on main. No code
-before that gate. No code exists yet; the liminal
+shutdown-completion clarification), all consolidated fold items folded,
+followed by the pair's item-7/denomination rulings (connection-scoped
+4 MiB inbox byte budget, serialized-bytes-as-admitted) and the
+tombstone-lifecycle ruling (TTL deleted after the author's
+residual-window finding — both halves independently chose
+scope-over-time; "rule 2 signs costs, not residual wrongness"). Per §10
+sequencing: D2/D3/D4 unblocked for focused branches; D1 waits on beamr
+§2.5 pinning suite green on main. No code before that gate. No code exists yet; the liminal
 consumer merges only after beamr's §2.5 pinning suite is green on main.*
 
 ## 0. Principle and scope
@@ -107,38 +111,48 @@ never a gated suspension (C2 scope) — asserted by test.
    parked connection whose pending reply expires under zero other traffic
    never wakes, and the client waits indefinitely for a timeout error the
    connection believes it handled). The timeout error frame is then
-   written in the woken slice. **Tombstone reclamation is explicit**
-   (Vesper advisory 2 — without it the cap becomes a denial mechanism on a
-   long-lived connection accumulating timeouts): a tombstone is reclaimed
-   when its late reply arrives and is discarded, swept when its
-   conversation closes, and otherwise expires under a bounded tombstone
-   TTL — a deadline evaluated at slice entry, **not** a second timer:
-   tombstone capacity only matters when a new request needs admission, and
-   a new request is itself a wake, so expired tombstones are reclaimed
-   before cap admission in the same slice. Tombstones count against the
-   table cap while present, so the TTL is what returns capacity.
-   **TTL reclamation guard (Vesper's final condition):** reclamation is
-   permitted only for tombstones with NO younger pending entry in the same
-   conversation — otherwise reclaiming tombstone-1 lets a very-late reply
-   to op-1 FIFO-match pending entry-2, resurrecting exactly the
-   mis-correlation the tombstone exists to prevent. The guard is
-   self-clearing (every pending entry resolves to completion or tombstone
-   in bounded time, so a fully-tombstoned conversation becomes reclaimable
-   end-to-end), and a table full of guarded tombstones is the existing
-   typed cap refusal, not a new mechanism. Test: a late reply arriving
-   after the TTL window with a younger pending entry on the same
-   conversation is discarded, never matched. The connection finalizer (§1.2(5))
+   written in the woken slice. **Tombstone lifecycle (pair ruling,
+   2026-07-11 — replaces the earlier TTL design):** only two events
+   genuinely disambiguate a tombstone — its late reply arriving (consume:
+   reply discarded, tombstone freed) or its conversation ending (close
+   sweep). Those are the ONLY reclamation triggers; there is no time-based
+   expiry. The TTL was retired after the author's residual-window finding:
+   any time-based reclamation, however guarded, eventually races an actor
+   that is slow rather than dead — and slow-not-dead is precisely what
+   produced the timeout — letting a very-late reply FIFO-match a younger
+   entry admitted after reclamation. The ruling's principle, recorded for
+   reuse (Waffles): **rule 2 signs costs, not residual wrongness** — a
+   nonzero probability of delivering the wrong reply as the right one is
+   semantic corruption, not a cost, and no signature attaches to it at any
+   probability. Bounding is by scope instead of time: tombstones count
+   against a per-conversation sub-cap ONLY
+   (`max_pending_replies_per_conversation`, §5); pending entries count
+   against both the sub-cap and the connection table. A conversation
+   accumulating tombstones therefore wedges ITSELF — new reply-requested
+   admissions on it draw the existing typed cap refusal until the
+   conversation closes. The self-wedge is the honest semantic, not a
+   degraded mode: a conversation holding a tombstone whose reply may still
+   arrive IS ambiguous, and the refusal confines the ambiguity to the
+   party that created it — sibling conversations and the connection's
+   table are untouched. Tombstone memory is exact, with no latency
+   assumptions: sub-cap × `max_conversations_per_connection` fixed-size
+   entries, inside the already-signed tables budget. The connection finalizer (§1.2(5))
    cancels every entry, notifier, and timer **before** conversation actors
    are closed. The table is capped by
    `max_pending_conversation_replies_per_connection` (§5 — distinct from
    server-push slots). Tests: multiple pipelined reply-requested frames on
    one and on several conversations; timeout followed by a late reply and a
-   new request on the same conversation; a table filled entirely with
-   tombstones recovering capacity via TTL and via conversation close;
-   **a reply that times out while the connection is parked with zero other
-   traffic — the timeout error frame still reaches the client promptly**
-   (the seventh-wake-source gate); crash/close with entries pending; reply
-   arriving after finalization. Removes the last bounded-blocking wait
+   new request on the same conversation; capacity recovery via late-reply
+   consume and via conversation close; a wedged conversation (sub-cap full
+   of tombstones) refusing new reply-requested admissions with the typed
+   error while sibling conversations proceed unaffected; **the slow-actor
+   sequence end-to-end: a tombstone-only conversation, a new admission
+   (refused at the sub-cap, or admitted under it), then the very late
+   reply — asserted discarded or consumed, never matched to the younger
+   entry**; **a reply that times out while the connection is parked with
+   zero other traffic — the timeout error frame still reaches the client
+   promptly** (the seventh-wake-source gate); crash/close with entries
+   pending; reply arriving after finalization. Removes the last bounded-blocking wait
    from the slice path and the four-concurrent-replies scheduler wedge.
 4. **Single idempotent marker (R6).** One `READY` atom per connection; any
    marker triggers one full slice servicing all sources. Marker coalescing
@@ -316,7 +330,13 @@ typed error, each cap a config key):
   exceeds any observed dispatch depth.
 - `max_pending_conversation_replies_per_connection` = **32** — symmetric
   with pushes; entries are small and timers cancel on completion, so the
-  cap exists for the tombstone/wedge case, not memory.
+  cap exists for admission control, not memory.
+- `max_pending_replies_per_conversation` = **8** — the sub-cap that
+  confines tombstone ambiguity to its own conversation (pair ruling):
+  pending entries count against both this and the connection table;
+  tombstones against this alone, so tombstone memory is exactly ≤ 8 × 32
+  fixed-size entries per connection and an ambiguous conversation can
+  never starve its siblings.
 - `max_connection_inbox_bytes` = **4 MiB** — one shared inbox-byte budget
   per connection, spent across ALL that connection's subscription inboxes,
   deliberately mirroring the outbound 4 MiB bound (a connection gets 4 MiB
