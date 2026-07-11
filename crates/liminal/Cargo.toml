@@ -14,6 +14,12 @@ description = "A conversation-based messaging bus built on beamr"
 [lib]
 name = "liminal"
 
+[features]
+# Test-only construction seams (rooted ephemeral stores) that would break
+# lifecycle invariants if offered as general API; enabled by downstream crates'
+# dev-dependencies only, never in a production dependency graph.
+test-support = []
+
 [dependencies]
 async-trait = { workspace = true }
 beamr = { workspace = true, features = ["cooperative", "json"] }

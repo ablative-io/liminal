@@ -348,18 +348,29 @@ pub fn open_ephemeral(shard_count: usize) -> Result<EphemeralHaematiteStore, Dur
     open_ephemeral_in(ephemeral_tempdir(None)?, shard_count)
 }
 
-/// Opens a self-owning ephemeral store whose temporary directory lives under
+/// TEST SEAM: [`open_ephemeral`] with the temporary directory placed under
 /// `root` instead of the system temp dir.
 ///
-/// Same lifecycle contract as [`open_ephemeral`] — the store owns and removes
-/// its directory. Pointing ephemeral storage at a specific volume (a faster
-/// disk, a quota'd mount, a test-isolated root) is the intended use; `root`
-/// must already exist.
+/// Rooting lets construction gates assert on an isolated directory instead of
+/// scanning the shared temp dir. Same lifecycle contract as
+/// [`open_ephemeral`] — the store owns and removes its directory; `root` must
+/// already exist and must outlive the store.
+///
+/// That last requirement is why this is NOT a production API: the store's
+/// exclusive ownership of its directory (the D3 invariant) says nothing about
+/// the PARENT — a caller rooting the store inside a directory they own via
+/// their own guard can drop that guard while the store is live, deleting the
+/// database out from under its running workers. A general rooted API would
+/// need a root-ownership token so parent cleanup cannot outrun the store;
+/// that is deferred until a real embedder need arrives. Until then the
+/// function is gated to tests (`cfg(test)` in this crate, the default-off
+/// `test-support` feature for downstream test harnesses).
 ///
 /// # Errors
 /// Returns [`DurabilityError::EphemeralStoreOpen`] if the directory cannot be
 /// created under `root` or haematite cannot create the database; no residue
 /// remains under `root` when this returns an error.
+#[cfg(any(test, feature = "test-support"))]
 pub fn open_ephemeral_rooted(
     root: &Path,
     shard_count: usize,
