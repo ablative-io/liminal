@@ -6,7 +6,7 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use beamr::atom::{Atom, AtomTable};
 use beamr::module::ModuleRegistry;
@@ -232,17 +232,132 @@ impl ConnectionSupervisor {
     /// same correlation id, the connection process resolves the awaiter's slot. The
     /// returned [`PushReplyAwaiter`] blocks (bounded) for that reply.
     ///
+    /// The reply's lifetime belongs to the push, not to any one
+    /// [`PushReplyAwaiter::receive`] call: this no-deadline push reserves a slot
+    /// that is reclaimed only by (a) the reply being consumed or (b) the
+    /// connection closing. An elapsed `receive` poll is a benign re-arm, never a
+    /// failure and never a cancellation. The §5
+    /// `max_pending_pushes_per_connection` cap bounds abandonment; use
+    /// [`push_to_connection_with_deadline`](Self::push_to_connection_with_deadline)
+    /// when the reply must have an explicit expiry.
+    ///
     /// # Errors
     /// Returns [`ServerError`] when the correlation id cannot be allocated, the
     /// reply slot cannot be registered, or the control message cannot be enqueued
-    /// for the (possibly already-gone) connection process.
+    /// for the (possibly already-gone or concurrently-closing) connection
+    /// process. PUBLICATION INVARIANT: an `Err` guarantees no `Push` control was
+    /// published — the client never sees a `Push` frame for a failed call.
+    /// Conversely `Ok` promises ADMISSION, not delivery: the awaiter's outcome
+    /// is the delivery truth (a push admitted just as its connection closes
+    /// resolves to the truthful disconnected outcome, never to a lost reply).
     pub fn push_to_connection(
         &self,
         pid: u64,
         payload: Vec<u8>,
     ) -> Result<PushReplyAwaiter, ServerError> {
+        self.push_with_deadline(pid, payload, None)
+    }
+
+    /// Like [`push_to_connection`](Self::push_to_connection) but attaches an
+    /// explicit reply deadline to the reserved slot: `deadline` is a DURATION
+    /// FROM NOW bounding the reply's lifetime — a property of THIS push rather
+    /// than of any [`PushReplyAwaiter::receive`] wait quantum.
+    ///
+    /// Deadline expiry is evaluated HOST-SIDE and LAZILY — at the next `receive`
+    /// touch, and at connection close at the latest. It never wakes the connection
+    /// process, adds no timer thread, and runs no periodic sweeper: a push that is
+    /// abandoned and never polled resolves at the next host-side touch (connection
+    /// close). At expiry the slot resolves to [`ServerError::PushReplyExpired`],
+    /// is removed, and its §5 `max_pending_pushes_per_connection` cap admission is
+    /// released. An elapsed `receive` poll BEFORE the deadline is still a benign
+    /// re-arm. A `receive` call in flight when the deadline falls due returns
+    /// the terminal expiry PROMPTLY — it waits the earlier of its quantum and
+    /// the deadline, so a large quantum can never extend the reply's lifetime
+    /// and the terminal outcome is quantum-independent.
+    ///
+    /// The deadline is evaluated at OBSERVATION POINTS, not enforced against the
+    /// wall clock: a reply that arrives before expiry is observed is delivered
+    /// normally, even if it arrives after the deadline instant. The deadline
+    /// bounds waiting and slot occupancy; it is not a delivery-freshness
+    /// guarantee. (This is deliberate — a reply is checked for at every
+    /// observation point before the deadline is, so an answer in hand always
+    /// beats an expiry.)
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when `deadline` is not representable on the
+    /// monotonic clock (an extreme duration is refused, never a panic), the
+    /// correlation id cannot be allocated, the reply slot cannot be registered,
+    /// or the control message cannot be enqueued for the (possibly already-gone
+    /// or concurrently-closing) connection process. PUBLICATION INVARIANT: an
+    /// `Err` guarantees no `Push` control was published — the client never sees
+    /// a `Push` frame for a failed call. Conversely `Ok` promises ADMISSION,
+    /// not delivery: the awaiter's outcome is the delivery truth.
+    pub fn push_to_connection_with_deadline(
+        &self,
+        pid: u64,
+        payload: Vec<u8>,
+        deadline: Duration,
+    ) -> Result<PushReplyAwaiter, ServerError> {
+        self.push_with_deadline(pid, payload, Some(deadline))
+    }
+
+    /// Shared body for the no-deadline and explicit-deadline push paths. With
+    /// `deadline == None` this is byte-for-byte the historical
+    /// `push_to_connection` behaviour (no per-slot deadline); with `Some`, the
+    /// slot carries an absolute expiry evaluated lazily at `receive`.
+    fn push_with_deadline(
+        &self,
+        pid: u64,
+        payload: Vec<u8>,
+        deadline: Option<Duration>,
+    ) -> Result<PushReplyAwaiter, ServerError> {
+        // S5: an extreme `Duration` must surface as this fallible API's typed
+        // error, not an `Instant` addition panic. Checked BEFORE any slot is
+        // registered so a refused deadline leaves nothing to roll back.
+        let deadline_at = match deadline {
+            None => None,
+            Some(window) => {
+                Some(
+                    Instant::now()
+                        .checked_add(window)
+                        .ok_or_else(|| ServerError::ListenerAccept {
+                            message: format!(
+                                "cannot push to connection process {pid}: reply deadline of {window:?} overflows the monotonic clock"
+                            ),
+                        })?,
+                )
+            }
+        };
         let correlation_id = self.inner.runtime.next_push_correlation_id();
-        let receiver = self.inner.runtime.register_push(pid, correlation_id)?;
+        let receiver = self
+            .inner
+            .runtime
+            .register_push(pid, correlation_id, deadline_at)?;
+        // S3+S7 close-vs-register wall, ordered INSERT -> CONFIRM -> PUBLISH.
+        // The confirmation runs BEFORE the control is enqueued, which yields the
+        // PUBLICATION INVARIANT: an `Err` from this method guarantees no `Push`
+        // control was published — the client never sees a Push for a failed
+        // call. (Confirming after the enqueue was S7's non-linearizable race: a
+        // close could sweep, the published Push could already be answered and
+        // resolved, and the failed confirmation then returned `Err` for a push
+        // the client had received.) A close landing AFTER a successful confirm
+        // linearizes after push admission: the enqueue either fails (process
+        // gone — rollback below, `Err` truthful, nothing delivered) or succeeds
+        // with the slot already swept, and the awaiter then reads the truthful
+        // DISCONNECTED while a late client reply is the pinned harmless no-op.
+        // The exactly-one-side-observes argument lives at
+        // `confirm_push_registration`.
+        if !self
+            .inner
+            .runtime
+            .confirm_push_registration(pid, correlation_id)
+        {
+            return Err(ServerError::ListenerAccept {
+                message: format!(
+                    "cannot push to connection process {pid}: the connection closed during push registration"
+                ),
+            });
+        }
         let control = ConnectionControl::Push {
             correlation_id,
             payload,
@@ -251,11 +366,17 @@ impl ConnectionSupervisor {
             Ok(PushReplyAwaiter {
                 correlation_id,
                 receiver,
+                deadline: deadline_at,
                 runtime: Arc::downgrade(&self.inner.runtime),
             })
         } else {
-            // The process is gone; drop the now-unreachable reply slot so it cannot
-            // leak in the correlation registry.
+            // The process is gone AND the control provably never reached a
+            // consumer: `enqueue_control` returns false only when its failed-wake
+            // rollback REMOVED the queued control (S8 — an entry a drain already
+            // consumed counts as published and returns true, with the slot
+            // lifecycle carrying the delivery truth). Dropping the now-unreachable
+            // reply slot here therefore keeps the publication invariant exact on
+            // every `Err` path.
             self.inner.runtime.cancel_push(correlation_id);
             Err(ServerError::ListenerAccept {
                 message: format!("cannot push to connection process {pid}: process is not live"),
@@ -286,6 +407,13 @@ impl ConnectionSupervisor {
     #[cfg(test)]
     pub(super) fn slice_count(&self, pid: u64) -> u64 {
         self.inner.runtime.slice_count(pid)
+    }
+
+    /// Reserved push reply slots outstanding (test observability for the public
+    /// push paths — lets e2e tests assert slot reclamation and cap accounting).
+    #[cfg(test)]
+    pub(super) fn pending_push_count(&self) -> usize {
+        self.inner.runtime.pending_push_count()
     }
 
     /// R6 test seam: a [`ReadyWaker`](super::wake::ReadyWaker) for `pid` — the same
@@ -380,10 +508,18 @@ impl ConnectionHandle {
 pub struct PushReplyAwaiter {
     correlation_id: u64,
     receiver: Receiver<Vec<u8>>,
-    /// Weak handle to the owning runtime, used to cancel this awaiter's reserved
-    /// reply slot the moment its deadline passes so a timed-out push does not leak
-    /// the slot until connection close. `Weak` so the awaiter never keeps the
-    /// runtime alive; if it is already gone, the slot is gone with it.
+    /// This push's absolute reply deadline, mirrored from its slot. `None` (the
+    /// default push) selects the no-deadline receive path, which NEVER touches
+    /// the runtime — byte-compatible with 0.2.3, no shared-lock exposure.
+    /// `Some` lets `receive` wait `min(caller quantum, time until deadline)` and
+    /// resolve expiry promptly, so the caller's quantum can never select a
+    /// deadlined push's terminal outcome.
+    deadline: Option<Instant>,
+    /// Weak handle to the owning runtime, used ONLY by the explicit-deadline
+    /// path to resolve expiry host-side at [`receive`](Self::receive). A
+    /// no-deadline push never upgrades it. `Weak` so the awaiter never keeps the
+    /// runtime alive; if it is already gone, the slot (and its sender) is gone
+    /// with it — the connection side is torn down.
     runtime: Weak<ConnectionRuntime>,
 }
 
@@ -396,49 +532,155 @@ impl PushReplyAwaiter {
 
     /// Blocks up to `timeout` for the client's correlated reply payload.
     ///
+    /// `timeout` is a WAIT QUANTUM ONLY — a MAXIMUM wait, not a promise to
+    /// block: an elapsed poll is a benign re-arm, never a failure; the reply's
+    /// lifetime belongs to the push. A caller may re-invoke `receive`
+    /// indefinitely after a [`ServerError::PushReplyTimeout`]: the reserved slot
+    /// is untouched and a later reply is still delivered byte-exact. The poll
+    /// quantum never changes the protocol outcome — for a deadlined push the
+    /// call waits no longer than the EARLIER of the caller's quantum and the
+    /// push's deadline, so the terminal expiry is returned promptly once due,
+    /// never held until the quantum ends and never deferred past it.
+    ///
+    /// A push with no explicit deadline never touches shared supervisor state
+    /// here: the elapsed quantum returns straight from the channel wait
+    /// (behaviour-compatible with 0.2.3 — no registry lock, no contention, no
+    /// poison exposure on the unchanged API).
+    ///
     /// # Errors
-    /// Returns [`ServerError::PushReplyTimeout`] when no reply arrives within
-    /// `timeout` (the worker is connected but slow), or
-    /// [`ServerError::PushReplyDisconnected`] when the connection process dropped
-    /// the reply slot (the connection closed — the prompt worker-death signal).
-    /// The two are distinct variants so callers classify by type, not message.
+    /// Returns [`ServerError::PushReplyTimeout`] when no reply arrived within this
+    /// `timeout` quantum and the push's deadline (if any) is not yet due (a
+    /// benign re-arm — call again to keep waiting);
+    /// [`ServerError::PushReplyExpired`] when the push carried an explicit reply
+    /// deadline (via
+    /// [`push_to_connection_with_deadline`](ConnectionSupervisor::push_to_connection_with_deadline))
+    /// and that deadline is due (terminal: the slot is removed and its §5 cap
+    /// admission released; returned as soon as the deadline passes, even
+    /// mid-quantum — but evaluated at observation points, not against the wall
+    /// clock: a reply already delivered when this call observes the slot wins
+    /// over expiry, even if it arrived after the deadline instant); or
+    /// [`ServerError::PushReplyDisconnected`] when the connection process
+    /// dropped the reply slot (the connection closed — the prompt worker-death
+    /// signal). The variants are distinct so callers classify by type, not
+    /// message.
     pub fn receive(&self, timeout: Duration) -> Result<Vec<u8>, ServerError> {
+        self.deadline.map_or_else(
+            || self.receive_no_deadline(timeout),
+            |deadline| self.receive_deadlined(timeout, deadline),
+        )
+    }
+
+    /// The default-push receive: exactly the 0.2.3 shape. One bounded channel
+    /// wait; an elapsed quantum is a benign timeout straight from the channel —
+    /// no runtime upgrade, no registry lock, EVER (unrelated registry work can
+    /// never stretch this call past its quantum, and registry poison cannot
+    /// reach it).
+    fn receive_no_deadline(&self, timeout: Duration) -> Result<Vec<u8>, ServerError> {
         match self.receiver.recv_timeout(timeout) {
             Ok(payload) => Ok(payload),
-            Err(RecvTimeoutError::Timeout) => self.resolve_timeout(),
+            Err(RecvTimeoutError::Timeout) => Err(ServerError::PushReplyTimeout {
+                correlation_id: self.correlation_id,
+            }),
             Err(RecvTimeoutError::Disconnected) => Err(ServerError::PushReplyDisconnected {
                 correlation_id: self.correlation_id,
             }),
         }
     }
 
-    /// Settles a deadline expiry against the slot's atomic resolved-vs-cancelled
-    /// transition (removal under the registry mutex). Winning the transition
-    /// frees the reserved slot immediately — a timed-out push must not hold its
-    /// slot until connection close — and any later reply finds no slot and is
-    /// discarded. Losing it means the resolver already delivered (its send
-    /// happens under the same lock, so the payload is present now — return it
-    /// rather than a timeout for an answer that arrived) or the connection
-    /// closed (sender dropped, disconnected).
-    fn resolve_timeout(&self) -> Result<Vec<u8>, ServerError> {
+    /// The deadlined receive: waits `min(caller quantum, time until deadline)`
+    /// and re-evaluates reply-first-then-expiry on every wake, so the caller's
+    /// quantum can never select the terminal outcome (S1). Order per iteration:
+    ///
+    /// 1. Deliver a reply already in hand — an answer that is here must never be
+    ///    reported as a timeout OR an expiry (the observation-point rule).
+    /// 2. If the deadline is due, resolve expiry atomically against the registry
+    ///    (`expire_slot`) and return the terminal outcome promptly — even when
+    ///    the caller's quantum has time left (the quantum is a max wait).
+    /// 3. Otherwise wait for the earlier of quantum-remaining and deadline; a
+    ///    wake re-runs 1-2, and an exhausted quantum before the deadline is the
+    ///    benign `PushReplyTimeout` re-arm with the slot untouched.
+    fn receive_deadlined(
+        &self,
+        timeout: Duration,
+        deadline: Instant,
+    ) -> Result<Vec<u8>, ServerError> {
+        let started = Instant::now();
+        loop {
+            if let Some(result) = self.try_take_reply() {
+                return result;
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return self.expire_slot();
+            }
+            let quantum_left = timeout.saturating_sub(now.duration_since(started));
+            if quantum_left.is_zero() {
+                return Err(ServerError::PushReplyTimeout {
+                    correlation_id: self.correlation_id,
+                });
+            }
+            match self
+                .receiver
+                .recv_timeout(quantum_left.min(deadline.duration_since(now)))
+            {
+                Ok(payload) => return Ok(payload),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(ServerError::PushReplyDisconnected {
+                        correlation_id: self.correlation_id,
+                    });
+                }
+                // Re-loop: deliver a reply that raced the wake, expire a
+                // now-due deadline, or report the exhausted quantum benignly.
+                Err(RecvTimeoutError::Timeout) => {}
+            }
+        }
+    }
+
+    /// Resolves a due deadline against the registry's atomic removal transition.
+    fn expire_slot(&self) -> Result<Vec<u8>, ServerError> {
         let timeout_error = || ServerError::PushReplyTimeout {
             correlation_id: self.correlation_id,
         };
         let Some(runtime) = self.runtime.upgrade() else {
-            // The runtime is gone, and the slot map with it.
-            return Err(timeout_error());
+            // The runtime is gone, and the slot map (with every sender) with it:
+            // the connection side is torn down. Re-check the channel so the
+            // dropped sender reads as the established DISCONNECTED outcome — a
+            // dead runtime must not be misreported as a benign healthy-but-slow
+            // timeout (S4).
+            return self
+                .try_take_reply()
+                .unwrap_or(Err(ServerError::PushReplyDisconnected {
+                    correlation_id: self.correlation_id,
+                }));
         };
-        if runtime.cancel_push(self.correlation_id) {
-            return Err(timeout_error());
-        }
-        match self.receiver.try_recv() {
-            Ok(payload) => Ok(payload),
-            Err(TryRecvError::Disconnected) => Err(ServerError::PushReplyDisconnected {
+        match runtime.expire_push_if_due(self.correlation_id) {
+            PushSlotDisposition::Expired => Err(ServerError::PushReplyExpired {
                 correlation_id: self.correlation_id,
             }),
-            // Unreachable by construction (a removed slot either sent under the
-            // lock or dropped its sender); honest fallback rather than a panic.
-            Err(TryRecvError::Empty) => Err(timeout_error()),
+            // Unreachable by construction (this is only called with the deadline
+            // due, and the registry re-reads a monotonic clock); honest benign
+            // fallback rather than a panic.
+            PushSlotDisposition::Live => Err(timeout_error()),
+            // Another path (a concurrent `resolve_push`, or connection close)
+            // removed the slot under the registry lock while we waited on it. Its
+            // send, if any, happens under that same lock, so re-check the channel:
+            // a delivered reply is present now; a dropped sender is disconnected.
+            PushSlotDisposition::Absent => self
+                .try_take_reply()
+                .unwrap_or_else(|| Err(timeout_error())),
+        }
+    }
+
+    /// Non-blocking check for a reply already sitting in the channel. `Some` with
+    /// the payload or a disconnected error; `None` when the channel is still empty
+    /// (no reply yet — the caller re-arms).
+    fn try_take_reply(&self) -> Option<Result<Vec<u8>, ServerError>> {
+        match self.receiver.try_recv() {
+            Ok(payload) => Some(Ok(payload)),
+            Err(TryRecvError::Disconnected) => Some(Err(ServerError::PushReplyDisconnected {
+                correlation_id: self.correlation_id,
+            })),
+            Err(TryRecvError::Empty) => None,
         }
     }
 }
@@ -577,6 +819,23 @@ impl SupervisorInner {
         }
     }
 
+    /// Queues `control` for `pid` and wakes the process. Returns whether the
+    /// control was PUBLISHED (left in the queue with a successful wake, or
+    /// already consumed by a drain) — `false` guarantees no consumer ever saw
+    /// it.
+    ///
+    /// S8: a failed wake does NOT prove the queued control was never consumed.
+    /// The insert releases the queue lock before the wake attempt, and a
+    /// process already executing a control drain (each control atom drains ALL
+    /// queued controls for the pid) can pop the just-inserted entry in that
+    /// window, then exit before the wake check. Publication is therefore
+    /// disambiguated BY OBSERVATION on the failed-wake path: `remove_control`
+    /// finding and removing the entry proves no consumer saw it (truly
+    /// unpublished — `false`); finding nothing proves a drain consumed it
+    /// (`pop_control` is the only other remover of queue entries, and the
+    /// removal key embeds the push's runtime-unique correlation id, so it can
+    /// never match a different entry) — the control was published and the
+    /// caller's slot lifecycle carries the delivery truth (`true`).
     fn enqueue_control(&self, pid: u64, control: ConnectionControl) -> bool {
         // Keep a key for the failure-path removal before the control is moved into
         // the queue, so a non-`Copy` (push) control can still be located and pulled
@@ -585,14 +844,22 @@ impl SupervisorInner {
         if self.runtime.push_control(pid, control).is_err() {
             return false;
         }
+        // Deterministic test seam in the insert->wake window (S8 staging).
+        #[cfg(test)]
+        self.runtime.run_pre_wake_barrier();
         if self
             .scheduler
             .enqueue_atom_message(pid, self.runtime.control_atom())
         {
             true
         } else {
-            self.runtime.remove_control(pid, &removal_key);
-            false
+            // Failed wake: the entry's fate is the publication verdict. Removed
+            // here => nobody consumed it => unpublished. Already gone => a
+            // drain consumed it before the wake check => published. (A poisoned
+            // queue lock reads as not-removed => published — the safe
+            // direction: the slot lifecycle then reports the truthful outcome,
+            // whereas claiming "unpublished" could be a lie.)
+            !self.runtime.remove_control(pid, &removal_key)
         }
     }
 }
@@ -672,6 +939,9 @@ pub(super) struct ConnectionRuntime {
     /// Deterministic test gate placed after arm and before the final probe.
     #[cfg(test)]
     pre_wait_barrier: Mutex<Option<PreWaitBarrier>>,
+    /// Deterministic test gate in `enqueue_control`'s insert->wake window (S8).
+    #[cfg(test)]
+    pre_wake_barrier: Mutex<Option<PreWaitBarrier>>,
     /// Barrier-staged slices where the final probe found newly arrived work.
     #[cfg(test)]
     pre_wait_probe_hits: AtomicU64,
@@ -727,6 +997,8 @@ impl ConnectionRuntime {
             slice_counts: Mutex::new(HashMap::new()),
             #[cfg(test)]
             pre_wait_barrier: Mutex::new(None),
+            #[cfg(test)]
+            pre_wake_barrier: Mutex::new(None),
             #[cfg(test)]
             pre_wait_probe_hits: AtomicU64::new(0),
             push_replies: Mutex::new(HashMap::new()),
@@ -855,6 +1127,36 @@ impl ConnectionRuntime {
         barrier.armed.wait();
         barrier.release.wait();
         true
+    }
+
+    /// Installs a one-use barrier in `enqueue_control`'s insert->wake window
+    /// (S8 staging: lets a test act as the control-drain consumer between the
+    /// queue insertion and the wake attempt) and returns its test endpoints.
+    #[cfg(test)]
+    pub(super) fn install_pre_wake_barrier(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        let armed = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        if let Ok(mut slot) = self.pre_wake_barrier.lock() {
+            *slot = Some(PreWaitBarrier {
+                armed: Arc::clone(&armed),
+                release: Arc::clone(&release),
+            });
+        }
+        (armed, release)
+    }
+
+    /// Runs the one-use insert->wake test gate, if installed.
+    #[cfg(test)]
+    pub(super) fn run_pre_wake_barrier(&self) {
+        let barrier = self
+            .pre_wake_barrier
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(barrier) = barrier {
+            barrier.armed.wait();
+            barrier.release.wait();
+        }
     }
 
     #[cfg(test)]
@@ -1000,9 +1302,11 @@ impl ConnectionRuntime {
     }
 
     /// Registers a one-shot reply slot for `correlation_id`, owned by connection
-    /// `pid`, and returns its receiver. The connection process resolves the slot
-    /// via [`resolve_push`]; the close path drops the connection's outstanding
-    /// slots via [`cancel_pushes_for_connection`].
+    /// `pid`, and returns its receiver. `deadline` is the slot's optional absolute
+    /// reply expiry (`None` = the default no-deadline shape). The connection
+    /// process resolves the slot via [`resolve_push`]; the close path drops the
+    /// connection's outstanding slots via [`cancel_pushes_for_connection`]; an
+    /// explicit deadline resolves it via [`expire_push_if_due`].
     ///
     /// # Errors
     /// Returns [`ServerError`] when the correlation registry mutex is poisoned.
@@ -1010,6 +1314,7 @@ impl ConnectionRuntime {
         &self,
         pid: u64,
         correlation_id: u64,
+        deadline: Option<Instant>,
     ) -> Result<Receiver<Vec<u8>>, ServerError> {
         let (sender, receiver) = channel();
         let limit = self.limits.max_pending_pushes_per_connection;
@@ -1018,8 +1323,8 @@ impl ConnectionRuntime {
             // §5 `max_pending_pushes_per_connection`: refuse a new in-flight push
             // once this connection already holds the cap. Counted per owning pid so
             // one connection cannot exhaust the shared registry; slots free on
-            // reply, timeout, or connection close. The count-and-insert stays under
-            // the one lock so the cap is enforced atomically.
+            // reply, deadline expiry, or connection close. The count-and-insert
+            // stays under the one lock so the cap is enforced atomically.
             let outstanding = slots.values().filter(|pending| pending.pid == pid).count();
             if outstanding >= limit {
                 return Err(ServerError::ConnectionCapReached {
@@ -1028,26 +1333,70 @@ impl ConnectionRuntime {
                     limit,
                 });
             }
-            slots.insert(correlation_id, PendingPush { pid, sender });
+            slots.insert(
+                correlation_id,
+                PendingPush {
+                    pid,
+                    sender,
+                    deadline,
+                },
+            );
         }
         Ok(receiver)
     }
 
-    /// Drops a registered reply slot without resolving it (the push could not be
-    /// delivered, or its reply deadline passed). Dropping the slot's `Sender`
-    /// wakes a still-waiting awaiter with a disconnected error.
+    /// Host-side, lazy evaluation of a push's reply deadline, called from an
+    /// elapsed [`PushReplyAwaiter::receive`] quantum. This NEVER wakes the
+    /// connection process and runs no timer — it inspects supervisor-owned state
+    /// under the registry lock only.
+    ///
+    /// A slot with an explicit deadline that has passed is removed here (dropping
+    /// its `Sender` and releasing its §5 `max_pending_pushes_per_connection` cap
+    /// admission, since the cap is the per-pid slot count) and reported
+    /// [`PushSlotDisposition::Expired`]. A slot with no deadline, or a deadline
+    /// still in the future, is left UNTOUCHED and reported
+    /// [`PushSlotDisposition::Live`] — the elapsed quantum is a benign re-arm. A
+    /// missing slot is [`PushSlotDisposition::Absent`].
+    fn expire_push_if_due(&self, correlation_id: u64) -> PushSlotDisposition {
+        // S4: a poisoned registry must NOT read as slot absence — the slot (and
+        // its cap admission) may still be in the map. Reclamation recovers the
+        // guard: removal-only operations are sound on a recovered map (a panic
+        // in another critical section cannot leave the HashMap itself in a
+        // partial state; only our bookkeeping invariants could be stale, and
+        // removal restores them). Admission (`register_push`) stays fail-closed.
+        let mut slots = recover_lock(&self.push_replies);
+        let Some(pending) = slots.get(&correlation_id) else {
+            return PushSlotDisposition::Absent;
+        };
+        // Copy the deadline out so the immutable borrow of `slots` ends before the
+        // conditional `remove` below takes a mutable one.
+        let deadline = pending.deadline;
+        match deadline {
+            Some(at) if Instant::now() >= at => {
+                slots.remove(&correlation_id);
+                PushSlotDisposition::Expired
+            }
+            _ => PushSlotDisposition::Live,
+        }
+    }
+
+    /// Drops a registered reply slot without resolving it, used on the
+    /// push-enqueue failure path (the control could not be delivered to a
+    /// now-gone process, so the just-reserved slot is unreachable). Dropping the
+    /// slot's `Sender` wakes a still-waiting awaiter with a disconnected error.
     ///
     /// Returns whether THIS call removed the slot. Removal under the registry
     /// mutex is the atomic resolved-vs-cancelled transition: `false` means
     /// another path won — [`resolve_push`](Self::resolve_push) already sent the
     /// reply (its send happens under the same lock, so the payload is already in
     /// the channel when this returns), or the connection's close path dropped
-    /// the slot (sender gone, channel disconnected). The timed-out awaiter
-    /// disambiguates the two with a non-blocking receive.
+    /// the slot (sender gone, channel disconnected).
     pub(super) fn cancel_push(&self, correlation_id: u64) -> bool {
-        self.push_replies
-            .lock()
-            .is_ok_and(|mut slots| slots.remove(&correlation_id).is_some())
+        // S4: reclamation recovers a poisoned guard — a rollback that silently
+        // skipped its removal would strand the slot and its cap admission.
+        recover_lock(&self.push_replies)
+            .remove(&correlation_id)
+            .is_some()
     }
 
     /// Drops every reply slot owned by connection `pid`, waking each awaiter with a
@@ -1057,27 +1406,80 @@ impl ConnectionRuntime {
     /// awaiter to block the full push-reply timeout. A slot that [`resolve_push`]
     /// already removed is gone, so it is untouched here; an unknown pid is a no-op.
     fn cancel_pushes_for_connection(&self, pid: u64) {
-        if let Ok(mut slots) = self.push_replies.lock() {
-            slots.retain(|_correlation_id, pending| pending.pid != pid);
-        }
+        // S4: the close sweep is the reclamation of last resort ("connection
+        // close at the latest") — it must complete on a poisoned map too.
+        recover_lock(&self.push_replies).retain(|_correlation_id, pending| pending.pid != pid);
     }
 
-    /// Number of reserved push reply slots outstanding. A timed-out push must
-    /// release its slot, so the D4 gate pins this back to zero after a timeout.
+    /// S3 second half (shape (b), check-after-insert): pre-publication
+    /// confirmation that the connection record for `pid` still exists, run in
+    /// the INSERT -> CONFIRM -> PUBLISH order (S7 — confirming after the
+    /// enqueue let a close-swept-then-answered push report `Err` for a Push the
+    /// client had received). `true` leaves the slot in place and the caller may
+    /// publish; `false` means a concurrent close already removed the record —
+    /// this call then removes the caller's own just-inserted slot (rolling back
+    /// its cap admission) so nothing is stranded, and the caller returns
+    /// WITHOUT publishing: an `Err` from the push methods guarantees no `Push`
+    /// control was published.
+    ///
+    /// Why exactly one side always observes the slot: `remove` (the single
+    /// record-removal path) removes the host record BEFORE sweeping the pid's
+    /// push slots, and this check reads the record AFTER inserting the slot and
+    /// BEFORE the control is published. Both records accesses are serialized by
+    /// the `records` mutex, so either (i) this read precedes the record removal
+    /// — then the slot insert precedes the sweep (insert < read < removal <
+    /// sweep in the happens-before order) and the SWEEP observes and removes
+    /// the slot: if the control was published in the meantime the awaiter reads
+    /// the truthful disconnected outcome and a late client reply is a harmless
+    /// no-op; or (ii) this read follows the record removal — then THIS call
+    /// observes the absence, rolls the slot back itself, and nothing was
+    /// published. When both observe (a sweep and a rollback can both run in
+    /// case (ii) if the insert also preceded the sweep), removal is idempotent
+    /// and the cap is derived from map membership, so nothing double-releases.
+    ///
+    /// Lock discipline: `records` and `push_replies` are NEVER held together —
+    /// here (`records` read, released, then `push_replies` on rollback), in
+    /// `remove` (`records` removal, released, then the sweep), and everywhere
+    /// else in this file the two mutexes are taken strictly sequentially, so no
+    /// lock-order inversion is possible. This adds ZERO work to the connection
+    /// slice path: the re-check runs on the push caller's thread only.
+    pub(super) fn confirm_push_registration(&self, pid: u64, correlation_id: u64) -> bool {
+        if self.is_registered(pid) {
+            return true;
+        }
+        self.cancel_push(correlation_id);
+        false
+    }
+
+    /// Number of reserved push reply slots outstanding. A benign wait-quantum
+    /// timeout must NOT change this (the slot survives); an explicit-deadline
+    /// expiry, a consumed reply, and connection close each release exactly one.
     #[cfg(test)]
     pub(super) fn pending_push_count(&self) -> usize {
-        self.push_replies.lock().map_or(0, |slots| slots.len())
+        recover_lock(&self.push_replies).len()
+    }
+
+    /// Reserved push reply slots owned by connection `pid` — the exact quantity
+    /// the §5 `max_pending_pushes_per_connection` cap counts (test instrument).
+    #[cfg(test)]
+    pub(super) fn pending_push_count_for(&self, pid: u64) -> usize {
+        recover_lock(&self.push_replies)
+            .values()
+            .filter(|pending| pending.pid == pid)
+            .count()
     }
 
     /// Resolves the reply slot for `correlation_id` with the client's reply
     /// payload, waking the [`PushReplyAwaiter`]. Called by the connection process
-    /// when a correlated `PushReply` frame arrives. A missing slot (already
-    /// resolved, cancelled, or unknown id) is ignored — a reply that lost the
-    /// resolved-vs-timed-out transition is discarded, never delivered late.
+    /// when a correlated `PushReply` frame arrives. A missing slot — already
+    /// resolved, expired at its explicit deadline, dropped by connection close, or
+    /// an unknown id — is a harmless no-op: a late `PushReply` for a slot that is
+    /// gone is discarded here, never delivered and never a panic or desync.
     pub(super) fn resolve_push(&self, correlation_id: u64, payload: Vec<u8>) {
-        let Ok(mut slots) = self.push_replies.lock() else {
-            return;
-        };
+        // S4: delivery-plus-removal recovers a poisoned guard — dropping a real
+        // reply (and stranding its slot) because an unrelated critical section
+        // panicked would kill reclamation and exact cap accounting.
+        let mut slots = recover_lock(&self.push_replies);
         if let Some(pending) = slots.remove(&correlation_id) {
             // The send stays under the registry lock so removal and delivery are
             // one atomic step: a timed-out awaiter that observes the slot gone
@@ -1325,17 +1727,25 @@ impl ConnectionRuntime {
             .is_ok_and(|controls| controls.iter().any(|queued| queued.pid == pid))
     }
 
-    fn remove_control(&self, pid: u64, control: &ConnectionControl) {
+    /// Pulls a queued-but-unconsumed control back out of the queue. Returns
+    /// whether THIS call removed it — `false` means the entry already left the
+    /// queue, and since [`Self::pop_control`] is the only other remover, a
+    /// consumer drain took it (S8's publication disambiguator). Matching is
+    /// `pid` + full control equality; a `Push` control embeds its
+    /// runtime-unique correlation id, so this can never remove a different
+    /// push's entry and misreport.
+    fn remove_control(&self, pid: u64, control: &ConnectionControl) -> bool {
         let Ok(mut controls) = self.controls.lock() else {
-            return;
+            return false;
         };
         let Some(index) = controls
             .iter()
             .position(|queued| queued.pid == pid && &queued.control == control)
         else {
-            return;
+            return false;
         };
         controls.remove(index);
+        true
     }
 
     fn active_count(&self) -> usize {
@@ -1348,13 +1758,27 @@ impl ConnectionRuntime {
     /// on every close route — `finish`, `mark_crashed`, and `reap_crashed` all
     /// remove through here — and fires regardless of whether the connection ever
     /// registered a worker, so a plain push target is covered too.
+    ///
+    /// ORDER MATTERS (S3/S7): the record is removed BEFORE the push sweep. A
+    /// push registering concurrently runs INSERT -> CONFIRM -> PUBLISH
+    /// (`confirm_push_registration` reads the record after inserting its slot
+    /// and before publishing its control), so with this ordering exactly one
+    /// side always observes a racing slot: a confirm that ran before this
+    /// removal implies the slot was inserted before the sweep below (which then
+    /// reaps it — a control published after that confirm is answered into a
+    /// swept slot, read as the truthful disconnected outcome); a confirm after
+    /// this removal sees the absence, rolls the slot back itself, and never
+    /// publishes. Sweeping first (the original order) left a window — sweep,
+    /// then insert+confirm, then record removal — where NEITHER side observed
+    /// the slot and it leaked past connection close. The two locks are taken
+    /// strictly sequentially (never nested), so no lock-order inversion.
     fn remove(&self, pid: u64) -> Option<ConnectionRecord> {
-        self.cancel_pushes_for_connection(pid);
         let mut removed = self
             .records
             .lock()
             .ok()
             .and_then(|mut records| records.remove(&pid));
+        self.cancel_pushes_for_connection(pid);
         if let Some(registration) = removed.as_mut().and_then(|record| record.readiness.take()) {
             if let Some(scheduler) = self.scheduler.upgrade() {
                 // This call is ACK'd: it returns only after the poll owner has
@@ -1392,6 +1816,25 @@ impl ConnectionRuntime {
 struct PendingPush {
     pid: u64,
     sender: Sender<Vec<u8>>,
+    /// Absolute reply deadline for this push, when one was requested via
+    /// [`ConnectionSupervisor::push_to_connection_with_deadline`]. `None` is the
+    /// default 0.2.3 shape: the slot has no per-slot deadline and is reclaimed
+    /// only by reply-consumed or connection-close. `Some` is evaluated host-side
+    /// and lazily in [`ConnectionRuntime::expire_push_if_due`].
+    deadline: Option<Instant>,
+}
+
+/// Host-side disposition of a reply slot at an elapsed `receive` quantum.
+enum PushSlotDisposition {
+    /// The slot carried an explicit deadline that has passed; this call removed
+    /// it (releasing its §5 cap admission).
+    Expired,
+    /// The slot is present with no deadline, or a deadline still in the future:
+    /// the elapsed quantum is a benign re-arm and the slot is untouched.
+    Live,
+    /// No slot for this correlation id — a concurrent resolve or connection close
+    /// already removed it.
+    Absent,
 }
 
 #[derive(Debug)]
@@ -1424,4 +1867,15 @@ fn lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> Result<MutexGuard<'a, T>, 
     mutex.lock().map_err(|error| ServerError::ListenerAccept {
         message: format!("{context} unavailable: {error}"),
     })
+}
+
+/// Locks `mutex`, RECOVERING a poisoned guard instead of failing (S4). For
+/// lifecycle-cleanup paths only (reply delivery, expiry, cancellation, the
+/// close sweep): removal-style operations are sound on a recovered map, and a
+/// cleanup that silently skipped its removal would strand slots and their §5
+/// cap admissions forever. Admission paths keep the fail-closed [`lock`].
+fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

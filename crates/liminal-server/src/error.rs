@@ -51,12 +51,32 @@ pub enum ServerError {
     },
 
     /// A server→client push reply did not arrive within the awaiter's timeout —
-    /// the worker is still connected but did not reply in time.
+    /// the worker is still connected but did not reply in this wait quantum. This
+    /// is BENIGN: the reply slot survives untouched and the caller may re-arm
+    /// [`PushReplyAwaiter::receive`](crate::server::connection::PushReplyAwaiter::receive)
+    /// indefinitely. It is not a worker-death signal.
     #[error(
         "push correlation {correlation_id} did not complete: no correlated push reply arrived within the timeout"
     )]
     PushReplyTimeout {
-        /// Correlation id of the push that timed out.
+        /// Correlation id of the push whose wait quantum elapsed.
+        correlation_id: u64,
+    },
+
+    /// A server→client push carrying an explicit reply deadline (via
+    /// [`push_to_connection_with_deadline`](crate::server::connection::ConnectionSupervisor::push_to_connection_with_deadline))
+    /// reached that deadline before a correlated reply arrived. Unlike
+    /// [`Self::PushReplyTimeout`] this is TERMINAL: the reply slot has been
+    /// removed and its §5 `max_pending_pushes_per_connection` cap admission
+    /// released. Returned PROMPTLY once the deadline is due — a `receive` call
+    /// does not hold a due expiry until its caller's quantum ends, so the
+    /// terminal outcome is independent of how the caller polls. Distinct
+    /// variant so callers classify by type, not message.
+    #[error(
+        "push correlation {correlation_id} did not complete: its reply deadline passed before a correlated push reply arrived"
+    )]
+    PushReplyExpired {
+        /// Correlation id of the push whose reply deadline passed.
         correlation_id: u64,
     },
 

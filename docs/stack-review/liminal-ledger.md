@@ -186,6 +186,105 @@ beamr `d147fc6` + `9710912` (FIFO owner pop + regression tests), merged
 2026-07-07, unpublished. Pin bump targets **0.12.1 ≥ 9710912** (Artemis
 preparing; publish gated on Tom). Do not pin crates.io 0.12.0.
 
+### G7. Push-reply slot cancelled on the first receive timeout — FIXED 2026-07-12 (unreleased-main-only regression; never shipped)
+
+**Scope: unreleased main only — this defect existed between the D4 leak-repair
+wave and this fix; no published liminal release ever carried it.** The
+documented 0.2.3 push-reply contract was: `PushReplyAwaiter::receive(timeout)`'s
+`timeout` is a WAIT QUANTUM only — "each elapsed poll is a benign re-arm, never a
+failure." The D4 leak-repair wave (`supervisor.rs` `resolve_timeout` →
+`runtime.cancel_push`) silently overloaded that parameter to ALSO be the reply
+slot's lifetime: the FIRST elapsed `receive` cancelled the reserved slot. A
+consumer that polls `receive(1s)` in an unbounded re-arm loop (aion's dispatch
+path) then saw its re-armed `receive` find the sender dropped →
+`PushReplyDisconnected` → a FALSE lost-worker at ~poll+ε while the worker was
+healthy and its handler merely ran longer than one poll quantum.
+
+**Found by aion re-proofs, root-caused by counter-experiment** (the counter-test
+inverted the assertion the D4 wave had pinned, `pending_push_count == 0` after a
+timeout, and showed a slow-but-healthy handler dying at the first quantum). The
+leak the D4 cancel-on-timeout guarded is now bounded anyway by the §5
+`max_pending_pushes_per_connection` cap (32 — count-and-insert under the
+push-slot registry mutex, the cap being the per-pid slot count, released on
+slot removal; the CAS reservation is the `max_connections` CONNECTION
+admission, a different cap), so the cancel earned nothing and cost the
+contract.
+
+**Ruling (domain owner + consumer seats, on the record):** a caller's poll
+quantum must NEVER change the protocol outcome. The `timeout` was doing two jobs
+(wait quantum AND slot lifetime); they split — the slot's lifetime belongs to the
+PUSH (the reply's deadline is a property of the request), the receive timeout is
+just how long THIS caller waits THIS time. Mirrors the certified R1(vi)
+pending-reply table design (deadline at admission, reclamation by operation
+lifecycle).
+
+**Restored + strengthened contract:** (1) `receive`'s elapsed timeout returns the
+`PushReplyTimeout` variant WITHOUT cancelling and NEVER cancels — re-arm works
+indefinitely; a reply already in the channel is delivered rather than reported as
+a timeout. (2) DEFAULT slot lifetime is the 0.2.3 shape exactly: no per-slot
+deadline; the slot is reclaimed only by reply-consumed or connection-close
+(`cancel_pushes_for_connection`). Rule 2 signs cost NUMBERS, so no default
+deadline number was invented; the §5 push cap bounds abandonment. (3) Additive
+NEW capability: `push_to_connection_with_deadline(pid, payload, deadline)` attaches
+an explicit per-push reply deadline; at expiry the slot resolves to the new typed
+`ServerError::PushReplyExpired`, is removed, and its §5 cap admission released.
+Expiry is evaluated HOST-SIDE and LAZILY (at `receive` touch points and at
+connection close at the latest) — no timer thread, no sweeper, no parked-process
+wake; an abandoned-and-never-polled deadlined push resolves at connection close.
+This laziness is deliberate: zero idle cost. `push_to_connection` stays
+byte-compatible on the no-deadline path. (4) A late `PushReply` frame for an
+expired/removed slot is a harmless no-op (`resolve_push` benign missing-slot
+discard), pinned by test.
+
+**Regression pins:** `elapsed_receive_polls_are_benign_rearms` (the inverted D4
+assertion — every elapsed poll leaves the slot reserved),
+`receive_poll_quantum_never_changes_protocol_outcome` (real connection, reply
+after ≥3 elapsed quanta, delivered byte-exact, no disconnect),
+`explicit_deadline_expires_slot_and_releases_cap`,
+`late_reply_after_expiry_is_a_harmless_noop`,
+`poll_quantum_independence_yields_the_same_outcome`,
+`concurrent_enumeration_during_polling_does_not_change_outcome`.
+
+**Adversarial Sol round hardening (same branch, pre-merge):** the deadlined
+receive now waits `min(caller quantum, time until deadline)` and re-evaluates
+reply-first-then-expiry on every wake, so the terminal outcome of a deadlined
+push is quantum-independent and a due expiry returns promptly (the quantum is a
+max wait, not a promise to block); the no-deadline receive never touches the
+slot registry (behaviour-compatible with 0.2.3 — no contention or poison
+exposure on the unchanged API); a close-vs-register race that could strand a
+slot past connection close is walled off (record removal ordered before the
+close's push sweep + a post-insert, pre-enqueue registration confirmation (INSERT -> CONFIRM -> PUBLISH) — exactly one side
+always observes a racing slot); reclamation paths (expiry, reply delivery,
+cancellation, close sweep) recover a poisoned registry guard and complete
+their removals while admission stays fail-closed; a dead runtime reads as
+DISCONNECTED, never a benign timeout; and an extreme deadline duration is
+refused as a typed error instead of an `Instant` panic. Round 2 added the
+PUBLICATION INVARIANT (S7): push registration runs insert -> confirm ->
+publish, so an `Err` from `push_to_connection{,_with_deadline}` guarantees no
+`Push` control was published — the confirm-after-enqueue order could report
+failure for a push the client had already received and answered. Round 3
+closed the invariant's last hole (S8): a failed wake does not prove the queued
+control was never consumed (a live control drain can pop it in the
+insert->wake window), so publication on that branch is disambiguated BY
+OBSERVATION — the failed-wake rollback returning "removed" proves unpublished
+(typed `Err`); "already gone" proves a drain consumed it (only `pop_control`
+also removes queue entries, and the removal key embeds the push's unique
+correlation id), and the call returns `Ok`: `Ok` promises ADMISSION, not
+delivery — the awaiter's outcome is the delivery truth. Pins:
+`same_deadlined_schedule_yields_same_outcome_for_any_quantum`,
+`overdue_deadlined_receive_returns_expired_promptly`,
+`no_deadline_receive_never_blocks_on_registry_lock`,
+`close_racing_push_registration_never_strands_slot_or_cap`,
+`poisoned_registry_still_reclaims_and_expires`,
+`dropped_runtime_yields_disconnected_not_timeout`,
+`duration_max_deadline_is_refused_without_slot_leak`,
+`public_deadlined_push_expires_promptly_over_real_connection`,
+`public_deadlined_push_reply_after_deadline_instant_still_wins`,
+`close_between_insert_and_confirm_publishes_nothing`,
+`err_from_public_push_publishes_nothing_after_close`,
+`failed_wake_rollback_err_publishes_nothing`,
+`control_consumed_before_failed_wake_reads_ok_then_disconnected`.
+
 ## H. Server direction (2026-07-07)
 
 Product scoping + phase-1 build plan live in `docs/design/SERVER-DIRECTION.md`
