@@ -1,9 +1,10 @@
 # The MCP seam — joint one-pager (liminal × haematite)
 
-**Status:** DRAFT — Hermes Crumpet first-clear draft, awaiting Apollo
-Biscuit's tear (agreed protocol: first-clear-drafts-other-tears). Feeds BOTH
-repos' console/MCP design docs; neither routes to the pair before this page
-is torn and settled.
+**Status:** TORN AND FOLDED — Hermes Crumpet first-clear draft (5e0e098),
+Apollo Biscuit's tear 2026-07-12 (verdict: structure stands; six amendments
+T1–T6, folded in this revision — T2/T3/T4 are his layer's load-bearing
+walls, worded by him). Joint names: Hermes Crumpet (liminal) + Apollo
+Biscuit (haematite). Feeds BOTH repos' console/MCP design docs.
 **Inputs:** liminal console scout (norn session b4fad82a, envelope
 `~/.norn/delegations/claude-scout-console.GMHHYy`, observed at liminal main
 3c3aa10); Cally Ray's F-0c §R1 consumer contract (frame `6a750c8`,
@@ -40,8 +41,14 @@ The argument rests on an asymmetry the gateway shape cannot absorb:
   its MCP surface can only be served by whatever process embeds it
   (liminal-server, aion, a standalone inspector). A "haematite MCP
   endpoint" as a deployable is a category error; a "haematite MCP contract
-  hosted by the embedder" is exactly implementable. [Apollo: tear here —
-  this sentence is me speaking for your layer.]
+  hosted by the embedder" is exactly implementable. **(T1, torn and
+  confirmed):** the standalone-inspector host is not hypothetical — the
+  `crates/haem` stats CLI is a real standalone host today, and the
+  haematite contract's FIRST host may be a local `haem` process speaking
+  MCP over **stdio**: zero listener, zero idle cost, auth = OS
+  process-spawn rights. The seam contract is **transport-identical** over
+  stdio and an embedder's HTTP listener — same resources, same refusals,
+  same versioning.
 
 So: **each service defines its contract; each host process mounts the
 contracts of the services it embeds** (liminal-server mounts liminal's, and
@@ -73,14 +80,28 @@ Contract:
    bearer token, configured independently of the H4 client token
    (`[console] auth_token` class, exact key at design-doc level). One
    credential class per audience; rotating operator access never touches
-   client auth, and vice versa.
-2. **haematite's trust boundary is the embedder.** haematite trusts its
-   host process; it never sees the network. Therefore the embedder's MCP
-   auth IS haematite's auth, and the haematite contract must state what the
-   embedder is licensed to expose: redacted stats and lifecycle facts, not
-   store contents. No raw key/value read, no scan, no path disclosure
-   beyond what the embedder's own config already names. [Apollo: your
-   boundary to word.]
+   client auth, and vice versa. **(T1):** where the transport is stdio (the
+   `haem`-class local host), the bearer-token clause is **N/A by
+   construction and says so** — auth is the OS's process-spawn boundary;
+   nobody bolts a token onto a pipe.
+2. **haematite's trust boundary is the embedder — and it splits into TWO
+   read modes with OPPOSITE lock semantics that the seam must never blur
+   (T2, Apollo's wording, load-bearing):**
+   - **(a) LIVE observer:** the blessed `ReadOnlyDatabase` path — takes NO
+     lock, cannot block a writer. This is the ONLY mode a live host mounts.
+   - **(b) OFFLINE inspector:** the `vacuum_stats` class — takes the A4
+     WRITER LOCK by design (exclusive store access is its correctness
+     precondition). Offline tools NEVER mount on a live host's seam; an
+     attempt is a typed refusal in its own class
+     (`refused:requires-exclusive-store`, §(iii)) whose remedy names the
+     offline runbook. Without this split, someone eventually wires
+     `haem stats` behind an MCP tool on liminal-server and the console
+     acquires the writer lock against a live database — the storage twin of
+     the busy-spin resurrection the liminal birth-rule kills.
+   The embedder's MCP auth IS haematite's auth; what the embedder is
+   licensed to expose is redacted stats and lifecycle facts, never store
+   contents: no raw key/value read, no scan, no checkout, no path
+   disclosure beyond what the embedder's own config already names.
 3. **Redaction by default, allowlist to widen.** Raw fds, auth token bytes,
    cluster cookies, and filesystem paths are redacted from every MCP
    response by default. Widening is an explicit config act with a named
@@ -95,10 +116,12 @@ v1 ships no mutating tools. But per house doctrine (**refusals name their
 remedy**), read-only is a CONTRACT SHAPE, not a missing feature: the seam
 declares the mutation classes it does not serve, and a mutation attempt
 gets a typed refusal naming the class, the version gate, and the remedy
-("not in v1; mutation class X is design-gated on <doc>"). Three distinct
-outcomes, never conflated: `refused:unauthenticated`, `refused:read-only`,
-`refused:not-mounted`. A consumer can build against v1 and know exactly
-which wall it hit.
+("not in v1; mutation class X is design-gated on <doc>"). **Four** distinct
+outcomes, never conflated (T2 adds the fourth):
+`refused:unauthenticated`, `refused:read-only`, `refused:not-mounted`,
+`refused:requires-exclusive-store` (an offline-inspector capability asked
+of a live host — remedy names the offline runbook). A consumer can build
+against v1 and know exactly which wall it hit.
 
 **liminal v1 views** (each field arrives at design-doc level with the full
 per-field line: owner / update-event / read-primitive / lock-behavior /
@@ -123,9 +146,31 @@ registry snapshot, `service_inventory()`, and OpsState-class
 event-maintained snapshots (immutable redacted config + atomics +
 Arc-swapped copy-on-write). The R7 slice counters ride only via their
 signed promotion (per-connection AtomicU64, active-slice cost signed at the
-pair's desk). **haematite v1 views:** Apollo's half — same shape expected
-(store mode/paths-as-configured, shard/sweep gauges, no content reads), his
-layer to word.
+pair's desk).
+
+**haematite v1 views (T4, Apollo's half):**
+
+- **store identity** — data_dir AS CONFIGURED, format_version, shard_count
+  (config echo; the vacuum TRUST_BOUNDARY precedent applies verbatim).
+- **shard gauges** — materialised count, per-shard committed seq
+  (embedder-maintained).
+- **branch/snapshot metadata counts** — names redacted by default per
+  (ii)(3): count + kind only, until allowlisted.
+- **last VacuumReport AS A DOCUMENT** — if the operator ran one; the report
+  is already serde-Serialize and redaction-shaped. The seam serves the
+  artifact, never runs the tool.
+
+NO content reads, NO scan, NO checkout — the mutation-class registry lists
+vacuum/sweep (unit 2) as design-gated from birth.
+
+### Versioning (T5 — load-bearing, given consoles-rewritten-in-Frame)
+
+The contract version is a **resource the consumer reads FIRST**. Additive =
+new views/fields. Breaking = any removal, rename, redaction-widening
+reversal, or refusal-class change; a breaking change bumps the major, and
+the old contract's refusals name the migration. The seam is the durable
+artifact, so its version discipline is the whole ballgame — and it is the
+part other seats' seams inherit verbatim (§out-of-scope).
 
 ## (iv) The shared idle clause
 
@@ -138,26 +183,37 @@ from the incident, stated so no console can resurrect the busy-spin:
   event-maintained host state; writers pay at their existing lifecycle
   events. Pinned by the permanent regression: a console scrape does not
   advance a parked connection's slice counter (the R7 tombstone's sibling).
-- **No-writer-lock (haematite's half, wording Apollo's):** serving any MCP
-  read never takes a lock that a write/flush/sweep hot path takes, and
-  never touches the writer lock or store fds. Pinned by an equivalent
-  fail-first assertion in haematite's suite.
+- **No-writer-lock (haematite's half — T3, Apollo's wording):** "Serving
+  any MCP read acquires zero locks that any write/flush/sweep path
+  acquires, touches zero store fds for writing, and performs zero node
+  writes — pinned fail-first." The caveat that rides WITH it:
+  `ReadOnlyDatabase`'s read is WAL-replay-per-call (recorded under LEDGER
+  A2) — a polling console re-replays the WAL every scrape. So the haematite
+  v1 views ride embedder-maintained gauges and config-echo wherever
+  possible, and any observer-backed view carries its per-call cost as a
+  lens line PLUS a staleness field (as-of-last-replay) in the response
+  itself. A view that hides its polling cost is the incident wearing a
+  dashboard.
 
 Honest caveat, stated not hidden: the serving THREAD itself is not free —
 the health worker already wakes every 10ms polling accept, and an HTTP/MCP
 request executes on it. That is a pre-existing, separately-signed idle cost
 of the transport, not of the seam; any new listener thread this design adds
-is a rule-2 item (bound + pinning test + sign-off) from birth.
+is a rule-2 item (bound + pinning test + sign-off) from birth. (The
+stdio-host transport, T1, carries zero idle cost by construction.)
 
 **Idle-cost lens answers travel WITH the seam:** every view added to the
 contract answers the four lens questions (idle cost + ceiling / aggregate
 ceiling / quiescence test / by-design⇒signed) in the design doc, per the
 campaign's standing rule 5.
 
-## Out of scope (named so the tear can confirm the fence)
+## Out of scope (named so the tear can confirm the fence — confirmed, T6)
 
-Mutating tools (v2+, design-gated); the Frame console itself (consumer);
-the stack gateway (consumer); aion/norn MCP surfaces (their seats, same
-shape expected); F-0c's conversation-participant contract (Cally's R1 list
-is the *client-protocol* acceptance surface — this seam is the *operator*
+Mutating tools (v2+, design-gated; haematite's vacuum/sweep listed in the
+mutation-class registry from birth); the Frame console itself (consumer);
+the stack gateway (consumer); aion/norn MCP surfaces — their seats, same
+shape expected, **and the §Versioning paragraph is the part they inherit
+verbatim, so four seams don't invent four version disciplines** (T6);
+F-0c's conversation-participant contract (Cally's R1 list is the
+*client-protocol* acceptance surface — this seam is the *operator*
 surface; they meet only at the conversations view's field list).
