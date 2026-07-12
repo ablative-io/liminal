@@ -1,19 +1,22 @@
 # Liminal ops-console + MCP surface — the liminal half of the seam
 
-**Status:** DRAFT — pending Apollo Biscuit's tear of the MCP-seam one-pager
-(its (i)/(ii)/(iv) conclusions are load-bearing here and may shift); does not
-route to the certifying pair before that tear settles. Every section that
-rests on a one-pager conclusion carries a **[SEAM-DEP]** tag so post-tear
-rework is mechanical: if the tear moves (i), (ii), (iii), or (iv), grep this
-file for the tag and only those sections change.
+**Status:** DRAFT — the one-pager this doc drafts against is now **TORN AND
+SETTLED** (Apollo Biscuit's tear folded at `design/mcp-seam-one-pager` @
+`7b768eb`, amendments T1–T6); this revision is the post-tear sync. Routes to
+the certifying pair after the domain owner's read. Every section that rests
+on a one-pager conclusion carries a **[SEAM-DEP]** tag; the tags now mark
+sections *synced to the settled one-pager @ 7b768eb* — if the contract ever
+moves again, grep the tag and only those sections change.
 
-**Base:** liminal branch `design/mcp-seam-one-pager` (this doc cites that
-branch's `docs/design/MCP-SEAM-ONE-PAGER.md`; it is NOT written off main).
+**Base:** liminal branch `design/mcp-seam-one-pager` @ `7b768eb` (this doc
+cites that branch's settled `docs/design/MCP-SEAM-ONE-PAGER.md`; it is NOT
+written off main).
 **Ground truth:** the liminal console scout (norn session b4fad82a, envelope
 `~/.norn/delegations/claude-scout-console.GMHHYy`, observed at liminal main
 `3c3aa10`). The scout's file:line anchors are cited throughout. The tree has
-moved since `3c3aa10` (this branch descends from main `a028711`, and a
-push-reply fix is in flight elsewhere); every anchor a design decision rests
+moved since `3c3aa10` (this branch descends from main `a028711`; the
+push-reply deadline fix has since **merged to main @ `68379e8`** — see §4.5);
+every anchor a design decision rests
 on was re-derived on this branch and the re-derived line is the one cited.
 Where a cited number is load-bearing it was opened and read, not trusted from
 the scout.
@@ -87,16 +90,29 @@ implementation half. Concretely, this doc commits to:
   resources and tools, JSON shapes at sketch level, the typed-refusal
   taxonomy, and versioning posture.
 
-**Transport binding, restated from the tear-pending one-pager §(i):** the
+**Transport binding, restated from the settled one-pager §(i):** the
 liminal MCP surface rides the **EXISTING health listener** process-side (same
 bind-address exposure model, no new listener thread in v1), OR a sibling
 listener in the same process if the certifying pair rules that the health
 listener's serial handler and 2 s read timeout disqualify sharing
 (`health/endpoint.rs:122,146` — one worker, `thread::sleep(10ms)` on
-WouldBlock, `set_read_timeout(2s)`). **v1 chooses reuse-no-new-thread**; the
-sibling-listener fallback is a rule-2 item from birth (§8) because it adds a
-resident thread. This whole paragraph is [SEAM-DEP §(i)]: if the tear moves
-the transport verdict, §2's mount point and §8's cost accounting move with it.
+WouldBlock, `set_read_timeout(2s)`). **v1 chooses reuse-no-new-thread** —
+**domain-owner determination (b), recorded:** v1 stays on the shared health
+worker with the bounded-response + scrape-work budget (§8); the
+sibling-listener fallback fires only if the pair rules the head-of-line risk
+disqualifying, and is a rule-2 item from birth (§8) because it adds a
+resident thread.
+
+**T1 (tear amendment, folded): the contract is transport-identical over
+stdio and HTTP.** The tear confirmed a real stdio host in the seam (the
+`haem` stats CLI class: zero listener, zero idle cost, auth = OS
+process-spawn rights). **liminal-server's v1 surface is HTTP** — it is a
+process with an existing listener, and nothing here proposes a liminal stdio
+host — but the CONTRACT (§11) must not assume HTTP: same resources, same
+refusals, same versioning over either transport. Concretely, no §11 resource
+or refusal may encode an HTTP-ism (status codes, headers, URLs-as-semantics);
+HTTP is the mount, not the meaning. This whole section is [SEAM-DEP §(i)],
+synced @ 7b768eb.
 
 ---
 
@@ -360,17 +376,21 @@ atomic the relevant view already maintains:
 Plus **refusal counters by typed-refusal class** — one atomic per class,
 incremented where the refusal is emitted:
 
-- `refused:unauthenticated`, `refused:read-only`, `refused:not-mounted` (the
-  one-pager §(iii) MCP-surface taxonomy, §11.3).
+- `refused:unauthenticated`, `refused:read-only`, `refused:not-mounted`,
+  `refused:requires-exclusive-store` (the one-pager §(iii) four-class
+  MCP-surface taxonomy, §11.3 — the fourth class is reserved liminal-side,
+  §11.3).
 - Wire-protocol refusal counters: auth failures, cap-exceeded rejections by
   cap class, backpressure `Reject`/`Defer` counts.
-- **Push-reply expiry counter — taxonomy anticipates the in-flight variant.**
-  A push-reply fix is in flight on `fix/push-reply-deadline-on-push` adding
-  `push_to_connection_with_deadline` + a `PushReplyExpired` outcome. The
-  caps/pressure refusal taxonomy reserves a `push_reply_expired_total` class
-  now so that when that fix lands, its expiries surface as a first-class
-  pressure counter rather than an untyped drop. **This doc does not depend on
-  or touch that branch** — it only shapes the taxonomy to receive it.
+- **Push-reply expiry counter — now a merged surface.** The push-reply
+  deadline fix **merged to main @ `68379e8`** (ledger G7):
+  `ConnectionSupervisor::push_to_connection_with_deadline`
+  (`supervisor.rs:295` on main) and `ServerError::PushReplyExpired`
+  (`error.rs:78` on main; an expired slot resolves to it at
+  `supervisor.rs:657`). The caps/pressure taxonomy carries
+  `push_reply_expired_total` as a first-class pressure counter, incremented
+  where the `Expired` disposition resolves — a typed expiry, not an untyped
+  drop.
 
 All lock-free atomics; idle-cost 0 (occupancy gauges are written at the same
 events the caps govern; refusal counters only move when a refusal is emitted,
@@ -461,8 +481,30 @@ contend the durability writer path. **Safe alternative:** report store **mode/
 path-configured from the construction branch** (`config`, `services.rs:830-888`
 selects `Some(path)`→persistent vs `None`→ephemeral) plus, if wanted, explicit
 operation/last-error **counters instrumented at the call sites** — never a
-store probe. Deeper haematite internals are Apollo's half of the seam, under
-haematite's own never-take-writer-lock rule (one-pager §(iv) no-writer-lock).
+store probe. **Domain-owner determination (d), recorded: store status =
+construction-facts only, confirmed.**
+
+**The settled split (T4, no longer a deferral):** the tear settled the
+durability line's two halves. **liminal-side: construction facts** (mode/
+path-configured from the construction branch, as above). **haematite-side:
+the T4 views, Apollo's half of the settled contract** — store identity
+(data_dir AS CONFIGURED, format_version, shard_count — config echo), shard
+gauges (materialised count, per-shard committed seq, embedder-maintained),
+branch/snapshot metadata counts (names redacted by default), and the last
+`VacuumReport` **as a document** (the seam serves the artifact, never runs
+the tool). No content reads, no scan, no checkout. When liminal-server opts
+in to mounting haematite's contract (namespaced, one-pager §(i)), it mounts
+those T4 views as specified there — this doc adds nothing to them.
+
+**T3 shape inheritance (folded):** every liminal v1 field is
+event-maintained or config-frozen, so **no liminal v1 field is
+observer-backed** — but the durability line inherits T3's shape for any
+future observer-backed field (haematite's `ReadOnlyDatabase` read is
+WAL-replay-per-call, LEDGER A2): such a field carries its **per-call cost as
+a §9 lens line PLUS an `as_of` staleness field in the response itself**. A
+view that hides its polling cost is the incident wearing a dashboard
+(one-pager §(iv), Apollo's wording). §11.1's response shape reserves the
+`as_of` slot for exactly this.
 
 ### 5.5 Conversation registry `count` scrapes — CONTENTION-UNSAFE
 `registered_actor_count`/`registered_participant_count`
@@ -498,7 +540,9 @@ runs no slice, `process.rs:211`). Reads are `Relaxed` loads, lock-free.
 - **Cardinality:** one atomic per live connection, ≤ `max_connections` (256).
   Not a per-pid labelled metric (registry cardinality/cache risk, scout) and
   not the mutex map (§5.3). This is the explicit cardinality decision the scout
-  asked for.
+  asked for — **domain-owner determination (a), recorded: per-connection
+  AtomicU64 cardinality CONFIRMED; the increment-cost number stays the
+  pair's to sign.**
 - **Signed active-slice cost:** the added steady cost is exactly one `Relaxed`
   atomic increment on the slice path that already ran. At idle there is no
   slice, so the added idle cost is **zero**. Because it touches the hot path at
@@ -553,10 +597,19 @@ decision").
    credential returns `refused:unauthenticated` (§11.3), distinguishable from
    `refused:not-mounted`. An agent must be able to tell "wrong credential" from
    "surface not here."
+4. **Stdio transport: auth N/A by construction (T1, folded).** Where a seam
+   host's transport is stdio (the `haem`-class local host), the bearer-token
+   clause is **N/A by construction and says so** — auth is the OS's
+   process-spawn boundary; nobody bolts a token onto a pipe. liminal-server's
+   v1 mount is HTTP, so the bearer clause applies here in full — but the
+   CONTRACT's auth section is worded per-transport, not assumed-HTTP (§1 T1),
+   so a future stdio host of this same contract inherits the N/A clause
+   rather than a vestigial token check.
 
-[SEAM-DEP §(ii)]: if the tear changes the credential model (e.g. mandates mTLS
-or an authenticated proxy over bearer), §7.2 and the §11.3 refusal wiring
-change; nothing else does.
+[SEAM-DEP §(ii)]: synced to the settled one-pager @ 7b768eb (tear folded T1
+into §(ii)(1)); if the credential model ever moves again (e.g. mTLS or an
+authenticated proxy over bearer), §7.2 and the §11.3 refusal wiring change;
+nothing else does.
 
 ### 7.3 Redaction defaults
 Redacted from **every** MCP response by default, widened only by an explicit
@@ -613,7 +666,13 @@ a resident thread whose idle cost (its own accept-poll cadence) must be bounded,
 pinned, and signed. v1 avoids this by reusing the existing worker and by
 **addressing the serial 2 s head-of-line behavior before adding expensive
 endpoints** (scout next-step) — e.g. a bounded response size and a scrape-work
-budget so an MCP call cannot starve liveness.
+budget so an MCP call cannot starve liveness. **Domain-owner determination
+(b), recorded:** exactly this posture is confirmed — shared worker +
+bounded-response + scrape-work budget; sibling listener only on the pair's
+disqualifying ruling. (For contrast, the seam's stdio-host transport — T1,
+not liminal-server's mount — carries **zero** idle cost by construction; the
+10 ms accept-poll is a cost of *this host's* HTTP transport, not of the
+contract.)
 
 House rule enforced here: **every acceptance claim names its (future) pinning
 test.** G-NOWAKE names the §6 regression + the boundary assertion. No claim in
@@ -724,7 +783,12 @@ OpsState/the reused primitives:
 
 Every document carries `phase` (`starting` | `running` | `draining`, §2.3) and
 a `scraped_at` timestamp; the console **never** claims an all-fields atomic
-instant (§2.4, scout risk).
+instant (§2.4, scout risk). The response shape also reserves a per-field
+`as_of` staleness slot (T3, §5.4): unused by liminal's v1 event-maintained
+fields, **mandatory** for any future observer-backed field, whose response
+must carry its own as-of alongside the §9 lens line for its per-call cost.
+Per §1 T1, none of these shapes encode an HTTP-ism — they are
+transport-identical documents.
 
 ### 11.2 Tools (read-only in v1)
 Tools are the *queryable* face of the same state (a resource is the whole view;
@@ -743,37 +807,67 @@ a tool is a parameterized read):
 is declared as a **known-refused class**, so an attempt returns a typed refusal
 naming the class, the version gate, and the remedy (§11.3) — not a silent 404.
 
-### 11.3 The typed-refusal taxonomy (one-pager §(iii))
-Three distinct outcomes, **never conflated**:
+### 11.3 The typed-refusal taxonomy (one-pager §(iii), four classes per T2)
+**Four** distinct outcomes, **never conflated** (the tear added the fourth):
 
 | Refusal | Meaning | Remedy named in the refusal |
 |---|---|---|
 | `refused:unauthenticated` | missing/wrong operator bearer token (§7) | "present a valid `[console] auth_token` bearer" |
 | `refused:read-only` | a mutation verb that is design-gated out of v1 | "not in v1; mutation class `X` is design-gated on `<doc>`" (v2+) |
 | `refused:not-mounted` | the surface/service is not mounted in this process (e.g. a full-only view under worker-front-door, §2.3) | "view `Y` is absent-by-profile / mount the embedding service" |
+| `refused:requires-exclusive-store` | an offline-inspector capability asked of a live host (T2: the `vacuum_stats` class takes the A4 writer lock by design; offline tools never mount on a live host's seam) | **names the offline runbook** — "run `<offline tool>` against a stopped store per `<runbook>`" |
+
+**`refused:requires-exclusive-store` is reserved/unused liminal-side in v1 —
+stated honestly rather than inventing a liminal use.** The class exists in
+haematite's half (Apollo's T2 wall: without it, someone eventually wires
+`haem stats` behind an MCP tool on liminal-server and the console acquires
+the writer lock against a live database — the storage twin of the busy-spin
+resurrection). liminal's own v1 views have no exclusive-store capability to
+refuse; liminal carries the class because the taxonomy is seam-wide
+(consumers switch on four names, not per-service subsets), and it becomes
+live on this host exactly when liminal-server opts in to mounting haematite's
+contract (§5.4).
 
 A consumer can build against v1 and know **exactly which wall it hit** — wrong
-credential vs design-gated vs not-here — which is the product-honesty property
-§0 requires. Each refusal also increments its §4.5 counter, so refusal rates
-are themselves observable.
+credential vs design-gated vs not-here vs needs-the-store-offline — which is
+the product-honesty property §0 requires. Each refusal also increments its
+§4.5 counter, so refusal rates are themselves observable.
 
-### 11.4 Versioning posture
-The seam is a **named, versioned** contract (one-pager §0). v1 posture:
+### 11.4 Versioning — aligned to the one-pager §Versioning (T5), not restated differently
+The seam's version discipline is settled contract text; this section quotes
+and applies it rather than paraphrasing it into drift:
 
-- The contract carries a version (`liminal-ops/v1`) surfaced in a discovery
-  resource so a consumer can pin it.
-- **Additive within a major:** new fields and new read tools may be added
-  within v1 without a break; a consumer must ignore unknown fields.
-- **Refusal classes are stable:** the three refusal names are part of the
-  contract, not implementation detail — an agent may switch on them.
+> The contract version is a **resource the consumer reads FIRST**. Additive =
+> new views/fields. Breaking = any removal, rename, redaction-widening
+> reversal, or refusal-class change; a breaking change bumps the major, and
+> the old contract's refusals name the migration.
+> — one-pager §Versioning (T5) @ 7b768eb
+
+Applied to liminal's half:
+
+- **Version-as-resource, read first:** `liminal://ops/contract` returns
+  `{ contract: "liminal-ops", major: 1, additive_rev: N }`; a consumer reads
+  it before any view. It is itself served from immutable OpsState config
+  (read-prim `config`, exact, zero idle-cost).
+- **Additive** (no bump): new views, new fields, new read tools. A consumer
+  must ignore unknown fields (§11.1 shapes are open-world within a major).
+- **Breaking** (major bump): any removal, rename, **redaction-widening
+  reversal** (un-exposing something previously widened), or refusal-class
+  change — the four refusal names of §11.3 are contract, and changing them is
+  a break by the settled definition.
+- **Refusals name the migration:** after a major bump, the OLD contract's
+  refusals name the migration path — a v1 consumer hitting a v2 host is told
+  where to go, not left to a 404.
 - **Mutation is a major-version act:** v2 introduces mutating tools behind
   their own design gate (§14); until then `refused:read-only` names v2 as the
-  remedy. The durable artifact is this contract, so its evolution is governed,
-  not incidental (the Frame console will be rewritten against *this*, §0).
+  remedy.
 
-[SEAM-DEP §(iii)]: if the tear changes the view set, the read-only framing, or
-the refusal taxonomy, §11.1–§11.3 change and §11.4's stability promises are
-re-derived against the new set.
+This discipline is the part other seats' seams (aion/norn) inherit verbatim
+(T6, §14), so it is deliberately the one-pager's text, not this doc's.
+
+[SEAM-DEP §(iii)]: synced to the settled view set, four-class taxonomy, and
+§Versioning @ 7b768eb; if the contract moves again, §11.1–§11.4 are the
+rework surface.
 
 ---
 
@@ -790,9 +884,9 @@ existing routes, so there is one source of truth per fact.
 
 ---
 
-## 13. Open risks carried into the tear
+## 13. Open risks carried forward (tear settled; pair still to rule)
 
-Stated so the tear and the pair see them, not buried:
+Stated so the pair sees them, not buried:
 
 - **The literal-no-wake ambiguity (scout risk #1).** Any HTTP/MCP request runs
   *a* server thread; the defensible incident-safe reading is "never wake a
@@ -802,34 +896,47 @@ Stated so the tear and the pair see them, not buried:
   file export satisfies it — a different design, flagged not chosen.
 - **Head-of-line on the shared worker (scout risk #6).** The serial 2 s
   read-timeout handler means an expensive MCP call can delay `/health`/`/ready`.
-  v1 mitigates with a bounded response and scrape-work budget (§8); if
-  insufficient, the sibling listener (rule-2) is the fallback the pair rules on.
+  v1 mitigates with a bounded response and scrape-work budget (§8 —
+  domain-owner determination (b) confirms this posture); the sibling listener
+  (rule-2) remains the fallback **the pair rules on** — that ruling is the
+  open item here.
 - **Cluster peer snapshot staleness (scout risk #11).** Peer names are stale by
-  up to the 250 ms membership poll and are mutex-backed; the design exposes them
-  (if at all) as a copy-on-write name snapshot updated by the existing poll
-  thread, labelled as status-not-realtime. Cluster peers are **not** in the six
-  v1 views; they are noted here as a candidate the tear may pull in or leave out.
+  up to the 250 ms membership poll and are mutex-backed; if ever exposed, they
+  ride a copy-on-write name snapshot updated by the existing poll thread,
+  labelled as status-not-realtime. **Domain-owner determination (c), recorded:
+  cluster peer names are OUT of v1, confirmed.** The note stays as the
+  standing future-candidate record: any later pull-in is an additive act
+  against §11.4 with the CoW-snapshot read primitive already designed here.
 
 ---
 
-## 14. Explicitly out of scope
+## 14. Explicitly out of scope (fence confirmed by the tear, T6)
+
+The one-pager's out-of-scope fence was named so the tear could confirm it —
+and the tear confirmed it (T6, settled @ 7b768eb). This doc's fence is the
+same fence:
 
 - **Mutations of any kind** — v2+, design-gated; v1 refuses them by class
-  (§11.2–§11.3). The mutation design doc does not exist yet; `refused:read-only`
-  names it as the remedy without pretending it does.
+  (§11.2–§11.3); haematite's vacuum/sweep sit in the mutation-class registry
+  from birth (settled §out-of-scope). The mutation design doc does not exist
+  yet; `refused:read-only` names it as the remedy without pretending it does.
 - **The Frame console rewrite** — a consumer of this seam, not this seam
-  (one-pager §out-of-scope, §0). This doc is chrome-light precisely because the
+  (settled §out-of-scope, §0). This doc is chrome-light precisely because the
   chrome is disposable and the contract is not.
 - **The stack gateway** — a thin MCP *client* re-exporting mounted seams, a
   Frame/console concern (one-pager §(i)). Not designed here.
-- **Other services' seams** — haematite's half is Apollo's to word (one-pager
-  §(ii)/§(iv)); aion/norn MCP surfaces are their own seats, same shape expected.
+- **Other services' seams** — haematite's half is now settled contract text
+  (the T2 read-mode split, T3 no-writer-lock wording, T4 views — cited in
+  §5.4 and §11.3, designed on Apollo's side); aion/norn MCP surfaces are
+  their own seats, same shape expected, **and per T6 they inherit the
+  §Versioning discipline verbatim, so four seams don't invent four version
+  disciplines** (§11.4).
 - **Per-channel publish/delivery split, exact subscription depth, deeper
   haematite internals** — named deferrals (§4.2, §4.3, §5.4), each a future
   instrument with its own signed idle-cost, never a v1 bolt-on.
-- **The `fix/push-reply-deadline-on-push` branch** — this doc anticipates its
-  `PushReplyExpired` in the refusal taxonomy (§4.5) but does not depend on or
-  touch it.
+- **The push-reply deadline fix** — merged to main @ `68379e8` (ledger G7);
+  this doc consumes its `PushReplyExpired` surface in the §4.5 counter
+  taxonomy and adds nothing to it.
 
 ---
 
@@ -843,7 +950,11 @@ load-bearing anchors were re-derived on this branch and read, not trusted:
 §5.3, §6); `health/endpoint.rs:14-16,122,146,184` (routes, 10 ms poll, 2 s
 timeout, request-line-only parse — §7, §8); `channel/registry.rs:89-100`
 (`list`→`subscriber_count` — §5.1); `metrics.rs:15-17` (three families — §10);
-`config/types.rs:14,203-236` (health addr, eight limits — §4.5). Anchors cited
+`config/types.rs:14,203-236` (health addr, eight limits — §4.5). The §4.5
+push-reply anchors (`push_to_connection_with_deadline` at `supervisor.rs:295`,
+`ServerError::PushReplyExpired` at `error.rs:78`, expiry resolution at
+`supervisor.rs:657`) were verified on **origin/main @ `68379e8`** — that
+surface is merged to main but not on this design branch's base. Anchors cited
 but not individually re-opened (taken from the scout at its stated lines, and
 flagged as such) are the deeper conversation/subscription/durability internals
 in §4.3–§4.4 and §5.4–§5.6; a builder implementing those views re-verifies each
