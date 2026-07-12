@@ -56,6 +56,23 @@ compile the new code (the API absence is the guard). Interim development
 may use a `[patch.crates-io]` path override, marked not-for-commit, exactly
 as the failover re-proofs did.
 
+### 1a. Amendments recorded at re-dispatch (2026-07-12, build leg; reviewer
+notified async during his compaction)
+
+- **The artifact is beamr 0.14.0, not 0.13.x.** The composition campaign's
+  commits changed public API (honest-None distribution accessors, service
+  composition), so 0.13.1/0.13.2 were breaking changes wearing patch
+  versions — a range consumer of 0.13 breaks on cargo update. Both are
+  YANKED; 0.14.0 is the same bytes under a truthful version. The §1
+  falsifiable-pin acceptance is unchanged (cargo tree shows readiness).
+- **One consumer-side migration is IN SCOPE beyond the original text:**
+  `cluster/membership.rs` consumed the removed
+  `Scheduler::distribution_connections()`; it now uses
+  `try_distribution_connections()` with typed absence mapped to a fatal
+  `ServerError::ClusterJoin` at cluster bring-up — the same refuse-at-birth
+  posture §2 uses for readiness composition. Done by the build leg's hands
+  before re-dispatch; the builder does not touch it further.
+
 ## 2. Composition (beamr doc §8, first-consumer recorded)
 
 `SupervisorInner::new` composes readiness **Owned on the CONNECTION
