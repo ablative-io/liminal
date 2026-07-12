@@ -1,15 +1,264 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use beamr::process::ExitReason;
-use liminal::protocol::{Frame, SchemaId, decode, encode, encoded_len};
+use liminal::conversation::ParticipantBehaviour;
+use liminal::envelope::Envelope;
+use liminal::protocol::{
+    CONVERSATION_REPLY_REQUESTED_FLAG, CausalContext, Frame, MessageEnvelope, SchemaId, decode,
+    encode, encoded_len,
+};
 
 use super::{ConnectionRuntime, ConnectionSupervisor, PushReplyAwaiter};
 use crate::server::connection::services::{
     ConnectionServices, LiminalConnectionServices, server_error_from_protocol,
 };
+
+#[test]
+fn connection_scheduler_inventory_has_one_readiness_poll_thread()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let inventory = supervisor.scheduler().service_inventory();
+    let readiness = inventory
+        .iter()
+        .find(|entry| entry.service == "readiness")
+        .ok_or("connection scheduler readiness inventory line is missing")?;
+    assert_eq!(readiness.configured, 1);
+    assert_eq!(readiness.actual, 1);
+    assert_eq!(readiness.thread_names, ["beamr-readiness-poll"]);
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[test]
+fn readable_ping_produces_one_pong_then_reparks() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+    wait_for_slice(&supervisor, pid, 0)?;
+    let parked_at = supervisor.slice_count(pid);
+    thread::sleep(Duration::from_millis(50));
+    assert_eq!(supervisor.slice_count(pid), parked_at);
+
+    write_frame(&mut client, &Frame::Ping { flags: 0 })?;
+    assert!(matches!(read_frame(&mut client)?, Frame::Pong { .. }));
+    wait_for_slice(&supervisor, pid, parked_at)?;
+    let reparks_at = supervisor.slice_count(pid);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        supervisor.slice_count(pid),
+        reparks_at,
+        "readable wake must drain Pong output and repark"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[test]
+fn pre_wait_race_barrier_finds_data_arriving_after_arm() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    wait_for_parked(&supervisor, handle.pid())?;
+    let (armed, release) = supervisor.install_pre_wait_barrier();
+    let waker = supervisor
+        .ready_waker(handle.pid())
+        .ok_or("live connection must have a READY waker")?;
+    waker.fire();
+    armed.wait();
+    write_frame(&mut client, &Frame::Ping { flags: 0 })?;
+    // Keep the process behind the gate until the loopback stack exposes the byte
+    // to a nonblocking peek; arrival remains strictly between arm and probe.
+    thread::sleep(Duration::from_millis(20));
+    release.wait();
+
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    assert!(matches!(read_frame(&mut client)?, Frame::Pong { .. }));
+    assert_eq!(
+        supervisor.pre_wait_probe_hits(),
+        1,
+        "the post-arm socket probe must observe the staged arrival"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+fn wait_for_slice(
+    supervisor: &ConnectionSupervisor,
+    pid: u64,
+    after: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if supervisor.slice_count(pid) > after {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    Err(format!(
+        "connection {pid} did not service a slice after {after}; observed {}",
+        supervisor.slice_count(pid)
+    )
+    .into())
+}
+
+fn wait_for_parked(
+    supervisor: &ConnectionSupervisor,
+    pid: u64,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let before = supervisor.slice_count(pid);
+        thread::sleep(Duration::from_millis(50));
+        let after = supervisor.slice_count(pid);
+        if before > 0 && before == after {
+            return Ok(after);
+        }
+    }
+    Err(format!(
+        "connection {pid} did not settle parked; observed {} slices",
+        supervisor.slice_count(pid)
+    )
+    .into())
+}
+
+fn conversation_request(conversation_id: u64, stream_id: u32, payload: &[u8]) -> Frame {
+    Frame::ConversationMessage {
+        flags: CONVERSATION_REPLY_REQUESTED_FLAG,
+        stream_id,
+        conversation_id,
+        envelope: MessageEnvelope::new(
+            SchemaId::new([0; SchemaId::WIRE_LEN]),
+            CausalContext::independent(),
+            payload.to_vec(),
+        ),
+    }
+}
+
+#[test]
+fn reply_availability_wakes_a_parked_connection() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+
+    write_frame(
+        &mut client,
+        &Frame::ConversationOpen {
+            flags: 0,
+            stream_id: 4,
+            conversation_id: 9,
+            subject: "echo".to_owned(),
+        },
+    )?;
+    wait_for_parked(&supervisor, handle.pid())?;
+
+    write_frame(&mut client, &conversation_request(9, 17, b"reply-wake"))?;
+    let frame = read_frame(&mut client)?;
+    assert!(matches!(
+        frame,
+        Frame::ConversationMessage {
+            stream_id: 17,
+            conversation_id: 9,
+            envelope,
+            ..
+        } if envelope.payload == b"reply-wake"
+    ));
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[derive(Debug)]
+struct SilentBehaviour;
+
+impl ParticipantBehaviour for SilentBehaviour {
+    fn process(&self, _request: &Envelope) -> Option<Envelope> {
+        None
+    }
+}
+
+#[test]
+fn pending_reply_deadline_is_the_only_wake_under_zero_traffic()
+-> Result<(), Box<dyn std::error::Error>> {
+    let services = Arc::new(LiminalConnectionServices::empty()?);
+    services.register_responder("silent", Arc::new(SilentBehaviour))?;
+    let supervisor = ConnectionSupervisor::with_services(services)?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    client.set_read_timeout(Some(Duration::from_secs(7)))?;
+
+    write_frame(
+        &mut client,
+        &Frame::ConversationOpen {
+            flags: 0,
+            stream_id: 3,
+            conversation_id: 12,
+            subject: "silent".to_owned(),
+        },
+    )?;
+    wait_for_parked(&supervisor, handle.pid())?;
+
+    let started = Instant::now();
+    write_frame(&mut client, &conversation_request(12, 23, b"never-replied"))?;
+    let frame = read_frame_with_timeout(&mut client, Duration::from_secs(7))?;
+    assert!(started.elapsed() >= Duration::from_secs(4));
+    assert!(matches!(
+        frame,
+        Frame::ConversationError {
+            stream_id: 23,
+            conversation_id: 12,
+            message: Some(message),
+            ..
+        } if message.contains("timed out")
+    ));
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[test]
+fn server_push_control_wakes_a_parked_process_and_reparks() -> Result<(), Box<dyn std::error::Error>>
+{
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    let parked_at = wait_for_parked(&supervisor, handle.pid())?;
+
+    let awaiter = supervisor.push_to_connection(handle.pid(), b"parked-push".to_vec())?;
+    let frame = read_frame(&mut client)?;
+    let correlation_id = match frame {
+        Frame::Push {
+            correlation_id,
+            payload,
+            ..
+        } => {
+            assert_eq!(payload, b"parked-push");
+            correlation_id
+        }
+        other => return Err(format!("expected Push, got {other:?}").into()),
+    };
+    assert_eq!(correlation_id, awaiter.correlation_id());
+    wait_for_slice(&supervisor, handle.pid(), parked_at)?;
+
+    write_frame(
+        &mut client,
+        &Frame::new_push_reply(1, correlation_id, b"push-reply".to_vec())?,
+    )?;
+    assert_eq!(
+        awaiter.receive(Duration::from_secs(2))?,
+        b"push-reply".to_vec()
+    );
+    wait_for_parked(&supervisor, handle.pid())?;
+    supervisor.shutdown();
+    Ok(())
+}
 
 #[test]
 fn spawning_connections_creates_distinct_beamr_processes() -> Result<(), Box<dyn std::error::Error>>
@@ -61,6 +310,64 @@ fn crashing_one_connection_process_does_not_affect_others() -> Result<(), Box<dy
 }
 
 #[test]
+fn external_kill_then_fd_reuse_survives_old_token_deregister()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (old_client, old_server) = tcp_pair()?;
+    let old = supervisor.spawn_connection(old_server)?;
+    wait_for_parked(&supervisor, old.pid())?;
+    assert_eq!(supervisor.readiness_registration_count(), 1);
+    let old_fd = supervisor
+        .readiness_fd(old.pid())
+        .ok_or("old connection did not publish its readiness fd")?;
+
+    supervisor
+        .scheduler()
+        .terminate_process(old.pid(), ExitReason::Error);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while old.is_live() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if old.is_live() {
+        return Err("externally killed process did not exit".into());
+    }
+
+    // Hold clone descriptors below `old_fd` until the allocator reaches the exact
+    // externally-freed number. Full-suite concurrency may leave unrelated lower
+    // holes, so a single clone is not deterministic.
+    let (mut new_client, new_server_original) = tcp_pair()?;
+    let mut fillers = Vec::new();
+    let new_server = loop {
+        let candidate = new_server_original.try_clone()?;
+        let candidate_fd = candidate.as_raw_fd();
+        if candidate_fd == old_fd {
+            break candidate;
+        }
+        if candidate_fd > old_fd {
+            return Err(format!("fd allocator skipped reusable descriptor {old_fd}").into());
+        }
+        fillers.push(candidate);
+    };
+    drop(new_server_original);
+    let new = supervisor.spawn_connection(new_server)?;
+    drop(fillers);
+    wait_for_parked(&supervisor, new.pid())?;
+    assert_eq!(supervisor.readiness_fd(new.pid()), Some(old_fd));
+    assert_eq!(supervisor.readiness_registration_count(), 2);
+
+    assert_eq!(supervisor.reap_crashed_connections(), 1);
+    assert_eq!(supervisor.readiness_registration_count(), 1);
+    new_client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    write_frame(&mut new_client, &Frame::Ping { flags: 0 })?;
+    assert!(matches!(read_frame(&mut new_client)?, Frame::Pong { .. }));
+    assert!(new.is_live());
+
+    drop(old_client);
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[test]
 fn force_close_sends_disconnect_and_removes_connection() -> Result<(), Box<dyn std::error::Error>> {
     // The supervisor must carry the "orders" channel so the subscribe below
     // succeeds with a `SubscribeAck` (the empty-services supervisor would reject
@@ -84,7 +391,7 @@ fn force_close_sends_disconnect_and_removes_connection() -> Result<(), Box<dyn s
 }
 
 #[test]
-fn notify_shutdown_subscribers_sends_disconnect_to_subscriber()
+fn shutdown_control_wakes_a_parked_subscriber_without_closing_it()
 -> Result<(), Box<dyn std::error::Error>> {
     // R6: a connected subscriber must receive a shutdown notification BEFORE its
     // connection closes. Unlike force-close, the graceful notification only
@@ -96,9 +403,11 @@ fn notify_shutdown_subscribers_sends_disconnect_to_subscriber()
     client.set_read_timeout(Some(Duration::from_secs(2)))?;
     send_subscribe(&mut client)?;
     read_until_subscribe_ack(&mut client)?;
+    let parked_at = wait_for_parked(&supervisor, handle.pid())?;
 
     supervisor.notify_shutdown_subscribers();
     let frame = read_frame(&mut client)?;
+    wait_for_slice(&supervisor, handle.pid(), parked_at)?;
 
     assert!(matches!(frame, Frame::Disconnect { .. }));
     // The notification precedes connection close: the process stays tracked
@@ -378,7 +687,8 @@ fn resolved_push_then_close_is_a_noop_with_no_double_send() -> Result<(), Box<dy
 /// (client dropped) with two conversations open; the teardown path must return the
 /// conversation supervisor's scheduler to its pre-open process count.
 #[test]
-fn connection_teardown_closes_open_conversations() -> Result<(), Box<dyn std::error::Error>> {
+fn eof_hup_deregisters_readiness_and_closes_open_conversations()
+-> Result<(), Box<dyn std::error::Error>> {
     let services = std::sync::Arc::new(LiminalConnectionServices::empty()?);
     let conv_scheduler = services.conversation_supervisor().scheduler();
     let baseline = conv_scheduler.process_table().len();
@@ -386,6 +696,8 @@ fn connection_teardown_closes_open_conversations() -> Result<(), Box<dyn std::er
     let supervisor = ConnectionSupervisor::with_services(services.clone())?;
     let (client, server) = tcp_pair()?;
     let handle = supervisor.spawn_connection(server)?;
+    wait_for_parked(&supervisor, handle.pid())?;
+    assert_eq!(supervisor.readiness_registration_count(), 1);
 
     // Open two conversations over the connection; each spawns an actor, a
     // participant, and an exit watcher, so the conversation scheduler gains six
@@ -398,6 +710,7 @@ fn connection_teardown_closes_open_conversations() -> Result<(), Box<dyn std::er
     // Abrupt teardown: drop the client so the connection reads EOF and finalizes.
     drop(writer);
     wait_for_cleanup(&supervisor, handle.pid())?;
+    assert_eq!(supervisor.readiness_registration_count(), 0);
 
     // Teardown must have finalized both conversations: zero leaked
     // actors/participants in the process table AND in both lifecycle registries.
@@ -423,7 +736,7 @@ fn connection_teardown_closes_open_conversations() -> Result<(), Box<dyn std::er
 /// cycles must leave the conversation scheduler bounded — every cycle returns to
 /// baseline rather than accumulating leaked actors/participants.
 #[test]
-fn connection_open_close_churn_pins_bounded_conversation_processes()
+fn connection_churn_greater_than_worker_count_remains_bounded()
 -> Result<(), Box<dyn std::error::Error>> {
     let services = std::sync::Arc::new(LiminalConnectionServices::empty()?);
     let conv_scheduler = services.conversation_supervisor().scheduler();
@@ -880,7 +1193,14 @@ fn write_frame(stream: &mut TcpStream, frame: &Frame) -> Result<(), Box<dyn std:
 }
 
 fn read_frame(stream: &mut TcpStream) -> Result<Frame, Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    read_frame_with_timeout(stream, Duration::from_secs(2))
+}
+
+fn read_frame_with_timeout(
+    stream: &mut TcpStream,
+    timeout: Duration,
+) -> Result<Frame, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + timeout;
     let mut buffer = Vec::new();
     while Instant::now() < deadline {
         let mut chunk = [0_u8; 256];

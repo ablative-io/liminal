@@ -203,10 +203,10 @@ fn raw_silent_subscribe(address: SocketAddr) -> Result<TcpStream, Box<dyn Error>
     }
 }
 
-/// (a) A published message is delivered to a remote subscriber with payload
-/// fidelity, and successive publishes arrive in order with `delivery_seq` 1, 2, 3.
+/// A subscriber is parked after its `SubscribeAck`; later publishes fire the inbox
+/// notifier, wake it, and deliver payloads in order with sequences 1, 2, 3.
 #[test]
-fn subscription_receives_published_messages_in_order() -> Result<(), Box<dyn Error>> {
+fn subscription_publish_wakes_parked_connection_in_order() -> Result<(), Box<dyn Error>> {
     let server = RunningServer::start()?;
     let subscription =
         SubscriptionStream::open(&server.address().to_string(), CHANNEL, Vec::new())?;

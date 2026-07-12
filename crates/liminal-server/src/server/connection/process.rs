@@ -1,17 +1,19 @@
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
 
 use beamr::atom::Atom;
 use beamr::native::native_process::{NativeContext, NativeHandler, NativeOutcome};
 use beamr::process::ExitReason;
+use beamr::scheduler::{Interest, ReadinessToken};
 use beamr::term::Term;
 
 use liminal::protocol::{Frame, ProtocolError, decode};
 
 use super::apply::apply_frame;
 use super::delivery::{DELIVERY_SLICE_BUDGET, service_subscriptions};
-use super::outbound::OutboundWriter;
+use super::outbound::{DrainOutcome, OutboundWriter};
 use super::services::server_error_from_protocol;
 use super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
@@ -43,6 +45,9 @@ pub(super) struct ConnectionProcess {
     /// frame larger than the socket send buffer streams out across slices instead
     /// of failing a `write_all` on the non-blocking socket (ledger G4).
     outbound: OutboundWriter,
+    /// One registration for this connection's lifetime. The same token is copied
+    /// into the host record so external death can deregister it.
+    readiness_token: Option<ReadinessToken>,
 }
 
 /// Whether a connection slice's socket/inbound servicing leaves the connection
@@ -101,6 +106,7 @@ impl ConnectionProcess {
             buffer: Vec::new(),
             state,
             outbound: OutboundWriter::new(),
+            readiness_token: None,
         }
     }
 
@@ -111,13 +117,19 @@ impl ConnectionProcess {
     /// The ordering is load-bearing (subscriptions are pumped AFTER socket/control
     /// work), and the whole slice preserves the no-sleep `Continue` discipline: a
     /// slice never parks a scheduler thread, it re-queues the process to poll again.
-    fn handle_slice(&mut self, pid: u64) -> NativeOutcome {
+    fn handle_slice(&mut self, pid: u64, ctx: &mut NativeContext<'_>) -> NativeOutcome {
         // R7 (§1.2(6)): count this serviced slice. The park-flip's permanent
         // rule-1 quiescence assertion — a parked connection's counter must not
         // advance without an event — reads this; under the busy loop the counter
         // advances every slice, and the instrument proves it counts.
         #[cfg(test)]
         self.runtime.record_slice(pid);
+        // `spawn_native` may schedule the first slice before the spawn thread has
+        // inserted the host record. Do not mint an unpublishable token; yield once
+        // and register after the record exists.
+        if !self.runtime.is_registered(pid) {
+            return NativeOutcome::Continue;
+        }
         match self.service_socket(pid) {
             SliceStep::Stop(reason) => return NativeOutcome::Stop(reason),
             SliceStep::Continue => {}
@@ -156,18 +168,57 @@ impl ConnectionProcess {
         }
         // Drain queued outbound bytes with partial-write tracking. A hard write
         // error (or overflow surfaced here) tears the connection down.
-        if let Err(error) = self.drain_outbound() {
-            tracing::warn!(
-                connection_pid = pid,
-                %error,
-                "outbound drain failed; tearing down the connection"
-            );
-            self.release_conversations();
-            self.runtime
-                .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-            return NativeOutcome::Stop(ExitReason::Error);
+        let drain = match self.drain_outbound() {
+            Ok(drain) => drain,
+            Err(error) => {
+                tracing::warn!(
+                    connection_pid = pid,
+                    %error,
+                    "outbound drain failed; tearing down the connection"
+                );
+                self.release_conversations();
+                self.runtime
+                    .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+                return NativeOutcome::Stop(ExitReason::Error);
+            }
+        };
+        if let Err(error) = self.sync_deadline_timers(pid, ctx) {
+            return self.fail_slice(pid, &error);
         }
-        NativeOutcome::Continue
+        // A successful budget-limited write proves immediately actionable work
+        // remains. Do not arm a permanently-writable socket in this state.
+        if drain == DrainOutcome::Progress {
+            return NativeOutcome::Continue;
+        }
+        let interest = if drain == DrainOutcome::WouldBlockWithResidue {
+            Interest::both()
+        } else {
+            Interest::READABLE
+        };
+        if let Err(error) = self.arm_readiness(pid, ctx, interest) {
+            return self.fail_slice(pid, &error);
+        }
+        #[cfg(test)]
+        let barrier_staged = self.runtime.run_pre_wait_barrier();
+        match self.final_probe(pid) {
+            Ok(true) => {
+                #[cfg(test)]
+                if barrier_staged {
+                    self.runtime.record_pre_wait_probe_hit();
+                }
+                NativeOutcome::Continue
+            }
+            Ok(false) => NativeOutcome::Wait,
+            Err(error) => self.fail_slice(pid, &error),
+        }
+    }
+
+    fn fail_slice(&mut self, pid: u64, error: &ServerError) -> NativeOutcome {
+        tracing::error!(connection_pid = pid, %error, "connection readiness contract failed");
+        self.release_conversations();
+        self.runtime
+            .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+        NativeOutcome::Stop(ExitReason::Error)
     }
 
     /// Services the inbound half of a slice: reads available bytes and applies any
@@ -366,7 +417,111 @@ impl ConnectionProcess {
         let Some(stream) = self.stream.as_mut() else {
             return Ok(super::outbound::DrainOutcome::Drained);
         };
-        self.outbound.drain(stream, None)
+        self.outbound.drain(stream, Some(READ_BUFFER_BYTES))
+    }
+
+    fn arm_readiness(
+        &mut self,
+        pid: u64,
+        ctx: &NativeContext<'_>,
+        interest: Interest,
+    ) -> Result<(), ServerError> {
+        let facility = ctx
+            .readiness_facility()
+            .ok_or_else(|| ServerError::ListenerAccept {
+                message: "connection scheduler started without its required readiness service"
+                    .to_owned(),
+            })?;
+        if let Some(token) = self.readiness_token {
+            return facility
+                .rearm(&token, interest)
+                .map_err(|error| ServerError::ListenerAccept {
+                    message: format!("failed to rearm connection readiness: {error}"),
+                });
+        }
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| ServerError::ListenerAccept {
+                message: "cannot register readiness for a missing connection stream".to_owned(),
+            })?;
+        let token = facility
+            .register(stream.as_raw_fd(), interest, pid, self.runtime.ready_atom())
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("failed to register connection readiness: {error}"),
+            })?;
+        if let Err(error) = self
+            .runtime
+            .set_readiness_token_once(pid, token, stream.as_raw_fd())
+        {
+            self.runtime.deregister_unpublished_readiness(token);
+            return Err(error);
+        }
+        self.readiness_token = Some(token);
+        Ok(())
+    }
+
+    fn sync_deadline_timers(
+        &mut self,
+        pid: u64,
+        ctx: &mut NativeContext<'_>,
+    ) -> Result<(), ServerError> {
+        for timer in self.state.pending_replies.take_retired_timers() {
+            ctx.cancel_timer(timer);
+        }
+        for (op_id, delay) in self
+            .state
+            .pending_replies
+            .timers_to_arm(std::time::Instant::now())
+        {
+            let timer = ctx
+                .send_after(delay, pid, Term::atom(self.runtime.ready_atom()))
+                .ok_or_else(|| ServerError::ListenerAccept {
+                    message: "connection scheduler has no timer facility for reply deadlines"
+                        .to_owned(),
+                })?;
+            if !self.state.pending_replies.install_timer(op_id, timer) {
+                ctx.cancel_timer(timer);
+            }
+        }
+        Ok(())
+    }
+
+    /// Post-arm C1/C4 barrier. Each query is nonblocking and non-consuming.
+    fn final_probe(&self, pid: u64) -> Result<bool, ServerError> {
+        let socket_ready = if let Some(stream) = self.stream.as_ref() {
+            let mut byte = [0_u8; 1];
+            match stream.peek(&mut byte) {
+                Ok(_) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => true,
+                Err(error) => {
+                    return Err(ServerError::ListenerAccept {
+                        message: format!("connection readiness probe failed: {error}"),
+                    });
+                }
+            }
+        } else {
+            true
+        };
+        let subscription_ready = !self.state.held_deliveries.is_empty()
+            || self
+                .state
+                .subscriptions
+                .values()
+                .any(|subscription| subscription.is_overflowed() || subscription.has_pending());
+        let reply_ready = self
+            .state
+            .pending_replies
+            .has_due(std::time::Instant::now())
+            || self
+                .state
+                .pending_replies
+                .conversations_awaiting_reply()
+                .into_iter()
+                .filter_map(|id| self.state.conversations.get(&id))
+                .any(super::conversation::ConnectionConversation::has_pending_reply);
+        Ok(socket_ready || subscription_ready || reply_ready || self.runtime.has_control(pid))
     }
 
     fn handle_control(&mut self, pid: u64, control: ConnectionControl) -> Option<NativeOutcome> {
@@ -380,9 +535,11 @@ impl ConnectionProcess {
                 // Flush the enqueued `Disconnect` (and any residue) before the
                 // stream is dropped; best-effort, since we are stopping regardless.
                 let _ = self.drain_outbound();
-                self.stream.take();
                 self.release_conversations();
+                // Host removal ACKs readiness deregistration while both the
+                // process stream and record fd guard are still live.
                 self.runtime.finish(pid);
+                self.stream.take();
                 Some(NativeOutcome::Stop(ExitReason::Normal))
             }
             ConnectionControl::Push {
@@ -518,7 +675,7 @@ impl NativeHandler for ConnectionProcess {
                 return outcome;
             }
         }
-        self.handle_slice(pid)
+        self.handle_slice(pid, ctx)
     }
 }
 
@@ -530,6 +687,8 @@ impl Drop for ConnectionProcess {
         // in-handler teardown paths the conversation map is already drained, so
         // this is a no-op there.
         self.release_conversations();
+        let timers = self.state.pending_replies.take_retired_timers();
+        self.runtime.cancel_deadline_timers(timers);
     }
 }
 

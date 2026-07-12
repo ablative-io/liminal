@@ -107,6 +107,10 @@ impl SubscriptionResource for TestSubscription {
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
         None
     }
+
+    fn has_pending(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]

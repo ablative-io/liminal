@@ -292,12 +292,22 @@ impl SubscriptionInbox {
             }
             if state.queue.len() >= state.depth_cap {
                 self.overflowed.store(true, Ordering::Release);
+                let notifier = state.notifier.clone();
+                drop(state);
+                if let Some(notifier) = notifier {
+                    notifier();
+                }
                 return InboxAdmission::FairnessTripped;
             }
             let charged = match state.budget.as_ref() {
                 Some(budget) => {
                     if !budget.try_charge(bytes) {
                         self.overflowed.store(true, Ordering::Release);
+                        let notifier = state.notifier.clone();
+                        drop(state);
+                        if let Some(notifier) = notifier {
+                            notifier();
+                        }
                         return InboxAdmission::BudgetExceeded;
                     }
                     bytes
@@ -334,6 +344,11 @@ impl SubscriptionInbox {
             budget.release(charged);
         }
         Some(envelope)
+    }
+
+    /// Non-consuming race-barrier query used after a connection arms readiness.
+    pub(crate) fn has_pending(&self) -> bool {
+        self.state.lock().is_ok_and(|state| !state.queue.is_empty())
     }
 
     /// Atomically closes the inbox, releasing every queued charge back to the
@@ -592,6 +607,12 @@ impl SubscriptionHandle {
         // Dequeue releases the envelope's admitted bytes back to the shared
         // connection budget (§5 charge/release symmetry).
         Ok(self.inner.inbox.pop())
+    }
+
+    /// Whether an envelope is available without consuming it.
+    #[must_use]
+    pub fn has_pending(&self) -> bool {
+        self.inner.inbox.has_pending()
     }
 
     /// Whether an overflow has marked this subscription for shedding (§5).

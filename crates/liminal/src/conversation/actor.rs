@@ -199,6 +199,12 @@ impl ConversationActor {
         self.core.try_take_reply()
     }
 
+    /// Whether a participant reply is buffered without consuming it.
+    #[must_use]
+    pub fn has_pending_reply(&self) -> bool {
+        self.core.has_pending_reply()
+    }
+
     /// R1(vi)(a): installs the reply-availability notifier, fired on the reply
     /// queue's empty→non-empty transition and on terminal actor error. Installed
     /// permanently at conversation open; cleared at close/finalize.

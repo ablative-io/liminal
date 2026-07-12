@@ -1,20 +1,10 @@
 //! R6 (idempotent READY marker) and R7 (quiescence slice counter) instruments.
 //!
-//! These land the consumer machinery the park-flip consumes, tested behind the
-//! existing busy loop. Under the busy loop a connection runs every slice, so a
-//! READY marker is redundant and the slice counter advances continuously — but
-//! the marker's idempotence and the counter's per-slice accounting are exactly
-//! what the park-flip's wake semantics and quiescence assertion rely on, so they
-//! are pinned now.
+//! The park-flip makes READY markers the connection's event vocabulary and parks
+//! after every fully drained slice. The counter therefore pins quiescence: an
+//! idle connection runs its admission slice once and remains flat until an event.
 
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::items_after_statements
-)]
-
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -50,24 +40,26 @@ fn wait_until(mut predicate: impl FnMut() -> bool) -> bool {
     predicate()
 }
 
-/// R7: the per-connection slice counter advances as the connection is serviced —
-/// the instrument counts slices. (The park-flip's dual assertion, that a PARKED
-/// connection's counter does NOT advance, becomes meaningful only once parking
-/// exists; under the busy loop the counter is expected to keep climbing, which is
-/// precisely the permanent-runnable cost the park-flip removes.)
+/// R7: an idle connection parks after its initial drain and stays quiescent.
 #[test]
-fn slice_counter_counts_serviced_slices() -> Result<(), Box<dyn std::error::Error>> {
+fn idle_connection_slice_count_is_flat_across_soak() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = supervisor()?;
     let (_client, server) = tcp_pair()?;
     let handle = supervisor.spawn_connection(server)?;
     let pid = handle.pid();
 
-    // The idle connection busy-loops; its counter must climb past any threshold.
-    let advanced = wait_until(|| supervisor.slice_count(pid) > 3);
+    let admitted = wait_until(|| supervisor.slice_count(pid) > 0);
     assert!(
-        advanced,
-        "the slice counter must advance as the connection is serviced (got {})",
+        admitted,
+        "the connection must run its admission slice (got {})",
         supervisor.slice_count(pid)
+    );
+    let parked_at = supervisor.slice_count(pid);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        supervisor.slice_count(pid),
+        parked_at,
+        "an idle parked connection must service no slices during the soak"
     );
     supervisor.shutdown();
     Ok(())
@@ -104,7 +96,6 @@ fn duplicate_ready_markers_are_harmless() -> Result<(), Box<dyn std::error::Erro
         client
             .set_read_timeout(Some(Duration::from_millis(50)))
             .ok();
-        use std::io::Read;
         matches!(client.read(&mut probe), Ok(n) if n > 0)
     });
     assert!(
