@@ -144,105 +144,133 @@ families, `Relaxed` collectors, read-lock only on structural registration —
 OpsState generalizes exactly that shape to every field the six views need. It
 is the design's answer to the scout's central finding.
 
-### 2.2 Composition — three ingredients, one object
+### 2.2 Composition — the concrete type, not three adjectives
 
-`OpsState` is an `Arc<OpsState>` holding three kinds of member, and **nothing
-that reads through a scheduler or a hot lock**:
+`OpsState` is an `Arc<OpsState>` whose members are **exactly** these, and
+**nothing that reads through a scheduler or a hot lock**:
 
-1. **Immutable redacted config.** A cloned, redacted snapshot of the
-   validated `ServerConfig`, frozen at construction: profile, all eight
-   limits (`config/types.rs:203-236`), configured channel names, persistence
-   mode/flag, `auth_enabled` (boolean only), listen and health addresses,
-   `cluster_configured`. Redaction is applied at clone time (§7.3): no auth
-   token bytes, no cluster cookie, no raw fds, no filesystem paths beyond what
-   config already names publicly. Immutable ⇒ read is a pointer deref, zero
-   lock, exact, zero idle cost.
+1. **Immutable redacted config** (`OpsConfig`, plain owned struct). A cloned,
+   redacted snapshot of the validated `ServerConfig`, frozen at construction:
+   profile, all eight limits (`config/types.rs:203-236`), configured channel
+   names, persistence mode/flag, `auth_enabled` (boolean only), listen and
+   health addresses, `cluster_configured`. Redaction is applied at clone time
+   (§7.3): no auth token bytes, no cluster cookie, no raw fds, no filesystem
+   paths beyond what config already names publicly. Immutable ⇒ read is a
+   pointer deref, zero lock, exact, zero idle cost.
 
-2. **Lifecycle-maintained atomics.** A flat block of `AtomicU64`/`AtomicUsize`
-   counters and gauges, each **written only at an existing lifecycle event**
-   the writer already executes (accept/auth/register/readiness/close, publish,
-   subscribe/unsubscribe, conversation register/deregister, timer arm/cancel).
-   Reads are `Relaxed`/`Acquire` loads — lock-free, bounded-stale by one event,
-   one cache line each. These carry the occupancy gauges the process-owned
-   maps cannot safely expose (§4).
+2. **`phase: AtomicU8` — the explicit lifecycle atomic.** Not derived from
+   readiness flags (which are independent booleans with no total order,
+   `health/checks.rs:139-200`): OpsState owns its own phase with exact
+   transitions, all written by `run()`:
+   `Starting` (at construction) → `Running` (set immediately after
+   `readiness.set_listener_bound(true)` at `runtime.rs:87` AND the §2.3
+   inventory seal — both must hold) → `Draining` (set when
+   `shutdown_handle.wait()` returns at `runtime.rs:102`, before cluster/
+   connection teardown). No other transition exists; the writer is the runtime
+   thread only. Every §11 response carries it (§3.1).
 
-3. **Arc-swapped copy-on-write snapshots.** For per-connection *detail* (peer,
-   worker posture, readiness posture) that is too structured for a scalar
-   atomic, OpsState holds an `ArcSwap<ConnectionsSnapshot>` (and siblings).
-   The snapshot is a plain immutable `Vec`/map, rebuilt and swapped **on
-   infrequent per-connection lifecycle events only** — accept, auth, worker
-   register, readiness register, close — never on the slice hot path. A reader
-   does one atomic load of the current `Arc` and walks an immutable structure;
-   a writer pays a copy-on-write allocation at an event it already handles.
-   This is the scout's explicit recommendation ("publish an Arc-swapped/
-   copy-on-write snapshot on infrequent events … rather than reading
-   ConnectionRuntime.records").
+3. **Lifecycle-maintained atomics.** A flat block of `AtomicU64`/`AtomicUsize`
+   counters and gauges written through the §2.5 write-side API — each write
+   rides an existing lifecycle event. Reads are `Relaxed`/`Acquire` loads —
+   lock-free, bounded-stale by one event, one cache line each.
 
-   One refinement the field tables rely on (**the shared-live-atomic
-   pattern** — §4.1, §4.3, §6): a snapshot **entry** may embed
-   `Arc`-shared live atomics — a per-connection counter created at admission
-   (or an atomic that already exists, like the inbox byte budget) whose
-   `Arc` is cloned into each rebuilt entry. The counter **survives snapshot
-   swaps** (only the entry `Vec` is rebuilt; the `Arc` is carried), the hot
-   path keeps its existing write handle, and a scrape reads the counter
-   lock-free through the arcswap — so per-connection values that change at
-   slice or delivery rate are readable **without** rebuilding snapshots at
-   that rate and **without** touching any map mutex.
+4. **Arc-swapped copy-on-write snapshots** (`ArcSwap<ConnectionsSnapshot>`),
+   updated ONLY through the §2.6 single-writer protocol. The snapshot is a
+   plain immutable structure keyed by pid; a reader does one atomic load of
+   the current `Arc` and walks it. Rebuild events: admission publication,
+   auth, worker registration, readiness registration, **subscribe/
+   unsubscribe (§2.5's lazy-budget resolution)**, and every close/reap route
+   — connection-lifecycle and control-plane rate, never per-delivery, never
+   per-slice.
 
-All three read primitives — plus the two the console reuses rather than
-duplicates (the /metrics registry snapshot and `SharedReadinessState`) — are
-the **only** read primitives the console is permitted (one-pager §(iii): "all
-of it rides three read primitives and nothing else"). No fourth primitive is
-introduced; §5 is the fence that keeps it so.
+   The field tables rely on one refinement (**the shared-live-atomic
+   pattern** — §4.1, §4.3, §6): a snapshot **entry** embeds `Arc`-shared live
+   atomics from the connection's §2.5 observation bundle. The counters
+   **survive snapshot swaps** (only the entry structure is rebuilt; the
+   `Arc`s are carried), the hot path keeps its existing write handle, and a
+   scrape reads them lock-free through the arcswap — per-connection values
+   that change at slice or delivery rate are readable **without** rebuilding
+   snapshots at that rate and **without** touching any map mutex.
 
-### 2.3 Where OpsState is assembled — the ordering constraint
+5. **`inventory: OnceLock<InventoryHandles>` — sealed once, late** (§2.3).
+   `InventoryHandles` holds **`Weak`** scheduler handles: connection (always;
+   `Weak<Scheduler>` downgraded from `ConnectionSupervisor::scheduler()`,
+   `supervisor.rs:152-156`), channel + conversation (full profile only,
+   captured pre-coercion). **Weak, not strong, per handle — decided:**
+   OpsState is owned by the `'static` health worker and must never extend a
+   scheduler's life past `run()`'s teardown; a strong `Arc<Scheduler>` in the
+   health worker would do exactly that (the original "captured by reference"
+   wording was a contradiction — a reference cannot move into the `'static`
+   worker, and a strong Arc extends ownership; this replaces it). **Upgrade-
+   failure semantics:** a failed `Weak::upgrade()` during draining renders the
+   inventory view's scheduler block as typed-absent with `phase: draining` —
+   an expected lifecycle fact, not an error. The `ClusterHandle`/membership
+   note follows the same rule: if cluster facts are ever exposed (out of v1,
+   §13), they ride a `Weak` + published snapshot, never a strong retention.
 
-This is load-bearing and was verified by reading `runtime.rs` on this branch.
-The health listener is started **early and populated late**:
+6. **Reused readers, not duplicated state:** `SharedReadinessState` (clone)
+   and the process-global metrics registry reader. These stay their own
+   surfaces (§12); OpsState holds read handles only.
+
+These back the §3 read-primitive table — the **only** read primitives the
+console is permitted (one-pager §(iii): "all of it rides three read
+primitives and nothing else" — config/atomics/arcswap are the OpsState class;
+metrics and inventory are the reused pair). No further primitive is
+admissible; §5 is the fence that keeps it so.
+
+### 2.3 Where OpsState is assembled — the corrected ordering
+
+The health listener is started **early and populated late**. Verified on this
+branch (and corrected from this doc's earlier revision, which mis-stated the
+erasure point):
 
 ```
-runtime.rs:28   config = load_config(...)                      // config known
-runtime.rs:33   metrics::init()                                // registry live
-runtime.rs:35   readiness = SharedReadinessState::new(...)     // shared handle
-runtime.rs:36   start_health_server(addr, readiness.clone())   // SERVING begins
+runtime.rs:28   config = load_config(...)                       // config known
+runtime.rs:33   metrics::init()                                 // registry live
+runtime.rs:35   readiness = SharedReadinessState::new(...)      // shared handle
+runtime.rs:36   start_health_server(addr, readiness.clone())    // SERVING begins
 runtime.rs:56   match profile { Full => {
 runtime.rs:58       services = Arc::new(LiminalConnectionServices::from_config)  // concrete
-runtime.rs:61       ConnectionSupervisor::with_services_and_auth(services, ..)   // ERASURE
-runtime.rs:67       readiness.set_cluster_configured(...)       // late population
+runtime.rs:61       with_services_and_auth(services, ..)         // takes Arc<dyn …> — ERASURE HERE
+                       └─ SupervisorInner::new (supervisor.rs:461-499)
+                          constructs the CONNECTION SCHEDULER *inside*, AFTER erasure
 runtime.rs:86-87   readiness.set_config_loaded/​set_listener_bound(true)
 ```
 
-`SharedReadinessState` is the existing proof that the health worker can hold a
-shared handle from line 36 and have lifecycle events mutate it afterward
-(`set_config_loaded` at :86 fires long after the worker is serving). **OpsState
-rides the identical seam:**
+**The factual correction, load-bearing:** `with_services_and_auth` accepts the
+already-erased `Arc<dyn ConnectionServices>` (`supervisor.rs:111-119`), and
+the connection scheduler does not exist until `SupervisorInner::new`
+constructs it (`supervisor.rs:471-484`) — *after* the erasure. So "capture
+everything before erasure" is impossible for the connection scheduler and the
+assembly is a three-step seal, in this order:
 
-- **Construct the immutable-config shell + zeroed atomics right after
-  `load_config` (≈ line 28–34)**, so its config half is exact from the first
-  scrape. Hand `ops.clone()` to `start_health_server` at line 36 (its
-  signature grows one `Arc<OpsState>` parameter — the only runtime change to
-  the listener's start path).
+1. **Construct `Arc<OpsState>`** (config shell + `phase=Starting` + zeroed
+   atomics + empty snapshot + empty `OnceLock`) right after `load_config`;
+   hand `ops.clone()` to `start_health_server` at line 36 (its signature grows
+   one parameter) and the §2.5 writer handles to service construction.
+2. **Capture channel + conversation scheduler handles PRE-coercion** from the
+   concrete `LiminalConnectionServices` (`services.rs:397-418` — the only
+   window; after coercion they are unreachable and bolting queries onto the
+   trait object risks wake-unsafe implementations). Downgrade to `Weak`.
+3. **Construct the supervisor, THEN capture its scheduler** via the existing
+   `ConnectionSupervisor::scheduler()` accessor (`supervisor.rs:152-156`),
+   downgrade to `Weak`, and **SEAL**: `inventory.set(InventoryHandles{…})` —
+   exactly once, before `phase` flips to `Running`. A scrape that arrives
+   before the seal sees `phase: starting` and an inventory view that is
+   typed-absent ("not yet sealed"), never a partial handle set.
 
-- **Capture the safe scheduler handles BEFORE the erasure at line 58/61.** The
-  concrete `LiminalConnectionServices` still exposes the channel cluster,
-  conversation supervisor, and store *before* it is coerced into
-  `Arc<dyn ConnectionServices>` (scout: `services.rs:397-419`, "concrete
-  full-service access … before trait erasure"; the coercion happens as
-  `services` moves into `with_services_and_auth`). After erasure those handles
-  are gone and bolting actor queries onto the trait object would risk
-  wake-unsafe implementations (scout risk). So the connection scheduler handle
-  (always), and the channel/conversation scheduler handles (full profile
-  only), are moved into OpsState's inventory slot at this point. The task's
-  phrase "assembled BEFORE the Arc<dyn ConnectionServices> type erasure" is
-  exactly this capture.
+**The boot window is honest, not hidden:** between line 36 and the seal,
+gauges read zero, the snapshot is empty, `phase` says `starting` — precisely
+as `/ready` reads 503 until :86. A consumer can never mistake a boot zero for
+steady state because `phase` travels in every response (§3.1).
 
-- **The boot-window is honest, not hidden.** Between line 36 (worker serving)
-  and full assembly, the atomic gauges read zero and the connection snapshot
-  is empty — precisely as `/ready` reads 503 until :86. A scrape during boot
-  therefore returns `profile` and `limits` (exact, config-derived) with gauges
-  marked `starting` (§4 staleness column, §11 JSON `phase` field), never a
-  false "0 connections, healthy". This mirrors the readiness state machine and
-  is stated so no consumer reads a boot zero as steady state.
+**Named transition tests** (each fail-first): (t1) scrape before seal →
+`starting` + typed-absent inventory, no partial handles; (t2) scrape
+immediately after `Running` flips → sealed inventory renders; (t3) scrape
+during `Draining` with schedulers torn down → `Weak` upgrade fails → typed-
+absent-with-phase, no panic, no stall; (t4) `phase` transitions are monotonic
+Starting→Running→Draining under concurrent scrapes (no observable regression
+to an earlier phase).
 
 The worker-front-door profile (`runtime.rs:76-82`) builds only the connection
 supervisor; OpsState's channel/conversation/store/cluster slots are then
@@ -256,9 +284,118 @@ thread refreshes (that would be a resident wake — rule-2). It is not a
 transactional snapshot: each atomic is independently current, so a scrape is
 consistent *per field*, not across fields — the console labels a scrape
 timestamp and never claims an all-fields instant (scout risk: "Metric snapshot
-consistency is per-atomic, not transactional"). It never retains a handle
-beyond `run()`'s ownership (ClusterHandle/membership reachability is captured
-by reference into OpsState without extending its lifetime — scout next-step).
+consistency is per-atomic, not transactional"). And it never extends a
+domain object's lifetime: every retained scheduler handle is `Weak` (§2.2.5);
+the only strong `Arc`s OpsState holds are its own config, atomics, snapshot
+generations, and observation-bundle counters (plain atomics with no Drop
+side-effects, harmless to outlive their connection until the next rebuild
+drops the entry).
+
+### 2.5 The write side — ownership defined, not implied
+
+Reading is `OpsReadState`'s job (§3.2); **writing is a separate API** with
+named owners for every gauge. Sol's review established that several gauges
+have no viable writer path without this: `admissions` is a non-shareable
+`AtomicU64` embedded in `ConnectionRuntime` (`supervisor.rs:687-692`), the
+inbox budget is **lazy** — `ConnectionProcessState.inbox_budget` is `None`
+until first subscribe (`state.rs:47-52`; created at `apply.rs:383-395`) — and
+channel/conversation lifecycle events fire in the lower `liminal` crate,
+which must not know about a server-owned OpsState. The write side is
+therefore three shapes:
+
+**(a) The per-connection OBSERVATION BUNDLE.** One
+`Arc<ConnectionObservation>` created **at admission** (in
+`try_reserve_admission`'s success path, before process construction),
+containing the connection's live atomics: the §6 R7 slice counter,
+`subscriptions_active`, `inbox_depth` (§4.3), `pending_pushes`,
+`pending_replies`/`tombstones`/`armed_timers` (per-connection homes of the
+§4.4 gauges), `saturated_conversations` (§4.5), and an
+**initially-empty budget slot** (`OnceLock<Arc<ConnectionInboxBudget>>`).
+Clones go three ways: one into the connection process state (the slice-path
+writer — no map lookup on any hot path), one into the host-side connection
+record (host-side writers: push slots, teardown sweeps), one embedded in the
+snapshot entry (the reader). Every rollback/close route resolves the bundle
+it already holds — admission rollback decrements what it incremented and
+unpublishes the entry; the single removal/finalization path (park-flip §3)
+is where close-side decrements and entry removal happen, covering EOF,
+protocol close, error close, force close, reap, external kill, and shutdown
+sweep. **One-write-per-transition tests** are named per gauge in §9.
+
+**(b) The lazy-budget resolution — decided: subscribe joins the rebuild
+set.** Two options were on the table: make the budget eager at admission
+(one `Arc<ConnectionInboxBudget>` allocated per connection whether or not it
+ever subscribes — a resident change to the wire path's current lazy
+contract), or keep the budget lazy and add subscribe/unsubscribe to the
+snapshot-rebuild event set. **This design picks the rebuild-set option**,
+because (i) it leaves the shipped lazy semantics byte-identical
+(`apply.rs:383-395` keeps its `get_or_insert_with`; a connection that never
+subscribes still allocates nothing), (ii) subscribe events are control-plane
+rate, bounded by `max_subscriptions_per_connection` per connection lifetime
+— not per-delivery — so the rebuild cost is priced with the other lifecycle
+rebuilds (§8), and (iii) the rebuild is needed anyway to publish the §4.3
+per-subscription depth handles. On first subscribe, the apply path fills the
+bundle's budget `OnceLock` with the budget `Arc` it just created and the
+subscribe rebuild publishes it; before that, the view renders
+`inbox_bytes_used: null` with `subscriptions_active: 0` — a typed
+never-subscribed fact, not a zero.
+
+**(c) Dependency-neutral writer handles for the lower crate.** Channel
+subscriber gauges and conversation registration gauges move at events owned
+by `crates/liminal` (registry/actor code), which cannot name a server type.
+They receive **plain injected atomics** at construction: the server
+pre-registers per-channel `Arc<AtomicU64>` subscriber gauges (keyed by the
+immutable configured-channel list) and hands them to channel construction;
+the conversation supervisor's registration/deregistration sites take two
+injected `Arc<AtomicU64>`s (actors, participants). No trait, no callback
+into the server, no reverse dependency — an `Arc<AtomicU64>` is
+dependency-neutral by construction. Every deregistration/cleanup path that
+the D4 churn discipline already covers decrements what registration
+incremented; the §9 transition tests assert balance.
+
+### 2.6 The snapshot writer protocol — one authority, cold by construction
+
+The snapshot has MULTIPLE natural writers — the accept thread
+(reserve/spawn/register, `supervisor.rs:502-560`), connection scheduler
+workers (worker registration `:979-995`, readiness registration
+`:1197-1218`), and the converging close/crash/reap routes
+(`:1148-1266,1345-1382`). A naive load-copy-store on the `ArcSwap` loses
+updates under that concurrency (a lost close leaves a ghost connection; a
+lost accept omits a live one), and serializing on the `records` mutex is
+forbidden — every slice locks it via `is_registered`
+(`process.rs:120-131` → `supervisor.rs:1165-1170,1269-1273`), which would
+re-import §5.2.
+
+**Decision: a dedicated snapshot-writer mutex is the single update
+authority.** `ops_snapshot_writer: Mutex<()>` (or `Mutex<SnapshotBuilder>`),
+with these invariants:
+
+- **Every mutation** (publish entry, update posture, fill budget slot, remove
+  entry) acquires the writer mutex, clones the current snapshot, applies a
+  **keyed idempotent transformation** (by pid; apply-to-missing is a no-op,
+  re-apply is harmless), and swaps. No unserialized load-copy-store exists.
+- **"Cold" is a precise claim, not a vibe:** the writer mutex is acquired
+  ONLY at connection-lifecycle and control-plane events (admission, auth,
+  worker/readiness registration, subscribe/unsubscribe, close/reap) — never
+  on the per-slice service path, never per-delivery, and **never by
+  readers** (a scrape does one `ArcSwap` load; it cannot contend this mutex
+  by construction). A slice-path writer touches it at most once per
+  registration event in its connection's LIFE, not per slice.
+- **Ordering, per route:** admission — reserve CAS → construct bundle →
+  insert record → publish snapshot entry (under writer mutex) → return from
+  spawn; nothing external can address the connection before its entry
+  exists. Admission rollback — remove entry if present (idempotent), release
+  reservation. Worker/readiness updates — keyed posture update; entry
+  already gone (concurrent close) ⇒ no-op. Close/reap — all routes funnel
+  through the single removal path, which removes the record, then the
+  snapshot entry, then drops the bundle clone; entry removal is the LAST
+  publication, so a scrape never sees an entry whose record is still
+  half-torn.
+- **Named collision tests:** (c1) concurrent accept×N + close×N storm —
+  snapshot converges to exactly the live record set at quiescence, no ghost
+  and no missing entry; (c2) worker/readiness registration racing close —
+  no resurrection of a removed entry; (c3) readers scraping continuously
+  during (c1)/(c2) never block (bounded scrape latency while the writer
+  mutex is held-and-released under storm) and never observe a torn entry.
 
 ---
 
@@ -282,6 +419,33 @@ implied). An `arcswap` entry may embed shared live atomics (§2.2's
 shared-live-atomic pattern); reading such a field is one `Arc` load plus one
 `Relaxed` atomic load — still lock-free, still this primitive. No primitive
 outside this table is admissible; introducing one is a §5 violation.
+
+### 3.1 The common envelope — its own field table, same discipline
+
+Every §11 response carries an envelope; its fields obey the same per-field
+discipline as view fields (they were previously asserted without rows — Sol
+minor, fixed):
+
+| Field | Owner | Update event | Read-prim | Lock | Staleness | Redaction | Idle-cost |
+|---|---|---|---|---|---|---|---|
+| `phase` | OpsState `AtomicU8` (§2.2.2); writer = runtime thread only; transitions Starting→Running (listener bound + inventory sealed) → Draining (shutdown initiated) | the two named transitions | `atomic` | lock-free | bounded-stale by one transition | none | 0 |
+| `scraped_at` | **render-time work, NOT state** — `SystemTime::now()` read while building the response, formatted RFC 3339 UTC. Explicitly outside the §3 primitive table: it is per-request work on the serving thread, not a stored fact. Clock failure ⇒ field is `null`, response still serves. | per response render | — (render work) | none | exact at render | none | 0 (no scrape ⇒ no clock read) |
+| `as_of` (per observer-backed field; v1: unused) | the observer's own replay/refresh timestamp, carried in-response per T3 (§5.4) | observer refresh | rides the field | rides the field | stated by the field itself | none | rides the field |
+| `contract`, `major`, `additive_rev` | **compile-time contract metadata** — `const` in the §11.0 contract module, NOT ServerConfig (it describes the code's contract, not the operator's config; the earlier "immutable config" attribution was wrong and is corrected here) | — (frozen at build) | `config`-class (const deref) | none | exact | none | 0 |
+
+### 3.2 `OpsReadState` — the structural read boundary
+
+View builders and endpoint handlers receive **`OpsReadState`**, a read-only
+boundary type that exposes ONLY: the `OpsConfig` deref, the atomic loads, the
+`ArcSwap` snapshot load, the readiness snapshot, the metrics renderer, and
+the sealed inventory's `Weak` upgrades. It holds **no** `ConnectionRuntime`,
+no supervisor, no process state, no actor/channel/conversation handles, no
+store — a view builder **cannot** reach a hot mutex because the types it can
+name do not contain one. This is enforced structurally (module visibility:
+the write side of §2.5/§2.6 lives in a module the view code cannot import)
+and pinned by the §8 no-hot-lock barrier test. The boundary is the design's
+answer to "the no-hot-lock property must be enforced by the abstraction, not
+by review vigilance."
 
 ---
 
@@ -307,16 +471,17 @@ structural read guard never taken by a hot path); **none** (immutable deref).
 | Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
 |---|---|---|---|---|---|---|---|---|
 | `active` | `liminal_connections_active` gauge | accept/close | `metrics` | read-lock | bounded-stale | 1 | none | 0 |
-| `admissions_current` | `Relaxed` accessor on the EXISTING `admissions` AtomicU64 (`supervisor.rs:654`, today no accessor). **Semantics: the CAS'd CURRENT admitted+reserved count** — that is how the admission CAS enforces `max_connections`; it decrements at teardown/rollback. NOT a monotonic total. | admission CAS / teardown decrement | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
+| `admissions_current` | **the CAS'd CURRENT admitted+reserved count.** Writer path defined (Sol finding — the existing `admissions` AtomicU64 is embedded non-shareably in `ConnectionRuntime`, `supervisor.rs:687-692`): OpsState owns an `Arc<AtomicU64>` and `ConnectionRuntime::new` takes it injected at construction as ITS admission counter — `try_reserve_admission` (`supervisor.rs:741-765`) CASes the shared atomic directly. One atomic, two names, no mirror, no new write. Decrements at teardown/rollback; NOT a monotonic total. | admission CAS / teardown decrement (existing writes on the shared atomic) | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
 | `admissions_started_total` | NEW monotonic OpsState counter, incremented once at admission-success (a new write at a connection-lifecycle event, not a promotion of the CAS count) | admission success | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `reserved_in_flight` | derived `admissions_current − active`: current admitted+reserved minus connections that reached a live record — the reserved-before-record window the scout flagged | — | `atomic`+`metrics` | lock-free | bounded-stale | 1 | none | 0 |
+| `reserved_in_flight` | derived `admissions_current.saturating_sub(active)`: current admitted+reserved minus connections that reached a live record — the reserved-before-record window the scout flagged. The two terms are **independently sampled** (§2.4 disclaims cross-field atomicity): a cross-event sample can transiently exceed truth or hit zero via saturation — **`saturating_sub`, never unsigned wrap**, and the caveat rides the field's description in the contract. | — | `atomic`+`metrics` | **read-lock** (the `active` term rides the metrics registry snapshot) | bounded-stale, cross-sampled | 1 | none | 0 |
 | `peer` (per conn) | `ConnectionsSnapshot` arcswap | accept/auth/close | `arcswap` | lock-free | last conn event | ≤ `max_connections` (256) | peer addr shown; **fd redacted** | 0 |
 | `worker_posture` (per conn) | `ConnectionsSnapshot` | worker register | `arcswap` | lock-free | last conn event | ≤ 256 | registration summarized, no raw fd | 0 |
 | `readiness_posture` (per conn) | `ConnectionsSnapshot` | readiness register/dereg | `arcswap` | lock-free | last conn event | ≤ 256 | token **never** shown | 0 |
 | `slice_serviced` (per conn) | R7 `Arc<AtomicU64>` shared into the snapshot entry (§6, the §2.2 shared-live-atomic pattern — never read through the records map) | serviced slice | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 (parked ⇒ no write) |
 
 **Never** the `records` mutex (§5.2). Per-connection detail rides the arcswap
-snapshot, rebuilt only on accept/auth/worker-register/readiness/close — never
+snapshot, rebuilt only on the §2.2.4 event set (connection lifecycle +
+subscribe/unsubscribe, under the §2.6 writer mutex) — never
 on a slice.
 
 ### 4.2 channels
@@ -324,7 +489,7 @@ on a slice.
 | Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
 |---|---|---|---|---|---|---|---|---|
 | `name`, `configured` metadata | immutable config channel list (`config/types.rs`) | — (frozen) | `config` | none | exact | # configured channels | none | 0 |
-| `subscriber_count` (per channel) | new lifecycle-maintained atomic per configured channel | subscribe/unsubscribe | `atomic` | lock-free | bounded-stale | # configured channels (pre-registered) | none | 0 |
+| `subscriber_count` (per channel) | injected per-channel `Arc<AtomicU64>` (§2.5(c)), pre-registered from the immutable configured-channel list | subscribe/unsubscribe | `atomic` | lock-free | bounded-stale | ≤ `max_configured_channels` (1,024 — the §9 config cap) | none | 0 |
 | `publishes_total` | `liminal_publishes_total` | publish accepted | `metrics` | read-lock | bounded-stale | 1 (process-global) | none | 0 |
 | `deliveries_total` | `liminal_deliveries_total` | delivery | `metrics` | read-lock | bounded-stale | 1 (process-global) | none | 0 |
 
@@ -342,18 +507,32 @@ cost, not smuggled in here. **Absent-by-profile** in worker-front-door.
 | `inbox_bytes_used` (per conn) | the EXISTING `ConnectionInboxBudget.used` AtomicUsize (`subscription.rs:47-118`), `Arc`-shared into the snapshot entry (§2.2 pattern) — **not mirrored; NO new write exists.** One-line code change implied: promote the `cfg(test)` `used()` accessor to a host-reachable handle captured at budget construction. | admit/drain (existing writes, unchanged) | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
 | `inbox_bytes_cap` | immutable `max_connection_inbox_bytes` (4 MiB) | — | `config` | none | exact | 1 | none | 0 |
 | `overflow_flags_total` | new atomic counter, incremented when a subscription sets its sticky `overflowed` (`subscription.rs:349-396`) | overflow set | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `subscriptions_active` (per conn) | new lifecycle atomic (process-owned map length is host-unreachable) | subscribe/unsubscribe | `atomic` | lock-free | bounded-stale | ≤ 256 | none | 0 |
+| `subscriptions_active` (per conn) | per-connection AtomicU64 in the §2.5 observation bundle, embedded in the snapshot entry (the keyed read path — a bare "OpsState atomic" has no per-connection key; corrected per Sol) | subscribe/unsubscribe | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
+| `depth` (per subscription) | **NEW event-maintained `AtomicUsize` owned by `SubscriptionInbox`**, written beside the queue ops that already hold the inbox mutex: `fetch_add(1)` on successful admit (`subscription.rs:277-330`), `fetch_sub(1)` on pop/drain, reset on close/teardown, decremented by rollback paths that un-admit. `Arc`-shared into the snapshot entry's per-subscription sub-list, published by the subscribe rebuild (§2.5(b)). **Never reads the queue mutex** — the atomic rides next to it, it does not take it. | admit/pop/drain/close/rollback | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 × 32 = 8,192 | none | 0 |
+
+**Depth is a settled-seam REQUIREMENT, not an option** (one-pager §(iii):
+"inbox budget occupancy, overflow flags, **depth gauges** (event-maintained
+host atomics)"). An earlier revision deferred it; Ruling A reversed that:
+implement the settled seam, do not amend it. The shape chosen is
+**per-subscription** (not per-connection aggregate) because the governing cap
+— `max_subscription_inbox_depth` = 256 — is per-subscription: an aggregate
+cannot be compared against the cap it exists to observe. **Priced honestly:**
+the depth writes are **per-delivery active-work** — one `Relaxed` atomic
+add/sub per admit and per pop, zero while parked — grouped with the R7
+rule-2 items in §8 and signed in the same pair sitting. **Named pins:**
+(depth-t1) one-write-per-transition — admit/pop/close/rollback each move the
+gauge exactly once, balanced to zero at teardown; (depth-t2) cost pin — the
+depth write is present on the admit/pop paths and absent from the parked
+path (scrape moves no parked depth gauge, the §6-class sibling).
 
 **Never** the inbox queue lock: `has_pending`/`len` share the same mutex the
-admit/pop delivery hot paths take (`subscription.rs`, §5). Depth is **not**
-exposed exactly in v1 — only the event-maintained byte-budget occupancy and
-overflow counter, which are the safe instruments (scout: depth is
-contention-unsafe; byte budget is safe once promoted to a host-reachable
-atomic). Exact per-subscription depth is deferred with its reason stated.
+admit/pop delivery hot paths take (`subscription.rs:350-395`, §5) — the depth
+atomic exists precisely so no reader ever wants that mutex.
 
 Write-rate honesty for this view's NEW atomics: `subscriptions_active` moves
 at subscribe/unsubscribe rate and `overflow_flags_total` only when an
 overflow trips — control-plane/pressure events, not per-delivery.
+`depth` moves **per delivery** (active-work, priced above).
 `inbox_bytes_used` moves per delivery, but that write **already exists**
 (the budget's own accounting); this design adds no write to it.
 
@@ -361,22 +540,25 @@ overflow trips — control-plane/pressure events, not per-delivery.
 
 | Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
 |---|---|---|---|---|---|---|---|---|
-| `actors_registered` | new lifecycle atomic (mirrors D4 `registered_actor_count`, `conversation/actor.rs:124-150`, whose registry is `Mutex<HashMap>`) | actor register/dereg | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `participants_registered` | new lifecycle atomic (mirrors `registered_participant_count`) | participant register/dereg | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `pending_replies_total` | new OpsState atomic (table is process-owned, `pending_reply.rs`; `len` is `cfg(test)`) | admit/complete/expire | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `tombstones_total` | new OpsState atomic | tombstone insert/reap | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `armed_timers` | new OpsState atomic (park-flip §5 deadline timers) | timer arm/cancel | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
+| `actors_registered` | injected global `Arc<AtomicU64>` (§2.5(c)) written by the conversation supervisor's register/dereg sites (the D4-count sites, `conversation/actor.rs:124-150`, whose `Mutex<HashMap>` is never read) | actor register/dereg | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
+| `participants_registered` | injected global `Arc<AtomicU64>` (§2.5(c)) | participant register/dereg | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
+| `pending_replies` (per conn) + `pending_replies_total` | per-connection AtomicU64 in the §2.5 observation bundle, written by the pending-reply table's transition sites the process already executes (`pending_reply.rs:139-308`: admit / complete / cancel / expire); **total = render-time sum over snapshot entries** (≤ 256 loads, bounded render work — one write per transition, no global duplicate) | admit/complete/cancel/expire | `arcswap` (entry-embedded; total summed at render) | lock-free | bounded-stale | ≤ 256 (+1 derived) | none | 0 |
+| `tombstones` (per conn) + `tombstones_total` | same bundle shape; written at tombstone insert / reap-sweep | tombstone insert/reap | `arcswap` (summed at render) | lock-free | bounded-stale | ≤ 256 (+1 derived) | none | 0 |
+| `armed_timers` (per conn) + `armed_timers_total` | same bundle shape; written at timer arm/cancel (park-flip §5 deadline timers) | timer arm/cancel | `arcswap` (summed at render) | lock-free | bounded-stale | ≤ 256 (+1 derived) | none | 0 |
+| `conversations_active` (per conn) | bundle AtomicU64, written where the process enforces `max_conversations_per_connection` (conversation join/leave on the connection) | conversation join/leave | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
 
 **Never** the conversation registry mutex (`count` locks the maps actor
 dispatch/lifecycle share, §5.5), **never** `ConversationActor::state()` (an
-actor command → wake-unsafe, §5.6). All five are event-maintained host atomics
-updated at the same lifecycle transitions the actors already execute.
-**Write-rate honesty:** `pending_replies_total`, `tombstones_total`, and
-`armed_timers` move at REQUEST-lifecycle rate (reply admit/complete/expire,
-timer arm/cancel) — each write is a NEW **active-work cost** (one `Relaxed`
-atomic write per event), zero at idle, priced and grouped with the R7 rule-2
-discussion in §8, **not** implied-infrequent; `actors_registered`/
-`participants_registered` move at the slower conversation-lifecycle rate. The
+actor command → wake-unsafe, §5.6). All are event-maintained host atomics
+updated at the same lifecycle transitions the process/supervisor already
+executes, homed per §2.5 (bundle for per-connection, injected globals for the
+supervisor pair). **Write-rate honesty:** the pending/tombstone/timer/
+conversation gauges move at REQUEST-lifecycle rate — each write is a NEW
+**active-work cost** (one `Relaxed` atomic write per transition), zero at
+idle, priced and grouped with the R7 rule-2 discussion in §8, **not**
+implied-infrequent; `actors_registered`/`participants_registered` move at the
+slower conversation-lifecycle rate. Totals derived by render-sum cost ≤ 256
+atomic loads per scrape — render work, not state. The
 `armed_timers` gauge is the direct observability of the park-flip §5 deadline
 machinery — an idle parked connection holds ZERO timers by that design, so this
 gauge reads 0 at idle and is itself the proof the deadline timers are
@@ -388,32 +570,42 @@ The §5 `LimitsConfig` matrix (`config/types.rs:203-236`) rendered as
 **config-vs-occupancy pairs** — the cap from `config`, the occupancy from the
 atomic the relevant view already maintains:
 
-| Cap (config) | Default | Occupancy source | Read-prim |
+| Cap (config) | Default | Occupancy source (granularity matches the cap's scope) | Read-prim |
 |---|---|---|---|
-| `max_connections` | 256 | connections.`active` | `metrics` |
-| `max_subscriptions_per_connection` | 32 | subscriptions.`subscriptions_active` (per-connection) | `atomic` |
-| `max_conversations_per_connection` | 32 | conversations gauges — **occupancy granularity: process-global in v1; per-connection deferred** (see note) | `atomic` |
-| `max_pending_pushes_per_connection` | 32 | new push-slot atomic (map is shared hot mutex, `cfg(test)` accessor only — §5) | `atomic` |
-| `max_pending_conversation_replies_per_connection` | 32 | conversations.`pending_replies_total` — **occupancy granularity: process-global in v1; per-connection deferred** (see note) | `atomic` |
-| `max_pending_replies_per_conversation` | 8 | per-conversation saturation counter (event-maintained) | `atomic` |
-| `max_connection_inbox_bytes` | 4 MiB | subscriptions.`inbox_bytes_used` | `atomic` |
-| `max_subscription_inbox_depth` | 256 | overflow counter (depth itself contention-unsafe) | `atomic` |
+| `max_connections` | 256 | connections.`admissions_current` — **the CAS-enforced value** (`try_reserve_admission`, `supervisor.rs:741-765`, refuses against admitted+reserved, so `active` alone can read below-cap while admissions already refuse; Sol finding, fixed). `active` and `reserved_in_flight` are exposed alongside, separately. | `atomic` |
+| `max_subscriptions_per_connection` | 32 | subscriptions.`subscriptions_active` (per-connection, bundle) | `arcswap` |
+| `max_conversations_per_connection` | 32 | conversations.`conversations_active` (per-connection, bundle — §4.4) | `arcswap` |
+| `max_pending_pushes_per_connection` | 32 | `pending_pushes` (per-connection, bundle — full row below) | `arcswap` |
+| `max_pending_conversation_replies_per_connection` | 32 | conversations.`pending_replies` (per-connection, bundle — §4.4) | `arcswap` |
+| `max_pending_replies_per_conversation` | 8 | `saturated_conversations` (per-connection, bundle — full row below; exact per-conversation occupancy is process-owned and not exposed, the saturation gauge is the honest substitute and says so in the contract) | `arcswap` |
+| `max_connection_inbox_bytes` | 4 MiB | subscriptions.`inbox_bytes_used` (per-connection, shared budget atomic — §4.3) | `arcswap` |
+| `max_subscription_inbox_depth` | 256 | subscriptions.`depth` (per-subscription — §4.3) + overflow counter | `arcswap` + `atomic` |
 
-**Granularity note (two rows marked above):** two PER-CONNECTION caps are
-paired with PROCESS-GLOBAL occupancy gauges in v1 — a global total is not a
-per-connection occupancy, and the table says so rather than implying a pair
-it doesn't have. **Why deferred rather than fixed in v1:** per-connection
-occupancy for these two would need either snapshot rebuilds at
-request-lifecycle rate (violating §2.2's infrequent-rebuild discipline) or
-two more per-connection shared atomics written on the slice path — a new
-active-work cost in the R7 rule-2 class that v1 has not priced or had
-signed. **What v1 gives instead:** the global totals bound aggregate
-pressure, and the per-cap-class `cap_exceeded` refusal counters (below)
-surface every actual per-connection saturation event — an operator sees
-*that* and *which* cap refused, just not the near-cap distribution.
-**Upgrade path:** per-connection gauges via the §2.2 shared-live-atomic
-pattern (the D4/§6 shape exactly), an additive change under §11.4 with its
-own signed per-event write cost.
+**Granularity, resolved (supersedes the earlier deferral):** an earlier
+revision paired two per-connection caps with process-global gauges and
+deferred the fix. The §2.5 observation bundle dissolves the deferral's
+reason: per-connection occupancy is the SAME single write per transition
+(targeting a bundle atomic instead of a global), needs NO request-rate
+snapshot rebuilds (the Arcs are entry-embedded), and its per-event cost is
+already in the §8 rule-2 set being signed. Every per-connection cap is
+therefore paired with a per-connection gauge in v1; view-level totals are
+render-sums (§4.4). In the JSON (§11.1), per-connection occupancies appear
+in the caps document as `{ cap, limit, worst: { id, occupancy }, over_80pct:
+n }`-shaped summaries plus per-connection detail in the connections view —
+sketch-level, frozen by the contract module.
+
+**The two new bundle gauges, full rows:**
+
+| Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
+|---|---|---|---|---|---|---|---|---|
+| `pending_pushes` (per conn) | bundle AtomicU64. Transitions, enumerated from `supervisor.rs:1002-1091` + the merged deadline surface: +1 `register_push`; −1 reply-resolved; −1 timeout/`Expired` disposition (`supervisor.rs:657` on main); −k close-sweep (all of a pid's slots dropped at close — decrement per removed slot, balanced). Host-side writers resolve the bundle through the current snapshot (lock-free `ArcSwap` load) or the record's bundle clone — never a new map. | push register/resolve/expire/close-sweep | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
+| `saturated_conversations` (per conn) | bundle AtomicU64 counting conversations currently AT `max_pending_replies_per_conversation`. Transitions, enumerated from `pending_reply.rs:139-308`: +1 when a conversation's pending+tombstone count reaches cap at admit/tombstone-insert; −1 when it drops below at complete/cancel/expire/tombstone-reap-sweep. Written by the table's own transition sites (the process owns the table and the bundle clone). | admit/complete/cancel/expire/reap crossing the cap boundary | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
+
+Both are push/request-rate **active-work writes**, in the §8 rule-2 signed
+set; both get one-write-per-transition + balanced-teardown tests (§9), the
+close-sweep balance explicitly (a connection dying with k outstanding pushes
+and s saturated conversations must zero both gauges through the single
+removal path).
 
 Plus **refusal counters by typed-refusal class** — one atomic per class,
 incremented where the refusal is emitted:
@@ -584,7 +776,9 @@ the counter lived only inside the `records` map, READING it would take the
 slice-hot records mutex — §5.2's own violation, re-imported through the back
 door. The shape that avoids it (§2.2's shared-live-atomic pattern):
 
-- the counter is an **`Arc<AtomicU64>` created at admission**;
+- the counter is an **`Arc<AtomicU64>` created at admission** — the first
+  member of the §2.5 observation bundle, and the pattern the bundle's other
+  counters follow;
 - **one clone rides with the connection process/record** for the slice-path
   `fetch_add` (the writer's handle — no map lookup on the hot path);
 - **one clone is embedded in the immutable `ConnectionsSnapshot` entry**, so
@@ -692,10 +886,30 @@ beamr process, scheduler, or mailbox** — no actor command, no
 host state (§2–§3); writers pay at their existing lifecycle events. **Pinned
 by** the §6 permanent regression (a console scrape does not advance a parked
 connection's slice counter) **plus** a boundary assertion that no
-actor/control/mailbox API is invoked on any scrape path (scout next-step: "park
-a connection, record R7, call every console endpoint repeatedly, and assert no
-slice advance; separately assert no actor command/control queue/mailbox APIs
-are invoked").
+actor/control/mailbox API is invoked on any scrape path (scout next-step).
+**Honest scope limit (Sol finding, folded): this gate pins WAKE-safety only.**
+A read-only scrape can lock the `records` mutex without waking anything — the
+parked slice counter stays flat while the exact §5.2 contention regression
+ships. The R7 pin does not and cannot detect lock contention; claiming
+otherwise left half the safety property uncertified. Hence the second gate:
+
+**G-NOHOTLOCK (the no-hot-lock gate).** Serving any MCP/console read **never
+acquires a lock that a slice, delivery, actor-dispatch, or write path
+acquires** — `records`, inbox queue mutexes, conversation registries, push
+slots, or any successor. Pinned TWO ways, independent of G-NOWAKE:
+
+1. **Structurally:** view builders receive only `OpsReadState` (§3.2), a type
+   that cannot name `ConnectionRuntime`, process state, actor handles, or
+   queue maps — enforced by module visibility and an API-surface test that
+   fails if the boundary type ever grows a reachable hot-lock owner.
+2. **Behaviorally — the barrier test:** a deterministic test acquires and
+   HOLDS each named hot mutex (`records`, a subscription inbox lock, the
+   conversation registries, `push_replies`) while repeatedly scraping every
+   endpoint; every scrape must complete within its §11.6 latency budget
+   while the lock is held. A scrape that ever wants one of those locks
+   deadlocks/times out the test — fail-first by construction. (Lock-order
+   instrumentation in debug builds is an acceptable strengthening, not a
+   substitute.)
 
 **The honest caveat, stated not hidden (one-pager §(iv)).** The serving
 **thread** is not free. The health worker **already wakes every 10 ms polling
@@ -710,26 +924,34 @@ steady cost this design introduces is:
   a **rule-2 item**: bound stated (one `fetch_add` per serviced slice), pinning
   test named (§6 regression), certifying-pair sign-off on the number required
   before merge.
-- **the request-rate gauge writes — active-work costs, priced with R7, not
-  implied-infrequent:** `pending_replies_total`, `tombstones_total`, and
-  `armed_timers` (§4.4) are NEW `Relaxed` atomic writes at request-lifecycle
-  events (reply admit/complete/expire, timer arm/cancel). Zero at idle, but
-  each is a by-design active-work cost: bound = one atomic write per event,
-  pinned by the same §6-class no-wake regression (a scrape moves none of
-  them on a parked connection), and signed at the pair's desk **in the same
-  sitting as the R7 number** — one sign-off covering the full set of new
-  hot-adjacent writes.
+- **the active-work write set — priced with R7, enumerated COMPLETELY, not
+  implied-infrequent.** Every NEW `Relaxed` atomic write this design adds on
+  or adjacent to hot paths, one write per transition each:
+  (i) per-delivery: subscription `depth` add/sub (§4.3 — admit/pop);
+  (ii) request-rate: per-connection `pending_replies`, `tombstones`,
+  `armed_timers`, `conversations_active`, `saturated_conversations` (§4.4,
+  §4.5);
+  (iii) push-rate: `pending_pushes` register/resolve/expire (§4.5);
+  (iv) refusal counters (only move on refusals).
+  Zero at idle, every one. Bound = one atomic write per transition; pinned
+  by the §9 one-write-per-transition + balanced-teardown tests and the
+  §6-class scrape-moves-nothing-parked regression; signed at the pair's desk
+  **in one sitting with the R7 number** — one sign-off covering the complete
+  set. A future gauge that adds a hot-adjacent write joins this list or
+  doesn't ship.
 - **costs this design does NOT add, stated so they aren't double-counted:**
   `inbox_bytes_used` is the budget's EXISTING per-delivery atomic,
   `Arc`-shared into the snapshot (§4.3, no new write); `admissions_current`
-  is the existing CAS count behind a new accessor (§4.1, no new write).
+  is the existing CAS atomic injected at construction (§4.1, no new write).
 - the genuinely infrequent writers: per-channel subscriber atomics
   (subscribe/unsubscribe), `admissions_started_total` and conversation
   registration gauges (connection/conversation lifecycle), overflow counter
-  (pressure events), and arcswap rebuilds (accept/auth/register/readiness/
-  close only) — zero-idle-cost by construction and off the per-request path.
-  No background refresh thread exists (§2.4); if one were ever added it would
-  be a rule-2 item from birth.
+  (pressure events), and **snapshot rebuilds under the §2.6 writer mutex** —
+  now including subscribe/unsubscribe per §2.5(b), still
+  connection-lifecycle/control-plane rate, each rebuild one CoW allocation
+  ∝ live connections, never per-delivery, never per-slice. Zero-idle-cost by
+  construction and off the per-request path. No background refresh thread
+  exists (§2.4); if one were ever added it would be a rule-2 item from birth.
 
 **The sibling-listener fallback is a rule-2 item from birth (§1).** If the pair
 rules the shared serial handler's head-of-line risk (a client can occupy the
@@ -738,8 +960,8 @@ sole worker for its 2 s read timeout, degrading `/health` and `/ready` —
 a resident thread whose idle cost (its own accept-poll cadence) must be bounded,
 pinned, and signed. v1 avoids this by reusing the existing worker and by
 **addressing the serial 2 s head-of-line behavior before adding expensive
-endpoints** (scout next-step) — e.g. a bounded response size and a scrape-work
-budget so an MCP call cannot starve liveness. **Domain-owner determination
+endpoints** (scout next-step) — with the NUMERIC budgets and head-of-line
+pins now set in §11.6, not left as adjectives. **Domain-owner determination
 (b), recorded:** exactly this posture is confirmed — shared worker +
 bounded-response + scrape-work budget; sibling listener only on the pair's
 disqualifying ruling. (For contrast, the seam's stdio-host transport — T1,
@@ -766,42 +988,72 @@ pull-only (a scrape arrives or it doesn't). The non-zero costs are all
 active-work: the §6 R7 increment fires **only on a serviced slice** — of
 which a parked connection runs none — and the §4.4 request-rate gauge writes
 fire only on request-lifecycle events, of which an idle server has none
-(Q4(c)). **Ceiling:** the memory ceiling is OpsState's resident
-size — immutable config (constant) + atomics bounded by `max_connections` × a
-handful of `AtomicU64` (256 × O(10) × 8 B ≈ single-digit KiB) + the current
-`ConnectionsSnapshot` arc (≤ 256 entries). No unbounded growth: cardinality is
-capped by the §5 limits.
+(Q4(c)). **The resident-memory ceiling, as a formula** (Sol finding — the
+earlier "handful of atomics" hand-wave undercounted; and configured channels
+are an unbounded `Vec` in `ServerConfig` (`config/types.rs:17-18`), NOT
+governed by any of the eight limits, so a ceiling claim was false without a
+config cap — **this design adds one**: `max_configured_channels = 1024`,
+validated at config load, refuse-at-load beyond, a NEW named cap):
+
+```
+R = |OpsConfig|                                   (redacted config clone; ∝ config size,
+                                                   bounded by config validation + channel cap)
+  + N_ch × (8 B gauge + pre-registered handle)     N_ch ≤ max_configured_channels (1024)
+  + N_conn × |bundle|                              N_conn ≤ max_connections (256);
+      |bundle| ≈ 9 atomics × 8 B + Arc overhead    ≈ 100–150 B  → ≤ ~40 KiB
+  + N_sub × (8 B depth atomic + Arc)               N_sub ≤ 256 × 32 = 8,192 → ≤ ~130 KiB
+  + G × |snapshot|                                 |snapshot| = N_conn × |entry|;
+      |entry| = peer + posture strings (each bounded: peer addr ≤ 64 B,
+      posture strings ≤ 256 B — a NAMED bound, enforced by truncation at
+      publication) + embedded Arcs → ≤ ~512 B → snapshot ≤ ~128 KiB
+      G = live generations ≤ 3 (current + one in-flight writer clone + one
+      reader-held old generation — the serial worker holds at most one)
+  + InventoryHandles (3 Weak) + phase + flat counters (constant, < 1 KiB)
+```
+
+Worst-case resident ≈ low single-digit MiB at full config and full caps;
+**every term is parameterized by a validated cap** — nothing scales with
+traffic or deployment config outside a named ceiling. Transient per-scrape:
+one response buffer ≤ the §11.6 response budget + the inventory Vec copy.
 
 **Q2 — What is the aggregate ceiling across all views?** Bounded by the eight
-`LimitsConfig` caps (§4.5): connections ≤ 256, per-connection subs/convs/pushes
-≤ 32, inbox ≤ 4 MiB. Every gauge is a fixed-width atomic or a snapshot bounded
-by those caps; the refusal counters are a fixed small set of classes (§4.5). No
-view has cardinality that grows with traffic rather than with the capped live
-population. The metrics registry read-lock is the one shared-lock touch, and it
-is a **structural read** guard never taken by the recording hot path
-(`metrics/registry.rs:140-157`) — its ceiling is the registered family count
-(three in v1).
+`LimitsConfig` caps **plus the new `max_configured_channels` config cap**
+(the honest fix to the earlier eight-limits claim, which was false for the
+channels view): connections ≤ 256, per-connection subs/convs/pushes ≤ 32,
+subscriptions ≤ 8,192, inbox ≤ 4 MiB, channels ≤ 1,024. Every gauge is a
+fixed-width atomic or a snapshot bounded by those caps; refusal counters are
+a fixed class set (§4.5). The metrics registry read-lock is the one
+shared-lock touch — a **structural read** guard never taken by the recording
+hot path (`metrics/registry.rs:140-157`); its ceiling is the registered
+family count (three in v1).
 
 **Q3 — Which test asserts quiescence, and would it catch THIS diff's cost?**
-The park-flip quiescence pin (`supervisor_tests.rs:38-59`: parked slice count
-flat across a soak) plus the §6 sibling regression (a scrape leaves the parked
-counter unchanged). **Would it catch this diff's cost?** Yes for the wake class:
-if any console read were wired through an actor command or the `records` mutex,
-the parked-counter-unchanged assertion (with the no-actor-API boundary check)
-fails. It would **not** catch a mis-signed *active*-slice cost (the R7
-increment on a busy connection) — that is why the increment is a rule-2 number
-signed at the pair's desk (§8), not left to a quiescence soak that only
-exercises the idle path. This gap is stated, not papered over.
+Answered per property, without over-claiming (Sol finding — the earlier
+answer claimed the R7 pin catches a records-mutex scrape; it does not, a
+lock acquisition wakes nothing):
+- **Wake-safety:** the park-flip quiescence pin (`supervisor_tests.rs:38-59`)
+  + the §6 scrape regression. Catches any console read wired through an
+  actor command, mailbox, or process-table execution.
+- **Hot-lock safety:** NOT caught by the above — caught by the §8
+  G-NOHOTLOCK pair (the `OpsReadState` structural boundary + the
+  barrier test that scrapes while each hot mutex is held).
+- **Write-cost correctness:** NOT caught by quiescence soaks (they exercise
+  the idle path) — caught by the §9 one-write-per-transition and
+  balanced-teardown tests per gauge, plus the pair-signed bound on the §8
+  active-work set. Stated, not papered over.
 
 **Q4 — By-design costs → bound + test + sign-off.** The by-design costs are
 enumerated in §8: (a) the transport thread's 10 ms accept-poll — pre-existing,
 separately signed, not this design's to re-sign; (b) the §6 R7 active-slice
 increment — bound stated, §6 test named, pair sign-off required; (c) the
-request-rate gauge writes (§4.4 pending/tombstone/timer gauges) — one
-`Relaxed` write per request-lifecycle event, zero at idle, signed in the same
-sitting as (b); (d) any sibling listener, if the pair mandates one — rule-2
-from birth. No by-design cost is left unbounded or unsigned. No silent
-tradeoffs.
+complete §8 active-work write set (per-delivery depth, request-rate
+pending/tombstone/timer/conversation/saturation, push-rate slots) — one
+`Relaxed` write per transition, zero at idle, one-write-per-transition +
+balanced-teardown tests per gauge, signed in the same sitting as (b); (d) the
+snapshot-rebuild set including subscribe/unsubscribe — one CoW allocation per
+control-plane event, bounded by entry-size bounds and generation cap (Q1);
+(e) any sibling listener, if the pair mandates one — rule-2 from birth. No
+by-design cost is left unbounded or unsigned. No silent tradeoffs.
 
 ---
 
@@ -845,18 +1097,53 @@ centerpiece instrument and not an optional extra.
 
 v1 is **read-only as a typed-refusal contract, not an absence** (one-pager
 §(iii)): the seam declares the mutation classes it does not serve and refuses
-them by name. JSON shapes are at sketch level (field lists, not a frozen
-schema); the frozen schema is a §11.4 versioning act.
+them by name.
+
+### 11.0 The contract module — transport-neutral, defined ONCE
+
+Per Ruling C, the decisions a builder needs are made here, not invented
+during coding. The contract lives in one module (`ops-contract` class,
+compile-time metadata per §3.1) that BOTH adapters (§11.5) call — no adapter
+owns any semantics:
+
+- **Frozen request/result/refusal structs.** `OpsRequest` (resource URI or
+  tool name + validated args), `OpsResult` (the §11.1 documents / §11.2 tool
+  results, envelope per §3.1), and **`OpsRefusal` — defined ONCE and reused
+  everywhere**: `{ class: <one of the four §11.3 names>, message, remedy,
+  gate: <doc/version reference, when class = read-only>, migration: <path,
+  when serving an old major> }`. Resources, tools, refusal counters, and
+  old-major migration responses all carry THIS struct — there is no second
+  refusal shape anywhere.
+- **Discovery tables.** A resource table (the six URIs + `ops/contract`) and
+  a tool table (§11.2), served through MCP's standard list operations from
+  compile-time constants — discovery never reads runtime state except
+  `phase`-driven mount facts.
+- **The mutation-class registry.** An explicit compile-time registry of
+  known-refused verb classes — `connection.close`, `channel.publish`,
+  `cap.set`, `conversation.terminate`, plus haematite's vacuum/sweep when
+  mounted — each with its refusal class (`read-only` or
+  `requires-exclusive-store`), gate doc, and remedy. **Classification rule,
+  explicit:** a request naming a registry entry gets its typed refusal; a
+  request naming a tool in NEITHER the tool table NOR the registry is an
+  **MCP protocol-level unknown-tool error, not a refusal** — the taxonomy
+  never absorbs typos.
+- **Normal-miss results** (§11.2): data-level misses are typed results,
+  never refusals, never protocol errors.
+
+JSON shapes below remain at sketch level (field lists); the frozen schema is
+this module's structs, versioned per §11.4.
 
 ### 11.1 Resources (read-only, one per view)
 MCP resources, one per §4 view, each a JSON document sourced entirely from
 OpsState/the reused primitives:
 
-- `liminal://ops/connections` — `{ phase, active, admissions_current, admissions_started_total, reserved_in_flight, connections: [{ id, peer, worker_posture, readiness_posture, slice_serviced }] }`
+- `liminal://ops/contract` — `{ contract, major, additive_rev }` — **read
+  FIRST** (§11.4).
+- `liminal://ops/connections` — `{ phase, active, admissions_current, admissions_started_total, reserved_in_flight, connections: [{ id, peer, worker_posture, readiness_posture, slice_serviced, subscriptions_active, conversations_active, pending_replies, pending_pushes }] }`
 - `liminal://ops/channels` — `{ phase, channels: [{ name, subscriber_count }], publishes_total, deliveries_total }`
-- `liminal://ops/subscriptions` — `{ phase, per_connection: [{ id, subscriptions_active, inbox_bytes_used, inbox_bytes_cap }], overflow_flags_total }`
-- `liminal://ops/conversations` — `{ phase, actors_registered, participants_registered, pending_replies_total, tombstones_total, armed_timers }`
-- `liminal://ops/caps` — `{ phase, caps: [{ name, limit, occupancy }], refusals: { unauthenticated, read_only, not_mounted, auth_failures, cap_exceeded: {..}, backpressure: { reject, defer }, push_reply_expired } }`
+- `liminal://ops/subscriptions` — `{ phase, per_connection: [{ id, subscriptions_active, inbox_bytes_used, inbox_bytes_cap, subscriptions: [{ channel, depth, overflowed }] }], overflow_flags_total }`
+- `liminal://ops/conversations` — `{ phase, actors_registered, participants_registered, pending_replies_total, tombstones_total, armed_timers_total }`
+- `liminal://ops/caps` — `{ phase, caps: [{ name, limit, worst: { id, occupancy }, over_80pct }], refusals: { unauthenticated, read_only, not_mounted, requires_exclusive_store, auth_failures, cap_exceeded: {..}, backpressure: { reject, defer }, push_reply_expired } }` — **all four taxonomy counters present; `requires_exclusive_store` serves as `0` while the class is reserved (§11.3)** — the schema does not shrink because a counter is quiet.
 - `liminal://ops/inventory` — `{ phase, profile, services: [{ service, mode, instance, configured, actual, thread_names, fd_classes }], schedulers: {..} }`
 
 Every document carries `phase` (`starting` | `running` | `draining`, §2.3) and
@@ -877,7 +1164,7 @@ a tool is a parameterized read):
   NOT a refusal: a connection that closed a second ago is a data-level miss,
   and a consumer switching on refusal classes must never see
   `refused:not-mounted` for it. The four refusal classes are
-  seam/mount/credential-level only (§11.3).
+  access/capability outcomes, never data-existence outcomes (§11.3).
 - `ops.get_caps()` → the caps/pressure matrix (same as the resource; offered as
   a tool for agents that poll pressure).
 - `ops.get_inventory()` → the inventory view.
@@ -910,14 +1197,18 @@ refuse; liminal carries the class because the taxonomy is seam-wide
 live on this host exactly when liminal-server opts in to mounting haematite's
 contract (§5.4).
 
-**The refusal classes are seam/mount/credential-level ONLY — never
-data-level.** A refusal answers "may this consumer reach this surface at
-all?"; it never answers "does this row exist?". An unknown connection id, an
-empty view, or an absent optional value is a **normal typed tool
+**The invariant (corrected per Sol — the earlier "seam/mount/credential-level
+only" wording was wrong for two of its own classes):** refusals are
+**contract access/capability outcomes, never row/data-existence outcomes**.
+`refused:unauthenticated` and `refused:not-mounted` are access outcomes;
+`refused:read-only` is a mutation-**capability** outcome and
+`refused:requires-exclusive-store` an execution-mode-**capability** outcome —
+none of the four ever answers "does this row exist?". An unknown connection
+id, an empty view, or an absent optional value is a **normal typed tool
 result/document** (`{ found: false }`, an empty list, a null field) —
-distinct from the refusal taxonomy by construction. Conflating the two
-dilutes the four-class contract: a consumer switching on refusal classes must
-be able to treat every refusal as an access/mount fact, not a data fact.
+distinct from the refusal taxonomy by construction. And per §11.0, an
+unregistered verb is an MCP protocol error, not a refusal. Every refusal is
+the ONE `OpsRefusal` struct (§11.0), everywhere it appears.
 
 A consumer can build against v1 and know **exactly which wall it hit** — wrong
 credential vs design-gated vs not-here vs needs-the-store-offline — which is
@@ -938,17 +1229,26 @@ Applied to liminal's half:
 
 - **Version-as-resource, read first:** `liminal://ops/contract` returns
   `{ contract: "liminal-ops", major: 1, additive_rev: N }`; a consumer reads
-  it before any view. It is itself served from immutable OpsState config
-  (read-prim `config`, exact, zero idle-cost).
-- **Additive** (no bump): new views, new fields, new read tools. A consumer
-  must ignore unknown fields (§11.1 shapes are open-world within a major).
+  it before any view. It is served from compile-time contract metadata
+  (§3.1 — not ServerConfig; exact, zero idle-cost).
+- **Additive** (no bump): new views, new fields — **exactly the settled
+  list, nothing appended** (Ruling B: an earlier revision added "new read
+  tools" to this class; the settled text does not authorize it, and under
+  the current contract **a new tool is NOT additive** — it takes the
+  major-version treatment). A consumer must ignore unknown fields (§11.1
+  shapes are open-world within a major). *Open question, recorded for the
+  joint page, not enacted here:* a future one-pager amendment could define a
+  tools-additive class (a strictly-new read tool arguably cannot break a
+  consumer that never calls it) — that is Apollo's-half/joint territory and
+  stays an open question until the one-pager says so.
 - **Breaking** (major bump): any removal, rename, **redaction-widening
   reversal** (un-exposing something previously widened), or refusal-class
   change — the four refusal names of §11.3 are contract, and changing them is
-  a break by the settled definition.
+  a break by the settled definition. Plus, per the ruling above: new tools.
 - **Refusals name the migration:** after a major bump, the OLD contract's
-  refusals name the migration path — a v1 consumer hitting a v2 host is told
-  where to go, not left to a 404.
+  refusals name the migration path — the `OpsRefusal.migration` field
+  (§11.0), the same struct as every other refusal — a v1 consumer hitting a
+  v2 host is told where to go, not left to a 404.
 - **Mutation is a major-version act:** v2 introduces mutating tools behind
   their own design gate (§14); until then `refused:read-only` names v2 as the
   remedy.
@@ -956,8 +1256,98 @@ Applied to liminal's half:
 This discipline is the part other seats' seams (aion/norn) inherit verbatim
 (T6, §14), so it is deliberately the one-pager's text, not this doc's.
 
+### 11.5 The two adapters, the [console] config, and the auth mechanics
+
+**The adapters.** Both are thin hosts of the §11.0 contract module; tests
+prove **identical semantic payloads over both** (the T1 transport-identical
+pin):
+
+- **stdio adapter** — the contract's other mount (T1): standard MCP JSON-RPC
+  2.0 over stdio, stateless per the read-only surface. Auth N/A by
+  construction (§7.2(4)). liminal-server does not SHIP a stdio mount in v1
+  (it is a process with a listener); the adapter exists in the contract
+  crate so the contract is provably transport-neutral and a future local
+  inspector binary mounts it unchanged.
+- **HTTP adapter, on the existing health worker** — one new route:
+  `POST /mcp`, carrying a single MCP JSON-RPC 2.0 message per request,
+  response in the body; no SSE/streaming, no sessions in v1 (a read-only
+  request/response surface needs neither; adding either later is a design
+  act). `GET /health`, `/ready`, `/metrics` are byte-identical to today.
+- **The error-vs-refusal mapping, exact:** malformed HTTP or JSON-RPC →
+  protocol-level error (HTTP 400 / JSON-RPC parse-invalid-request error),
+  never a refusal; unknown tool (neither table nor registry, §11.0) →
+  JSON-RPC method-level error; **application refusals (`OpsRefusal`) are
+  ALWAYS successful JSON-RPC responses carrying the refusal as the typed
+  result** — a refusal is a contract answer, not a transport failure, and it
+  must survive any HTTP status-code folklore. HTTP status is 200 for every
+  well-formed request that reaches the contract, including refusals; 401 is
+  NOT used for `refused:unauthenticated` (the refusal payload is the
+  contract; a bare 401 would be an HTTP-ism encoding the auth outcome —
+  T1 violation).
+
+**The `[console]` config section, under `deny_unknown_fields`.**
+`ServerConfig` is `deny_unknown_fields` (`config/types.rs:9`), so a NEW
+optional `console: Option<ConsoleConfig>` field is **additive**: existing
+config files (no `[console]` section) deserialize unchanged. Semantics:
+
+- `[console]` **absent** → the MCP surface is NOT mounted. `POST /mcp`
+  returns the `refused:not-mounted` `OpsRefusal` (the surface that answers
+  refusals is compiled in; the seam is what's unmounted — this is exactly
+  the not-mounted class's job). Health routes unchanged.
+- `[console]` **present** → `auth_token` is REQUIRED by validation:
+  **mounted-without-token = REFUSE STARTUP, fail-loud** (domain-owner call,
+  consistent with the refuse-at-birth posture of park-flip §2 — a server
+  that would serve operator state without a credential is a misconfiguration
+  refused at birth, not warned about). No default-open mode exists for this
+  surface, unlike H4's absent-token-open wire posture — different audience,
+  different default, stated deliberately.
+
+**Auth mechanics, bounded and exact:** `POST /mcp` (and only it — the
+protected-route scope is exactly the MCP route; §7.2's liveness-probe
+exemption for `/health`/`/ready`/`/metrics` is deliberate and unchanged)
+requires `Authorization: Bearer <token>`. The health parser today reads only
+the request line (`endpoint.rs:173-215`); the adapter extends it to parse
+headers **for POST /mcp only**, with hard bounds: request head ≤ 8 KiB, body
+≤ 64 KiB (both NUMERIC, both enforced before any allocation proportional to
+claimed size; over-bound → protocol-level 413/400, not a refusal), within
+the existing 2 s read timeout. Token comparison is `constant_time_eq` — the
+same discipline H4 already uses (`apply.rs:258-317`). Missing/malformed/
+wrong bearer → `refused:unauthenticated` `OpsRefusal` (well-formed HTTP,
+wrong credential — a contract answer). Token bytes live only in the
+adapter's auth check, never in OpsState (§7.3).
+
+### 11.6 Numeric budgets and the head-of-line pins
+
+Determination (b) promised bounded-response + scrape-work budgets; Sol's
+round demanded the numbers and their enforcement. Set here, enforced in the
+contract module's render path (transport-neutral), pinned:
+
+| Budget | Number | Enforcement |
+|---|---|---|
+| Response body | ≤ 256 KiB | render truncates deterministically (below) |
+| List items per response | ≤ 1,024 entries | covers connections (≤256) and subscriptions (≤8,192 → paginated) with headroom |
+| Scrape work | one snapshot load + ≤ (N_conn + N_sub + N_ch + inventory) atomic loads + one metrics snapshot + render — no loops beyond cap-bounded cardinality | structural: `OpsReadState` exposes nothing unbounded |
+| Scrape latency (the head-of-line number) | a maximal scrape completes ≤ 50 ms on the reference config (256 conns, 8,192 subs, 1,024 channels); CI pin uses a generous multiplier for machine variance | the head-of-line pin below |
+| Request head / body | 8 KiB / 64 KiB (§11.5) | pre-allocation bound |
+
+**Deterministic truncation/pagination rule:** lists exceeding the item
+budget truncate at a stable sort order (by id) with `{ truncated: true,
+total: N, next: <cursor> }` — the same rule on both transports; a truncated
+response is well-formed and says so, never silently partial.
+
+**Head-of-line pins (on `/health` and `/ready`, the routes that must not
+starve):** (h1) with a maximal-config scrape in flight, a following
+`/health` request answers within (scrape budget + ε) — pinned against the
+50 ms number; (h2) a slow-loris client on `POST /mcp` costs at most the
+existing 2 s read timeout — the SAME pre-existing worst case the serial
+worker already has for `/health` today (`endpoint.rs:146`); the pin asserts
+the MCP route does not increase the per-request ceiling (body bound + same
+timeout). Honest statement: the serial worker's 2 s worst case is
+pre-existing transport exposure, inherited not added; what this design must
+prove (h2) is that it made it no worse.
+
 [SEAM-DEP §(iii)]: synced to the settled view set, four-class taxonomy, and
-§Versioning @ 7b768eb; if the contract moves again, §11.1–§11.4 are the
+§Versioning @ 7b768eb; if the contract moves again, §11.0–§11.6 are the
 rework surface.
 
 ---
@@ -991,6 +1381,13 @@ Stated so the pair sees them, not buried:
   domain-owner determination (b) confirms this posture); the sibling listener
   (rule-2) remains the fallback **the pair rules on** — that ruling is the
   open item here.
+- **The named numbers are proposals until signed.** This revision sets
+  concrete numbers where the review demanded them — `max_configured_channels`
+  = 1,024 (§9), response ≤ 256 KiB / items ≤ 1,024 / scrape ≤ 50 ms / head
+  8 KiB / body 64 KiB (§11.6), snapshot entry-string bounds (§9 Q1) — each
+  with its enforcement rule and pin. The NUMBERS are the certifying pair's to
+  confirm or move; the STRUCTURE (every budget numeric, enforced, pinned)
+  is this design's commitment either way.
 - **Cluster peer snapshot staleness (scout risk #11).** Peer names are stale by
   up to the 250 ms membership poll and are mutex-backed; if ever exposed, they
   ride a copy-on-write name snapshot updated by the existing poll thread,
@@ -1045,7 +1442,15 @@ timeout, request-line-only parse — §7, §8); `channel/registry.rs:89-100`
 push-reply anchors (`push_to_connection_with_deadline` at `supervisor.rs:295`,
 `ServerError::PushReplyExpired` at `error.rs:78`, expiry resolution at
 `supervisor.rs:657`) were verified on **origin/main @ `68379e8`** — that
-surface is merged to main but not on this design branch's base. Anchors cited
+surface is merged to main but not on this design branch's base. The Sol-round
+corrections were re-verified on this branch before folding:
+`supervisor.rs:111-119` (`with_services_and_auth` takes the erased
+`Arc<dyn ConnectionServices>`), `supervisor.rs:461-499` (`SupervisorInner::new`
+constructs the connection scheduler inside, after erasure),
+`supervisor.rs:152-156` (`scheduler()` accessor), `state.rs:47-52` +
+`apply.rs:383-395` (lazy inbox budget, created on first subscribe),
+`config/types.rs:9,17-18` (`deny_unknown_fields`; `channels: Vec<ChannelDef>`
+unbounded). Anchors cited
 but not individually re-opened (taken from the scout at its stated lines, and
 flagged as such) are the deeper conversation/subscription/durability internals
 in §4.3–§4.4 and §5.4–§5.6; a builder implementing those views re-verifies each
