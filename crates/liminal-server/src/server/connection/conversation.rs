@@ -70,6 +70,11 @@ pub trait ConversationResource: std::fmt::Debug + Send {
         None
     }
 
+    /// Non-consuming reply availability query for the post-arm race barrier.
+    fn has_pending_reply(&self) -> bool {
+        false
+    }
+
     /// R1(vi)(a): installs the reply-availability notifier (fired on the reply
     /// queue's empty→non-empty transition and on terminal actor error), captured at
     /// conversation open. Defaulted to a no-op for resources with no reply queue.
@@ -144,6 +149,10 @@ impl ConnectionConversation {
     /// R1(vi)(a): non-blocking drain of one buffered participant reply.
     pub(super) fn try_receive_reply(&self) -> Option<MessageEnvelope> {
         self.resource.try_receive_reply()
+    }
+
+    pub(super) fn has_pending_reply(&self) -> bool {
+        self.resource.has_pending_reply()
     }
 
     /// R1(vi)(a): installs the reply-availability notifier at conversation open.
@@ -299,6 +308,10 @@ impl ConversationResource for LiminalConversationResource {
             ProtocolCausalContext::independent(),
             reply.payload,
         ))
+    }
+
+    fn has_pending_reply(&self) -> bool {
+        self.actor.has_pending_reply()
     }
 
     fn register_reply_notifier(&self, notifier: std::sync::Arc<dyn Fn() + Send + Sync>) {

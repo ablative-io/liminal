@@ -48,6 +48,9 @@ pub trait SubscriptionResource: std::fmt::Debug + Send {
     /// empty read is simply "nothing to deliver this slice", never an error.
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope>;
 
+    /// Non-consuming availability query for the post-arm race barrier.
+    fn has_pending(&self) -> bool;
+
     /// Whether an overflow has marked this subscription for shedding (§5). The
     /// delivery pump sheds an overflowed subscription with a typed error frame.
     /// Defaulted to `false`: a resource with no bounded inbox never overflows.
@@ -111,6 +114,10 @@ impl ConnectionSubscription {
     /// Attempts to pull the next delivered envelope without blocking.
     pub(super) fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
         self.resource.try_next()
+    }
+
+    pub(super) fn has_pending(&self) -> bool {
+        self.resource.has_pending()
     }
 
     /// Whether this subscription has been shed by an inbox overflow (§5).
@@ -1111,6 +1118,10 @@ impl SubscriptionResource for LiminalSubscriptionResource {
 
     fn is_overflowed(&self) -> bool {
         self.subscription.is_overflowed()
+    }
+
+    fn has_pending(&self) -> bool {
+        self.subscription.has_pending()
     }
 
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {

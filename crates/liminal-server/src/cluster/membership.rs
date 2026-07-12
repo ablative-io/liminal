@@ -278,7 +278,17 @@ pub fn start(
     install_observer: impl FnOnce(ClusterSync),
     on_established: impl FnOnce(),
 ) -> Result<ClusterHandle, ServerError> {
-    let connections = scheduler.distribution_connections();
+    // Typed absence (beamr 0.14 honest-None surface): a scheduler composed
+    // WITHOUT distribution cannot join a cluster — refused at bring-up, the
+    // same refuse-at-birth posture readiness composition uses (plan §2).
+    let connections =
+        scheduler
+            .try_distribution_connections()
+            .ok_or_else(|| ServerError::ClusterJoin {
+                message: "scheduler was composed without a distribution service; \
+                      cluster membership requires one"
+                    .to_owned(),
+            })?;
     let atoms = Arc::clone(scheduler.atom_table());
     let pg = scheduler.pg_registry();
     let local_node = atoms.intern(&config.node_name);

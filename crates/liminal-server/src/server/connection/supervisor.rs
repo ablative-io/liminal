@@ -1,5 +1,8 @@
 use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
+use std::os::fd::RawFd;
+#[cfg(test)]
+use std::sync::Barrier;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
@@ -9,7 +12,8 @@ use beamr::atom::{Atom, AtomTable};
 use beamr::module::ModuleRegistry;
 use beamr::native::native_process::NativeHandlerFactory;
 use beamr::process::ExitReason;
-use beamr::scheduler::{Scheduler, SchedulerConfig};
+use beamr::scheduler::{ReadinessToken, Scheduler, SchedulerConfig, SchedulerServices};
+use beamr::timer::TimerRef;
 
 use liminal::protocol::WorkerRegistration;
 
@@ -269,6 +273,12 @@ impl ConnectionSupervisor {
 
     /// Stops the beamr scheduler used by connection processes.
     pub fn shutdown(&self) {
+        // Remove every host record while the readiness owner is still live. The
+        // removal path ACKs deregistration and only then releases each fd guard;
+        // scheduler shutdown subsequently drops the process-owned handles.
+        for connection in self.inner.runtime.active_connections() {
+            self.inner.runtime.finish(connection.pid);
+        }
         self.inner.scheduler.shutdown();
     }
 
@@ -283,6 +293,30 @@ impl ConnectionSupervisor {
     #[cfg(test)]
     pub(super) fn ready_waker(&self, pid: u64) -> Option<super::wake::ReadyWaker> {
         self.inner.runtime.ready_waker(pid)
+    }
+
+    /// Registered readiness tokens held in host records (test observability).
+    #[cfg(test)]
+    pub(super) fn readiness_registration_count(&self) -> usize {
+        self.inner.runtime.readiness_registration_count()
+    }
+
+    /// Kernel fd registered for `pid` (test observability for fd-reuse races).
+    #[cfg(test)]
+    pub(super) fn readiness_fd(&self, pid: u64) -> Option<RawFd> {
+        self.inner.runtime.readiness_fd(pid)
+    }
+
+    /// Installs a one-use arm-to-probe barrier and returns its test endpoints.
+    #[cfg(test)]
+    pub(super) fn install_pre_wait_barrier(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        self.inner.runtime.install_pre_wait_barrier()
+    }
+
+    /// Barrier-staged final probes that observed newly arrived work.
+    #[cfg(test)]
+    pub(super) fn pre_wait_probe_hits(&self) -> u64 {
+        self.inner.runtime.pre_wait_probe_hits()
     }
 }
 
@@ -434,11 +468,12 @@ impl SupervisorInner {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let registry = Arc::new(ModuleRegistry::new());
 
-        let scheduler = Scheduler::new(
+        let scheduler = Scheduler::with_services(
             SchedulerConfig {
                 thread_count: Some(CONNECTION_SCHEDULER_THREADS),
                 ..SchedulerConfig::default()
             },
+            SchedulerServices::from_config().owned_readiness(),
             registry,
         )
         .map_err(|message| ServerError::ListenerAccept {
@@ -487,6 +522,14 @@ impl SupervisorInner {
                 message: format!("failed to configure connection stream: {error}"),
             })?;
         let peer_addr = stream.peer_addr().ok();
+        // The host-held duplicate keeps the fd alive until the single record-removal
+        // path has synchronously deregistered readiness. External process death can
+        // therefore never let fd reuse overtake host-side deregistration.
+        let fd_guard = stream
+            .try_clone()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("failed to retain connection fd for teardown: {error}"),
+            })?;
         let holder = Arc::new(Mutex::new(Some(stream)));
         let runtime = Arc::clone(&self.runtime);
         let process_holder = Arc::clone(&holder);
@@ -503,7 +546,13 @@ impl SupervisorInner {
                 .map_err(|error| ServerError::ListenerAccept {
                     message: format!("failed to spawn connection process: {error}"),
                 })?;
-        self.runtime.register(pid, peer_addr)?;
+        if let Err(error) = self.runtime.register_with_fd(pid, peer_addr, fd_guard) {
+            // Registration failure leaves no host record to reap. Terminate the
+            // just-spawned process explicitly so neither its stream nor admission
+            // reservation can escape this failed spawn.
+            self.scheduler.terminate_process(pid, ExitReason::Error);
+            return Err(error);
+        }
         // The reservation is now owned by the registered record: `remove` (the
         // single record-removal path — finish/mark_crashed/reap all funnel
         // through it) releases the admission when the record goes away.
@@ -594,6 +643,13 @@ pub struct ActiveConnection {
     peer_addr: Option<SocketAddr>,
 }
 
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct PreWaitBarrier {
+    armed: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
 #[derive(Debug)]
 pub(super) struct ConnectionRuntime {
     services: Arc<dyn ConnectionServices>,
@@ -613,6 +669,12 @@ pub(super) struct ConnectionRuntime {
     /// reads this; the instrument lands now with a test proving it counts slices.
     #[cfg(test)]
     slice_counts: Mutex<HashMap<u64, u64>>,
+    /// Deterministic test gate placed after arm and before the final probe.
+    #[cfg(test)]
+    pre_wait_barrier: Mutex<Option<PreWaitBarrier>>,
+    /// Barrier-staged slices where the final probe found newly arrived work.
+    #[cfg(test)]
+    pre_wait_probe_hits: AtomicU64,
     /// One-shot reply slots for in-flight server pushes, keyed by correlation id.
     /// The supervisor registers a slot in `push_to_connection`; the connection
     /// process resolves it when the matching `PushReply` frame arrives. Each slot
@@ -663,6 +725,10 @@ impl ConnectionRuntime {
             scheduler,
             #[cfg(test)]
             slice_counts: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            pre_wait_barrier: Mutex::new(None),
+            #[cfg(test)]
+            pre_wait_probe_hits: AtomicU64::new(0),
             push_replies: Mutex::new(HashMap::new()),
             next_push_id: AtomicU64::new(1),
             admissions: AtomicU64::new(0),
@@ -759,6 +825,46 @@ impl ConnectionRuntime {
         self.slice_counts
             .lock()
             .map_or(0, |counts| counts.get(&pid).copied().unwrap_or(0))
+    }
+
+    #[cfg(test)]
+    fn install_pre_wait_barrier(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        let armed = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        if let Ok(mut slot) = self.pre_wait_barrier.lock() {
+            *slot = Some(PreWaitBarrier {
+                armed: Arc::clone(&armed),
+                release: Arc::clone(&release),
+            });
+        }
+        (armed, release)
+    }
+
+    /// Runs a one-use deterministic test gate after arm. Returns whether the gate
+    /// was installed so only that staged probe contributes to observability.
+    #[cfg(test)]
+    pub(super) fn run_pre_wait_barrier(&self) -> bool {
+        let barrier = self
+            .pre_wait_barrier
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        let Some(barrier) = barrier else {
+            return false;
+        };
+        barrier.armed.wait();
+        barrier.release.wait();
+        true
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_pre_wait_probe_hit(&self) {
+        self.pre_wait_probe_hits.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[cfg(test)]
+    fn pre_wait_probe_hits(&self) -> u64 {
+        self.pre_wait_probe_hits.load(Ordering::Acquire)
     }
 
     /// Builds a runtime wrapping `services` for unit tests that exercise
@@ -1003,12 +1109,33 @@ impl ConnectionRuntime {
     /// record for an already-dead pid. That orphan is self-healing:
     /// `reap_crashed`, driven continuously by the listener loop, removes any
     /// record whose pid is absent from the scheduler process table.
+    fn register_with_fd(
+        &self,
+        pid: u64,
+        peer_addr: Option<SocketAddr>,
+        fd_guard: TcpStream,
+    ) -> Result<(), ServerError> {
+        self.register_record(pid, peer_addr, Some(fd_guard))
+    }
+
+    #[cfg(test)]
     fn register(&self, pid: u64, peer_addr: Option<SocketAddr>) -> Result<(), ServerError> {
+        self.register_record(pid, peer_addr, None)
+    }
+
+    fn register_record(
+        &self,
+        pid: u64,
+        peer_addr: Option<SocketAddr>,
+        fd_guard: Option<TcpStream>,
+    ) -> Result<(), ServerError> {
         lock(&self.records, "connection registry")?.insert(
             pid,
             ConnectionRecord {
                 peer_addr,
                 registration: None,
+                readiness: None,
+                fd_guard,
             },
         );
         // Single-writer insert (see doc above) pairs one gauge increment with the
@@ -1019,23 +1146,76 @@ impl ConnectionRuntime {
     }
 
     pub(super) fn mark_crashed(&self, pid: u64, reason: ExitReason, peer_addr: Option<SocketAddr>) {
-        let removed = self.remove(pid).unwrap_or(ConnectionRecord {
-            peer_addr,
-            registration: None,
-        });
-        self.fire_unregistered(pid, &removed);
+        let removed = self.remove(pid);
+        if let Some(record) = removed.as_ref() {
+            self.fire_unregistered(pid, record);
+        }
+        let removed_peer_addr = removed
+            .as_ref()
+            .and_then(|record| record.peer_addr)
+            .or(peer_addr);
         tracing::warn!(
             connection_pid = pid,
-            peer_addr = ?removed.peer_addr,
+            peer_addr = ?removed_peer_addr,
             reason = ?reason,
             "connection process crashed"
         );
+    }
+
+    /// Whether the spawn thread has installed the host record. A first native
+    /// slice can win the enqueue-vs-record race and must remain runnable until it
+    /// has somewhere host-reachable to publish its readiness token.
+    pub(super) fn is_registered(&self, pid: u64) -> bool {
+        self.contains(pid)
+    }
+
+    /// Removes a token minted in-slice when publishing it to the host record fails.
+    pub(super) fn deregister_unpublished_readiness(&self, token: ReadinessToken) {
+        if let Some(scheduler) = self.scheduler.upgrade() {
+            scheduler.readiness_deregister(token);
+        }
+    }
+
+    /// Cancels deadline timers detached by reply completion or connection close.
+    pub(super) fn cancel_deadline_timers(&self, timers: Vec<TimerRef>) {
+        let Some(scheduler) = self.scheduler.upgrade() else {
+            return;
+        };
+        if let Ok(mut wheel) = scheduler.timers().lock() {
+            for timer in timers {
+                wheel.cancel(timer);
+            }
+        }
     }
 
     pub(super) fn finish(&self, pid: u64) {
         if let Some(removed) = self.remove(pid) {
             self.fire_unregistered(pid, &removed);
         }
+    }
+
+    /// Records the one readiness token minted for this connection. A live
+    /// connection never re-registers: later parked slices rearm this identity.
+    pub(super) fn set_readiness_token_once(
+        &self,
+        pid: u64,
+        token: ReadinessToken,
+        fd: RawFd,
+    ) -> Result<(), ServerError> {
+        let mut records = lock(&self.records, "connection registry")?;
+        let record = records
+            .get_mut(&pid)
+            .ok_or_else(|| ServerError::ListenerAccept {
+                message: format!("connection {pid} has no host record for readiness registration"),
+            })?;
+        if record.readiness.is_some() {
+            return Err(ServerError::ListenerAccept {
+                message: format!("connection {pid} attempted to replace its readiness token"),
+            });
+        }
+        record.readiness = Some(ReadinessRegistration { token, fd });
+        drop(records);
+        Ok(())
     }
 
     /// Invokes `on_worker_unregistered` for a removed connection record that
@@ -1092,6 +1272,25 @@ impl ConnectionRuntime {
             .is_ok_and(|records| records.contains_key(&pid))
     }
 
+    #[cfg(test)]
+    fn readiness_registration_count(&self) -> usize {
+        self.records.lock().map_or(0, |records| {
+            records
+                .values()
+                .filter(|record| record.readiness.is_some())
+                .count()
+        })
+    }
+
+    #[cfg(test)]
+    fn readiness_fd(&self, pid: u64) -> Option<RawFd> {
+        self.records
+            .lock()
+            .ok()?
+            .get(&pid)
+            .and_then(|record| record.readiness.map(|registration| registration.fd))
+    }
+
     fn active_connections(&self) -> Vec<ActiveConnection> {
         self.records.lock().map_or_else(
             |_| Vec::new(),
@@ -1119,6 +1318,13 @@ impl ConnectionRuntime {
         Some(controls.remove(index).control)
     }
 
+    /// Non-consuming final-probe query for controls enqueued after mailbox drain.
+    pub(super) fn has_control(&self, pid: u64) -> bool {
+        self.controls
+            .lock()
+            .is_ok_and(|controls| controls.iter().any(|queued| queued.pid == pid))
+    }
+
     fn remove_control(&self, pid: u64, control: &ConnectionControl) {
         let Ok(mut controls) = self.controls.lock() else {
             return;
@@ -1144,11 +1350,22 @@ impl ConnectionRuntime {
     /// registered a worker, so a plain push target is covered too.
     fn remove(&self, pid: u64) -> Option<ConnectionRecord> {
         self.cancel_pushes_for_connection(pid);
-        let removed = self
+        let mut removed = self
             .records
             .lock()
             .ok()
             .and_then(|mut records| records.remove(&pid));
+        if let Some(registration) = removed.as_mut().and_then(|record| record.readiness.take()) {
+            if let Some(scheduler) = self.scheduler.upgrade() {
+                // This call is ACK'd: it returns only after the poll owner has
+                // removed the registration. `fd_guard` is still live here.
+                scheduler.readiness_deregister(registration.token);
+                tracing::debug!(
+                    registered_fd = registration.fd,
+                    "connection readiness deregistration acknowledged"
+                );
+            }
+        }
         // Decrement only when a record was actually present so a double-remove
         // (e.g. `finish` after `reap_crashed`) cannot drive the gauge negative.
         // The §5 admission slot is released on the same guard: the reservation
@@ -1157,6 +1374,10 @@ impl ConnectionRuntime {
         if removed.is_some() {
             crate::metrics::connection_closed();
             self.release_admission();
+        }
+        if let Some(record) = removed.as_mut() {
+            // Explicit after-deregister drop documents and enforces the fd wall.
+            drop(record.fd_guard.take());
         }
         removed
     }
@@ -1173,13 +1394,24 @@ struct PendingPush {
     sender: Sender<Vec<u8>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ConnectionRecord {
     peer_addr: Option<SocketAddr>,
     /// Worker registration declared on this connection, set by `set_registration`
     /// when a `WorkerRegister` frame is accepted. `Some` marks a connection whose
     /// close must fire `on_worker_unregistered`.
     registration: Option<WorkerRegistration>,
+    /// Host-reachable identity for ACK'd deregistration after external death.
+    readiness: Option<ReadinessRegistration>,
+    /// Keeps the fd alive until deregistration has been acknowledged, preventing
+    /// stale registration delivery to a subsequently reused descriptor number.
+    fd_guard: Option<TcpStream>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReadinessRegistration {
+    token: ReadinessToken,
+    fd: RawFd,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

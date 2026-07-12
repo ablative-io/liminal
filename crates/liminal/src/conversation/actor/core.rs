@@ -142,6 +142,12 @@ impl ActorCore {
         self.inbox.lock().ok()?.pop_front()
     }
 
+    /// Non-consuming reply availability query for a connection's post-arm
+    /// pre-Wait race barrier.
+    pub(crate) fn has_pending_reply(&self) -> bool {
+        !self.is_finalized() && self.inbox.lock().is_ok_and(|inbox| !inbox.is_empty())
+    }
+
     /// Fires the reply-availability notifier once, if installed. Called on the
     /// reply-queue empty→non-empty edge and on terminal actor error.
     fn fire_reply_notifier(&self) {

@@ -41,6 +41,7 @@
 
 use std::time::{Duration, Instant};
 
+use beamr::timer::TimerRef;
 use liminal::protocol::{CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope};
 
 use crate::ServerError;
@@ -79,6 +80,9 @@ struct PendingReplyEntry {
     /// When a still-`Pending` entry becomes a tombstone.
     deadline: Instant,
     state: EntryState,
+    /// Per-active-entry deadline wake. `None` only between admission and the
+    /// admitting slice's timer synchronization, or after expiry.
+    timer: Option<TimerRef>,
 }
 
 /// Per-connection pending-reply table (§1.2(3b)).
@@ -96,6 +100,9 @@ pub(super) struct PendingReplyTable {
     /// PENDING entries across the whole connection.
     max_per_connection: usize,
     reply_timeout: Duration,
+    /// Timer handles detached by completion/close and awaiting host cancellation.
+    /// Bounded by the same typed pending-entry cap as `entries`.
+    retired_timers: Vec<TimerRef>,
 }
 
 impl Default for PendingReplyTable {
@@ -125,6 +132,7 @@ impl PendingReplyTable {
             max_per_conversation,
             max_per_connection,
             reply_timeout,
+            retired_timers: Vec::new(),
         }
     }
 
@@ -184,6 +192,7 @@ impl PendingReplyTable {
             stream_id,
             deadline: now + self.reply_timeout,
             state: EntryState::Pending,
+            timer: None,
         });
         Ok(op_id)
     }
@@ -194,7 +203,10 @@ impl PendingReplyTable {
     /// so no reply can ever arrive for it and the reservation must not linger to
     /// time out into a spurious tombstone.
     pub(super) fn cancel(&mut self, op_id: u64) {
-        self.entries.retain(|entry| entry.op_id != op_id);
+        if let Some(index) = self.entries.iter().position(|entry| entry.op_id == op_id) {
+            let entry = self.entries.remove(index);
+            self.retire_timer(entry.timer);
+        }
     }
 
     /// Correlates a reply that became available for `conversation_id` against the
@@ -213,6 +225,7 @@ impl PendingReplyTable {
     ) -> Option<Frame> {
         let index = self.oldest_index_for(conversation_id)?;
         let entry = self.entries.remove(index);
+        self.retire_timer(entry.timer);
         match entry.state {
             EntryState::Pending => Some(Frame::ConversationMessage {
                 flags: CONVERSATION_REPLY_REQUESTED_FLAG,
@@ -241,6 +254,12 @@ impl PendingReplyTable {
         for entry in &mut self.entries {
             if entry.state == EntryState::Pending && entry.deadline <= now {
                 entry.state = EntryState::Tombstone;
+                // Dropping the TimerRef WITHOUT cancel is deliberate, not a
+                // leak: the deadline timer either already fired (that wake is
+                // why we are here) or fires once more as an R6-harmless
+                // spurious wake; the wheel entry is consumed at fire and the
+                // exposure is bounded by the reply-deadline horizon.
+                entry.timer = None;
                 frames.push(reply_timeout_frame(entry.stream_id, entry.conversation_id));
             }
         }
@@ -267,14 +286,65 @@ impl PendingReplyTable {
     /// pending entry swept here had its reply never arrive; the client already saw
     /// (or will not need) the reply because the conversation is gone.
     pub(super) fn remove_conversation(&mut self, conversation_id: u64) {
-        self.entries
-            .retain(|entry| entry.conversation_id != conversation_id);
+        let mut retained = Vec::with_capacity(self.entries.len());
+        let entries = std::mem::take(&mut self.entries);
+        for entry in entries {
+            if entry.conversation_id == conversation_id {
+                self.retire_timer(entry.timer);
+            } else {
+                retained.push(entry);
+            }
+        }
+        self.entries = retained;
     }
 
     /// Connection-finalization cancel (§1.2(5)): drops every entry. Called before
     /// conversation actors are torn down, so no entry outlives its connection.
     pub(super) fn cancel_all(&mut self) {
-        self.entries.clear();
+        let entries = std::mem::take(&mut self.entries);
+        for entry in entries {
+            self.retire_timer(entry.timer);
+        }
+    }
+
+    /// Pending entries admitted in this slice that still need their one timer.
+    pub(super) fn timers_to_arm(&self, now: Instant) -> Vec<(u64, Duration)> {
+        self.entries
+            .iter()
+            .filter(|entry| entry.state == EntryState::Pending && entry.timer.is_none())
+            .map(|entry| (entry.op_id, entry.deadline.saturating_duration_since(now)))
+            .collect()
+    }
+
+    /// Attaches the timer minted for `op_id`. Failure means the entry completed
+    /// between candidate collection and installation, so the caller cancels it.
+    pub(super) fn install_timer(&mut self, op_id: u64, timer: TimerRef) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.op_id == op_id) else {
+            return false;
+        };
+        if entry.state != EntryState::Pending || entry.timer.is_some() {
+            return false;
+        }
+        entry.timer = Some(timer);
+        true
+    }
+
+    /// Timer handles whose entries completed or closed since the last sync.
+    pub(super) fn take_retired_timers(&mut self) -> Vec<TimerRef> {
+        std::mem::take(&mut self.retired_timers)
+    }
+
+    /// Whether any pending deadline is already due; used by the final race probe.
+    pub(super) fn has_due(&self, now: Instant) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.state == EntryState::Pending && entry.deadline <= now)
+    }
+
+    fn retire_timer(&mut self, timer: Option<TimerRef>) {
+        if let Some(timer) = timer {
+            self.retired_timers.push(timer);
+        }
     }
 
     /// Total entries (pending + tombstone) — test/observability.

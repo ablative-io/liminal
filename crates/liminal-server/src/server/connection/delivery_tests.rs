@@ -28,6 +28,10 @@ impl SubscriptionResource for FakeResource {
         self.queue.pop_front()
     }
 
+    fn has_pending(&self) -> bool {
+        !self.queue.is_empty()
+    }
+
     fn is_overflowed(&self) -> bool {
         self.overflowed
     }
