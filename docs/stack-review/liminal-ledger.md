@@ -204,8 +204,11 @@ healthy and its handler merely ran longer than one poll quantum.
 inverted the assertion the D4 wave had pinned, `pending_push_count == 0` after a
 timeout, and showed a slow-but-healthy handler dying at the first quantum). The
 leak the D4 cancel-on-timeout guarded is now bounded anyway by the §5
-`max_pending_pushes_per_connection` cap (32, CAS-reserved, released on slot
-removal), so the cancel earned nothing and cost the contract.
+`max_pending_pushes_per_connection` cap (32 — count-and-insert under the
+push-slot registry mutex, the cap being the per-pid slot count, released on
+slot removal; the CAS reservation is the `max_connections` CONNECTION
+admission, a different cap), so the cancel earned nothing and cost the
+contract.
 
 **Ruling (domain owner + consumer seats, on the record):** a caller's poll
 quantum must NEVER change the protocol outcome. The `timeout` was doing two jobs
@@ -241,6 +244,30 @@ after ≥3 elapsed quanta, delivered byte-exact, no disconnect),
 `late_reply_after_expiry_is_a_harmless_noop`,
 `poll_quantum_independence_yields_the_same_outcome`,
 `concurrent_enumeration_during_polling_does_not_change_outcome`.
+
+**Adversarial Sol round hardening (same branch, pre-merge):** the deadlined
+receive now waits `min(caller quantum, time until deadline)` and re-evaluates
+reply-first-then-expiry on every wake, so the terminal outcome of a deadlined
+push is quantum-independent and a due expiry returns promptly (the quantum is a
+max wait, not a promise to block); the no-deadline receive never touches the
+slot registry (behaviour-compatible with 0.2.3 — no contention or poison
+exposure on the unchanged API); a close-vs-register race that could strand a
+slot past connection close is walled off (record removal ordered before the
+close's push sweep + a post-enqueue registration re-check — exactly one side
+always observes a racing slot); reclamation paths (expiry, reply delivery,
+cancellation, close sweep) recover a poisoned registry guard and complete
+their removals while admission stays fail-closed; a dead runtime reads as
+DISCONNECTED, never a benign timeout; and an extreme deadline duration is
+refused as a typed error instead of an `Instant` panic. Pins:
+`same_deadlined_schedule_yields_same_outcome_for_any_quantum`,
+`overdue_deadlined_receive_returns_expired_promptly`,
+`no_deadline_receive_never_blocks_on_registry_lock`,
+`close_racing_push_registration_never_strands_slot_or_cap`,
+`poisoned_registry_still_reclaims_and_expires`,
+`dropped_runtime_yields_disconnected_not_timeout`,
+`duration_max_deadline_is_refused_without_slot_leak`,
+`public_deadlined_push_expires_promptly_over_real_connection`,
+`public_deadlined_push_reply_after_deadline_instant_still_wins`.
 
 ## H. Server direction (2026-07-07)
 

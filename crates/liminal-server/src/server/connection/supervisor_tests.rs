@@ -3,6 +3,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::channel;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -531,8 +532,18 @@ fn outstanding_push_with_deadline(
     Ok(PushReplyAwaiter {
         correlation_id,
         receiver,
+        deadline,
         runtime: std::sync::Arc::downgrade(runtime),
     })
+}
+
+/// Reads the next frame off `client`, asserting it is a `Push`, and returns its
+/// correlation id (helper for the public push-path e2e tests).
+fn expect_push_correlation(client: &mut TcpStream) -> Result<u64, Box<dyn std::error::Error>> {
+    match read_frame(client)? {
+        Frame::Push { correlation_id, .. } => Ok(correlation_id),
+        other => Err(format!("expected Push, got {other:?}").into()),
+    }
 }
 
 #[test]
@@ -929,37 +940,41 @@ fn connection_cleanup_after_conversation_scheduler_shutdown_is_prompt()
     Ok(())
 }
 
-/// Push resolve/quantum-elapse race, staged deterministically with the
-/// slot-registry mutex as the barrier. The awaiter's wait quantum elapses while
-/// the resolver holds the registry lock; the resolver then wins the transition
-/// (remove + send under the lock, exactly what `resolve_push` does) before
-/// releasing it. Under the restored no-cancel contract the awaiter never cancels
-/// on timeout — it re-checks the channel and, finding the just-delivered reply,
-/// returns it rather than reporting a timeout for an answer that arrived. The
-/// property survives the removal of cancel-on-timeout; the slot must be gone.
+/// Push resolve/expiry race, staged deterministically with the slot-registry
+/// mutex as the barrier — DEADLINED awaiter (only the explicit-deadline path
+/// consults the registry; a no-deadline receive never touches it, see
+/// `no_deadline_receive_never_blocks_on_registry_lock`). The awaiter's deadline
+/// falls due while the resolver holds the registry lock, so its `expire_slot`
+/// blocks; the resolver then wins the transition (remove + send under the lock,
+/// exactly what `resolve_push` does) before releasing it. The awaiter must
+/// return the delivered reply — not an expiry for an answer that arrived — and
+/// the slot must be gone.
 #[test]
-fn resolver_winning_the_timeout_race_delivers_the_reply() -> Result<(), Box<dyn std::error::Error>>
-{
+fn resolver_winning_the_expiry_race_delivers_the_reply() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
         FlushFailingServices,
     )));
     let pid = 51;
     runtime.register(pid, None)?;
-    let awaiter = outstanding_push(&runtime, pid)?;
+    let awaiter = outstanding_push_with_deadline(
+        &runtime,
+        pid,
+        Some(Instant::now() + Duration::from_millis(10)),
+    )?;
     let correlation_id = awaiter.correlation_id();
     let reply = b"late-but-won".to_vec();
 
-    // Hold the slot-registry lock: the awaiter's post-quantum `expire_push_if_due`
-    // (via `on_quantum_elapsed`) cannot proceed until the resolver below has
+    // Hold the slot-registry lock: the awaiter's due-deadline `expire_slot`
+    // (via `expire_push_if_due`) cannot proceed until the resolver below has
     // finished, so the interleaving is enforced by the mutex, not by sleeps.
     let mut slots = runtime
         .push_replies
         .lock()
         .map_err(|error| format!("slot registry lock poisoned: {error}"))?;
 
-    let awaiter_thread = thread::spawn(move || awaiter.receive(Duration::from_millis(20)));
+    let awaiter_thread = thread::spawn(move || awaiter.receive(Duration::from_millis(500)));
 
-    // Let the awaiter's wait quantum elapse; it then blocks on the held lock.
+    // Let the awaiter's deadline fall due; it then blocks on the held lock.
     // (The sleep only makes the block observable — the outcome is lock-ordered
     // and identical even if the awaiter arrives later.)
     thread::sleep(Duration::from_millis(100));
@@ -978,6 +993,69 @@ fn resolver_winning_the_timeout_race_delivers_the_reply() -> Result<(), Box<dyn 
         .map_err(|error| format!("awaiter must return the delivered reply, got {error}"))?;
     assert_eq!(received, reply);
     assert_eq!(runtime.pending_push_count(), 0, "the slot must be gone");
+    Ok(())
+}
+
+/// S2 pin: the no-deadline receive path NEVER touches the slot registry — it is
+/// behaviour-compatible with 0.2.3 (one bounded channel wait). Staged by holding
+/// the registry lock for the whole call: the receive must still return its
+/// benign timeout near its quantum (proven by observing the result WHILE the
+/// lock is held), and a later re-arm still gets the lock-ordered reply.
+#[test]
+fn no_deadline_receive_never_blocks_on_registry_lock() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 53;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+    let correlation_id = awaiter.correlation_id();
+
+    // Hold the registry lock across the entire receive call.
+    let mut slots = runtime
+        .push_replies
+        .lock()
+        .map_err(|error| format!("slot registry lock poisoned: {error}"))?;
+
+    let (outcome_tx, outcome_rx) = channel();
+    let awaiter_thread = thread::spawn(move || {
+        let outcome = awaiter.receive(Duration::from_millis(50));
+        // Report the variant while the parent still holds the lock.
+        outcome_tx
+            .send(matches!(
+                outcome,
+                Err(crate::ServerError::PushReplyTimeout { .. })
+            ))
+            .ok();
+        awaiter
+    });
+
+    // Received WHILE the lock is held: if the no-deadline path ever consulted
+    // the registry, this bounded wait would elapse instead (clean failure).
+    let benign = outcome_rx
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|_| "no-deadline receive blocked on the held registry lock past its quantum")?;
+    assert!(
+        benign,
+        "the elapsed quantum must be a benign timeout, untouched by the held lock"
+    );
+
+    // Lock-ordered reply, exactly as `resolve_push` does, then release.
+    let pending = slots
+        .remove(&correlation_id)
+        .ok_or("the benign timeout must have left the slot reserved")?;
+    pending.sender.send(b"lock-ordered".to_vec()).ok();
+    drop(slots);
+
+    // A later re-arm still gets the lock-ordered reply.
+    let awaiter = awaiter_thread
+        .join()
+        .map_err(|_| "awaiter thread panicked")?;
+    assert_eq!(
+        awaiter.receive(Duration::from_millis(200))?,
+        b"lock-ordered"
+    );
+    assert_eq!(runtime.pending_push_count(), 0);
     Ok(())
 }
 
@@ -1113,6 +1191,469 @@ fn reply_delivered_after_deadline_instant_beats_unobserved_expiry()
         received, reply,
         "a reply delivered before expiry is observed must win over the deadline"
     );
+    Ok(())
+}
+
+/// S1 pin (i): identical deadlined pushes under the same schedule produce the
+/// SAME terminal outcome regardless of the receive quantum — including the
+/// blocker's exact shape: an already-due slot with a reply arriving later must
+/// expire under receive(ZERO) and receive(60s) alike, never letting a large
+/// quantum extend reply eligibility past the push's deadline.
+#[test]
+fn same_deadlined_schedule_yields_same_outcome_for_any_quantum()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 66;
+    runtime.register(pid, None)?;
+
+    // Schedule A — no reply ever, deadline D: a short-quanta poller and a
+    // single-long-quantum caller must both end in Expired.
+    let deadline = Instant::now() + Duration::from_millis(40);
+    let short_polls = outstanding_push_with_deadline(&runtime, pid, Some(deadline))?;
+    let one_long = outstanding_push_with_deadline(&runtime, pid, Some(deadline))?;
+    let mut short_terminal = None;
+    for _ in 0..200 {
+        match short_polls.receive(Duration::from_millis(10)) {
+            Err(crate::ServerError::PushReplyTimeout { .. }) => {}
+            other => {
+                short_terminal = Some(other);
+                break;
+            }
+        }
+    }
+    assert!(
+        matches!(
+            short_terminal,
+            Some(Err(crate::ServerError::PushReplyExpired { .. }))
+        ),
+        "short quanta must reach the typed expiry, got {short_terminal:?}"
+    );
+    let long_outcome = one_long.receive(Duration::from_secs(60));
+    assert!(
+        matches!(
+            long_outcome,
+            Err(crate::ServerError::PushReplyExpired { .. })
+        ),
+        "one long quantum must reach the SAME typed expiry, got {long_outcome:?}"
+    );
+
+    // Schedule B (the blocker's scenario): slot already due at entry, no reply
+    // in hand, reply arriving later. receive(ZERO) and receive(60s) must agree:
+    // both expire; the late reply is a discard for both.
+    let due = Instant::now();
+    let zero_quantum = outstanding_push_with_deadline(&runtime, pid, Some(due))?;
+    let long_quantum = outstanding_push_with_deadline(&runtime, pid, Some(due))?;
+    let zero_outcome = zero_quantum.receive(Duration::ZERO);
+    assert!(
+        matches!(
+            zero_outcome,
+            Err(crate::ServerError::PushReplyExpired { .. })
+        ),
+        "receive(ZERO) on a due slot must expire it, got {zero_outcome:?}"
+    );
+    let started = Instant::now();
+    let long_due_outcome = long_quantum.receive(Duration::from_secs(60));
+    assert!(
+        matches!(
+            long_due_outcome,
+            Err(crate::ServerError::PushReplyExpired { .. })
+        ),
+        "receive(60s) on a due slot must expire it identically, got {long_due_outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the due-slot expiry must be prompt, not held for the 60s quantum"
+    );
+    // The late replies find no slots: discarded for both consumers alike.
+    runtime.resolve_push(zero_quantum.correlation_id(), b"too-late".to_vec());
+    runtime.resolve_push(long_quantum.correlation_id(), b"too-late".to_vec());
+    assert_eq!(runtime.pending_push_count_for(pid), 0);
+
+    // Schedule C — reply resolved before any observation: every quantum
+    // delivers the identical payload.
+    let far = Instant::now() + Duration::from_secs(60);
+    let short_reply = outstanding_push_with_deadline(&runtime, pid, Some(far))?;
+    let long_reply = outstanding_push_with_deadline(&runtime, pid, Some(far))?;
+    runtime.resolve_push(short_reply.correlation_id(), b"same".to_vec());
+    runtime.resolve_push(long_reply.correlation_id(), b"same".to_vec());
+    assert_eq!(short_reply.receive(Duration::ZERO)?, b"same");
+    assert_eq!(long_reply.receive(Duration::from_secs(60))?, b"same");
+    Ok(())
+}
+
+/// S1 pin (ii): a deadlined receive is bounded by the deadline, not the caller's
+/// quantum — an in-flight long-quantum call returns the typed expiry near the
+/// deadline (mid-wait wake), and an already-overdue slot expires at entry.
+#[test]
+fn overdue_deadlined_receive_returns_expired_promptly() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 67;
+    runtime.register(pid, None)?;
+
+    // Mid-wait: the deadline falls due DURING a 30s quantum; receive wakes at
+    // the deadline and returns the terminal expiry promptly.
+    let awaiter = outstanding_push_with_deadline(
+        &runtime,
+        pid,
+        Some(Instant::now() + Duration::from_millis(50)),
+    )?;
+    let started = Instant::now();
+    let outcome = awaiter.receive(Duration::from_secs(30));
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(outcome, Err(crate::ServerError::PushReplyExpired { .. })),
+        "a deadline falling due mid-quantum must return the typed expiry, got {outcome:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "expiry must arrive near the 50ms deadline, not the 30s quantum (took {elapsed:?})"
+    );
+    assert_eq!(runtime.pending_push_count_for(pid), 0);
+
+    // Already overdue at entry: a long quantum returns the expiry immediately.
+    let overdue = outstanding_push_with_deadline(&runtime, pid, Some(Instant::now()))?;
+    let started = Instant::now();
+    let outcome = overdue.receive(Duration::from_secs(30));
+    assert!(
+        matches!(outcome, Err(crate::ServerError::PushReplyExpired { .. })),
+        "an overdue slot must expire at receive entry, got {outcome:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "an entry expiry must not wait out any of the quantum"
+    );
+    Ok(())
+}
+
+/// S3 pin: the close-vs-register race can never strand a slot or its cap
+/// admission, staged at each of the three interleavings of `remove`'s
+/// record-removal-BEFORE-sweep ordering against registration's
+/// insert-then-confirm. Asserts the typed awaiter outcome and the exact per-pid
+/// slot count after every winner.
+#[test]
+fn close_racing_push_registration_never_strands_slot_or_cap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+
+    // Interleaving A — confirm BEFORE the record removal: the push stands; the
+    // later close's sweep (which runs after its record removal) reaps the slot
+    // and the awaiter disconnects.
+    let pid_a = 71;
+    runtime.register(pid_a, None)?;
+    let awaiter_a = outstanding_push(&runtime, pid_a)?;
+    assert!(
+        runtime.confirm_push_registration(pid_a, awaiter_a.correlation_id()),
+        "a live record must confirm the registration"
+    );
+    runtime.finish(pid_a);
+    assert_eq!(
+        runtime.pending_push_count_for(pid_a),
+        0,
+        "the close sweep must reap the confirmed slot"
+    );
+    let outcome_a = awaiter_a.receive(Duration::from_secs(5));
+    assert!(
+        matches!(
+            outcome_a,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "interleaving A must end disconnected, got {outcome_a:?}"
+    );
+
+    // Interleaving B — the exact leak Sol proved: barrier-staged INSIDE close's
+    // two steps. The record is already removed (close's first step) but the
+    // sweep (its second step) has not run; the push inserts its slot and its
+    // enqueue succeeds against the still-executing process. The post-enqueue
+    // confirm must observe the missing record and roll the slot back itself.
+    let pid_b = 72;
+    runtime.register(pid_b, None)?;
+    runtime
+        .records
+        .lock()
+        .map_err(|error| format!("records lock poisoned: {error}"))?
+        .remove(&pid_b); // close, step 1 of 2 (record removal)
+    let awaiter_b = outstanding_push(&runtime, pid_b)?; // push admits its slot
+    assert_eq!(runtime.pending_push_count_for(pid_b), 1);
+    assert!(
+        !runtime.confirm_push_registration(pid_b, awaiter_b.correlation_id()),
+        "the confirm must observe the removed record"
+    );
+    assert_eq!(
+        runtime.pending_push_count_for(pid_b),
+        0,
+        "the failed confirm must roll back its own slot — nothing strands"
+    );
+    runtime.cancel_pushes_for_connection(pid_b); // close, step 2 (sweep): no-op now
+    assert_eq!(runtime.pending_push_count_for(pid_b), 0);
+    let outcome_b = awaiter_b.receive(Duration::from_secs(5));
+    assert!(
+        matches!(
+            outcome_b,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "interleaving B's awaiter must disconnect, got {outcome_b:?}"
+    );
+
+    // Interleaving C — close fully completed before the push registers: the
+    // confirm rolls back immediately.
+    let pid_c = 73;
+    runtime.register(pid_c, None)?;
+    runtime.finish(pid_c);
+    let awaiter_c = outstanding_push(&runtime, pid_c)?;
+    assert!(!runtime.confirm_push_registration(pid_c, awaiter_c.correlation_id()));
+    assert_eq!(runtime.pending_push_count_for(pid_c), 0);
+    Ok(())
+}
+
+/// S4 pin: a poisoned slot registry must not kill reclamation or exact cap
+/// accounting. Admission stays fail-closed, but expiry, reply delivery, and the
+/// close sweep all recover the guard and complete their removals.
+// The deliberate panic-while-holding-the-guard IS the poisoning mechanism under
+// test; the unwrap can only fail if the fresh lock is somehow already poisoned.
+#[allow(clippy::unwrap_used, clippy::panic)]
+#[test]
+fn poisoned_registry_still_reclaims_and_expires() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 74;
+    runtime.register(pid, None)?;
+    let due = outstanding_push_with_deadline(&runtime, pid, Some(Instant::now()))?;
+    let resolved = outstanding_push(&runtime, pid)?;
+    let swept = outstanding_push(&runtime, pid)?;
+    assert_eq!(runtime.pending_push_count_for(pid), 3);
+
+    // Poison the registry: a panic while holding the lock.
+    let poisoner = std::sync::Arc::clone(&runtime);
+    let _ = thread::spawn(move || {
+        let _guard = poisoner.push_replies.lock().unwrap();
+        panic!("deliberately poison the push-slot registry");
+    })
+    .join();
+    assert!(
+        runtime.push_replies.is_poisoned(),
+        "the registry is poisoned"
+    );
+
+    // Admission is fail-closed on a poisoned registry.
+    assert!(
+        runtime.register_push(pid, 9_999, None).is_err(),
+        "admission must refuse a poisoned registry"
+    );
+
+    // Expiry recovers the guard: typed Expired, slot removed — NOT a benign
+    // timeout from a false slot-absence.
+    let due_outcome = due.receive(Duration::from_millis(10));
+    assert!(
+        matches!(
+            due_outcome,
+            Err(crate::ServerError::PushReplyExpired { .. })
+        ),
+        "expiry must complete on a poisoned registry, got {due_outcome:?}"
+    );
+    assert_eq!(runtime.pending_push_count_for(pid), 2);
+
+    // Reply delivery recovers the guard.
+    runtime.resolve_push(resolved.correlation_id(), b"poison-proof".to_vec());
+    assert_eq!(
+        resolved.receive(Duration::from_millis(200))?,
+        b"poison-proof"
+    );
+    assert_eq!(runtime.pending_push_count_for(pid), 1);
+
+    // The close sweep recovers the guard — close-at-latest reclamation holds.
+    runtime.finish(pid);
+    assert_eq!(runtime.pending_push_count_for(pid), 0);
+    let swept_outcome = swept.receive(Duration::from_secs(5));
+    assert!(
+        matches!(
+            swept_outcome,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "the swept awaiter must disconnect, got {swept_outcome:?}"
+    );
+    Ok(())
+}
+
+/// S4 pin: a dead runtime yields the established DISCONNECTED outcome, never a
+/// benign healthy-but-slow timeout — for a dropped runtime (map and senders
+/// gone) and for the staged Weak-upgrade-failure branch inside `expire_slot`.
+#[test]
+fn dropped_runtime_yields_disconnected_not_timeout() -> Result<(), Box<dyn std::error::Error>> {
+    // Dropped runtime: both the deadlined and the no-deadline awaiter observe
+    // their dropped senders as disconnected.
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 75;
+    runtime.register(pid, None)?;
+    let overdue = outstanding_push_with_deadline(&runtime, pid, Some(Instant::now()))?;
+    let plain = outstanding_push(&runtime, pid)?;
+    drop(runtime);
+    let overdue_outcome = overdue.receive(Duration::from_millis(10));
+    assert!(
+        matches!(
+            overdue_outcome,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "a dead runtime must read disconnected on the deadlined path, got {overdue_outcome:?}"
+    );
+    let plain_outcome = plain.receive(Duration::from_millis(10));
+    assert!(
+        matches!(
+            plain_outcome,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "a dead runtime must read disconnected on the plain path, got {plain_outcome:?}"
+    );
+
+    // The precise Weak-upgrade-failure branch: a due deadline, a dead Weak, and
+    // a sender kept artificially alive so the entry channel check stays Empty.
+    // `expire_slot` must classify this as disconnected, not a benign timeout.
+    let (sender, receiver) = channel();
+    let orphan = PushReplyAwaiter {
+        correlation_id: 424_242,
+        receiver,
+        deadline: Some(Instant::now()),
+        runtime: std::sync::Weak::new(),
+    };
+    let orphan_outcome = orphan.receive(Duration::from_millis(10));
+    assert!(
+        matches!(
+            orphan_outcome,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "a failed Weak upgrade at expiry must read disconnected, got {orphan_outcome:?}"
+    );
+    drop(sender);
+    Ok(())
+}
+
+/// S5 pin (public API): an extreme deadline duration is refused with this
+/// fallible API's typed error — never an `Instant` addition panic — and leaves
+/// no slot or cap admission behind; the connection then still serves a sane
+/// deadlined push end to end.
+#[test]
+fn duration_max_deadline_is_refused_without_slot_leak() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    wait_for_parked(&supervisor, pid)?;
+
+    let refused = supervisor.push_to_connection_with_deadline(pid, b"x".to_vec(), Duration::MAX);
+    assert!(
+        matches!(refused, Err(crate::ServerError::ListenerAccept { .. })),
+        "Duration::MAX must be refused with the typed admission error, got {refused:?}"
+    );
+    assert_eq!(
+        supervisor.pending_push_count(),
+        0,
+        "a refused deadline must leave no slot behind"
+    );
+
+    // The same connection still serves a sane deadlined push.
+    let awaiter = supervisor.push_to_connection_with_deadline(
+        pid,
+        b"ping".to_vec(),
+        Duration::from_secs(5),
+    )?;
+    let correlation_id = expect_push_correlation(&mut client)?;
+    write_frame(
+        &mut client,
+        &Frame::new_push_reply(1, correlation_id, b"pong".to_vec())?,
+    )?;
+    assert_eq!(awaiter.receive(Duration::from_secs(2))?, b"pong");
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// S6 pin (public API, real connection): a deadlined push whose client never
+/// replies expires PROMPTLY under a long receive quantum (the public face of
+/// S1(ii)), the slot is reclaimed, and the §5 accounting returns to zero.
+#[test]
+fn public_deadlined_push_expires_promptly_over_real_connection()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    wait_for_parked(&supervisor, pid)?;
+
+    let awaiter = supervisor.push_to_connection_with_deadline(
+        pid,
+        b"no-answer".to_vec(),
+        Duration::from_millis(60),
+    )?;
+    let _correlation_id = expect_push_correlation(&mut client)?; // delivered; client stays silent
+    let started = Instant::now();
+    let outcome = awaiter.receive(Duration::from_secs(30));
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(outcome, Err(crate::ServerError::PushReplyExpired { .. })),
+        "an unanswered deadlined push must expire with the typed outcome, got {outcome:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the expiry must arrive near the 60ms deadline, not the 30s quantum (took {elapsed:?})"
+    );
+    assert_eq!(supervisor.pending_push_count(), 0, "the slot is reclaimed");
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// S6 pin (public API, real connection): the observation-point rule end to end —
+/// a client reply that lands AFTER the deadline instant but before any host-side
+/// observation is delivered byte-exact, not expired.
+#[test]
+fn public_deadlined_push_reply_after_deadline_instant_still_wins()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    wait_for_parked(&supervisor, pid)?;
+
+    let awaiter = supervisor.push_to_connection_with_deadline(
+        pid,
+        b"needs-answer".to_vec(),
+        Duration::from_millis(40),
+    )?;
+    let correlation_id = expect_push_correlation(&mut client)?;
+
+    // Let the deadline instant pass with no host-side observation, then reply.
+    thread::sleep(Duration::from_millis(100));
+    write_frame(
+        &mut client,
+        &Frame::new_push_reply(1, correlation_id, b"after-the-instant".to_vec())?,
+    )?;
+
+    // Wait until the connection process has resolved the slot host-side, so the
+    // receive below deterministically observes the delivered reply.
+    let wait_deadline = Instant::now() + Duration::from_secs(2);
+    while supervisor.pending_push_count() > 0 && Instant::now() < wait_deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        supervisor.pending_push_count(),
+        0,
+        "the reply must resolve the slot before any expiry observation"
+    );
+    assert_eq!(
+        awaiter.receive(Duration::from_secs(1))?,
+        b"after-the-instant",
+        "a reply delivered before expiry is observed must win, even past the deadline instant"
+    );
+    supervisor.shutdown();
     Ok(())
 }
 

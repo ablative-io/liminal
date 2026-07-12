@@ -68,7 +68,10 @@ pub enum ServerError {
     /// reached that deadline before a correlated reply arrived. Unlike
     /// [`Self::PushReplyTimeout`] this is TERMINAL: the reply slot has been
     /// removed and its §5 `max_pending_pushes_per_connection` cap admission
-    /// released. Distinct variant so callers classify by type, not message.
+    /// released. Returned PROMPTLY once the deadline is due — a `receive` call
+    /// does not hold a due expiry until its caller's quantum ends, so the
+    /// terminal outcome is independent of how the caller polls. Distinct
+    /// variant so callers classify by type, not message.
     #[error(
         "push correlation {correlation_id} did not complete: its reply deadline passed before a correlated push reply arrived"
     )]
