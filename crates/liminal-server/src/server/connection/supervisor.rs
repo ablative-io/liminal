@@ -244,7 +244,9 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when the correlation id cannot be allocated, the
     /// reply slot cannot be registered, or the control message cannot be enqueued
-    /// for the (possibly already-gone) connection process.
+    /// for the (possibly already-gone or concurrently-closing) connection
+    /// process. PUBLICATION INVARIANT: an `Err` guarantees no `Push` control was
+    /// published — the client never sees a `Push` frame for a failed call.
     pub fn push_to_connection(
         &self,
         pid: u64,
@@ -283,7 +285,9 @@ impl ConnectionSupervisor {
     /// monotonic clock (an extreme duration is refused, never a panic), the
     /// correlation id cannot be allocated, the reply slot cannot be registered,
     /// or the control message cannot be enqueued for the (possibly already-gone
-    /// or concurrently-closing) connection process.
+    /// or concurrently-closing) connection process. PUBLICATION INVARIANT: an
+    /// `Err` guarantees no `Push` control was published — the client never sees
+    /// a `Push` frame for a failed call.
     pub fn push_to_connection_with_deadline(
         &self,
         pid: u64,
@@ -325,38 +329,47 @@ impl ConnectionSupervisor {
             .inner
             .runtime
             .register_push(pid, correlation_id, deadline_at)?;
+        // S3+S7 close-vs-register wall, ordered INSERT -> CONFIRM -> PUBLISH.
+        // The confirmation runs BEFORE the control is enqueued, which yields the
+        // PUBLICATION INVARIANT: an `Err` from this method guarantees no `Push`
+        // control was published — the client never sees a Push for a failed
+        // call. (Confirming after the enqueue was S7's non-linearizable race: a
+        // close could sweep, the published Push could already be answered and
+        // resolved, and the failed confirmation then returned `Err` for a push
+        // the client had received.) A close landing AFTER a successful confirm
+        // linearizes after push admission: the enqueue either fails (process
+        // gone — rollback below, `Err` truthful, nothing delivered) or succeeds
+        // with the slot already swept, and the awaiter then reads the truthful
+        // DISCONNECTED while a late client reply is the pinned harmless no-op.
+        // The exactly-one-side-observes argument lives at
+        // `confirm_push_registration`.
+        if !self
+            .inner
+            .runtime
+            .confirm_push_registration(pid, correlation_id)
+        {
+            return Err(ServerError::ListenerAccept {
+                message: format!(
+                    "cannot push to connection process {pid}: the connection closed during push registration"
+                ),
+            });
+        }
         let control = ConnectionControl::Push {
             correlation_id,
             payload,
         };
         if self.inner.enqueue_control(pid, control) {
-            // S3 close-vs-register wall: a close whose push sweep ran BEFORE this
-            // slot was inserted may have already removed the connection record,
-            // while the (still-executing) process accepted the enqueue. Re-check
-            // registration AFTER insert+enqueue; combined with `remove`'s
-            // record-removal-before-sweep ordering, exactly one side always
-            // observes the slot (argued at `confirm_push_registration`).
-            if self
-                .inner
-                .runtime
-                .confirm_push_registration(pid, correlation_id)
-            {
-                Ok(PushReplyAwaiter {
-                    correlation_id,
-                    receiver,
-                    deadline: deadline_at,
-                    runtime: Arc::downgrade(&self.inner.runtime),
-                })
-            } else {
-                Err(ServerError::ListenerAccept {
-                    message: format!(
-                        "cannot push to connection process {pid}: the connection closed during push registration"
-                    ),
-                })
-            }
+            Ok(PushReplyAwaiter {
+                correlation_id,
+                receiver,
+                deadline: deadline_at,
+                runtime: Arc::downgrade(&self.inner.runtime),
+            })
         } else {
             // The process is gone; drop the now-unreachable reply slot so it cannot
-            // leak in the correlation registry.
+            // leak in the correlation registry. `enqueue_control` rolled the queued
+            // control back out on the failed wake, so nothing was published here
+            // either — the publication invariant holds on every `Err` path.
             self.inner.runtime.cancel_push(correlation_id);
             Err(ServerError::ListenerAccept {
                 message: format!("cannot push to connection process {pid}: process is not live"),
@@ -1331,22 +1344,29 @@ impl ConnectionRuntime {
         recover_lock(&self.push_replies).retain(|_correlation_id, pending| pending.pid != pid);
     }
 
-    /// S3 second half (shape (b), check-after-insert): post-enqueue confirmation
-    /// that the connection record for `pid` still exists. `true` leaves the slot
-    /// in place; `false` means a concurrent close already removed the record —
+    /// S3 second half (shape (b), check-after-insert): pre-publication
+    /// confirmation that the connection record for `pid` still exists, run in
+    /// the INSERT -> CONFIRM -> PUBLISH order (S7 — confirming after the
+    /// enqueue let a close-swept-then-answered push report `Err` for a Push the
+    /// client had received). `true` leaves the slot in place and the caller may
+    /// publish; `false` means a concurrent close already removed the record —
     /// this call then removes the caller's own just-inserted slot (rolling back
-    /// its cap admission) so nothing is stranded.
+    /// its cap admission) so nothing is stranded, and the caller returns
+    /// WITHOUT publishing: an `Err` from the push methods guarantees no `Push`
+    /// control was published.
     ///
     /// Why exactly one side always observes the slot: `remove` (the single
     /// record-removal path) removes the host record BEFORE sweeping the pid's
-    /// push slots, and this check reads the record AFTER inserting the slot.
-    /// Both records accesses are serialized by the `records` mutex, so either
-    /// (i) this read precedes the record removal — then the slot insert precedes
-    /// the sweep (insert < read < removal < sweep in the happens-before order)
-    /// and the SWEEP observes and removes the slot (the awaiter disconnects), or
-    /// (ii) this read follows the record removal — then THIS call observes the
-    /// absence and rolls the slot back itself. When both observe (read before
-    /// removal is impossible then, but a sweep and a rollback can both run in
+    /// push slots, and this check reads the record AFTER inserting the slot and
+    /// BEFORE the control is published. Both records accesses are serialized by
+    /// the `records` mutex, so either (i) this read precedes the record removal
+    /// — then the slot insert precedes the sweep (insert < read < removal <
+    /// sweep in the happens-before order) and the SWEEP observes and removes
+    /// the slot: if the control was published in the meantime the awaiter reads
+    /// the truthful disconnected outcome and a late client reply is a harmless
+    /// no-op; or (ii) this read follows the record removal — then THIS call
+    /// observes the absence, rolls the slot back itself, and nothing was
+    /// published. When both observe (a sweep and a rollback can both run in
     /// case (ii) if the insert also preceded the sweep), removal is idempotent
     /// and the cap is derived from map membership, so nothing double-releases.
     ///
@@ -1664,14 +1684,17 @@ impl ConnectionRuntime {
     /// remove through here — and fires regardless of whether the connection ever
     /// registered a worker, so a plain push target is covered too.
     ///
-    /// ORDER MATTERS (S3): the record is removed BEFORE the push sweep. A push
-    /// registering concurrently re-checks the record AFTER inserting its slot
-    /// (`confirm_push_registration`), so with this ordering exactly one side
-    /// always observes a racing slot: a re-check that ran before this removal
-    /// implies the slot was inserted before the sweep below (which then reaps
-    /// it); a re-check after this removal sees the absence and rolls the slot
-    /// back itself. Sweeping first (the previous order) left a window — sweep,
-    /// then insert+re-check, then record removal — where NEITHER side observed
+    /// ORDER MATTERS (S3/S7): the record is removed BEFORE the push sweep. A
+    /// push registering concurrently runs INSERT -> CONFIRM -> PUBLISH
+    /// (`confirm_push_registration` reads the record after inserting its slot
+    /// and before publishing its control), so with this ordering exactly one
+    /// side always observes a racing slot: a confirm that ran before this
+    /// removal implies the slot was inserted before the sweep below (which then
+    /// reaps it — a control published after that confirm is answered into a
+    /// swept slot, read as the truthful disconnected outcome); a confirm after
+    /// this removal sees the absence, rolls the slot back itself, and never
+    /// publishes. Sweeping first (the original order) left a window — sweep,
+    /// then insert+confirm, then record removal — where NEITHER side observed
     /// the slot and it leaked past connection close. The two locks are taken
     /// strictly sequentially (never nested), so no lock-order inversion.
     fn remove(&self, pid: u64) -> Option<ConnectionRecord> {

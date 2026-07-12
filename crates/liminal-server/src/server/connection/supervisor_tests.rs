@@ -1331,9 +1331,17 @@ fn overdue_deadlined_receive_returns_expired_promptly() -> Result<(), Box<dyn st
 
 /// S3 pin: the close-vs-register race can never strand a slot or its cap
 /// admission, staged at each of the three interleavings of `remove`'s
-/// record-removal-BEFORE-sweep ordering against registration's
-/// insert-then-confirm. Asserts the typed awaiter outcome and the exact per-pid
-/// slot count after every winner.
+/// record-removal-BEFORE-sweep ordering against registration's INSERT ->
+/// CONFIRM -> PUBLISH sequence. Asserts the typed awaiter outcome and the exact
+/// per-pid slot count after every winner.
+///
+/// EVIDENCE HONESTY: this staging drives the runtime seams directly — the slot
+/// insert (`register_push` via the test helper) and `confirm_push_registration`
+/// — with close's two steps interleaved between them; no control is actually
+/// enqueued here. The insert->confirm->PUBLISH ordering and its publication
+/// invariant are pinned separately
+/// (`close_between_insert_and_confirm_publishes_nothing` and
+/// `err_from_public_push_publishes_nothing_after_close`).
 #[test]
 fn close_racing_push_registration_never_strands_slot_or_cap()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -1341,9 +1349,9 @@ fn close_racing_push_registration_never_strands_slot_or_cap()
         FlushFailingServices,
     )));
 
-    // Interleaving A — confirm BEFORE the record removal: the push stands; the
-    // later close's sweep (which runs after its record removal) reaps the slot
-    // and the awaiter disconnects.
+    // Interleaving A — confirm BEFORE the record removal: the push stands (in
+    // production it then publishes); the later close's sweep (which runs after
+    // its record removal) reaps the slot and the awaiter disconnects.
     let pid_a = 71;
     runtime.register(pid_a, None)?;
     let awaiter_a = outstanding_push(&runtime, pid_a)?;
@@ -1366,11 +1374,12 @@ fn close_racing_push_registration_never_strands_slot_or_cap()
         "interleaving A must end disconnected, got {outcome_a:?}"
     );
 
-    // Interleaving B — the exact leak Sol proved: barrier-staged INSIDE close's
-    // two steps. The record is already removed (close's first step) but the
-    // sweep (its second step) has not run; the push inserts its slot and its
-    // enqueue succeeds against the still-executing process. The post-enqueue
-    // confirm must observe the missing record and roll the slot back itself.
+    // Interleaving B — the exact S3 leak Sol proved, staged INSIDE close's two
+    // steps: the record is already removed (close's first step) but the sweep
+    // (its second step) has not run when the push inserts its slot. The confirm
+    // must observe the missing record and roll the slot back itself — in
+    // production this happens BEFORE any control is enqueued (S7), so the `Err`
+    // coexists with nothing published.
     let pid_b = 72;
     runtime.register(pid_b, None)?;
     runtime
@@ -1401,13 +1410,122 @@ fn close_racing_push_registration_never_strands_slot_or_cap()
     );
 
     // Interleaving C — close fully completed before the push registers: the
-    // confirm rolls back immediately.
+    // confirm rolls back immediately (and production never publishes).
     let pid_c = 73;
     runtime.register(pid_c, None)?;
     runtime.finish(pid_c);
     let awaiter_c = outstanding_push(&runtime, pid_c)?;
     assert!(!runtime.confirm_push_registration(pid_c, awaiter_c.correlation_id()));
     assert_eq!(runtime.pending_push_count_for(pid_c), 0);
+    Ok(())
+}
+
+/// S7 pin (publication race, both directions, staged deterministically at the
+/// runtime level between registration's steps):
+///
+/// Err side — close lands between INSERT and CONFIRM: the failed confirm rolls
+/// the slot back and (in the production INSERT -> CONFIRM -> PUBLISH order) the
+/// control is never enqueued, so `Err` coexists with NO published control and
+/// no delivered push. Ok side — close lands AFTER a successful confirm (i.e.
+/// after push admission): the sweep reaps the slot, the awaiter reads the
+/// truthful DISCONNECTED, a late client reply is the pinned harmless no-op, and
+/// zero slots are left. Under the pre-fix order (INSERT -> PUBLISH -> CONFIRM)
+/// the Err side could return failure for a push the client had already received
+/// and answered — the discarded lock-ordered reply Sol proved.
+#[test]
+fn close_between_insert_and_confirm_publishes_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+
+    // Err side: INSERT, then the full close (record removal + sweep), then
+    // CONFIRM — the pause point is exactly between registration's two steps.
+    let pid = 76;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?; // INSERT
+    runtime.finish(pid); // close runs across the pause (removal, then sweep)
+    assert!(
+        !runtime.confirm_push_registration(pid, awaiter.correlation_id()),
+        "CONFIRM after the close must fail"
+    );
+    // Production returns Err HERE, before ConnectionControl::Push is built or
+    // enqueued: no control exists for this pid and no slot is left.
+    assert!(
+        !runtime.has_control(pid),
+        "a failed confirm must precede any published control"
+    );
+    assert_eq!(runtime.pending_push_count_for(pid), 0);
+    let outcome = awaiter.receive(Duration::from_secs(5));
+    assert!(
+        matches!(
+            outcome,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "the rolled-back slot reads disconnected, got {outcome:?}"
+    );
+
+    // Ok side: INSERT + successful CONFIRM (push admitted), then the close
+    // lands before/while the published Push is answered. The sweep reaps the
+    // slot; the client's late reply is a harmless no-op; the awaiter reads the
+    // truthful disconnected outcome; zero slots left.
+    let pid_ok = 77;
+    runtime.register(pid_ok, None)?;
+    let admitted = outstanding_push(&runtime, pid_ok)?;
+    assert!(runtime.confirm_push_registration(pid_ok, admitted.correlation_id()));
+    runtime.finish(pid_ok); // close linearizes AFTER push admission
+    runtime.resolve_push(admitted.correlation_id(), b"late-reply".to_vec()); // no-op
+    assert_eq!(runtime.pending_push_count_for(pid_ok), 0, "zero slots left");
+    let admitted_outcome = admitted.receive(Duration::from_secs(5));
+    assert!(
+        matches!(
+            admitted_outcome,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "a push admitted before the close reads the truthful disconnect, got {admitted_outcome:?}"
+    );
+    Ok(())
+}
+
+/// S7 pin (public path, real connection): an `Err` from `push_to_connection`
+/// against a connection whose host-side close half already ran (record removed,
+/// slots swept — the S7 window at its widest, staged deterministically by
+/// running that half directly while the beamr process is still live) publishes
+/// NOTHING: the client's socket carries no `Push` frame and zero slots remain.
+///
+/// EVIDENCE HONESTY: the mid-flight pause (close landing between the public
+/// call's own insert and confirm) is not deterministically stageable over the
+/// live scheduler without a test-only hook in `push_with_deadline`; that exact
+/// interleaving is pinned at the runtime level in
+/// `close_between_insert_and_confirm_publishes_nothing`. This test pins the
+/// public-API face of the invariant: Err => nothing on the wire.
+#[test]
+fn err_from_public_push_publishes_nothing_after_close() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    client.set_read_timeout(Some(Duration::from_millis(300)))?;
+    wait_for_parked(&supervisor, pid)?;
+
+    // Close's host-side half: record removed + pushes swept, process still live.
+    supervisor.inner.runtime.finish(pid);
+
+    let result = supervisor.push_to_connection(pid, b"never-published".to_vec());
+    assert!(
+        matches!(result, Err(crate::ServerError::ListenerAccept { .. })),
+        "the push against the closed record must fail typed, got {result:?}"
+    );
+    assert_eq!(
+        supervisor.pending_push_count(),
+        0,
+        "the failed push must leave no slot"
+    );
+    // Publication invariant on the wire: the client must receive NO Push frame.
+    assert!(
+        read_frame(&mut client).is_err(),
+        "an Err from push_to_connection must publish nothing to the client"
+    );
+    supervisor.shutdown();
     Ok(())
 }
 

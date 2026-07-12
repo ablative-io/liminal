@@ -258,7 +258,11 @@ always observes a racing slot); reclamation paths (expiry, reply delivery,
 cancellation, close sweep) recover a poisoned registry guard and complete
 their removals while admission stays fail-closed; a dead runtime reads as
 DISCONNECTED, never a benign timeout; and an extreme deadline duration is
-refused as a typed error instead of an `Instant` panic. Pins:
+refused as a typed error instead of an `Instant` panic. Round 2 added the
+PUBLICATION INVARIANT (S7): push registration runs insert -> confirm ->
+publish, so an `Err` from `push_to_connection{,_with_deadline}` guarantees no
+`Push` control was published — the confirm-after-enqueue order could report
+failure for a push the client had already received and answered. Pins:
 `same_deadlined_schedule_yields_same_outcome_for_any_quantum`,
 `overdue_deadlined_receive_returns_expired_promptly`,
 `no_deadline_receive_never_blocks_on_registry_lock`,
@@ -267,7 +271,9 @@ refused as a typed error instead of an `Instant` panic. Pins:
 `dropped_runtime_yields_disconnected_not_timeout`,
 `duration_max_deadline_is_refused_without_slot_leak`,
 `public_deadlined_push_expires_promptly_over_real_connection`,
-`public_deadlined_push_reply_after_deadline_instant_still_wins`.
+`public_deadlined_push_reply_after_deadline_instant_still_wins`,
+`close_between_insert_and_confirm_publishes_nothing`,
+`err_from_public_push_publishes_nothing_after_close`.
 
 ## H. Server direction (2026-07-07)
 
