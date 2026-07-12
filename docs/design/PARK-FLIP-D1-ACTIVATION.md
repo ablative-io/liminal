@@ -151,6 +151,23 @@ admitted active work — an idle parked connection holds ZERO timers, so
 this is active-work cost, never idle cost. Expiry batch-drains via
 `expire_due`, so co-expiring timers still produce one slice of work.
 
+**Mechanism resident cost (beamr side), signed and WALLED (domain-owner
+review follow-up, folded post-merge):** the timers ride beamr's
+`TimerWheel` — data, not machinery. A pending entry adds no thread, no
+tick, and no wake: **zero RESIDENT cost is added by pending timers.** Two
+scope caveats, stated so this line claims exactly what is true: the
+scheduler's own idle floor (the fixed `IDLE_PARK_TIMEOUT` park wait,
+~200 wakes/s/worker) is a separately-signed pre-existing property, NOT
+covered by this line; and expiry granularity rides that same floor — a
+due deadline fires on the next worker wake, so reply deadlines are
+honored to ~5 ms resolution, which for connection-liveness timeouts is
+noise. Pinned fail-first in beamr `tests/timer_resident_cost.rs` (three
+walls: thread multiset unchanged, park timeout never re-derived from the
+wheel, idle wake rate obeys the same 2× ceiling with a full wheel — each
+verified able to fail against a live regression), commit `70af42d`,
+merged to beamr main via `619d38b`. The citation is the wall, not the
+signature.
+
 ## 6. Test inversion + acceptance matrix
 
 - `process_wake_tests.rs:59-70` currently PINS the busy-spin (idle slices
