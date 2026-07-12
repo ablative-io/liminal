@@ -253,7 +253,7 @@ max wait, not a promise to block); the no-deadline receive never touches the
 slot registry (behaviour-compatible with 0.2.3 — no contention or poison
 exposure on the unchanged API); a close-vs-register race that could strand a
 slot past connection close is walled off (record removal ordered before the
-close's push sweep + a post-enqueue registration re-check — exactly one side
+close's push sweep + a post-insert, pre-enqueue registration confirmation (INSERT -> CONFIRM -> PUBLISH) — exactly one side
 always observes a racing slot); reclamation paths (expiry, reply delivery,
 cancellation, close sweep) recover a poisoned registry guard and complete
 their removals while admission stays fail-closed; a dead runtime reads as
