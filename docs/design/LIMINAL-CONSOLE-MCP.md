@@ -358,16 +358,61 @@ connection slice via `service_socket` — calling them "never on a slice" was
 internally false — and their rate is bounded only by frame rate, not by the
 occupancy cap, so a global CoW per transition was a writer-side DoS).**
 
-- **Per-subscription observation object, created WITH the inbox:**
+- **Per-subscription observation object — created SERVER-SIDE, injected
+  INWARD (r3 finding 2: the previous "constructed by `SubscriptionInbox`
+  itself" wording was unimplementable).** `InboxInstall` is an **inward-only
+  seam**: it is an input struct (`subscription.rs:127-135` — `budget`,
+  `depth_cap`, `notifier`), `SubscriptionHandle::spawn` consumes it into the
+  inbox at construction and returns only `(handle, registration)`
+  (`subscription.rs:540-592`), and the server sees the subscription solely
+  through `SubscriptionResource` (`services.rs:35-60`), whose interface is
+  unsubscribe/try_next/has_pending/is_overflowed. **There is no outward slot
+  and this design adds none.** An inbox-CREATED observation therefore has no
+  path back to the server, and the earlier text was describing machinery that
+  does not and must not exist.
+
+  **Inverted, so the seam is used in the direction it points:**
   `SubscriptionObservation { depth: Arc<AtomicUsize>, overflowed:
-  Arc<AtomicBool> }`, constructed by `SubscriptionInbox` itself so the
-  sticky overflow flag becomes the SHARED atomic (today it is an embedded
-  non-shareable `AtomicBool`, `subscription.rs:179-187` — the field's owner
-  changes from embedded to `Arc`, its `store(true, Release)` sites
-  unchanged in meaning). Injected through the **existing `InboxInstall`
-  seam** (`subscription.rs:127`, installed at subscribe, `apply.rs:401`) —
-  the seam that already carries budget/cap/notifier, so no new construction
-  path exists.
+  Arc<AtomicBool> }` is a type defined in the lower `liminal` crate (it must
+  be nameable by `InboxInstall`) and **constructed by the SERVER**, in the
+  connection process's apply path that already builds `InboxInstall`
+  (`apply.rs:401`, on the connection's own slice). The server **keeps its
+  clones** — they go straight into the per-connection sub-list entry below —
+  and passes a clone INWARD through `InboxInstall`. The inbox holds the
+  **injected `Arc`s in place of its embedded fields**: today's sticky
+  `overflowed: AtomicBool` is a non-shareable struct member
+  (`subscription.rs:186`), and the field's owner changes from embedded to the
+  injected `Arc<AtomicBool>` — its three `store(true, Release)` sites
+  (`subscription.rs:287,294,305`) are unchanged in meaning. `depth` is new
+  and written under the inbox lock per §4.3.
+- **The seam change, named honestly as an API change to the pair (house rule:
+  no silent tradeoffs).** `InboxInstall` gains **one additive field** —
+  `observation: Option<SubscriptionObservation>` — and `liminal` exports one
+  new public type. This is **source-breaking for external struct-literal
+  construction**: `InboxInstall`'s fields are `pub` and the struct is not
+  `#[non_exhaustive]`, and it IS public API (`channel/mod.rs:16` →
+  `lib.rs:13`), so any out-of-tree literal gains a required field. In-tree
+  the blast radius is exactly one construction site (`apply.rs:401`); every
+  other reference passes it through opaquely (`services.rs:182,980`) or
+  ignores it (`_install` in the four test/worker-front-door adapters). **This
+  is the same class of flagged API change as the original `InboxInstall`
+  introduction during D1-prep, and it is flagged to the pair on the same
+  terms, not smuggled.** `SubscriptionInbox::new` also grows an
+  `Option<SubscriptionObservation>` parameter so the injected `Arc`s are the
+  inbox's **from birth** — but that constructor is `pub(crate)`
+  (`subscription.rs:221`), so it is an internal change with no public
+  surface. Taking the observation at construction (rather than installing it
+  afterwards like `install_budget`) means there is **no pre-install window**
+  by construction — the inbox never writes a throwaway atomic, so no write
+  can be lost to install ordering, and the existing pre-install-window
+  argument (`subscription.rs:120-126,545-555`) does not even need to be
+  re-run for this field.
+- **Failure semantics, stated:** if `services.subscribe(...)` fails
+  (`apply.rs:406`), the server simply **never publishes the sub-list entry**
+  and drops its clones; the observation dies with the failed attempt. No
+  half-published subscription, no orphan observation, and no rollback
+  machinery — because the server never gave the object away, it has nothing
+  to reclaim. This is the direct dividend of inward-only injection.
 - **The aggregate `overflow_flags_total`:** an injected `Arc<AtomicU64>`
   riding the same `InboxInstall`; the inbox increments it on the **first
   false→true transition only** — `overflowed.swap(true, AcqRel)` returning
@@ -375,18 +420,102 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   (`subscription.rs:283-311` stores on every refusal) count once per shed,
   not once per drop. Semantics now defined, not implied.
 - **Publication — the per-connection sub-list, NOT the global snapshot:**
-  the bundle holds `sub_list: ArcSwap<SubscriptionList>` (≤ 32 entries of
+  the bundle holds the sub-list behind a **per-connection authority with a
+  TERMINAL state** (r3 finding 1 — mutual exclusion alone was not enough;
+  see below): `Mutex<SubListAuthority>` where `SubListAuthority` is
+  `{ closed: bool, list: Arc<SubscriptionList> }`, published to readers
+  through the bundle's `ArcSwap<SubscriptionList>` slot (≤ 32 entries of
   `{ subscription_id, channel: Arc<str>, observation }`). Subscription
   transitions (subscribe, unsubscribe, **automatic shed** —
   `process.rs:377-398`, which removes a subscription with NO unsubscribe
   frame and must publish like one) rebuild ONLY this list: a ≤ 32-entry
   copy, swapped on the bundle's own slot. The global `ConnectionsSnapshot`
-  is untouched; the §2.6 global writer mutex is NOT acquired. **Write
-  authority:** the connection's own slice is the only subscription-
-  transition writer (a connection's slices are serialized by beamr), and
-  the close path clears the slot through the single removal path — a
-  per-connection cold mutex in the bundle serializes those two, contended
-  at most once per connection life.
+  is untouched; the §2.6 global writer mutex is NOT acquired.
+- **Why mutual exclusion was insufficient — the race the mutex did not
+  close.** The previous text serialized "the slice publishes" against "the
+  close path clears" and stopped there. Serialization gives an ORDER, not a
+  TERMINUS: if close clears and unlocks FIRST, a slice that already passed
+  its `is_registered` check can acquire the same mutex afterwards and
+  republish a non-empty list onto a dead connection. **The race is reachable
+  in current source, not hypothetical:** `handle_slice` checks
+  `is_registered(pid)` exactly once, near its start (`process.rs:128`), and
+  then runs `service_socket` → `apply` → subscribe; meanwhile
+  `ConnectionSupervisor::shutdown` calls `runtime.finish(pid)` for every
+  connection *before* shutting the scheduler down (`supervisor.rs:275-281`),
+  and `finish` → `remove` (`supervisor.rs:1191-1195,1351`) tears the record
+  out from under a slice that is already past its check. The
+  publication is therefore **not** ordered behind the close by anything the
+  old design named.
+- **The terminal CLOSED state — the wall.** The removal path takes the
+  authority **once** and **seals** it: lock; set `closed = true`; publish the
+  **empty** list (swap the `ArcSwap` to an empty `SubscriptionList`); set
+  `subscriptions_active = 0`; unlock. `closed` is **never cleared** — the
+  authority is a one-way state machine `Open → Closed`, so the seal is
+  monotonic in exactly the sense §2.6 gives global entries. Every
+  subscription transition (subscribe/unsubscribe/shed) locks the authority,
+  **checks `closed` first**, and if sealed **returns without swapping** — a
+  **documented no-op**, not an error: the connection is gone, its global
+  entry is being removed, and there is nothing to publish into. The seal
+  lives on the **bundle** — the shared object — not on the record, which is
+  precisely why it binds a slice that already passed `is_registered` and
+  still holds its own bundle clone.
+- **Ordering: SEAL BEFORE the §2.6 global entry removal — chosen, and why.**
+  The removal path (park-flip §3's single finalization route) seals the
+  per-connection authority FIRST, then removes the global snapshot entry
+  under the §2.6 writer mutex, then drops its bundle clone. **Seal-after
+  would leave a real hole:** between the global entry's removal and the seal,
+  a racing slice could publish a non-empty list, and although no *current*
+  snapshot still carries the entry, a reader holding an **older generation**
+  (§9's `G`) still holds that entry — and the entry embeds the bundle `Arc`,
+  so the reader would walk the slot and observe a **resurrected** live-looking
+  subscription list on a closed connection. Sealing first makes that
+  unreachable: by the time the global entry is removed, the sub-list is
+  already permanently empty, so **every** generation — current or
+  reader-held — resolves the bundle to an empty list. An old generation may
+  still show the connection (that is ordinary bounded staleness, stated in
+  §3), but it can never show it holding subscriptions it no longer has.
+- **Exactly-one-outcome argument** (same style as §2.6's keyed-idempotent
+  wall). Take any concurrent pair (P = a subscription-transition publication,
+  S = the seal). Both bodies run inside the one per-connection authority
+  mutex, so the mutex admits exactly two total orders and no interleaving:
+  1. **P before S.** P locks, observes `closed == false`, swaps its list, and
+     unlocks. S then locks, seals, and swaps the empty list. Terminal state:
+     `(closed = true, list = ∅)`. P's list is observable only in the interval
+     between P's swap and S's swap — during which the connection is still
+     globally published and genuinely still held that subscription. That is an
+     **honest live read**, not a resurrection.
+  2. **S before P.** S locks, seals, swaps empty, unlocks. P then locks,
+     observes `closed == true`, and **returns without swapping**. Terminal
+     state: `(closed = true, list = ∅)`.
+
+  Both orders terminate in `(closed = true, list = ∅)`, and no third order
+  exists. Because `closed` is never cleared, no later transition can leave
+  that state, and because the seal precedes the global entry removal, no
+  snapshot generation of any age can observe a non-empty list after the
+  connection is unpublished. **Exactly one outcome.**
+- **`subscriptions_active` is written under the same authority, not
+  independently.** It is **set from the published list's length** inside the
+  authority's critical section — never an independent `fetch_add` on the
+  bundle atomic. If it were a free-standing RMW, a racing slice could bump it
+  after the seal zeroed it, and the count would drift nonzero on a dead
+  connection while the list correctly read empty. One authority, one write,
+  no drift.
+- **Write authority, restated:** the connection's own slice is the only
+  subscription-transition writer (a connection's slices are serialized by
+  beamr), and the single removal path is the only sealer. The per-connection
+  mutex is **cold**: a transition contends it only against the one seal in
+  the connection's life, and readers **never** take it (they read the
+  `ArcSwap` slot).
+- **Named race pin — (c4) the post-close sub-list resurrection wall.** A
+  same-connection collision test stages a Subscribe that has passed
+  `is_registered` (`process.rs:128`) but not yet reached publication, then
+  drives the close/seal, then lets the Subscribe proceed. Asserts: the
+  publication is a no-op; the sub-list reads empty; `subscriptions_active`
+  is 0; **and** a reader holding an old global-snapshot generation captured
+  before the close ALSO resolves the bundle to an empty list — the
+  resurrection is unobservable through both the current snapshot and a
+  reader-held stale one. Fail-first: it fails against a design without the
+  terminal state (which is the design this round replaces).
 - **Honest slice-path pricing:** subscribe/unsubscribe/shed IS slice-path
   work, and nothing structurally bounds a client's churn RATE (the
   occupancy cap bounds the map length, `apply.rs:349-377`, not the
@@ -460,16 +589,24 @@ with these invariants:
   exists. Admission rollback — remove entry if present (idempotent), release
   reservation. Worker/readiness updates — keyed posture update; entry
   already gone (concurrent close) ⇒ no-op. Close/reap — all routes funnel
-  through the single removal path, which removes the record, then the
-  snapshot entry, then drops the bundle clone; entry removal is the LAST
-  publication, so a scrape never sees an entry whose record is still
-  half-torn.
+  through the single removal path, which removes the record
+  (`supervisor.rs:1351`), **then SEALS the per-connection sub-list authority
+  (§2.5(b): `closed = true`, empty list published, `subscriptions_active`
+  zeroed)**, then removes the snapshot entry under this writer mutex, then
+  drops the bundle clone. **The seal precedes the global entry removal** —
+  the §2.5(b) ordering argument depends on it: once the entry is gone, only
+  reader-held OLD generations can still reach the bundle, and they must find
+  it already sealed. Entry removal remains the LAST publication, so a scrape
+  never sees an entry whose record is still half-torn.
 - **Named collision tests:** (c1) concurrent accept×N + close×N storm —
   snapshot converges to exactly the live record set at quiescence, no ghost
   and no missing entry; (c2) worker/readiness registration racing close —
   no resurrection of a removed entry; (c3) readers scraping continuously
   during (c1)/(c2) never block (bounded scrape latency while the writer
-  mutex is held-and-released under storm) and never observe a torn entry.
+  mutex is held-and-released under storm) and never observe a torn entry;
+  **(c4) the post-close sub-list resurrection wall** (§2.5(b)) — a Subscribe
+  staged past `is_registered` and released after the seal publishes nothing,
+  through the current snapshot AND a reader-held older generation.
 
 ---
 
