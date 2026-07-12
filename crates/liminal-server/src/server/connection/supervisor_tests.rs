@@ -949,9 +949,9 @@ fn resolver_winning_the_timeout_race_delivers_the_reply() -> Result<(), Box<dyn 
     let correlation_id = awaiter.correlation_id();
     let reply = b"late-but-won".to_vec();
 
-    // Hold the slot-registry lock: the awaiter's post-timeout `cancel_push`
-    // cannot proceed until the resolver below has finished, so the interleaving
-    // is enforced by the mutex, not by sleeps.
+    // Hold the slot-registry lock: the awaiter's post-quantum `expire_push_if_due`
+    // (via `on_quantum_elapsed`) cannot proceed until the resolver below has
+    // finished, so the interleaving is enforced by the mutex, not by sleeps.
     let mut slots = runtime
         .push_replies
         .lock()
@@ -959,9 +959,9 @@ fn resolver_winning_the_timeout_race_delivers_the_reply() -> Result<(), Box<dyn 
 
     let awaiter_thread = thread::spawn(move || awaiter.receive(Duration::from_millis(20)));
 
-    // Let the awaiter's deadline expire; it then blocks on the held lock. (The
-    // sleep only makes the block observable — the outcome is lock-ordered and
-    // identical even if the awaiter arrives later.)
+    // Let the awaiter's wait quantum elapse; it then blocks on the held lock.
+    // (The sleep only makes the block observable — the outcome is lock-ordered
+    // and identical even if the awaiter arrives later.)
     thread::sleep(Duration::from_millis(100));
 
     // The resolver's winning transition, under the same lock `resolve_push`
@@ -1073,6 +1073,46 @@ fn late_reply_after_expiry_is_a_harmless_noop() -> Result<(), Box<dyn std::error
     // A reply for a correlation id that never had a slot is equally harmless.
     runtime.resolve_push(9_999, b"never-existed".to_vec());
     assert_eq!(runtime.pending_push_count(), 0);
+    Ok(())
+}
+
+/// Observation-point expiry pin: the deadline is evaluated at observation
+/// points, not enforced against the wall clock. A reply that is delivered AFTER
+/// the deadline instant but BEFORE any receive observes the slot wins — the
+/// payload is returned, not `PushReplyExpired`. This locks the deliberate
+/// reply-before-deadline check ordering in `on_quantum_elapsed`/`receive`
+/// against a future eager-expiry "fix": the deadline bounds waiting and slot
+/// occupancy, it is not a delivery-freshness guarantee.
+#[test]
+fn reply_delivered_after_deadline_instant_beats_unobserved_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 65;
+    runtime.register(pid, None)?;
+
+    let deadline = Instant::now() + Duration::from_millis(10);
+    let awaiter = outstanding_push_with_deadline(&runtime, pid, Some(deadline))?;
+
+    // Let the deadline instant pass with NO observation (no receive call).
+    thread::sleep(Duration::from_millis(30));
+
+    // The reply lands after the deadline instant but before any observation.
+    let reply = b"late-but-unobserved".to_vec();
+    runtime.resolve_push(awaiter.correlation_id(), reply.clone());
+    assert_eq!(
+        runtime.pending_push_count(),
+        0,
+        "the resolver consumed the slot — lazy expiry never raced it"
+    );
+
+    // The first observation finds the payload: delivered, not Expired.
+    let received = awaiter.receive(Duration::from_millis(100))?;
+    assert_eq!(
+        received, reply,
+        "a reply delivered before expiry is observed must win over the deadline"
+    );
     Ok(())
 }
 

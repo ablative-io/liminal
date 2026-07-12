@@ -254,9 +254,9 @@ impl ConnectionSupervisor {
     }
 
     /// Like [`push_to_connection`](Self::push_to_connection) but attaches an
-    /// explicit reply deadline to the reserved slot: the reply's lifetime is
-    /// `deadline` from now, a property of THIS push rather than of any
-    /// [`PushReplyAwaiter::receive`] wait quantum.
+    /// explicit reply deadline to the reserved slot: `deadline` is a DURATION
+    /// FROM NOW bounding the reply's lifetime — a property of THIS push rather
+    /// than of any [`PushReplyAwaiter::receive`] wait quantum.
     ///
     /// Deadline expiry is evaluated HOST-SIDE and LAZILY — at the next `receive`
     /// touch, and at connection close at the latest. It never wakes the connection
@@ -266,6 +266,14 @@ impl ConnectionSupervisor {
     /// is removed, and its §5 `max_pending_pushes_per_connection` cap admission is
     /// released. An elapsed `receive` poll BEFORE the deadline is still a benign
     /// re-arm.
+    ///
+    /// The deadline is evaluated at OBSERVATION POINTS, not enforced against the
+    /// wall clock: a reply that arrives before expiry is observed is delivered
+    /// normally, even if it arrives after the deadline instant. The deadline
+    /// bounds waiting and slot occupancy; it is not a delivery-freshness
+    /// guarantee. (This is deliberate — a reply is checked for at every
+    /// observation point before the deadline is, so an answer in hand always
+    /// beats an expiry.)
     ///
     /// # Errors
     /// Returns [`ServerError`] when the correlation id cannot be allocated, the
@@ -465,7 +473,10 @@ impl PushReplyAwaiter {
     /// deadline (via
     /// [`push_to_connection_with_deadline`](ConnectionSupervisor::push_to_connection_with_deadline))
     /// and that deadline has passed (terminal: the slot is removed and its §5 cap
-    /// admission released); or [`ServerError::PushReplyDisconnected`] when the
+    /// admission released — but the deadline is evaluated at observation points,
+    /// not against the wall clock: a reply already delivered when this call
+    /// observes the slot wins over expiry, even if it arrived after the deadline
+    /// instant); or [`ServerError::PushReplyDisconnected`] when the
     /// connection process dropped the reply slot (the connection closed — the
     /// prompt worker-death signal). The variants are distinct so callers classify
     /// by type, not message.
