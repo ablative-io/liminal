@@ -254,6 +254,11 @@ impl PendingReplyTable {
         for entry in &mut self.entries {
             if entry.state == EntryState::Pending && entry.deadline <= now {
                 entry.state = EntryState::Tombstone;
+                // Dropping the TimerRef WITHOUT cancel is deliberate, not a
+                // leak: the deadline timer either already fired (that wake is
+                // why we are here) or fires once more as an R6-harmless
+                // spurious wake; the wheel entry is consumed at fire and the
+                // exposure is bounded by the reply-deadline horizon.
                 entry.timer = None;
                 frames.push(reply_timeout_frame(entry.stream_id, entry.conversation_id));
             }

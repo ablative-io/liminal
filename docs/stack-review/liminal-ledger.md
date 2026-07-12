@@ -107,6 +107,15 @@ idempotency); snapshot/compaction story for long conversation logs
 
 ## F. Tech debt / honesty items
 
+- **Signed resource bound — host-held fd duplicate (park-flip, 2026-07-12,
+  domain-owner review N1):** every live connection holds ONE extra fd — the
+  supervisor's `fd_guard` dup that keeps the socket alive until the single
+  record-removal funnel ACKs readiness deregistration (dereg while the fd
+  is live, never after reuse). Bound: +1 fd per live connection, capped by
+  `max_connections` (256 at cap). Same cost-shape as beamr commit 4's
+  signed "one-extra-fd-per-live-connection teardown-dup budget" §6 line —
+  this entry is liminal's mirror of that signature: named bound, deliberate,
+  not a leak.
 - Design checklists under `docs/design/` show `done:false` for shipped work
   — reconcile or delete; they currently mislead (bit me during
   orientation; trust git, not the JSONs).
