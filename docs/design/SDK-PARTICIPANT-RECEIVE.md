@@ -21,6 +21,21 @@ string verified resolving from the registry (anonymous fetch — the
 publish-before-pin law), and only then does this brief dispatch. A brief
 with the placeholder unfilled is half-armed by design and must not launch.
 
+To be read plainly: **this gate is a SEQUENCING gate wearing a dependency
+costume.** The worker builds in this repo on main and nothing here consumes
+the crates.io artifact — the gate's real function is release hygiene (0.2.4
+exists ⟹ this surface belongs to the next line and 0.2.4's changelog stays
+one honest sentence). Nobody should later read "floor" as a build
+constraint and go hunting for the pin.
+
+**Deferred obligation (routing freeze, ruled at tear 2026-07-13):** the
+liminal domain-owner pass on the worker's diff stands as agreed but its
+seat is frozen; the reviewer-of-record's review lands the worker's tree as
+**REVIEWED-NOT-MERGED**, and the merge gate stays two-key — the merge waits
+for the domain-owner pass, whose trigger is that seat's return from the
+routing freeze. Findings relevant to the liminal-uplift design pass are
+FLAGGED in the worker's report, never routed to a frozen seat.
+
 ## Why (one paragraph)
 
 `liminal-sdk` 0.2.3/main can REQUEST but cannot PARTICIPATE: `receive`
@@ -81,16 +96,30 @@ that yields unsolicited conversation messages: blocking-with-quantum
 (`receive(timeout) -> Ok(Some(Delivery)) | Ok(None) | Err(typed)`), where
 `Delivery` carries conversation id, sender participant, payload, and
 delivery sequence. Elapsed quantum = `Ok(None)` = benign re-arm (assertion
-8). The existing request-reply drain remains for compatibility; its docs
-gain one sentence naming it request-scoped so nobody mistakes it for this.
+8). The typed error surface names ONE discriminating axis explicitly:
+**connection-fate vs conversation-fate** — a participant's only real
+decision on error is reconnect-or-leave, and an error enum that doesn't
+distinguish "this connection is dead" from "this conversation is over"
+forces the caller to guess; the worker shapes the variants, the axis is the
+contract. The existing request-reply drain remains for compatibility; its
+docs gain one sentence naming it request-scoped so nobody mistakes it for
+this.
 
 **R2 — Lifecycle events, typed.** Participant join/leave/death arrive as
-typed events on the same receive surface (one ordered stream per
-connection — a participant reads deliveries AND lifecycle in arrival order,
-which is the only way ORDERING (assertion 5) can be stated coherently
-across both). Death distinguishes what the server actually knows: clean
-leave vs connection-down (the FIN vs no-FIN distinction stays server-side;
-the SDK reports the server's verdict, never invents its own).
+typed events on the receive surface. **The ordering relationship between
+lifecycle events and deliveries is a QUESTION the worker answers with
+evidence, not a shape this brief pre-commits** — assertion 5 demands
+ordering be DEFINED, and the definition must come from what the server
+actually guarantees (per-conversation total? per-sender FIFO?
+cross-conversation interleave undefined? lifecycle ordered relative to
+deliveries at ingest, transmit, or not at all?). Assertion 5 carries the
+same honesty valve as assertion 1: if the strong shape (one ordered stream)
+cannot be proven, the documented-weaker answer PASSES by stating its
+limitation typed and loud — a true weaker guarantee beats a false stronger
+one, and briefs must not win arguments against evidence. Death
+distinguishes what the server actually knows: clean leave vs
+connection-down (the FIN vs no-FIN distinction stays server-side; the SDK
+reports the server's verdict, never invents its own).
 
 **R3 — Resume.** `ResumeRequest` machinery exists in the SDK
 (remote/handles.rs:88 `connected()` returns them); this leg completes the
@@ -107,9 +136,11 @@ Accept/Defer/Reject vocabulary exists; live-path wiring is design-landed
 but not code-complete upstream (A1). This leg does NOT wire A1. It does:
 surface whatever the server actually signals today as typed outcomes on
 the participant side, document the current truth (what a slow participant
-experiences NOW), and leave a named seam where A1's wiring lands. No
-pretending — the F-0c R5 reality-recording obligation, honored from the
-inside.
+experiences NOW), and give A1's future wiring a HOME at the type level, not
+just a name — the participant-side outcome enum is documented as A1's
+landing site, citing A1's design doc, so the wiring lands in a socket
+rather than a sentence. No pretending — the F-0c R5 reality-recording
+obligation, honored from the inside.
 
 **R5 — Embedded parity is OUT, stated.** The embedded transport's receive
 remains a stub; this leg is remote/TCP only. The embedded form arrives as a
@@ -121,8 +152,11 @@ demands, plus the silence-attackers this week's law requires: symmetric
 receive of a message sent while the receiver was mid-quantum; lifecycle
 event racing a delivery (order defined, asserted); resume across kill -9
 (READY-after-durable discipline for cursor persistence if the SDK owns
-any); SIGSTOP'd peer (no-FIN — what does the participant observe, and in
-what bound); the eighth-assertion regression pin on every new timeout
+any); SIGSTOP'd peer (no-FIN) — **the observed bound DERIVES from the
+server's named heartbeat/sweep configuration parameters and the test pins
+against those parameters, or it cannot fail** ("eventually" is not a test;
+a bound without a source is an assertion, not an acceptance); the
+eighth-assertion regression pin on every new timeout
 parameter; and the two aion-shape tests from the receive-cancel incident
 ported to the participant surface (slow-handler-under-short-quantum
 completes exactly once).
