@@ -177,11 +177,16 @@ is the design's answer to the scout's central finding.
 4. **Arc-swapped copy-on-write snapshots** (`ArcSwap<ConnectionsSnapshot>`),
    updated ONLY through the §2.6 single-writer protocol. The snapshot is a
    plain immutable structure keyed by pid; a reader does one atomic load of
-   the current `Arc` and walks it. Rebuild events: admission publication,
-   auth, worker registration, readiness registration, **subscribe/
-   unsubscribe (§2.5's lazy-budget resolution)**, and every close/reap route
-   — connection-lifecycle and control-plane rate, never per-delivery, never
-   per-slice.
+   the current `Arc` and walks it. **Global rebuild events — connection
+   lifecycle ONLY:** admission publication, auth, worker registration,
+   readiness registration, and every close/reap route. Subscription
+   transitions do NOT rebuild the global snapshot (Sol r2: subscribe/
+   unsubscribe are processed ON the connection's slice via `service_socket`,
+   `process.rs:120-141` → `apply.rs:349-447`, at request rate with no
+   lifetime churn bound — a global CoW per transition would let one
+   authenticated client force full-population copies at frame rate and
+   monopolize the §2.6 writer authority). They ride the per-connection
+   sub-list slot instead (§2.5(b)).
 
    The field tables rely on one refinement (**the shared-live-atomic
    pattern** — §4.1, §4.3, §6): a snapshot **entry** embeds `Arc`-shared live
@@ -306,12 +311,15 @@ therefore three shapes:
 **(a) The per-connection OBSERVATION BUNDLE.** One
 `Arc<ConnectionObservation>` created **at admission** (in
 `try_reserve_admission`'s success path, before process construction),
-containing the connection's live atomics: the §6 R7 slice counter,
-`subscriptions_active`, `inbox_depth` (§4.3), `pending_pushes`,
+containing the connection's live members: the §6 R7 slice counter,
+`subscriptions_active`, `conversations_active`, `pending_pushes`,
 `pending_replies`/`tombstones`/`armed_timers` (per-connection homes of the
-§4.4 gauges), `saturated_conversations` (§4.5), and an
-**initially-empty budget slot** (`OnceLock<Arc<ConnectionInboxBudget>>`).
-Clones go three ways: one into the connection process state (the slice-path
+§4.4 gauges), the §4.5 per-conversation-worst pair, an
+**initially-empty budget slot** (`OnceLock<Arc<ConnectionInboxBudget>>`),
+and the **per-connection subscription sub-list slot** (§2.5(b) — the home of
+the per-subscription observation objects; the bundle holds the slot, the
+inboxes own the objects). Clones go three ways: one into the connection
+process state (the slice-path
 writer — no map lookup on any hot path), one into the host-side connection
 record (host-side writers: push slots, teardown sweeps), one embedded in the
 snapshot entry (the reader). Every rollback/close route resolves the bundle
@@ -321,32 +329,95 @@ is where close-side decrements and entry removal happen, covering EOF,
 protocol close, error close, force close, reap, external kill, and shutdown
 sweep. **One-write-per-transition tests** are named per gauge in §9.
 
-**(b) The lazy-budget resolution — decided: subscribe joins the rebuild
-set.** Two options were on the table: make the budget eager at admission
-(one `Arc<ConnectionInboxBudget>` allocated per connection whether or not it
-ever subscribes — a resident change to the wire path's current lazy
-contract), or keep the budget lazy and add subscribe/unsubscribe to the
-snapshot-rebuild event set. **This design picks the rebuild-set option**,
-because (i) it leaves the shipped lazy semantics byte-identical
-(`apply.rs:383-395` keeps its `get_or_insert_with`; a connection that never
-subscribes still allocates nothing), (ii) subscribe events are control-plane
-rate, bounded by `max_subscriptions_per_connection` per connection lifetime
-— not per-delivery — so the rebuild cost is priced with the other lifecycle
-rebuilds (§8), and (iii) the rebuild is needed anyway to publish the §4.3
-per-subscription depth handles. On first subscribe, the apply path fills the
-bundle's budget `OnceLock` with the budget `Arc` it just created and the
-subscribe rebuild publishes it; before that, the view renders
-`inbox_bytes_used: null` with `subscriptions_active: 0` — a typed
-never-subscribed fact, not a zero.
+**Constructor migration, explicit (Sol r2 finding 1 — the injection is only
+mechanically viable if the production constructor carries it):** production
+runtime calls `ConnectionSupervisor::with_services_and_auth(services,
+auth_token)` (`runtime.rs:58-61`), which today passes
+`LimitsConfig::default()` to `SupervisorInner::new`
+(`supervisor.rs:111-119`); only `from_config_via` threads `config.limits`
+(`:65-79`). Left as-is, the shared admissions Arc would render the
+CONFIGURED cap from OpsConfig while the CAS enforces the DEFAULT 256 — the
+caps resource and the CAS authority disagreeing on every non-default
+deployment. **The migration:** the production constructor grows to
+`with_services_auth_and_ops(services, auth_token, limits: LimitsConfig,
+ops: OpsWriteHandles)` where `OpsWriteHandles` carries the injected
+admissions `Arc<AtomicU64>`, the observation-bundle factory, and the §2.5(c)
+injected gauges — threaded intact through `SupervisorInner::new` to
+`ConnectionRuntime::new`. Test/non-config constructors explicitly take
+defaults (default limits + a fresh throwaway `OpsWriteHandles`), stated in
+their doc comments as test-only defaults, not silently. **Pin:** a
+non-default `max_connections` test (e.g. 7) proving the rendered caps-view
+limit, the CAS refusal threshold (8th admission refused), and the
+`admissions_current` load are all the SAME injected state — one value, three
+observers.
+
+**(b) The lazy-budget + subscription-publication shape — REVISED (r2
+composition of findings 2+4; supersedes the "subscribe joins the rebuild
+set" decision, which was wrong twice: subscribe/unsubscribe run ON the
+connection slice via `service_socket` — calling them "never on a slice" was
+internally false — and their rate is bounded only by frame rate, not by the
+occupancy cap, so a global CoW per transition was a writer-side DoS).**
+
+- **Per-subscription observation object, created WITH the inbox:**
+  `SubscriptionObservation { depth: Arc<AtomicUsize>, overflowed:
+  Arc<AtomicBool> }`, constructed by `SubscriptionInbox` itself so the
+  sticky overflow flag becomes the SHARED atomic (today it is an embedded
+  non-shareable `AtomicBool`, `subscription.rs:179-187` — the field's owner
+  changes from embedded to `Arc`, its `store(true, Release)` sites
+  unchanged in meaning). Injected through the **existing `InboxInstall`
+  seam** (`subscription.rs:127`, installed at subscribe, `apply.rs:401`) —
+  the seam that already carries budget/cap/notifier, so no new construction
+  path exists.
+- **The aggregate `overflow_flags_total`:** an injected `Arc<AtomicU64>`
+  riding the same `InboxInstall`; the inbox increments it on the **first
+  false→true transition only** — `overflowed.swap(true, AcqRel)` returning
+  `false` gates the increment — so repeated refused admits
+  (`subscription.rs:283-311` stores on every refusal) count once per shed,
+  not once per drop. Semantics now defined, not implied.
+- **Publication — the per-connection sub-list, NOT the global snapshot:**
+  the bundle holds `sub_list: ArcSwap<SubscriptionList>` (≤ 32 entries of
+  `{ subscription_id, channel: Arc<str>, observation }`). Subscription
+  transitions (subscribe, unsubscribe, **automatic shed** —
+  `process.rs:377-398`, which removes a subscription with NO unsubscribe
+  frame and must publish like one) rebuild ONLY this list: a ≤ 32-entry
+  copy, swapped on the bundle's own slot. The global `ConnectionsSnapshot`
+  is untouched; the §2.6 global writer mutex is NOT acquired. **Write
+  authority:** the connection's own slice is the only subscription-
+  transition writer (a connection's slices are serialized by beamr), and
+  the close path clears the slot through the single removal path — a
+  per-connection cold mutex in the bundle serializes those two, contended
+  at most once per connection life.
+- **Honest slice-path pricing:** subscribe/unsubscribe/shed IS slice-path
+  work, and nothing structurally bounds a client's churn RATE (the
+  occupancy cap bounds the map length, `apply.rs:349-377`, not the
+  transition count — a client may subscribe/unsubscribe at frame rate
+  indefinitely). The per-event cost is therefore stated as a bound, not
+  assumed infrequent: one ≤ 32-entry list copy + one `ArcSwap` swap +
+  (first subscribe only) one `OnceLock` fill, all connection-local. A
+  churning client burns ITS OWN slice budget (the §4 slice contract already
+  meters that) and contends with nobody: not the global writer, not other
+  connections, not readers. **Named storm test:** a malicious subscriber
+  churning subscribe/unsubscribe at frame rate while the server accepts and
+  closes other connections — accept/close latency and other connections'
+  publication latency stay bounded (flat), and the churner's own slice
+  counter shows the cost landing where it belongs.
+- **The budget slot:** first subscribe fills the bundle's `OnceLock` with
+  the budget `Arc` it just created (`apply.rs:383-395` keeps its lazy
+  `get_or_insert_with`, byte-identical wire semantics); the slot is
+  lock-free readable from the entry — no rebuild of anything is needed to
+  publish it. Before first subscribe the view renders `inbox_bytes_used:
+  null` with `subscriptions_active: 0` — a typed never-subscribed fact.
 
 **(c) Dependency-neutral writer handles for the lower crate.** Channel
-subscriber gauges and conversation registration gauges move at events owned
-by `crates/liminal` (registry/actor code), which cannot name a server type.
-They receive **plain injected atomics** at construction: the server
-pre-registers per-channel `Arc<AtomicU64>` subscriber gauges (keyed by the
-immutable configured-channel list) and hands them to channel construction;
-the conversation supervisor's registration/deregistration sites take two
-injected `Arc<AtomicU64>`s (actors, participants). No trait, no callback
+subscriber gauges, conversation registration gauges, and the aggregate
+overflow counter (b) move at events owned by `crates/liminal`
+(registry/actor/inbox code), which cannot name a server type. They receive
+**plain injected atomics** at construction: the server pre-registers
+per-channel `Arc<AtomicU64>` subscriber gauges (keyed by the immutable
+configured-channel list) and hands them to channel construction; the
+conversation supervisor's registration/deregistration sites take two
+injected `Arc<AtomicU64>`s (actors, participants); the inbox takes the
+overflow aggregate through `InboxInstall`. No trait, no callback
 into the server, no reverse dependency — an `Arc<AtomicU64>` is
 dependency-neutral by construction. Every deregistration/cleanup path that
 the D4 churn discipline already covers decrements what registration
@@ -369,14 +440,17 @@ re-import §5.2.
 authority.** `ops_snapshot_writer: Mutex<()>` (or `Mutex<SnapshotBuilder>`),
 with these invariants:
 
-- **Every mutation** (publish entry, update posture, fill budget slot, remove
-  entry) acquires the writer mutex, clones the current snapshot, applies a
+- **Every GLOBAL mutation** (publish entry, update posture, remove entry)
+  acquires the writer mutex, clones the current snapshot, applies a
   **keyed idempotent transformation** (by pid; apply-to-missing is a no-op,
   re-apply is harmless), and swaps. No unserialized load-copy-store exists.
+  Subscription sub-lists and the budget slot are NOT global mutations — they
+  ride the per-connection authority and the bundle `OnceLock` (§2.5(b)) and
+  never touch this mutex.
 - **"Cold" is a precise claim, not a vibe:** the writer mutex is acquired
-  ONLY at connection-lifecycle and control-plane events (admission, auth,
-  worker/readiness registration, subscribe/unsubscribe, close/reap) — never
-  on the per-slice service path, never per-delivery, and **never by
+  ONLY at connection-lifecycle events (admission, auth, worker/readiness
+  registration, close/reap) — never on the per-slice service path, never
+  per-delivery, never at subscription transitions (§2.5(b)), and **never by
   readers** (a scrape does one `ArcSwap` load; it cannot contend this mutex
   by construction). A slice-path writer touches it at most once per
   registration event in its connection's LIFE, not per slice.
@@ -426,18 +500,20 @@ Every §11 response carries an envelope; its fields obey the same per-field
 discipline as view fields (they were previously asserted without rows — Sol
 minor, fixed):
 
-| Field | Owner | Update event | Read-prim | Lock | Staleness | Redaction | Idle-cost |
-|---|---|---|---|---|---|---|---|
-| `phase` | OpsState `AtomicU8` (§2.2.2); writer = runtime thread only; transitions Starting→Running (listener bound + inventory sealed) → Draining (shutdown initiated) | the two named transitions | `atomic` | lock-free | bounded-stale by one transition | none | 0 |
-| `scraped_at` | **render-time work, NOT state** — `SystemTime::now()` read while building the response, formatted RFC 3339 UTC. Explicitly outside the §3 primitive table: it is per-request work on the serving thread, not a stored fact. Clock failure ⇒ field is `null`, response still serves. | per response render | — (render work) | none | exact at render | none | 0 (no scrape ⇒ no clock read) |
-| `as_of` (per observer-backed field; v1: unused) | the observer's own replay/refresh timestamp, carried in-response per T3 (§5.4) | observer refresh | rides the field | rides the field | stated by the field itself | none | rides the field |
-| `contract`, `major`, `additive_rev` | **compile-time contract metadata** — `const` in the §11.0 contract module, NOT ServerConfig (it describes the code's contract, not the operator's config; the earlier "immutable config" attribution was wrong and is corrected here) | — (frozen at build) | `config`-class (const deref) | none | exact | none | 0 |
+| Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
+|---|---|---|---|---|---|---|---|---|
+| `phase` | OpsState `AtomicU8` (§2.2.2); writer = runtime thread only; transitions Starting→Running (listener bound + inventory sealed) → Draining (shutdown initiated) | the two named transitions | `atomic` | lock-free | bounded-stale by one transition | 1 | none | 0 |
+| `scraped_at` | **render-time work, NOT state** — `SystemTime::now()` read while building the response, formatted RFC 3339 UTC. Explicitly outside the §3 primitive table: it is per-request work on the serving thread, not a stored fact. Clock failure ⇒ field is `null`, response still serves. | per response render | — (render work) | none | exact at render | 1 per response | none | 0 (no scrape ⇒ no clock read) |
+| `as_of` (per observer-backed field; v1: unused) | the observer's own replay/refresh timestamp, carried in-response per T3 (§5.4) | observer refresh | rides the field | rides the field | stated by the field itself | per observer-backed field (v1: 0) | none | rides the field |
+| `contract`, `major`, `additive_rev` | **compile-time contract metadata** — `const` in the §11.0 contract module, NOT ServerConfig (it describes the code's contract, not the operator's config; the earlier "immutable config" attribution was wrong and is corrected here) | — (frozen at build) | `config`-class (const deref) | none | exact | 1 | none | 0 |
 
 ### 3.2 `OpsReadState` — the structural read boundary
 
 View builders and endpoint handlers receive **`OpsReadState`**, a read-only
-boundary type that exposes ONLY: the `OpsConfig` deref, the atomic loads, the
-`ArcSwap` snapshot load, the readiness snapshot, the metrics renderer, and
+boundary type that exposes ONLY: the `OpsConfig` deref, the atomic loads, a
+**scoped** snapshot accessor — `with_snapshot(|s| …)`, so a snapshot `Arc`
+cannot escape a view build (the §9 generation invariant is structural, not
+convention) — the readiness snapshot, the metrics renderer, and
 the sealed inventory's `Weak` upgrades. It holds **no** `ConnectionRuntime`,
 no supervisor, no process state, no actor/channel/conversation handles, no
 store — a view builder **cannot** reach a hot mutex because the types it can
@@ -471,7 +547,7 @@ structural read guard never taken by a hot path); **none** (immutable deref).
 | Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
 |---|---|---|---|---|---|---|---|---|
 | `active` | `liminal_connections_active` gauge | accept/close | `metrics` | read-lock | bounded-stale | 1 | none | 0 |
-| `admissions_current` | **the CAS'd CURRENT admitted+reserved count.** Writer path defined (Sol finding — the existing `admissions` AtomicU64 is embedded non-shareably in `ConnectionRuntime`, `supervisor.rs:687-692`): OpsState owns an `Arc<AtomicU64>` and `ConnectionRuntime::new` takes it injected at construction as ITS admission counter — `try_reserve_admission` (`supervisor.rs:741-765`) CASes the shared atomic directly. One atomic, two names, no mirror, no new write. Decrements at teardown/rollback; NOT a monotonic total. | admission CAS / teardown decrement (existing writes on the shared atomic) | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
+| `admissions_current` | **the CAS'd CURRENT admitted+reserved count.** Writer path defined (Sol finding — the existing `admissions` AtomicU64 is embedded non-shareably in `ConnectionRuntime`, `supervisor.rs:687-692`): OpsState owns an `Arc<AtomicU64>` and `ConnectionRuntime::new` takes it injected at construction as ITS admission counter — `try_reserve_admission` (`supervisor.rs:741-765`) CASes the shared atomic directly. One atomic, two names, no mirror, no new write. Threaded via the §2.5(a) constructor migration WITH `config.limits` (the production constructor today defaults limits, `supervisor.rs:111-119` — carry both or the caps view and the CAS disagree); pinned by the §2.5(a) non-default-cap test. Decrements at teardown/rollback; NOT a monotonic total. | admission CAS / teardown decrement (existing writes on the shared atomic) | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
 | `admissions_started_total` | NEW monotonic OpsState counter, incremented once at admission-success (a new write at a connection-lifecycle event, not a promotion of the CAS count) | admission success | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
 | `reserved_in_flight` | derived `admissions_current.saturating_sub(active)`: current admitted+reserved minus connections that reached a live record — the reserved-before-record window the scout flagged. The two terms are **independently sampled** (§2.4 disclaims cross-field atomicity): a cross-event sample can transiently exceed truth or hit zero via saturation — **`saturating_sub`, never unsigned wrap**, and the caveat rides the field's description in the contract. | — | `atomic`+`metrics` | **read-lock** (the `active` term rides the metrics registry snapshot) | bounded-stale, cross-sampled | 1 | none | 0 |
 | `peer` (per conn) | `ConnectionsSnapshot` arcswap | accept/auth/close | `arcswap` | lock-free | last conn event | ≤ `max_connections` (256) | peer addr shown; **fd redacted** | 0 |
@@ -506,9 +582,10 @@ cost, not smuggled in here. **Absent-by-profile** in worker-front-door.
 |---|---|---|---|---|---|---|---|---|
 | `inbox_bytes_used` (per conn) | the EXISTING `ConnectionInboxBudget.used` AtomicUsize (`subscription.rs:47-118`), `Arc`-shared into the snapshot entry (§2.2 pattern) — **not mirrored; NO new write exists.** One-line code change implied: promote the `cfg(test)` `used()` accessor to a host-reachable handle captured at budget construction. | admit/drain (existing writes, unchanged) | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
 | `inbox_bytes_cap` | immutable `max_connection_inbox_bytes` (4 MiB) | — | `config` | none | exact | 1 | none | 0 |
-| `overflow_flags_total` | new atomic counter, incremented when a subscription sets its sticky `overflowed` (`subscription.rs:349-396`) | overflow set | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `subscriptions_active` (per conn) | per-connection AtomicU64 in the §2.5 observation bundle, embedded in the snapshot entry (the keyed read path — a bare "OpsState atomic" has no per-connection key; corrected per Sol) | subscribe/unsubscribe | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
-| `depth` (per subscription) | **NEW event-maintained `AtomicUsize` owned by `SubscriptionInbox`**, written beside the queue ops that already hold the inbox mutex: `fetch_add(1)` on successful admit (`subscription.rs:277-330`), `fetch_sub(1)` on pop/drain, reset on close/teardown, decremented by rollback paths that un-admit. `Arc`-shared into the snapshot entry's per-subscription sub-list, published by the subscribe rebuild (§2.5(b)). **Never reads the queue mutex** — the atomic rides next to it, it does not take it. | admit/pop/drain/close/rollback | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 × 32 = 8,192 | none | 0 |
+| `overflow_flags_total` | injected `Arc<AtomicU64>` riding `InboxInstall` (§2.5(b)/(c)); incremented ONLY on the first false→true overflow transition — `overflowed.swap(true, AcqRel) == false` gates it, so the repeated `store(true)` refusal sites (`subscription.rs:283-311`) count once per shed, not once per dropped frame. Semantics: counts SHEDS, not refused admits. | first overflow per subscription | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
+| `subscriptions_active` (per conn) | per-connection AtomicU64 in the §2.5 observation bundle, embedded in the snapshot entry (the keyed read path — a bare "OpsState atomic" has no per-connection key; corrected per Sol) | subscribe/unsubscribe/shed | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
+| `depth` (per subscription) | the `SubscriptionObservation.depth` `Arc<AtomicUsize>` created WITH the inbox (§2.5(b)). **Write placement is mandated, not optional — INSIDE the inbox lock** (outside-the-lock is racy: close can drain between a queue op and a delayed depth update, stranding nonzero depth on a closed inbox): after successful push, increment BEFORE unlock (`subscription.rs:277-326`); after successful pop, decrement BEFORE unlock; on close, store zero (or subtract the drained count) WHILE HOLDING the lock (`:354-385`); a refused admit writes nothing. Published via the per-connection sub-list (§2.5(b)). Readers never take the mutex. | admit/pop/drain/close | `arcswap` (sub-list-embedded atomic) | lock-free read; **write is inside the inbox hot mutex** | bounded-stale | ≤ 256 × 32 = 8,192 | none | 0 |
+| `overflowed` (per subscription) | the `SubscriptionObservation.overflowed` `Arc<AtomicBool>` — the inbox's sticky flag itself, its owner changed from embedded to `Arc` (`subscription.rs:179-187`; set sites unchanged). Sticky-true survives until the shed's unsubscribe publication removes the sub-list entry, so a scrape between overflow and shed sees `overflowed: true` on a still-listed subscription — the honest window. **Automatic shed ordering:** the shed path (`process.rs:377-398`) removes the subscription with no Unsubscribe frame; it publishes the sub-list removal exactly as an explicit unsubscribe does — no path removes an inbox without publishing. | overflow set (sticky); entry removed at shed/unsubscribe publication | `arcswap` (sub-list-embedded atomic) | lock-free | bounded-stale | ≤ 8,192 | none | 0 |
 
 **Depth is a settled-seam REQUIREMENT, not an option** (one-pager §(iii):
 "inbox budget occupancy, overflow flags, **depth gauges** (event-maintained
@@ -516,25 +593,33 @@ host atomics)"). An earlier revision deferred it; Ruling A reversed that:
 implement the settled seam, do not amend it. The shape chosen is
 **per-subscription** (not per-connection aggregate) because the governing cap
 — `max_subscription_inbox_depth` = 256 — is per-subscription: an aggregate
-cannot be compared against the cap it exists to observe. **Priced honestly:**
-the depth writes are **per-delivery active-work** — one `Relaxed` atomic
-add/sub per admit and per pop, zero while parked — grouped with the R7
-rule-2 items in §8 and signed in the same pair sitting. **Named pins:**
-(depth-t1) one-write-per-transition — admit/pop/close/rollback each move the
-gauge exactly once, balanced to zero at teardown; (depth-t2) cost pin — the
-depth write is present on the admit/pop paths and absent from the parked
-path (scrape moves no parked depth gauge, the §6-class sibling).
+cannot be compared against the cap it exists to observe.
 
-**Never** the inbox queue lock: `has_pending`/`len` share the same mutex the
-admit/pop delivery hot paths take (`subscription.rs:350-395`, §5) — the depth
-atomic exists precisely so no reader ever wants that mutex.
+**Re-priced honestly (Sol r2 — "one Relaxed write beside the lock" was an
+under-claim):** because the write is mandated INSIDE the lock, the cost is
+**one atomic RMW added to the publisher/delivery critical section while the
+inbox hot mutex is held**, plus reader-side cache-line traffic that can
+contend with a lock-holding writer (a scrape loading `depth` invalidates the
+line the writer is about to touch). Zero while parked, but the critical-
+section widening is the number the pair signs — stated as such in §8, not
+hidden inside "beside". **Named pins:** (depth-t1) concurrent admit/pop/close
+tests asserting `depth == queue.len()` at every lock-protected checkpoint,
+reaching zero at teardown without underflow; (depth-t2) cost pin — the depth
+write is present on the admit/pop paths and absent from the parked path
+(scrape moves no parked depth gauge, the §6-class sibling).
 
-Write-rate honesty for this view's NEW atomics: `subscriptions_active` moves
-at subscribe/unsubscribe rate and `overflow_flags_total` only when an
-overflow trips — control-plane/pressure events, not per-delivery.
-`depth` moves **per delivery** (active-work, priced above).
-`inbox_bytes_used` moves per delivery, but that write **already exists**
-(the budget's own accounting); this design adds no write to it.
+**Never** the inbox queue lock for READS: `has_pending`/`len` share the mutex
+the admit/pop delivery hot paths take (`subscription.rs:350-395`, §5) — the
+depth atomic exists precisely so no reader ever wants that mutex; the WRITE
+lives inside it by correctness necessity, and is priced accordingly.
+
+Write-rate honesty for this view's NEW atomics: `subscriptions_active` and
+the sub-list copies move at subscription-transition rate (slice-path,
+rate-unbounded — priced in §2.5(b) with the storm test);
+`overflow_flags_total` moves once per shed. `depth` moves **per delivery**
+(inside-lock RMW, priced above). `inbox_bytes_used` moves per delivery, but
+that write **already exists** (the budget's own accounting); this design
+adds no write to it.
 
 ### 4.4 conversations — [SEAM-DEP: F-0c §R1 boundary, §4.7 below]
 
@@ -577,7 +662,7 @@ atomic the relevant view already maintains:
 | `max_conversations_per_connection` | 32 | conversations.`conversations_active` (per-connection, bundle — §4.4) | `arcswap` |
 | `max_pending_pushes_per_connection` | 32 | `pending_pushes` (per-connection, bundle — full row below) | `arcswap` |
 | `max_pending_conversation_replies_per_connection` | 32 | conversations.`pending_replies` (per-connection, bundle — §4.4) | `arcswap` |
-| `max_pending_replies_per_conversation` | 8 | `saturated_conversations` (per-connection, bundle — full row below; exact per-conversation occupancy is process-owned and not exposed, the saturation gauge is the honest substitute and says so in the contract) | `arcswap` |
+| `max_pending_replies_per_conversation` | 8 | `max_pending_plus_tombstones_per_conversation` (per-connection WORST-conversation value, bundle — full row below). **Scope-matching, per Sol r2:** the earlier `saturated_conversations` pairing was semantically invalid — a count of saturated conversations (e.g. 9) compared against limit 8 reads as false over-cap pressure; the caps row needs a value in the CAP'S unit (pending+tombstones of the worst conversation), which this is. | `arcswap` |
 | `max_connection_inbox_bytes` | 4 MiB | subscriptions.`inbox_bytes_used` (per-connection, shared budget atomic — §4.3) | `arcswap` |
 | `max_subscription_inbox_depth` | 256 | subscriptions.`depth` (per-subscription — §4.3) + overflow counter | `arcswap` + `atomic` |
 
@@ -594,18 +679,23 @@ in the caps document as `{ cap, limit, worst: { id, occupancy }, over_80pct:
 n }`-shaped summaries plus per-connection detail in the connections view —
 sketch-level, frozen by the contract module.
 
-**The two new bundle gauges, full rows:**
+**The new bundle gauges, full rows:**
 
 | Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
 |---|---|---|---|---|---|---|---|---|
 | `pending_pushes` (per conn) | bundle AtomicU64. Transitions, enumerated from `supervisor.rs:1002-1091` + the merged deadline surface: +1 `register_push`; −1 reply-resolved; −1 timeout/`Expired` disposition (`supervisor.rs:657` on main); −k close-sweep (all of a pid's slots dropped at close — decrement per removed slot, balanced). Host-side writers resolve the bundle through the current snapshot (lock-free `ArcSwap` load) or the record's bundle clone — never a new map. | push register/resolve/expire/close-sweep | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
-| `saturated_conversations` (per conn) | bundle AtomicU64 counting conversations currently AT `max_pending_replies_per_conversation`. Transitions, enumerated from `pending_reply.rs:139-308`: +1 when a conversation's pending+tombstone count reaches cap at admit/tombstone-insert; −1 when it drops below at complete/cancel/expire/tombstone-reap-sweep. Written by the table's own transition sites (the process owns the table and the bundle clone). | admit/complete/cancel/expire/reap crossing the cap boundary | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
+| `max_pending_plus_tombstones_per_conversation` (per conn, worst) | TWO bundle atomics: worst VALUE (AtomicU64) + worst CONVERSATION ID (AtomicU64). Recomputed by the process-owned table — a bounded scan (≤ `max_conversations_per_connection` = 32 conversations) — after each **cardinality-changing** transition, then both stored. **The cardinality-changing set, corrected per Sol from `pending_reply.rs:139-308`:** admit (`:139-198`), cancel (`:200-210`), reply removal (`:212-240`), conversation sweep (`:284-299`), cancel-all (`:301-308`). **Expiry is NOT in the set** — it converts Pending→Tombstone (`:243-267`) without changing pending+tombstone cardinality, so expire neither raises nor lowers this value. **Redaction considered:** the conversation id is an identifier, not content — exposed by default (it names WHERE the pressure is, which is the row's operational point) and listed in §7.3's identifier class; the cross-sample caveat (value and id are two atomics, §2.4) rides the field. | admit/cancel/reply-removal/sweep/cancel-all (cardinality changes only) | `arcswap` (entry-embedded pair) | lock-free | bounded-stale; value/id cross-sampled | ≤ 256 × 2 | id = identifier class (§7.3) | 0 |
+| `saturated_conversations` (per conn) | bundle AtomicU64 — **a separately-named PRESSURE count, deliberately NOT in the caps table** (it answers "how many conversations are pinned at cap", not "how close is the worst one"). Maintained on the same corrected cardinality-changing set as the row above: +1 when a conversation's pending+tombstones reaches cap via admit; −1 when a cardinality-reducing transition (cancel / reply removal / sweep / cancel-all) drops it below; **expiry does neither**. | the corrected cardinality-changing set | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
 
-Both are push/request-rate **active-work writes**, in the §8 rule-2 signed
-set; both get one-write-per-transition + balanced-teardown tests (§9), the
-close-sweep balance explicitly (a connection dying with k outstanding pushes
-and s saturated conversations must zero both gauges through the single
-removal path).
+All are push/request-rate **active-work writes** (the worst-pair recompute
+adds a ≤ 32-entry scan at request rate — bounded, stated, in the signed
+set); each gets boundary-crossing tests (§9) for the corrected transition
+set explicitly: **admit, pending-reply removal, late-reply tombstone reap,
+cancel, conversation close, connection close** — plus the expiry
+NON-transition (an expiry storm moves neither gauge, the fail-first pin for
+the corrected semantics). Close-sweep balance explicit: a connection dying
+with k outstanding pushes and s saturated conversations zeroes all gauges
+through the single removal path.
 
 Plus **refusal counters by typed-refusal class** — one atomic per class,
 incremented where the refusal is emitted:
@@ -925,15 +1015,21 @@ steady cost this design introduces is:
   test named (§6 regression), certifying-pair sign-off on the number required
   before merge.
 - **the active-work write set — priced with R7, enumerated COMPLETELY, not
-  implied-infrequent.** Every NEW `Relaxed` atomic write this design adds on
-  or adjacent to hot paths, one write per transition each:
-  (i) per-delivery: subscription `depth` add/sub (§4.3 — admit/pop);
+  implied-infrequent.** Every NEW cost this design adds on or adjacent to
+  hot paths, each with its honest shape:
+  (i) per-delivery: subscription `depth` — **one atomic RMW INSIDE the inbox
+  hot mutex** (§4.3's mandated ordering; a critical-section widening plus
+  reader cache-line contention with a lock-holding writer, NOT a free write
+  beside the lock);
   (ii) request-rate: per-connection `pending_replies`, `tombstones`,
-  `armed_timers`, `conversations_active`, `saturated_conversations` (§4.4,
-  §4.5);
+  `armed_timers`, `conversations_active`, `saturated_conversations`, **plus
+  the worst-pair recompute's ≤ 32-entry table scan** (§4.4, §4.5);
   (iii) push-rate: `pending_pushes` register/resolve/expire (§4.5);
-  (iv) refusal counters (only move on refusals).
-  Zero at idle, every one. Bound = one atomic write per transition; pinned
+  (iv) subscription-transition rate (slice-path, rate-UNBOUNDED by
+  occupancy caps): the ≤ 32-entry sub-list copy + swap (§2.5(b)),
+  connection-local, pinned by the §2.5(b) storm test;
+  (v) refusal counters (only move on refusals).
+  Zero at idle, every one. Bounds as stated per item; pinned
   by the §9 one-write-per-transition + balanced-teardown tests and the
   §6-class scrape-moves-nothing-parked regression; signed at the pair's desk
   **in one sitting with the R7 number** — one sign-off covering the complete
@@ -943,14 +1039,17 @@ steady cost this design introduces is:
   `inbox_bytes_used` is the budget's EXISTING per-delivery atomic,
   `Arc`-shared into the snapshot (§4.3, no new write); `admissions_current`
   is the existing CAS atomic injected at construction (§4.1, no new write).
-- the genuinely infrequent writers: per-channel subscriber atomics
-  (subscribe/unsubscribe), `admissions_started_total` and conversation
-  registration gauges (connection/conversation lifecycle), overflow counter
-  (pressure events), and **snapshot rebuilds under the §2.6 writer mutex** —
-  now including subscribe/unsubscribe per §2.5(b), still
-  connection-lifecycle/control-plane rate, each rebuild one CoW allocation
-  ∝ live connections, never per-delivery, never per-slice. Zero-idle-cost by
-  construction and off the per-request path. No background refresh thread
+- the genuinely infrequent writers: `admissions_started_total` and
+  conversation registration gauges (connection/conversation lifecycle),
+  overflow counter (once per shed), and **global snapshot rebuilds under the
+  §2.6 writer mutex** — connection-lifecycle rate ONLY (subscription
+  transitions ride the per-connection sub-list, item (iv) above, NOT the
+  global rebuild — the r2 correction), each rebuild one CoW allocation
+  ∝ live connections, never per-delivery, never per-slice. (Per-channel
+  subscriber atomics move at subscription-transition rate and belong to
+  item (iv)'s rate class — one `Relaxed` write per transition, listed there
+  in spirit, named here so nothing hides.) Zero-idle-cost by
+  construction. No background refresh thread
   exists (§2.4); if one were ever added it would be a rule-2 item from birth.
 
 **The sibling-listener fallback is a rule-2 item from birth (§1).** If the pair
@@ -988,33 +1087,59 @@ pull-only (a scrape arrives or it doesn't). The non-zero costs are all
 active-work: the §6 R7 increment fires **only on a serviced slice** — of
 which a parked connection runs none — and the §4.4 request-rate gauge writes
 fire only on request-lifecycle events, of which an idle server has none
-(Q4(c)). **The resident-memory ceiling, as a formula** (Sol finding — the
-earlier "handful of atomics" hand-wave undercounted; and configured channels
-are an unbounded `Vec` in `ServerConfig` (`config/types.rs:17-18`), NOT
-governed by any of the eight limits, so a ceiling claim was false without a
-config cap — **this design adds one**: `max_configured_channels = 1024`,
-validated at config load, refuse-at-load beyond, a NEW named cap):
+(Q4(c)). **The resident-memory ceiling, as a formula.** Two rounds of
+corrections are folded here: configured channels are an unbounded `Vec` in
+`ServerConfig` (`config/types.rs:17-18`), NOT governed by any of the eight
+limits — **this design adds `max_configured_channels = 1024`**, validated at
+config load, refuse-at-load beyond. And a COUNT cap does not bound BYTES
+(Sol r2): `ChannelDef.name` is an unconstrained `String` (validation checks
+only empty/duplicate, `config/validation.rs:138-158`), so **byte ceilings
+are added as validated config rules**: channel name ≤ 64 B; `[console]
+auth_token` ≤ 128 B; total rendered redacted-config text ≤ 64 KiB (checked
+once at load against the actual redacted rendering — the config either fits
+its ceiling or the server refuses to start). **Channel-name representation,
+decided:** interned once in OpsConfig as `Arc<str>` and SHARED — sub-list
+records and snapshot entries clone the `Arc`, never the string, so name
+bytes appear exactly once in the formula regardless of generations.
 
 ```
-R = |OpsConfig|                                   (redacted config clone; ∝ config size,
-                                                   bounded by config validation + channel cap)
-  + N_ch × (8 B gauge + pre-registered handle)     N_ch ≤ max_configured_channels (1024)
-  + N_conn × |bundle|                              N_conn ≤ max_connections (256);
-      |bundle| ≈ 9 atomics × 8 B + Arc overhead    ≈ 100–150 B  → ≤ ~40 KiB
-  + N_sub × (8 B depth atomic + Arc)               N_sub ≤ 256 × 32 = 8,192 → ≤ ~130 KiB
-  + G × |snapshot|                                 |snapshot| = N_conn × |entry|;
-      |entry| = peer + posture strings (each bounded: peer addr ≤ 64 B,
-      posture strings ≤ 256 B — a NAMED bound, enforced by truncation at
-      publication) + embedded Arcs → ≤ ~512 B → snapshot ≤ ~128 KiB
-      G = live generations ≤ 3 (current + one in-flight writer clone + one
-      reader-held old generation — the serial worker holds at most one)
+R = |OpsConfig|                                    ≤ 64 KiB (validated byte ceiling above)
+  + N_ch × (8 B gauge + handle + Arc<str> hdr)     N_ch ≤ 1,024 → ≤ ~96 KiB (name bytes in |OpsConfig|)
+  + N_conn × |bundle|                              N_conn ≤ 256
+      |bundle| ≈ 11 atomics × 8 B + sub-list slot + budget slot
+                + per-conn mutex + Arc overhead    ≈ ~200 B → ≤ ~50 KiB
+  + N_sub × |observation object|                   N_sub ≤ 8,192; one-time (owned by inboxes,
+      2 Arcs (depth + overflowed) ≈ 64 B           not per-generation) → ≤ ~512 KiB
+  + N_conn × G_sub × |sub-list|                    per-connection sub-list generations
+      |sub-list| = ≤32 × |record|;                 G_sub ≤ 2 (current + one reader-held);
+      |record| = id + Arc<str> clone + 2 Arc ptrs
+                 + vec overhead ≈ 64 B             → ≤32 × 64 B × 2 × 256 ≈ ≤ ~1 MiB
+  + G × |global snapshot|                          |entry| = peer (≤64 B) + posture strings
+      (≤256 B, truncated at publication) + bundle Arc + sub-list slot ptr
+      ≈ ≤ 512 B → G × ≤ 128 KiB
   + InventoryHandles (3 Weak) + phase + flat counters (constant, < 1 KiB)
 ```
 
-Worst-case resident ≈ low single-digit MiB at full config and full caps;
-**every term is parameterized by a validated cap** — nothing scales with
+**The generation multiplier G, stated as what the mechanism guarantees, not
+as a global constant (Sol r2 minor):** `G = 2 +
+max_concurrent_snapshot_readers`. The invariant that keeps readers at 1 in
+v1 is made structural: `OpsReadState` exposes snapshot access ONLY as a
+scoped `with_snapshot(|s| …)` — the `Arc` cannot escape a view build — and
+both v1 adapters are explicitly serialized (the single health worker; the
+stdio adapter is single-request by construction). So v1 has G ≤ 3 as a
+CONSEQUENCE, not an assumption; any future host with concurrent readers
+re-derives G from its own reader cap, which the formula is parameterized
+for. **Pin:** a generation-retention test under writer churn (writer swaps
+in a loop while a scoped reader renders; assert old generations are freed —
+live-generation count never exceeds the formula's G).
+
+Worst-case resident ≈ ~2 MiB at full config and full caps; **every term is
+parameterized by a validated cap or byte ceiling** — nothing scales with
 traffic or deployment config outside a named ceiling. Transient per-scrape:
 one response buffer ≤ the §11.6 response budget + the inventory Vec copy.
+**Pin:** an allocation test at maximal validated configuration (256 conns,
+8,192 subs, 1,024 max-length channel names) asserting measured resident
+bytes within the formula's ceiling.
 
 **Q2 — What is the aggregate ceiling across all views?** Bounded by the eight
 `LimitsConfig` caps **plus the new `max_configured_channels` config cap**
@@ -1141,7 +1266,25 @@ OpsState/the reused primitives:
   FIRST** (§11.4).
 - `liminal://ops/connections` — `{ phase, active, admissions_current, admissions_started_total, reserved_in_flight, connections: [{ id, peer, worker_posture, readiness_posture, slice_serviced, subscriptions_active, conversations_active, pending_replies, pending_pushes }] }`
 - `liminal://ops/channels` — `{ phase, channels: [{ name, subscriber_count }], publishes_total, deliveries_total }`
-- `liminal://ops/subscriptions` — `{ phase, per_connection: [{ id, subscriptions_active, inbox_bytes_used, inbox_bytes_cap, subscriptions: [{ channel, depth, overflowed }] }], overflow_flags_total }`
+- `liminal://ops/subscriptions{?cursor,limit}` — **a standard MCP resource
+  TEMPLATE, not a fixed URI** (Sol r2: 8,192 possible entries against a
+  1,024-item budget means pagination must be a contract operation, not a
+  dangling `next` field; and deferring it past the v1 freeze would make
+  completing it a major-version act under §11.4). Shape: `{ phase,
+  per_connection: [{ id, subscriptions_active, inbox_bytes_used,
+  inbox_bytes_cap, subscriptions: [{ subscription_id, channel, depth,
+  overflowed }] }], overflow_flags_total, page: { truncated, total, next }
+  }`. **Cursor contract:** opaque base64 of the last-seen `(connection_id,
+  subscription_id)` pair; **stable global ordering** = connection id
+  ascending, then subscription id ascending; `limit` clamped to the item
+  budget. **Stale-cursor semantics:** a cursor whose connection/subscription
+  has since closed resumes at the next id in order (well-defined under the
+  stable ordering — no error); a syntactically invalid cursor returns a
+  normal typed result `{ cursor_invalid: true, items: [] }` (a data-level
+  outcome, not a refusal, per §11.3). Transport-neutral: the same
+  `OpsRequest` args over stdio and HTTP. **Pin:** full traversal of a
+  populated 8,192-entry view — no duplicates, no omissions of entries that
+  live through the whole traversal, body/item budgets honored on EVERY page.
 - `liminal://ops/conversations` — `{ phase, actors_registered, participants_registered, pending_replies_total, tombstones_total, armed_timers_total }`
 - `liminal://ops/caps` — `{ phase, caps: [{ name, limit, worst: { id, occupancy }, over_80pct }], refusals: { unauthenticated, read_only, not_mounted, requires_exclusive_store, auth_failures, cap_exceeded: {..}, backpressure: { reject, defer }, push_reply_expired } }` — **all four taxonomy counters present; `requires_exclusive_store` serves as `0` while the class is reserved (§11.3)** — the schema does not shrink because a counter is quiet.
 - `liminal://ops/inventory` — `{ phase, profile, services: [{ service, mode, instance, configured, actual, thread_names, fd_classes }], schedulers: {..} }`
@@ -1309,12 +1452,39 @@ requires `Authorization: Bearer <token>`. The health parser today reads only
 the request line (`endpoint.rs:173-215`); the adapter extends it to parse
 headers **for POST /mcp only**, with hard bounds: request head ≤ 8 KiB, body
 ≤ 64 KiB (both NUMERIC, both enforced before any allocation proportional to
-claimed size; over-bound → protocol-level 413/400, not a refusal), within
-the existing 2 s read timeout. Token comparison is `constant_time_eq` — the
-same discipline H4 already uses (`apply.rs:258-317`). Missing/malformed/
-wrong bearer → `refused:unauthenticated` `OpsRefusal` (well-formed HTTP,
-wrong credential — a contract answer). Token bytes live only in the
-adapter's auth check, never in OpsState (§7.3).
+claimed size; over-bound → protocol-level 413/400, not a refusal). Token
+comparison is `constant_time_eq` — the same discipline H4 already uses
+(`apply.rs:258-317`). Missing/malformed/wrong bearer →
+`refused:unauthenticated` `OpsRefusal` (well-formed HTTP, wrong credential —
+a contract answer). Token bytes live only in the adapter's auth check, never
+in OpsState (§7.3).
+
+**Socket deadlines — absolute, not per-read (Sol r2 finding: the earlier
+"at most the existing 2 s read timeout" claim was false for a multi-read
+request).** Today's handler does ONE bounded read under the 2 s socket
+timeout (`endpoint.rs:136-162`); reading an 8 KiB head + 64 KiB body takes
+REPEATED reads, and a per-read socket timeout lets a trickling peer feed one
+byte per ~2 s window and occupy the serial worker indefinitely. The response
+path is worse: `write_all`/`flush` (`endpoint.rs:162-170`) has NO deadline
+at all, so a client that sends a valid request and never reads the ≤ 256 KiB
+response blocks the worker unboundedly. Mandated:
+
+- **One monotonic whole-REQUEST deadline: 2 s** from accept to
+  fully-parsed request. Every blocking read sets its socket timeout to
+  `remaining = deadline − now` (clamped > 0); `remaining ≤ 0` → close, 408.
+  Covers header termination (head not CRLF-terminated within budget →
+  400/431), `Content-Length` validation (required for `POST /mcp`, must be
+  ≤ 64 KiB, mismatch/short body → 400 at deadline), partial reads, and
+  early EOF (→ close, no response owed).
+- **One monotonic whole-RESPONSE deadline: 2 s** from render-complete to
+  last byte written. The response path becomes a bounded-write loop
+  (nonblocking or per-write `remaining` timeout — implementation's pick,
+  same bound): `remaining ≤ 0` with bytes unsent → drop the connection.
+  A response is never retried and never buffered past its deadline.
+- Worst-case worker occupancy per request is therefore **request deadline +
+  render budget + response deadline ≈ 4.05 s, a hard ceiling** — stated as
+  the number h1–h4 pin against, and honestly ~2× today's single-read worst
+  case, which is why the pins below are gates, not decoration.
 
 ### 11.6 Numeric budgets and the head-of-line pins
 
@@ -1331,20 +1501,38 @@ contract module's render path (transport-neutral), pinned:
 | Request head / body | 8 KiB / 64 KiB (§11.5) | pre-allocation bound |
 
 **Deterministic truncation/pagination rule:** lists exceeding the item
-budget truncate at a stable sort order (by id) with `{ truncated: true,
-total: N, next: <cursor> }` — the same rule on both transports; a truncated
-response is well-formed and says so, never silently partial.
+budget truncate at the stable sort order (connection id, then subscription
+id) with `{ truncated: true, total: N, next: <cursor> }`, and the cursor is
+REDEEMABLE — the `{?cursor,limit}` resource template (§11.1) is the contract
+operation that accepts it; truncation without a follow-up operation is not
+pagination. Same rule on both transports; a truncated response is
+well-formed and says so, never silently partial. **Byte-budget enforcement
+happens AT serialization, not by item count alone (Sol r2):** the renderer
+tracks serialized bytes and closes the page at whichever budget trips first
+(items or 256 KiB). **Oversized-single-item policy:** an item that alone
+exceeds the remaining page (pathological strings should be impossible under
+the §9 byte ceilings, but the policy exists anyway) serializes as a
+truncation stub `{ id, item_truncated: true }` — the page stays valid JSON
+and under budget; a partial item is never emitted.
 
 **Head-of-line pins (on `/health` and `/ready`, the routes that must not
 starve):** (h1) with a maximal-config scrape in flight, a following
 `/health` request answers within (scrape budget + ε) — pinned against the
-50 ms number; (h2) a slow-loris client on `POST /mcp` costs at most the
-existing 2 s read timeout — the SAME pre-existing worst case the serial
-worker already has for `/health` today (`endpoint.rs:146`); the pin asserts
-the MCP route does not increase the per-request ceiling (body bound + same
-timeout). Honest statement: the serial worker's 2 s worst case is
-pre-existing transport exposure, inherited not added; what this design must
-prove (h2) is that it made it no worse.
+50 ms number; (h2) a stalled-then-dead client on `POST /mcp` costs at most
+the whole-request deadline; (h3) **byte-trickle:** a client feeding one byte
+per read-timeout window is cut at the 2 s absolute request deadline — the
+pin proves the deadline is absolute, not per-read; (h4) **never-reads-
+response:** a valid MCP client that stops reading its ≤ 256 KiB response is
+cut at the 2 s response deadline. Under all four, `/health` and `/ready`
+answer within the stated ceiling: **worst-case delay ≤ one in-flight
+request's remaining hard ceiling (≈ 4.05 s) + own service time** — the
+ceiling the pins enforce and the pair signs. **Stated plainly: if the single
+serial worker cannot meet that `/health`/`/ready` ceiling under h1–h4, the
+sibling listener (already rule-2-specified in §8) is TAKEN — that is the
+decision rule, not a revisit.** Honest accounting: today's worst case was
+~2 s (single read, no write deadline but responses were tiny); the MCP
+route's larger I/O makes the deadline machinery load-bearing where it used
+to be latent.
 
 [SEAM-DEP §(iii)]: synced to the settled view set, four-class taxonomy, and
 §Versioning @ 7b768eb; if the contract moves again, §11.0–§11.6 are the
@@ -1383,8 +1571,11 @@ Stated so the pair sees them, not buried:
   open item here.
 - **The named numbers are proposals until signed.** This revision sets
   concrete numbers where the review demanded them — `max_configured_channels`
-  = 1,024 (§9), response ≤ 256 KiB / items ≤ 1,024 / scrape ≤ 50 ms / head
-  8 KiB / body 64 KiB (§11.6), snapshot entry-string bounds (§9 Q1) — each
+  = 1,024 (§9); byte ceilings: channel name ≤ 64 B, console token ≤ 128 B,
+  rendered config ≤ 64 KiB (§9); response ≤ 256 KiB / items ≤ 1,024 /
+  scrape ≤ 50 ms / head 8 KiB / body 64 KiB (§11.6); request/response socket
+  deadlines 2 s + 2 s with the ≈ 4.05 s worker-occupancy ceiling (§11.5);
+  snapshot entry-string bounds (§9 Q1) — each
   with its enforcement rule and pin. The NUMBERS are the certifying pair's to
   confirm or move; the STRUCTURE (every budget numeric, enforced, pinned)
   is this design's commitment either way.
@@ -1419,9 +1610,11 @@ same fence:
   their own seats, same shape expected, **and per T6 they inherit the
   §Versioning discipline verbatim, so four seams don't invent four version
   disciplines** (§11.4).
-- **Per-channel publish/delivery split, exact subscription depth, deeper
-  haematite internals** — named deferrals (§4.2, §4.3, §5.4), each a future
-  instrument with its own signed idle-cost, never a v1 bolt-on.
+- **Per-channel publish/delivery split and deeper haematite internals** —
+  named deferrals (§4.2, §5.4), each a future instrument with its own signed
+  idle-cost, never a v1 bolt-on. (Exact subscription depth WAS on this list
+  in an earlier revision; Ruling A pulled it into v1 — §4.3 — and the fence
+  no longer claims otherwise.)
 - **The push-reply deadline fix** — merged to main @ `68379e8` (ledger G7);
   this doc consumes its `PushReplyExpired` surface in the §4.5 counter
   taxonomy and adds nothing to it.
@@ -1450,7 +1643,18 @@ constructs the connection scheduler inside, after erasure),
 `supervisor.rs:152-156` (`scheduler()` accessor), `state.rs:47-52` +
 `apply.rs:383-395` (lazy inbox budget, created on first subscribe),
 `config/types.rs:9,17-18` (`deny_unknown_fields`; `channels: Vec<ChannelDef>`
-unbounded). Anchors cited
+unbounded). The Sol round-2 anchors were likewise re-verified before folding:
+`supervisor.rs:65-79,111-119` (only `from_config_via` threads `config.limits`;
+the production constructor defaults them), `apply.rs:349-447`
+(subscribe/unsubscribe processed on the connection slice; occupancy cap
+bounds map length, not transition rate), `process.rs:377-398` (automatic
+overflow shed, no Unsubscribe frame), `subscription.rs:127,179-187,277-385`
+(`InboxInstall` seam; embedded sticky `overflowed: AtomicBool` with repeated
+`store(true)` refusal sites; admit/pop/close lock scopes),
+`pending_reply.rs:243-267` (expiry converts Pending→Tombstone, cardinality
+unchanged), `endpoint.rs:136-170` (single bounded read; `write_all`/`flush`
+with no write deadline), `config/validation.rs:138-158` (channel-name
+validation checks empty/duplicate only). Anchors cited
 but not individually re-opened (taken from the scout at its stated lines, and
 flagged as such) are the deeper conversation/subscription/durability internals
 in §4.3–§4.4 and §5.4–§5.6; a builder implementing those views re-verifies each
