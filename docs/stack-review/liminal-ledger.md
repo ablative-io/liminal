@@ -186,6 +186,62 @@ beamr `d147fc6` + `9710912` (FIFO owner pop + regression tests), merged
 2026-07-07, unpublished. Pin bump targets **0.12.1 ≥ 9710912** (Artemis
 preparing; publish gated on Tom). Do not pin crates.io 0.12.0.
 
+### G7. Push-reply slot cancelled on the first receive timeout — FIXED 2026-07-12 (unreleased-main-only regression; never shipped)
+
+**Scope: unreleased main only — this defect existed between the D4 leak-repair
+wave and this fix; no published liminal release ever carried it.** The
+documented 0.2.3 push-reply contract was: `PushReplyAwaiter::receive(timeout)`'s
+`timeout` is a WAIT QUANTUM only — "each elapsed poll is a benign re-arm, never a
+failure." The D4 leak-repair wave (`supervisor.rs` `resolve_timeout` →
+`runtime.cancel_push`) silently overloaded that parameter to ALSO be the reply
+slot's lifetime: the FIRST elapsed `receive` cancelled the reserved slot. A
+consumer that polls `receive(1s)` in an unbounded re-arm loop (aion's dispatch
+path) then saw its re-armed `receive` find the sender dropped →
+`PushReplyDisconnected` → a FALSE lost-worker at ~poll+ε while the worker was
+healthy and its handler merely ran longer than one poll quantum.
+
+**Found by aion re-proofs, root-caused by counter-experiment** (the counter-test
+inverted the assertion the D4 wave had pinned, `pending_push_count == 0` after a
+timeout, and showed a slow-but-healthy handler dying at the first quantum). The
+leak the D4 cancel-on-timeout guarded is now bounded anyway by the §5
+`max_pending_pushes_per_connection` cap (32, CAS-reserved, released on slot
+removal), so the cancel earned nothing and cost the contract.
+
+**Ruling (domain owner + consumer seats, on the record):** a caller's poll
+quantum must NEVER change the protocol outcome. The `timeout` was doing two jobs
+(wait quantum AND slot lifetime); they split — the slot's lifetime belongs to the
+PUSH (the reply's deadline is a property of the request), the receive timeout is
+just how long THIS caller waits THIS time. Mirrors the certified R1(vi)
+pending-reply table design (deadline at admission, reclamation by operation
+lifecycle).
+
+**Restored + strengthened contract:** (1) `receive`'s elapsed timeout returns the
+`PushReplyTimeout` variant WITHOUT cancelling and NEVER cancels — re-arm works
+indefinitely; a reply already in the channel is delivered rather than reported as
+a timeout. (2) DEFAULT slot lifetime is the 0.2.3 shape exactly: no per-slot
+deadline; the slot is reclaimed only by reply-consumed or connection-close
+(`cancel_pushes_for_connection`). Rule 2 signs cost NUMBERS, so no default
+deadline number was invented; the §5 push cap bounds abandonment. (3) Additive
+NEW capability: `push_to_connection_with_deadline(pid, payload, deadline)` attaches
+an explicit per-push reply deadline; at expiry the slot resolves to the new typed
+`ServerError::PushReplyExpired`, is removed, and its §5 cap admission released.
+Expiry is evaluated HOST-SIDE and LAZILY (at `receive` touch points and at
+connection close at the latest) — no timer thread, no sweeper, no parked-process
+wake; an abandoned-and-never-polled deadlined push resolves at connection close.
+This laziness is deliberate: zero idle cost. `push_to_connection` stays
+byte-compatible on the no-deadline path. (4) A late `PushReply` frame for an
+expired/removed slot is a harmless no-op (`resolve_push` benign missing-slot
+discard), pinned by test.
+
+**Regression pins:** `elapsed_receive_polls_are_benign_rearms` (the inverted D4
+assertion — every elapsed poll leaves the slot reserved),
+`receive_poll_quantum_never_changes_protocol_outcome` (real connection, reply
+after ≥3 elapsed quanta, delivered byte-exact, no disconnect),
+`explicit_deadline_expires_slot_and_releases_cap`,
+`late_reply_after_expiry_is_a_harmless_noop`,
+`poll_quantum_independence_yields_the_same_outcome`,
+`concurrent_enumeration_during_polling_does_not_change_outcome`.
+
 ## H. Server direction (2026-07-07)
 
 Product scoping + phase-1 build plan live in `docs/design/SERVER-DIRECTION.md`

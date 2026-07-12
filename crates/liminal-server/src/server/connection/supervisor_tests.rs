@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -514,8 +515,19 @@ fn outstanding_push(
     runtime: &std::sync::Arc<ConnectionRuntime>,
     pid: u64,
 ) -> Result<PushReplyAwaiter, Box<dyn std::error::Error>> {
+    outstanding_push_with_deadline(runtime, pid, None)
+}
+
+/// Like [`outstanding_push`] but attaches an explicit absolute reply `deadline`,
+/// mirroring `push_to_connection_with_deadline`'s slot bookkeeping without a live
+/// scheduler.
+fn outstanding_push_with_deadline(
+    runtime: &std::sync::Arc<ConnectionRuntime>,
+    pid: u64,
+    deadline: Option<Instant>,
+) -> Result<PushReplyAwaiter, Box<dyn std::error::Error>> {
     let correlation_id = runtime.next_push_correlation_id();
-    let receiver = runtime.register_push(pid, correlation_id)?;
+    let receiver = runtime.register_push(pid, correlation_id, deadline)?;
     Ok(PushReplyAwaiter {
         correlation_id,
         receiver,
@@ -524,10 +536,15 @@ fn outstanding_push(
 }
 
 #[test]
-fn timed_out_push_cancels_its_reply_slot() -> Result<(), Box<dyn std::error::Error>> {
-    // D4 push-slot leak: a reserved slot whose reply never arrives must be released
-    // when its deadline passes, not left until connection close. The connection
-    // stays open (no `finish`/`mark_crashed`), so only the deadline can free it.
+fn elapsed_receive_polls_are_benign_rearms() -> Result<(), Box<dyn std::error::Error>> {
+    // THE regression pin (unit level). The restored 0.2.3 contract: a caller's
+    // poll quantum never changes the protocol outcome. An elapsed `receive` on a
+    // no-deadline push returns the timeout variant WITHOUT cancelling the slot,
+    // and the slot survives every poll so a later reply is still delivered. The
+    // D4-wave cancel-on-timeout (this test's former assertion, `pending_push_count
+    // == 0`, now INVERTED) is exactly the regression: it cancelled the slot on the
+    // first poll, so an aion re-arm loop saw the sender dropped and reported a
+    // false lost-worker at poll+epsilon.
     let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
         FlushFailingServices,
     )));
@@ -536,16 +553,34 @@ fn timed_out_push_cancels_its_reply_slot() -> Result<(), Box<dyn std::error::Err
     let awaiter = outstanding_push(&runtime, pid)?;
     assert_eq!(runtime.pending_push_count(), 1, "the slot is reserved");
 
-    let result = awaiter.receive(Duration::from_millis(50));
+    // Five short elapsed polls, no reply: every poll is a benign timeout and the
+    // reserved slot is untouched each time — no cancellation, no disconnect.
+    for poll in 0..5 {
+        let result = awaiter.receive(Duration::from_millis(10));
+        assert!(
+            matches!(result, Err(crate::ServerError::PushReplyTimeout { .. })),
+            "poll {poll}: an elapsed quantum must be a benign timeout, got {result:?}"
+        );
+        assert_eq!(
+            runtime.pending_push_count(),
+            1,
+            "poll {poll}: the elapsed quantum must NOT cancel the reserved slot"
+        );
+    }
 
-    assert!(
-        matches!(result, Err(crate::ServerError::PushReplyTimeout { .. })),
-        "a slow-but-connected worker must yield a typed timeout, got {result:?}"
+    // The reply finally arrives; the SAME awaiter, re-armed, receives it byte-exact
+    // and only then is the slot freed. Re-arming after timeout works indefinitely.
+    let reply = b"eventual-reply".to_vec();
+    runtime.resolve_push(awaiter.correlation_id(), reply.clone());
+    assert_eq!(
+        awaiter.receive(Duration::from_millis(200))?,
+        reply,
+        "the reply survives the elapsed polls and is delivered on re-arm"
     );
     assert_eq!(
         runtime.pending_push_count(),
         0,
-        "the timed-out slot must be cancelled, not leaked until connection close"
+        "the consumed reply frees the slot"
     );
     Ok(())
 }
@@ -894,12 +929,14 @@ fn connection_cleanup_after_conversation_scheduler_shutdown_is_prompt()
     Ok(())
 }
 
-/// D4 rework minor-1 pin: the push resolve/timeout race, staged deterministically
-/// with the slot-registry mutex as the barrier. The awaiter's deadline expires
-/// while the resolver holds the registry lock; the resolver then wins the
-/// resolved-vs-cancelled transition (remove + send under the lock, exactly what
-/// `resolve_push` does) before releasing it. The awaiter must return the reply —
-/// not report a timeout for an answer that arrived — and the slot must be gone.
+/// Push resolve/quantum-elapse race, staged deterministically with the
+/// slot-registry mutex as the barrier. The awaiter's wait quantum elapses while
+/// the resolver holds the registry lock; the resolver then wins the transition
+/// (remove + send under the lock, exactly what `resolve_push` does) before
+/// releasing it. Under the restored no-cancel contract the awaiter never cancels
+/// on timeout — it re-checks the channel and, finding the just-delivered reply,
+/// returns it rather than reporting a timeout for an answer that arrived. The
+/// property survives the removal of cancel-on-timeout; the slot must be gone.
 #[test]
 fn resolver_winning_the_timeout_race_delivers_the_reply() -> Result<(), Box<dyn std::error::Error>>
 {
@@ -944,39 +981,279 @@ fn resolver_winning_the_timeout_race_delivers_the_reply() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// The other side of the minor-1 transition: when the timeout WINS (slot removed
-/// by the awaiter), a late resolve is a discard — the reply is never delivered,
-/// not even to a retried receive.
+/// Test (b): an explicit reply deadline resolves the slot to a TYPED expiry on
+/// the next receive after the deadline, removes the slot, and releases its §5
+/// `max_pending_pushes_per_connection` cap admission — proven by a follow-up push
+/// admitting at the cap boundary that would have been refused had the expired
+/// slot leaked. Deadline evaluation is host-side and lazy: it fires here at the
+/// receive touch, waking no process and running no timer.
 #[test]
-fn timeout_winning_the_race_discards_the_late_reply() -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
-        FlushFailingServices,
-    )));
-    let pid = 52;
+fn explicit_deadline_expires_slot_and_releases_cap() -> Result<(), Box<dyn std::error::Error>> {
+    // Cap of one in-flight push per connection: the boundary is trivially
+    // observable — a second concurrent push is refused, but a push after the
+    // first has EXPIRED must admit.
+    let limits = crate::config::types::LimitsConfig {
+        max_pending_pushes_per_connection: 1,
+        ..crate::config::types::LimitsConfig::default()
+    };
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests_with_limits(
+        std::sync::Arc::new(FlushFailingServices),
+        limits,
+    ));
+    let pid = 61;
     runtime.register(pid, None)?;
-    let awaiter = outstanding_push(&runtime, pid)?;
 
-    let result = awaiter.receive(Duration::from_millis(20));
+    // A push with a very short deadline, already elapsed by the time we poll.
+    let deadline = Instant::now() + Duration::from_millis(20);
+    let awaiter = outstanding_push_with_deadline(&runtime, pid, Some(deadline))?;
+    assert_eq!(
+        runtime.pending_push_count(),
+        1,
+        "the deadlined slot is reserved"
+    );
+
+    // At the cap: a second push while the first is still in-flight is refused.
+    let refused = outstanding_push_with_deadline(&runtime, pid, None);
     assert!(
-        matches!(result, Err(crate::ServerError::PushReplyTimeout { .. })),
-        "with no reply the deadline expiry must report a typed timeout, got {result:?}"
+        refused.is_err(),
+        "a second push at the cap must be refused while the first is in flight"
+    );
+
+    // Poll after the deadline: the slot resolves to a typed expiry and is removed.
+    thread::sleep(Duration::from_millis(40));
+    let result = awaiter.receive(Duration::from_millis(10));
+    assert!(
+        matches!(result, Err(crate::ServerError::PushReplyExpired { .. })),
+        "a passed reply deadline must yield a typed PushReplyExpired, got {result:?}"
     );
     assert_eq!(
         runtime.pending_push_count(),
         0,
-        "the timeout freed the slot"
+        "expiry removes the slot (releasing its cap admission)"
     );
 
-    // A very late reply finds no slot: discarded, and a retried receive reports
-    // the dropped sender (disconnected), never the stale payload.
-    runtime.resolve_push(awaiter.correlation_id(), b"too-late".to_vec());
-    let retried = awaiter.receive(Duration::from_millis(20));
+    // The cap admission is released: a follow-up push admits at the boundary.
+    let follow_up = outstanding_push_with_deadline(&runtime, pid, None);
+    assert!(
+        follow_up.is_ok(),
+        "the expired slot's cap admission must be released so a follow-up push admits"
+    );
+    Ok(())
+}
+
+/// Test (c) + item 4: a late `PushReply` for a slot that already expired (or that
+/// never existed) is a harmless no-op — nothing is delivered, no panic, no
+/// desync. Pins `resolve_push`'s missing-slot benign discard for the expiry case.
+#[test]
+fn late_reply_after_expiry_is_a_harmless_noop() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 62;
+    runtime.register(pid, None)?;
+
+    let deadline = Instant::now() + Duration::from_millis(10);
+    let awaiter = outstanding_push_with_deadline(&runtime, pid, Some(deadline))?;
+    let correlation_id = awaiter.correlation_id();
+    thread::sleep(Duration::from_millis(30));
+    assert!(matches!(
+        awaiter.receive(Duration::from_millis(5)),
+        Err(crate::ServerError::PushReplyExpired { .. })
+    ));
+    assert_eq!(runtime.pending_push_count(), 0, "expiry removed the slot");
+
+    // A late reply for the now-removed slot: benign discard, no panic, no desync.
+    runtime.resolve_push(correlation_id, b"too-late".to_vec());
+    assert_eq!(
+        runtime.pending_push_count(),
+        0,
+        "a late reply must not resurrect or leak a slot"
+    );
+
+    // A reply for a correlation id that never had a slot is equally harmless.
+    runtime.resolve_push(9_999, b"never-existed".to_vec());
+    assert_eq!(runtime.pending_push_count(), 0);
+    Ok(())
+}
+
+/// Test (a): THE missing pin, over a real connection. A server push is
+/// outstanding and the caller polls `receive` in short quanta while the reply
+/// arrives only after SEVERAL elapsed quanta (Vesper's aion shape: the false
+/// lost-worker fired at poll+epsilon on the first quantum). Every elapsed poll
+/// must be a benign timeout, the slot must survive, and the reply must eventually
+/// be received byte-exact with NO `PushReplyDisconnected` and no cancellation.
+#[test]
+fn receive_poll_quantum_never_changes_protocol_outcome() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    wait_for_parked(&supervisor, handle.pid())?;
+
+    let awaiter = supervisor.push_to_connection(handle.pid(), b"slow-handler".to_vec())?;
+    let correlation_id = match read_frame(&mut client)? {
+        Frame::Push { correlation_id, .. } => correlation_id,
+        other => return Err(format!("expected Push, got {other:?}").into()),
+    };
+
+    // Poll FOUR short quanta with no reply on the wire yet: each is a benign
+    // re-arm timeout, never a disconnect. (Reply arrives only after these,
+    // making the multi-quantum shape explicit — >= 3 elapsed quanta.) Short
+    // quanta keep this real-connection test from perturbing the parallel suite.
+    for poll in 0..4 {
+        let result = awaiter.receive(Duration::from_millis(25));
+        assert!(
+            matches!(result, Err(crate::ServerError::PushReplyTimeout { .. })),
+            "poll {poll}: an elapsed quantum before the reply must be a benign timeout, got {result:?}"
+        );
+    }
+
+    // The slow handler finally answers; the re-armed awaiter delivers it
+    // byte-exact. That the reply arrives at all proves the four elapsed polls did
+    // not cancel the slot (a cancelled slot's dropped sender would disconnect).
+    write_frame(
+        &mut client,
+        &Frame::new_push_reply(1, correlation_id, b"slow-reply".to_vec())?,
+    )?;
+    let reply = loop {
+        match awaiter.receive(Duration::from_millis(50)) {
+            Ok(payload) => break payload,
+            Err(crate::ServerError::PushReplyTimeout { .. }) => {}
+            Err(other) => return Err(format!("unexpected error while re-arming: {other:?}").into()),
+        }
+    };
+    assert_eq!(
+        reply, b"slow-reply",
+        "the slow reply must arrive byte-exact"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Test (e): poll-quantum independence. The same push shape, one serviced by a
+/// single long `receive(2s)` and one by short `receive(500ms)` quanta with an
+/// intervening benign timeout, must produce the SAME outcome: the identical
+/// byte-exact reply. Staged deterministically at the runtime level (the test
+/// controls when the reply is resolved) so the poll quantum — not any wall-clock
+/// race — is the only variable, and with zero TCP descriptors so it adds no
+/// concurrent-fd churn to the suite.
+#[test]
+fn poll_quantum_independence_yields_the_same_outcome() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 64;
+    runtime.register(pid, None)?;
+    let reply = b"same-outcome".to_vec();
+
+    // Strategy A — one long quantum: the reply is already resolved, so a single
+    // `receive(2s)` returns it.
+    let single_awaiter = outstanding_push(&runtime, pid)?;
+    runtime.resolve_push(single_awaiter.correlation_id(), reply.clone());
+    let single_payload = single_awaiter.receive(Duration::from_secs(2))?;
+
+    // Strategy B — many short quanta: one elapsed short `receive` is a benign
+    // timeout (the slot survives, count unchanged), THEN the reply is resolved and
+    // a re-armed quantum delivers it. The quantum length is deliberately small
+    // and irrelevant to the outcome — that is exactly what this test pins.
+    let split_awaiter = outstanding_push(&runtime, pid)?;
+    let first_quantum = split_awaiter.receive(Duration::from_millis(20));
     assert!(
         matches!(
-            retried,
-            Err(crate::ServerError::PushReplyDisconnected { .. })
+            first_quantum,
+            Err(crate::ServerError::PushReplyTimeout { .. })
         ),
-        "a late reply must be discarded, got {retried:?}"
+        "the pre-reply quantum must be a benign timeout, got {first_quantum:?}"
+    );
+    assert_eq!(
+        runtime.pending_push_count(),
+        1,
+        "the benign quantum must not cancel the surviving slot"
+    );
+    runtime.resolve_push(split_awaiter.correlation_id(), reply.clone());
+    let split_payload = loop {
+        match split_awaiter.receive(Duration::from_millis(20)) {
+            Ok(payload) => break payload,
+            Err(crate::ServerError::PushReplyTimeout { .. }) => {}
+            Err(other) => return Err(format!("unexpected error while re-arming: {other:?}").into()),
+        }
+    };
+
+    // Same terminal outcome: the identical byte-exact reply, regardless of quantum.
+    assert_eq!(single_payload, reply);
+    assert_eq!(split_payload, reply);
+    assert_eq!(
+        single_payload, split_payload,
+        "the poll quantum must not change the delivered reply"
+    );
+    Ok(())
+}
+
+/// Test (e), enumeration half (Vesper's aion shape (b)): a handler parked past
+/// one poll quantum while a side channel enumerates the in-flight push entry,
+/// then releases. The entry must stay continuously enumerable across the polls
+/// and the outcome must be unchanged (the reply is delivered).
+///
+/// NOTE: `ConnectionSupervisor` exposes NO public host-side push-enumeration
+/// surface — `pending_push_count` is a `cfg(test)` runtime instrument. This diff
+/// deliberately does not add one (that is the console/MCP arc's job), so this
+/// coverage rides the test instrument at the runtime level.
+#[test]
+fn concurrent_enumeration_during_polling_does_not_change_outcome()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
+        FlushFailingServices,
+    )));
+    let pid = 63;
+    runtime.register(pid, None)?;
+    let awaiter = outstanding_push(&runtime, pid)?;
+
+    // A side channel busy-enumerates the in-flight entry for the whole poll window.
+    let stop = Arc::new(AtomicBool::new(false));
+    let enum_runtime = Arc::clone(&runtime);
+    let enum_stop = Arc::clone(&stop);
+    let enumerator = thread::spawn(move || {
+        let mut max_seen = 0;
+        while !enum_stop.load(Ordering::Acquire) {
+            max_seen = max_seen.max(enum_runtime.pending_push_count());
+            // Yield between reads: the entry stays continuously enumerable without
+            // hot-spinning a core (a busy loop here steals CPU from co-running
+            // timing-sensitive tests in the parallel suite).
+            thread::yield_now();
+        }
+        max_seen
+    });
+
+    // Park past several quanta: each poll is a benign timeout and the entry stays
+    // enumerable (count 1) throughout.
+    for poll in 0..3 {
+        assert!(
+            matches!(
+                awaiter.receive(Duration::from_millis(10)),
+                Err(crate::ServerError::PushReplyTimeout { .. })
+            ),
+            "poll {poll}: expected a benign timeout while enumerated"
+        );
+        assert_eq!(runtime.pending_push_count(), 1);
+    }
+
+    // Release: the reply is delivered byte-exact on re-arm — outcome unchanged.
+    runtime.resolve_push(awaiter.correlation_id(), b"released".to_vec());
+    let delivered = loop {
+        match awaiter.receive(Duration::from_millis(50)) {
+            Ok(payload) => break payload,
+            Err(crate::ServerError::PushReplyTimeout { .. }) => {}
+            Err(other) => return Err(format!("unexpected error: {other:?}").into()),
+        }
+    };
+    assert_eq!(delivered, b"released");
+
+    stop.store(true, Ordering::Release);
+    let max_seen = enumerator.join().map_err(|_| "enumerator panicked")?;
+    assert_eq!(
+        max_seen, 1,
+        "the in-flight push entry must be continuously enumerable during polling"
     );
     Ok(())
 }
