@@ -1,7 +1,9 @@
 # Park-Flip / D1 Activation — one seam, one plan
 
-**Status:** FIX PLAN for pair review (Waffles the Terrible reviewer-of-record;
-build leg Vesper Lynd). Closes the idle-connection busy-spin incident
+**Status:** SIGNED 2026-07-12 (Waffles the Terrible reviewer-of-record;
+build leg Vesper Lynd; pair asks (a) timer shape and (b) re-register
+clause folded in this revision). Build dispatch gated on the beamr 0.13.1
+artifact resolving — NOTHING merges before the pinned artifact exists. Closes the idle-connection busy-spin incident
 (docs/stack-review/AION-HOST-RESOURCE-INCIDENT-2026-07-11.md) by activating
 the D1-prep consumer machinery (b3c8a38, landed dark) against the beamr
 readiness service (beamr main 1f98f73, composition commit 6, pair-certified).
@@ -69,8 +71,14 @@ Registration happens in-slice (fd + Interest + pid + READY marker); the
 token must ALSO be host-reachable: beamr's ACK'd deregistration is
 host-side (`Scheduler::readiness_deregister`), and a token held only
 inside `ConnectionProcess` state cannot be deregistered after an external
-kill/reap. **Plan:** the supervisor's connection record carries the token
-(set on first registration, updated on re-register), and deregistration
+kill/reap. **Plan:** the supervisor's connection record carries the token — set
+ONCE at first registration, dropped at deregistration. There is no
+live-connection re-register case (pair ask (b): the "updated on
+re-register" clause is STRUCK as decoration): one connection = one
+process = one fd for its whole life, re-arming is `rearm` on the same
+token never a fresh registration, and every path that would invalidate
+the registration (EOF, close, kill, reap, ServiceFailed→fatal-loud) ends
+the connection. Deregistration
 funnels through the EXISTING single removal/finalization path — covering
 spawn rollback, EOF, protocol close, error close, force close, reap,
 external termination, and shutdown sweep. The ACK'd dereg completes BEFORE
@@ -115,6 +123,16 @@ channel); completion/close cancels it; the woken slice reuses the existing
 `expire_due`. This rides liminal's existing timer facilities — it is a
 consumer-side wake source, NOT a claim on beamr's readiness service (beamr
 doc §9 explicitly keeps timer expiry off the service).
+
+**Shape (pair ask (a), stated): per-pending-entry timers** — one armed at
+admission, cancelled on that entry's completion/close, so cancellation
+rides the entry's existing completion path instead of a per-connection
+min-deadline state machine that must re-arm whenever an earlier deadline
+is admitted. **Bound:** the pending-reply typed limit caps live timers at
+(pending-reply cap × live connections); every armed timer belongs to
+admitted active work — an idle parked connection holds ZERO timers, so
+this is active-work cost, never idle cost. Expiry batch-drains via
+`expire_due`, so co-expiring timers still produce one slice of work.
 
 ## 6. Test inversion + acceptance matrix
 
