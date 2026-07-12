@@ -11,9 +11,13 @@ brief cites was verified present at that commit.
 
 ## Gate (named placeholder — this brief is NOT dispatchable until filled)
 
-**`«LIMINAL-BASE-VERSION: unfilled»`** — fill condition: Tom publishes
-liminal **0.2.4** (main @ 68379e8 is publish-ready; the trigger is live on
-his list). This work is new SDK surface and belongs to the NEXT version
+**`«LIMINAL-BASE-VERSION: 0.2.4»`** — FILLED 2026-07-13 by Waffles the
+Terrible (publish authority delegated by Tom, 2026-07-12 ~21:43Z): liminal-rs,
+liminal-sdk, and liminal-server 0.2.4 published from main @ 4619057 (fresh
+gates: fmt clean, clippy 211 crates-lines/59s, 754/0 tests) and each verified
+resolving as 0.2.4 by anonymous sparse-index fetch. The brief is now
+dispatchable. Original fill condition, preserved for the record: Tom publishes
+liminal **0.2.4**. This work is new SDK surface and belongs to the NEXT version
 line, not to the fix release: 0.2.4 ships the G7 contract restoration alone,
 so its changelog stays one honest sentence, and this leg dispatches against
 the published 0.2.4 as its floor. The placeholder is filled with the version
