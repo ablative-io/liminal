@@ -15,7 +15,7 @@ use liminal::protocol::{
     encode, encoded_len,
 };
 
-use super::{ConnectionRuntime, ConnectionSupervisor, PushReplyAwaiter};
+use super::{ConnectionControl, ConnectionRuntime, ConnectionSupervisor, PushReplyAwaiter};
 use crate::server::connection::services::{
     ConnectionServices, LiminalConnectionServices, server_error_from_protocol,
 };
@@ -1524,6 +1524,130 @@ fn err_from_public_push_publishes_nothing_after_close() -> Result<(), Box<dyn st
     assert!(
         read_frame(&mut client).is_err(),
         "an Err from push_to_connection must publish nothing to the client"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// S8 pin (Err side), driving the REAL failed-wake rollback path over a real
+/// connection: the process is killed externally (which leaves its host record —
+/// so the confirm passes and the push reaches `enqueue_control`), the wake
+/// fails against the dead pid, and `remove_control` REMOVES the never-consumed
+/// entry — the observation-proven unpublished case. The API must return the
+/// typed `Err` with zero slots, an empty control queue, and no `Push` frame on
+/// the client socket. (Neither S7 test executed this branch; this one does.)
+#[test]
+fn failed_wake_rollback_err_publishes_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    client.set_read_timeout(Some(Duration::from_millis(300)))?;
+    wait_for_parked(&supervisor, pid)?;
+
+    // External kill: the process leaves the scheduler table but its host record
+    // REMAINS until reaped (the fd-reuse pin established this), so the push
+    // below passes its confirm and fails at the wake — the exact S8 branch.
+    supervisor
+        .scheduler()
+        .terminate_process(pid, ExitReason::Error);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while handle.is_live() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    if handle.is_live() {
+        return Err("externally killed process did not exit".into());
+    }
+    assert!(
+        supervisor.is_tracked(pid),
+        "the host record must still exist so the confirm passes"
+    );
+
+    let result = supervisor.push_to_connection(pid, b"never-consumed".to_vec());
+    assert!(
+        matches!(result, Err(crate::ServerError::ListenerAccept { .. })),
+        "the failed wake with a rolled-back control must fail typed, got {result:?}"
+    );
+    assert_eq!(
+        supervisor.pending_push_count(),
+        0,
+        "the rollback must leave no slot"
+    );
+    assert!(
+        !supervisor.inner.runtime.has_control(pid),
+        "the rollback must leave no queued control"
+    );
+    // Publication invariant on the wire: nothing reached the (dead) socket.
+    assert!(
+        read_frame(&mut client).is_err(),
+        "an Err from the failed-wake rollback must publish nothing"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// S8 pin (consumed side), staged deterministically with the insert->wake
+/// barrier: a consumer drains the just-queued `Push` control in the window
+/// between `push_control` and the wake attempt (exactly what a live
+/// control-drain slice does — each control atom drains ALL queued controls),
+/// then the wake fails. `remove_control` finds nothing, so the control was
+/// PUBLISHED: the API must return `Ok` (admission — never `Err` for a control a
+/// consumer took), and the slot lifecycle carries the delivery truth — the
+/// close sweep resolves the awaiter to the truthful DISCONNECTED with zero
+/// slots left.
+#[test]
+fn control_consumed_before_failed_wake_reads_ok_then_disconnected()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    // A pid with a host record (so the confirm passes) that is NOT in the
+    // scheduler table (so the wake deterministically fails).
+    let pid = 991;
+    supervisor.inner.runtime.register(pid, None)?;
+    let (armed, release) = supervisor.inner.runtime.install_pre_wake_barrier();
+
+    let pusher_supervisor = supervisor.clone();
+    let pusher =
+        thread::spawn(move || pusher_supervisor.push_to_connection(pid, b"drained".to_vec()));
+
+    // The pusher has inserted its slot and queued its control, and is now
+    // paused BEFORE the wake attempt. Act as the control-drain consumer.
+    armed.wait();
+    let consumed = supervisor
+        .inner
+        .runtime
+        .pop_control(pid)
+        .ok_or("the queued Push control must be visible to the consumer")?;
+    assert!(
+        matches!(consumed, ConnectionControl::Push { ref payload, .. } if payload == b"drained"),
+        "the consumer must have drained the just-queued Push, got {consumed:?}"
+    );
+    release.wait();
+
+    // The wake now fails; remove_control finds nothing (we consumed it):
+    // published — the API returns Ok, never Err for a delivered-side control.
+    let awaiter = pusher
+        .join()
+        .map_err(|_| "pusher thread panicked")?
+        .map_err(|error| {
+            format!("a consumed control must yield Ok (admission), got Err: {error}")
+        })?;
+    assert_eq!(
+        supervisor.inner.runtime.pending_push_count_for(pid),
+        1,
+        "the admitted slot survives — Ok promises admission"
+    );
+
+    // The slot lifecycle carries the delivery truth: the close sweep resolves
+    // the awaiter to the truthful disconnected outcome, zero slots left.
+    supervisor.inner.runtime.finish(pid);
+    assert_eq!(supervisor.inner.runtime.pending_push_count_for(pid), 0);
+    let outcome = awaiter.receive(Duration::from_secs(5));
+    assert!(
+        matches!(
+            outcome,
+            Err(crate::ServerError::PushReplyDisconnected { .. })
+        ),
+        "the consumed-then-closed push must read disconnected, got {outcome:?}"
     );
     supervisor.shutdown();
     Ok(())

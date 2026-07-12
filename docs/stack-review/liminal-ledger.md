@@ -262,7 +262,15 @@ refused as a typed error instead of an `Instant` panic. Round 2 added the
 PUBLICATION INVARIANT (S7): push registration runs insert -> confirm ->
 publish, so an `Err` from `push_to_connection{,_with_deadline}` guarantees no
 `Push` control was published — the confirm-after-enqueue order could report
-failure for a push the client had already received and answered. Pins:
+failure for a push the client had already received and answered. Round 3
+closed the invariant's last hole (S8): a failed wake does not prove the queued
+control was never consumed (a live control drain can pop it in the
+insert->wake window), so publication on that branch is disambiguated BY
+OBSERVATION — the failed-wake rollback returning "removed" proves unpublished
+(typed `Err`); "already gone" proves a drain consumed it (only `pop_control`
+also removes queue entries, and the removal key embeds the push's unique
+correlation id), and the call returns `Ok`: `Ok` promises ADMISSION, not
+delivery — the awaiter's outcome is the delivery truth. Pins:
 `same_deadlined_schedule_yields_same_outcome_for_any_quantum`,
 `overdue_deadlined_receive_returns_expired_promptly`,
 `no_deadline_receive_never_blocks_on_registry_lock`,
@@ -273,7 +281,9 @@ failure for a push the client had already received and answered. Pins:
 `public_deadlined_push_expires_promptly_over_real_connection`,
 `public_deadlined_push_reply_after_deadline_instant_still_wins`,
 `close_between_insert_and_confirm_publishes_nothing`,
-`err_from_public_push_publishes_nothing_after_close`.
+`err_from_public_push_publishes_nothing_after_close`,
+`failed_wake_rollback_err_publishes_nothing`,
+`control_consumed_before_failed_wake_reads_ok_then_disconnected`.
 
 ## H. Server direction (2026-07-07)
 

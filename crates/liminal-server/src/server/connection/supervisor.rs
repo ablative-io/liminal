@@ -247,6 +247,9 @@ impl ConnectionSupervisor {
     /// for the (possibly already-gone or concurrently-closing) connection
     /// process. PUBLICATION INVARIANT: an `Err` guarantees no `Push` control was
     /// published — the client never sees a `Push` frame for a failed call.
+    /// Conversely `Ok` promises ADMISSION, not delivery: the awaiter's outcome
+    /// is the delivery truth (a push admitted just as its connection closes
+    /// resolves to the truthful disconnected outcome, never to a lost reply).
     pub fn push_to_connection(
         &self,
         pid: u64,
@@ -287,7 +290,8 @@ impl ConnectionSupervisor {
     /// or the control message cannot be enqueued for the (possibly already-gone
     /// or concurrently-closing) connection process. PUBLICATION INVARIANT: an
     /// `Err` guarantees no `Push` control was published — the client never sees
-    /// a `Push` frame for a failed call.
+    /// a `Push` frame for a failed call. Conversely `Ok` promises ADMISSION,
+    /// not delivery: the awaiter's outcome is the delivery truth.
     pub fn push_to_connection_with_deadline(
         &self,
         pid: u64,
@@ -366,10 +370,13 @@ impl ConnectionSupervisor {
                 runtime: Arc::downgrade(&self.inner.runtime),
             })
         } else {
-            // The process is gone; drop the now-unreachable reply slot so it cannot
-            // leak in the correlation registry. `enqueue_control` rolled the queued
-            // control back out on the failed wake, so nothing was published here
-            // either — the publication invariant holds on every `Err` path.
+            // The process is gone AND the control provably never reached a
+            // consumer: `enqueue_control` returns false only when its failed-wake
+            // rollback REMOVED the queued control (S8 — an entry a drain already
+            // consumed counts as published and returns true, with the slot
+            // lifecycle carrying the delivery truth). Dropping the now-unreachable
+            // reply slot here therefore keeps the publication invariant exact on
+            // every `Err` path.
             self.inner.runtime.cancel_push(correlation_id);
             Err(ServerError::ListenerAccept {
                 message: format!("cannot push to connection process {pid}: process is not live"),
@@ -812,6 +819,23 @@ impl SupervisorInner {
         }
     }
 
+    /// Queues `control` for `pid` and wakes the process. Returns whether the
+    /// control was PUBLISHED (left in the queue with a successful wake, or
+    /// already consumed by a drain) — `false` guarantees no consumer ever saw
+    /// it.
+    ///
+    /// S8: a failed wake does NOT prove the queued control was never consumed.
+    /// The insert releases the queue lock before the wake attempt, and a
+    /// process already executing a control drain (each control atom drains ALL
+    /// queued controls for the pid) can pop the just-inserted entry in that
+    /// window, then exit before the wake check. Publication is therefore
+    /// disambiguated BY OBSERVATION on the failed-wake path: `remove_control`
+    /// finding and removing the entry proves no consumer saw it (truly
+    /// unpublished — `false`); finding nothing proves a drain consumed it
+    /// (`pop_control` is the only other remover of queue entries, and the
+    /// removal key embeds the push's runtime-unique correlation id, so it can
+    /// never match a different entry) — the control was published and the
+    /// caller's slot lifecycle carries the delivery truth (`true`).
     fn enqueue_control(&self, pid: u64, control: ConnectionControl) -> bool {
         // Keep a key for the failure-path removal before the control is moved into
         // the queue, so a non-`Copy` (push) control can still be located and pulled
@@ -820,14 +844,22 @@ impl SupervisorInner {
         if self.runtime.push_control(pid, control).is_err() {
             return false;
         }
+        // Deterministic test seam in the insert->wake window (S8 staging).
+        #[cfg(test)]
+        self.runtime.run_pre_wake_barrier();
         if self
             .scheduler
             .enqueue_atom_message(pid, self.runtime.control_atom())
         {
             true
         } else {
-            self.runtime.remove_control(pid, &removal_key);
-            false
+            // Failed wake: the entry's fate is the publication verdict. Removed
+            // here => nobody consumed it => unpublished. Already gone => a
+            // drain consumed it before the wake check => published. (A poisoned
+            // queue lock reads as not-removed => published — the safe
+            // direction: the slot lifecycle then reports the truthful outcome,
+            // whereas claiming "unpublished" could be a lie.)
+            !self.runtime.remove_control(pid, &removal_key)
         }
     }
 }
@@ -907,6 +939,9 @@ pub(super) struct ConnectionRuntime {
     /// Deterministic test gate placed after arm and before the final probe.
     #[cfg(test)]
     pre_wait_barrier: Mutex<Option<PreWaitBarrier>>,
+    /// Deterministic test gate in `enqueue_control`'s insert->wake window (S8).
+    #[cfg(test)]
+    pre_wake_barrier: Mutex<Option<PreWaitBarrier>>,
     /// Barrier-staged slices where the final probe found newly arrived work.
     #[cfg(test)]
     pre_wait_probe_hits: AtomicU64,
@@ -962,6 +997,8 @@ impl ConnectionRuntime {
             slice_counts: Mutex::new(HashMap::new()),
             #[cfg(test)]
             pre_wait_barrier: Mutex::new(None),
+            #[cfg(test)]
+            pre_wake_barrier: Mutex::new(None),
             #[cfg(test)]
             pre_wait_probe_hits: AtomicU64::new(0),
             push_replies: Mutex::new(HashMap::new()),
@@ -1090,6 +1127,36 @@ impl ConnectionRuntime {
         barrier.armed.wait();
         barrier.release.wait();
         true
+    }
+
+    /// Installs a one-use barrier in `enqueue_control`'s insert->wake window
+    /// (S8 staging: lets a test act as the control-drain consumer between the
+    /// queue insertion and the wake attempt) and returns its test endpoints.
+    #[cfg(test)]
+    pub(super) fn install_pre_wake_barrier(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        let armed = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        if let Ok(mut slot) = self.pre_wake_barrier.lock() {
+            *slot = Some(PreWaitBarrier {
+                armed: Arc::clone(&armed),
+                release: Arc::clone(&release),
+            });
+        }
+        (armed, release)
+    }
+
+    /// Runs the one-use insert->wake test gate, if installed.
+    #[cfg(test)]
+    pub(super) fn run_pre_wake_barrier(&self) {
+        let barrier = self
+            .pre_wake_barrier
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        if let Some(barrier) = barrier {
+            barrier.armed.wait();
+            barrier.release.wait();
+        }
     }
 
     #[cfg(test)]
@@ -1660,17 +1727,25 @@ impl ConnectionRuntime {
             .is_ok_and(|controls| controls.iter().any(|queued| queued.pid == pid))
     }
 
-    fn remove_control(&self, pid: u64, control: &ConnectionControl) {
+    /// Pulls a queued-but-unconsumed control back out of the queue. Returns
+    /// whether THIS call removed it — `false` means the entry already left the
+    /// queue, and since [`Self::pop_control`] is the only other remover, a
+    /// consumer drain took it (S8's publication disambiguator). Matching is
+    /// `pid` + full control equality; a `Push` control embeds its
+    /// runtime-unique correlation id, so this can never remove a different
+    /// push's entry and misreport.
+    fn remove_control(&self, pid: u64, control: &ConnectionControl) -> bool {
         let Ok(mut controls) = self.controls.lock() else {
-            return;
+            return false;
         };
         let Some(index) = controls
             .iter()
             .position(|queued| queued.pid == pid && &queued.control == control)
         else {
-            return;
+            return false;
         };
         controls.remove(index);
+        true
     }
 
     fn active_count(&self) -> usize {
