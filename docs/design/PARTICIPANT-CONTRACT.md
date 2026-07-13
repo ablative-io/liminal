@@ -397,9 +397,12 @@ requires conversation, sender, payload, and sequence
 contract requires reattach from a server cursor with a typed compaction outcome
 (`docs/design/SDK-PARTICIPANT-RECEIVE.md:128-136`). Consequently, the version that carries that receive path must not
 claim those guarantees before this wire/server contract passes and lands.
-However, the outline's literal `«LIMINAL-SDK-VERSION»` name is not present in
-that checked-in note; `«LIMINAL-SDK-VERSION-GATE-NAME»` records the discrepancy
-in §7.
+The gate this paragraph depends on is `«LIMINAL-SDK-VERSION»` — F-3a's
+dependency gate on the **future** liminal release that carries the receive
+path, unfilled by construction until this contract lands and ships. It is a
+different gate from the checked-in brief's `«LIMINAL-BASE-VERSION: 0.2.4»`
+sequencing gate, which is already filled (reconciled by the gate's owner,
+Cally Ray, 2026-07-13; frame channel).
 
 **R-I3 — Resume vehicle.** After both keys pass and the contract lands, norn
 session `256a81a0` / envelope `claude-dev-sdk-receive.8rss9K` is the designated
@@ -438,7 +441,7 @@ close it explicitly or leave it open in the next revision.
 | `«KEEPALIVE-PORTABILITY»` | Which OS socket options realize the same contract, and which platforms refuse participant mode? | Per-platform option readback and bounded no-FIN tests; no silent fallback. |
 | `«REPLAY-LIVE-CUTOVER»` | What atomic sequencer/storage/binding operation fixes the replay watermark while admitting later live events? | Linearization point and adversarial reconnect/send interleaving test. |
 | `«LIFECYCLE-VERDICT-RECIPIENTS»` | Which attached participants receive join/leave/death verdicts, and where are those verdicts ordered relative to deliveries? | One per-conversation ordering rule and race tests. |
-| `«LIMINAL-SDK-VERSION-GATE-NAME»` | The outline names `«LIMINAL-SDK-VERSION»`; the checked-in Cally brief instead contains the filled `«LIMINAL-BASE-VERSION: 0.2.4»` sequencing gate (`docs/design/SDK-PARTICIPANT-RECEIVE.md:12-33`). Which artifact owns the SDK-version gate name? | Cally/domain-owner correction; do not cite a placeholder that is absent. |
+| `«LIMINAL-SDK-VERSION-GATE-NAME»` — **CLOSED (owner reconciliation, Cally Ray, 2026-07-13)** | Both names are real and are different gates: `«LIMINAL-BASE-VERSION: 0.2.4»` is the SDK-receive brief's sequencing gate, filled (`docs/design/SDK-PARTICIPANT-RECEIVE.md:12-33`); `«LIMINAL-SDK-VERSION»` is F-3a's dependency gate on the future release carrying the receive path, unfilled. §6 R-I2 now cites the latter by exact name. | Closed by the gate owner's reconciliation; R-I2 updated in place. |
 
 **LAW 2 closes the escape hatch:** an unresolved dependency is either one of
 these grep-able names or it is not allowed to support a codebase-state claim.
