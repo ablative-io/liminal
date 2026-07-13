@@ -1,8 +1,8 @@
-# Participant-domain wire/server contract — design draft R4
+# Participant-domain wire/server contract — design draft R5
 
 **Status: DRAFT — decisions made by this draft, not yet ratified.** This redraft
 parks at the two-key gate: reviewer-of-record plus the liminal domain-owner pass
-(Hermes Crumpet). “Decided-by-draft” below means that R4 selects one contract
+(Hermes Crumpet). “Decided-by-draft” below means that R5 selects one contract
 shape for those keys to accept or refute; it does not grant implementation
 authority before both keys turn.
 
@@ -14,7 +14,7 @@ authority before both keys turn.
 
 This draft is pinned to liminal commit
 `ce8814daa748373d8ffc66b3ff1664f1697a5f4e`, confirmed as the merge base of this
-design branch. Every repository citation retained from R1–R3 or added in R4 was
+design branch. Every repository citation retained from R1–R4 or added in R5 was
 opened and re-verified in this checkout against that pin. A bare `path:line`
 below therefore means that path and current line at that named commit; no
 citation is inherited from an outline or review.
@@ -44,6 +44,11 @@ read from envelope `claude-review-contract-r3.RMX45H`. The ruling confirms all
 six R2 refusal items are resolved in form and mandates decisions—not new
 mechanisms—at seven seams among receipts, Leave, observer projection, compaction,
 and retention. R4 makes those decisions in place and records them in §0.4.
+
+R5 is the failure-taxonomy redraft required by second-key refusal tear
+`be2ca4fb`, read from envelope `claude-review-contract-r4-c.b11qea`. That ruling
+confirms all seven R3 seams closed correctly and narrows refusal to five outcome,
+bounded-provenance, backpressure, and SDK-transition decisions recorded in §0.4.
 
 The corrected boundary survives R1: the server side has symmetric **transport**,
 not a participant-domain contract. At the pin, transport parks on readiness,
@@ -100,20 +105,18 @@ Driver: second-key refusal tear `22923c37` and its full envelope findings.
 | M3 — sockets were decisions in disguise | Audited every R1 socket, decided identity, ack shape, retention units, mux, and recipients, and added a `decided-by-draft / genuinely-open` column. **Recorded outline/tear tension:** the tear sought owner choices for no-FIN defaults and the legacy-resume migration now; the governing outline leaves `«NO-FIN-KERNEL-BOUND»` and `«RESUME-COMMENT-SERVER-MISMATCH»` genuinely open to platform evidence and owner ruling. | §7 |
 | M4/minor — keepalive citation overreach | Removed the claim that the read span itself proves HUP and write errors; R-B1 now cites read EOF/error and outbound write failure separately and describes HUP as readiness confirmed by read outcome. | §3 R-B1 |
 
-### 0.4 R3 → R4 changelog
+### 0.4 R4 → R5 changelog
 
-Driver: second-key refusal tear `5de60e4c`, envelope
-`claude-review-contract-r3.RMX45H`.
+Driver: second-key refusal tear `be2ca4fb`, envelope
+`claude-review-contract-r4-c.b11qea`.
 
-| Refusal item | R4 decision | Where |
+| Refusal item | R5 decision | Where |
 |---|---|---|
-| B1 — receipts versus terminal Leave | Leave atomically terminalizes every attach receipt. Later enrollment or credential receipt replay returns typed `Retired`, never a live secret/result. **R3 tension:** byte-identical replay is narrowed to a live receipt epoch; terminal retirement governs afterward. | §4 R-C0/R-C2; acceptance 12 |
-| B2 — irreversible Leave lacks authority/idempotency/race order | Leave requires the current capability generation, secret, and authoritative incarnation; carries a write-ahead token; serializes with attach; returns one stable duplicate result; and has explicit attach-wins/Leave-wins outcomes. The wire gains the missing Leave request. | §4 R-C0/R-C2; §5 R-D1; acceptance 13 |
-| B3 — observer projection can be compacted away | Chose the tear's **observer-progress retention claimant** alternative. Compaction never overtakes it; admission fails before doing so, and observer progress wakes admission without polling. **Alternative not chosen:** no second outbox or queue is introduced. | §2 R-A4; §4 R-C4; acceptance |
-| M1 — duplicate attach succeeds while replacement connection is unbound | Receipt recovery and binding are distinct typed outcomes. A different connection receives `UnboundReceipt`; the SDK persists it, then performs a fresh tokenized attach before exposing replay/ack authority. **R3 tension:** response content remains stable, but “byte-identical success” is withdrawn across connections because it was ambiguous. | §4 R-C0/R-C1; §5 R-D1; acceptance 14 |
-| M2 — receipt freshness and unbounded lifetime | Added monotonic `capability_generation`, crash-safe SDK persistence ordering, negotiated signed receipt age/count caps, typed stale-proof/expired-receipt outcomes, and deadline-event GC. No expiry sweep or timer asks whether state changed. | §4 R-C0/R-C1; §5 R-D1; §7; acceptance 15 |
-| M3 — marker swallows retained entitled payload | Chose **explicit authorized abandonment through the watermark**. R-C3's promise is narrowed to continuous history, marker fields are renamed `abandoned_after`/`abandoned_through`, and the example says retained 20–29 are deliberately abandoned only on marker ack. | §4 R-C3–R-C5; §5 R-D1; acceptance 6 |
-| M4 — retention claim has no floor formula | Defined one monotonic physical-floor formula combining soft member cursors, hard observer progress, and both hard caps; specified atomic prefix removal, cap-overtake markers, last-claim Leave, and multiple-claim/at-cap/below-cap/cursor-0 examples. | §4 R-C4; acceptance 16 |
+| B1 — receipt classifier lacks provenance | Chose **bounded non-secret token fingerprints**. Exact `ReceiptExpired` reason is promised only inside the signed provenance window; a fresh losing token is `StaleAuthority`, and after provenance GC both exact and unknown old tokens are honestly `StaleOrUnknownReceipt`. | §4 R-C0; §5 R-D1; acceptance 17 |
+| M1 — retirement tombstones are unbounded | Added signed conversation/server retirement-slot caps reserved before enrollment. A live identity reservation converts to its permanent tombstone on Leave, so Leave cannot fail for capacity; pre-enrollment `IdentityCapacityExceeded` bounds churn while preserving `Retired` and duplicate `LeaveCommitted` forever. No cleanup sweep exists. | §4 R-C0/R-C2; §5 R-D1; acceptance 18 |
+| M2 — observer backpressure is incomplete | Added `ObserverBackpressure` to every affected operation and a pushed `ObserverAdmissionReady` transition. The SDK parks the exact request/token and retries once only when TOLD. Added genuine socket `«WEDGED-OBSERVER-POLICY»` for deterministic poison without silent progress. | §2 R-A4; §5 R-D1; §7; acceptance 19 |
+| M3 — TTL manufactures total credential loss | Declared negotiated receipt TTL the deployment's maximum supported recovery outage. Lost response plus expiry enters terminal SDK `CredentialRecoveryLost`, preserving participant/conversation identity and routing only to `«ATTACH-SECRET-LIFECYCLE»` operator re-issue. | §4 R-C0/R-C1; §7; acceptance 20 |
+| M4 — wire outcomes are not exhaustive | Replaced generic refusal prose with an exhaustive per-operation R-D1 table naming discriminant, echoed fields, retryability, and SDK transition; explicitly added `GenerationExhausted`, capacity failures, and backpressure outcomes. | §5 R-D1; acceptance 21 |
 
 ## 1. The verified gap
 
@@ -149,7 +152,7 @@ existing frame that jointly carries participant identity, conversation identity,
 a durable authorized cursor, replay position, and lifecycle verdict, or by
 showing server Subscribe consumes such a cursor. A nearby field with narrower
 scope does not close the gap. Conversely, finding the named listener loop does
-not refute R4; it proves the explicit retirement prerequisite remains unmet.
+not refute R5; it proves the explicit retirement prerequisite remains unmet.
 
 ## 2. Section (a) — participant lifecycle at the participant boundary
 
@@ -247,13 +250,26 @@ Each conversation stores a durable cumulative `observer_progress` initialized to
 records without a callback, and advances across a lifecycle record only after
 its at-least-once projection is durably marked. `observer_progress` is R-C4's
 **hard retention claimant**: no compaction commit may remove a sequence above it.
-If satisfying either retention cap would require that removal, the candidate log
-admission is atomically refused with typed `ObserverBackpressure`, consumes no
-sequence, and waits for a later caller retry; observer-progress persistence emits
-the wake that makes new admission possible. There is no outbox, hidden queue,
-poll, sweep, or periodic retry. Thus an arbitrarily long observer outage remains
-bounded by the existing log caps: the log fills, admissions refuse, the lifecycle
-fact remains reconstructible, and observer recovery resumes projection.
+If satisfying either retention cap would require that removal, every operation
+listed in R-D1's fail-closed set returns typed
+`ObserverBackpressure { conversation_id, backpressure_epoch,
+observer_progress }`, commits nothing, and consumes no sequence. The SDK durably
+parks the exact request, attempt token where present, and generation as
+`AwaitingObserverAdmission`; it does not retry on a timer. When persisted observer
+progress changes the conversation from blocked to admissible, the server pushes
+one coalesced `ObserverAdmissionReady { conversation_id,
+backpressure_epoch }` event to attached connections; a later attach result also
+reports the current epoch/readiness so reconnect cannot miss it. Only that TOLD
+event/status permits one same-request retry. Duplicate/lost backpressure
+responses return the same epoch while blocked, so response loss creates no loop.
+There is no outbox, hidden request queue, poll, or sweep.
+
+An arbitrarily long observer outage therefore remains bounded: admissions refuse
+and lifecycle facts remain reconstructible. A deterministic callback failure at
+sequence K may freeze the conversation indefinitely; replacement/retirement
+without advancing past K is the genuine owner socket
+`«WEDGED-OBSERVER-POLICY»`. Implementations may not skip K, weaken the hard claim,
+or invent automatic observer retirement.
 
 ### Silence-attacking acceptance frame
 
@@ -270,8 +286,14 @@ admit until both byte and entry caps would be exceeded, and prove further commit
 receive typed `ObserverBackpressure` without sequence consumption while every
 unprojected lifecycle record remains retained. Recover one observer: its own
 progress event permits only its conversation to admit again, with all pending
-callbacks delivered at least once; no timer or sweep participates. Separately
-force the worker-registration storage rollback at
+callbacks delivered at least once; no timer or sweep participates. At the cap,
+submit a valid authoritative Leave, lose its `ObserverBackpressure` response, and
+replay: prove the same epoch and no `Left`. Recover the observer, receive one
+`ObserverAdmissionReady`, retry the same Leave token once, and prove one `Left`.
+Then make callback K deterministically fail across restart; prove progress holds
+at K, all appending operations fail closed, and only
+`«WEDGED-OBSERVER-POLICY»` can authorize replacement—never a silent skip.
+Separately force the worker-registration storage rollback at
 `crates/liminal-server/src/server/connection/apply.rs:205-213`; assert the
 worker compensation callback runs while **zero** participant events or records
 are produced. A reviewer refutes this section by finding a fake cause on
@@ -288,7 +310,7 @@ detection remains event-driven—linked-EXIT in-VM, connection-fate
 cross-process. No heartbeat frame, periodic sweep, scan, synthetic liveness
 write, or timer whose job is to ask whether state changed.
 
-R4 retains two different liveness classes:
+R5 retains two different liveness classes:
 
 1. **Class 1 — host/network/TCP-path death.** Host down, network partition or
    black hole, socket close, FIN/EOF, and fatal socket errors are connection-fate
@@ -333,7 +355,7 @@ adapter must:
 The fields extend the named/defaulted/nonzero `LimitsConfig` pattern verified in
 §1. Exact signed defaults, platform mappings, and macOS/Linux worst-case formula
 remain the genuine evidence socket `«NO-FIN-KERNEL-BOUND»` together with
-`«KEEPALIVE-PORTABILITY»`; R4 does not manufacture numbers.
+`«KEEPALIVE-PORTABILITY»`; R5 does not manufacture numbers.
 
 **R-B3 — Honest Class-1 bound.** The advertised detection bound is the supported
 platform's documented worst case for the read-back configuration, including
@@ -396,47 +418,59 @@ uses `(conversation_id, participant_id, leave_attempt_token)`. All serialize on
 the same participant state. A duplicate commits no second capability, binding,
 lifecycle record, rotation, cursor transition, or retention claim.
 
-Every attach receipt contains `{ participant_id, capability_generation,
-attach_secret, originating_connection_incarnation, receipt_expires_at }` and has
-an explicit state:
+Every live attach receipt contains `{ participant_id, capability_generation,
+attach_secret, originating_connection_incarnation, receipt_expires_at }`. Replay
+on its authoritative origin returns `Bound`; replay on another connection returns
+`UnboundReceipt` with the same credential payload and never binds that connection.
+Leave overrides every receipt with non-secret `Retired`.
 
-- while its generation is current and its origin binding is authoritative, replay
-  on that same connection returns the original typed `Bound` result;
-- replay on any other connection returns typed `UnboundReceipt` with the same
-  credential payload and **does not** bind that connection;
-- after a newer generation completes/forgets the receipt, replay returns typed
-  `ReceiptExpired { reason: Superseded, receipt_generation,
-  current_generation }` and returns no secret;
-- after R-C2 Leave commits, every enrollment and attach receipt for the participant
-  returns typed `Retired` and returns no secret; and
-- after the live receipt deadline, replay returns typed
-  `ReceiptExpired { reason: Deadline, ... }` and returns no secret.
+**Bounded provenance.** Each committed token also has a non-secret fingerprint
+record `{ token_fingerprint, participant_id, request_generation,
+result_generation, terminal_reason, provenance_expires_at }`. While that record
+exists, the server may claim exact provenance: an exact committed token whose
+body was ended by a newer generation returns
+`ReceiptExpired { reason: Superseded, ... }`; one ended by its deadline returns
+`ReceiptExpired { reason: Deadline, ... }`. At the same old generation, a fresh
+token absent from the complete in-window fingerprint set returns
+`StaleAuthority`, proving no commit for that token. After the fingerprint's
+provenance deadline, both an exact old token and an unknown old token return
+`StaleOrUnknownReceipt { presented_generation, current_generation }`, which
+expressly does **not** claim that a transaction committed. A retired identity's
+tombstone still wins and returns `Retired`.
 
-Thus byte identity applies only to a live receipt's credential payload, never to
-connection-binding status or across the terminal/expiry state transitions. The
-participant record permanently retains the one enrollment-token fingerprint, so
-an expired or retired enrollment token can never mint a ghost. Credential retry
-requests carry `participant_id` and the presented generation; their expected
-result generation is its checked successor (enrollment expects `1`). If current
-generation equals that expected result but no live token entry remains, replay is
-`ReceiptExpired { reason: Deadline }`; if current generation is greater, it is
-`ReceiptExpired { reason: Superseded }`; a participant tombstone makes it
-`Retired`. The server therefore returns the exact typed state after the
-secret-bearing body is gone without retaining every historical secret or token.
-
-Receipt cost is signed and known before send. Add nonzero
-`attach_receipt_ttl_ms`, server-wide `max_pending_attach_receipts`, and
-`max_pending_attach_receipts_per_participant`, each with a signed default and
-advertised in negotiated participant capability state; they extend the verified
-named/defaulted/nonzero `LimitsConfig` pattern
+Receipt/provenance cost is signed and known before send. Add nonzero
+`attach_receipt_ttl_ms`, `receipt_provenance_ttl_ms` (not shorter than the receipt
+TTL), server-wide and per-participant live-receipt caps, and server-wide,
+per-conversation, and per-participant provenance-fingerprint caps, all with signed
+defaults advertised in negotiated participant capability state. They extend the
+verified named/defaulted/nonzero `LimitsConfig` pattern
 (`crates/liminal-server/src/config/types.rs:193-203`,
-`crates/liminal-server/src/config/types.rs:257-316`). Receipt-cap exhaustion
-refuses the candidate attach before commit. A receipt becomes non-live at the
-earliest of: a later authorized mutation proves its returned generation/secret,
-Leave terminalizes it, or its commit-derived deadline expires. GC removes the
-secret-bearing body at that boundary. Expiry uses one admitted durable deadline
-event (and a request-time deadline check), never a periodic sweep or timer that
-asks whether state changed.
+`crates/liminal-server/src/config/types.rs:257-316`). If either complete bounded
+set lacks capacity, the candidate attach returns
+`ReceiptCapacityExceeded { scope, limit }` before commit. A later authorized
+proof, Leave, or receipt deadline removes the secret body; the non-secret
+fingerprint remains only through its provenance deadline. Both cleanups are
+admitted durable deadline events plus request-time checks—never a sweep.
+
+**Bounded retirement identity.** Add signed nonzero server-wide and
+per-conversation `max_retired_identity_slots`. Enrollment must reserve one slot
+in both scopes before mint and returns
+`IdentityCapacityExceeded { scope, limit }` if either is full. A live participant's
+reservation counts against the cap; Leave converts that same reservation into
+the permanent non-secret tombstone without another capacity decision. Slots are
+not cleaned up in v1, preserving exact `Retired`, no-ghost enrollment replay, and
+stable lost-response `LeaveCommitted` forever while bounding total authenticated
+enroll/Leave churn. There is no tombstone sweep.
+
+The negotiated receipt TTL is normatively the deployment's **maximum supported
+recovery outage**. If generation G is invalidated by a committed G+1 attach, its
+response is lost, and the client returns after the secret body expired, no wire
+outcome can restore G+1. On exact `ReceiptExpired` or later
+`StaleOrUnknownReceipt` while the SDK has only invalid G, it durably enters
+terminal `CredentialRecoveryLost { conversation_id, participant_id,
+last_known_generation }`, preserves those identities, disables attach/replay/ack,
+and routes only to `«ATTACH-SECRET-LIFECYCLE»` operator re-issue. It never retries
+periodically.
 
 **R-C1 — Retry-safe enrollment, generation-ordered rotation, and binding.** Every
 successful attach returns a newly minted secret: enrollment creates generation
@@ -544,8 +578,9 @@ from transient attachment:
    secret, converts every outstanding enrollment/attach receipt to R-C0
    `Retired`, releases the member cursor/soft retention claim, and permanently
    tombstones `participant_id` in one commit. The tombstone retains the enrollment
-   fingerprint and successful Leave token/result but no attach secret. Tombstone
-   lookup precedes live capability validation: duplicate Leave with that token
+   fingerprint and successful Leave token/result but no attach secret; it converts
+   the retirement slot reserved by enrollment under R-C0 and cannot exceed either
+   signed cap. Tombstone lookup precedes live capability validation: duplicate Leave with that token
    returns the stable `LeaveCommitted { retired_generation, left_delivery_seq }`
    and commits no second record even though the secret is now invalid; any other
    later attach/Leave returns `Retired` with no record.
@@ -766,6 +801,27 @@ R-A2.
     cursor-0 Leave, and cursor-0 late mint at cap. Assert the exact removed prefix,
     monotonic `F'`, which member is overtaken, observer hard-stop refusal, marker
     fields, and the final empty-log floor after observer progress.
+17. From generation G, let exact token T commit G+1 while fresh token U loses.
+    Inside the provenance window, T replay after secret-body GC must be exact
+    `ReceiptExpired { reason: Superseded }` while U is `StaleAuthority`. After T's
+    fingerprint deadline, both T and U return `StaleOrUnknownReceipt`; neither
+    claims a commit, leaks a secret, binds, or writes a record.
+18. Churn enroll/Leave until each conversation/server retirement-slot boundary.
+    Every admitted enrollment has a reserved slot; lost Leave response still
+    returns stable `LeaveCommitted`, retired enrollment replay cannot ghost-remint,
+    and the next enrollment returns `IdentityCapacityExceeded` without minting.
+19. Force `ObserverBackpressure` separately on enrollment attach, credential
+    attach, ordinary record admission, valid Leave, normal ack, and marker ack.
+    Lose each response and prove same epoch/no commit; after one pushed Ready,
+    retry each exact request once. A poison callback reaches the named socket.
+20. Commit G+1, lose its response, crash the client past `receipt_expires_at`, GC
+    the secret, then replay T. Assert non-secret `ReceiptExpired` (or
+    `StaleOrUnknownReceipt` after provenance), terminal `CredentialRecoveryLost`
+    preserving conversation/participant/G, and no automatic retry.
+21. Drive generation to its maximum and prove `GenerationExhausted` is terminal,
+    non-retryable, and no-commit. Exercise live-receipt and fingerprint-cap
+    `ReceiptCapacityExceeded`, every R-D1 discriminant's echoed fields, and the
+    table's required SDK transition/retryability.
 
 A reviewer refutes R-C0–R-C4 by finding an exactly-once application-effect
 claim, changed delivery key, ghost enrollment, `Bound` on an unbound replacement
@@ -780,34 +836,59 @@ refute cumulative ack because targeted v1 delivery does not exist.
 
 ### Proposed contract
 
-**R-D1 — Typed participant records and transaction outcomes.** Add versioned
-participant frame types for:
+**R-D1 — Exhaustive participant requests and outcomes.** Add versioned request
+frames for enrollment, credential attach/receipt replay, cumulative ack, Leave,
+marker ack, and ordinary record admission. Every outcome carries its named
+discriminant and `conversation_id`; it echoes the request token when one exists,
+`participant_id` and `capability_generation` when known, and the operation's
+requested sequence/generation. No generic “proof/admission refusal” exists.
+Connection authentication/version failures remain R-D2 pre-participant outcomes.
 
-- enrollment request `{ conversation_id, enrollment_token }` and credential
-  attach request `{ conversation_id, participant_id, capability_generation,
-  attach_secret, attach_attempt_token }`;
-- attach outcomes that echo the attempt token and distinguish
-  `Bound`, `UnboundReceipt`, `ReceiptExpired` (deadline or superseded), `Retired`,
-  and proof/admission refusal. Secret-bearing outcomes carry `participant_id`,
-  `capability_generation`, `attach_secret`, and `receipt_expires_at`; no secret
-  enters a broadcast record;
-- the missing Leave request `{ conversation_id, participant_id,
-  capability_generation, attach_secret, leave_attempt_token }`, plus
-  `LeaveCommitted`, `StaleAuthority`, and `Retired` outcomes that echo its token;
-- participant delivery carrying `conversation_id`, optional
-  `sender_participant_id`, `delivery_seq`, record kind, and opaque payload;
-- explicit cumulative `ParticipantAck`; and
-- typed compaction/abandonment and other refusal outcomes.
+| Operation | Named outcome discriminant | Required fields | Retryability and required SDK transition |
+|---|---|---|---|
+| Enrollment attach | `EnrollBound` | enrollment token, participant id, generation `1`, secret, receipt/provenance deadlines | Success; persist before exposing `Bound`; replay same token only after unknown response. |
+| Enrollment attach | `EnrollUnboundReceipt` | same credential fields, origin incarnation | Persist, then fresh-token credential attach; never expose binding. |
+| Enrollment attach | `ReceiptExpired` | token, participant id, result/current generations, `Deadline` or `Superseded` | Not retryable; preserve any newer credential, otherwise enter `CredentialRecoveryLost`. |
+| Enrollment attach | `StaleOrUnknownReceipt` | token, participant id when mapped, presented/current generations | Not retryable; claims no commit; preserve newer credential or enter `CredentialRecoveryLost`. |
+| Enrollment attach | `Retired` | token, participant id, retired generation | Terminal; preserve identity for operator record, no attach. |
+| Enrollment attach | `ReceiptCapacityExceeded` | token, `scope`, `limit` | No SDK auto-retry; surface typed admission refusal. |
+| Enrollment attach | `IdentityCapacityExceeded` | token, `scope`, `limit` | Terminal for new enrollment; no participant was minted. |
+| Enrollment attach | `ObserverBackpressure` | token, observer progress, backpressure epoch | Persist `AwaitingObserverAdmission`; retry same token once only after `ObserverAdmissionReady`. |
+| Enrollment attach | `ConversationSequenceExhausted` | token, terminal sequence | Terminal conversation failure; no mint. |
+| Credential attach | `AttachBound` | attach token, participant id, new generation/secret, deadlines, incarnation | Success; generation-ordered persist, then expose binding. |
+| Credential attach | `AttachUnboundReceipt` | same credential fields, origin incarnation | Persist, then fresh-token attach; no replay/ack authority. |
+| Credential attach | `ReceiptExpired` / `StaleOrUnknownReceipt` / `Retired` | attach token and fields defined above | Never retry same request; preserve newer credential or enter the specified terminal state. |
+| Credential attach | `StaleAuthority` | token, presented/current generations | Terminal for this request; preserve current durable credential. |
+| Credential attach | `GenerationExhausted` | token, participant id, current generation = maximum | Terminal, not retryable; enter `CapabilityGenerationExhausted`, preserve identity, no commit. |
+| Credential attach | `ReceiptCapacityExceeded` / `ObserverBackpressure` / `ConversationSequenceExhausted` | token plus capacity/epoch/sequence fields above | Capacity is surfaced; backpressure is Ready-only retry; exhaustion is terminal. |
+| Receipt replay | `Bound` / `UnboundReceipt` | exact token plus live receipt fields | Same-connection binding or persist-then-fresh-attach respectively. |
+| Receipt replay | `ReceiptExpired` | exact fingerprint, reason, result/current generations | Exact only inside provenance window; not retryable; preserve newer credential or `CredentialRecoveryLost`. |
+| Receipt replay | `StaleAuthority` | fresh token absent from complete in-window set, presented/current generations | Proves no commit for this token; not retryable. |
+| Receipt replay | `StaleOrUnknownReceipt` | token, presented/current generations | Post-provenance ambiguity; claims no commit; no automatic retry. |
+| Receipt replay | `Retired` | token, participant id, retired generation | Terminal; no secret or binding. |
+| `ParticipantAck` | `AckCommitted` | participant id, generation, requested `through_seq`, persisted cursor | Success; advance SDK watermark. |
+| `ParticipantAck` | `AckNoOp` | generation and unchanged cursor | Success; idempotent confirmation. |
+| `ParticipantAck` | `AckGap` / `AckRegression` / `StaleAuthority` / `Retired` | generation, requested/current cursor, reason | Terminal for this ack; do not advance SDK watermark. |
+| `ParticipantAck` | `ObserverBackpressure` | generation, `through_seq`, epoch/progress | Park exact ack; retry once after Ready. |
+| `LeaveRequest` | `LeaveCommitted` | leave token, retired generation, `left_delivery_seq` | Success; terminal participant state. Duplicate token returns same result. |
+| `LeaveRequest` | `StaleAuthority` / `Retired` | leave token, presented/current or retired generation | Terminal; no record. |
+| `LeaveRequest` | `ObserverBackpressure` | leave token, generation, epoch/progress | Preserve valid authority/request; retry same token once after Ready. |
+| `LeaveRequest` | `ConversationSequenceExhausted` | leave token, terminal sequence | Terminal fail-closed: Leave cannot commit; surface conversation failure. |
+| Marker ack | `MarkerAckCommitted` / `AckNoOp` | participant id, generation, marker seq, persisted cursor | Success; record abandonment or idempotent confirmation. |
+| Marker ack | `MarkerNotDelivered` / `MarkerMismatch` / `StaleAuthority` / `Retired` | generation, marker/requested/current sequences, reason | Terminal for this ack; cursor holds. |
+| Marker ack | `ObserverBackpressure` | generation, marker seq, epoch/progress | Park exact ack; retry once after Ready. |
+| Ordinary record admission | `RecordCommitted` | sender, assigned delivery seq | Success. |
+| Ordinary record admission | `RecordTooLarge` / `ConversationSequenceExhausted` | measured cap/terminal sequence | Terminal for this record; no sequence consumed. |
+| Ordinary record admission | `ObserverBackpressure` | sender, epoch/progress | Park exact admission; retry once after Ready. |
 
-Application records name a sender. Lifecycle records name the affected
-participant and incarnation and carry attach/detach/death/Leave plus R-A1 cause.
-`HistoryCompacted` names the affected participant, `abandoned_after`,
-`abandoned_through`, and `physical_floor_at_decision`; it is an abandonment
-offer, not a claim that the whole interval was physically removed. Every
-committed record has the R-C2 sequence and is entitled to all members in that
-order, whether attached or not. `conversation_id`, not `stream_id`, is the mux
-key. From a result alone the SDK can always distinguish credential recovery from
-connection authority and order credentials by generation.
+`ObserverAdmissionReady { conversation_id, backpressure_epoch }` is a pushed
+state-transition event, not a response and not a polling invitation. Receipt and
+identity capacity refusals are terminal for that request; no readiness event is
+promised. `HistoryCompacted` carries affected participant, `abandoned_after`,
+`abandoned_through`, and `physical_floor_at_decision`. Participant delivery
+carries conversation, optional sender, delivery sequence, record kind, and opaque
+payload. Every record has R-C2 order and member entitlement. `conversation_id`,
+not `stream_id`, is the mux key.
 
 **R-D2 — One structural protocol-capability choke point.** Leave Push
 byte-for-byte untouched and add participant frame discriminants beside it. Push
@@ -912,7 +993,8 @@ resume vehicle. Until then it remains blocked upstream.
 - No ACL or human/agent identity mapping; that belongs above the participant
   continuity capability.
 - No exactly-once application effect guarantee.
-- No lifecycle outbox or unbounded secret-bearing receipt store.
+- No lifecycle outbox or unbounded secret-bearing receipt, provenance-fingerprint,
+  or retired-identity store.
 - No application heartbeat, poll, sweep, scan, synthetic probe, receipt-expiry
   sweep, observer retry loop, or wall-clock liveness score.
 - No connection-fate detection for SIGSTOP/deadlock/livelock.
@@ -924,22 +1006,23 @@ resume vehicle. Until then it remains blocked upstream.
 
 A reviewer refutes this section by finding a hidden ACL claim, SDK ergonomics
 commitment, exactly-once effect promise, targeted-delivery branch, schedule, or
-liveness detector. The receive brief must be implementable from explicit R4
+liveness detector. The receive brief must be implementable from explicit R5
 facts, except where §7 names a genuine gate.
 
 ## 7. Named sockets and decision register
 
-R4 distinguishes decisions made by the draft from genuine unknowns. A
+R5 distinguishes decisions made by the draft from genuine unknowns. A
 **decided-by-draft** row has one candidate answer and may change only by explicit
 key refusal/revision. A **genuinely-open** row names unavailable platform
 evidence, an implementation linearization mechanism, a layer-above policy, or
 an owner migration decision. Open rows are not permission for implementations
 to choose incompatible semantics silently.
 
-| Socket | Status | R4 answer or reason openness is genuine | Closure/refutation evidence |
+| Socket | Status | R5 answer or reason openness is genuine | Closure/refutation evidence |
 |---|---|---|---|
-| `«ATTACH-TRANSACTION»` | **decided-by-draft** | Attach and Leave use mandatory write-ahead tokens and one serialized participant state. Duplicate operations commit nothing; attach replay returns typed `Bound`/`UnboundReceipt`/`ReceiptExpired`/`Retired`, never ambiguous success. | All send/commit/response windows, replacement-connection recovery, and terminal receipt tests. |
-| `«RECEIPT-LIFETIME»` | **decided-by-draft** | Monotonic generations plus negotiated signed nonzero receipt TTL/count caps bound secret-bearing receipts. Later proof, Leave, or deadline terminalizes the receipt; expiry GC is a deadline event, not a sweep. | Delayed-generation, crash-order, before/after-deadline, cap-exhaustion, and idle-no-sweep tests. |
+| `«ATTACH-TRANSACTION»` | **decided-by-draft** | Attach and Leave use mandatory write-ahead tokens and one serialized participant state. Duplicate operations commit nothing; attach replay returns typed bound/unbound, exact in-window expired, honest post-window `StaleOrUnknownReceipt`, or `Retired`, never invented provenance. | All send/commit/response windows, replacement recovery, exact-T/fresh-U, and terminal receipt tests. |
+| `«RECEIPT-LIFETIME»` | **decided-by-draft** | Signed receipt TTL/count and non-secret provenance TTL/count caps bound both bodies and classifiers. Cleanup uses admitted deadlines; TTL is the maximum supported recovery outage and expiry may enter `CredentialRecoveryLost`. | Delayed generation, crash order, exact/unknown before/after provenance, cap exhaustion, composed outage, and no-sweep tests. |
+| `«RETIRED-IDENTITY-BOUND»` | **decided-by-draft** | Enrollment reserves signed server/conversation retirement slots; Leave converts its reservation to a permanent tombstone. Cap exhaustion refuses before mint, so churn is bounded without weakening `Retired` or duplicate `LeaveCommitted`. | Boundary churn, no-ghost replay, lost Leave response, and pre-mint capacity refusal. |
 | `«PARTICIPANT-ID-ORIGIN»` | **decided-by-draft** | Server mints participant id, generation 1, and initial secret inside tokenized enrollment; later attach proves current generation/secret and atomically increments/rotates before cursor access. External ids never authorize a cursor. | Authorization-before-cursor, collision, enrollment replay, generation ordering, rotation loss, and reconnect tests. |
 | `«MEMBERSHIP-BOUNDARY»` | **decided-by-draft** | Membership begins at mint with cursor `0`, survives detach, entitles full history and offline commits, and ends only with authoritative tokenized Leave that retires id, receipts, and soft retention claim. | Late join, offline replay, Leave authority/idempotency/races, and floor-transition tests. |
 | `«LEAVE-AUTHORITY»` | **decided-by-draft** | Only the current bound incarnation proving current generation/secret may Leave. Attach and Leave serialize: attach-first makes old Leave stale; Leave-first makes attach/receipts retired. V1 has no operator Leave. | Shared-bearer/stale-proof refusals, duplicate stable result, and both race orders. |
@@ -948,15 +1031,16 @@ to choose incompatible semantics silently.
 | `«RETENTION-UNITS»` | **decided-by-draft** | Both bytes and entries, with signed nonzero caps. `F'=max(F,min(min_member_or_H,observer_progress)+1,cap_floor)`; members are soft, observer progress hard, and one commit removes `[F,F')`. | Exact byte/entry accounting, multiple claims, observer stop, cap overtake, and Leave examples. |
 | `«MULTI-CONVERSATION-MUX»` | **decided-by-draft** | Yes. One connection carries many conversations, demuxed by `conversation_id`; participant `stream_id = 0` and has no semantic role. | Cross-conversation interleaving and independent-cursor tests. |
 | `«LIFECYCLE-VERDICT-RECIPIENTS»` | **decided-by-draft** | Every member is entitled to every lifecycle/compaction record in total order, including while detached, unless it explicitly accepts a named abandonment after compaction broke continuity. | Three-party lifecycle/compaction races, offline replay, and explicit-abandonment tests. |
-| `«LIFECYCLE-OBSERVER-DELIVERY»` | **decided-by-draft** | The log is sole authority; per-conversation observer progress is a hard retention claimant. Projection is at-least-once with exactly-once marking; admission refuses before compaction could erase pending lifecycle. No outbox exists. | Both observer crash windows, outage past both caps, independent conversation recovery, stable-key dedupe, and zero-event rollback. |
+| `«LIFECYCLE-OBSERVER-DELIVERY»` | **decided-by-draft** | The log is sole authority and observer progress is a hard claim. Every fail-closed operation returns `ObserverBackpressure`; `ObserverAdmissionReady` TELLs attached/reconnected SDKs when one exact retry is permitted. No outbox/request queue exists. | Both crash windows, outage past caps, every appending/ack operation, response loss, TOLD retry, independent recovery, and zero-event rollback. |
 | `«SUPERSESSION-FENCE»` | **decided-by-draft** | Every credential-bearing successful attach checked-increments generation and rotates the secret; stale proof is a connection-level no-record refusal. | Two-holder generation race, single handoff pair, rotation receipt recovery, and stale-proof zero-record tests. |
-| `«RESUME-COMMENT-SERVER-MISMATCH»` | **genuinely-open** | Owner must choose separate legacy subscription recovery versus version/deprecate/delete it for participant attach. Outline governs over the earlier tear's preference to decide now; R4 nevertheless makes “comment-only fix” insufficient. | Owner ruling covering types, cursor owner, starting convention, persistence, release boundary, and removal/compatibility tests. |
+| `«RESUME-COMMENT-SERVER-MISMATCH»` | **genuinely-open** | Owner must choose separate legacy subscription recovery versus version/deprecate/delete it for participant attach. Outline governs over the earlier tear's preference to decide now; R5 nevertheless makes “comment-only fix” insufficient. | Owner ruling covering types, cursor owner, starting convention, persistence, release boundary, and removal/compatibility tests. |
 | `«EXTERNAL-EXIT-REASON»` | **genuinely-open** | Current external reap cannot read the private beamr exit reason; complete `ProcessKilled` detail needs event/API plumbing, not inference. | Typed event payload or nonblocking termination-reason API; no scan substitute. |
 | `«NO-FIN-KERNEL-BOUND»` | **genuinely-open** | Exact signed defaults and macOS/Linux worst-case formulas require platform evidence. The contract shape and refusal policy are decided; numbers are not invented. | Platform documentation, readback, and black-hole fault tests proving lower/worst-case behavior. |
 | `«KEEPALIVE-PORTABILITY»` | **genuinely-open** | Supported target option/range/granularity mapping and refusal matrix require target validation. | Per-target set/readback and bounded fault tests; unsupported targets refuse. |
 | `«REPLAY-LIVE-CUTOVER»` | **genuinely-open** | External behavior is fixed, but the atomic sequencer/storage/binding linearization mechanism depends on the selected durability backend. | Named linearization point and adversarial attach/replay/live/crash tests. |
-| `«ATTACH-SECRET-LIFECYCLE»` | **genuinely-open (narrowed)** | Receipt lifetime is decided and is not credential revocation. The deferred reachable state is total client-side loss of current secret and every live receipt/enrollment recovery path, requiring operator re-issue; post-receipt capability expiry and revocation policy remain open. | Threat model and authorized operator re-issue; atomic capability expiry/revocation preserving generation, Retired, and no-polling rules. |
+| `«ATTACH-SECRET-LIFECYCLE»` | **genuinely-open (narrowed)** | Receipt lifetime is decided and is not credential revocation. The negotiated TTL is the maximum recovery outage; lost response plus expiry normatively produces SDK `CredentialRecoveryLost` with preserved identity. Operator re-issue, post-receipt capability expiry, and revocation remain open. | Threat model and authorized operator re-issue from `CredentialRecoveryLost`; atomic expiry/revocation preserving generation, Retired, and no-polling rules. |
 | `«WEDGED-PARTICIPANT-POLICY»` | **genuinely-open** | Connection-fate exclusion is decided. Alerting/eviction for cursor stall belongs to the layer above and must not feed a false lifecycle verdict back into this layer. | Layer-owner policy demonstrating no polling detector and no false `ConnectionLost`. |
+| `«WEDGED-OBSERVER-POLICY»` | **genuinely-open** | A deterministic callback failure at sequence K truthfully freezes the conversation. Owner must define operator replacement or retirement that resumes from K without silently advancing observer progress, skipping lifecycle, polling, or weakening the hard claim. | Operator-authority ruling, same-key replay/replacement evidence, poison recovery tests, and no-skip audit. |
 | `«TARGETED-DELIVERY»` | **genuinely-open (future only)** | V1 excludes it. A future version must redesign entitlement, cursor scanning, ack validation, and capability negotiation rather than weakening broadcast implicitly. | New versioned contract and mixed-version/recipient-gap tests; not a v1 implementation gate. |
 | `«LIMINAL-SDK-VERSION-GATE-NAME»` | **decided-by-draft (owner-closed)** | Preserve both real gates: filled `«LIMINAL-BASE-VERSION: 0.2.4»` and unfilled future `«LIMINAL-SDK-VERSION»`. | Existing owner reconciliation and exact names in §6. |
 
@@ -978,9 +1062,9 @@ existing domain event rather than change detection.
 
 ---
 
-**Gate posture:** DESIGN DRAFT R4. The five R1 blockers and all six R2 refusal
-items remain resolved in form; R4 closes the seven R3 composition findings by
-explicit decisions without adding a second durability mechanism. The socket
-register separates decisions from real unknowns. Reviewer key plus Hermes
-Crumpet's liminal domain-owner key are still required; until both turn, this
-document is not ratified and grants no implementation authority.
+**Gate posture:** DESIGN DRAFT R5. The five R1 blockers, six R2 refusal items,
+and seven R3 composition findings remain resolved; R5 closes the five R4
+failure-taxonomy findings by explicit decisions. The socket register separates
+decisions from real unknowns. Reviewer key plus Hermes Crumpet's liminal
+domain-owner key are still required; until both turn, this document is not
+ratified and grants no implementation authority.
