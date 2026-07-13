@@ -347,7 +347,11 @@ cursor authority is a separate capability:
 
 This is a participant-scoped continuity capability, **not an ACL system**. The
 shared token still gates the connection; the attach secret gates only identity
-continuity and that participant's cursor. Mapping humans, agents, or external
+continuity and that participant's cursor. The shape deliberately echoes the
+frame program's F-1b grant vocabulary — a narrow capability minted by the
+authority that owns the guarded resource, proven on use, never derived from a
+broader credential — so the two layers stay conceptually alignable without
+either citing the other's implementation. Mapping humans, agents, or external
 principals to participants belongs to aion/the layer above. If the domain owner
 later prefers externally minted participant ids, the security decision survives:
 the server still mints and binds the secret, and external ids cannot authorize a
