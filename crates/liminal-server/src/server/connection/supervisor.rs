@@ -435,6 +435,15 @@ impl ConnectionSupervisor {
         self.inner.runtime.readiness_fd(pid)
     }
 
+    /// Installs a one-use observation for the process-owned stream at `fd` being
+    /// dropped. External scheduler termination removes the process-table entry
+    /// before an executing native handler is destroyed, so table absence is not
+    /// sufficient evidence that the descriptor is reusable.
+    #[cfg(test)]
+    pub(super) fn observe_process_stream_drop(&self, fd: RawFd) -> Receiver<()> {
+        self.inner.runtime.observe_process_stream_drop(fd)
+    }
+
     /// Installs a one-use arm-to-probe barrier and returns its test endpoints.
     #[cfg(test)]
     pub(super) fn install_pre_wait_barrier(&self) -> (Arc<Barrier>, Arc<Barrier>) {
@@ -945,6 +954,10 @@ pub(super) struct ConnectionRuntime {
     /// Barrier-staged slices where the final probe found newly arrived work.
     #[cfg(test)]
     pre_wait_probe_hits: AtomicU64,
+    /// One-use observers for process-owned streams reaching their actual drop
+    /// boundary after external scheduler termination.
+    #[cfg(test)]
+    process_stream_drop_observers: Mutex<HashMap<RawFd, Sender<()>>>,
     /// One-shot reply slots for in-flight server pushes, keyed by correlation id.
     /// The supervisor registers a slot in `push_to_connection`; the connection
     /// process resolves it when the matching `PushReply` frame arrives. Each slot
@@ -1001,6 +1014,8 @@ impl ConnectionRuntime {
             pre_wake_barrier: Mutex::new(None),
             #[cfg(test)]
             pre_wait_probe_hits: AtomicU64::new(0),
+            #[cfg(test)]
+            process_stream_drop_observers: Mutex::new(HashMap::new()),
             push_replies: Mutex::new(HashMap::new()),
             next_push_id: AtomicU64::new(1),
             admissions: AtomicU64::new(0),
@@ -1167,6 +1182,28 @@ impl ConnectionRuntime {
     #[cfg(test)]
     fn pre_wait_probe_hits(&self) -> u64 {
         self.pre_wait_probe_hits.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn observe_process_stream_drop(&self, fd: RawFd) -> Receiver<()> {
+        let (sender, receiver) = channel();
+        if let Ok(mut observers) = self.process_stream_drop_observers.lock() {
+            observers.insert(fd, sender);
+        }
+        receiver
+    }
+
+    /// Publishes the process-owned stream's real drop boundary to a waiting test.
+    #[cfg(test)]
+    pub(super) fn record_process_stream_drop(&self, fd: RawFd) {
+        let observer = self
+            .process_stream_drop_observers
+            .lock()
+            .ok()
+            .and_then(|mut observers| observers.remove(&fd));
+        if let Some(observer) = observer {
+            let _ = observer.send(());
+        }
     }
 
     /// Builds a runtime wrapping `services` for unit tests that exercise

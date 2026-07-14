@@ -323,21 +323,22 @@ fn external_kill_then_fd_reuse_survives_old_token_deregister()
         .readiness_fd(old.pid())
         .ok_or("old connection did not publish its readiness fd")?;
 
+    // Build the replacement pair while `old_fd` is still owned by the old process.
+    // Once the drop event arrives, the only fd allocation this test performs is the
+    // clone loop that claims the newly reusable number.
+    let (mut new_client, new_server_original) = tcp_pair()?;
+    let old_stream_dropped = supervisor.observe_process_stream_drop(old_fd);
     supervisor
         .scheduler()
         .terminate_process(old.pid(), ExitReason::Error);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while old.is_live() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    if old.is_live() {
-        return Err("externally killed process did not exit".into());
-    }
+    old_stream_dropped
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("externally killed process did not drop its stream: {error}"))?;
+    assert!(!old.is_live());
 
     // Hold clone descriptors below `old_fd` until the allocator reaches the exact
     // externally-freed number. Full-suite concurrency may leave unrelated lower
     // holes, so a single clone is not deterministic.
-    let (mut new_client, new_server_original) = tcp_pair()?;
     let mut fillers = Vec::new();
     let new_server = loop {
         let candidate = new_server_original.try_clone()?;

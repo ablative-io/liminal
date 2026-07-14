@@ -689,6 +689,16 @@ impl Drop for ConnectionProcess {
         self.release_conversations();
         let timers = self.state.pending_replies.take_retired_timers();
         self.runtime.cancel_deadline_timers(timers);
+        // External scheduler termination can remove the process-table entry while
+        // this native handler is still executing. Tests that need the descriptor
+        // allocator boundary must observe the stream's actual drop, not table
+        // absence. Production keeps the ordinary field-drop path byte-for-byte.
+        #[cfg(test)]
+        if let Some(stream) = self.stream.take() {
+            let fd = stream.as_raw_fd();
+            drop(stream);
+            self.runtime.record_process_stream_drop(fd);
+        }
     }
 }
 
