@@ -385,9 +385,17 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   constructs** the object in `subscribe_response`, beside the existing
   budget/notifier install construction (`apply.rs:349-407`), keeps a clone for
   the sub-list entry, and passes a clone **inward**. On the installed server
-  path this is always `Some`; the lower crate's ordinary `subscribe()` path may
-  construct a private unobserved instance so its public non-server behavior
-  remains unchanged.
+  path this is always `Some`. **The ordinary non-server path is decided
+  structurally, not left open (Sol r4):** the lower crate's plain
+  `subscribe()` passes `None`, and the uninstalled inbox keeps an explicit
+  no-observation representation — today's embedded `overflowed: AtomicBool`
+  (`subscription.rs:175-187`) survives as the unobserved arm, selected at
+  construction. No private observation is constructed: the public non-server
+  path performs **zero new allocations and zero depth writes**, preserving
+  its existing profile exactly; its only change is the refusal branches'
+  `store`→`swap` conversion (same width, no new cost). The refusal branches
+  write through one internal accessor that resolves to whichever arm the
+  inbox carries; depth accounting exists only in the observed arm.
 
   The inbox holds the injected object in place of today's embedded
   `overflowed: AtomicBool` (`subscription.rs:175-187`). The same three refusal
@@ -525,20 +533,31 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   after the seal zeroed it, and the count would drift nonzero on a dead
   connection while the list correctly read empty. One authority, one write,
   no drift.
-- **Process-state teardown ordering — two structural cases.** Live subscription
-  resources are owned by `ConnectionProcessState.subscriptions`
+- **Process-state teardown ordering — two structural cases, one wall.** Live
+  subscription resources are owned by `ConnectionProcessState.subscriptions`
   (`state.rs:14-32`) and are dropped with the process
-  (`process.rs:664-692`). Ordering has two honest cases. On in-handler
-  close/crash and supervisor shutdown, `finish`/`mark_crashed` removes and
-  seals before the handler returns or the scheduler is shut down
-  (`process.rs:133-182,224-299`; `supervisor.rs:274-282`), so any still-running slice
-  sees `CLOSED`. On external termination, `reap_crashed` first proves the
-  process is already absent, then removes the record
-  (`supervisor.rs:1233-1266`): process state is already gone, so no publisher
-  remains; the reaper still seals before global unpublication so stale global
-  generations resolve empty. These are the only two orders. A surviving
-  slice may mutate its private map after the seal while unwinding, but its
-  publication helper sees `CLOSED`; dropping a map cannot reopen the bundle.
+  (`process.rs:664-692`). On in-handler close/crash and supervisor shutdown,
+  `finish`/`mark_crashed` removes and seals before the handler returns or the
+  scheduler is shut down (`process.rs:133-182,224-299`; `supervisor.rs:274-282`),
+  so any still-running slice sees `CLOSED`. On external termination,
+  `reap_crashed` observes process-table absence and then removes the record
+  (`supervisor.rs:1233-1266`) — but **table absence does not prove the process
+  body, and therefore every publisher, is gone.** In the resolved beamr 0.14.0,
+  `finalize_exited_process` consumes the table token **before** the body token
+  (`scheduler/execution/core.rs:1657-1676` in the registry sources), and its
+  ownership comment explicitly permits an `Executing` shadow: a worker may
+  still own the real body — and a slice may still reach publication — after
+  the table entry is consumed (`core.rs:1640-1655`). External reap is
+  therefore **another seal-versus-live-publisher race, not a no-publisher
+  case**: the reaper removes the record, seals, and globally unpublishes; a
+  surviving executing slice's publication helper observes `CLOSED` and
+  no-ops. Both structural cases reduce to the same wall — the terminal
+  authority, not any teardown-ordering assumption, is what excludes
+  resurrection. Because this argument leans on beamr's teardown semantics,
+  the c4 pin below exercises the external-reap route explicitly so a
+  dependency change cannot silently alter the ordering. A surviving slice may
+  mutate its private map after the seal while unwinding, but its publication
+  helper sees `CLOSED`; dropping a map cannot reopen the bundle.
 - **Write authority, restated and honestly priced:** `process_buffer` applies
   frames through `&mut ConnectionProcessState` (`process.rs:695-725`), and the
   delivery pump's shed path mutates that same process state
@@ -555,14 +574,24 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   is 0; **and** a reader holding an old global-snapshot generation captured
   before the close ALSO resolves the bundle to an empty list — the
   resurrection is unobservable through both the current snapshot and a
-  reader-held stale one. Fail-first: it fails against a design without the
-  terminal state (which is the design this round replaces).
+  reader-held stale one. **Second variant — the external-reap route:** an
+  external `terminate_process` plus `reap_crashed` while a native body is
+  staged past registration but before publication (the beamr
+  table-token-before-body-token window above); asserts the identical
+  outcomes through the reaper's remove-record → seal → global-unpublish
+  path. This variant is the integration-boundary pin on beamr's teardown
+  ordering: it fails loudly if a dependency change makes table absence stop
+  implying the seal still wins. Fail-first: both variants fail against a
+  design without the terminal state (which is the design this round
+  replaces).
 - **Honest slice-path pricing:** subscribe/unsubscribe/shed IS slice-path
   work, and nothing structurally bounds a client's churn RATE (the
   occupancy cap bounds the map length, `apply.rs:349-377`, not the
   transition count — a client may subscribe/unsubscribe at frame rate
   indefinitely). The per-event cost is therefore stated as a bound, not
-  assumed infrequent: one authority lock/unlock + one ≤ 32-entry list copy +
+  assumed infrequent: one `SubscriptionObservation::new` construction (two
+  atomic allocations + one aggregate `Arc` clone, paid on failed attempts
+  too — §8 item (iv)) + one authority lock/unlock + one ≤ 32-entry list copy +
   one `ArcSwap` swap + one `subscriptions_active` store + (first subscribe
   only) one `OnceLock` fill, all connection-local. During the copy, a writer
   replacement, current generation, and one reader-held old generation may
@@ -1290,7 +1319,16 @@ steady cost this design introduces is:
   occupancy caps): one per-connection authority lock/unlock, the ≤ 32-entry
   sub-list copy, one swap, one `subscriptions_active` store, and the
   per-channel subscriber atomic (§2.5(b)), connection-local and pinned by the
-  §2.5(b) storm test;
+  §2.5(b) storm test; **plus, at subscription-ATTEMPT rate (success AND
+  failure — Sol r4): the server-side `SubscriptionObservation::new`
+  construction — two atomic allocations behind fresh `Arc`s plus one
+  aggregate `Arc` clone — performed before `services.subscribe`, so a refused
+  or failed attempt allocates and drops the object.** The §2.5(b) storm test
+  gains a failed-attempt arm: repeated refused subscribes at frame rate —
+  allocation churn lands on the churner's own slice budget, observation
+  objects from failed attempts are provably dropped (no leak, no sub-list
+  entry, no aggregate movement), and other connections' latency stays within
+  signed bounds;
   (v) overflow refusal: the current sticky store becomes one AcqRel swap on
   each refusal, plus one aggregate increment only on the first false→true
   transition (§2.5(b));
@@ -1306,12 +1344,16 @@ steady cost this design introduces is:
   `Arc`-shared into the snapshot (§4.3, no new write); `admissions_current`
   is the existing CAS atomic injected at construction (§4.1, no new write).
 - the genuinely infrequent writers: `admissions_started_total` and
-  conversation registration gauges (connection/conversation lifecycle),
-  overflow counter (once per shed), and **global snapshot rebuilds under the
+  conversation registration gauges (connection/conversation lifecycle), and
+  **global snapshot rebuilds under the
   §2.6 writer mutex** — connection-lifecycle rate ONLY (subscription
   transitions ride the per-connection sub-list, item (iv) above, NOT the
   global rebuild — the r2 correction), each rebuild one CoW allocation
-  ∝ live connections, never per-delivery, never per-slice. (Per-channel
+  ∝ live connections, never per-delivery, never per-slice. **The overflow
+  aggregate is deliberately NOT in this list (Sol r4): its swap moves at
+  refusal rate and its increment at first-overflow-per-subscription rate,
+  and subscription churn makes "once per shed" rate-unbounded — it belongs
+  to item (v)'s pressure/churn class, where it is priced.** (Per-channel
   subscriber atomics move at subscription-transition rate and belong to
   item (iv)'s rate class — one `Relaxed` write per transition, listed there
   in spirit, named here so nothing hides.) Zero-idle-cost by
@@ -1414,14 +1456,29 @@ assert the peak is three and all old/replacement generations free after their
 scopes. This bounded resident peak adds no timer, poll, sweep, wake, or thread;
 the certifying pair signs the `G_sub` bound and allocation result before merge.
 
-Worst-case resident ≈ ~3 MiB at full config and full caps; **every term is
-parameterized by a validated cap or byte ceiling** — nothing scales with
-traffic or deployment config outside a named ceiling. Transient per-scrape:
-one response buffer ≤ the §11.6 response budget + the inventory Vec copy.
-**Pin:** an allocation test at maximal validated configuration (256 conns,
-8,192 subs, 1,024 max-length channel names, three sub-list generations per
-connection, and 32 F3 count-index records per connection) asserting measured
-resident bytes within the formula's ceiling.
+**Resident ceiling ≈ ~3 MiB — a SIGNED-DEFAULT measurement, not a
+worst-case bound over valid configurations** (Sol r4). The numeric constants
+above (`N_conn ≤ 256`, `N_sub ≤ 8,192`, 32 subscriptions and count-index
+records per connection) are the `LimitsConfig` **defaults**
+(`config/types.rs:241-255`); validation only rejects zero
+(`config/types.rs:257-300`), so a larger configured limit is valid and scales
+the resident total by the configured products. The binding claims are
+therefore: (1) the symbolic formula, with every term expressed in the actual
+configured limits — `N_conn ≤ limits.max_connections`, `N_sub ≤
+max_connections × max_subscriptions_per_connection`, sub-list length ≤
+`max_subscriptions_per_connection`, count-index records ≤
+`max_conversations_per_connection` — is the per-deployment bound; nothing
+scales with traffic outside a configured limit or named byte ceiling. (2)
+~3 MiB is the formula **evaluated at the signed defaults**, the number the
+certifying pair signs. **Pins:** an allocation test at the signed-default
+configuration (256 conns, 8,192 subs, 1,024 max-length channel names, three
+sub-list generations per connection, 32 count-index records per connection)
+asserting measured resident bytes within the evaluated ceiling; plus a
+config-derived ceiling test that recomputes the formula with
+checked arithmetic from an arbitrary `LimitsConfig` (overflow refuses at
+startup, not at scrape time) and asserts the measured resident tracks the
+recomputed ceiling on a non-default configuration. Transient per-scrape: one
+response buffer ≤ the §11.6 response budget + the inventory Vec copy.
 
 **Q2 — What is the aggregate ceiling across all views?** Bounded by the eight
 `LimitsConfig` caps **plus the new `max_configured_channels` config cap**
