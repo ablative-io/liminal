@@ -317,8 +317,9 @@ containing the connection's live members: the §6 R7 slice counter,
 §4.4 gauges), the §4.5 per-conversation-worst pair, an
 **initially-empty budget slot** (`OnceLock<Arc<ConnectionInboxBudget>>`),
 and the **per-connection subscription sub-list slot** (§2.5(b) — the home of
-the per-subscription observation objects; the bundle holds the slot, the
-inboxes own the objects). Clones go three ways: one into the connection
+the per-subscription observation objects; the server creates each object and
+the bundle/sub-list and inbox share clones). Bundle clones go three ways: one
+into the connection
 process state (the slice-path
 writer — no map lookup on any hot path), one into the host-side connection
 record (host-side writers: push slots, teardown sweeps), one embedded in the
@@ -361,76 +362,99 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
 - **Per-subscription observation object — created SERVER-SIDE, injected
   INWARD (r3 finding 2: the previous "constructed by `SubscriptionInbox`
   itself" wording was unimplementable).** `InboxInstall` is an **inward-only
-  seam**: it is an input struct (`subscription.rs:127-135` — `budget`,
-  `depth_cap`, `notifier`), `SubscriptionHandle::spawn` consumes it into the
-  inbox at construction and returns only `(handle, registration)`
-  (`subscription.rs:540-592`), and the server sees the subscription solely
-  through `SubscriptionResource` (`services.rs:35-60`), whose interface is
-  unsubscribe/try_next/has_pending/is_overflowed. **There is no outward slot
-  and this design adds none.** An inbox-CREATED observation therefore has no
-  path back to the server, and the earlier text was describing machinery that
-  does not and must not exist.
+  seam**: its current payload is exactly `budget`, `depth_cap`, and `notifier`
+  (`subscription.rs:120-135`); `subscribe_with_install` forwards that value
+  inward to `SubscriptionHandle::spawn` (`types.rs:424-461`), and spawn
+  consumes it before returning only `(handle, registration)`
+  (`subscription.rs:540-592`). The server then hides the handle behind
+  `SubscriptionResource`, whose surface is only unsubscribe/try-next/
+  has-pending/is-overflowed (`services.rs:35-60,1108-1151`). **There is no
+  outward observation slot, and this design adds none.** The r2 text's
+  inbox-created object therefore could never reach the server for sub-list
+  publication; that ownership direction was wrong, not merely incomplete.
 
   **Inverted, so the seam is used in the direction it points:**
   `SubscriptionObservation { depth: Arc<AtomicUsize>, overflowed:
-  Arc<AtomicBool> }` is a type defined in the lower `liminal` crate (it must
-  be nameable by `InboxInstall`) and **constructed by the SERVER**, in the
-  connection process's apply path that already builds `InboxInstall`
-  (`apply.rs:401`, on the connection's own slice). The server **keeps its
-  clones** — they go straight into the per-connection sub-list entry below —
-  and passes a clone INWARD through `InboxInstall`. The inbox holds the
-  **injected `Arc`s in place of its embedded fields**: today's sticky
-  `overflowed: AtomicBool` is a non-shareable struct member
-  (`subscription.rs:186`), and the field's owner changes from embedded to the
-  injected `Arc<AtomicBool>` — its three `store(true, Release)` sites
-  (`subscription.rs:287,294,305`) are unchanged in meaning. `depth` is new
-  and written under the inbox lock per §4.3.
+  Arc<AtomicBool>, overflow_flags_total: Arc<AtomicU64> }` is a cloneable
+  public type defined in the lower `liminal` crate beside `InboxInstall`.
+  Its public `new(overflow_flags_total)` allocates depth 0/overflow false; its
+  public read-only accessors load depth/overflow values, while the Arc fields
+  and aggregate writer remain private to the lower crate. The
+  aggregate pointer is carried inside the same object so the API change below
+  is one new payload field, not an unnamed second seam. The **server
+  constructs** the object in `subscribe_response`, beside the existing
+  budget/notifier install construction (`apply.rs:349-407`), keeps a clone for
+  the sub-list entry, and passes a clone **inward**. On the installed server
+  path this is always `Some`; the lower crate's ordinary `subscribe()` path may
+  construct a private unobserved instance so its public non-server behavior
+  remains unchanged.
+
+  The inbox holds the injected object in place of today's embedded
+  `overflowed: AtomicBool` (`subscription.rs:175-187`). The same three refusal
+  branches remain the writers, but their operation changes from
+  `store(true, Release)` to `swap(true, AcqRel)`
+  (`subscription.rs:269-330`): only the call that observes `false` increments
+  the object's aggregate counter. `depth` is new and is updated under the
+  inbox-state lock per §4.3. The sub-list reader uses only `depth` and
+  `overflowed`; the aggregate pointer is an inward write handle, not a new
+  per-subscription response field.
 - **The seam change, named honestly as an API change to the pair (house rule:
   no silent tradeoffs).** `InboxInstall` gains **one additive field** —
   `observation: Option<SubscriptionObservation>` — and `liminal` exports one
   new public type. This is **source-breaking for external struct-literal
   construction**: `InboxInstall`'s fields are `pub` and the struct is not
-  `#[non_exhaustive]`, and it IS public API (`channel/mod.rs:16` →
-  `lib.rs:13`), so any out-of-tree literal gains a required field. In-tree
-  the blast radius is exactly one construction site (`apply.rs:401`); every
-  other reference passes it through opaquely (`services.rs:182,980`) or
-  ignores it (`_install` in the four test/worker-front-door adapters). **This
-  is the same class of flagged API change as the original `InboxInstall`
-  introduction during D1-prep, and it is flagged to the pair on the same
-  terms, not smuggled.** `SubscriptionInbox::new` also grows an
-  `Option<SubscriptionObservation>` parameter so the injected `Arc`s are the
-  inbox's **from birth** — but that constructor is `pub(crate)`
-  (`subscription.rs:221`), so it is an internal change with no public
-  surface. Taking the observation at construction (rather than installing it
-  afterwards like `install_budget`) means there is **no pre-install window**
-  by construction — the inbox never writes a throwaway atomic, so no write
-  can be lost to install ordering, and the existing pre-install-window
-  argument (`subscription.rs:120-126,545-555`) does not even need to be
-  re-run for this field.
-- **Failure semantics, stated:** if `services.subscribe(...)` fails
-  (`apply.rs:406`), the server simply **never publishes the sub-list entry**
-  and drops its clones; the observation dies with the failed attempt. No
-  half-published subscription, no orphan observation, and no rollback
-  machinery — because the server never gave the object away, it has nothing
-  to reclaim. This is the direct dividend of inward-only injection.
+  `#[non_exhaustive]` (`subscription.rs:127-135`), and it is reachable as
+  `liminal::channel::InboxInstall` (`channel/mod.rs:16`; the module itself is
+  public at `lib.rs:1-3`), so every out-of-tree literal gains a required
+  field and must choose `Some` or `None`. The only in-tree struct literal is
+  the server apply site (`apply.rs:401-405`); the lower channel path and server
+  service path forward the payload rather than reconstructing it
+  (`types.rs:424-461`; `services.rs:178-183,976-1011`). This is a flagged
+  public-API migration, not a compatibility claim.
+
+  `SubscriptionInbox::new` grows an
+  `Option<SubscriptionObservation>` parameter and selects the injected object
+  (or the private unobserved fallback) as part of construction. That
+  constructor is `pub(crate)` (`subscription.rs:216-232`), so this second
+  signature change is internal. Spawn currently performs every install before
+  it spawns/publishes the registration (`subscription.rs:540-592`); carrying
+  the observation into `new` strengthens that ordering: the inbox never has a
+  pre-observation write window and never writes a throwaway atomic.
+- **Success/failure publication order, stated.** The server creates the
+  observation and retains its clone before `services.subscribe`; only the `Ok` arm inserts the
+  returned resource into process state (`apply.rs:407-429`). That arm then
+  publishes `{subscription_id, channel, observation}` through the authority
+  below. On `Err`, it publishes nothing and drops its retained clone; the
+  lower `Result` path must unwind the handle/registration and its injected
+  clone before returning. A failure-injection test at both lower failure
+  points (subscriber spawn and actor registration) asserts no process-state
+  entry, no sub-list entry, and no retained observation. The server **did pass
+  a clone inward**; the interrupted text's claim that it "never gave the
+  object away" was false. The invariant is no publication before success,
+  not imaginary single-owner rollback.
 - **The aggregate `overflow_flags_total`:** an injected `Arc<AtomicU64>`
-  riding the same `InboxInstall`; the inbox increments it on the **first
-  false→true transition only** — `overflowed.swap(true, AcqRel)` returning
+  riding inside the installed observation; the inbox increments it on the
+  **first false→true transition only** — `overflowed.swap(true, AcqRel)` returning
   `false` gates the increment — so repeated refused admits
-  (`subscription.rs:283-311` stores on every refusal) count once per shed,
+  (`subscription.rs:269-330` contains the three current store sites) count
+  once per shed,
   not once per drop. Semantics now defined, not implied.
 - **Publication — the per-connection sub-list, NOT the global snapshot:**
-  the bundle holds the sub-list behind a **per-connection authority with a
-  TERMINAL state** (r3 finding 1 — mutual exclusion alone was not enough;
-  see below): `Mutex<SubListAuthority>` where `SubListAuthority` is
-  `{ closed: bool, list: Arc<SubscriptionList> }`, published to readers
-  through the bundle's `ArcSwap<SubscriptionList>` slot (≤ 32 entries of
-  `{ subscription_id, channel: Arc<str>, observation }`). Subscription
-  transitions (subscribe, unsubscribe, **automatic shed** —
-  `process.rs:377-398`, which removes a subscription with NO unsubscribe
-  frame and must publish like one) rebuild ONLY this list: a ≤ 32-entry
-  copy, swapped on the bundle's own slot. The global `ConnectionsSnapshot`
-  is untouched; the §2.6 global writer mutex is NOT acquired.
+  the bundle holds a **per-connection authority with a TERMINAL state** (r3
+  finding 1 — mutual exclusion alone was not enough):
+  `Mutex<SubListAuthority>`, where the state is exactly
+  `OPEN(Arc<SubscriptionList>) | CLOSED`, plus the reader-facing
+  `ArcSwap<SubscriptionList>`. It starts `OPEN(∅)`. The immutable list has
+  ≤ 32 entries of
+  `{ subscription_id, channel: Arc<str>, observation }`. Subscription
+  success adds the known id/channel/object after process-state insertion;
+  unsubscribe removes by id after process-state removal
+  (`apply.rs:349-447`); **automatic shed** does the same removal without an
+  Unsubscribe frame (`process.rs:377-398`). Each route calls one
+  `publish_if_open(transform)` helper: lock; reject `CLOSED`; build a ≤ 32
+  entry replacement from the locked `OPEN` list; set `OPEN(new.clone())`;
+  swap the bundle's `ArcSwap`; set `subscriptions_active` from `new.len()`;
+  unlock. The global `ConnectionsSnapshot` and §2.6 mutex are untouched.
 - **Why mutual exclusion was insufficient — the race the mutex did not
   close.** The previous text serialized "the slice publishes" against "the
   close path clears" and stopped there. Serialization gives an ORDER, not a
@@ -438,31 +462,33 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   its `is_registered` check can acquire the same mutex afterwards and
   republish a non-empty list onto a dead connection. **The race is reachable
   in current source, not hypothetical:** `handle_slice` checks
-  `is_registered(pid)` exactly once, near its start (`process.rs:128`), and
-  then runs `service_socket` → `apply` → subscribe; meanwhile
+  `is_registered(pid)` exactly once, near its start
+  (`process.rs:120-133`), and then `service_socket` reaches `apply_frame`
+  (`process.rs:224-299,695-725`); meanwhile
   `ConnectionSupervisor::shutdown` calls `runtime.finish(pid)` for every
-  connection *before* shutting the scheduler down (`supervisor.rs:275-281`),
-  and `finish` → `remove` (`supervisor.rs:1191-1195,1351`) tears the record
+  connection *before* shutting the scheduler down (`supervisor.rs:274-282`),
+  and `finish` → `remove` (`supervisor.rs:1191-1195,1345-1382`) tears the record
   out from under a slice that is already past its check. The
   publication is therefore **not** ordered behind the close by anything the
   old design named.
 - **The terminal CLOSED state — the wall.** The removal path takes the
-  authority **once** and **seals** it: lock; set `closed = true`; publish the
-  **empty** list (swap the `ArcSwap` to an empty `SubscriptionList`); set
-  `subscriptions_active = 0`; unlock. `closed` is **never cleared** — the
-  authority is a one-way state machine `Open → Closed`, so the seal is
-  monotonic in exactly the sense §2.6 gives global entries. Every
-  subscription transition (subscribe/unsubscribe/shed) locks the authority,
-  **checks `closed` first**, and if sealed **returns without swapping** — a
-  **documented no-op**, not an error: the connection is gone, its global
-  entry is being removed, and there is nothing to publish into. The seal
-  lives on the **bundle** — the shared object — not on the record, which is
-  precisely why it binds a slice that already passed `is_registered` and
-  still holds its own bundle clone.
+  authority **once** and **seals** it: lock; replace `OPEN(_)` with `CLOSED`;
+  swap the reader slot to the canonical empty list; store
+  `subscriptions_active = 0`; unlock. `CLOSED` has no outgoing transition.
+  Every later publisher locks, observes `CLOSED`, and returns without
+  swapping or changing the count — a documented publication no-op. The seal
+  lives on the shared bundle, not only on the host record, so it binds a slice
+  that passed `is_registered` and still holds its process-state bundle clone.
+  **Writers observe `OPEN/CLOSED` under the mutex; readers never observe the
+  enum or take its mutex.** Readers use a scoped sub-list load and observe
+  either the pre-seal immutable generation or the canonical empty generation.
 - **Ordering: SEAL BEFORE the §2.6 global entry removal — chosen, and why.**
-  The removal path (park-flip §3's single finalization route) seals the
-  per-connection authority FIRST, then removes the global snapshot entry
-  under the §2.6 writer mutex, then drops its bundle clone. **Seal-after
+  The existing finalizer first removes and returns the host record
+  (`supervisor.rs:1345-1382`); the record's new bundle clone then lets that
+  same finalizer seal **immediately**, without holding the records mutex. It
+  next removes the global snapshot entry under the §2.6 writer mutex and only
+  then drops its host bundle clone. The seal is the observation lifecycle's
+  close linearization point. **Seal-after-global-removal
   would leave a real hole:** between the global entry's removal and the seal,
   a racing slice could publish a non-empty list, and although no *current*
   snapshot still carries the entry, a reader holding an **older generation**
@@ -478,19 +504,18 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   wall). Take any concurrent pair (P = a subscription-transition publication,
   S = the seal). Both bodies run inside the one per-connection authority
   mutex, so the mutex admits exactly two total orders and no interleaving:
-  1. **P before S.** P locks, observes `closed == false`, swaps its list, and
+  1. **P before S.** P locks, observes `OPEN`, swaps its list, and
      unlocks. S then locks, seals, and swaps the empty list. Terminal state:
-     `(closed = true, list = ∅)`. P's list is observable only in the interval
-     between P's swap and S's swap — during which the connection is still
-     globally published and genuinely still held that subscription. That is an
-     **honest live read**, not a resurrection.
+     `(CLOSED, reader-list = ∅)`. P's list is observable only in the bounded
+     pre-seal interval between the two swaps; S overwrites it before close is
+     linearized and before global unpublication.
   2. **S before P.** S locks, seals, swaps empty, unlocks. P then locks,
-     observes `closed == true`, and **returns without swapping**. Terminal
-     state: `(closed = true, list = ∅)`.
+     observes `CLOSED`, and **returns without swapping**. Terminal state:
+     `(CLOSED, reader-list = ∅)`.
 
-  Both orders terminate in `(closed = true, list = ∅)`, and no third order
-  exists. Because `closed` is never cleared, no later transition can leave
-  that state, and because the seal precedes the global entry removal, no
+  Both orders terminate in `(CLOSED, reader-list = ∅)`, and no third order
+  exists. Because `CLOSED` is terminal, no later transition can leave that
+  state; because the seal precedes global entry removal, no
   snapshot generation of any age can observe a non-empty list after the
   connection is unpublished. **Exactly one outcome.**
 - **`subscriptions_active` is written under the same authority, not
@@ -500,15 +525,31 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   after the seal zeroed it, and the count would drift nonzero on a dead
   connection while the list correctly read empty. One authority, one write,
   no drift.
-- **Write authority, restated:** the connection's own slice is the only
-  subscription-transition writer (a connection's slices are serialized by
-  beamr), and the single removal path is the only sealer. The per-connection
-  mutex is **cold**: a transition contends it only against the one seal in
-  the connection's life, and readers **never** take it (they read the
-  `ArcSwap` slot).
+- **Process-state teardown ordering — two structural cases.** Live subscription
+  resources are owned by `ConnectionProcessState.subscriptions`
+  (`state.rs:14-32`) and are dropped with the process
+  (`process.rs:664-692`). Ordering has two honest cases. On in-handler
+  close/crash and supervisor shutdown, `finish`/`mark_crashed` removes and
+  seals before the handler returns or the scheduler is shut down
+  (`process.rs:133-182,224-299`; `supervisor.rs:274-282`), so any still-running slice
+  sees `CLOSED`. On external termination, `reap_crashed` first proves the
+  process is already absent, then removes the record
+  (`supervisor.rs:1233-1266`): process state is already gone, so no publisher
+  remains; the reaper still seals before global unpublication so stale global
+  generations resolve empty. These are the only two orders. A surviving
+  slice may mutate its private map after the seal while unwinding, but its
+  publication helper sees `CLOSED`; dropping a map cannot reopen the bundle.
+- **Write authority, restated and honestly priced:** `process_buffer` applies
+  frames through `&mut ConnectionProcessState` (`process.rs:695-725`), and the
+  delivery pump's shed path mutates that same process state
+  (`process.rs:377-398`); they are the transition publishers. The single
+  finalization path is the only sealer. The mutex is **contention-cold, not
+  acquisition-cold**: every subscription transition takes it, but the only
+  cross-thread contender is the once-per-connection seal. Readers never take
+  it; they use the `ArcSwap` slot.
 - **Named race pin — (c4) the post-close sub-list resurrection wall.** A
   same-connection collision test stages a Subscribe that has passed
-  `is_registered` (`process.rs:128`) but not yet reached publication, then
+  `is_registered` (`process.rs:120-133`) but not yet reached publication, then
   drives the close/seal, then lets the Subscribe proceed. Asserts: the
   publication is a no-op; the sub-list reads empty; `subscriptions_active`
   is 0; **and** a reader holding an old global-snapshot generation captured
@@ -521,15 +562,20 @@ occupancy cap, so a global CoW per transition was a writer-side DoS).**
   occupancy cap bounds the map length, `apply.rs:349-377`, not the
   transition count — a client may subscribe/unsubscribe at frame rate
   indefinitely). The per-event cost is therefore stated as a bound, not
-  assumed infrequent: one ≤ 32-entry list copy + one `ArcSwap` swap +
-  (first subscribe only) one `OnceLock` fill, all connection-local. A
+  assumed infrequent: one authority lock/unlock + one ≤ 32-entry list copy +
+  one `ArcSwap` swap + one `subscriptions_active` store + (first subscribe
+  only) one `OnceLock` fill, all connection-local. During the copy, a writer
+  replacement, current generation, and one reader-held old generation may
+  coexist; §9 prices all three. A
   churning client burns ITS OWN slice budget (the §4 slice contract already
-  meters that) and contends with nobody: not the global writer, not other
-  connections, not readers. **Named storm test:** a malicious subscriber
+  meters that) and contends with neither the global writer, other
+  connections, nor readers. **Named storm test:** a malicious subscriber
   churning subscribe/unsubscribe at frame rate while the server accepts and
   closes other connections — accept/close latency and other connections'
-  publication latency stay bounded (flat), and the churner's own slice
-  counter shows the cost landing where it belongs.
+  publication latency stay within their signed bounds, and the churner's own
+  slice counter shows the cost landing where it belongs. The certifying pair
+  signs this complete per-transition bound with §8's active-work set; "mutex
+  is cold" is not accepted as a substitute for the number.
 - **The budget slot:** first subscribe fills the bundle's `OnceLock` with
   the budget `Arc` it just created (`apply.rs:383-395` keeps its lazy
   `get_or_insert_with`, byte-identical wire semantics); the slot is
@@ -590,9 +636,9 @@ with these invariants:
   reservation. Worker/readiness updates — keyed posture update; entry
   already gone (concurrent close) ⇒ no-op. Close/reap — all routes funnel
   through the single removal path, which removes the record
-  (`supervisor.rs:1351`), **then SEALS the per-connection sub-list authority
-  (§2.5(b): `closed = true`, empty list published, `subscriptions_active`
-  zeroed)**, then removes the snapshot entry under this writer mutex, then
+  (`supervisor.rs:1345-1382`), **then SEALS the per-connection sub-list
+  authority (§2.5(b): `OPEN(_) → CLOSED`, empty reader list published,
+  `subscriptions_active` zeroed)**, then removes the snapshot entry under this writer mutex, then
   drops the bundle clone. **The seal precedes the global entry removal** —
   the §2.5(b) ordering argument depends on it: once the entry is gone, only
   reader-held OLD generations can still reach the bundle, and they must find
@@ -613,13 +659,17 @@ with these invariants:
 ## 3. The read primitives, named
 
 For the field tables, "read-primitive" takes one of exactly these values, in
-increasing cost, none of which wakes a scheduler or takes a slice-hot lock:
+increasing read cost. None wakes a scheduler or takes a slice-hot lock.
+`arcswap` is one primitive with two backing/update shapes; both are listed so
+the r2 per-connection sub-list correction cannot be mistaken for a global
+snapshot rebuild:
 
 | Primitive | Backing | Cost | Staleness |
 |---|---|---|---|
 | `config` | Immutable redacted `ServerConfig` clone in OpsState | pointer deref | exact (frozen at boot) |
 | `atomic` | `AtomicU64`/`AtomicUsize` in OpsState, written at a lifecycle event | one load | bounded-stale by one event |
-| `arcswap` | `ArcSwap<Snapshot>` in OpsState, rebuilt on infrequent per-connection events | one `Arc` load + immutable walk | bounded-stale to last such event |
+| `arcswap` — global | `ArcSwap<ConnectionsSnapshot>` in OpsState; rebuilt under §2.6 only on connection lifecycle (publish/posture/remove), never on subscription transitions | one `Arc` load + immutable walk bounded by live connections | bounded-stale to last connection-lifecycle event |
+| `arcswap` — nested sub-list | one `ArcSwap<SubscriptionList>` in each connection bundle; rebuilt under §2.5(b)'s per-connection authority on subscribe/unsubscribe/shed, never under §2.6 | one `Arc` load + immutable walk bounded by 32 subscriptions; readers take no authority mutex | bounded-stale to last subscription transition or terminal seal |
 | `metrics` | Process-global registry snapshot (`metrics_route.rs`) | RwLock **read** guard, copy | bounded-stale, structural lock only |
 | `readiness` | `SharedReadinessState::snapshot` (`health/checks.rs`) | four `SeqCst` loads | bounded-stale, lock-free |
 | `inventory` | beamr `service_inventory()`/`worker_names()`/`service_policies()` on a retained scheduler handle | metadata Vec copy | bounded-stale, no actor query |
@@ -628,7 +678,9 @@ increasing cost, none of which wakes a scheduler or takes a slice-hot lock:
 tables say so explicitly (§8's honesty rule: staleness is stated, never
 implied). An `arcswap` entry may embed shared live atomics (§2.2's
 shared-live-atomic pattern); reading such a field is one `Arc` load plus one
-`Relaxed` atomic load — still lock-free, still this primitive. No primitive
+`Relaxed` atomic load — still lock-free, still this primitive. The two
+`arcswap` rows are not two primitive values: field rows continue to say
+`arcswap`, while their owner names the global or nested backing. No primitive
 outside this table is admissible; introducing one is a §5 violation.
 
 ### 3.1 The common envelope — its own field table, same discipline
@@ -650,7 +702,9 @@ View builders and endpoint handlers receive **`OpsReadState`**, a read-only
 boundary type that exposes ONLY: the `OpsConfig` deref, the atomic loads, a
 **scoped** snapshot accessor — `with_snapshot(|s| …)`, so a snapshot `Arc`
 cannot escape a view build (the §9 generation invariant is structural, not
-convention) — the readiness snapshot, the metrics renderer, and
+convention) — and, through each entry, only a similarly scoped
+`with_sub_list(|list| …)` accessor, so a nested-list `Arc` cannot escape its
+walk. It also exposes the readiness snapshot, the metrics renderer, and
 the sealed inventory's `Weak` upgrades. It holds **no** `ConnectionRuntime`,
 no supervisor, no process state, no actor/channel/conversation handles, no
 store — a view builder **cannot** reach a hot mutex because the types it can
@@ -693,9 +747,11 @@ structural read guard never taken by a hot path); **none** (immutable deref).
 | `slice_serviced` (per conn) | R7 `Arc<AtomicU64>` shared into the snapshot entry (§6, the §2.2 shared-live-atomic pattern — never read through the records map) | serviced slice | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 (parked ⇒ no write) |
 
 **Never** the `records` mutex (§5.2). Per-connection detail rides the arcswap
-snapshot, rebuilt only on the §2.2.4 event set (connection lifecycle +
-subscribe/unsubscribe, under the §2.6 writer mutex) — never
-on a slice.
+global snapshot, rebuilt only on §2.2.4's **connection-lifecycle** event set
+under the §2.6 writer mutex. Subscribe/unsubscribe/shed run on the connection
+process path (`process.rs:120-156,377-398,695-725`) and rebuild only that
+bundle's bounded nested sub-list under §2.5(b); they never rebuild the global
+snapshot or acquire §2.6.
 
 ### 4.2 channels
 
@@ -719,10 +775,10 @@ cost, not smuggled in here. **Absent-by-profile** in worker-front-door.
 |---|---|---|---|---|---|---|---|---|
 | `inbox_bytes_used` (per conn) | the EXISTING `ConnectionInboxBudget.used` AtomicUsize (`subscription.rs:47-118`), `Arc`-shared into the snapshot entry (§2.2 pattern) — **not mirrored; NO new write exists.** One-line code change implied: promote the `cfg(test)` `used()` accessor to a host-reachable handle captured at budget construction. | admit/drain (existing writes, unchanged) | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
 | `inbox_bytes_cap` | immutable `max_connection_inbox_bytes` (4 MiB) | — | `config` | none | exact | 1 | none | 0 |
-| `overflow_flags_total` | injected `Arc<AtomicU64>` riding `InboxInstall` (§2.5(b)/(c)); incremented ONLY on the first false→true overflow transition — `overflowed.swap(true, AcqRel) == false` gates it, so the repeated `store(true)` refusal sites (`subscription.rs:283-311`) count once per shed, not once per dropped frame. Semantics: counts SHEDS, not refused admits. | first overflow per subscription | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
-| `subscriptions_active` (per conn) | per-connection AtomicU64 in the §2.5 observation bundle, embedded in the snapshot entry (the keyed read path — a bare "OpsState atomic" has no per-connection key; corrected per Sol) | subscribe/unsubscribe/shed | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
-| `depth` (per subscription) | the `SubscriptionObservation.depth` `Arc<AtomicUsize>` created WITH the inbox (§2.5(b)). **Write placement is mandated, not optional — INSIDE the inbox lock** (outside-the-lock is racy: close can drain between a queue op and a delayed depth update, stranding nonzero depth on a closed inbox): after successful push, increment BEFORE unlock (`subscription.rs:277-326`); after successful pop, decrement BEFORE unlock; on close, store zero (or subtract the drained count) WHILE HOLDING the lock (`:354-385`); a refused admit writes nothing. Published via the per-connection sub-list (§2.5(b)). Readers never take the mutex. | admit/pop/drain/close | `arcswap` (sub-list-embedded atomic) | lock-free read; **write is inside the inbox hot mutex** | bounded-stale | ≤ 256 × 32 = 8,192 | none | 0 |
-| `overflowed` (per subscription) | the `SubscriptionObservation.overflowed` `Arc<AtomicBool>` — the inbox's sticky flag itself, its owner changed from embedded to `Arc` (`subscription.rs:179-187`; set sites unchanged). Sticky-true survives until the shed's unsubscribe publication removes the sub-list entry, so a scrape between overflow and shed sees `overflowed: true` on a still-listed subscription — the honest window. **Automatic shed ordering:** the shed path (`process.rs:377-398`) removes the subscription with no Unsubscribe frame; it publishes the sub-list removal exactly as an explicit unsubscribe does — no path removes an inbox without publishing. | overflow set (sticky); entry removed at shed/unsubscribe publication | `arcswap` (sub-list-embedded atomic) | lock-free | bounded-stale | ≤ 8,192 | none | 0 |
+| `overflow_flags_total` | the aggregate `Arc<AtomicU64>` carried inside the server-created observation and injected by `InboxInstall` (§2.5(b)/(c)); incremented ONLY on the first false→true overflow transition — `overflowed.swap(true, AcqRel) == false` gates it, so the three current refusal branches (`subscription.rs:269-330`) count once per shed after their store→swap conversion, not once per dropped frame. Semantics: counts SHEDS, not refused admits. | first overflow per subscription | `atomic` | lock-free | bounded-stale | 1 | none | 0 |
+| `subscriptions_active` (per conn) | per-connection AtomicU64 in the §2.5 observation bundle, set from the nested sub-list length under the same OPEN/CLOSED authority and forced to 0 by the terminal seal (the keyed read path — a bare "OpsState atomic" has no per-connection key; corrected per Sol) | subscribe/unsubscribe/shed/close seal | `arcswap` (entry-embedded atomic) | lock-free | bounded-stale | ≤ 256 | none | 0 |
+| `depth` (per subscription) | the server-created `SubscriptionObservation.depth` `Arc<AtomicUsize>`, cloned inward through `InboxInstall` before registration (§2.5(b)). **Write placement is mandated, not optional — INSIDE the inbox lock** (outside-the-lock is racy: close can drain between a queue op and a delayed depth update, stranding nonzero depth on a closed inbox): after successful push, increment BEFORE unlock (`subscription.rs:277-326`); after successful pop, decrement BEFORE unlock; on close, store zero (or subtract the drained count) WHILE HOLDING the lock (`:354-385`); a refused admit writes nothing. Published via the per-connection sub-list (§2.5(b)). Readers never take the mutex. | admit/pop/drain/close | `arcswap` (sub-list-embedded atomic) | lock-free read; **write is inside the inbox hot mutex** | bounded-stale | ≤ 256 × 32 = 8,192 | none | 0 |
+| `overflowed` (per subscription) | the server-created `SubscriptionObservation.overflowed` `Arc<AtomicBool>` — the inbox's sticky flag itself, changed from today's embedded field to the injected Arc (`subscription.rs:175-187`); the same refusal branches remain, with store→swap semantics (`subscription.rs:269-330`). Sticky-true survives until the shed's unsubscribe publication removes the sub-list entry, so a scrape between overflow and shed sees `overflowed: true` on a still-listed subscription — the honest window. **Automatic shed ordering:** the existing shed path (`process.rs:377-398`) removes the subscription with no Unsubscribe frame; the design therefore REQUIRES it to publish the sub-list removal exactly as an explicit unsubscribe does — no implemented path may remove an inbox without publishing. | overflow set (sticky); entry removed at shed/unsubscribe publication | `arcswap` (sub-list-embedded atomic) | lock-free | bounded-stale | ≤ 8,192 | none | 0 |
 
 **Depth is a settled-seam REQUIREMENT, not an option** (one-pager §(iii):
 "inbox budget occupancy, overflow flags, **depth gauges** (event-maintained
@@ -821,18 +877,85 @@ sketch-level, frozen by the contract module.
 | Field | Owner | Update event | Read-prim | Lock | Staleness | Cardinality | Redaction | Idle-cost |
 |---|---|---|---|---|---|---|---|---|
 | `pending_pushes` (per conn) | bundle AtomicU64. Transitions, enumerated from `supervisor.rs:1002-1091` + the merged deadline surface: +1 `register_push`; −1 reply-resolved; −1 timeout/`Expired` disposition (`supervisor.rs:657` on main); −k close-sweep (all of a pid's slots dropped at close — decrement per removed slot, balanced). Host-side writers resolve the bundle through the current snapshot (lock-free `ArcSwap` load) or the record's bundle clone — never a new map. | push register/resolve/expire/close-sweep | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
-| `max_pending_plus_tombstones_per_conversation` (per conn, worst) | TWO bundle atomics: worst VALUE (AtomicU64) + worst CONVERSATION ID (AtomicU64). Recomputed by the process-owned table — a bounded scan (≤ `max_conversations_per_connection` = 32 conversations) — after each **cardinality-changing** transition, then both stored. **The cardinality-changing set, corrected per Sol from `pending_reply.rs:139-308`:** admit (`:139-198`), cancel (`:200-210`), reply removal (`:212-240`), conversation sweep (`:284-299`), cancel-all (`:301-308`). **Expiry is NOT in the set** — it converts Pending→Tombstone (`:243-267`) without changing pending+tombstone cardinality, so expire neither raises nor lowers this value. **Redaction considered:** the conversation id is an identifier, not content — exposed by default (it names WHERE the pressure is, which is the row's operational point) and listed in §7.3's identifier class; the cross-sample caveat (value and id are two atomics, §2.4) rides the field. | admit/cancel/reply-removal/sweep/cancel-all (cardinality changes only) | `arcswap` (entry-embedded pair) | lock-free | bounded-stale; value/id cross-sampled | ≤ 256 × 2 | id = identifier class (§7.3) | 0 |
-| `saturated_conversations` (per conn) | bundle AtomicU64 — **a separately-named PRESSURE count, deliberately NOT in the caps table** (it answers "how many conversations are pinned at cap", not "how close is the worst one"). Maintained on the same corrected cardinality-changing set as the row above: +1 when a conversation's pending+tombstones reaches cap via admit; −1 when a cardinality-reducing transition (cancel / reply removal / sweep / cancel-all) drops it below; **expiry does neither**. | the corrected cardinality-changing set | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
+| `max_pending_plus_tombstones_per_conversation` (per conn, worst) | TWO bundle atomics: worst VALUE (AtomicU64) + worst CONVERSATION ID (AtomicU64). Recomputed from the process-owned table's new per-conversation count index (r3 decision below) — one scan of ≤ `max_conversations_per_connection` entries (32 at the signed defaults) — after each **cardinality-changing** transition, then both stored. **The cardinality-changing set, corrected per Sol from `pending_reply.rs:139-308`:** admit (`:139-198`), cancel (`:200-210`), reply removal (`:212-240`), conversation sweep (`:284-299`), cancel-all (`:301-308`). **Expiry is NOT in the set** — it converts Pending→Tombstone (`:243-267`) without changing pending+tombstone cardinality, so expire neither raises nor lowers this value. **Redaction considered:** the conversation id is an identifier, not content — exposed by default (it names WHERE the pressure is, which is the row's operational point) and listed in §7.3's identifier class; the cross-sample caveat (value and id are two atomics, §2.4) rides the field. | admit/cancel/reply-removal/sweep/cancel-all (cardinality changes only) | `arcswap` (entry-embedded pair) | lock-free | bounded-stale; value/id cross-sampled | ≤ 256 × 2 | id = identifier class (§7.3) | 0 |
+| `saturated_conversations` (per conn) | bundle AtomicU64 — **a separately-named PRESSURE count, deliberately NOT in the caps table** (it answers "how many conversations are pinned at cap", not "how close is the worst one"). Recomputed in the same ≤32-entry count-index scan as the row above: count entries whose pending+tombstone count equals the configured cap after admit / cancel / reply removal / sweep / cancel-all; **expiry changes no count and triggers no recompute**. | the corrected cardinality-changing set | `arcswap` (entry-embedded) | lock-free | bounded-stale | ≤ 256 | none | 0 |
 
-All are push/request-rate **active-work writes** (the worst-pair recompute
-adds a ≤ 32-entry scan at request rate — bounded, stated, in the signed
-set); each gets boundary-crossing tests (§9) for the corrected transition
-set explicitly: **admit, pending-reply removal, late-reply tombstone reap,
-cancel, conversation close, connection close** — plus the expiry
-NON-transition (an expiry storm moves neither gauge, the fail-first pin for
-the corrected semantics). Close-sweep balance explicit: a connection dying
-with k outstanding pushes and s saturated conversations zeroes all gauges
-through the single removal path.
+**The true flat-table bound — corrected in r3, not a new cap.** The current
+`PendingReplyTable` is one flat `Vec` of pending **and** tombstone entries
+(`pending_reply.rs:88-105`). Admission limits pending+tombstone entries to the
+configured per-conversation cap, but the configured per-connection cap counts
+only entries still `Pending` (`pending_reply.rs:155-196`). Conversation open
+is separately bounded by `max_conversations_per_connection`
+(`apply.rs:498-533`). Therefore the flat table's maximum length is:
+
+```
+max_conversations_per_connection × max_pending_replies_per_conversation
+= 32 × 8 = 256 entries at the signed defaults
+```
+
+The 32 and 8 are the source constants, not invented review numbers
+(`config/types.rs:239-251`). Thirty-two pending entries do **not** bound the
+tombstones: each of 32 live conversations can hold eight tombstones. The
+formula, rather than 256, applies if those configured limits change. Thus one
+full flat-table recomputation costs up to 256 entry visits at the defaults,
+and scanning that Vec separately for each of 32 conversations costs up to
+8,192 visits. The interrupted/r2 claim that the existing table gave a ≤32
+scan was wrong by up to 8× even before the nested-scan failure mode.
+
+**Chosen r3 index — restore the intended ≤32 recomputation without a second
+unspecified authority.** `PendingReplyTable` gains
+`conversation_counts: Vec<ConversationReplyCount>`, where each record is
+`{ conversation_id: u64, pending_plus_tombstones: usize }`. The Vec is
+unordered, contains no zero-count record, and is bounded by the configured
+live-conversation cap. The existing entry Vec remains authoritative for FIFO
+correlation and entry lifecycle; the count index is authoritative for
+per-conversation cardinality admission and for the published worst/saturated
+values. Both live inside the table and every mutation occurs through the same
+exclusive `&mut self` method — no lock, callback, timer, poll, or sweep is
+added.
+
+The convergence discipline is exhaustive over the current mutation surface:
+
+1. **Admit:** after both cap checks succeed, push the Pending entry and
+   increment/create its count record together. A cap-refused admit mutates
+   neither. If participant forwarding then fails, the existing exact
+   `cancel(op_id)` rollback (`apply.rs:586-611`) removes the entry and
+   decrements/removes the same count record.
+2. **Cancel and reply removal:** removing an entry by `cancel` or
+   `match_reply` decrements its conversation count regardless of whether that
+   reply removed Pending or consumed a Tombstone
+   (`pending_reply.rs:200-240`). Remove the count record at zero.
+3. **Conversation sweep:** `remove_conversation` removes all matching entries
+   and the one matching count record in the same method
+   (`pending_reply.rs:284-299`); the removed cardinalities must agree.
+4. **Connection cancel-all:** `cancel_all` clears both Vecs
+   (`pending_reply.rs:301-308`).
+5. **Expiry:** `expire_due` changes Pending→Tombstone but changes no
+   pending+tombstone cardinality (`pending_reply.rs:243-267`), so it updates
+   neither the index nor the worst/saturated publication.
+
+After each index-changing method, one scan of at most 32 count records at the
+signed defaults computes both outputs: greatest count (lowest conversation id
+wins a tie; empty index publishes value 0/id 0) and number of records equal to
+the configured per-conversation cap. The scan then stores the worst pair and
+`saturated_conversations`. Index lookup is itself ≤32 record visits; key birth
+is one bounded push and key death uses `swap_remove`, so no mutation scans the
+up-to-256-entry table merely to derive observability.
+
+These are request-rate **active-work writes**, and the honest new bound is one
+≤32 count-index lookup/update plus one ≤32 worst/saturation scan and the named
+atomic stores per cardinality transition — zero at idle, pinned, and included
+in the §8 certifying-pair sign-off. **F3 pins:** a maximal fixture builds 32
+conversations × 8 tombstones and asserts flat length 256, index length 32, and
+recompute visits ≤32; transition tests assert, after admit, failed-forward
+rollback, Pending reply removal, late-reply Tombstone removal, cancel,
+conversation close, and connection close, that every index count equals a
+fresh test-only Vec count and that the worst pair/saturated output matches.
+An expiry storm asserts both publications and the index remain unchanged.
+Close-sweep balance remains explicit: a connection dying with k outstanding
+pushes and s saturated conversations zeroes all gauges through the single
+removal path. The allocation pin in §9 includes the index's bounded resident
+term.
 
 Plus **refusal counters by typed-refusal class** — one atomic per class,
 incremented where the refusal is emitted:
@@ -1160,12 +1283,18 @@ steady cost this design introduces is:
   beside the lock);
   (ii) request-rate: per-connection `pending_replies`, `tombstones`,
   `armed_timers`, `conversations_active`, `saturated_conversations`, **plus
-  the worst-pair recompute's ≤ 32-entry table scan** (§4.4, §4.5);
+  F3's one ≤32-entry count-index lookup/update and one ≤32-entry
+  worst/saturation scan** (§4.4, §4.5) — not a falsely priced flat-table scan;
   (iii) push-rate: `pending_pushes` register/resolve/expire (§4.5);
   (iv) subscription-transition rate (slice-path, rate-UNBOUNDED by
-  occupancy caps): the ≤ 32-entry sub-list copy + swap (§2.5(b)),
-  connection-local, pinned by the §2.5(b) storm test;
-  (v) refusal counters (only move on refusals).
+  occupancy caps): one per-connection authority lock/unlock, the ≤ 32-entry
+  sub-list copy, one swap, one `subscriptions_active` store, and the
+  per-channel subscriber atomic (§2.5(b)), connection-local and pinned by the
+  §2.5(b) storm test;
+  (v) overflow refusal: the current sticky store becomes one AcqRel swap on
+  each refusal, plus one aggregate increment only on the first false→true
+  transition (§2.5(b));
+  (vi) refusal counters (only move on refusals).
   Zero at idle, every one. Bounds as stated per item; pinned
   by the §9 one-write-per-transition + balanced-teardown tests and the
   §6-class scrape-moves-nothing-parked regression; signed at the pair's desk
@@ -1218,9 +1347,9 @@ Campaign standing rule 5, answered for the console/MCP surface as one unit:
 
 **Q1 — What is this design's idle cost, and its ceiling?** At steady idle (no
 traffic, all connections parked): the console/MCP surface adds **zero** new
-wakes and **zero** new resident threads (§8). Every OpsState field is written
-only at a lifecycle event, so an idle server writes none of them. The reads are
-pull-only (a scrape arrives or it doesn't). The non-zero costs are all
+wakes and **zero** new resident threads (§8). Every maintenance write is
+event-driven; a parked server with no traffic fires none of those events. The
+reads are pull-only (a scrape arrives or it doesn't). The non-zero costs are all
 active-work: the §6 R7 increment fires **only on a serviced slice** — of
 which a parked connection runs none — and the §4.4 request-rate gauge writes
 fire only on request-lifecycle events, of which an idle server has none
@@ -1245,12 +1374,14 @@ R = |OpsConfig|                                    ≤ 64 KiB (validated byte ce
   + N_conn × |bundle|                              N_conn ≤ 256
       |bundle| ≈ 11 atomics × 8 B + sub-list slot + budget slot
                 + per-conn mutex + Arc overhead    ≈ ~200 B → ≤ ~50 KiB
-  + N_sub × |observation object|                   N_sub ≤ 8,192; one-time (owned by inboxes,
-      2 Arcs (depth + overflowed) ≈ 64 B           not per-generation) → ≤ ~512 KiB
+  + N_sub × |observation object|                   N_sub ≤ 8,192; one-time (server/inbox shared,
+      2 atomic Arcs + 1 aggregate Arc ptr ≈ 72 B   not per-generation) → ≤ ~576 KiB
   + N_conn × G_sub × |sub-list|                    per-connection sub-list generations
-      |sub-list| = ≤32 × |record|;                 G_sub ≤ 2 (current + one reader-held);
-      |record| = id + Arc<str> clone + 2 Arc ptrs
-                 + vec overhead ≈ 64 B             → ≤32 × 64 B × 2 × 256 ≈ ≤ ~1 MiB
+      |sub-list| = ≤32 × |record|;                 G_sub = 2 + max_concurrent_sublist_readers;
+      |record| = id + Arc<str> clone + 3 Arc ptrs  v1 G_sub ≤3; + vec overhead ≈ 72 B
+                                                    → ≤32 × 72 B × 3 × 256 ≈ ≤ ~1.7 MiB
+  + N_conn × |pending-count index|                 ≤256 × (24 B Vec + 32 × 16 B record)
+                                                    ≈ ≤ ~134 KiB
   + G × |global snapshot|                          |entry| = peer (≤64 B) + posture strings
       (≤256 B, truncated at publication) + bundle Arc + sub-list slot ptr
       ≈ ≤ 512 B → G × ≤ 128 KiB
@@ -1270,13 +1401,27 @@ for. **Pin:** a generation-retention test under writer churn (writer swaps
 in a loop while a scoped reader renders; assert old generations are freed —
 live-generation count never exceeds the formula's G).
 
-Worst-case resident ≈ ~2 MiB at full config and full caps; **every term is
+**M4 nested-generation correction.** The same accounting applies per
+connection: `G_sub = 2 + max_concurrent_sublist_readers` — current + the
+writer's in-flight replacement + each reader-held older generation. The r2
+formula's `G_sub ≤ 2` omitted the replacement and was wrong. The scoped
+`with_sub_list` boundary (§3.2) and serialized v1 adapters cap readers of a
+given sub-list at one, so v1 derives `G_sub ≤ 3`; future concurrent adapters
+must re-derive the parameter. **Pin:** extend the generation-retention test
+with sub-list writer churn: hold an old generation in the scoped reader,
+stage a replacement while a distinct current generation remains installed,
+assert the peak is three and all old/replacement generations free after their
+scopes. This bounded resident peak adds no timer, poll, sweep, wake, or thread;
+the certifying pair signs the `G_sub` bound and allocation result before merge.
+
+Worst-case resident ≈ ~3 MiB at full config and full caps; **every term is
 parameterized by a validated cap or byte ceiling** — nothing scales with
 traffic or deployment config outside a named ceiling. Transient per-scrape:
 one response buffer ≤ the §11.6 response budget + the inventory Vec copy.
 **Pin:** an allocation test at maximal validated configuration (256 conns,
-8,192 subs, 1,024 max-length channel names) asserting measured resident
-bytes within the formula's ceiling.
+8,192 subs, 1,024 max-length channel names, three sub-list generations per
+connection, and 32 F3 count-index records per connection) asserting measured
+resident bytes within the formula's ceiling.
 
 **Q2 — What is the aggregate ceiling across all views?** Bounded by the eight
 `LimitsConfig` caps **plus the new `max_configured_channels` config cap**
@@ -1309,12 +1454,15 @@ enumerated in §8: (a) the transport thread's 10 ms accept-poll — pre-existing
 separately signed, not this design's to re-sign; (b) the §6 R7 active-slice
 increment — bound stated, §6 test named, pair sign-off required; (c) the
 complete §8 active-work write set (per-delivery depth, request-rate
-pending/tombstone/timer/conversation/saturation, push-rate slots) — one
-`Relaxed` write per transition, zero at idle, one-write-per-transition +
-balanced-teardown tests per gauge, signed in the same sitting as (b); (d) the
-snapshot-rebuild set including subscribe/unsubscribe — one CoW allocation per
-control-plane event, bounded by entry-size bounds and generation cap (Q1);
-(e) any sibling listener, if the pair mandates one — rule-2 from birth. No
+pending/tombstone/timer/conversation/saturation plus F3 index scans, push-rate
+slots, subscription-transition copies/authority operations, and overflow
+RMW) — the per-item bounds in §8, zero at idle, transition/convergence tests,
+and balanced teardown, signed in the same sitting as (b); (d) **global**
+snapshot rebuilds on connection-lifecycle events only — one CoW allocation
+bounded by live-connection size and global `G`; (e) **nested sub-list**
+rebuilds on subscribe/unsubscribe/shed — one ≤32-entry connection-local CoW
+allocation bounded by `G_sub`, never §2.6; (f) any sibling listener, if the
+pair mandates one — rule-2 from birth. No
 by-design cost is left unbounded or unsigned. No silent tradeoffs.
 
 ---
@@ -1785,14 +1933,30 @@ unbounded). The Sol round-2 anchors were likewise re-verified before folding:
 the production constructor defaults them), `apply.rs:349-447`
 (subscribe/unsubscribe processed on the connection slice; occupancy cap
 bounds map length, not transition rate), `process.rs:377-398` (automatic
-overflow shed, no Unsubscribe frame), `subscription.rs:127,179-187,277-385`
+overflow shed, no Unsubscribe frame),
+`subscription.rs:120-135,175-187,269-390`
 (`InboxInstall` seam; embedded sticky `overflowed: AtomicBool` with repeated
 `store(true)` refusal sites; admit/pop/close lock scopes),
 `pending_reply.rs:243-267` (expiry converts Pending→Tombstone, cardinality
 unchanged), `endpoint.rs:136-170` (single bounded read; `write_all`/`flush`
 with no write deadline), `config/validation.rs:138-158` (channel-name
-validation checks empty/duplicate only). Anchors cited
-but not individually re-opened (taken from the scout at its stated lines, and
-flagged as such) are the deeper conversation/subscription/durability internals
-in §4.3–§4.4 and §5.4–§5.6; a builder implementing those views re-verifies each
-at build time, because a design-doc anchor is a starting coordinate, not a pin.
+validation checks empty/duplicate only).
+
+The Sol round-3 fold re-opened every anchor it changed or added. F1:
+`process.rs:120-182,224-299,377-398,664-725` (single early registration check,
+apply/shed writers, in-handler exits, process teardown), `state.rs:14-32`
+(subscription-resource owner), and `supervisor.rs:274-282,1191-1195,
+1233-1266,1345-1382` (shutdown-before-scheduler ordering, external reap, and
+finish/remove). F2: `subscription.rs:120-135,216-232,
+269-390,540-592` (payload, internal constructor, sticky writers/lock scopes,
+spawn return), `types.rs:424-461` (`subscribe_with_install` forwarding),
+`services.rs:35-60,178-183,976-1011,1108-1151` (server trait, forwarding,
+wrapper), `apply.rs:349-447` (construction and success/failure branches),
+`channel/mod.rs:16` plus `lib.rs:1-3` (public reachability). F3:
+`pending_reply.rs:88-105,155-308` (flat Vec, cap semantics, every cardinality
+transition, expiry non-transition), `config/types.rs:239-251` (32/8 source
+constants), and `apply.rs:498-533,586-611` (live-conversation cap and failed-
+forward rollback). Anchors still cited but not individually re-opened in this
+round are the unrelated deeper conversation/durability internals in §4.4 and
+§5.4–§5.6; a builder re-verifies each at build time, because a design-doc
+anchor is a starting coordinate, not a pin.
