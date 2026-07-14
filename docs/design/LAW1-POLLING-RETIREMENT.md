@@ -665,6 +665,25 @@ belongs to a reviewed event/deadline primitive whose non-change-detection job,
 idle ceiling, tests, and certifying-pair sign-off are recorded. Any new r12 hit
 reopens the document and appends a row mechanically.
 
+**D.5 Scope boundary — dependency-internal wake sources.** A sweep at a liminal
+commit can never certify silence inside a dependency's compiled code, so
+dependency-owned timer families carry their own inventory documents in their
+own repositories, pinned to their own commits, reusing this protocol (scope
+ruling, 2026-07-14). What **is** this document's obligation is the boundary:
+what liminal's own configuration **arms**. Verified at `ce8814d` against the
+shipped `haematite 0.4.1` (Cargo.lock, crates.io registry sources): haematite's
+TTL sweeper and sync-pull scheduler are both config-gated, and **both liminal
+production creation sites disarm both** — `sweep_interval: None, distributed:
+None` at `crates/liminal/src/durability/store.rs:402-408` (ephemeral store) and
+`crates/liminal-server/src/server/connection/services.rs:874-880` (durable
+store). One honest edge: the `Database::open` path at
+`crates/liminal-server/src/server/connection/services.rs:871-873` inherits the
+persisted on-disk `config.json`, so a data directory created **outside**
+liminal could arm the sweeper inside a liminal process; the claim above covers
+liminal-created stores. The haematite `0.4.1 → 0.5` migration brief must
+re-verify this boundary at the new pin, because new wake machinery arriving
+with the release changes what these literals arm.
+
 ## E. How the original shipped
 
 These loops shipped under a review culture with substantial correctness
