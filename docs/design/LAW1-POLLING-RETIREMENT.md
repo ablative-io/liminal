@@ -627,9 +627,14 @@ the same defect as silence about a family. The class table at `ce8814d`:
 
 **Re-run the unfiltered enumeration at the sweep commit before any grep runs;
 any newly appearing class or root is classified and added, never silently
-omitted.** Tests are included because they can bless a banned calling
-pattern. These searches intentionally over-match; semantic review narrows
-them, never an exclusion added merely to make the output small.
+omitted.** And the blocking rule (owners' amendment (c), 2026-07-14,
+provenance: haematite inventory §D.1a, Apollo's contribution): **a sweep
+whose class enumeration surfaces any class without a disposition row cannot
+make its claim — the claim is BLOCKED until every class is dispositioned.**
+A class enumeration that can silently grow a class is the false-absent grep
+wearing a bigger costume. Tests are included because they can bless a banned
+calling pattern. These searches intentionally over-match; semantic review
+narrows them, never an exclusion added merely to make the output small.
 
 ```text
 git ls-files '*.rs' | grep -v '^crates/'   # root enumeration — classify every hit
