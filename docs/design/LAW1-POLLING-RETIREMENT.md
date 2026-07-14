@@ -601,20 +601,35 @@ prose or dismissed because a nearby row looks similar.
 | **UNVERIFIED-UNTIL-SWEPT** | `PushReplyAwaiter` receive re-arm — the push-reply quantum contract restored by liminal ledger gate G7 (“a push's reply deadline belongs to the push, not to the caller's poll”) | The public contract says `timeout` is a wait quantum and explicitly blesses indefinite reinvocation at `crates/liminal-server/src/server/connection/supervisor.rs:533-570`; its no-deadline path performs one `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:573-588`, while the deadlined path loops over reply observation, `Instant::now`, quantum exhaustion, and `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:590-636`. The pinned test deliberately executes five short 10 ms polls and re-arms for the eventual reply at `crates/liminal-server/src/server/connection/supervisor_tests.rs:549-590`. | Examiner finding B4 must receive a named requirement. **Expected outcome at this pin: CONCESSION** — an SDK call-site successor owning the race of reply, connection fate, and one admitted deadline, with the quantum surface intact underneath as the wait primitive, no longer asking callers to re-invoke short waits. The alternative argue branch (one `receive` quantum serves the caller's explicit wait budget rather than change detection) required evidence that production callers do not install an indefinite check loop; at `ce8814d` that evidence is absent and its negation is present — the blessing test's own doc-comment protects “an aion re-arm loop” as the production calling pattern at `crates/liminal-server/src/server/connection/supervisor_tests.rs:550-558`. If the r12 sweep or a later pin removes that caller pattern, the argue branch reopens. The contract and tests may not bless application polling by name while relying on an unproved caller distinction. |
 | **UNVERIFIED-UNTIL-SWEPT** | Subscription setup clock-sampling | One 100 ms timeout is shared by reader and synchronous setup at `crates/liminal-sdk/src/remote/tcp/subscription.rs:43-49` and installed at `crates/liminal-sdk/src/remote/tcp/subscription.rs:229-233`. `read_one_frame` creates one deadline from `SETUP_TIMEOUT` (5 s, `crates/liminal-sdk/src/remote/tcp/subscription.rs:47-49`) but repeatedly converts socket timeout into an `Instant::now() >= deadline` check at `crates/liminal-sdk/src/remote/tcp/subscription.rs:389-416`. | Decide whether the admitted setup deadline excuses only the single deadline event, not the 100 ms sampling implementation. Expected candidate shape is a blocking/readiness control-frame read raced directly with one setup deadline; no periodic clock observation. Confirm every setup entry point and partial-frame behavior before promoting this row. |
 | **UNVERIFIED-UNTIL-SWEPT** | Durability bridge `block_on` | The bridge documents a bounded `MAX_POLLS = 8` pending-future loop at `crates/liminal/src/durability/bridge.rs:31-52`; implementation polls and `yield_now`s up to eight times against a **no-op waker that can never be woken** at `crates/liminal/src/durability/bridge.rs:83-99`; its negative test feeds an always-pending future at `crates/liminal/src/durability/bridge.rs:114-123`. Verified production callers at `ce8814d`: durable publish, flush, and recovery at `crates/liminal/src/channel/types.rs:359`, `crates/liminal/src/channel/types.rs:506`, and `crates/liminal/src/channel/types.rs:578`; dedup claim/release and one further site at `crates/liminal-server/src/server/connection/services.rs:515`, `crates/liminal-server/src/server/connection/services.rs:533`, and `crates/liminal-server/src/server/connection/services.rs:951`. The `block_on` use in `crates/liminal/src/durability/store.rs:449-488` is inside a `#[cfg(test)]`-style test module, not production. | Determine whether this is a synchronous-backend contract assertion or a bounded application scan asking whether a future changed. Honest outcomes: prove one poll is the complete synchronous contract and fail immediately on `Pending`, or concede a real waker-driven executor/bridge. A smaller `MAX_POLLS`, another yield, or a sleep is not a retirement. The six production call sites above are the family's current boundary evidence; the r12 sweep must also **separately classify** the distinct tokio-runtime `block_on` sites at `crates/liminal-server/src/cluster/membership.rs:320-328` (startup) and `crates/liminal-server/src/cluster/sync.rs:282-290` (per-write, including a runtime-construction fallback) — a real-waker runtime park is a different mechanism from the NoopWaker scan and must not be conflated with it, in either direction. |
+| **UNVERIFIED-UNTIL-SWEPT** | TypeScript SDK reconnection loop — default-infinite backoff-paced retry | `sdks/liminal-ts/src/connection.ts`: `maxAttempts` defaults to `Number.POSITIVE_INFINITY` (doc comment `:73-76`; resolution `:313-315`), the reconnect loop iterates `attempt < maxAttempts` at `:243-267`, and each iteration sleeps on a `setTimeout`-based `defaultSleep` (`:85`, `:337-340`) with exponential backoff + jitter. The NO-POLLING ruling names this downstream shape explicitly: reconnect is event-driven, never poll-retry. First seeded row of the `.ts` class sweep named in D.1's class table. | The TypeScript-class sweep must set this family's boundary (other timer uses in the SDK ride the same sweep). Expected shape question, not a decision: whether a backoff-paced retry of a failed CONNECT is an admitted-deadline event chain or a poll-retry loop — the ruling's own wording ("browser reconnect is event-driven never poll-retry") suggests the retry must be driven by a connectivity/readiness event where the platform offers one, with any residual timed retry bounded, signed, and pinned rather than default-infinite. Honest outcomes preserved: argue the platform offers no event source for this transport and sign the bounded timer, or concede an event-driven successor. |
 
 ## D. Repeatable sweep protocol
 
-**D.1 Run from the pinned tree and retain the raw result.** The r12 sweep runs
-at a named commit over **every tracked Rust source in the repository** — the
-sweep root is itself a LAW-2 claim, not an assumption. At `ce8814d`,
-`git ls-files '*.rs' | grep -v '^crates/'` returns exactly one path:
-`sdks/liminal-ts/wasm-src/src/lib.rs`, the TypeScript SDK's wasm shim — product
-source, in scope. The sweep roots are therefore `crates sdks`. **Re-run that
-enumeration at the sweep commit before the greps run; any newly appearing root
-is classified and added, never silently omitted.** Tests are included because
-they can bless a banned calling pattern. These searches intentionally
-over-match; semantic review narrows them, never an exclusion added merely to
-make the output small.
+**D.1 Run from the pinned tree and retain the raw result.** The sweep runs at
+a named commit over **every tracked source file in the repository, regardless
+of language** (owners' amendment (b), 2026-07-14, taught twice in one night:
+a Rust-only sweep left this repo's TypeScript reconnect loop and haematite's
+tracked Gleam/Python/shell sources outside the claim). The sweep root is
+itself a LAW-2 claim, not an assumption: enumerate with **unfiltered**
+`git ls-files`, group by language class, and for each class either
+**sweep-and-classify with language-appropriate patterns** or **exclude it
+from the claim with a stated reason, per class** — silence about a class is
+the same defect as silence about a family. The class table at `ce8814d`:
+
+| Class | Count | Disposition |
+|---|---|---|
+| `.rs` | 184 | swept — the Rust pattern set below over roots `crates sdks` (the one non-`crates/` `.rs` is `sdks/liminal-ts/wasm-src/src/lib.rs`, product source, in scope) |
+| `.ts` | 15 | `sdks/liminal-ts` — a PRODUCT SDK. **Named sweep obligation, not yet executed:** TypeScript-appropriate patterns (`setTimeout|setInterval|poll|retry|backoff|attempt` + loop pairing per D.2). Its first candidate family is already seeded in §C from source. |
+| `.gleam` | 11 | `sdks/liminal-gleam` — a PRODUCT SDK. **Named sweep obligation, not yet executed:** Gleam-appropriate patterns (`process.sleep|repeatedly|every|after` + loop pairing). No verified polling site yet; absence is unproven until swept. |
+| `.py` | 8 | `.meridian/design-system-v2/scripts` — repo tooling, not shipped product. **Excluded from the product claim** for that reason, but named here; if any script becomes long-running fleet apparatus, it re-enters per the runs-on-fleet ruling. |
+| `.pyc` | 1 | `.meridian/design-system-v2/scripts/__pycache__/render-brief.cpython-314.pyc` — a **tracked compiled artifact** (same hygiene defect flagged as haematite tear T3). Remedy: untrack in a separate hygiene commit; until then it is named so no sweep trips on it. |
+| `.json`/`.md`/`.toml`/lock/license/git-metadata | — | non-executable; excluded from the claim as a class. |
+
+**Re-run the unfiltered enumeration at the sweep commit before any grep runs;
+any newly appearing class or root is classified and added, never silently
+omitted.** Tests are included because they can bless a banned calling
+pattern. These searches intentionally over-match; semantic review narrows
+them, never an exclusion added merely to make the output small.
 
 ```text
 git ls-files '*.rs' | grep -v '^crates/'   # root enumeration — classify every hit
