@@ -1,8 +1,8 @@
-# Participant-domain wire/server contract — design draft R11
+# Participant-domain wire/server contract — design draft R12
 
 **Status: DRAFT — decisions made by this draft, not yet ratified.** This redraft
 parks at the two-key gate: reviewer-of-record plus the liminal domain-owner pass
-(Hermes Crumpet). “Decided-by-draft” below means that R11 selects one contract
+(Hermes Crumpet). “Decided-by-draft” below means that R12 selects one contract
 shape for those keys to accept or refute; it does not grant implementation
 authority before both keys turn.
 
@@ -88,6 +88,16 @@ receipt binding, equal-generation secret proof, stale outbound work, binding
 epoch identity, and three additional LAW-1 polling families. R11 closes all
 items in §0.4 without changing the frozen laws or relaxing the two-key gate.
 
+R12 is the specification-completeness redraft required after both independent
+triple-lens examiners and the acceptance-executability lens refused R11 commit
+`1e6aa99`. The mandate preserves the E/T reserve formula, case 47 arithmetic,
+and all verified polling evidence; R12 closes the thirteen named classes without
+re-deriving those surviving decisions. It makes repayment edges closed and
+resource-backed, reserves recovery occupancy, makes the polling inventory
+reproducible, validates recovery-handshake encoding, closes token fingerprints,
+candidate order, Leave drains, restart/incarnation recovery, dispatch-slot
+handoff, and all affected executable fixtures.
+
 The corrected boundary survives R1: the server side has symmetric **transport**,
 not a participant-domain contract. At the pin, transport parks on readiness,
 has bounded inbox configuration with an installed READY notifier, and owns
@@ -163,6 +173,25 @@ acceptance rather than by an implementation placeholder.
 | S7 — queued participant bytes can cross detach/rebind | Queued work is keyed by participant plus binding epoch and revalidated at the sole final construction site; stale work is dropped; constructed bytes precede the same-writer detach/rebind response, while cross-stream handoff atomically retires the old SDK epoch. | §4 R-C5; §5 R-D2; acceptance 42 |
 | S8 — connection incarnation does not identify same-connection rotations | Lifecycle, finalization, delivery, and receipt state use immutable `binding_epoch=(connection_incarnation, capability_generation)`, so same-connection rotation fences old work and yields distinct ordered lifecycle facts. | §2 R-A1/R-A2; §4 R-C1/R-C5; acceptance 42 |
 
+### 0.5 R11 → R12 changelog
+
+Driver: the decisions-only r12 refusal mandate over commit `1e6aa99`. The E/T
+formula and its boundary arithmetic are unchanged.
+
+| Mandate class | R12 decision | Where |
+|---|---|---|
+| C1–C2 | Repayment edges are a closed successor machine whose stored fixed-point claims own sequence, candidate position, occupancy, and recovery headroom. | R-C2/R-C4; cases 37/48/49/51 |
+| C3 | A reproducible pinned-source grep classifies the total LAW-1 result set; durability bridge, push-reply re-arm, and subscription setup have retirement sockets. | §§1, 3, 7; case 50 |
+| C4 | Startup/renegotiation validate the maximum one-shot refusal list against request and wire maxima; no chunk protocol is adopted. | R-A4/R-D1; case 52 |
+| C5 | Fenced-recovery death preserves its independent projection edge; detached marker-delivery death has its own arm. | case 45 |
+| C6 | Every live token stores a canonical verifier; wrong-secret conflict is `StaleAuthority`, other body conflict is typed. | R-C0/R-C1/R-D1; case 53 |
+| C7–C8 | Candidate phases/indexes are normative and every affected finite-boundary fixture is a complete snapshot. | R-A2; cases 26/31/43/47/54 |
+| C9 | Globally earlier Leave drains are separately committed and Q-bounded; only the member's own preserved terminal plus `Left` is the two-record atomic core. | R-C2/R-C4; case 55 |
+| C10 | Prior-incarnation bindings undergo claim-backed startup recovery; connection incarnation is fixed-width, durable, unique, and exhaustion-safe. | R-A1/R-A2/R-D1; cases 42/56 |
+| C11 | Cross-connection handoff retires one SDK dispatch slot, never an unrelated physical reader. | R-C5/R-D2; case 42 |
+| C12 | Bound Leave at exact E/T equality spends both claims in one `Left`. | case 47D |
+| C13/global | Names, outcomes, idle cost, no-polling, shared definitions, and cross-references receive explicit whole-document audits. | §§5, 7 and final audits |
+
 ## 1. The verified gap
 
 The evidence base was re-verified rather than copied:
@@ -185,6 +214,9 @@ The evidence base was re-verified rather than copied:
 | Channel command reply liveness is polled. | `LIVENESS_POLL` is 10ms and `poll_reply` repeatedly `recv_timeout`s, queries the process table, and samples the command deadline (`crates/liminal/src/channel/actor/wait.rs:21-24`, `crates/liminal/src/channel/actor/wait.rs:73-95`). | `«CHANNEL-REPLY-EVENT-RACE»` must race the reply, a pushed process-exit notification, and the one admitted command deadline; no repeated liveness query may remain. |
 | The SDK push reader polls for local shutdown. | The reader installs a 100ms read timeout, maps timeout to `None`, and loops to re-read an atomic stop flag (`crates/liminal-sdk/src/remote/tcp/push_client.rs:52`, `crates/liminal-sdk/src/remote/tcp/push_client.rs:378-385`, `crates/liminal-sdk/src/remote/tcp/push_client.rs:460-510`). | `«SDK-PUSH-READER-SHUTDOWN-WAKE»` must race blocking/readiness input and an explicit local shutdown wake that interrupts the reader; socket silence is not a clock. |
 | The SDK subscription reader polls for local shutdown. | The reader installs the same 100ms timeout and treats timeout as a chance to re-check its stop flag (`crates/liminal-sdk/src/remote/tcp/subscription.rs:47`, `crates/liminal-sdk/src/remote/tcp/subscription.rs:229-233`, `crates/liminal-sdk/src/remote/tcp/subscription.rs:327-382`). | `«SDK-SUBSCRIPTION-READER-SHUTDOWN-WAKE»` must race blocking/readiness input and an explicit local shutdown wake that interrupts the reader; no timeout/flag recheck loop may remain. |
+| The synchronous durability bridge repeatedly polls without honoring a waker. | `block_on` constructs a no-op waker, polls up to eight times, and yields after `Pending` (`crates/liminal/src/durability/bridge.rs:29-40`, `crates/liminal/src/durability/bridge.rs:83-99`); production channel and server-dedup callers use it (`crates/liminal/src/channel/types.rs:340-368`, `crates/liminal-server/src/server/connection/services.rs:508-545`). | `«DURABILITY-BRIDGE-WAKE»` permits exactly one poll followed by a loud `Pending` error under the asserted synchronous backend, or a real parked executor honoring the future's waker. No no-op-waker retry/yield loop is conforming. |
+| The push-reply public wait contract blesses caller-side timeout re-arm. | `PushReplyAwaiter::receive` describes elapsed polls as benign re-arms and implements timeout/`try_recv` looping (`crates/liminal-server/src/server/connection/supervisor.rs:533-636`); pinned tests repeatedly call it with short quanta (`crates/liminal-server/src/server/connection/supervisor_tests.rs:1211-1225`, `crates/liminal-server/src/server/connection/supervisor_tests.rs:1979-2004`). | `«PUSH-REPLY-AWAITER-EVENT-RACE»` replaces that blessed use with one SDK-call-site race among reply, connection fate, and one admitted deadline. An internal one-shot wait quantum may implement the race, but indefinite caller re-arm is not its contract. |
+| Subscription setup samples a total deadline through repeated read timeouts. | `read_one_frame` takes 100ms reads and samples `Instant::now()` against `SETUP_TIMEOUT` (`crates/liminal-sdk/src/remote/tcp/subscription.rs:389-416`). | `«SDK-SUBSCRIPTION-SETUP-DEADLINE-RACE»` races handshake/Subscribe socket input against one total admitted setup deadline; no periodic clock sampling remains. |
 | Existing caps have a signed configuration pattern. | `LimitsConfig` defines named hard caps and defaults, rejects zero by field name, and constructs explicit defaults (`crates/liminal-server/src/config/types.rs:193-203`, `crates/liminal-server/src/config/types.rs:257-316`). | Keepalive, retention, receipt lifetime/count, and negotiated SDK parking extend this pattern rather than creating silent unlimited states. |
 
 **`«RESUME-COMMENT-SERVER-MISMATCH»` is broader than a comment edit.** The
@@ -193,24 +225,56 @@ are participant/conversation-keyed and server-cursored. §7 requires an owner to
 choose distinct protocols or a versioned deprecation/removal; merely correcting
 the comment cannot close the socket.
 
-**LAW-1 prerequisite inventory.** The participant implementation may not inherit
-the listener, cluster-membership, health-accept, shutdown drain/settle, channel-
-reply liveness, SDK push-reader, or SDK subscription-reader loops above. Main and
-health accepts use blocking/readiness notification plus explicit shutdown wakes;
-membership changes are pushed by an event source; connection exit updates a drain
-completion primitive; and an admitted shutdown deadline may race that primitive
-but never samples it. A command wait races reply, pushed process exit, and its one
-admitted deadline. Each SDK reader races blocking/readiness socket input against
-an explicit local shutdown wake. All six missing event-API dependencies are named
-in §7. No periodic reap, count/check, timeout-as-wake, atomic-flag recheck, `sleep`
-backoff, synthetic wake, or “temporary” polling adapter is conforming.
+**LAW-1 prerequisite inventory — reproducible total sweep.** R12 derives this
+inventory from the pin, not reviewer testimony. From a checkout containing the
+pinned object, run each expression independently so overlaps remain visible:
+
+```text
+PIN=ce8814daa748373d8ffc66b3ff1664f1697a5f4e
+git grep -n -E 'recv_timeout' "$PIN" -- 'crates/*/src/**/*.rs' 'crates/*/src/*.rs'
+git grep -n -E 'try_recv'     "$PIN" -- 'crates/*/src/**/*.rs' 'crates/*/src/*.rs'
+git grep -n -E 'poll'         "$PIN" -- 'crates/*/src/**/*.rs' 'crates/*/src/*.rs'
+git grep -n -E 'yield_now'    "$PIN" -- 'crates/*/src/**/*.rs' 'crates/*/src/*.rs'
+git grep -n -E 'sleep'        "$PIN" -- 'crates/*/src/**/*.rs' 'crates/*/src/*.rs'
+git grep -n -E 'Instant::now' "$PIN" -- 'crates/*/src/**/*.rs' 'crates/*/src/*.rs'
+git grep -n -E 'read_timeout|set_read_timeout|read_one_frame' "$PIN" -- \
+  'crates/*/src/**/*.rs' 'crates/*/src/*.rs'
+```
+
+The first six result counts at the pin are respectively `28, 2, 151, 12, 53,
+96`; the timeout-read expression is classified by every returned line rather
+than by a fragile count because it deliberately includes definitions and call
+sites. The classification below is total over the union. “Lexical” means a doc,
+comment, identifier, trait implementation, or a `#[cfg(test)]` body, not an
+executing production wait; every non-lexical result belongs to exactly one other
+row.
+
+| Complete grep-result class | Classification and reason |
+|---|---|
+| Main listener; cluster membership; health accept; shutdown drain/settle; channel reply wait; SDK push reader; SDK subscription reader | **Nonconforming prerequisite families already evidenced above.** Retire through the corresponding §7 event socket. |
+| Durability `bridge::block_on`; `PushReplyAwaiter::receive` caller re-arm; subscription `read_one_frame` setup loop | **Nonconforming prerequisite families added by R12.** Retire through `«DURABILITY-BRIDGE-WAKE»`, `«PUSH-REPLY-AWAITER-EVENT-RACE»`, and `«SDK-SUBSCRIPTION-SETUP-DEADLINE-RACE»`. |
+| `Future::poll`/`Stream::poll_next` implementations in SDK lifecycle/embedded types | **Event-driven conformant.** These are executor-called callbacks honoring the supplied waker, not application loops. |
+| One-shot `recv_timeout`/timeout reads in public SDK receive calls, actor request/reply, routing handoff, health request parsing, and connection setup | **Event-driven conformant only as one admitted wait/deadline.** No caller or callee may use timeout return as a re-arm/change-sampling loop; the three violations above are carved out explicitly. |
+| Conversation EXIT `try_recv`, pending-reply `try_recv`, process timer reads, causal-order timestamps, lifecycle timestamps, and tracing timestamps | **Event-driven conformant.** Each is read only on an already delivered scheduler/domain event, a final park probe, or records one timestamp; none schedules repeated observation. |
+| All matches under `*_tests.rs`, `*/tests.rs`, an in-file `#[cfg(test)]` module, docs/comments, field/type names, and negative assertions such as “no polling” | **Lexical/test-only.** They are retained as acceptance affordances and do not execute in a production artifact. Tests may coordinate with sleeps/yields; no such helper is a production liveness mechanism. |
+
+Consequently the participant implementation may inherit none of the ten named
+nonconforming families. Main/health accepts use readiness plus explicit shutdown;
+membership deltas and connection exit are pushed; deadline waits race one admitted
+deadline; SDK readers race input with explicit shutdown; push reply races reply,
+connection fate, and deadline; subscription setup races input with one total
+deadline; and the durability bridge either completes on its sole synchronous poll
+or parks on a real waker. No periodic reap, count/check, timeout-as-wake,
+atomic-flag recheck, `sleep` backoff, no-op-waker repoll, synthetic wake, or
+“temporary” polling adapter is conforming. A future source edit adding a sweep
+match is unclassified until this table or a new evidence row classifies it.
 
 **Silence attack / gap acceptance.** Refute this section by identifying an
 existing frame that jointly carries participant identity, conversation identity,
 a durable authorized cursor, replay position, and lifecycle verdict, or by
 showing server Subscribe consumes such a cursor. A nearby field with narrower
 scope does not close the gap. Conversely, finding the named listener loop does
-not refute R11; it proves the explicit retirement prerequisite remains unmet.
+not refute R12; it proves the explicit retirement prerequisite remains unmet.
 
 ## 2. Section (a) — participant lifecycle at the participant boundary
 
@@ -220,9 +284,28 @@ not refute R11; it proves the explicit retirement prerequisite remains unmet.
 name subject to domain-owner review) and a separate participant-domain observer,
 working name `ParticipantLifecycle`. A binding is identified by the immutable
 `BindingEpoch { connection_incarnation, capability_generation }` captured by its
-attach commit. Rotating on the same physical connection therefore creates a new
-epoch and can never reuse the old generation's lifecycle, receipt, finalization,
-or queued-delivery identity. Binding-domain facts identify
+attach commit. This is the artifact's sole definition of **binding epoch**; R-C0,
+R-C1, R-C5, and restart recovery cite it rather than redefining it. Rotating on
+the same physical connection therefore creates a new epoch and can never reuse
+the old generation's lifecycle, receipt, finalization, or queued-delivery
+identity.
+
+`connection_incarnation` is a fixed-width unsigned 128-bit wire/storage value
+`(server_incarnation: u64, connection_ordinal: u64)`. Before participant mode
+accepts connections, startup transactionally checked-increments and fsyncs the
+persisted `server_incarnation`; it never wraps, rebases, or reuses a value. Before
+a connection can negotiate participant capability, the server transactionally
+allocates its checked-incrementing `connection_ordinal`. The pair is compared
+against every still-live or durably referenced binding, receipt, work item, and
+recovery row; a collision is never published and retries the next ordinal.
+Exhaustion of either component returns the R-D1
+`ConnectionIncarnationExhausted` startup/connection outcome and refuses new
+participant connections without changing identity state. The fixed 16-byte
+encoding is included in Qb, parked-row, receipt, and frame maxima. Thus the pair
+is unique across every simultaneously or durably referenceable connection,
+including server restarts, and is minted before first participant use.
+
+Binding-domain facts identify
 `(participant_id, conversation_id, binding_epoch)`; each committed lifecycle
 record and observer callback also carries its canonical delivery key
 `(conversation_id, delivery_seq)`:
@@ -265,6 +348,9 @@ record and observer callback also carries its canonical delivery key
 - `ServerShutdown`: the server deliberately ends an active participant binding
   during shutdown. It is not misreported as participant choice or transport
   failure.
+- `UncleanServerRestart { prior_server_incarnation }`: startup recovery found a
+  durably active binding owned by a prior server incarnation. It is authoritative
+  restart evidence, not a fabricated FIN, clean disconnect, or transport timeout.
 
 The enum may carry typed detail, but no catch-all may erase these classes. EOF is
 not proof of clean deregistration. An `Attached` event has no invented close
@@ -289,11 +375,37 @@ governed by R-A4 and is not a second exactly-once effect promise:
 | Trapped linked-EXIT or locally known forced process termination | `Died(ProcessKilled)`; external reason detail remains gated by `«EXTERNAL-EXIT-REASON»`. |
 | Terminating decode/protocol-state refusal | `Died(ProtocolError)`. |
 | Server shutdown | `Detached(ServerShutdown)` unless the participant completes explicit detach first; shutdown is neither participant choice nor inferred transport death. |
+| Server startup finds a persisted active binding from a prior `server_incarnation` | One claim-backed startup-recovery transaction revokes authority and records `Died(UncleanServerRestart { prior_server_incarnation })` directly or as `PendingFinalization`; it never invents FIN. |
 | Worker-registration compensation in `crates/liminal-server/src/server/connection/apply.rs:205-213` | **No participant event.** The registration never became a participant binding. |
 
 The connection owner publishes one typed connection-termination event to the
 participant owner; the participant owner derives the keyed terminal events. It
 does not infer cause from later absence and adds no detector, sweep, or timer.
+
+**Prior-incarnation startup recovery.** Before participant traffic or receipt
+replay is enabled, startup enumerates the bounded persisted binding slots once as
+durable recovery input. For each epoch whose `server_incarnation` is not current,
+one idempotent transaction immediately revokes transport/cursor authority,
+consumes that epoch's already-owned `A` major and `T` sequence claim, records
+`UncleanServerRestart`, and either appends the one terminal record where the
+ordinary drain law permits or writes the exact ordered `PendingFinalization`.
+The transaction also updates the bounded detach cell, ClosureDebt witness, and
+its already-owned edge claims atomically. It creates no reserve domain and is not
+refusable at full debt or at sequence/order equality. An exact receipt for the
+recovered epoch subsequently fails R-C0's current-slot test and returns
+`UnboundReceipt`.
+
+The sole state outcome is R-D1 `BindingRecoveryCommitted { participant_id,
+conversation_id, recovered_binding_epoch, cause, assigned_transaction_order,
+finalization: Appended { delivery_seq } | Pending { admission_order },
+repayment_edge }`; exact restart replay returns the same state and cannot append
+a second terminal. A storage-commit failure keeps participant mode closed and
+retries startup recovery on the next explicit startup attempt; it is not a wire
+semantic outcome. Enumeration is bounded by signed identity slots and runs once
+from startup input, never from a periodic scan. Each transaction is TOLD by
+startup/storage completion and introduces no timer, poll, or sweep. Its only
+durable state is the existing binding/finalization/detach/debt cells plus the
+terminal record, so idle cost does not grow.
 
 **Pending finalization and one server-candidate order.** Each R-C0 identity
 reservation owns at most one current-or-pending binding slot because replacement
@@ -314,13 +426,41 @@ major `transaction_order`. Persist it as `Option<u64>` so the exact number of
 allocatable values is derivable in checked `u128`: `2^64` when absent and
 `u64::MAX - high` otherwise. Values `0..=u64::MAX` allocate once and the major
 never wraps, saturates, aliases, resets, or rebases. Candidate order is
-`(transaction_order, candidate_phase, ascending_participant_index)`; the phase is
-a fixed protocol enum and the participant index is bounded by the signed identity
-cap. All candidates caused by one transaction—including every marker found by
-R-C4's fixed point—share that major without aliasing.
+`(transaction_order, candidate_phase, ascending_participant_index)`. Its complete
+canonical phase order is:
 
-Finite ordering is backed by consumable claims, not physical-longevity prose. Let
-`A` be active binding epochs whose terminal fate has no assigned major and let
+| Numeric phase | Protocol name | Record/candidate class |
+|---:|---|---|
+| 0 | `BindingTerminal` | Pending or direct `Detached`/`Died`, including startup recovery. |
+| 1 | `MembershipExit` | `Left`; a bound `Left` that also terminalizes its binding appears only here, not twice. |
+| 2 | `AttachLifecycle` | `Attached`, including enrollment, supersession, detached attach, and fenced recovery. |
+| 3 | `OrdinaryRecord` | One admitted application record owned by the transaction. |
+| 4 | `CompactionMarker` | Every `HistoryCompacted` candidate/record induced by the causal transaction. |
+
+All binding terminals in a major therefore precede all attached/ordinary facts
+and **all induced markers**; within one phase, ascending `participant_index`
+decides order. Transaction-specific impossible classes are absent rather than
+assigned another value: enrollment has `AttachLifecycle` then any markers;
+supersession has `BindingTerminal`, `AttachLifecycle`, then markers; a multi-
+binding fate has every terminal then every marker; and a bound one-record Leave
+has `MembershipExit` then any exit markers. A composed preserved-terminal Leave
+uses the preserved old major for phase 0 and the member's `X` major for phases 1
+and 4, as R-C2 specifies.
+
+`participant_index` is the permanent ordinal of the identity reservation slot,
+assigned once in `0..I` at enrollment. It is unique within the conversation,
+persists through live membership and tombstone, and is never reused. All
+candidates caused by one transaction—including every marker found by R-C4's
+fixed point—share that major without aliasing. **Candidate-key uniqueness** is a
+named invariant: no two live candidates or direct records may share the complete
+`(transaction_order, candidate_phase, participant_index)` tuple. Commit and
+restart reconstruction reject a duplicate as corrupt durable state rather than
+choosing an order.
+
+Finite ordering is backed by consumable claims, not physical-longevity prose.
+This is the sole **reserved-counter-capacity** definition: every accepted future
+obligation owns its required finite counter value before publication, and later
+work refuses rather than borrow it. Let `A` be active binding epochs whose terminal fate has no assigned major and let
 `X=L` be live members whose tokenized `Left` has no assigned major. Leave is never
 accepted into a separate server pending state, so every stable live member retains
 that exit claim. Checked arithmetic preserves the complete major-order reserve:
@@ -415,12 +555,29 @@ participant id, presented generation/binding epoch, refusal epoch, retry metadat
 fixed eight-byte `u64 park_order`. Token and identifier widths are protocol
 constants. The row is a fixed-layout tagged union: reservation charges the exact
 encoded request plus the largest state-variant fields for that row, so later state
-transitions cannot grow its charged full-row bytes. Startup/negotiation rejects `B` smaller than `R` plus the schema's
-maximum metadata/framing bytes; checked-product overflow; `C > N × B`; or
-`D > G × B`. The configured `C` and `D`, not those products, are independently
-binding exact full-row byte ceilings. One-connection recovery additionally rejects
-`P > max_participant_conversations_per_connection`. Thus every durable parked
-conversation can own a recoverable interest slot.
+transitions cannot grow its charged full-row bytes.
+
+Define `RF` as the protocol-version-fixed reconnect-handshake framing bytes,
+`RC(P)` as the maximum encoded list-count field for signed `P`, `RE` as the
+fixed maximum encoding of one `{ conversation_id, refused_epoch }`, and `WF` as
+the negotiated wire frame-length maximum. Checked wide arithmetic defines the
+worst one-shot recovery request as `RH(P) = RF + RC(P) + (P × RE)`. These are
+codec-schema maxima, not runtime estimates; their fixed widths are included in
+R/Qb accounting.
+
+Startup/negotiation rejects `B` smaller than `R` plus the schema's maximum
+metadata/framing bytes; checked-product overflow; `C > N × B`; `D > G × B`; or
+`P > max_participant_conversations_per_connection`. It additionally rejects any
+checked overflow in `RH(P)`, `RH(P) > R`, or `RH(P) > WF` as
+`ParticipantRecoveryHandshakeTooLarge { max_entries: P, framing_bytes: RF +
+RC(P), entry_bytes: RE, encoded_bytes: RH(P), request_limit: R,
+wire_frame_limit: WF, dimension: ArithmeticOverflow | RequestBytes |
+WireFrameBytes }`. Thus every accepted configuration can encode the complete
+one-shot recovery request. The configured `C` and `D`, not their products, remain
+independently binding exact full-row byte ceilings. Checked validation does not
+unacceptably constrain legal P: P already means the maximum conversations one
+connection must recover atomically, so R12 deliberately adopts **no chunked
+handshake** and introduces no per-chunk arming race.
 
 Before sending an operation that can backpressure, the SDK encodes it. A request
 above `R` returns local `SdkParticipantRequestTooLarge { conversation_id,
@@ -490,9 +647,10 @@ are `InvalidObserverEpochList`. For each unique entry, one serialized comparison
 exhaustive: older returns progressed/unarmed without disturbing a newer arm;
 equal atomically subscribes then snapshots; newer returns
 `InvalidObserverEpoch` and arms nothing. Because `P` is validated against the
-recoverable connection slots, every Awaiting conversation can be included in one
-handshake. Equality linearizes either after progress (older branch) or before it
-(installed recipient receives the push), never between both.
+recoverable connection slots **and** `RH(P)` is validated against both R and WF,
+every Awaiting conversation can be included in one encodable handshake. Equality
+linearizes either after progress (older branch) or before it (installed recipient
+receives the push), never between both.
 
 One matching signal/status atomically changes the entire matching
 `AwaitingObserverProgress` cohort to `RetryAuthorized` before any send. Restart
@@ -512,10 +670,16 @@ silently reissued under new authority. Normal and marker acks never park.
 Restart/renegotiation checks every dimension before sending any parked row:
 conversation and SDK-wide row/byte counts; parked-conversation count; each stored
 request length against new `R`; each full serialized row length against new `B`;
-and `P` against recoverable connection slots. Any violation returns
-`SdkParkingCapacityIncompatible { scope, dimension, conversation_id,
-park_order?, occupied_or_actual, negotiated_limit }`, preserving every row and
-sending none until operator/configuration correction. `Reserved` rows and interest
+`P` against recoverable connection slots; and checked `RH(P)` against new R and
+WF. Any violation returns `SdkParkingCapacityIncompatible { scope, dimension,
+conversation_id, park_order?, occupied_or_actual, negotiated_limit,
+max_recovery_entries?, recovery_framing_bytes?, recovery_entry_bytes? }`.
+`dimension: RecoveryHandshakeRequestBytes | RecoveryHandshakeWireFrameBytes |
+RecoveryHandshakeArithmetic` carries the three optional recovery fields and the
+checked encoded size where arithmetic succeeds. Existing parked rows are
+preserved even when a downward R/WF change would strand them; no partial
+handshake is sent. Every violation preserves every row and sends none until
+operator/configuration correction. `Reserved` rows and interest
 slots participate. It never grandfather-discard rows. The only request-sized
 waiter is this SDK-wide and per-conversation bounded set; every retry is TOLD by
 startup, connection readiness, response, observer progress, or authority change,
@@ -524,12 +688,16 @@ never a timer, poll, or sweep.
 **Idle-cost closure.** Per SDK, parked conversation/interest headers are bounded by
 signed P, rows by signed G, and fully serialized bytes by signed D; per-conversation
 subsets are additionally bounded by N/C and each row by R/B. Per server
-conversation, `ClosureDebt`, its repayment-edge tag, and `transaction_order` are
-fixed header fields; binding-epoch and order/exit-claim tags live in the already
-bounded identity slots; marker/finalization/detach cells are bounded by signed I;
-retained log bytes/entries by their signed caps; and connection-local binding/
-interest maps by signed `max_participant_conversations_per_connection`. Resettable
-`park_order` is one fixed header per currently parked conversation. No new R11
+conversation, `ClosureDebt`, its fixed-size edge-claim bitmap/counters, and
+`transaction_order` are fixed header fields; K is unavailable occupancy inside the
+existing signed cap, not stored bytes. Binding epoch, request verifier, and order/
+exit-claim tags live in the already bounded identity/receipt cells; verifier life
+is receipt-TTL/cap bounded. Startup recovery reuses binding/finalization/detach/
+debt cells and creates only the already-owed terminal. Marker/finalization/detach
+cells are bounded by signed I; retained log bytes/entries by their signed caps;
+and connection-local binding/interest/dispatch maps by signed
+`max_participant_conversations_per_connection`. Resettable
+`park_order` is one fixed header per currently parked conversation. No new R12
 table, set, counter, cell, recipient interest, or recovery token exists outside
 one of those bounds.
 
@@ -585,7 +753,7 @@ detection remains event-driven—linked-EXIT in-VM, connection-fate
 cross-process. No heartbeat frame, periodic sweep, scan, synthetic liveness
 write, or timer whose job is to ask whether state changed.
 
-R11 retains two different liveness classes:
+R12 retains two different liveness classes:
 
 1. **Class 1 — host/network/TCP-path death.** Host down, network partition or
    black hole, socket close, FIN/EOF, and fatal socket errors are connection-fate
@@ -630,7 +798,7 @@ adapter must:
 The fields extend the named/defaulted/nonzero `LimitsConfig` pattern verified in
 §1. Exact signed defaults, platform mappings, and macOS/Linux worst-case formula
 remain the genuine evidence socket `«NO-FIN-KERNEL-BOUND»` together with
-`«KEEPALIVE-PORTABILITY»`; R11 does not manufacture numbers.
+`«KEEPALIVE-PORTABILITY»`; R12 does not manufacture numbers.
 
 **R-B3 — Honest Class-1 bound.** The advertised detection bound is the supported
 platform's documented worst case for the read-back configuration, including
@@ -659,7 +827,10 @@ signals drain completion; and an admitted shutdown deadline races that
 notification. Channel commands race reply, pushed process exit, and their one
 admitted deadline. SDK push/subscription readers race socket readiness with an
 explicit local shutdown wake, never a read timeout used to sample a stop flag.
-The implementation dependencies are §7 sockets. Retention, replay, lifecycle,
+Push reply races reply/connection fate/one deadline; subscription setup races
+input against one total deadline; and the durability bridge performs one asserted
+synchronous poll or uses an executor honoring its waker. The implementation
+dependencies are §7 sockets. Retention, replay, lifecycle, startup recovery,
 epoch rewrite, detached Leave, fenced recovery, order/debt repayment, and reader
 shutdown may not add polling under another name.
 
@@ -700,6 +871,37 @@ Leave use `(conversation_id, participant_id, detach_attempt_token)` and
 `(conversation_id, participant_id, leave_attempt_token)`. All serialize on the
 same participant state. A duplicate commits no second capability, binding,
 lifecycle record, rotation, cursor transition, or retention claim.
+
+**Canonical live-token verifier.** Every live token record stores a fixed-size
+constant-time `request_verifier` over the protocol-versioned canonical request.
+Canonicalization is the unique wire-field order with normalized optional tags;
+for a secret-bearing request the verifier consists of a constant-time secret-
+proof verifier plus a non-secret fingerprint over operation discriminant,
+conversation, participant, presented generation, and every operation field. For
+credential attach it necessarily covers
+`accept_marker_delivery_seq: Option<DeliverySeq>`. Enrollment covers its complete
+non-secret body. Detach and Leave cover their generation and operation fields in
+the same way. Padding, map order, or alternate encodings cannot create a second
+canonical body.
+
+Exact-token lookup checks this verifier before returning any live receipt or
+cell result. A canonical match replays the stored result. A secret-proof mismatch
+returns the existing `StaleAuthority` with equal presented/current generation
+where applicable and reveals no receipt. With a matching secret proof, any other
+canonical-body mismatch returns R-D1 `AttemptTokenBodyConflict { token,
+operation, conversation_id, presented_participant_id?, presented_generation?,
+presented_marker_delivery_seq?, conflict: Generation | MarkerDeliverySequence |
+CanonicalBody }`; it mutates nothing and discloses neither stored body, credential,
+nor receipt. `conflict` reports only which presented non-secret field class differs.
+Terminal tombstone/expiry outcomes no longer hold a live verifier and retain their
+existing precedence.
+
+The verifier is stored only with the already counted live receipt, pending detach
+cell, or bounded parked token-fate row and is charged at its fixed maximum before
+commit. Receipt TTL/caps bound attach/enrollment verifiers; the identity-slot cell
+bounds detach; Leave moves directly to its bounded tombstone result. This verifier
+is distinct from R-C0's longer-lived non-secret provenance fingerprint and creates
+no table, sweep, or idle-cost dimension.
 
 **Bounded detach replay.** Each reserved identity slot has exactly one fixed-size
 durable tagged cell for the current-or-most-recent binding:
@@ -841,12 +1043,15 @@ escape. Connection authentication remains the shared bearer gate, not an ACL.
 Participant cursor authority is separate.
 
 For every secret-bearing credential attach or Leave, the serialized authority
-check is exhaustive: after tombstone/identity lookup it compares generation, then
-compares the presented secret in constant time. A generation mismatch or an
-equal-generation secret mismatch returns the existing `StaleAuthority` carrying
-presented and current generations. Equality of those fields identifies the latter
-without a new discriminant or additional secret oracle. It commits no receipt,
-order, cursor, binding, lifecycle record, candidate, or retention mutation.
+check is exhaustive. A live exact token first runs R-C0's constant-time verifier:
+wrong secret is `StaleAuthority`, while matching-secret non-secret mismatch is
+`AttemptTokenBodyConflict`. Otherwise, after tombstone/identity lookup, authority
+compares generation and then the presented secret in constant time. A generation
+mismatch or an equal-generation secret mismatch returns the one
+`StaleAuthority` row carrying presented and current generations. Equality of
+those fields identifies either wrong-secret path without a new discriminant or
+additional oracle. Every refusal commits no receipt, order, cursor, binding,
+lifecycle record, candidate, or retention mutation.
 
 V1 has exactly one participant binding per
 `(connection_incarnation, conversation_id)`. Before enrollment mint or credential-
@@ -946,11 +1151,14 @@ point, every decoded request that names a participant uses this total precedence
 before operation-specific checks:
 
 0a. Exact-token lookup runs R-C0's receipt/cell state machine before ordinary
-    identity lookup. An exact **live** attach receipt returns its stored credential
-    payload plus the current `Bound`/`UnboundReceipt` classification; a terminalized
-    or expired attach token returns only its currently retained non-secret R-C0
-    outcome. An exact `detach_replay::Pending` or `detach_replay::Committed` token
-    returns that cell's stable operation result.
+    identity lookup. For a **live** token it first constant-time checks the stored
+    canonical verifier: wrong secret is `StaleAuthority`; matching-secret body
+    mismatch is `AttemptTokenBodyConflict`; only a complete match may return a
+    stored result. A matching live attach receipt returns its stored credential
+    payload plus the current `Bound`/`UnboundReceipt` classification. A terminalized
+    or expired attach token returns only its retained non-secret R-C0 outcome. A
+    matching `detach_replay::Pending` or `detach_replay::Committed` token returns
+    that cell's stable operation result.
 0b. A Pending detach cell with a **different** detach token returns
     `DetachInProgress`; this classification precedes binding lookup. A nonmatching
     token against Committed gets no special result and continues below.
@@ -1006,6 +1214,19 @@ or at generation maximum. A bound member also keeps its separate binding-termina
 claim in `T`. Checked wide arithmetic preserves after every commit:
 
 `MAX - H >= E + T + M + (L × T) + (L_other × E)`.
+
+The formula is unchanged in R12. A repayment edge that can induce markers must
+pre-plan its complete finite marker fixed point when the debt-producing
+transaction commits. Every such conditional marker is already counted in `M`,
+owns its marker capacity credit, and records its preassigned causal
+`transaction_order`, phase-4 candidate position, and participant index in the
+edge witness. It is therefore not a later new sequence/order allocation. If the
+post-state cannot include those claims, the **original optional operation** gets
+`ConversationSequenceExhausted`, `ConversationOrderExhausted`, or
+`MarkerClosureCapacityExceeded`—whichever first check in R-D1 precedence fails—
+before mutation. This cites R-A2's sole **reserved-counter-capacity** definition: an accepted
+obligation owns its finite counter values and later ordinary work cannot borrow
+them; R-C2 applies that definition to sequence values without redefining it.
 
 `E`, `T`, and `M` are durable owed-record claims. `E` and `T` remain separately
 charged for a bound member even though one bound `Left` can discharge both; when a
@@ -1089,19 +1310,36 @@ from transient attachment:
    cell. If hard observer progress is the blocker, `ObserverBackpressure` leaves
    the member/secret/binding unchanged and only the bounded SDK row waits; any
    independent closure-equation failure is the cross-cutting R-D1
-   `MarkerClosureCapacityExceeded` with no automatic retry. If an
-   earlier detach/death terminal occupies the identity cell, the lane preflights
-   one atomic composition that drains all globally earlier candidates, appends
-   that identity's original terminal record before
-   its `Left`, releases `T` and `E`, applies floor/credit/debt changes, and writes
-   the tombstone. R-C4 permits this composition at full debt under absolute fit
-   because anchor/membership release leaves a persisted TOLD repayment edge. If
-   observer hard progress still prevents absolute fit, the request remains
-   unaccepted and returns `ObserverBackpressure`; the bounded SDK row retries on
-   the pushed epoch. There is no circular server candidate or poll.
+   `MarkerClosureCapacityExceeded` with no automatic retry.
 
-   Crash exposes all-old pending/member state or both ordered records plus the
-   complete tombstone. Exact token replay after commit returns one stable
+   Leave first drains every **unrelated globally earlier** candidate in a separate
+   committed candidate transaction, strictly by the R-A2 tuple. Each transaction
+   is independently Q-bounded and crash-visible. A terminal transaction appends
+   that terminal and atomically creates its complete same-major marker candidate
+   fixed point; those marker records then drain in phase-4/index order, each in its
+   own Q-bounded transaction, before any later major. After every commit, all
+   sequence/order/credit/debt invariants hold, so restart simply resumes at the
+   lowest remaining tuple. No transaction groups an unbounded earlier set.
+
+   If this member's own detach/death terminal occupies its identity cell after
+   that prefix drain, the only Leave atomic core is exactly two records: the
+   preserved terminal first under its assigned old major, then `Left` under the
+   member's X major. The transaction evaluates one combined final floor: no
+   intermediate floor is externally committed, and every newly induced marker is
+   therefore an exit-induced phase-4 candidate under the `Left` major. Those
+   marker records drain afterward in separate Q-bounded transactions. The core
+   releases T/E, applies floor/credit/debt changes, and writes the tombstone. If
+   observer hard progress blocks it, the request remains unaccepted and returns
+   `ObserverBackpressure`; otherwise full debt is legal only under absolute fit
+   with a persisted resource-backed successor edge. There is no circular server
+   candidate or poll.
+
+   The exact crash-visible record order is: zero or more separately committed
+   earlier terminals, each followed by all markers it induced; then either the
+   one-record `Left` core, or the indivisible own-terminal/`Left` pair; then every
+   exit-induced marker. A crash between any two transactions exposes precisely
+   that valid prefix. A crash around the two-record core exposes all-old pending/
+   member state or both ordered records plus the complete tombstone. Exact token replay after commit returns one stable
    `LeaveCommitted { retired_generation, prior_terminal_delivery_seq: Option,
    left_delivery_seq }`; the optional field is present only for the composed
    two-record path. This terminal proof is as strong as attach proof but cannot
@@ -1208,32 +1446,56 @@ bound payload/storage and entries bound metadata. The fields extend the verified
 `LimitsConfig` pattern
 (`crates/liminal-server/src/config/types.rs:193-203`,
 `crates/liminal-server/src/config/types.rs:257-316`). At participant-mode startup, let `I` be configured per-conversation
-`max_retired_identity_slots`; `(1,Bm)` the maximum encoded entry/byte cost of one
-`HistoryCompacted`; and `(Qe,Qb)` the maximum encoded cost of one transaction in
-exactly these **mandatory closure classes**: enrollment, attach from detached, the
-ordered supersession pair, one-record Leave, composed pending-terminal-plus-`Left`,
-immediate detach terminal, marker append, pending-finalization drain, and R-C1
-fenced recovery. Keys, fixed `u64 transaction_order`/candidate phase, and storage
-framing are included. Checked startup
-validation requires:
+`max_retired_identity_slots`; `marker_max=(1,Bm)` be the maximum encoded entry/
+byte cost of one `HistoryCompacted`; and `Q=(Qe,Qb)` be the maximum encoded cost
+of one transaction in exactly these **mandatory closure classes**: enrollment,
+attach from detached, the ordered supersession pair, one-record Leave, the own-
+pending-terminal plus `Left` two-record core, one earlier-candidate drain
+transaction, immediate detach terminal, marker append, pending-finalization
+drain, and R-C1 fenced recovery. Keys, fixed transaction/candidate order, the
+16-byte connection incarnation, and storage framing are included.
 
-- `max_retained_conversation_entries >= Qe + (I × 1)`; and
-- `max_retained_conversation_bytes >= Qb + (I × Bm)`.
+Define the non-consumable **recovery headroom** `K=(Ke,Kb)=Q`. It is the maximum
+occupancy of binding fate plus the pending-terminal-and-detached-attach recovery
+firing while an anchored marker remains retained. Checked startup validation is:
 
-Overflow is configuration failure. No other transaction may consume `(Qe,Qb)`.
-In particular, ordinary records preserve it. A detached credential attach is now
-a named mandatory closure class: it may consume Q under the debt/repayment rule
-below so a legal minimum configuration cannot circularly deny the only path that
-can deliver and accept an already retained marker. Mandatory records have no
-reachable `RecordTooLarge`; ordinary caller-sized records may.
+- `max_retained_conversation_entries >= (2 × Qe) + (I × 1)`; and
+- `max_retained_conversation_bytes >= (2 × Qb) + (I × Bm)`.
+
+Every sum/product uses checked wide arithmetic; overflow is the named startup
+configuration failure `ParticipantRetentionCapacityInvalid { dimension,
+configured, required_or_overflow }`. This is the derived R12 minimum: the first Q
+is the existing mandatory transaction envelope, K is the second Q, and the I
+term is marker capacity. Ordinary work may consume neither Q nor a stored edge's
+K. Mandatory records have no reachable `RecordTooLarge`; ordinary caller-sized
+records may.
 
 Each conversation header has one fixed-size durable
 `ClosureDebt { entry_debt: 0..=Qe, byte_debt: 0..=Qb,
-last_consuming_transaction_order, repayment_edge }` cell, initialized to zero and
-`None`. The fixed `repayment_edge` tag is one of `None`,
-`MarkerDelivery { participant_id, binding_epoch, marker_ref }`,
-`DetachedCredentialRecovery { participant_id, marker_ref }`, or
-`ObserverProjection { through_seq }`; it adds no independent set cardinality.
+last_consuming_transaction_order, repayment_edge, edge_claims }`, initialized to
+zero, `None`, and zero claims. `edge_claims { sequence_values,
+transaction_order: Option<u64>, candidate_positions, occupancy_entries,
+occupancy_bytes }` is fixed-width: candidate positions are an I-bit slot bitmap,
+not a growing set. Sequence values are simultaneously represented by R-C2 M;
+the order value/positions are exact R-A2 causal-major/phase/index tuples; and
+occupancy includes K where recovery can be required. No claim is double-counted.
+
+The complete `repayment_edge` enum is:
+
+- `None`;
+- `ObserverProjection { through_seq }`;
+- `PhysicalCompaction { from_floor, through_seq }`;
+- `MarkerDelivery { participant_id, binding_epoch, marker_delivery_seq }`;
+- `ParticipantCursorProgress { participant_id, binding_epoch, through_seq,
+  marker_delivery_seq: Option<DeliverySeq> }`; and
+- `DetachedCredentialRecovery { participant_id, marker_delivery_seq,
+  prior_binding_epoch }`.
+
+Every binding/sequence value in a tag is exact and immutable. A planned marker's
+`marker_delivery_seq` is its pre-owned value even before append. On restart the
+participant owner re-registers exactly the tagged storage/projection/compaction/
+delivery/cursor/recovery interest and continues from its recorded claims; it
+never scans for a substitute witness.
 
 Let `S_actual` be the actual encoded retained suffix. Let closure charge `S` equal
 actual non-marker retained cost plus `marker_max` for every planned or physically
@@ -1262,39 +1524,82 @@ marker prefix can only reduce it. Debt cannot increase.
 
 Ordinary admission must leave the zero-debt equation true and otherwise returns
 `MarkerClosureCapacityExceeded`. Mandatory classes collectively consume at most
-the one Q term. Their post-commit debt is, separately for entries and bytes,
+the one Q term. If a post-state stores an edge, its exact edge claims additionally
+remain unavailable to unrelated work. Its post-commit debt is, separately for
+entries and bytes,
 
 `d' = max(0, S' + ((I - C') × marker_max) + Q - configured_cap)`.
 
 The candidate appears once in `S'`, never again as Q. Commit requires absolute fit
-`S' + ((I-C')×marker_max) <= configured_cap` and `d'<=Q`. At the minimum startup
-cap, first enrollment therefore appears once in `S'`, consumes its actual cost as
-debt, and does not demand `candidate + Q + I`.
+`S' + ((I-C')×marker_max) + edge_occupancy_claims <= configured_cap`, `d'<=Q`,
+and the complete R-C2/R-A2 edge sequence/order claims. At the new minimum,
+enrollment appears once in S and K is not double-counted as candidate cost.
 
 While either debt component is nonzero, ordinary caller admission returns
 `MarkerClosureCapacityExceeded`. A mandatory transaction may commit at any debt,
 including `(Qe,Qb)`, only if absolute fit and the bounded equations hold and its
-post-state either lowers debt or persists a valid repayment edge that needs no
-capacity-consuming admission:
+post-state either lowers debt for everything consumed or stores one valid row of
+this closed successor machine with all resources through its finite fixed point
+already owned:
 
-- detached attach establishes `MarkerDelivery`; storage completion, marker append,
-  final emitter delivery, and marker ack are TOLD events, and all remain admissible
-  while debt exists;
-- a binding fate changes that edge to `DetachedCredentialRecovery`; the next exact-
-  credential attach or Leave is itself a mandatory class backed by R-C2's `T`/`E`
-  sequence claims and R-A2's `A`/`X` order claims;
-- marker acceptance, fenced recovery, or Leave releases its anchor/member and uses
-  `ObserverProjection` when only hard observer progress still prevents physical
-  prefix removal; the already scheduled projection completion pushes that progress.
+| Stored edge | TOLD event and exact witness | Atomic debt/resource effect | Successor if debt remains |
+|---|---|---|---|
+| `ObserverProjection` | Projection storage completion through exact `through_seq`. | Advance o, recompute floor, materialize only preplanned M/credit/candidate positions, and lower debt for removed occupancy. | Earliest valid `PhysicalCompaction`, `MarkerDelivery`, or `ParticipantCursorProgress`. |
+| `PhysicalCompaction` | Already-enabled storage compaction of exact `[from_floor, through_seq]`. | Remove that prefix, release only credits whose accepted markers are removed, and lower debt in the same commit. | Earliest remaining projection, delivery, or cursor edge. |
+| `MarkerDelivery` | Candidate append/storage completion and final-emitter delivery of the exact marker to the exact binding epoch. | Append spends its pre-owned M value/position; delivery changes no cursor or debt. | After durable delivery, `ParticipantCursorProgress`; on pre-ack binding fate, `DetachedCredentialRecovery`. |
+| `ParticipantCursorProgress` | Exact normal/marker ack from the named binding and through-sequence. | Advance only that cursor; for marker ack release its anchor but retain its capacity credit; recompute/lower debt atomically. | Observer-behind becomes `ObserverProjection`; observer-ahead becomes `PhysicalCompaction`. |
+| `DetachedCredentialRecovery` | Exact-current tokenized detached attach or Leave for the named participant/marker after prior fate. | Spend only the edge's K occupancy plus the binding's pre-owned T/A or member's E/X claims; lower debt or bind/retire atomically. | Attach becomes exact `MarkerDelivery`; Leave becomes projection/compaction or clears debt. |
+
+MarkerAck therefore has two explicit ordinary orderings. If o is behind the
+accepted marker, it atomically replaces `ParticipantCursorProgress` with
+`ObserverProjection`. If o is already through the marker, it atomically stores
+`PhysicalCompaction`; acceptance itself still leaves S_actual, S, C, and debt
+unchanged. Projection without member ack similarly materializes its preclaimed
+marker and moves to delivery/cursor progress rather than losing its witness.
+
+A binding-fate event invalidating delivery and any event satisfying projection,
+cursor, or compaction performs the named debt effect and successor replacement
+in **the same durability transaction**. There is no crash point between witness
+invalidation and successor commit. Any other event that can invalidate a witness
+is a contract defect unless added as a row; `None` is legal iff both debt
+components are zero.
+
+**Resource-backed edge invariant.** Before storing any edge, the transaction
+simulates every marker in the edge's finite floor fixed point, assigns its M value,
+marker credit, causal major and phase/index position, and reserves exact K/other
+occupancy. A later allocation—mandatory or ordinary—that would consume any owned
+counter, order position, marker credit, or byte/entry headroom must first recompute
+the witness and either transfer a still-fireable claim set atomically or refuse
+before mutation. It may not borrow T/E/A/X. At exact sequence or order equality,
+an ObserverProjection edge therefore either fires entirely from these claims or
+the original optional debt-producing operation was refused by its first applicable
+named capacity/order/sequence outcome.
+
+The successor table is closed because each row either clears/lower-accounts the
+debt it consumed or ends in another enumerated tag; all external invalidators are
+represented on the delivery/cursor rows. Induction over one atomic transition
+preserves: nonzero debt implies exactly one valid tag with complete claims. The
+base is the debt-producing commit, which preflights claims; the step is each table
+row's atomic lower-or-successor commit. Thus no crash-visible state has nonzero
+debt with an invalid witness.
+
+**Anchored recovery occupancy.** Whenever an edge is stored, preflight every
+occupancy-consuming operation against the worst binding-fate plus pending-terminal-
+and-detached-attach sequence with the marker anchor held. Exact K is unavailable
+to supersession, another mandatory transaction, or ordinary work. For
+`I=1,Qe=2`, the new legal minimum is `2×2+1=5` entries, not 3. With an anchored
+marker, a proposed Qe-sized supersession is refused *before supersession* if its
+complete successor fixed point would invade K; it may never commit and discover
+after death that recovery cannot fit. The byte dimension is identical with Qb/Bm.
 
 “Repayment edge” promises an ordinary-admission-independent TOLD path, not that an
 external participant or observer will cooperate; a deliberate wedge remains the
 named §7 policy. The fixed header stores the lexicographically first valid witness
-when several exist. It names the exact participant/epoch/marker or observer
-boundary, is recomputed/replaced in the same transaction as debt or witness
-invalidation, and is cleared when both components reach zero. A mandatory candidate that fits but can neither lower debt nor preserve
-one of these paths is refused before mutation; an already accepted ordered
-candidate remains in its bounded cell. Marker append, append-free ack, observer
+when several exist. It names exact binding/sequence boundaries, is recomputed or
+replaced in the same transaction as debt or witness invalidation, and is cleared
+when both components reach zero. A mandatory candidate that cannot lower debt or
+preserve a row uses its already-owned pending cell until its TOLD event; an optional
+producer is refused before mutation. Marker append, append-free ack, observer
 progress, cursor progress, and floor compaction may run while debt exists. No
 repayment path polls, scans, or requires an ordinary record to make room.
 
@@ -1419,11 +1724,16 @@ constructed after that response under the same epoch.
 
 A cross-connection handoff claims no impossible byte ordering between two TCP
 streams. The commit fences the old final constructor; after generation-ordered
-persistence the SDK atomically retires the old connection/epoch before exposing
-`AttachBound`, and subsequently arriving origin-stream bytes are old-epoch input,
-never Q delivery. Reader retirement is driven by the explicit shutdown/fate wake,
-not a drain poll. Thus no P work can be constructed after its per-connection
-barrier or retargeted merely because a physical slot was reused.
+persistence the SDK atomically retires only the old
+`DispatchSlot=(connection_incarnation, conversation_id, participant_id,
+binding_epoch)` before exposing `AttachBound`. Later origin-stream bytes for that
+slot are dropped as old-epoch input, never Q delivery. The physical C1 reader
+continues serving every other conversation/dispatch slot; only actual connection
+fate drives whole-reader shutdown through the explicit wake. Thus no P work can
+be constructed after its slot barrier or retargeted merely because a physical
+slot was reused, while unrelated multiplexed delivery is uninterrupted. The
+fixed-size dispatch map remains bounded by the negotiated per-connection
+conversation cap and adds no unbounded state or polling.
 
 One connection may attach many conversations, but R-C1 permits at most one
 participant binding for each `(connection_incarnation, conversation_id)`.
@@ -1445,6 +1755,10 @@ state every affected counter, claim, candidate, floor, cursor, debt, and epoch a
 must satisfy all invariants on entry; the test then crosses the final boundary
 through the ordinary production request/event path. Direct production mutation of
 generation, `delivery_seq`, `transaction_order`, or `park_order` is forbidden.
+An arm that omits any quantity read by its transition is a **suite defect**, not a
+fixture default; H/F/o, L/E/T/M, every cursor/anchor/credit, A/X/order high,
+ClosureDebt/edge claims, caps/S occupancy, binding epoch/generation/secret, and
+all pending candidates/admission orders must be explicit.
 
 1. Deliver N, let the SDK confirm its contiguous watermark, duplicate N on the
    same session, and prove the guard suppresses the duplicate it can prove.
@@ -1557,16 +1871,26 @@ generation, `delivery_seq`, `transaction_order`, or `park_order` is forbidden.
     boundary. Recovery preserves original cause/binding-epoch/order and observes
     either the whole atomic append/retention/delete/release transaction or none;
     exactly one ordered terminal record and one released bounded slot result.
-25. Refuse participant-mode startup below either checked `Q + I×marker`
+25. Refuse participant-mode startup below either checked `2Q + I×marker`
     retention floor; on SDK product overflow, `C>N×B`, `D>G×B`, invalid row schema,
     or parked conversations above recoverable slots. Then start at **exact equality
-    from an empty conversation**: first enrollment commits once, consumes Q into
-    bounded `ClosureDebt`, and is not double-counted; cursor/observer progress
-    repays debt. Exercise every detach outcome, prove acks never backpressure and
-    ordinary response loss remains at-most-once ambiguous, then re-run case 21.
-26. Test-seed a complete snapshot with N active/pending binding claims, at least
-    one detached live member, all current marker obligations, and
-    `MAX-H = E+T+M+(L×T)+(L_other×E)` exactly. Refuse ordinary, enrollment, detached attach,
+    from an empty conversation**: first enrollment commits once, is counted once
+    in S, and cannot consume K. Cursor/observer progress remains TOLD; no Q/K term
+    is double-counted. Exercise every detach outcome, prove acks never backpressure
+    and ordinary response loss remains at-most-once ambiguous, then re-run case 21.
+26. Test-seed this complete sequence-equality snapshot (`h=MAX-15`), preserving
+    the multi-binding coverage with two active/pending claims:
+
+    | Quantity | Exact fixture value |
+    |---|---|
+    | H/F/o; caps/S | `H=h`, empty `F=h+1`, `o=h`; `I=3,Q=(2,2Bm)`, caps `(64,64Bm)`, `S_actual=S=(0,0)`, K free |
+    | L/E/T/M; cursors/markers | `L=3,E=3,T=2,M=0`; P0/P1/P2 cursors all `h`; no anchors or credits |
+    | Order/debt | `A=2,X=3`; order high 100 with ample remaining values; debt `(0,0)`, edge `None`, zero claims |
+    | Identity | P0 index 0 active at `(server=7,ordinal=3; generation=7)`, secret K0; P1 index 1 active at `(7,4; generation=5)`, secret K1; P2 index 2 detached at generation 4, secret K2 |
+    | Candidates | none; all detach cells `Empty`; no admission orders |
+
+    Here `MAX-H=15=E+T+M+(L×T)+(L_other×E)`. Refuse ordinary,
+    enrollment, detached attach,
     floor-advancing, and two-value supersession candidates before they invade any
     flat exit, binding-terminal, marker, or potential-marker claim. Then deliver
     EOF/shutdown/protocol failure across all active bindings and valid detached
@@ -1593,11 +1917,24 @@ generation, `delivery_seq`, `transaction_order`, or `park_order` is forbidden.
     EOF's candidate ordered first: terminal appends first and the later marker's
     recomputed `abandoned_through` includes it. In both runs the resulting sequence,
     abandonment interval, and cumulative observer projection match that order.
-31. Test-seed an empty-member snapshot at `H=MAX-2`, `E=T=M=0`, and floor above
-    `1`, then use ordinary enrollment. Its `Attached` plus resulting `E`, `T`,
+31. Test-seed both complete snapshots below; caps are deliberately ample so only
+    sequence reserve can refuse:
+
+    | Quantity | Enrollment arm | Floor-trigger arm |
+    |---|---|---|
+    | H/F/o | `H=MAX-2,F=MAX-1` empty, `o=H` | `H=MAX-1,F=H-1`, `o=H` |
+    | L/E/T/M | `0/0/0/0` | `1/1/0/0` |
+    | Cursors/anchors/credits | none | P0 cursor `F-1=H-2` (`cursor+1=F` before trigger); none/none |
+    | A/X/order | `0/0`, order high absent | `0/1`, order high 100 with ample remaining values |
+    | Debt/edge | `(0,0)`, `None`, zero claims | `(0,0)`, `None`, zero claims |
+    | Caps/S | `I=1,Q=(2,2Bm)`, caps `(16,16Bm)`, `S=(0,0)` | `I=1,Q=(2,2Bm)`, caps `(5,16Bm)`; two retained entries, `S=(2,2Bm)`, K free |
+    | Identity/binding | no identity | P0 index 0 detached, generation 9, secret `K9`, no binding epoch |
+    | Candidates | none | none |
+
+    In the first arm use ordinary enrollment. Its `Attached` plus resulting E/T,
     cursor-0 `M`, `L×T`, and `L_other×E` claims exceed the one post-append value, so the
     whole mint refuses `ConversationSequenceExhausted`. Separately test-seed a
-    valid near-boundary member snapshot and make a production floor trigger newly
+    valid near-boundary member snapshot above and make a production floor trigger newly
     overtake members; refuse it atomically, preserve floor/cursors/claims, and
     later append every already owed marker.
 32. With varied row sizes, hit per-conversation row cap N while below byte cap C
@@ -1630,18 +1967,19 @@ generation, `delivery_seq`, `transaction_order`, or `park_order` is forbidden.
 36. Separately from case 17, commit T at G+1 and then a valid G+1→G+2 attach before
     T's deadline. T replay inside provenance is exactly
     `ReceiptExpired { reason: Superseded }`; case 17 alone proves `Deadline`.
-37. With `Qe=2,I=3`, reject entry cap 2 and accept exact minimum 5. Starting only
-    from public enrollment on three distinct connections, after each mint drain
-    every cursor-0 marker candidate, deliver and explicitly accept its marker,
+37. With `Qe=2,I=3`, reject entry cap 6 and accept exact new minimum 7. Starting
+    only from public enrollment on three distinct connections, after each mint
+    drain every cursor-0 marker candidate, deliver and explicitly accept its marker,
     project every record, cumulatively ack the remaining contiguous records, and
     physically compact the suffix before the next mint. Assert after the third
     cycle three live **bound** members at one cursor, empty suffix, `M=0`, all
-    marker credits free, and debt zero. (The first equality bootstrap commits once
-    with debt 1, never a six-entry demand.) Supersede P1 in one Qe-sized production
-    transaction and project it without member acks, producing debt 2. Supersede P2;
-    its preflight cap-floor removes the first pair, overtakes all three members, and
-    atomically creates three credited marker candidates while debt stays 2. At cap
-    5 append them by planned→actual conversion, `M:3→2→1→0`, with no eviction,
+    marker credits free, K free, and debt zero. Admit two public ordinary records
+    and project but do not member-ack them, reaching the zero-debt envelope.
+    Supersede P1 in one Qe-sized production transaction and project it without
+    member acks, producing debt 2. Supersede P2; its preflight cap-floor removes
+    the first two ordinary records, overtakes all three members, and atomically
+    creates three credited marker candidates while debt stays 2. At cap 7 append
+    them by planned→actual conversion, `M:3→2→1→0`, with no eviction,
     replacement, or second Q charge. Deliver/accept each retained marker on its
     existing binding, then observer/cursor progress physically compacts it,
     releases its credit, and repays debt. Separately make absolute fit impossible
@@ -1686,15 +2024,32 @@ generation, `delivery_seq`, `transaction_order`, or `park_order` is forbidden.
     still-live receipt there: it is `UnboundReceipt`, never `Bound`. Queue more P
     work across that handoff; prove none is encoded after the barrier or delivered
     as Q and Q's first delivery is keyed to Q's epoch internally. Repeat a P
-    credential handoff from C1 to C2: assert no order between the TCP streams, but
-    atomically persist P's newer epoch, retire C1's reader, and reject every later
-    C1 participant byte before exposing C2's `AttachBound`. Finally race P/Q into
-    an empty slot: one winner binds and the different-id loser gets the typed
-    outcome; codec vectors remain conversation-only.
-43. For `park_order`, test-seed a nonempty set at `u64::MAX-1`, allocate MAX,
-    prove the next reservation returns `SdkParkOrderExhausted`, then empty the set
-    transactionally and prove only that counter resets. Separately test-seed one
-    active member at `transaction_order=MAX-2` with exact
+    credential handoff for conversation X from C1 to C2 while unrelated R on
+    C1/conversation Y receives continuously: assert no order between TCP streams,
+    atomically persist P's newer epoch, retire only P/X's exact C1 dispatch slot,
+    and drop every later C1/X byte before exposing C2's `AttachBound`. C1's reader
+    remains live; R/Y delivery is gap-free and no lifecycle event is emitted for R.
+    Finally race P/Q into an empty slot: one winner binds and the different-id loser
+    gets the typed outcome; codec vectors remain conversation-only. Add fixed-width
+    incarnation vectors: same-connection rotation changes only generation; a new
+    connection changes ordinal; restart increments server incarnation; reuse,
+    collision, and either u64 exhaustion return `ConnectionIncarnationExhausted`
+    without aliasing a live/receipt/work epoch.
+43. Use these complete, independent snapshots:
+
+    | Quantity | Park-order arm | Transaction-order arm |
+    |---|---|---|
+    | H/F/o; L/E/T/M | `0/1/0; 1/1/1/0` | `100/101/100; 1/1/1/0` |
+    | Cursors/anchors/credits | P0 cursor 0; none/none | P0 cursor 100; none/none |
+    | A/X/order | `1/1`, order high 10 | `1/1`, order high `MAX-2`, remaining 2 |
+    | Debt/edge | `(0,0)`, `None`, zero claims | same |
+    | Caps/S | `I=1,Qe=2`, caps `16/16Bm`, `S=0`, K free | same |
+    | Identity | P0 index 0, epoch `(11,2; generation 4)`, secret `K4` | P0 index 0, epoch `(11,3; generation 5)`, secret `K5` |
+    | Pending rows/candidates | one `Reserved` ordinary row at park order `MAX-1`: request 24 bytes, full row 48 bytes; `N=G=4,P=1,C=D=256,B=64,R=32`, occupied rows/conversations/bytes `1/1/48` with room for the MAX allocation and next attempted row; no server candidate | no parked row and no candidate |
+
+    For `park_order`, allocate MAX, prove the next reservation returns
+    `SdkParkOrderExhausted`, then empty the set transactionally and prove only that
+    counter resets. In the second snapshot, exact
     `order_remaining=A+X=2`. Optional record/enrollment/attach work returns
     `ConversationOrderExhausted` with high/remaining/reserved/resulting fields and
     no mutation. A real connection fate consumes `A`, assigns `MAX-1` to its
@@ -1720,13 +2075,19 @@ generation, `delivery_seq`, `transaction_order`, or `park_order` is forbidden.
     Q and make C1's terminal fate pending. On C2, a valid fresh attach naming that
     marker executes fenced recovery at full debt: one transaction accepts the
     marker, retains its capacity credit, releases the anchor, drains the old
-    terminal, appends `Attached`, rotates to C2's binding epoch, and lowers debt or
-    stores the exact TOLD repayment edge. Kill C2 before that edge repays; the fate
-    atomically changes it to `DetachedCredentialRecovery`, and exact-current C3
-    attach or detached Leave remains mandatory/admissible under absolute fit.
-    Crash before/after every C1→C2→death transition and response: observe all-old
-    or all-new, no abandoned payload marked delivered, no second marker/sequence
-    charge, and no timer or retry loop.
+    terminal, appends `Attached`, rotates to C2's binding epoch, and stores the
+    exact `ObserverProjection` edge. Kill C2 before projection repays: its fate
+    leaves that independent edge **unchanged**. No second marker is claimable until
+    physical compaction releases the accepted marker's credit.
+
+    In a separate ordinary detached-attach arm, keep the retained marker
+    unaccepted, bind C2 without fenced acceptance, and kill C2 before MarkerAck.
+    The same atomic fate transition changes `MarkerDelivery` or delivered
+    `ParticipantCursorProgress` to `DetachedCredentialRecovery` with exact C2/
+    marker witnesses and K claims. Exact-current C3 attach or detached Leave is
+    mandatory/admissible on those claims. Crash before/after every transition and
+    response: observe all-old or all-new, no abandoned payload marked delivered,
+    no false witness, no second marker/sequence charge, and no timer or retry loop.
 46. Through public operations enroll P (`E=1,T=1`), detach (`E=1,T=0`), reattach
     (`E=1,T=1`), and detach again (`E=1,T=0`); at each commit recompute every
     reserve term and prove no cycle creates, loses, or double-spends the flat exit
@@ -1734,40 +2095,113 @@ generation, `delivery_seq`, `transaction_order`, or `park_order` is forbidden.
     writes one `Left` and death sees `Retired`; death-first writes its exact-epoch
     terminal and detached Leave writes `Left` second. Inject crashes throughout and
     prove the mid-exit fate is exactly one of those two complete histories.
-47. Exercise exact sequence exhaustion with a step-by-step E1 construction. Arm A
-    test-seeds one detached member, zero bindings/markers, and `H=MAX-1`: required
-    reserve is exactly `E=1`, so unbound Leave allocates `Left` at `MAX` and leaves
-    zero claims—this is the `H=MAX`, zero-bindings arm. Arm B test-seeds one active
-    member at `H=MAX-3`: `E=1,T=1,M=0,L×T=1,L_other×E=0`. Optional work refuses;
-    EOF allocates `MAX-2`, consumes T, and creates one M at exact equality. Arm C
-    starts from that resulting durable state: marker append allocates `MAX-1` and
-    consumes M, then detached Leave allocates `MAX` and consumes E. Assert equality
-    after each of the three named arms' mandatory allocations, no wrap, and exact
-    `ConversationSequenceExhausted` fields for every optional invasion attempt.
-48. At exact entry and byte capacity, create and append one marker with `C=1` and
-    debt at its legal boundary. Snapshot `S`, `C`, remaining marker reserve, and
-    both debts immediately before acceptance; `MarkerAck` must commit with all four
-    capacity quantities unchanged and can never return a capacity outcome. Advance
-    cursors/observer so physical compaction removes that marker: assert `C:1→0`,
-    reserve increases by marker maximum, `S_actual` falls by actual encoded cost,
-    `S` falls by marker maximum, and required capacity/debt does not increase. Crash on both sides of acceptance and
-    compaction and observe only those complete states.
-49. Configure the legal minimum `cap=Q+I×marker` with `I=1`. Via public operations
-    detach the member, let cap-floor planning create and append its marker, and
-    crash before the marker is delivered. Restart at full legal debt. A fresh exact-
-    credential detached attach is a mandatory closure transaction: it fits once,
-    persists `MarkerDelivery`, binds a new epoch, receives the retained same-key
-    marker, accepts it, and uses observer/cursor progress to compact it, release the
-    credit, and repay debt. Crash before/after attach and first delivery; recovery
-    neither duplicates the attach nor permanently denies reconnect.
-50. Replace and adversarially test all three newly cited LAW-1 families. Channel
-    reply wait races reply, pushed process exit, and one command deadline in every
-    order; no 10ms liveness query remains. On indefinitely silent push and
-    subscription sockets, explicit local shutdown wakes and joins each reader
-    without a 100ms read timeout or atomic stop-flag recheck; race shutdown with
-    readable bytes, EOF, and decode error. A source-structure test rejects the old
-    constants/timeout-as-wake loops and proves every wait parks until one named
-    event, never a timer whose job is change detection.
+47. Exercise exact sequence exhaustion from the complete snapshots below. `Kx`
+    denotes explicit fixture secret bytes, never an implicit default.
+
+    | Quantity | Arm A | Arm B | Arm C (durable result of B) | Arm D |
+    |---|---|---|---|---|
+    | H/F/o | `MAX-1/MAX/MAX-1` empty | `h=MAX-3; F=h-4; o=h` | `MAX-2; F=(h-3); o=h` | `MAX-3/MAX-2/MAX-3` empty |
+    | L/E/T/M | `1/1/0/0` | `1/1/1/0` | `1/1/0/1` | `1/1/1/0` |
+    | Cursor; anchor/credit | P0=`H`; none/none | P0=`F-1`; none/none | P0 unchanged; none/P0 credit | P0=`H`; none/none |
+    | A/X/order high | `0/1/100` | `1/1/100` | `0/1/101`; marker uses fate major 101 | `1/1/100` |
+    | Debt/edge claims | `(0,0)`, `None`, zero | same | same; marker candidate owns M/phase-4 slot | `(0,0)`, `None`, zero |
+    | Caps/S | `I=1,Q=(2,2Bm)`, caps `(8,8Bm)`, `S=(0,0)` | same Q/caps; five Bm-sized retained entries, `S_actual=S=(5,5Bm)`, K free | same `(5,5Bm)` charge after one-in/one-out floor shift | same Q/caps, `S=(0,0)`, K free |
+    | Identity/binding | P0 index 0 detached gen 3/secret K3 | P0 index 0 epoch `(20,1; gen 4)`, secret K4 | P0 detached gen 4/secret K4 | P0 index 0 epoch `(20,2; gen 5)`, secret K5 |
+    | Pending candidates | none | none | one marker at `(101,CompactionMarker,0)` | none |
+
+    Arm A's reserve is exactly E=1: unbound Leave allocates `Left` at MAX and
+    leaves zero claims. In B, `E=1,T=1,M=0,L×T=1,L_other×E=0`; optional work
+    refuses. EOF allocates MAX-2, consumes T, and cap-floor removes exactly the
+    first of five retained entries, overtaking exactly P0 and creating exactly one
+    M at equality. Arm C appends that marker at MAX-1 and consumes M, then detached
+    Leave allocates MAX and consumes E.
+
+    Arm D is the bound-Leave equality witness: `MAX-H=3=E+T+(L×T)`. Exact-current
+    bound Leave with no pending terminal appends **one** gap-free `Left` at MAX-2,
+    discharging both T and E in that record. Assert no
+    `ConversationSequenceExhausted`, no second record, `H'=MAX-2`, zero remaining
+    claims, and the reserve invariant. Across all arms assert exact fields for every
+    optional invasion, no wrap, and no transition blocked by order or closure.
+48. At exact entry and byte capacity, create and append one marker with C=1 and
+    legal-boundary debt. For observer-behind, final delivery stores
+    `ParticipantCursorProgress`; MarkerAck atomically releases the anchor and
+    switches to exact `ObserverProjection`. For observer-already-ahead, MarkerAck
+    atomically switches instead to exact `PhysicalCompaction`. In both arms snapshot
+    S_actual/S/C/reserve/debts/edge claims immediately before and after acceptance:
+    all capacity quantities are unchanged and no capacity outcome is possible.
+    Compaction then asserts `C:1→0`, reserve +marker_max, S_actual minus actual
+    encoding, S minus marker_max, and nonincreasing debt. Crash on both sides of
+    every ack/edge and compaction commit; no state exposes an invalid witness.
+49. Configure the new legal minimum `cap=2Q+I×marker` with `I=1,Qe=2`, hence entry
+    cap 5. First preserve the original recovery walk: via public operations detach
+    P, create/append its marker, crash before delivery, restart, exact-credential
+    attach using owned edge claims, deliver/accept the same key, then compact and
+    release credit without duplicate attach or polling. Separately construct the
+    A2 boundary exactly: P's credited unaccepted marker is first retained; propose
+    a Qe-sized `Detached(Superseded)/Attached` pair; if admitted, kill its epoch
+    before delivery, park its terminal, and exact-current fresh-attach. Preflight
+    must either reserve K and complete that fresh attach/delivery, or refuse the
+    **supersession before mutation** with `MarkerClosureCapacityExceeded`. It may
+    never admit supersession and strand the later recovery. Repeat byte-exact and
+    crash before/after every witness transition.
+50. Replace and adversarially test all ten sweep-classified LAW-1 families. Preserve
+    the seven existing arms: listener/membership/health/shutdown event wakes,
+    channel reply versus pushed process exit/one deadline, and silent push and
+    subscription readers versus explicit shutdown/data/EOF/error. Add durability
+    bridge: a synchronous backend is Ready on its only poll and Pending fails
+    loudly, while an asynchronous backend uses a real parked waker; reject
+    NoopWaker plus repeated poll/yield. Add `PushReplyAwaiter`: the SDK call races
+    reply, connection fate, and one admitted deadline and cannot re-arm indefinitely.
+    Add subscription setup: handshake/Subscribe input races one total deadline,
+    with no 100ms clock sampling. A source-structure audit reruns all §1 expressions,
+    rejects every retired construction, and requires each wait to park on its named
+    event rather than a change-detection timer.
+51. At the C1 resource boundary, use one detached member at the empty-log watermark,
+    then production attach with `order_remaining=A+X` exactly and R-C2 equality.
+    Make ObserverProjection fire before member ack and overtake that member. The
+    originating attach must either have pre-owned the marker's M value, capacity
+    credit, causal major and phase/index slot and complete through delivery/cursor/
+    compaction successors, or return its first named sequence/order/closure outcome
+    before any attach, floor, debt, or receipt mutation. It may not borrow T/A.
+    Inject a crash at the would-be invalidation/successor boundary and prove that
+    boundary is unobservable because it is one commit.
+52. Validate one-shot recovery handshake encoding at four boundaries: choose P/R/WF
+    so `RH(P)==R==WF` and encode all P entries; lower either limit by one byte and
+    get `ParticipantRecoveryHandshakeTooLarge` at startup; overflow `P×RE` and get
+    its arithmetic dimension; then park rows and renegotiate R or WF downward so
+    `SdkParkingCapacityIncompatible` names the recovery-handshake dimension and
+    exact size/framing/entry fields while preserving every row and sending no
+    chunk. Exact codec lengths, not estimates, drive all arms.
+53. Replay one committed credential-attach token with (a) byte-identical canonical
+    body: return the same Bound/UnboundReceipt; (b) altered secret: one
+    `StaleAuthority` with equal generations, no mutation and no receipt disclosure;
+    (c) correct secret proof but changed generation or marker option: one
+    `AttemptTokenBodyConflict` naming only the presented fields/conflict class,
+    with no mutation or receipt disclosure. Repeat codec normalization variants
+    and detach/Leave live cells; no duplicate transaction commits.
+54. Under one causal major create two binding terminals, including P0's terminal,
+    and markers for both participants including P0. Assert exact tuple sequence:
+    all `(major,BindingTerminal,index)` in index order, then every
+    `(major,CompactionMarker,index)` in index order; no collision occurs for P0.
+    Crash with all candidates durable and restart: reconstruction is byte-identical
+    and drains the same sequence. Attempt a duplicate full tuple and classify the
+    snapshot as corrupt rather than overwrite a candidate.
+55. With `I=3,Qe=2`, create three ordered pending finalizations and issue detached
+    Leave for the third identity, whose own pending fate is last of the three.
+    Drain the two unrelated earlier terminal transactions separately, then every
+    marker each induces, injecting a crash between every pair and restarting from
+    the exact prefix. Finally commit only the member's own preserved-terminal/Left two-record
+    core and then its exit markers. Every transaction is Q-bounded, every prefix
+    satisfies sequence/order/credit/debt invariants, and the final log/tombstone is
+    identical regardless of crash point.
+56. Commit AttachBound and crash the server before any connection-fate publication.
+    On a new server incarnation, startup recovery spends only the old epoch's T/A
+    claims, records exactly one `Died(UncleanServerRestart)` directly or pending,
+    and exact receipt replay is `UnboundReceipt`. Run the same arm with debt at Q
+    and with order/sequence remaining at exact reserved equality: recovery never
+    refuses or allocates a new reserve. Crash during recovery and restart again;
+    `BindingRecoveryCommitted` is stable and exactly one terminal results. Assert
+    no polling and no extra durable cell beyond the bounded existing state.
 
 A reviewer refutes R-C0–R-C5 by finding an exactly-once application-effect
 claim, changed delivery key, ghost enrollment, `Bound` on an unbound replacement
@@ -1798,7 +2232,12 @@ authentication/version failures remain R-D2 pre-participant outcomes.
 | SDK-local participant encoding | `SdkParticipantRequestTooLarge` | conversation id, encoded request bytes, signed request-byte limit | Local terminal refusal for this call; reserve no row, send no frame, create no server state. |
 | SDK-local observer-wait admission | `SdkObserverParkCapacityExceeded` | scope (`PerConversation` or `SdkWide`), dimension (`Conversations`, `Rows`, or `Bytes`), conversation id, signed limit, occupied, requested full amount | Local terminal refusal; atomically roll back empty first-interest reservation, reserve no row, send no frame, create no server state. |
 | SDK-local park-order allocation | `SdkParkOrderExhausted` | conversation id, `counter: ParkOrder`, `value: u64::MAX` | Terminal while set nonempty; reserve/send nothing, preserve ordered rows; only empty-set transaction may reset. |
-| SDK restart/cap renegotiation | `SdkParkingCapacityIncompatible` | scope; offending dimension (`ConversationRows`, `ConversationBytes`, `SdkConversations`, `SdkRows`, `SdkBytes`, `RequestBytes`, `RowBytes`, or `RecoverableInterestSlots`); conversation id/park order when applicable; actual or occupied; negotiated limit | Preserve every row and interest slot, send none, require operator/config correction. |
+| SDK restart/cap renegotiation | `SdkParkingCapacityIncompatible` | scope; offending dimension (`ConversationRows`, `ConversationBytes`, `SdkConversations`, `SdkRows`, `SdkBytes`, `RequestBytes`, `RowBytes`, `RecoverableInterestSlots`, `RecoveryHandshakeRequestBytes`, `RecoveryHandshakeWireFrameBytes`, or `RecoveryHandshakeArithmetic`); conversation id/park order when applicable; actual or occupied; negotiated limit; for recovery dimensions max entries, framing bytes, entry bytes, and encoded bytes when computable | Preserve every row and interest slot, send none and no partial handshake, require operator/config correction. |
+| Participant startup/negotiation cap validation | `ParticipantRecoveryHandshakeTooLarge` | max entries P, framing bytes `RF+RC(P)`, entry bytes RE, encoded bytes `RH(P)` when computable, R, WF, dimension (`ArithmeticOverflow`, `RequestBytes`, `WireFrameBytes`) | Refuse participant mode/configuration before accepting traffic; no rows are created or discarded and no chunk protocol runs. |
+| Participant retention startup validation | `ParticipantRetentionCapacityInvalid` | entry/byte dimension, configured cap, checked `2Q+I×marker` required value or overflow discriminant | Refuse participant mode before traffic; no conversation state exists. |
+| Participant connection-incarnation mint | `ConnectionIncarnationExhausted` | exhausted component (`ServerIncarnation` or `ConnectionOrdinal`), current u64 value, attempted server incarnation when applicable | Refuse new participant connections/startup before first participant use; preserve all durable identities and never wrap/reuse. |
+| Server startup binding recovery | `BindingRecoveryCommitted` | participant/conversation, recovered binding epoch, `UncleanServerRestart` cause/prior server incarnation, assigned major, finalization (`Appended { delivery_seq }` or `Pending { admission_order }`), repayment edge | Internal durable success; exact restart replay is idempotent, receipt status is UnboundReceipt, and no wire retry/poll is created. |
+| Live exact token with matching secret proof but changed canonical non-secret body | `AttemptTokenBodyConflict` | token, operation, conversation id, optional presented participant/generation/marker sequence, conflict (`Generation`, `MarkerDeliverySequence`, `CanonicalBody`) | Terminal for this request; disclose no stored body, secret, receipt, or current slot and mutate nothing. |
 | SDK-local untokenized response loss | `RecordAdmissionUnknown` | conversation id, presented participant id/generation, operation identity `OrdinaryRecordAdmission`, park order | Atomically delete the row/release last interest when applicable; terminal ambiguity and never resend automatically. |
 | First participant operation or reconnect refusal entry for a conversation on this connection | `ConnectionConversationCapacityExceeded` | conversation id, signed connection-conversation limit | No participant mutation, interest arming, or readiness promise; use a connection with a free negotiated slot. |
 | Enrollment or credential attach binding attempt | `ConnectionConversationBindingOccupied` | conversation id and `presented_participant_id: Option<ParticipantId>` (`None` for enrollment); no occupying identity fields | Terminal for this attempt; no mint/receipt/rotation/replay/binding/record; same-participant rotation remains eligible. |
@@ -1807,7 +2246,7 @@ authentication/version failures remain R-D2 pre-participant outcomes.
 | New detach with **no Pending cell**, Leave while a different live binding epoch exists, normal ack, marker ack, or ordinary admission after exact-token lookup misses | `NoBinding` | presented conversation id, participant id, generation | Terminal; no other binding disclosed and no state change. Detached exact-credential Leave is eligible; any Pending detach cell is classified at step 0b first. |
 | Any listed participant-id operation with a live generation mismatch, or any secret-bearing operation with equal generation and wrong secret | `StaleAuthority` | presented participant id/generation and current generation; operation-specific token/boundary when present; no secret-derived detail | Terminal under invalid authority; equal generation fields classify secret mismatch without a new oracle. No state changes. |
 | Any listed participant-id operation whose presented id has a tombstone | operation-specific `Retired` | presented participant id/generation, retired generation, and operation-specific token/boundary | Terminal tombstone result; no secret, binding, live cursor, or state change. |
-| Any closure-checked admission | `MarkerClosureCapacityExceeded` | conversation id, entry/byte dimension, checked required, configured limit, marker capacity-credit count, anchor count, entry/byte `ClosureDebt`, repayment-edge tag | No floor, membership, credit, participant, candidate, sequence, edge, or debt mutation; terminal for every unaccepted request, with no SDK park or automatic retry. Already accepted server candidates and claimed terminal paths remain event-driven. Marker acceptance itself never has this outcome. |
+| Any closure-checked admission | `MarkerClosureCapacityExceeded` | conversation id, entry/byte dimension, checked required, configured limit, marker capacity-credit count, anchor count, entry/byte `ClosureDebt`, repayment-edge tag, edge sequence/order-position claim counts, edge occupancy claim, and K headroom | No floor, membership, credit, participant, candidate, sequence, edge, or debt mutation; terminal for every unaccepted request, with no SDK park or automatic retry. Already accepted server candidates and claimed terminal paths remain event-driven. Marker acceptance itself never has this outcome. |
 | Enrollment attach | `EnrollBound` | enrollment token, participant id, generation `1`, secret, receipt/provenance deadlines, exact binding epoch | Success; persist before exposing `Bound`; replay same token only after unknown response. |
 | Enrollment attach | `EnrollUnboundReceipt` | same credential fields and origin binding epoch | Persist, then fresh-token credential attach; never expose binding. |
 | Enrollment attach | `EnrollmentKnown` | enrollment token, participant id, current generation | Committed identity, no secret/binding; use a valid current-or-newer credential or enter `CredentialRecoveryLost`; never remint. |
@@ -1950,8 +2389,9 @@ site, that it performs the final participant/binding-epoch revalidation, and tha
 generic enqueue refuses those discriminants. On one connection, queue P work,
 cross detach/rebind, and bind Q: only constructed P bytes precede the response,
 stale work drops, and Q's first construction uses Q's epoch. Repeat across two
-connections: assert no cross-stream order, atomically retire P's old SDK epoch
-before exposing Q's `AttachBound`, and reject every later old-stream delivery.
+connections: assert no cross-stream order, atomically retire P's exact old SDK
+dispatch slot before exposing Q's `AttachBound`, reject later old-slot delivery,
+and keep the physical reader serving unrelated conversations until connection fate.
 Push/PushReply codec vectors remain byte-identical.
 
 ## 6. Interactions and non-goals
@@ -2006,41 +2446,44 @@ resume vehicle. Until then it remains blocked upstream.
 
 A reviewer refutes this section by finding a hidden ACL claim, SDK ergonomics
 commitment, exactly-once effect promise, targeted-delivery branch, schedule, or
-liveness detector. The receive brief must be implementable from explicit R11
+liveness detector. The receive brief must be implementable from explicit R12
 facts, except where §7 names a genuine gate.
 
 ## 7. Named sockets and decision register
 
-R11 distinguishes decisions made by the draft from genuine unknowns. A
+R12 distinguishes decisions made by the draft from genuine unknowns. A
 **decided-by-draft** row has one candidate answer and may change only by explicit
 key refusal/revision. A **genuinely-open** row names unavailable platform
 evidence, an implementation linearization mechanism, a layer-above policy, or
 an owner migration decision. Open rows are not permission for implementations
 to choose incompatible semantics silently.
 
-| Socket | Status | R11 answer or reason openness is genuine | Closure/refutation evidence |
+| Socket | Status | R12 answer or reason openness is genuine | Closure/refutation evidence |
 |---|---|---|---|
 | `«ATTACH-TRANSACTION»` | **decided-by-draft** | Attach, detach, and Leave use mandatory write-ahead tokens and one serialized participant state. The identity slot's detach cell is `Empty`, token-bearing `Pending` without a sequence, or `Committed` with the exact binding epoch/sequence; it is the sole stable-echo source until next attach/Leave. | All send/commit/response windows, same/different token while Pending, crash around Pending→Committed, echo after binding removal, stale replay after replacement death, detach loss across attach/Leave, replacement recovery, and terminal receipt tests. |
 | `«RECEIPT-LIFETIME»` | **decided-by-draft** | Signed receipt TTL/count and non-secret provenance TTL/count caps bound both bodies and classifiers. Cleanup uses admitted deadlines; TTL is the maximum supported recovery outage and expiry may enter `CredentialRecoveryLost`. | Delayed generation, crash order, exact/unknown before/after provenance, cap exhaustion, composed outage, and no-sweep tests. |
 | `«RETIRED-IDENTITY-BOUND»` | **decided-by-draft** | Enrollment reserves signed server/conversation identity slots; each slot owns the enrollment-token mapping for the live+tombstone lifetime, and Leave converts it to a permanent tombstone. Cap exhaustion refuses before mint, bounding churn without weakening `EnrollmentKnown`, `Retired`, or duplicate `LeaveCommitted`. | Post-GC enrollment T versus fresh U, boundary churn, no-ghost replay, lost Leave response, and pre-mint capacity refusal. |
 | `«PARTICIPANT-ID-ORIGIN»` | **decided-by-draft** | Server mints participant id, generation 1, and initial secret inside tokenized enrollment; later attach proves current generation/secret and atomically increments/rotates before cursor access. External ids never authorize a cursor. | Authorization-before-cursor, collision, enrollment replay, generation ordering, rotation loss, and reconnect tests. |
 | `«MEMBERSHIP-BOUNDARY»` | **decided-by-draft** | Membership begins at mint with cursor `0`, survives detach, entitles full history and offline commits, and ends only with authoritative tokenized Leave that retires id, receipts, and soft retention claim. | Late join, offline replay, Leave authority/idempotency/races, and floor-transition tests. |
-| `«LEAVE-AUTHORITY»` | **decided-by-draft** | Exact current generation/secret authorizes tokenized terminal Leave from the authoritative bound epoch or while detached, at every generation. Detached Leave grants no cursor/binding authority; when an earlier terminal is pending, one atomic ordered composition writes it then `Left`. V1 has no operator Leave. | Shared-bearer/stale/wrong-secret refusals, duplicate stable result, attach/Leave/death races, full-debt pending-terminal composition, and generation-maximum tests. |
+| `«LEAVE-AUTHORITY»` | **decided-by-draft** | Exact current generation/secret authorizes tokenized terminal Leave from the authoritative bound epoch or while detached, at every generation. Detached Leave grants no cursor/binding authority. Unrelated earlier candidates drain in separate Q-bounded commits; only this member's own pending terminal plus `Left` is the two-record atomic core. V1 has no operator Leave. | Shared-bearer/stale/wrong-secret refusals, duplicate stable result, attach/Leave/death races, full-debt pending-terminal composition, and generation-maximum tests. |
 | `«ACK-SHAPE»` | **decided-by-draft** | Normal `ParticipantAck { conversation_id, participant_id, capability_generation, through_seq }` and `MarkerAck { conversation_id, participant_id, capability_generation, marker_delivery_seq }` carry presented authority. At one serialized point the server looks up the presented id, matches generation plus the exact binding epoch, then validates continuity or named abandonment. Post-Leave uses the presented id's tombstone and never a live cursor. | P-ack-after-Q-bind ambiguity, same-id rotation, unknown/unbound/stale/Retired codec vectors, normal gap/regression, marker-delivery refusal, and proof abandoned payload is not marked delivered. |
 | `«COMPACTION-EXIT»` | **decided-by-draft** | A pending marker shares the durable server-candidate admission order with finalizations; at append it recomputes `abandoned_after..abandoned_through` and the physical-floor snapshot. Acking abandons through that pre-marker watermark and advances to marker sequence. | Both marker/finalization orders, append-time fields, retained-suffix choice, marker loss/redelivery, repeated-cycle, concurrent-live, and post-ack flow tests. |
-| `«RETENTION-UNITS»` | **decided-by-draft** | Signed byte/entry caps start at `Q + I×marker`. Ordinary work preserves Q; detached attach and every named mandatory class may consume it under absolute fit. A marker capacity credit survives planning through physical compaction, acceptance never increases reserve, and nonzero/full `ClosureDebt` stores an exact TOLD repayment edge. | Empty-conversation equality bootstrap, independently computed entry/byte debt, reachable three-marker drain, acceptance/compaction credit boundary, minimum-cap crash-before-delivery reattach, full-debt C1→C2→death, and closure-refusal atomicity. |
+| `«RETENTION-UNITS»` | **decided-by-draft** | Signed byte/entry caps start at `2Q + I×marker`: Q is the mandatory envelope and K=Q is non-consumable anchored-recovery headroom. A marker capacity credit survives planning through physical compaction; acceptance never increases reserve; every nonzero-debt edge has exact fixed-point counter/order/occupancy claims and one closed successor. | Empty equality, entry/byte debt, three-marker drain, ack orderings, minimum-cap anchored supersession/recovery, projection-at-equality, crash-atomic successor, and closure-refusal tests. |
 | `«MULTI-CONVERSATION-MUX»` | **decided-by-draft** | Yes. One connection carries many conversations, demuxed by `conversation_id`; participant `stream_id = 0` and has no semantic role. | Cross-conversation interleaving and independent-cursor tests. |
 | `«MULTI-BINDING-PER-CONVERSATION»` | **decided-by-draft (excluded in v1)** | At most one participant binds each `(connection_incarnation, conversation_id)`. A different-id enrollment/attach gets `ConnectionConversationBindingOccupied` containing only its presented optional id; same-id rotation is allowed. | Empty-slot race, enrollment with no presented id, Q-after-P refusal without P disclosure, same-P rotation, and conversation-only delivery codec. |
 | `«LIFECYCLE-VERDICT-RECIPIENTS»` | **decided-by-draft** | Every member is entitled to every lifecycle/compaction record in total order, including while detached, unless it explicitly accepts a named abandonment after compaction broke continuity. | Three-party lifecycle/compaction races, offline replay, and explicit-abandonment tests. |
 | `«LIFECYCLE-OBSERVER-DELIVERY»` | **decided-by-draft** | The log is sole completed lifecycle history and observer progress hard. Signed per-conversation and SDK-wide conversation/row/full-byte caps plus request/row maxima bound parking; durable first-row interest slots make all Awaiting conversations armable. `Reserved` restart, checked u64 order, cohort marking, authority loss, epoch monotonicity, and all-dimension renegotiation are explicit. Acks never park. | Independent row/byte/global cap hits, interest-slot recovery, Reserved crash, per-row downward incompatibility, near-max order, epoch races, credential loss, and no orphan/ack/poll. |
 | `«SUPERSESSION-FENCE»` | **decided-by-draft** | Every credential-bearing successful attach checked-increments generation, rotates the secret, and creates a distinct immutable binding epoch even on one physical connection. Final outbound construction drops old-epoch work behind the response barrier; stale proof is a no-record refusal. | Two-holder and same-connection rotation races, single handoff pair, exact-epoch receipt recovery, queued-work barrier, and stale-proof zero-record tests. |
-| `«RESUME-COMMENT-SERVER-MISMATCH»` | **genuinely-open** | Owner must choose separate legacy subscription recovery versus version/deprecate/delete it for participant attach. Outline governs over the earlier tear's preference to decide now; R11 nevertheless makes “comment-only fix” insufficient. | Owner ruling covering types, cursor owner, starting convention, persistence, release boundary, and removal/compatibility tests. |
+| `«RESUME-COMMENT-SERVER-MISMATCH»` | **genuinely-open** | Owner must choose separate legacy subscription recovery versus version/deprecate/delete it for participant attach. Outline governs over the earlier tear's preference to decide now; R12 nevertheless makes “comment-only fix” insufficient. | Owner ruling covering types, cursor owner, starting convention, persistence, release boundary, and removal/compatibility tests. |
 | `«MEMBERSHIP-EVENT-SOURCE»` | **genuinely-open implementation dependency** | External behavior is fixed: membership deltas must be pushed and shutdown must wake the source. The selected membership backend's non-poll event API is not yet chosen. | Backend event subscription/callback with ordered delta and explicit shutdown tests; delete `PollLoop`, `poll_once` cadence, and sleep. |
 | `«HEALTH-ACCEPT-SHUTDOWN-WAKE»` | **genuinely-open implementation dependency** | External behavior is fixed: health accept blocks/uses readiness and explicit shutdown interrupts it. The concrete cross-platform wake mechanism is not selected. | Per-target accept/shutdown race tests with no WouldBlock sleep or shutdown-flag sampling loop. |
 | `«SHUTDOWN-DRAIN-NOTIFICATION»` | **genuinely-open implementation dependency** | External behavior is fixed: connection exit updates a completion primitive raced against one admitted deadline; force-close uses the same notification. Concrete supervisor API is not selected. | Exit/drain notification API, crash/force-close/deadline races, and deletion of reap/count/sleep loops. |
 | `«CHANNEL-REPLY-EVENT-RACE»` | **genuinely-open implementation dependency** | External behavior is fixed: a command wait parks on the reply, pushed process exit, and one admitted command deadline. The scheduler-to-waiter exit-notification primitive is not selected. | Reply/exit/deadline races in every order; delete `LIVENESS_POLL`, repeated `recv_timeout`, and process-table sampling. |
 | `«SDK-PUSH-READER-SHUTDOWN-WAKE»` | **genuinely-open implementation dependency** | External behavior is fixed: the push reader blocks on/readiness-waits for socket input and explicit local shutdown interrupts that wait. The portable wake primitive is not selected. | Silent-socket data/EOF/error/shutdown races and join tests; delete `READER_POLL_TIMEOUT`, timeout-as-`None`, and stop-flag rechecks. |
 | `«SDK-SUBSCRIPTION-READER-SHUTDOWN-WAKE»` | **genuinely-open implementation dependency** | External behavior is fixed: the subscription reader blocks on/readiness-waits for socket input and explicit local shutdown interrupts that wait. The portable wake primitive is not selected. | Silent-socket data/EOF/error/shutdown races and join tests; delete `READER_POLL_TIMEOUT`, timeout-as-`None`, and stop-flag rechecks. |
+| `«DURABILITY-BRIDGE-WAKE»` | **genuinely-open implementation dependency** | External behavior is fixed: asserted synchronous backends receive one poll and loud Pending error, or a real executor parks and honors the waker. Backend integration selects which shape. | Ready/one-Pending/real-wake cases; delete `MAX_POLLS`, `NoopWaker`, repeated `poll`, and `yield_now`. |
+| `«PUSH-REPLY-AWAITER-EVENT-RACE»` | **genuinely-open implementation dependency** | External behavior is fixed: the SDK call site waits once on reply, connection fate, and one admitted deadline. A one-shot internal quantum may remain only as mechanism, never a blessed caller re-arm loop. | All race orders and cancellation/drop; delete indefinite `receive` reinvocation contract and repeated short-poll tests. |
+| `«SDK-SUBSCRIPTION-SETUP-DEADLINE-RACE»` | **genuinely-open implementation dependency** | External behavior is fixed: handshake/Subscribe setup races socket input with one total deadline. Portable readiness/deadline composition is implementation-owned. | Input/deadline/EOF/error races; delete 100ms `read_one_frame` re-arm and `Instant::now` loop sampling. |
 | `«EXTERNAL-EXIT-REASON»` | **genuinely-open** | Current external reap cannot read the private beamr exit reason; complete `ProcessKilled` detail needs event/API plumbing, not inference. | Typed event payload or nonblocking termination-reason API; no scan substitute. |
 | `«NO-FIN-KERNEL-BOUND»` | **genuinely-open** | Exact signed defaults and macOS/Linux worst-case formulas require platform evidence. The contract shape and refusal policy are decided; numbers are not invented. | Platform documentation, readback, and black-hole fault tests proving lower/worst-case behavior. |
 | `«KEEPALIVE-PORTABILITY»` | **genuinely-open** | Supported target option/range/granularity mapping and refusal matrix require target validation. | Per-target set/readback and bounded fault tests; unsupported targets refuse. |
@@ -2059,25 +2502,58 @@ stop-flag sampling, or synthetic write whose job is to ask whether state changed
 
 ### Silence-attacking acceptance frame
 
-Search the document for `«` and require every result to appear in this register
-or be one of the two SDK gate names explained here. For decided rows, search for
+Extract every guillemet-delimited socket name and require each result to appear
+in this register or be one of the two SDK gate names explained here. For decided rows, search for
 one normative answer in §§2-6. For genuinely-open rows, require the named owner
 or evidence and refuse implementation where the gap is load-bearing. Search all
-timers, wakes, loops, and tasks—including main/health accept, membership,
-shutdown drain/settle, channel reply wait, and both SDK readers—and prove each is
-driven by admitted work, reply/data readiness, kernel connection fate, explicit
-shutdown/process exit, one admitted deadline, or an existing domain event rather
-than change detection.
+timers, wakes, loops, and tasks—including all ten §1 families and startup
+recovery—and prove each is driven by admitted work, reply/data readiness, kernel
+connection fate, explicit shutdown/process exit, one admitted deadline, or an
+existing domain event rather than change detection.
+
+### R12 define-what-you-name and coherence audits
+
+The drafter ran the standing name audit over this complete artifact. A checkable
+socket rerun extracts text between Unicode U+00AB/U+00BB delimiters and sorts it uniquely: R12 has 35 unique guillemet
+names, 33 exact register rows, plus exactly the two §6 SDK gate names permitted
+above; there is no unregistered socket. For typed names, rerun extraction of
+backtick-delimited identifiers, then require each declaration-shaped use (`{`,
+`enum`, “Define”, outcome-table discriminant, or capitalized protocol name) to
+resolve to its normative field/phase/outcome table. The audited result has no
+R12-introduced unresolved type, field, enum member, or quantity: RF/RC/RE/WF/RH
+are defined in R-A4; K/edge claims/tags in R-C4; phases/index in R-A2; request
+verifier/conflict in R-C0; incarnation/BindingEpoch in R-A1; and every new
+outcome in R-D1.
+
+Shared concepts have one definition and citations elsewhere:
+
+| Shared concept | Sole normative definition |
+|---|---|
+| Binding epoch | R-A1 `BindingEpoch`; R-C0/R-C1/R-C5/startup recovery cite it. |
+| Reserved counter capacity | R-A2's accepted-obligation claim principle; R-C2 and R-C4 apply it. |
+| Marker capacity credit | R-C4 from planning through physical compaction; cases 45/48 cite it. |
+
+The exhaustive-outcome pass searched every `returns`, `return`, `outcome`, and
+new discriminant: `ParticipantRecoveryHandshakeTooLarge`,
+`ParticipantRetentionCapacityInvalid`, `SdkParkingCapacityIncompatible` recovery
+dimensions, `AttemptTokenBodyConflict`, `ConnectionIncarnationExhausted`, and
+`BindingRecoveryCommitted` each has exactly one exhaustive R-D1 row with fields
+and transition. Fingerprint precedence is total at lookup step 0a; no later row
+can disclose a live receipt after verifier conflict. Acceptance references are
+contiguous 1–56. Every seeded quantity read by cases 26/31/43/47 is in its table.
+A heading/case/socket/reference scan finds no dangling case, section, edge tag,
+or superseded minimum. Idle cost is closed in R-A4/R-C0/R-C4, and the LAW-1 sweep
+plus case 50 covers every recovery/retirement wait.
 
 ---
 
-**Gate posture:** DESIGN DRAFT R11. All earlier-round decisions remain in force.
-R11 closes the latest examiner's E1–E3 and S1–S8 defects: flat member-exit
-sequence/order reserve, executable boundary seeding, reachable minimum-cap tests,
-marker capacity credit, full-debt repayment edges, general detached Leave and
-pending-terminal composition, exact receipt/binding epochs, equal-generation
-wrong-secret classification, final-emitter fencing, and the three additional
-LAW-1 polling families. The socket register separates decisions from real
-implementation dependencies. Reviewer key plus Hermes Crumpet's liminal domain-
-owner key are still required; until both turn, this document is not ratified and
-grants no implementation authority.
+**Gate posture:** DESIGN DRAFT R12. All earlier-round decisions remain in force.
+R12 closes C1–C13: closed resource-backed debt edges, anchored recovery headroom,
+reproducible polling inventory, encodable recovery handshake, valid fenced-edge
+acceptance, canonical token verifier, total candidate ordering, complete fixtures,
+Q-bounded Leave drains, restart/incarnation recovery, dispatch-slot handoff, and
+bound-Leave equality, plus the global name/outcome/idle/no-polling audits. The
+socket register separates decisions from real implementation dependencies.
+Reviewer key plus Hermes Crumpet's liminal domain-owner key are still required;
+until both turn, this document is not ratified and grants no implementation
+authority.
