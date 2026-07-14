@@ -1,0 +1,191 @@
+{
+  "id": "SDK-010",
+  "cluster": "sdk",
+  "title": "Retire SDK reader polling with explicit wake",
+  "depends_on": [
+    "SDK-004"
+  ],
+  "blocked_by": [
+    "PARTICIPANT-CONTRACT-R15-GATE — final participant-contract content hash and both keys are required before dispatch; the stable law/socket core was read only from f9f9bc2:docs/design/PARTICIPANT-CONTRACT.md:135-153,2776-2828, and every later contract-fixture number, equality, or budget is PENDING-CONTRACT-HASH until this gate passes.",
+    "OPEN QUESTION — PUSH-HANDSHAKE-DEADLINE: before deleting the shared reader poll timeout, the owner must select an explicit one-shot deadline and terminal error semantics for Connect and WorkerRegister control-frame replies. At fe3f7ec the tree's 100 ms `READER_POLL_TIMEOUT` also bounds these synchronous reads, the first timeout is fatal, subscription has a distinct 5 s setup constant, and push has no separate setup constant (`push_client.rs:143-195,369-390,517-540`; banked scout pack). No replacement value is selected by this skeleton."
+  ],
+  "checklist": [],
+  "stories": [],
+  "design_anchor": [
+    "6. SDK push reader",
+    "7. SDK subscription reader",
+    "A. Dependency map",
+    "B. Brief grouping proposal for post-key-turn server briefs",
+    "C. Growth section — candidate families pending the r12 exhaustive sweep"
+  ],
+  "purpose": "SKELETON — NOT DISPATCH-READY. Define one shared portable local wake shape for the Rust SDK TCP push and subscription readers, as grouped by `LAW1-POLLING-RETIREMENT.md` section `B. Brief grouping proposal for post-key-turn server briefs`, so silent peers cause no timeout-as-no-change wake and local drop interrupts the read explicitly. The skeleton also exposes the push handshake deadline hole that must close before the current shared timeout can be removed. The banked scout pack reverified all cited SDK ranges at fe3f7ec; contract-fixture values are intentionally absent and remain PENDING-CONTRACT-HASH.",
+  "task": "Draft structure and acceptance intent only. Scope is `crates/liminal-sdk/src/remote/tcp/push_client.rs`, `subscription.rs`, focused SDK tests, and existing server TCP E2E dependents. Build one cancellation/wake component for both cloned-socket reader handoffs; preserve buffered partial frames, subscription setup residue, frame/fate/error routing, caller-facing receive timeouts, and prompt join. Resolve the named push-handshake deadline question before removing the tree's reader timeout. The distinct subscription setup-deadline polling family remains an adjacent LAW-1 section C row, not silently retired or blessed here. All tree claims are attributed to the LAW-1 paper and banked scout pack's fe3f7ec citation-drift pass.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Hold the contract gate and keyed socket register",
+      "spec": "Keep socket references in this additive keyed register; r15 additions SHALL append rows without restructuring R2-R7.\n\n| key | status at skeleton pin | required use |\n|---|---|---|\n| `«SDK-PUSH-READER-SHUTDOWN-WAKE»` | genuinely open at f9f9bc2 contract line 2806 | Select one portable explicit local wake shared with subscription. |\n| `«SDK-SUBSCRIPTION-READER-SHUTDOWN-WAKE»` | genuinely open at f9f9bc2 contract line 2807 | Use the same primitive and race taxonomy as push. |\n| `«SDK-SUBSCRIPTION-SETUP-DEADLINE-RACE»` | genuinely open adjacent family at f9f9bc2 contract line 2810 | Keep separate from reader retirement; this brief SHALL NOT silently close or preserve its sampler as acceptable. |\n| `PUSH-HANDSHAKE-DEADLINE` | NAMED OPEN QUESTION; no separate push setup constant at fe3f7ec | Select an explicit one-shot Connect/WorkerRegister reply deadline before removing the shared socket timeout; choose no value in this skeleton. |\n| `FENCED: DCR-RECOVERY-ARM` | open r15 mandate — do not draft against | No requirement depends on `DetachedCredentialRecovery` or `«RETENTION-UNITS»` at f9f9bc2 lines 1738-1740 and 2795; when r15 resolves the non-fireable recovery continuation, any SDK fate/recovery interaction slots here as an added row. |\n| `<future-r15-socket-key>` | additive slot | Append any new keyed socket, including a TS-pressure Defer-retirement socket, without renumbering or reshaping this brief. |\n\nEvery later fixture-derived number, equality, or budget SHALL be labelled `PENDING-CONTRACT-HASH`, cite f9f9bc2 as provisional provenance, and remain explicitly unstable until the participant-contract gate passes.",
+      "acceptance": [
+        "The socket register remains keyed and a new r15 socket can be appended without changing R2-R7.",
+        "No dependency, requirement, or verification criterion relies on the DCR recovery arm.",
+        "A source review finds no unmarked participant-contract fixture-derived number, equality, or budget; every such later insertion is labelled PENDING-CONTRACT-HASH and provisional to f9f9bc2.",
+        "Push and subscription point to one shared wake decision while the subscription setup-deadline row remains explicitly adjacent and separate."
+      ],
+      "files": {
+        "create": [],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Resolve OPEN QUESTION — PUSH-HANDSHAKE-DEADLINE",
+      "spec": "NAMED OPEN QUESTION — `PUSH-HANDSHAKE-DEADLINE`: what explicit one-shot deadline and terminal error govern synchronous Connect and WorkerRegister control-frame replies after reader polling is removed? Tree fact, not a participant-contract fixture: at fe3f7ec the 100 ms `READER_POLL_TIMEOUT` is installed before handshake/worker registration at `crates/liminal-sdk/src/remote/tcp/push_client.rs:143-195,369-390`, and `read_one_frame` treats the first timeout as fatal at `:517-540`; subscription separately declares a 5 s setup constant, while push declares none (banked scout pack). The owner SHALL close this question before R4 deletes the poll timeout. Any chosen value derived from participant-contract fixtures SHALL be marked `PENDING-CONTRACT-HASH` and remain unstable until the r15 gate passes.",
+      "acceptance": [
+        "A post-gate owner ruling names one explicit total handshake deadline and terminal error behavior for both Connect and WorkerRegister replies.",
+        "The selected implementation races control-frame input, EOF/fatal error, and one deadline directly rather than treating a short socket timeout as a clock sample.",
+        "A partial control frame cannot reset or multiply the selected total deadline.",
+        "R4 cannot remove `READER_POLL_TIMEOUT` until focused Connect and WorkerRegister deadline tests exist."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Define one portable reader wake component",
+      "spec": "The SDK SHALL define one portable component that waits for socket input or explicit local shutdown and is reusable at the push stream-clone handoff (`push_client.rs:198-223`) and subscription stream/residue handoff (`subscription.rs:129-167`). Shutdown SHALL wake an indefinitely silent reader and join it without waiting for peer traffic. The component SHALL NOT use a maintenance tick, read-timeout recheck, stop-flag sampling loop, synthetic protocol probe, or server-only beamr readiness facility. Concrete primitive, ownership fields, and platform evidence remain open until the socket register closes.",
+      "acceptance": [
+        "The selected component has one arm-before-observe protocol, one data/shutdown winner rule, and one acknowledged teardown path shared by both readers.",
+        "A silent open peer can be held past the arm barrier and local shutdown wakes/join completes without a read-timeout expiry.",
+        "Partial buffered data survives wake integration and is decoded before another socket read when data wins.",
+        "Any selector, descriptor, runtime driver, or helper-thread cost is evidence-bound after the contract gate; no placeholder budget is invented in this skeleton."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Move the push reader to data, fate, and shutdown events",
+      "spec": "WHEN push socket data, EOF, fatal I/O/decode error, inbound receiver drop, or explicit local shutdown occurs, THE SYSTEM SHALL route the event through one reader outcome. WHILE peer and owner are silent, THE SYSTEM SHALL remain parked. THE SYSTEM SHALL preserve decode-before-read and frame routing at `push_client.rs:459-515,543-579` and SHALL NOT convert timeout to `Ok(None)` or resample `stop`. Only after R2 closes SHALL it delete `READER_POLL_TIMEOUT`, reader-facing timeout setup, and join-by-timeout assumptions at `push_client.rs:49-52,356-364,378-385,459-510` (LAW-1 paper section `6. SDK push reader`; banked scout pack reverified at fe3f7ec).",
+      "acceptance": [
+        "Shutdown raced with readable bytes, a partial frame, a complete frame, EOF, fatal read error, decode error, and receiver drop has a deterministic frame/terminal ownership outcome.",
+        "Dropping `PushClient` against an indefinitely silent open peer explicitly wakes and joins the reader.",
+        "Public caller-supplied receive timeout behavior at `push_client.rs:225-243` remains distinct and unchanged.",
+        "Connect and WorkerRegister retain the explicit one-shot deadline selected by R2 after the shared reader timeout is removed."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client.rs",
+          "crates/liminal-server/tests/sdk_tcp_e2e.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Move the subscription reader to the shared wake",
+      "spec": "WHEN subscription data, Disconnect, EOF, fatal I/O/decode error, receiver drop, or explicit local shutdown occurs, THE SYSTEM SHALL route the event through the shared component. Setup residue SHALL be decoded before another read, preserving coalesced SubscribeAck plus Deliver handling at `subscription.rs:129-167,316-387`. THE SYSTEM SHALL NOT convert reader timeout to `Ok(None)` or resample `stop`. Delete only the reader polling shape at `subscription.rs:43-49,197-215,218-241,316-387,419-456`; the distinct setup sampler at `:389-416` remains the separately named section C family and is neither certified nor silently retained as this brief's solution (LAW-1 paper section `7. SDK subscription reader`; banked scout pack reverified at fe3f7ec).",
+      "acceptance": [
+        "Shutdown raced with setup residue, readable bytes, partial/complete delivery, Disconnect, EOF, fatal read error, decode error, and receiver drop has a deterministic outcome.",
+        "`open_preserves_deliveries_coalesced_with_the_subscribe_ack` at `subscription_tests.rs:88-170` retains both residue deliveries and explicit-wake drop/join behavior.",
+        "Public caller-facing receive timeout behavior at `subscription.rs:170-188` remains distinct and unchanged.",
+        "The implementation and review record identify the subscription setup-deadline family separately rather than using it to justify reader polling."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/subscription.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription_tests.rs",
+          "crates/liminal-server/tests/subscription_e2e.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R6",
+      "title": "Preserve SDK reader lifecycle and observable fate",
+      "spec": "Push and subscription SHALL preserve writer ownership, inbound-channel closure, receiver-drop termination, EOF/fatal error mapping, and thread join semantics while replacing only idle wait and local cancellation. The push E2E drop/reply surfaces are `crates/liminal-server/tests/sdk_tcp_e2e.rs:640-702,990-1037,1061-1076`; subscription ordered delivery/drop surfaces are `crates/liminal-server/tests/subscription_e2e.rs:206-241,249-320,395-404` (banked scout pack, reverified at fe3f7ec). Manual server reap used by an E2E helper SHALL be tombstoned by the SRV-007/SRV-009 exit-delivery work rather than copied into SDK acceptance.",
+      "acceptance": [
+        "Push reply and worker-registration teardown remain observable after explicit reader wake replaces timeout-assisted join.",
+        "Subscription ordered delivery, Disconnect, and drop remain observable with no extra maintenance wake.",
+        "Unexpected-frame and fatal-fate behavior remains as currently routed unless a separate design ruling changes it.",
+        "No SDK test introduces a server process-table reap loop as a substitute for pushed server exit delivery."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/tests/sdk_tcp_e2e.rs",
+          "crates/liminal-server/tests/subscription_e2e.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R7",
+      "title": "Prove shared-reader quiescence and delete timeout polling",
+      "spec": "Add counter-backed quiescence tests following the park-flip inversion precedent at `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. After each reader's arm barrier, silent peer and owner SHALL leave read-attempt and reader-wake counters flat; explicit shutdown SHALL be the only local wake. Add a mixed push/subscription aggregate assertion for the same shared component. Source checks SHALL delete push and subscription background-reader timeout-as-no-change and stop-load paths; any contract-derived aggregate fixture value added later is `PENDING-CONTRACT-HASH` until the r15 gate passes.",
+      "acceptance": [
+        "`silent_push_reader_wakes_only_for_data_fate_or_shutdown` proves flat post-arm read/wake counters and prompt explicit-wake join.",
+        "`silent_subscription_reader_wakes_only_for_data_fate_or_shutdown` proves flat post-arm read/wake counters while preserving setup residue.",
+        "A mixed push/subscription quiescence test proves the shared component introduces no per-reader maintenance cadence.",
+        "A source search finds no background-reader `READER_POLL_TIMEOUT`, timeout-as-`Ok(None)`, `set_read_timeout`, or `stop.load` path after the handshake/setup boundaries are separated."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription_tests.rs",
+          "crates/liminal-server/tests/sdk_tcp_e2e.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT dispatch before the participant-contract r15 content hash and two-key gate close; f9f9bc2 is provisional normative-core evidence, not implementation authority.",
+    "SHALL NOT introduce an unmarked participant-contract fixture-derived number, equality, or budget; label each such later value PENDING-CONTRACT-HASH, cite f9f9bc2, and state that it is unstable until the gate passes.",
+    "FENCED: DCR-RECOVERY-ARM (open r15 mandate — do not draft against) — when r15 supplies a fireable recovery continuation, any SDK fate/recovery interaction will be appended to the keyed socket register; no current requirement depends on it.",
+    "SHALL NOT remove push's shared socket timeout before OPEN QUESTION — PUSH-HANDSHAKE-DEADLINE is closed with an explicit one-shot deadline and tests for Connect and WorkerRegister replies.",
+    "SHALL NOT choose two independent wake primitives for push and subscription or use a server-only beamr facility as a portable SDK mechanism.",
+    "SHALL NOT redesign public receive timeouts, frame codecs, subscription setup residue, writer-side protocol behavior, or server routes.",
+    "SHALL NOT silently retire, preserve as conforming, or fold in the separate subscription setup-deadline sampler; keep its section C/socket row explicit.",
+    "SHALL NOT absorb TypeScript reconnect, Gleam delay policy, push-reply re-arm, durability bridge, or other LAW-1 growth families."
+  ],
+  "verification": [
+    "PUSH OPEN QUESTION GATE — before any reader timeout deletion, record an owner-selected explicit one-shot Connect/WorkerRegister reply deadline and tests for input/deadline/EOF/error/partial-frame races at `push_client.rs:143-195,369-390,517-540`; this skeleton selects no value.",
+    "PUSH QUIESCENCE — implement `silent_push_reader_wakes_only_for_data_fate_or_shutdown` with a silent-open-peer arm barrier and flat read/wake counters, using `process_wake_tests.rs:43-65` as the inversion precedent; paper section `6.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
+    "SUBSCRIPTION QUIESCENCE — implement `silent_subscription_reader_wakes_only_for_data_fate_or_shutdown` with setup residue plus a silent-open-peer arm barrier and flat read/wake counters; paper section `7.7 Requirement — idle-cost lens`.",
+    "MIXED QUIESCENCE — hold push and subscription readers silent together and prove the shared component adds no per-reader maintenance cadence before explicit shutdown.",
+    "DATA/FATE MATRIX — race each reader's shutdown with buffered residue, partial/complete frames, EOF, fatal I/O/decode, receiver drop, and protocol terminal frames using deterministic barriers.",
+    "SEMANTIC DEPENDENTS — preserve `subscription_tests.rs:88-170`, push E2E receive/reply/drop at `sdk_tcp_e2e.rs:640-702`, worker teardown at `:990-1037`, and ordered subscription delivery at `subscription_e2e.rs:206-241` without manual-reap or cadence confidence.",
+    "DELETION CHECK — background push/subscription readers contain no timeout-as-no-change, stop-flag recheck, read-timeout wake, or maintenance tick identified at `push_client.rs:49-52,356-364,378-385,459-510` and `subscription.rs:43-49,197-215,229-233,316-387`; handshake/setup deadline paths remain explicitly separated.",
+    "DOCUMENT GATE — before dispatch, audit every contract-derived value for `PENDING-CONTRACT-HASH`, confirm the final r15 hash/two-key evidence, confirm the DCR fenced hole remains non-dependent, and keep the push handshake question named until closed."
+  ]
+}

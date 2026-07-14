@@ -1,0 +1,194 @@
+{
+  "id": "SRV-007",
+  "cluster": "server",
+  "title": "Retire server-owned accept and drain polling",
+  "depends_on": [
+    "SRV-003",
+    "SRV-004",
+    "SRV-006",
+    "SRV-009"
+  ],
+  "blocked_by": [
+    "PARTICIPANT-CONTRACT-R15-GATE — final participant-contract content hash and both keys are required before dispatch; the stable law/socket core was read only from f9f9bc2:docs/design/PARTICIPANT-CONTRACT.md:135-153,2776-2828, and every later contract-fixture number, equality, or budget is PENDING-CONTRACT-HASH until this gate passes.",
+    "BEAMR-ASK-HOST-LISTENER-READINESS — optional and applicable only if the existing shared-readiness candidate is selected; the banked scout pack verified at fe3f7ec that current registration is connection-process-only (`connection/process.rs:423-461`, `connection/supervisor.rs:722-744`), so this brief claims no host-listener API."
+  ],
+  "checklist": [],
+  "stories": [],
+  "design_anchor": [
+    "1. Listener accept loop",
+    "3. Health accept loop",
+    "4. Shutdown drain and force-close settle",
+    "A. Dependency map",
+    "B. Brief grouping proposal for post-key-turn server briefs"
+  ],
+  "purpose": "SKELETON — NOT DISPATCH-READY. Define the server-internal retirement shape for the main listener, health accept worker, and shutdown drain/settle loops grouped by `LAW1-POLLING-RETIREMENT.md` section `B. Brief grouping proposal for post-key-turn server briefs`. The group shares explicit shutdown propagation, arm-before-observe barriers, and the universal connection-removal funnel at `crates/liminal-server/src/server/connection/supervisor.rs:1812-1843` (paper plus banked scout pack, citations reverified at fe3f7ec). Contract-fixture values are intentionally absent and remain PENDING-CONTRACT-HASH.",
+  "task": "Draft the post-r15 implementation structure, not a final mechanism: consume the pushed-exit seam owned by SRV-009, make listener and health acceptance wait on real readiness plus explicit shutdown, make every connection removal update one drain-completion generation, and replace cadence-pinning tests with barriered quiescence assertions. Scope is `crates/liminal-server` listener, health, shutdown, runtime, supervisor, and their focused tests. Route semantics, the admitted configured graceful-shutdown deadline, and unrelated LAW-1 growth families stay outside this retirement. All tree claims below are attributed to the LAW-1 paper and the banked scout pack's fe3f7ec citation-drift pass.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Hold the contract gate and keyed socket register",
+      "spec": "Keep socket references in this additive keyed register; r15 additions SHALL append rows without restructuring R2-R7.\n\n| key | status at skeleton pin | required use |\n|---|---|---|\n| `«MAIN-LISTENER-READINESS-SHUTDOWN-EXIT»` | proposed by `LAW1-POLLING-RETIREMENT.md:70-84,562`; not a registered f9f9bc2 participant-contract row | Select listener readiness, explicit shutdown wake, and exit delivery only after the relevant gates close. |\n| `«HEALTH-ACCEPT-SHUTDOWN-WAKE»` | genuinely open at f9f9bc2 contract line 2803 | Select one portable accept interrupt/readiness shape; preserve route behavior. |\n| `«SHUTDOWN-DRAIN-NOTIFICATION»` | genuinely open at f9f9bc2 contract line 2804 | Select one supervisor completion-generation primitive updated by every removal. |\n| `FENCED: DCR-RECOVERY-ARM` | open r15 mandate — do not draft against | No requirement depends on `DetachedCredentialRecovery` or `«RETENTION-UNITS»` at f9f9bc2 lines 1738-1740 and 2795; when r15 resolves the non-fireable recovery continuation, any server-exit interaction slots here as an added row. |\n| `<future-r15-socket-key>` | additive slot | Append any new keyed socket, including a TS-pressure Defer-retirement socket, without renumbering or reshaping this brief. |\n\nEvery later fixture-derived number, equality, or budget SHALL be labelled `PENDING-CONTRACT-HASH`, cite f9f9bc2 as provisional provenance, and remain explicitly unstable until the participant-contract gate passes.",
+      "acceptance": [
+        "The socket register remains keyed and a new r15 socket can be appended without changing R2-R7.",
+        "No depends_on, blocked_by, requirement, or verification criterion relies on the DCR recovery arm.",
+        "A source review finds no unmarked participant-contract fixture-derived number, equality, or budget; every such later insertion is labelled PENDING-CONTRACT-HASH and provisional to f9f9bc2."
+      ],
+      "files": {
+        "create": [],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Drive cleanup and drain state from the universal removal funnel",
+      "spec": "WHEN SRV-009 delivers a connection-process exit or any existing normal/crash/force-close path removes a record, THE SYSTEM SHALL route the fact through `ConnectionRuntime::remove` and update one generation-safe completion state at `crates/liminal-server/src/server/connection/supervisor.rs:1812-1843`. THE SYSTEM SHALL NOT use `reap_crashed_connections`, active-count scans, `ConnectionNotifier`'s worker-only callback, or a maintenance timer as universal exit delivery. The banked scout pack verified external scan at `supervisor.rs:1672-1705` and the narrower worker-registration guard at `supervisor.rs:1660-1669`.",
+      "acceptance": [
+        "Normal finish, crash, external exit, force-close, and already-empty generations all reach one removal/completion seam.",
+        "A last exit delivered between predicate observation and park completes the registered generation without a lost wake.",
+        "The active-connection metric transition remains paired with record removal at the universal funnel."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/server/connection/supervisor.rs",
+          "crates/liminal-server/src/server/connection/notifier.rs",
+          "crates/liminal-server/src/metrics.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Replace main-listener sampling with readiness and explicit shutdown",
+      "spec": "WHILE the main listener is open and no socket is acceptable, THE SYSTEM SHALL remain parked until listener readiness, explicit shutdown, or pushed connection exit requires work. WHEN readiness is delivered, THE SYSTEM SHALL accept according to a bounded drain rule and hand admitted sockets to the existing supervisor. THE SYSTEM SHALL NOT sample shutdown, reap, call `accept`, or sleep to discover change. The target family is `crates/liminal-server/src/server/listener.rs:11-12,99-103,125-155` (LAW-1 paper section `1. Listener accept loop`; banked scout pack reverified at fe3f7ec). Resource exhaustion SHALL fail, shed, or await a genuine resource event under an owner-selected policy; it SHALL NOT retain the current backoff test contract at `listener.rs:268-273`.",
+      "acceptance": [
+        "Shutdown before arming, during arm, concurrent with readiness, and after an accepted-but-not-yet-supervised socket each has a deterministic ownership outcome.",
+        "Bursts, interrupted accept, and resource exhaustion complete without a periodic timer or retry cadence.",
+        "The replacement does not claim beamr host-listener readiness unless the optional host-listener ask has closed with evidence."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/server/listener.rs",
+          "crates/liminal-server/src/server/runtime.rs",
+          "crates/liminal-server/src/server/connection/process.rs",
+          "crates/liminal-server/src/server/connection/wake.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Replace health-accept sampling without changing routes",
+      "spec": "WHILE the health listener is silent, THE SYSTEM SHALL block or readiness-wait until an acceptable socket or explicit local shutdown. THE SYSTEM SHALL NOT sample the stop flag or sleep after `WouldBlock`. Preserve the one-worker lifecycle and `/health`, `/ready`, and `/metrics` behavior around `crates/liminal-server/src/health/endpoint.rs:83-133`; the accepted-client request timeout at `endpoint.rs:136-170` is outside this accept-loop retirement (banked scout pack, reverified at fe3f7ec).",
+      "acceptance": [
+        "Shutdown before wait, between arm and wait, concurrent with readiness, and after accept returns cannot leak the worker or a descriptor.",
+        "Existing health, readiness, and metrics route assertions remain semantic tests rather than cadence evidence.",
+        "The silent accept path performs no repeated accept attempt and no application-thread wake after its arm barrier."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/health/endpoint.rs",
+          "crates/liminal-server/src/health/metrics_route.rs",
+          "crates/liminal-server/src/server/runtime.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Race shutdown completion against one admitted deadline",
+      "spec": "WHEN graceful shutdown starts, THE SYSTEM SHALL create or observe the supervisor completion generation before an exit can be lost, then race completion against the existing configured drain deadline. IF the deadline wins, THE SYSTEM SHALL force-close the remaining generation and continue on the same completion notification. THE SYSTEM SHALL NOT periodically reap, count, sample the clock, emit cadence-based progress, or run a second settle poll. The retirement targets are `crates/liminal-server/src/server/shutdown.rs:14-16,185-245` (LAW-1 paper section `4. Shutdown drain and force-close settle`; banked scout pack reverified at fe3f7ec).",
+      "acceptance": [
+        "Zero-active-connection shutdown completes immediately from the completion state.",
+        "Last exit before registration, between observe and park, simultaneous with deadline delivery, after crash, and after force-close each produces one terminal shutdown outcome.",
+        "Production order remains stop accepting, notify, drain/deadline, force-close if required, durable flush, then supervisor shutdown as pinned at `shutdown.rs:162-182`."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/server/shutdown.rs",
+          "crates/liminal-server/src/server/runtime.rs",
+          "crates/liminal-server/src/server/connection/supervisor.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R6",
+      "title": "Make teardown ownership and lost-wake barriers explicit",
+      "spec": "For listener readiness, health readiness, process exits, and drain completion, arm-before-observe ordering SHALL be explicit and deregistration SHALL complete before owned descriptors or guards are dropped. The implementation SHALL preserve the existing readiness deregistration/removal ordering at `crates/liminal-server/src/server/connection/supervisor.rs:1812-1843` and SHALL NOT use a synthetic write whose purpose is to probe whether state changed. Concrete primitives remain open until the keyed register closes.",
+      "acceptance": [
+        "Each event source has an arm barrier, a final observation, a single ownership winner, and an acknowledged teardown path.",
+        "Repeated shutdown and simultaneous accept/exit/shutdown do not double-remove records or double-drop readiness ownership.",
+        "Any by-design helper thread or reactor cost is disclosed with a measurable aggregate bound after the contract gate; no placeholder budget is invented in this skeleton."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/server/listener.rs",
+          "crates/liminal-server/src/health/endpoint.rs",
+          "crates/liminal-server/src/server/shutdown.rs",
+          "crates/liminal-server/src/server/connection/supervisor.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R7",
+      "title": "Invert cadence tests into quiescence and event barriers",
+      "spec": "Replace tests that pass because a cadence eventually observes state with deterministic arm/delivery barriers and flat counters, following `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. The test plan SHALL tombstone the listener resource-backoff assertion at `listener.rs:268-273` and manual reap assertions/helpers at `connection/supervisor_tests.rs:314-362,2112-2124` (banked scout pack, reverified at fe3f7ec); retained domain outcomes SHALL be driven by events rather than sleeps.",
+      "acceptance": [
+        "`silent_main_listener_has_zero_application_wakes` fails on any post-arm accept attempt, reap call, application slice, or application-thread wake before an admitted event.",
+        "`silent_health_listener_has_zero_application_wakes` fails on any post-arm repeated accept or worker wake before readiness or shutdown.",
+        "`quiet_drain_wakes_only_for_exit_or_single_deadline` proves no wake while connections are silent before the admitted deadline and proves each delivered exit/deadline path deterministically.",
+        "Current listener connection/refusal, health route, force-close, and metric semantics remain covered after cadence wording and manual reap helpers are deleted."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/server/listener.rs",
+          "crates/liminal-server/src/health/endpoint.rs",
+          "crates/liminal-server/src/server/shutdown.rs",
+          "crates/liminal-server/src/server/connection/supervisor_tests.rs",
+          "crates/liminal-server/src/server/connection/process_wake_tests.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT dispatch before the participant-contract r15 content hash and two-key gate close; f9f9bc2 is provisional normative-core evidence, not implementation authority.",
+    "SHALL NOT introduce an unmarked participant-contract fixture-derived number, equality, or budget; label each such later value PENDING-CONTRACT-HASH, cite f9f9bc2, and state that it is unstable until the gate passes.",
+    "FENCED: DCR-RECOVERY-ARM (open r15 mandate — do not draft against) — when r15 supplies a fireable recovery continuation, any server-exit interaction will be appended to the keyed socket register; no current requirement depends on it.",
+    "SHALL NOT implement the arbitrary-pid exit API or its spawn/register race closure here; SRV-009 owns that pushed-exit seam and this brief consumes it.",
+    "SHALL NOT claim the optional beamr host-listener readiness surface exists; select it only after the named ask closes, otherwise choose and certify a portable local mechanism.",
+    "SHALL NOT redesign health/readiness/metrics routes, accepted-client request timeouts, the configured graceful drain deadline, durable flush ordering, or cluster membership.",
+    "SHALL NOT absorb unrelated growth-section families, including push-reply re-arm, SDK setup sampling, durability bridge polling, or TypeScript reconnect."
+  ],
+  "verification": [
+    "MAIN LISTENER QUIESCENCE — implement `silent_main_listener_has_zero_application_wakes` with an arm barrier and flat accept/reap/slice/wake counters, using the inversion precedent at `process_wake_tests.rs:43-65`; paper section `1.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
+    "MAIN LISTENER TOMBSTONES — delete or rewrite the resource-backoff cadence pin at `listener.rs:268-273` and manual-reap assertions/helpers at `supervisor_tests.rs:314-362,2112-2124`; preserve their resource classification, fd-reuse, and cleanup outcomes with event barriers.",
+    "HEALTH QUIESCENCE — implement `silent_health_listener_has_zero_application_wakes`; after the wait barrier, silence leaves accept-attempt and worker-wake counters flat while existing `/health`, `/ready`, and `/metrics` assertions still pass.",
+    "DRAIN QUIESCENCE — implement `quiet_drain_wakes_only_for_exit_or_single_deadline`; silent active connections produce no pre-deadline wakes, and exit/deadline delivery is barrier-controlled rather than cadence-observed.",
+    "DELETION CHECK — the replacement paths contain no listener/health `WouldBlock` sleep, stop/shutdown sampling loop, periodic `reap_crashed_connections`, drain active-count scan, or force-close settle poll identified at `listener.rs:11-12,99-103,125-155`, `health/endpoint.rs:83-133`, and `shutdown.rs:14-16,185-245`.",
+    "RACE MATRIX — exercise readiness before/during/after arm, shutdown against accepted ownership, externally delivered exit, zero/last/multiple exits, force-close, and deadline ties with deterministic barriers.",
+    "DOCUMENT GATE — before dispatch, audit every contract-derived value for `PENDING-CONTRACT-HASH`, confirm the final r15 hash/two-key evidence, and confirm the DCR fenced hole remains non-dependent."
+  ]
+}

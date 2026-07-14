@@ -1,0 +1,176 @@
+{
+  "id": "SRV-009",
+  "cluster": "server",
+  "title": "Retire channel liveness polling with pushed exits",
+  "depends_on": [
+    "SRV-003"
+  ],
+  "blocked_by": [
+    "PARTICIPANT-CONTRACT-R15-GATE — final participant-contract content hash and both keys are required before dispatch; the stable law/socket core was read only from f9f9bc2:docs/design/PARTICIPANT-CONTRACT.md:135-153,2776-2828, and every later contract-fixture number, equality, or budget is PENDING-CONTRACT-HASH until this gate passes.",
+    "BEAMR-ASK-ARBITRARY-PID-EXIT-NOTIFICATION — the scheduler must push exit for any target pid to a host waiter, replay already-dead state, define registration cancellation, and use no hidden scan; the existing conversation registry at `crates/liminal/src/conversation/actor/exit.rs:21-86` is participant-scoped precedent only (banked scout pack, reverified at fe3f7ec)."
+  ],
+  "checklist": [],
+  "stories": [],
+  "design_anchor": [
+    "5. Channel command-reply liveness wait",
+    "A. Dependency map",
+    "B. Brief grouping proposal for post-key-turn server briefs"
+  ],
+  "purpose": "SKELETON — NOT DISPATCH-READY. Define the scheduler-seam retirement selected by `LAW1-POLLING-RETIREMENT.md` section `B. Brief grouping proposal for post-key-turn server briefs`: park one channel command wait on reply, pushed target exit, reply-channel disconnect, or one admitted command deadline, and use the same pushed-exit capability to close the connection spawn/register race currently healed only by continuous reap. The banked scout pack reverified all cited channel and supervisor ranges at fe3f7ec; contract-fixture values are intentionally absent and remain PENDING-CONTRACT-HASH.",
+  "task": "Draft the post-r15 requirement and acceptance structure, not a final beamr API. Scope includes `crates/liminal/src/channel/actor/wait.rs`, the channel actor command funnel and tests, the arbitrary-pid exit-registration integration, and `crates/liminal-server/src/server/connection/supervisor.rs:1537-1550` where exit-before-record-insert currently relies on listener-driven continuous reap. Preserve reply/disconnect/deadline error distinctions and close registration/publication/record-insertion races without process-table polling. All tree claims are attributed to the LAW-1 paper and banked scout pack's fe3f7ec citation-drift pass.",
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Hold the contract gate and keyed socket register",
+      "spec": "Keep socket references in this additive keyed register; r15 additions SHALL append rows without restructuring R2-R7.\n\n| key | status at skeleton pin | required use |\n|---|---|---|\n| `«CHANNEL-REPLY-EVENT-RACE»` | genuinely open at f9f9bc2 contract line 2805 | Compose reply, pushed arbitrary-pid exit, disconnect, and one admitted deadline without repeated liveness queries. |\n| `FENCED: DCR-RECOVERY-ARM` | open r15 mandate — do not draft against | No requirement depends on `DetachedCredentialRecovery` or `«RETENTION-UNITS»` at f9f9bc2 lines 1738-1740 and 2795; when r15 resolves the non-fireable recovery continuation, any process-fate interaction slots here as an added row. |\n| `<future-r15-socket-key>` | additive slot | Append any new keyed socket, including a TS-pressure Defer-retirement socket, without renumbering or reshaping this brief. |\n\nEvery later fixture-derived number, equality, or budget SHALL be labelled `PENDING-CONTRACT-HASH`, cite f9f9bc2 as provisional provenance, and remain explicitly unstable until the participant-contract gate passes.",
+      "acceptance": [
+        "The socket register remains keyed and a new r15 socket can be appended without changing R2-R7.",
+        "No dependency, requirement, or verification criterion relies on the DCR recovery arm.",
+        "A source review finds no unmarked participant-contract fixture-derived number, equality, or budget; every such later insertion is labelled PENDING-CONTRACT-HASH and provisional to f9f9bc2."
+      ],
+      "files": {
+        "create": [],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Require race-safe arbitrary-pid exit delivery",
+      "spec": "The beamr API SHALL register a host waiter for any scheduler pid, report an already-dead pid without waiting, push each future terminal exit with a defined reason/lifetime, and cancel registration without a lost or duplicate terminal outcome. It SHALL NOT implement delivery by process-table scan, timer, heartbeat, or a participant-only adapter. The acceptance precedent is the participant-scoped replay-before-register registry at `crates/liminal/src/conversation/actor.rs:229-244`, `conversation/actor/exit.rs:21-86`, and `conversation/actor/tests.rs:190-236` (banked scout pack, reverified at fe3f7ec); this precedent is evidence of shape, not an available generic API.",
+      "acceptance": [
+        "Exit before registration returns the already-dead outcome through the pushed-exit API.",
+        "Exit after registration wakes the host waiter exactly through the selected terminal-delivery contract.",
+        "Cancellation concurrent with exit has one defined winner and leaves no retained registration or scan fallback."
+      ],
+      "files": {
+        "create": [],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Compose reply, exit, disconnect, and one deadline",
+      "spec": "WHEN a channel actor command is published, THE SYSTEM SHALL park on a one-winner completion containing reply, pushed target exit, reply-channel disconnect, and the existing admitted command deadline. Exit interest SHALL be armed before or atomically with command publication, and publication failure SHALL cancel it. THE SYSTEM SHALL NOT use `LIVENESS_POLL`, repeated `recv_timeout`, process-table lookup, or repeated clock sampling. The retirement targets are `crates/liminal/src/channel/actor/wait.rs:18-24,73-95` (LAW-1 paper section `5. Channel command-reply liveness wait`; banked scout pack reverified at fe3f7ec).",
+      "acceptance": [
+        "Reply-before-exit, exit-before-reply, disconnect, and deadline each return their defined observable outcome through one completion.",
+        "Reply/exit and reply/deadline released at the same barrier follow an explicitly selected winner rule after the gates close.",
+        "Target exit before interest registration and command publication failure after registration are both deterministic and leak-free."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal/src/channel/actor/wait.rs",
+          "crates/liminal/src/channel/actor/mod.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Close the connection spawn/register race with pushed exit",
+      "spec": "REQUIRED RACE CLOSURE: WHEN a newly spawned connection process exits before its host record is inserted, THE SYSTEM SHALL retain or replay that pushed exit so record insertion immediately reaches the universal removal path. It SHALL NOT rely on listener-driven continuous reap to heal the orphan. This current dependency is explicitly documented at `crates/liminal-server/src/server/connection/supervisor.rs:1537-1550`; external deaths are otherwise scanned at `:1672-1705`, and removal converges at `:1812-1843` (banked scout pack, reverified at fe3f7ec). SRV-007 consumes the resulting universal exit/removal seam for listener cleanup and drain completion.",
+      "acceptance": [
+        "A barrier forces process exit before record insertion and the later insertion deterministically triggers one removal without invoking reap.",
+        "A barrier forces exit after insertion and pushed delivery reaches the same universal removal funnel.",
+        "Exit delivery concurrent with insertion cannot leak the record, active metric, readiness token, fd guard, or worker-registration cleanup and cannot remove twice."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/server/connection/supervisor.rs",
+          "crates/liminal-server/src/server/connection/supervisor_tests.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Preserve the channel command surface and error taxonomy",
+      "spec": "All host-side actor commands at `crates/liminal/src/channel/actor/mod.rs:103-201` SHALL continue through the replacement wait. Reply values and the existing distinct dead-pid, reply-channel-disconnected, and command-deadline error mappings at `channel/actor/wait.rs:26-70` SHALL be preserved unless a post-gate ruling explicitly changes them. The one admitted deadline remains; only repeated liveness and clock discovery retire (banked scout pack, reverified at fe3f7ec).",
+      "acceptance": [
+        "Boot, publish, subscribe, unsubscribe, evolve, schema lookup, subscriber listing, and close each use the one-winner wait path.",
+        "A pushed dead-pid outcome remains distinguishable from reply-channel disconnect and command deadline expiry.",
+        "No caller adds a short re-arm loop around the replacement wait."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal/src/channel/actor/mod.rs",
+          "crates/liminal/src/channel/actor/wait.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R6",
+      "title": "Invert the dead-actor cadence test into exit barriers",
+      "spec": "Rewrite `command_on_dead_actor_returns_promptly_not_after_timeout` at `crates/liminal/src/channel/tests.rs:176-203`: preserve prompt dead-actor failure, but tombstone cadence-derived wall-clock wording and stage the test around exit registration, command publication, and pushed delivery barriers. Reuse already-dead/future-exit semantics from `conversation/actor/tests.rs:190-236,358-364` only as acceptance precedent for the generic API (banked scout pack, reverified at fe3f7ec).",
+      "acceptance": [
+        "The actor exits before registration and the test receives the replayed terminal outcome without waiting on a cadence.",
+        "The actor exits after registration and before reply; the pushed terminal event deterministically wins.",
+        "The rewritten test does not pass merely because elapsed wall time is below the command deadline."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal/src/channel/tests.rs",
+          "crates/liminal/src/conversation/actor/tests.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R7",
+      "title": "Prove command-wait quiescence and delete liveness polling",
+      "spec": "Add counter-backed quiescence coverage following the park-flip inversion precedent at `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. Before the one admitted deadline and in the absence of reply, exit, or disconnect, the wait SHALL show flat wake, process-table-lookup, and clock-sample counters. Delete the liveness poll family at `channel/actor/wait.rs:18-24,73-95`; any shared exit dispatcher cost SHALL receive an evidence-derived bound after the contract gate and SHALL NOT be filled with a skeleton default.",
+      "acceptance": [
+        "`channel_reply_wait_wakes_only_for_reply_exit_or_deadline` arms the wait and proves pre-event counters remain flat.",
+        "A source search finds no replacement-path `LIVENESS_POLL`, `poll_reply`, repeated `recv_timeout`, or process-table liveness query.",
+        "The exit dispatcher has no hidden scheduler scan, heartbeat, or timer used to discover target death."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal/src/channel/actor/wait.rs",
+          "crates/liminal/src/channel/tests.rs",
+          "crates/liminal-server/src/server/connection/supervisor_tests.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT dispatch before the participant-contract r15 content hash and two-key gate close; f9f9bc2 is provisional normative-core evidence, not implementation authority.",
+    "SHALL NOT introduce an unmarked participant-contract fixture-derived number, equality, or budget; label each such later value PENDING-CONTRACT-HASH, cite f9f9bc2, and state that it is unstable until the gate passes.",
+    "FENCED: DCR-RECOVERY-ARM (open r15 mandate — do not draft against) — when r15 supplies a fireable recovery continuation, any process-fate interaction will be appended to the keyed socket register; no current requirement depends on it.",
+    "SHALL NOT treat the conversation participant EXIT registry, worker-registration notifier, or server READY waker as an already-available arbitrary-pid host API.",
+    "SHALL NOT replace liveness polling with a scheduler scan, heartbeat, repeated deadline quantum, or process-table query hidden behind an adapter.",
+    "SHALL NOT redesign channel command semantics, actor behavior, or the admitted command deadline beyond the one-winner composition.",
+    "SHALL NOT implement SRV-007 listener readiness or drain completion; this brief supplies the pushed-exit seam and spawn/register race closure that SRV-007 consumes."
+  ],
+  "verification": [
+    "CHANNEL QUIESCENCE — implement `channel_reply_wait_wakes_only_for_reply_exit_or_deadline` with an arm barrier and flat wake/process-table/clock counters, using `process_wake_tests.rs:43-65` as the inversion precedent; paper section `5.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
+    "CHANNEL TOMBSTONE — rewrite `channel/tests.rs:176-203` so already-dead and future-exit barriers replace promptness-by-wall-clock/cadence wording while preserving the observable dead-actor error.",
+    "SPAWN/REGISTER RACE — force exit before record insertion at `supervisor.rs:1537-1550`, then prove pushed replay reaches `supervisor.rs:1812-1843` once and no listener reap heals the state.",
+    "EVENT MATRIX — exercise reply, already-dead exit, future exit, disconnect, deadline, registration cancellation, and publication failure in every relevant ordering with deterministic barriers.",
+    "DELETION CHECK — the replacement command path contains no `LIVENESS_POLL`, `poll_reply`, repeated `recv_timeout`, process-table liveness query, or repeated clock sample identified at `channel/actor/wait.rs:18-24,73-95`.",
+    "NO HIDDEN SCAN — inspect the selected beamr exit source and demonstrate event delivery, including already-dead replay, without a timer/scan substitute.",
+    "DOCUMENT GATE — before dispatch, audit every contract-derived value for `PENDING-CONTRACT-HASH`, confirm the final r15 hash/two-key evidence, and confirm the DCR fenced hole remains non-dependent."
+  ]
+}
