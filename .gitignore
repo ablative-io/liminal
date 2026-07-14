@@ -8,3 +8,5 @@ Thumbs.db
 *.log
 .meridian/worksites/
 aion.db
+__pycache__/
+*.pyc
