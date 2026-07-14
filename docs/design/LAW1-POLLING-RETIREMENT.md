@@ -629,6 +629,7 @@ rg -n --glob '*.rs' '(synthetic|probe|wake).{0,80}(write|send)|(write|send).{0,8
 rg -n --glob '*.rs' '\b(wait_timeout|wait_timeout_ms|park_timeout|sleep_until|sleep_till|deadline)\b' crates sdks
 rg -n --glob '*.rs' '\b(interval|tick|timeout)\s*\(' crates sdks
 rg -n --glob '*.rs' 'SystemTime::now\s*\(|\.elapsed\s*\(\)' crates sdks
+rg -n --glob '*.rs' '(?i)(^|_)(poll|probe|retry|sweep|reap|tick)|(poll|probe|retry|sweep|reap|tick)_' crates sdks
 ```
 
 The last three lines exist because wake-by-time primitives are their own
@@ -637,6 +638,14 @@ or a `thread::park_timeout` loop produces **no** `sleep`, `recv_timeout`,
 poll-word, `Instant::now`, `WouldBlock`, or (with the flag under the mutex)
 atomic-load hit. A primitive class absent from the pattern set is a blind
 spot, not over-match headroom.
+
+The final line is the **underscore-tolerant identifier grep** (protocol
+amendment, 2026-07-14, from the haematite inventory's F4 find): `\b` treats
+`_` as a word character, so the plain poll-word grep cannot see
+`poll_lost_server` or `probe_reconnect` — an underscore-composed adapter
+method is invisible to every word-bounded pattern above, and wrapped polling
+is still polling. This line deliberately over-matches compound identifiers;
+D.2's structural pairing narrows them.
 
 **D.2 Pair textual hits structurally.** For every `Instant::now`, atomic load,
 `WouldBlock`, `TimedOut`, and `Ok(None)` hit, inspect the containing function and
