@@ -590,18 +590,19 @@ that any owner, API, backend, or certifying pair is ready.
 
 ## C. Growth section — candidate families pending the r12 exhaustive sweep
 
-**Every row in this table is `UNVERIFIED-UNTIL-SWEPT`.** The evidence shown was
-opened at `ce8814d`, but neither family boundaries nor exhaustiveness are
-certified until r12. LAW-1 and LAW-2 bind these rows exactly as they bind the
-seven blockers. Each r12 finding appends a new row here; it is never folded into
-prose or dismissed because a nearby row looks similar.
+The first three rows remain `UNVERIFIED-UNTIL-SWEPT` at `ce8814d`. The
+TypeScript SDK row is now `OPEN`: its class sweep at `a7d7bbe` re-confirmed the
+live family and discharged the source-inventory debt without retiring the
+mechanism. LAW-1 and LAW-2 bind every row exactly as they bind the seven
+blockers. Each r12 finding appends a new row here; it is never folded into prose
+or dismissed because a nearby row looks similar.
 
-| Status | Candidate family | Candidate evidence at `ce8814d` | Required r12 question / expected shape, not a decision |
+| Status | Candidate family | Candidate evidence at the named pin | Required r12 question / expected shape, not a decision |
 |---|---|---|---|
 | **UNVERIFIED-UNTIL-SWEPT** | `PushReplyAwaiter` receive re-arm — the push-reply quantum contract restored by liminal ledger gate G7 (“a push's reply deadline belongs to the push, not to the caller's poll”) | The public contract says `timeout` is a wait quantum and explicitly blesses indefinite reinvocation at `crates/liminal-server/src/server/connection/supervisor.rs:533-570`; its no-deadline path performs one `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:573-588`, while the deadlined path loops over reply observation, `Instant::now`, quantum exhaustion, and `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:590-636`. The pinned test deliberately executes five short 10 ms polls and re-arms for the eventual reply at `crates/liminal-server/src/server/connection/supervisor_tests.rs:549-590`. | Examiner finding B4 must receive a named requirement. **Expected outcome at this pin: CONCESSION** — an SDK call-site successor owning the race of reply, connection fate, and one admitted deadline, with the quantum surface intact underneath as the wait primitive, no longer asking callers to re-invoke short waits. The alternative argue branch (one `receive` quantum serves the caller's explicit wait budget rather than change detection) required evidence that production callers do not install an indefinite check loop; at `ce8814d` that evidence is absent and its negation is present — the blessing test's own doc-comment protects “an aion re-arm loop” as the production calling pattern at `crates/liminal-server/src/server/connection/supervisor_tests.rs:550-558`. If the r12 sweep or a later pin removes that caller pattern, the argue branch reopens. The contract and tests may not bless application polling by name while relying on an unproved caller distinction. |
 | **UNVERIFIED-UNTIL-SWEPT** | Subscription setup clock-sampling | One 100 ms timeout is shared by reader and synchronous setup at `crates/liminal-sdk/src/remote/tcp/subscription.rs:43-49` and installed at `crates/liminal-sdk/src/remote/tcp/subscription.rs:229-233`. `read_one_frame` creates one deadline from `SETUP_TIMEOUT` (5 s, `crates/liminal-sdk/src/remote/tcp/subscription.rs:47-49`) but repeatedly converts socket timeout into an `Instant::now() >= deadline` check at `crates/liminal-sdk/src/remote/tcp/subscription.rs:389-416`. | Decide whether the admitted setup deadline excuses only the single deadline event, not the 100 ms sampling implementation. Expected candidate shape is a blocking/readiness control-frame read raced directly with one setup deadline; no periodic clock observation. Confirm every setup entry point and partial-frame behavior before promoting this row. |
 | **UNVERIFIED-UNTIL-SWEPT** | Durability bridge `block_on` | The bridge documents a bounded `MAX_POLLS = 8` pending-future loop at `crates/liminal/src/durability/bridge.rs:31-52`; implementation polls and `yield_now`s up to eight times against a **no-op waker that can never be woken** at `crates/liminal/src/durability/bridge.rs:83-99`; its negative test feeds an always-pending future at `crates/liminal/src/durability/bridge.rs:114-123`. Verified production callers at `ce8814d`: durable publish, flush, and recovery at `crates/liminal/src/channel/types.rs:359`, `crates/liminal/src/channel/types.rs:506`, and `crates/liminal/src/channel/types.rs:578`; dedup claim/release and one further site at `crates/liminal-server/src/server/connection/services.rs:515`, `crates/liminal-server/src/server/connection/services.rs:533`, and `crates/liminal-server/src/server/connection/services.rs:951`. The `block_on` use in `crates/liminal/src/durability/store.rs:449-488` is inside a `#[cfg(test)]`-style test module, not production. | Determine whether this is a synchronous-backend contract assertion or a bounded application scan asking whether a future changed. Honest outcomes: prove one poll is the complete synchronous contract and fail immediately on `Pending`, or concede a real waker-driven executor/bridge. A smaller `MAX_POLLS`, another yield, or a sleep is not a retirement. The six production call sites above are the family's current boundary evidence; the r12 sweep must also **separately classify** the distinct tokio-runtime `block_on` sites at `crates/liminal-server/src/cluster/membership.rs:320-328` (startup) and `crates/liminal-server/src/cluster/sync.rs:282-290` (per-write, including a runtime-construction fallback) — a real-waker runtime park is a different mechanism from the NoopWaker scan and must not be conflated with it, in either direction. |
-| **UNVERIFIED-UNTIL-SWEPT** | TypeScript SDK reconnection loop — default-infinite backoff-paced retry | `sdks/liminal-ts/src/connection.ts`: `maxAttempts` defaults to `Number.POSITIVE_INFINITY` (doc comment `:73-76`; resolution `:313-315`), the reconnect loop iterates `attempt < maxAttempts` at `:243-267`, and each iteration sleeps on a `setTimeout`-based `defaultSleep` (`:85`, `:337-340`) with exponential backoff + jitter. The NO-POLLING ruling names this downstream shape explicitly: reconnect is event-driven, never poll-retry. First seeded row of the `.ts` class sweep named in D.1's class table. | The TypeScript-class sweep must set this family's boundary (other timer uses in the SDK ride the same sweep). Expected shape question, not a decision: whether a backoff-paced retry of a failed CONNECT is an admitted-deadline event chain or a poll-retry loop — the ruling's own wording ("browser reconnect is event-driven never poll-retry") suggests the retry must be driven by a connectivity/readiness event where the platform offers one, with any residual timed retry bounded, signed, and pinned rather than default-infinite. Honest outcomes preserved: argue the platform offers no event source for this transport and sign the bounded timer, or concede an event-driven successor. |
+| **OPEN — swept, live at `a7d7bbe`** | TypeScript SDK reconnection loop — default-infinite backoff-paced retry | `sdks/liminal-ts/src/connection.ts`: `maxAttempts` defaults to `Number.POSITIVE_INFINITY` (doc comment `:73-76`; resolution and defaults `:309-319`), the complete executable reconnect function is `:246-269` (the exam envelope cites `:246-268`, stopping at the throw's closing `});`; the function's own closing brace is `:269`), and each unavailable iteration sleeps and then calls `transport.open()` (`:252-257`). The backoff formula is at `:118-131`; defaults are a 100 ms base, 30,000 ms cap, and 0.5 jitter. Production sleep is the `setTimeout`-backed helper at `:336-340`. A `close()` during backoff increments `generation`, but does not cancel the already-armed timer: it still expires before the generation check (`:230-235`, `:252-254`), leaving one avoidable post-close timer wake. Tests inject a no-wait sleep and finite retries at `sdks/liminal-ts/tests/connection.test.ts:40-92`; this test seam does not convert the production timer into an event source. The completed class sweep re-confirms this as the only live cadence-armed family in the two SDK roots, so LAW-1 closure remains not ready. | Replace retry cadence with a platform connectivity/readiness event where one exists. Any residual timed active-work retry must be explicitly bounded, cancelable on close, source-pinned, and signed as a by-design cost; exponential backoff and jitter do not constitute retirement. Acceptance-criterion candidate: `close()` must cancel the armed timer, not merely invalidate its generation. |
 
 ## D. Repeatable sweep protocol
 
@@ -614,16 +615,142 @@ itself a LAW-2 claim, not an assumption: enumerate with **unfiltered**
 `git ls-files`, group by language class, and for each class either
 **sweep-and-classify with language-appropriate patterns** or **exclude it
 from the claim with a stated reason, per class** — silence about a class is
-the same defect as silence about a family. The class table at `ce8814d`:
+the same defect as silence about a family. The class table begun at `ce8814d`,
+now updated with the SDK-class sweep at `a7d7bbe`:
 
 | Class | Count | Disposition |
 |---|---|---|
-| `.rs` | 184 | swept — the Rust pattern set below over roots `crates sdks` (the one non-`crates/` `.rs` is `sdks/liminal-ts/wasm-src/src/lib.rs`, product source, in scope) |
-| `.ts` | 15 | `sdks/liminal-ts` — a PRODUCT SDK. **Named sweep obligation, not yet executed:** TypeScript-appropriate patterns (`setTimeout|setInterval|poll|retry|backoff|attempt` + loop pairing per D.2). Its first candidate family is already seeded in §C from source. |
-| `.gleam` | 11 | `sdks/liminal-gleam` — a PRODUCT SDK. **Named sweep obligation, not yet executed:** Gleam-appropriate patterns (`process.sleep|repeatedly|every|after` + loop pairing). No verified polling site yet; absence is unproven until swept. |
+| `.rs` | 184 at `ce8814d` | swept — the Rust pattern set below over roots `crates sdks`; the product-source `sdks/liminal-ts/wasm-src/src/lib.rs` was also re-swept with canonical P01–P12 at `a7d7bbe` as part of the SDK root. |
+| `.ts` | 15 executable paths within 25 tracked `sdks/liminal-ts` paths at `a7d7bbe` | **SWEPT** — TS01–TS10 plus structural pairing; the known reconnect family remains OPEN in §C, with no new unretired family. |
+| `.cjs` | 1 executable path within the same 25-path TypeScript root | **SWEPT** — TS01–TS10; zero hit lines. |
+| `.gleam` | 11 executable paths within 14 tracked `sdks/liminal-gleam` paths at `a7d7bbe` | **SWEPT** — GL01–GL07 plus structural review; no new unretired family. |
 | `.py` | 8 | `.meridian/design-system-v2/scripts` — repo tooling, not shipped product. **Excluded from the product claim** for that reason, but named here; if any script becomes long-running fleet apparatus, it re-enters per the runs-on-fleet ruling. |
-| `.pyc` | 1 | `.meridian/design-system-v2/scripts/__pycache__/render-brief.cpython-314.pyc` — a **tracked compiled artifact** (same hygiene defect flagged as haematite tear T3). Remedy: untrack in a separate hygiene commit; until then it is named so no sweep trips on it. |
-| `.json`/`.md`/`.toml`/lock/license/git-metadata | — | non-executable; excluded from the claim as a class. |
+| `.pyc` | 1 | `.meridian/design-system-v2/scripts/__pycache__/render-brief.cpython-314.pyc` — a **tracked compiled artifact** (same hygiene defect flagged as haematite tear T3). Its untrack is **STAGED**, not merged, on pushed branch `chore/untrack-pyc-artifact` at `a9dc8db`, pending review and merge under house rules. |
+| `.json`/`.md`/`.toml`/lock/license/git-metadata | — | non-executable; excluded from the product claim. For the two swept SDK roots, each metadata path and its per-file reason appear in §D.1a rather than being lost to a source glob. |
+
+**D.1a Completed TypeScript/Gleam SDK class sweep evidence.** This read-only
+exam ran at liminal pin `a7d7bbea645e120fdfb676ae773feb275686af9a`
+(exam session `b4f44552-c85e-4d9a-8de3-5637eed6c018`, envelope
+`claude-review-sdksweep.G1FCRb`). Unfiltered tracked enumeration returned 25
+paths under `sdks/liminal-ts` and 14 under `sdks/liminal-gleam`, superseding
+the earlier source-glob counts. Executable classes were 15 `.ts`, 1 `.cjs`, 1
+wasm-src `.rs`, and 11 `.gleam`; the remainder was metadata excluded only for
+the per-file reasons recorded below.
+
+| Tracked file (current-pin cite) | Disposition ready for §D class table |
+|---|---|
+| `sdks/liminal-ts/.gitignore:1` | EXCLUDED — ignore metadata, not executable source. |
+| `sdks/liminal-ts/package-lock.json:1` | EXCLUDED — dependency lockfile, not executable source. |
+| `sdks/liminal-ts/package.json:1` | EXCLUDED — declarative package/build metadata; its finite build/test command declarations are at `sdks/liminal-ts/package.json:26-35`, not a shipped polling implementation. |
+| `sdks/liminal-ts/scripts/copy-build-extensions.cjs:1` | SWEPT — TS/JS patterns; zero hit lines. Its finite directory passes are source-bounded `for` loops at `sdks/liminal-ts/scripts/copy-build-extensions.cjs:9-20` and `:29-42`, with no timer/wait. |
+| `sdks/liminal-ts/src/channel.ts:1` | SWEPT — inert Promise type hits plus reviewed cadence-free delegated async waits at `sdks/liminal-ts/src/channel.ts:123-160`. |
+| `sdks/liminal-ts/src/codegen-cli.ts:1` | SWEPT — Promise type plus one one-shot generation await at `sdks/liminal-ts/src/codegen-cli.ts:13-20`. |
+| `sdks/liminal-ts/src/codegen.ts:1` | SWEPT — one-shot filesystem awaits at `sdks/liminal-ts/src/codegen.ts:314-324`. |
+| `sdks/liminal-ts/src/connection.ts:1` | SWEPT — KNOWN live reconnect family plus inert timeout labels; see the OPEN reconnect row in §C. |
+| `sdks/liminal-ts/src/conversation.ts:1` | SWEPT — reviewed event-driven async queue/transport waits plus inert timeout/type hits at `sdks/liminal-ts/src/conversation.ts:130-230` and `:277-323`. |
+| `sdks/liminal-ts/src/index.ts:1` | SWEPT — zero hit lines. |
+| `sdks/liminal-ts/src/pressure.ts:1` | SWEPT — inert transported delay values and one cadence-free delegated publish at `sdks/liminal-ts/src/pressure.ts:37-86` and `:212-246`. |
+| `sdks/liminal-ts/src/schema.ts:1` | SWEPT — zero hit lines. |
+| `sdks/liminal-ts/src/wasm-bindgen.d.ts:1` | SWEPT — inert Promise declaration only at line 11. |
+| `sdks/liminal-ts/src/wasm.ts:1` | SWEPT — Promise declarations and one-shot module/file/fetch delegation; no local timer at `sdks/liminal-ts/src/wasm.ts:45-195`. |
+| `sdks/liminal-ts/tests/codegen.test.ts:1` | SWEPT — TEST-ONLY hits. |
+| `sdks/liminal-ts/tests/conformance.test.ts:1` | SWEPT — TEST-ONLY hits. |
+| `sdks/liminal-ts/tests/connection.test.ts:1` | SWEPT — TEST-ONLY reconnect/sleep hits. |
+| `sdks/liminal-ts/tests/conversation.test.ts:1` | SWEPT — TEST-ONLY Promise/await hits. |
+| `sdks/liminal-ts/tests/pressure.test.ts:1` | SWEPT — TEST-ONLY delay/Promise/await hits. |
+| `sdks/liminal-ts/tsconfig.cjs.json:1` | EXCLUDED — declarative compiler config, not executable source. |
+| `sdks/liminal-ts/tsconfig.esm.json:1` | EXCLUDED — declarative compiler config, not executable source. |
+| `sdks/liminal-ts/tsconfig.json:1` | EXCLUDED — declarative compiler config, not executable source. |
+| `sdks/liminal-ts/tsconfig.test.json:1` | EXCLUDED — declarative compiler config, not executable source. |
+| `sdks/liminal-ts/wasm-src/Cargo.toml:1` | EXCLUDED — declarative crate/build/dependency metadata (`[dependencies]` is at `sdks/liminal-ts/wasm-src/Cargo.toml:14-16`). |
+| `sdks/liminal-ts/wasm-src/src/lib.rs:1` | SWEPT — canonical P01–P12; every pattern returned rg status 1, never 2. The file is a synchronous frame codec at `sdks/liminal-ts/wasm-src/src/lib.rs:12-112`, not a socket reader. |
+| `sdks/liminal-gleam/.gitignore:1` | EXCLUDED — ignore metadata, not executable source. |
+| `sdks/liminal-gleam/gleam.toml:1` | EXCLUDED — declarative package config; the Rust/NIF link is explicitly informational metadata at `sdks/liminal-gleam/gleam.toml:21-28`. |
+| `sdks/liminal-gleam/manifest.toml:1` | EXCLUDED — generated dependency lockfile, not executable source. |
+| `sdks/liminal-gleam/src/liminal.gleam:1` | SWEPT — inert FFI import/handle aliases. |
+| `sdks/liminal-gleam/src/liminal/channel.gleam:1` | SWEPT — cadence-free FFI delegation plus inert transported `timeout_millis` at `sdks/liminal-gleam/src/liminal/channel.gleam:17-25`, `:57-64`, `:98-135`. |
+| `sdks/liminal-gleam/src/liminal/connection.gleam:1` | SWEPT — pure reconnect-delay policy, with no timer/sleep/loop at `sdks/liminal-gleam/src/liminal/connection.gleam:47-59` and `:105-175`. |
+| `sdks/liminal-gleam/src/liminal/conversation.gleam:1` | SWEPT — timeout type/callback dispatch, no scheduler at `sdks/liminal-gleam/src/liminal/conversation.gleam:11-16` and `:45-72`. |
+| `sdks/liminal-gleam/src/liminal/ffi.gleam:1` | SWEPT — external declarations and transported timeout config; receive has no timeout argument at `sdks/liminal-gleam/src/liminal/ffi.gleam:11-20` and `:68-69`. |
+| `sdks/liminal-gleam/src/liminal/recovery.gleam:1` | SWEPT — inert prose hits only. |
+| `sdks/liminal-gleam/src/liminal/schema.gleam:1` | SWEPT — inert “external schema” prose only. |
+| `sdks/liminal-gleam/test/conformance_test.gleam:1` | SWEPT — TEST-ONLY hits. |
+| `sdks/liminal-gleam/test/connection_test.gleam:1` | SWEPT — TEST-ONLY attempt/retry/timeout hits. |
+| `sdks/liminal-gleam/test/liminal_test.gleam:1` | SWEPT — TEST-ONLY timeout/FFI/prose hits. |
+| `sdks/liminal-gleam/test/recovery_test.gleam:1` | SWEPT — TEST-ONLY attempt/after hits. |
+
+**Execution proof.** Every command ran over echoed real enumerated inputs: 16
+TypeScript/CJS paths, 11 Gleam paths, and the one wasm-src Rust path. For `rg`,
+status 0 means matches and status 1 proves an empty result; no pattern returned
+status 2.
+
+| Pattern set | Identity | `rg` status |
+|---|---|---:|
+| TS01 | timers | 0 |
+| TS02 | underscore-tolerant `poll`/`probe`/`retry`/`sweep`/`reap`/`tick`/`backoff`/`heartbeat` identifiers, per amendment (a) | 0 |
+| TS03 | `Date.now` / `performance.now` | 1 |
+| TS04 | `while` | 0 |
+| TS05 | sleep/delay/new-Promise/Promise types | 0 |
+| TS06 | `AbortSignal.timeout` | 1 |
+| TS07 | timeout | 0 |
+| TS08 | socket/WebSocket/read-write-connect timeout options | 1 |
+| TS09 | `await` | 0 |
+| TS10 | other schedulers | 1 |
+| GL01 | `process.sleep` | 1 |
+| GL02 | underscore-tolerant `repeatedly`/`every`/`after`/`sleep`/`backoff`/`retry`/`attempt` identifiers | 0 |
+| GL03 | receive-timeout/timeout | 0 |
+| GL04 | loop/recur/iterate/repeat | 1 |
+| GL05 | external/FFI | 0 |
+| GL06 | clocks | 1 |
+| GL07 | timer/interval/heartbeat/tick/poll/probe/sweep/reap | 0 |
+| P01 | `sleep` | 1 |
+| P02 | `recv_timeout` / `try_recv` | 1 |
+| P03 | poll words | 1 |
+| P04 | poll constants | 1 |
+| P05 | `Instant::now` | 1 |
+| P06 | `WouldBlock` / `TimedOut` / `set_read_timeout` / `Ok(None)` | 1 |
+| P07 | stop/shutdown loads | 1 |
+| P08 | synthetic wake writes | 1 |
+| P09 | wait/deadline primitives | 1 |
+| P10 | interval/tick/timeout calls | 1 |
+| P11 | clocks/elapsed | 1 |
+| P12 | underscore-tolerant poll/probe/retry/sweep/reap/tick identifiers | 1 |
+
+All empty results therefore have proven status 1, never 2. Structural review
+paired both TS `while` hits with the event Promise at
+`sdks/liminal-ts/src/conversation.ts:298-315`, not a sleep. Unique union ledgers
+for TS01–TS10 and GL01–GL07 partitioned every hit line exactly once as **KNOWN
+family**, **reviewed non-polling**, **INERT**, or **TEST-ONLY**, with zero
+unassigned lines. The only live cadence-armed family was the already-KNOWN
+TypeScript reconnect row in §C: there was **NO NEW unretired polling family** in
+either class. Before and after the sweep, `HEAD` was
+`a7d7bbea645e120fdfb676ae773feb275686af9a`; porcelain was empty, and both
+`git diff --quiet` and `git diff --cached --quiet` exited 0.
+
+**Seven-loop boundary cross-check.** The two known 100 ms SDK readers remain
+`crates/liminal-sdk/src/remote/tcp/push_client.rs` and
+`crates/liminal-sdk/src/remote/tcp/subscription.rs`; the distinct
+`SETUP_TIMEOUT` setup sampler remains
+`crates/liminal-sdk/src/remote/tcp/subscription.rs:389-416`. None is duplicated
+in either swept root. TypeScript consumes an injected `AsyncIterable` at
+`sdks/liminal-ts/src/channel.ts:34-45` and `:123-132`, and its wasm path is a
+synchronous codec at `sdks/liminal-ts/wasm-src/src/lib.rs:12-112`, with no socket
+reader. Gleam calls a single external receive with no timeout argument at
+`sdks/liminal-gleam/src/liminal/ffi.gleam:68-69` and
+`sdks/liminal-gleam/src/liminal/channel.gleam:107-111`; it only transports
+`timeout_millis` as inert config at
+`sdks/liminal-gleam/src/liminal/channel.gleam:118-135`. Its reconnect module
+computes delay policy but arms no timer at
+`sdks/liminal-gleam/src/liminal/connection.gleam:105-129` and `:144-175`. The
+Rust rows are unchanged. NIF, transport, and dependency internals remain outside
+this source claim.
+
+**Honesty boundary / residual risks (verbatim from the exam envelope):**
+
+- No builds or tests were run, exactly as required; this is source-inventory evidence, not runtime certification.
+- The sweep cannot certify behavior inside injected TypeScript transports, JavaScript runtime primitives, the Gleam `liminal_sdk_ffi` NIF target, or other dependencies. The reviewed source only proves what these two tracked classes arm or declare at their boundaries (`sdks/liminal-ts/src/channel.ts:34-45`, `sdks/liminal-ts/src/conversation.ts:71-107`, `sdks/liminal-gleam/src/liminal/ffi.gleam:51-72`).
+- Exact kernel/runtime work per TypeScript reconnect timer expiry and failed `open()` was not measured; only source-derived cadence and operation counts are reported from `sdks/liminal-ts/src/connection.ts:118-131`, `:246-268`, and `:309-339`.
+- Generated, ignored, or untracked build output is outside an unfiltered tracked-file claim. The post-sweep porcelain check showed no such working-tree additions, but dependency-compiled code remains outside this inventory.
 
 **Re-run the unfiltered enumeration at the sweep commit before any grep runs;
 any newly appearing class or root is classified and added, never silently
