@@ -159,9 +159,19 @@ name; LAW-1 forbids filling it with another snapshot cadence.
 membership join/leave deltas are pushed to the consumer, and shutdown
 explicitly wakes and terminates that consumption. Initial-state handoff must
 not lose a membership transition between snapshot and subscription.
-**OPEN:** the selected membership backend and its non-poll event API. A beamr
-connection-manager subscription, backend callback, or ordered event stream are
-candidates only.
+**OPEN:** the membership event API's shape. At the pin the backend **is** beamr
+distribution: `crates/liminal-server/src/cluster/membership.rs:32` imports
+`beamr::distribution::connection::ConnectionManager`, and `poll_once` samples
+its `connected_nodes()`. The family is also narrower than a full membership
+feed: the `POLL_INTERVAL` doc-comment at
+`crates/liminal-server/src/cluster/membership.rs:40-44` records that node-down
+handling does **not** depend on the cadence — beamr's own hook drives the pg
+purge synchronously on the drop — so the poll drives only membership logging
+and R5 peer-join backfill. The ask is therefore an ordered **join**/leave event
+API extending an existing synchronous drop-hook precedent, which makes the
+initial-state handoff clause above the load-bearing FIXED part. A
+`ConnectionManager` subscription, callback, or ordered event stream are
+candidates only; replacing the backend instead would be its own ruling.
 
 **2.5 Requirement — candidate event-driven replacement shape.** A candidate
 source atomically establishes an initial membership view plus a continuation
@@ -552,16 +562,18 @@ it does not mean reviewed, selected, or ready.
 | Main listener | Listener ownership, shutdown wiring, supervisor cleanup, and acceptance instrumentation | `«MAIN-LISTENER-READINESS-SHUTDOWN-EXIT»`: possibly expose host-owned fd registration/wake delivery from beamr's existing readiness service; if that candidate is rejected, select and prove a portable blocking-accept interrupt | beamr/Artemis for any readiness API; otherwise mechanism remains OPEN in the server brief |
 | Health accept | Health worker wait, explicit shutdown signal, and cross-platform race tests | `«HEALTH-ACCEPT-SHUTDOWN-WAKE»`: portable accept interrupt/readiness choice | liminal-local choice; genuinely open, no external readiness asserted |
 | Shutdown drain/settle | Add a supervisor completion-generation API and wire every connection-removal path | `«SHUTDOWN-DRAIN-NOTIFICATION»`: concrete primitive choice | liminal-local; genuinely open |
-| Cluster membership | Consume ordered deltas and explicit shutdown, remove snapshot cadence | `«MEMBERSHIP-EVENT-SOURCE»`: selected membership backend's atomic initial-view plus non-poll event API | external backend choice; backend-gated and genuinely open |
+| Cluster membership | Consume ordered deltas and explicit shutdown, remove snapshot cadence | `«MEMBERSHIP-EVENT-SOURCE»`: an ordered join/leave event API with atomic initial view on beamr distribution's `ConnectionManager` — the backend at `ce8814d` (`membership.rs:32`, `poll_once` over `connected_nodes()` at `membership.rs:112-128`); a backend change instead would be its own ruling | beamr/Artemis; **native-only surface** (distribution is net-gated and compiled out of wasm); genuinely open |
 | Channel command reply | Compose reply, disconnect, process exit, and one deadline | `«CHANNEL-REPLY-EVENT-RACE»`: scheduler-to-host-waiter process-exit notification | beamr/Artemis; API-gated and genuinely open |
 | SDK push + subscription readers | One shared portable cancellation/wake component and both frame-reader integrations | `«SDK-PUSH-READER-SHUTDOWN-WAKE»` plus `«SDK-SUBSCRIPTION-READER-SHUTDOWN-WAKE»`: select one portable primitive | liminal SDK brief; genuinely open |
 
-The named beamr asks are only (1) a scheduler-to-waiter exit notification for
-the channel seam and (2) possibly a host/listener readiness surface if the
-server brief selects the existing-service candidate. Cluster membership waits
-on a backend event API choice. The remaining work is liminal-local only after
-each named mechanism is selected and certified; this map makes no readiness or
-sequence claim.
+The named beamr asks are **three**: (1) a scheduler-to-waiter exit notification
+for the channel seam; (2) an ordered membership join/leave event API on
+distribution's `ConnectionManager` — a **native-only** surface, since
+distribution is net-gated and compiled out of wasm — unless a backend change is
+separately ruled; and (3) possibly a host/listener readiness surface if the
+server brief selects the existing-service candidate. The remaining work is
+liminal-local only after each named mechanism is selected and certified; this
+map makes no readiness or sequence claim.
 
 ## B. Brief grouping proposal for post-key-turn server briefs
 
@@ -586,28 +598,45 @@ prose or dismissed because a nearby row looks similar.
 
 | Status | Candidate family | Candidate evidence at `ce8814d` | Required r12 question / expected shape, not a decision |
 |---|---|---|---|
-| **UNVERIFIED-UNTIL-SWEPT** | `PushReplyAwaiter` receive re-arm — G7 surface | The public contract says `timeout` is a wait quantum and explicitly blesses indefinite reinvocation at `crates/liminal-server/src/server/connection/supervisor.rs:533-570`; its no-deadline path performs one `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:573-588`, while the deadlined path loops over reply observation, `Instant::now`, quantum exhaustion, and `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:590-636`. The pinned test deliberately executes five short 10 ms polls and re-arms for the eventual reply at `crates/liminal-server/src/server/connection/supervisor_tests.rs:549-590`. | Examiner finding B4 must receive a named requirement. Expected fix shape, if this is conceded as a family: at the SDK/caller site race reply, connection fate, and one admitted deadline while leaving the quantum surface intact underneath as the wait primitive. Preserve both honest outcomes for r12: **argue** that one `receive` quantum serves the caller's explicit wait budget rather than change detection, with evidence that production callers do not install an indefinite check loop; or **concede** an SDK call-site successor that owns the event race and no longer asks callers to re-invoke short waits. The contract and tests may not bless application polling by name while relying on an unproved caller distinction. |
+| **UNVERIFIED-UNTIL-SWEPT** | `PushReplyAwaiter` receive re-arm — the push-reply quantum contract restored by liminal ledger gate G7 (“a push's reply deadline belongs to the push, not to the caller's poll”) | The public contract says `timeout` is a wait quantum and explicitly blesses indefinite reinvocation at `crates/liminal-server/src/server/connection/supervisor.rs:533-570`; its no-deadline path performs one `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:573-588`, while the deadlined path loops over reply observation, `Instant::now`, quantum exhaustion, and `recv_timeout` at `crates/liminal-server/src/server/connection/supervisor.rs:590-636`. The pinned test deliberately executes five short 10 ms polls and re-arms for the eventual reply at `crates/liminal-server/src/server/connection/supervisor_tests.rs:549-590`. | Examiner finding B4 must receive a named requirement. **Expected outcome at this pin: CONCESSION** — an SDK call-site successor owning the race of reply, connection fate, and one admitted deadline, with the quantum surface intact underneath as the wait primitive, no longer asking callers to re-invoke short waits. The alternative argue branch (one `receive` quantum serves the caller's explicit wait budget rather than change detection) required evidence that production callers do not install an indefinite check loop; at `ce8814d` that evidence is absent and its negation is present — the blessing test's own doc-comment protects “an aion re-arm loop” as the production calling pattern at `crates/liminal-server/src/server/connection/supervisor_tests.rs:550-558`. If the r12 sweep or a later pin removes that caller pattern, the argue branch reopens. The contract and tests may not bless application polling by name while relying on an unproved caller distinction. |
 | **UNVERIFIED-UNTIL-SWEPT** | Subscription setup clock-sampling | One 100 ms timeout is shared by reader and synchronous setup at `crates/liminal-sdk/src/remote/tcp/subscription.rs:43-49` and installed at `crates/liminal-sdk/src/remote/tcp/subscription.rs:229-233`. `read_one_frame` creates one deadline from `SETUP_TIMEOUT` (5 s, `crates/liminal-sdk/src/remote/tcp/subscription.rs:47-49`) but repeatedly converts socket timeout into an `Instant::now() >= deadline` check at `crates/liminal-sdk/src/remote/tcp/subscription.rs:389-416`. | Decide whether the admitted setup deadline excuses only the single deadline event, not the 100 ms sampling implementation. Expected candidate shape is a blocking/readiness control-frame read raced directly with one setup deadline; no periodic clock observation. Confirm every setup entry point and partial-frame behavior before promoting this row. |
 | **UNVERIFIED-UNTIL-SWEPT** | Durability bridge `block_on` | The bridge documents a bounded `MAX_POLLS = 8` pending-future loop at `crates/liminal/src/durability/bridge.rs:31-52`; implementation polls and `yield_now`s up to eight times against a **no-op waker that can never be woken** at `crates/liminal/src/durability/bridge.rs:83-99`; its negative test feeds an always-pending future at `crates/liminal/src/durability/bridge.rs:114-123`. Verified production callers at `ce8814d`: durable publish, flush, and recovery at `crates/liminal/src/channel/types.rs:359`, `crates/liminal/src/channel/types.rs:506`, and `crates/liminal/src/channel/types.rs:578`; dedup claim/release and one further site at `crates/liminal-server/src/server/connection/services.rs:515`, `crates/liminal-server/src/server/connection/services.rs:533`, and `crates/liminal-server/src/server/connection/services.rs:951`. The `block_on` use in `crates/liminal/src/durability/store.rs:449-488` is inside a `#[cfg(test)]`-style test module, not production. | Determine whether this is a synchronous-backend contract assertion or a bounded application scan asking whether a future changed. Honest outcomes: prove one poll is the complete synchronous contract and fail immediately on `Pending`, or concede a real waker-driven executor/bridge. A smaller `MAX_POLLS`, another yield, or a sleep is not a retirement. The six production call sites above are the family's current boundary evidence; the r12 sweep must also **separately classify** the distinct tokio-runtime `block_on` sites at `crates/liminal-server/src/cluster/membership.rs:320-328` (startup) and `crates/liminal-server/src/cluster/sync.rs:282-290` (per-write, including a runtime-construction fallback) — a real-waker runtime park is a different mechanism from the NoopWaker scan and must not be conflated with it, in either direction. |
 
 ## D. Repeatable sweep protocol
 
 **D.1 Run from the pinned tree and retain the raw result.** The r12 sweep runs
-at a named commit over all Rust production and test sources. Tests are included
-because they can bless a banned calling pattern. These searches intentionally
+at a named commit over **every tracked Rust source in the repository** — the
+sweep root is itself a LAW-2 claim, not an assumption. At `ce8814d`,
+`git ls-files '*.rs' | grep -v '^crates/'` returns exactly one path:
+`sdks/liminal-ts/wasm-src/src/lib.rs`, the TypeScript SDK's wasm shim — product
+source, in scope. The sweep roots are therefore `crates sdks`. **Re-run that
+enumeration at the sweep commit before the greps run; any newly appearing root
+is classified and added, never silently omitted.** Tests are included because
+they can bless a banned calling pattern. These searches intentionally
 over-match; semantic review narrows them, never an exclusion added merely to
 make the output small.
 
 ```text
-rg -n --glob '*.rs' 'sleep\s*\(' crates
-rg -n --glob '*.rs' '\b(recv_timeout|try_recv)\s*\(' crates
-rg -n --glob '*.rs' '(?i)\b(poll|polling|poll_interval|interval|sweep|scan|heartbeat|backoff|reap)\b' crates
-rg -n --glob '*.rs' '\b(POLL[A-Z0-9_]*|[A-Z0-9_]*POLL[A-Z0-9_]*|Interval)\b' crates
-rg -n --glob '*.rs' 'Instant::now\s*\(' crates
-rg -n --glob '*.rs' 'WouldBlock|TimedOut|set_read_timeout|Ok\(None\)' crates
-rg -n --glob '*.rs' '(stop|shutdown).{0,80}\.load\(|\.load\([^)]*\).{0,80}(stop|shutdown)' crates
-rg -n --glob '*.rs' '(synthetic|probe|wake).{0,80}(write|send)|(write|send).{0,80}(synthetic|probe|wake)' crates
+git ls-files '*.rs' | grep -v '^crates/'   # root enumeration — classify every hit
+rg -n --glob '*.rs' 'sleep\s*\(' crates sdks
+rg -n --glob '*.rs' '\b(recv_timeout|try_recv)\s*\(' crates sdks
+rg -n --glob '*.rs' '(?i)\b(poll|polling|poll_interval|interval|sweep|scan|heartbeat|backoff|reap)\b' crates sdks
+rg -n --glob '*.rs' '\b(POLL[A-Z0-9_]*|[A-Z0-9_]*POLL[A-Z0-9_]*|Interval)\b' crates sdks
+rg -n --glob '*.rs' 'Instant::now\s*\(' crates sdks
+rg -n --glob '*.rs' 'WouldBlock|TimedOut|set_read_timeout|Ok\(None\)' crates sdks
+rg -n --glob '*.rs' '(stop|shutdown).{0,80}\.load\(|\.load\([^)]*\).{0,80}(stop|shutdown)' crates sdks
+rg -n --glob '*.rs' '(synthetic|probe|wake).{0,80}(write|send)|(write|send).{0,80}(synthetic|probe|wake)' crates sdks
+rg -n --glob '*.rs' '\b(wait_timeout|wait_timeout_ms|park_timeout|sleep_until|sleep_till|deadline)\b' crates sdks
+rg -n --glob '*.rs' '\b(interval|tick|timeout)\s*\(' crates sdks
+rg -n --glob '*.rs' 'SystemTime::now\s*\(|\.elapsed\s*\(\)' crates sdks
 ```
+
+The last three lines exist because wake-by-time primitives are their own
+escape class: a condvar loop — `while !done { cv.wait_timeout(guard, dur) }` —
+or a `thread::park_timeout` loop produces **no** `sleep`, `recv_timeout`,
+poll-word, `Instant::now`, `WouldBlock`, or (with the flag under the mutex)
+atomic-load hit. A primitive class absent from the pattern set is a blind
+spot, not over-match headroom.
 
 **D.2 Pair textual hits structurally.** For every `Instant::now`, atomic load,
 `WouldBlock`, `TimedOut`, and `Ok(None)` hit, inspect the containing function and
