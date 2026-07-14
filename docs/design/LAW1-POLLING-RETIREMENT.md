@@ -625,7 +625,7 @@ now updated with the SDK-class sweep at `a7d7bbe`:
 | `.cjs` | 1 executable path within the same 25-path TypeScript root | **SWEPT** — TS01–TS10; zero hit lines. |
 | `.gleam` | 11 executable paths within 14 tracked `sdks/liminal-gleam` paths at `a7d7bbe` | **SWEPT** — GL01–GL07 plus structural review; no new unretired family. |
 | `.py` | 8 | `.meridian/design-system-v2/scripts` — repo tooling, not shipped product. **Excluded from the product claim** for that reason, but named here; if any script becomes long-running fleet apparatus, it re-enters per the runs-on-fleet ruling. |
-| `.pyc` | 1 | `.meridian/design-system-v2/scripts/__pycache__/render-brief.cpython-314.pyc` — a **tracked compiled artifact** (same hygiene defect flagged as haematite tear T3). Its untrack is **STAGED**, not merged, on pushed branch `chore/untrack-pyc-artifact` at `a9dc8db`, pending review and merge under house rules. |
+| `.pyc` | 0 at `a9dc8db` (was 1) | **RESOLVED** — the tracked compiled artifact `.meridian/design-system-v2/scripts/__pycache__/render-brief.cpython-314.pyc` (same hygiene defect flagged as haematite tear T3) was untracked and `__pycache__/`+`*.pyc` ignored by `chore/untrack-pyc-artifact` @ `a9dc8db`, reviewed by the reviewer-of-record and merged to main as `a9dc8db` (fast-forward; merge battery green). No tracked `.pyc` remains; the class row stays so no future sweep silently loses the class. |
 | `.json`/`.md`/`.toml`/lock/license/git-metadata | — | non-executable; excluded from the product claim. For the two swept SDK roots, each metadata path and its per-file reason appear in §D.1a rather than being lost to a source glob. |
 
 **D.1a Completed TypeScript/Gleam SDK class sweep evidence.** This read-only
