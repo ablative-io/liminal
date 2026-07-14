@@ -7,7 +7,7 @@
   ],
   "blocked_by": [
     "PARTICIPANT-CONTRACT-R15-GATE — final participant-contract content hash and both keys are required before dispatch; the stable law/socket core was read only from f9f9bc2:docs/design/PARTICIPANT-CONTRACT.md:135-153,2776-2828, and every later contract-fixture number, equality, or budget is PENDING-CONTRACT-HASH until this gate passes.",
-    "BEAMR-ASK-ATOMIC-INITIAL-VIEW-ORDERED-DELTAS — ConnectionManager must expose an atomic initial membership view plus ordered join/leave continuation with defined duplicate, coalescing, overflow, close, and shutdown semantics; current liminal only snapshots `connected_nodes()` at `membership.rs:112-128` (banked scout pack, reverified at fe3f7ec)."
+    "BEAMR-ASK-ATOMIC-INITIAL-VIEW-ORDERED-DELTAS — ConnectionManager must expose an atomic initial membership view plus ordered join/leave continuation with defined duplicate, coalescing, overflow, close, and shutdown semantics; current liminal only snapshots `connected_nodes()` at `crates/liminal-server/src/cluster/membership.rs:112-128` (banked scout pack, reverified at fe3f7ec)."
   ],
   "checklist": [],
   "stories": [],
@@ -17,7 +17,7 @@
     "B. Brief grouping proposal for post-key-turn server briefs"
   ],
   "purpose": "SKELETON — NOT DISPATCH-READY. Define the standalone membership-event-source retirement selected by `LAW1-POLLING-RETIREMENT.md` section `B. Brief grouping proposal for post-key-turn server briefs`: replace beamr connected-node snapshots, set diffs, stop-flag sampling, and sleep with an atomic initial view and ordered pushed deltas. The banked scout pack reverified every cited membership range at fe3f7ec; contract-fixture values are intentionally absent and remain PENDING-CONTRACT-HASH.",
-  "task": "Draft structure and acceptance intent only. Consume a future beamr `ConnectionManager` event API, preserve the startup view, ordered join/leave effects, R5 peer-join backfill, beamr's already-occupied synchronous node-down purge hook, and explicit shutdown. Scope is `crates/liminal-server/src/cluster/membership.rs`, `cluster/sync.rs`, runtime wiring, and focused unit/real-cluster tests. Do not choose an upstream API, backend, buffering policy, or contract-fixture budget before the named gates close. All tree claims are attributed to the LAW-1 paper and banked scout pack's fe3f7ec citation-drift pass.",
+  "task": "Draft structure and acceptance intent only. Consume a future beamr `ConnectionManager` event API, preserve the startup view, ordered join/leave effects, R5 peer-join backfill, beamr's already-occupied synchronous node-down purge hook, and explicit shutdown. Scope is `crates/liminal-server/src/cluster/membership.rs`, `crates/liminal-server/src/cluster/sync.rs`, runtime wiring, and focused unit/real-cluster tests. Do not choose an upstream API, backend, buffering policy, or contract-fixture budget before the named gates close. All tree claims are attributed to the LAW-1 paper and banked scout pack's fe3f7ec citation-drift pass.",
   "requirements": [
     {
       "id": "R1",
@@ -76,7 +76,7 @@
     {
       "id": "R4",
       "title": "Preserve join backfill and the existing leave purge hook",
-      "spec": "WHEN an ordered join delta is applied, THE SYSTEM SHALL retain `ClusterSync::on_peer_join` subscription re-advertisement at `crates/liminal-server/src/cluster/sync.rs:241-247`. WHEN a leave delta is observed, THE SYSTEM SHALL preserve logging/consumer semantics without replacing or competing with beamr's scheduler-owned synchronous pg purge hook at `membership.rs:5-22`; `ClusterSync::on_peer_leave` remains downstream at `sync.rs:249-260`. THE SYSTEM SHALL NOT infer that the existing leave hook supplies join ordering or the atomic initial handoff (banked scout pack, reverified at fe3f7ec).",
+      "spec": "WHEN an ordered join delta is applied, THE SYSTEM SHALL retain `ClusterSync::on_peer_join` subscription re-advertisement at `crates/liminal-server/src/cluster/sync.rs:241-247`. WHEN a leave delta is observed, THE SYSTEM SHALL preserve logging/consumer semantics without replacing or competing with beamr's scheduler-owned synchronous pg purge hook at `crates/liminal-server/src/cluster/membership.rs:5-22`; `ClusterSync::on_peer_leave` remains downstream at `crates/liminal-server/src/cluster/sync.rs:249-260`. THE SYSTEM SHALL NOT infer that the existing leave hook supplies join ordering or the atomic initial handoff (banked scout pack, reverified at fe3f7ec).",
       "acceptance": [
         "A late join receives existing local subscription advertisements through the pushed join event path.",
         "Node-down still purges remote members synchronously through beamr's occupied hook, independent of consumer scheduling.",
@@ -117,7 +117,7 @@
     {
       "id": "R6",
       "title": "Prove membership quiescence and remove the poll family",
-      "spec": "Add counter-backed quiescence coverage following the park-flip inversion precedent at `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. Delete the poll constant, snapshot change-detection role, `PollLoop`, and stop/load/sleep implementation at `membership.rs:40-44,112-128,198-230`. Any by-design backend watcher or helper cost SHALL receive an evidence-derived bound after the contract gate and SHALL NOT be filled with a skeleton default.",
+      "spec": "Add counter-backed quiescence coverage following the park-flip inversion precedent at `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. Delete the poll constant, snapshot change-detection role, `PollLoop`, and stop/load/sleep implementation at `crates/liminal-server/src/cluster/membership.rs:40-44,112-128,198-230`. Any by-design backend watcher or helper cost SHALL receive an evidence-derived bound after the contract gate and SHALL NOT be filled with a skeleton default.",
       "acceptance": [
         "`stable_membership_source_has_zero_consumer_wakes` arms the source, holds the backend stable, and asserts source-snapshot and consumer-wake counters remain flat until shutdown.",
         "A source search finds no production membership-family `PollLoop`, `POLL_INTERVAL`, `poll_once`, or `run_poll_loop` change-detection path.",
@@ -145,11 +145,11 @@
     "SHALL NOT absorb unrelated growth-section families or claim that the repository sweep certifies dependency-internal wake sources."
   ],
   "verification": [
-    "MEMBERSHIP QUIESCENCE — implement `stable_membership_source_has_zero_consumer_wakes` with a source arm barrier and flat snapshot/wake counters, using `process_wake_tests.rs:43-65` as the inversion precedent; paper section `2.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
-    "MEMBERSHIP TOMBSTONE — delete the direct `poll_once` test at `membership.rs:391-403`; preserve empty-initial-view coverage through the new atomic source contract.",
+    "MEMBERSHIP QUIESCENCE — implement `stable_membership_source_has_zero_consumer_wakes` with a source arm barrier and flat snapshot/wake counters, using `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65` as the inversion precedent; paper section `2.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
+    "MEMBERSHIP TOMBSTONE — delete the direct `poll_once` test at `crates/liminal-server/src/cluster/membership.rs:391-403`; preserve empty-initial-view coverage through the new atomic source contract.",
     "ORDERING MATRIX — race join/leave across initial handoff, rapid join-leave-rejoin, duplicates/coalescing, source close/error/overflow, and shutdown before/with/after a delta using deterministic barriers.",
-    "REAL-CLUSTER INVERSION — rewrite `cluster_two_node.rs:26-39,128-146,228-291` so event barriers replace eventual membership polling while late-join backfill and synchronous node-drop purge assertions remain.",
-    "DELETION CHECK — production membership code has no `PollLoop`, `POLL_INTERVAL`, `poll_once`, `run_poll_loop`, stop-flag sampling, snapshot diff cadence, or sleep family identified at `membership.rs:40-44,112-128,198-230`.",
+    "REAL-CLUSTER INVERSION — rewrite `crates/liminal-server/tests/cluster_two_node.rs:26-39,128-146,228-291` so event barriers replace eventual membership polling while late-join backfill and synchronous node-drop purge assertions remain.",
+    "DELETION CHECK — production membership code has no `PollLoop`, `POLL_INTERVAL`, `poll_once`, `run_poll_loop`, stop-flag sampling, snapshot diff cadence, or sleep family identified at `crates/liminal-server/src/cluster/membership.rs:40-44,112-128,198-230`.",
     "DOCUMENT GATE — before dispatch, audit every contract-derived value for `PENDING-CONTRACT-HASH`, confirm the final r15 hash/two-key evidence, and confirm the DCR fenced hole remains non-dependent."
   ]
 }

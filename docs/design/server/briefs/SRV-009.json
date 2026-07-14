@@ -39,7 +39,7 @@
     {
       "id": "R2",
       "title": "Require race-safe arbitrary-pid exit delivery",
-      "spec": "The beamr API SHALL register a host waiter for any scheduler pid, report an already-dead pid without waiting, push each future terminal exit with a defined reason/lifetime, and cancel registration without a lost or duplicate terminal outcome. It SHALL NOT implement delivery by process-table scan, timer, heartbeat, or a participant-only adapter. The acceptance precedent is the participant-scoped replay-before-register registry at `crates/liminal/src/conversation/actor.rs:229-244`, `conversation/actor/exit.rs:21-86`, and `conversation/actor/tests.rs:190-236` (banked scout pack, reverified at fe3f7ec); this precedent is evidence of shape, not an available generic API.",
+      "spec": "The beamr API SHALL register a host waiter for any scheduler pid, report an already-dead pid without waiting, push each future terminal exit with a defined reason/lifetime, and cancel registration without a lost or duplicate terminal outcome. It SHALL NOT implement delivery by process-table scan, timer, heartbeat, or a participant-only adapter. The acceptance precedent is the participant-scoped replay-before-register registry at `crates/liminal/src/conversation/actor.rs:229-244`, `crates/liminal/src/conversation/actor/exit.rs:21-86`, and `crates/liminal/src/conversation/actor/tests.rs:190-236` (banked scout pack, reverified at fe3f7ec); this precedent is evidence of shape, not an available generic API.",
       "acceptance": [
         "Exit before registration returns the already-dead outcome through the pushed-exit API.",
         "Exit after registration wakes the host waiter exactly through the selected terminal-delivery contract.",
@@ -96,7 +96,7 @@
     {
       "id": "R5",
       "title": "Preserve the channel command surface and error taxonomy",
-      "spec": "All host-side actor commands at `crates/liminal/src/channel/actor/mod.rs:103-201` SHALL continue through the replacement wait. Reply values and the existing distinct dead-pid, reply-channel-disconnected, and command-deadline error mappings at `channel/actor/wait.rs:26-70` SHALL be preserved unless a post-gate ruling explicitly changes them. The one admitted deadline remains; only repeated liveness and clock discovery retire (banked scout pack, reverified at fe3f7ec).",
+      "spec": "All host-side actor commands at `crates/liminal/src/channel/actor/mod.rs:103-201` SHALL continue through the replacement wait. Reply values and the existing distinct dead-pid, reply-channel-disconnected, and command-deadline error mappings at `crates/liminal/src/channel/actor/wait.rs:26-70` SHALL be preserved unless a post-gate ruling explicitly changes them. The one admitted deadline remains; only repeated liveness and clock discovery retire (banked scout pack, reverified at fe3f7ec).",
       "acceptance": [
         "Boot, publish, subscribe, unsubscribe, evolve, schema lookup, subscriber listing, and close each use the one-winner wait path.",
         "A pushed dead-pid outcome remains distinguishable from reply-channel disconnect and command deadline expiry.",
@@ -116,7 +116,7 @@
     {
       "id": "R6",
       "title": "Invert the dead-actor cadence test into exit barriers",
-      "spec": "Rewrite `command_on_dead_actor_returns_promptly_not_after_timeout` at `crates/liminal/src/channel/tests.rs:176-203`: preserve prompt dead-actor failure, but tombstone cadence-derived wall-clock wording and stage the test around exit registration, command publication, and pushed delivery barriers. Reuse already-dead/future-exit semantics from `conversation/actor/tests.rs:190-236,358-364` only as acceptance precedent for the generic API (banked scout pack, reverified at fe3f7ec).",
+      "spec": "Rewrite `command_on_dead_actor_returns_promptly_not_after_timeout` at `crates/liminal/src/channel/tests.rs:176-203`: preserve prompt dead-actor failure, but tombstone cadence-derived wall-clock wording and stage the test around exit registration, command publication, and pushed delivery barriers. Reuse already-dead/future-exit semantics from `crates/liminal/src/conversation/actor/tests.rs:190-236,358-364` only as acceptance precedent for the generic API (banked scout pack, reverified at fe3f7ec).",
       "acceptance": [
         "The actor exits before registration and the test receives the replayed terminal outcome without waiting on a cadence.",
         "The actor exits after registration and before reply; the pushed terminal event deterministically wins.",
@@ -136,7 +136,7 @@
     {
       "id": "R7",
       "title": "Prove command-wait quiescence and delete liveness polling",
-      "spec": "Add counter-backed quiescence coverage following the park-flip inversion precedent at `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. Before the one admitted deadline and in the absence of reply, exit, or disconnect, the wait SHALL show flat wake, process-table-lookup, and clock-sample counters. Delete the liveness poll family at `channel/actor/wait.rs:18-24,73-95`; any shared exit dispatcher cost SHALL receive an evidence-derived bound after the contract gate and SHALL NOT be filled with a skeleton default.",
+      "spec": "Add counter-backed quiescence coverage following the park-flip inversion precedent at `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. Before the one admitted deadline and in the absence of reply, exit, or disconnect, the wait SHALL show flat wake, process-table-lookup, and clock-sample counters. Delete the liveness poll family at `crates/liminal/src/channel/actor/wait.rs:18-24,73-95`; any shared exit dispatcher cost SHALL receive an evidence-derived bound after the contract gate and SHALL NOT be filled with a skeleton default.",
       "acceptance": [
         "`channel_reply_wait_wakes_only_for_reply_exit_or_deadline` arms the wait and proves pre-event counters remain flat.",
         "A source search finds no replacement-path `LIVENESS_POLL`, `poll_reply`, repeated `recv_timeout`, or process-table liveness query.",
@@ -165,11 +165,11 @@
     "SHALL NOT implement SRV-007 listener readiness or drain completion; this brief supplies the pushed-exit seam and spawn/register race closure that SRV-007 consumes."
   ],
   "verification": [
-    "CHANNEL QUIESCENCE — implement `channel_reply_wait_wakes_only_for_reply_exit_or_deadline` with an arm barrier and flat wake/process-table/clock counters, using `process_wake_tests.rs:43-65` as the inversion precedent; paper section `5.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
-    "CHANNEL TOMBSTONE — rewrite `channel/tests.rs:176-203` so already-dead and future-exit barriers replace promptness-by-wall-clock/cadence wording while preserving the observable dead-actor error.",
-    "SPAWN/REGISTER RACE — force exit before record insertion at `supervisor.rs:1537-1550`, then prove pushed replay reaches `supervisor.rs:1812-1843` once and no listener reap heals the state.",
+    "CHANNEL QUIESCENCE — implement `channel_reply_wait_wakes_only_for_reply_exit_or_deadline` with an arm barrier and flat wake/process-table/clock counters, using `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65` as the inversion precedent; paper section `5.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
+    "CHANNEL TOMBSTONE — rewrite `crates/liminal/src/channel/tests.rs:176-203` so already-dead and future-exit barriers replace promptness-by-wall-clock/cadence wording while preserving the observable dead-actor error.",
+    "SPAWN/REGISTER RACE — force exit before record insertion at `crates/liminal-server/src/server/connection/supervisor.rs:1537-1550`, then prove pushed replay reaches `crates/liminal-server/src/server/connection/supervisor.rs:1812-1843` once and no listener reap heals the state.",
     "EVENT MATRIX — exercise reply, already-dead exit, future exit, disconnect, deadline, registration cancellation, and publication failure in every relevant ordering with deterministic barriers.",
-    "DELETION CHECK — the replacement command path contains no `LIVENESS_POLL`, `poll_reply`, repeated `recv_timeout`, process-table liveness query, or repeated clock sample identified at `channel/actor/wait.rs:18-24,73-95`.",
+    "DELETION CHECK — the replacement command path contains no `LIVENESS_POLL`, `poll_reply`, repeated `recv_timeout`, process-table liveness query, or repeated clock sample identified at `crates/liminal/src/channel/actor/wait.rs:18-24,73-95`.",
     "NO HIDDEN SCAN — inspect the selected beamr exit source and demonstrate event delivery, including already-dead replay, without a timer/scan substitute.",
     "DOCUMENT GATE — before dispatch, audit every contract-derived value for `PENDING-CONTRACT-HASH`, confirm the final r15 hash/two-key evidence, and confirm the DCR fenced hole remains non-dependent."
   ]
