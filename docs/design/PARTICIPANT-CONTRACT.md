@@ -1,8 +1,10 @@
-# Participant-domain wire/server contract — design draft R15
+# Participant-domain wire/server contract — design draft R16
 
-**Status: DRAFT R15 — closes debt-release, occurrence-plan, undelivered-marker, PCP-ordering, causal-marker, parking-limit, detach-schema, pressure-contract, reachability, fixture, and pen defects; not yet ratified.** This redraft
+**Status: DRAFT R16 — closes the seven verified R15 gate-refusal classes in
+edge routing, fixture reachability, occurrence bounds, floor triggers, seed
+totality, and recovery-entry validation; not yet ratified.** This redraft
 parks at the two-key gate: reviewer-of-record plus the liminal domain-owner pass
-(Hermes Crumpet). “Decided-by-draft” below means that R15 selects one contract
+(Hermes Crumpet). “Decided-by-draft” below means that R16 selects one contract
 shape for those keys to accept or refute; it does not grant implementation
 authority before both keys turn.
 
@@ -126,6 +128,14 @@ full-K legality, replaces milestone bits with occurrence plans, gives undelivere
 dead-epoch markers a Leave-only successor, closes PCP orderings, removes causal
 phantom markers, types nonzero limits, aligns TS pressure, and rebuilds every
 reachability/transfer fixture. The thirteen-family/socket structure remains.
+
+R16 is the worklist-closure redraft required after two independent max-effort
+examiners refused R15 commit `64bade9`. The coordinator hand-verified and
+deduplicated their findings into seven classes. R16 routes pre-delivery and
+no-marker fates to encodable Leave-only edges, makes supersession retargeting
+constant-space, rebuilds cases 31/43/45/47/48/49/51/56 from complete legal histories,
+and gives zero recovery-entry width a deterministic typed disposition. It does
+not reopen the sound full-K mandatory-envelope algebra.
 
 The corrected boundary survives R1: the server side has symmetric **transport**,
 not a participant-domain contract. At the pin, transport parks on readiness,
@@ -261,6 +271,18 @@ nineteen underlying findings were hand-verified before drafting.
 | N8–N10 | Nonzero parking limits are typed, detach has a complete no-body schema, and TS Defer means accepted/no retry. | R-A4/R-C0/R-D1; cases 25/50/53 |
 | N11–N12 | MAX seams are declared seeds, marker pre-states are history-reachable, names/digits/field counts are reconciled. | cases 42/44/45/56; final audits |
 
+### 0.9 R15 → R16 changelog
+
+| Worklist class | R16 closure | Where |
+|---|---|---|
+| W1 | Pre-delivery marker fate selects `DetachedMarkerRelease`; delivered-marker fate selects `DetachedCredentialRecovery`; no-marker cursor fate selects the distinct Leave-only `DetachedCursorRelease`. | R-C4; cases 47/49/51/56 |
+| W2 | Case 45 proves the marker-only legal-minimum producer must refuse its unsafe recovery fixed point, then walks the farther-cap success with undelivered retarget, exact one-/two-record K transfers, floor ranges, and full-K release. | case 45 |
+| W3 | Case 56 charges a planned marker in S/C only after a strict compaction overtake, retains the extra prefix record needed by the cap-8 success, fixes marker-before-terminal positions, and serializes both event-arrival orders. | case 56 |
+| W4 | Supersession retargeting consumes no event occurrence; a persisted episode-churn budget bounds every plan-changing lifecycle cycle, and checked `O_max=1+27×Ce+81×(I+J)×Qe+45×I+72×J` serializes every event/successor alternative. | R-C4; case 54 |
+| W5 | Case 31 uses a real ordinary-admission trigger whose class-specific cap floor overtakes the equality cursor and whose resulting marker makes sequence reserve fail. | case 31 |
+| W6 | Every seeded case named by the refusal now states all transition inputs, exact occurrence branches, authority, floor, budget, and charge positions. | cases 43/47/48/49/51 |
+| W7 | `RE=0` is the eighth deterministic `NonzeroLimit` arm in both initial and parked phases. | R-A4/R-D1; case 25 |
+
 ## 1. The verified gap
 
 The evidence base was re-verified rather than copied:
@@ -289,7 +311,7 @@ The evidence base was re-verified rather than copied:
 | The shipped TypeScript SDK reconnects by an unbounded-default timer retry loop. | `reconnect` iterates attempts, sleeps for backoff, and retries `transport.open()`; omitted or negative `maxAttempts` becomes `Number.POSITIVE_INFINITY`, and default sleep uses `setTimeout` (`sdks/liminal-ts/src/connection.ts:240-264`, `sdks/liminal-ts/src/connection.ts:309-320`, `sdks/liminal-ts/src/connection.ts:336-339`). | `«SDK-RECONNECT-TIMER-LOOP»` replaces automatic timer retry with transport/connection-fate arming; a manual reconnect request remains TOLD, never a retry poll. |
 | The Rust SDK's public lifecycle computes a reconnect delay and permits caller re-arm. | `ReconnectConfig` defaults from 100ms to 30s and computes capped exponential delay (`crates/liminal-sdk/src/connection/lifecycle.rs:115-195`); `reconnect()` accepts `Reconnecting`, advances its attempt counter, and returns another delay (`crates/liminal-sdk/src/connection/lifecycle.rs:277-300`). It computes only; it does not itself wait. | `«SDK-RECONNECT-DELAY-CONTRACT»` requires one fresh transport-fate event per returned delay/attempt and removes repeated timer re-arm as a public contract. |
 | The Gleam SDK mirrors that reconnect-delay contract. | Its lifecycle stores reconnect configuration/counter and documents exponential backoff (`sdks/liminal-gleam/src/liminal/connection.gleam:47-58`); `reconnect` accepts `Reconnecting`, increments, and returns a delay (`sdks/liminal-gleam/src/liminal/connection.gleam:105-129`). It also performs no wait itself. | The same `«SDK-RECONNECT-DELAY-CONTRACT»` retirement applies; compute-only is not permission for callers to turn each result into a timer re-arm. |
-| TypeScript pressure `Defer` blesses producer retry while Rust defines accepted buffering. | `sdks/liminal-ts/src/pressure.ts:32-44,76-86` says buffered delivery but also returns retry delay; Rust says accepted into the bounded buffer and delivered later (`crates/liminal-sdk/src/pressure.rs:11-17`). | R15 classifies `Defer` as **accepted/buffered**: producer MUST NOT retry; delay is only a delivery estimate. Retire contradictory TS wording/tests before conformance; this is part of the existing thirteen-family inventory, not a new socket. |
+| TypeScript pressure `Defer` blesses producer retry while Rust defines accepted buffering. | `sdks/liminal-ts/src/pressure.ts:32-44,76-86` says buffered delivery but also returns retry delay; Rust says accepted into the bounded buffer and delivered later (`crates/liminal-sdk/src/pressure.rs:11-17`). | This contract classifies `Defer` as **accepted/buffered**: producer MUST NOT retry; delay is only a delivery estimate. Retire contradictory TS wording/tests before conformance; this is sweep-classified retry/delay vocabulary adjacent to, but not counted as, a fourteenth LAW-1 family or socket. |
 | The durability API exposes a configured interval sweeper and scan. | `DedupSweeper` stores `sweep_interval` and `sweep_once` scans the store at caller-supplied time (`crates/liminal/src/durability/dedup/sweep.rs:39-76`); production source exports it (`crates/liminal/src/durability/dedup.rs:7-10`, `crates/liminal/src/durability/mod.rs:20`). | `«DEDUP-EXPIRY-EVENT-SOURCE»` replaces interval scanning with keyed admitted-expiry events or explicit mutation-triggered cleanup; no periodic full-store question is conforming. |
 | Existing caps have a signed configuration pattern. | `LimitsConfig` defines named hard caps and defaults, rejects zero by field name, and constructs explicit defaults (`crates/liminal-server/src/config/types.rs:193-203`, `crates/liminal-server/src/config/types.rs:257-316`). | Keepalive, retention, receipt lifetime/count, and negotiated SDK parking extend this pattern rather than creating silent unlimited states. |
 
@@ -300,7 +322,7 @@ choose distinct protocols or a versioned deprecation/removal; merely correcting
 the comment cannot close the socket.
 
 **LAW-1 prerequisite inventory — reproducible multi-language product sweep.**
-R15 derives this inventory from the pin, not reviewer testimony. The product root
+This draft derives the inventory from the pin, not reviewer testimony. The product root
 is every tracked path below `crates/*/src` and `sdks/**`, including TypeScript,
 Gleam, and `wasm-src`. SDK `test/` and `tests/` directories are intentionally
 excluded from the **product** claim, not represented as swept clean. In-source
@@ -356,7 +378,7 @@ behavioral row.
 
 | Complete grep-result class | Classification and reason |
 |---|---|
-| Main listener; cluster membership; health accept; shutdown drain/settle; channel reply wait; SDK push reader; SDK subscription reader | **Nonconforming prerequisite families already evidenced above.** Retire through the corresponding §7 event socket. |
+| Main listener; cluster membership; health accept; shutdown drain/settle; channel reply wait; SDK push reader; SDK subscription reader | **Nonconforming prerequisite families already evidenced above.** Retire the main listener directly through the readiness/blocking-accept plus shutdown/process-exit rule evidenced above; retire the remaining six through their corresponding §7 event sockets. |
 | Durability `bridge::block_on`; `PushReplyAwaiter::receive` caller re-arm; subscription `read_one_frame` setup loop | **Nonconforming prerequisite families added by R12.** Retire through `«DURABILITY-BRIDGE-WAKE»`, `«PUSH-REPLY-AWAITER-EVENT-RACE»`, and `«SDK-SUBSCRIPTION-SETUP-DEADLINE-RACE»`. |
 | TypeScript `Connection.reconnect`, its configurable/default sleep, and `setTimeout` implementation | **Nonconforming prerequisite family.** It is one default-infinite timer-driven retry loop; retire it through `«SDK-RECONNECT-TIMER-LOOP»`. |
 | Rust `ConnectionLifecycle::reconnect`/`ReconnectConfig` and Gleam `connection.reconnect`/`ReconnectConfig` | **Nonconforming public re-arm contract, not an executing wait.** Each computes/returns another delay from `Reconnecting`; retire repeated timer re-arm through `«SDK-RECONNECT-DELAY-CONTRACT»`. Other reconnect/retry/backoff/delay matches are TS-family, event-driven state/recovery vocabulary, bounded admission retries, tests, or lexical names classified by the other behavioral rows. |
@@ -680,6 +702,9 @@ fixed eight-byte `u64 park_order`. Token and identifier widths are protocol
 constants. The row is a fixed-layout tagged union: reservation charges the exact
 encoded request plus the largest state-variant fields for that row, so later state
 transitions cannot grow its charged full-row bytes.
+Let `M_row` be the codec-computed maximum non-request metadata bytes of that
+negotiated fixed row schema; it includes every field just enumerated and is not
+an operator estimate.
 
 Define every recovery-handshake input and limit as an unsigned wire/configuration
 `u64`: signed nonzero `P` is in `1..=u64::MAX`; `RF`, `RC(P)`, `RE`, `R`, and
@@ -694,7 +719,10 @@ unreachable and has no outcome discriminant. These are codec-schema maxima, not
 runtime estimates; their fixed widths are included in R/Qb accounting.
 
 Startup and first participant-capability negotiation first reject configuration
-shape as `ParticipantParkingConfigurationInvalid { dimension, operands }`. Its first-precedence dimension is `NonzeroLimit { field }` for any zero N/C/P/G/D/R/B; only nonzero proposals continue. The remaining dimensions are `RowSchemaBytes` for `B < R + maximum_metadata`;
+shape as `ParticipantParkingConfigurationInvalid { dimension, operands }`. Its
+first-precedence dimension is `NonzeroLimit { field }` for the first zero in the
+fixed field order `N,C,P,G,D,R,B,RE`; only proposals with all eight fields
+nonzero continue. The remaining dimensions are `RowSchemaBytes` for `B < R + M_row`;
 `CheckedProduct` for overflow in any validated product; `RowBytesBound` for
 `C > N × B`; `SdkBytesBound` for `D > G × B`; and `RecoverableSlots` for
 `P > max_participant_conversations_per_connection`. `operands` carries the exact
@@ -814,7 +842,8 @@ proposal and a rejected proposal can send or delete no snapshotted row. Restart/
 parked rows is initial phase.
 
 In parked phase, validation checks every dimension before sending any row:
-`NonzeroLimit`, `RowSchemaBytes`, `CheckedProduct`, `RowBytesBound`, `SdkBytesBound`, and
+`NonzeroLimit` in the same fixed eight-field order, `RowSchemaBytes`,
+`CheckedProduct`, `RowBytesBound`, `SdkBytesBound`, and
 `RecoverableSlots` configuration shape; conversation and SDK-wide row/byte counts;
 parked-conversation count; each stored request length against new `R`; each full
 serialized row length against new `B`; and `RH(P)` against new R and WF. The same
@@ -1621,8 +1650,12 @@ transactionally commit their effect against that key.
 **R-C4 — Monotonic physical floor, soft members, hard observer, and honest
 abandonment.** Retention has both
 `max_retained_conversation_bytes` and
-`max_retained_conversation_entries`, each nonzero with a signed default. Bytes
-bound payload/storage and entries bound metadata. The fields extend the verified
+`max_retained_conversation_entries`, each nonzero with a signed default. Let
+`Ce=max_retained_conversation_entries`. Participant mode also configures the
+fixed-width `max_debt_episode_churn=J`, with signed default 2 and valid range
+`2..=u32::MAX`. J bounds plan-changing lifecycle cycles while ClosureDebt is
+nonzero; it is not a retry count or timer. Bytes bound payload/storage and
+entries bound metadata. The fields extend the verified
 `LimitsConfig` pattern
 (`crates/liminal-server/src/config/types.rs:193-203`,
 `crates/liminal-server/src/config/types.rs:257-316`). At participant-mode startup, let `I` be configured per-conversation
@@ -1644,15 +1677,45 @@ and subtracts it componentwise from the incoming K claim:
 
 `0 <= r <= K_remaining`, and `K_remaining' = K_remaining - r`.
 
+For a K-funded fenced Attach or detached claim-backed Leave, r counts only
+records newly appended by this transaction. A terminal that
+is already durable contributes zero; a still-Pending terminal appended together
+with Attached or Left contributes one in addition to that Attached/Left. Live
+Leave is outside this transfer equation (`r_K=0`) and funds its appended record
+from the ordinary mandatory-Q class; fenced Attach and detached claim-backed
+Leave use their exact one- or two-record vector. No prose label may substitute Q
+or all K for this measured charge.
+
 The edge occupancy fields equal exact post-transfer `K_remaining`, never all K by
 fiat. Transferred occupancy is already in B and is not free or counted again; no K
 is reusable while debt remains. When repayment clears both debt components, the
 edge and `K_remaining` clear atomically and all K becomes free. K covers binding
-fate plus pending-terminal/recovery Attach while an anchored
-marker remains retained. Checked startup validation is:
+fate plus pending-terminal/recovery Attach while an anchored marker remains retained.
 
-- `max_retained_conversation_entries >= (2 × Qe) + (I × 1)`; and
-- `max_retained_conversation_bytes >= (2 × Qb) + (I × Bm)`.
+Every fenced Attach and every **detached claim-backed Leave** subtracts the exact
+entry/byte charge it appends from `K_remaining` in that same transaction. A live
+bound Leave is the ordinary mandatory-Q class, not a claim-backed Leave: it keeps
+K held and is distinguished by the durable live-binding fact even when it shares
+the bounded Leave event occurrence. For each edge, `exit_charge` is the exact
+pre-owned maximum positive charge of its next detached claim-backed Leave (one
+record when fate already appended its terminal, two when the terminal is still
+Pending). A fenced Attach may expose a recovered binding with nonzero debt only
+when its post-transfer `K_remaining >= exit_charge` componentwise; otherwise its
+producer's fixed-point preflight must prove that the Attach clears debt/full-K
+legality atomically or refuse the optional producer before mutation. This is a
+stored check, not an assumption that the recovered participant will cooperate.
+The same producer simulation applies the actual-base-floor Envelope rule to
+every later TOLD observer, compaction, cursor, recovered-fate, live-Leave, and
+detached-Leave transition. It rejects a plan whose later preferred floor could
+enter the raw-debt-zero/full-K-invalid band or whose recovered path could require
+a second marker/DCR quartet. A positive-debt commit may not defer discovery of
+either failure to a supposedly guaranteed completion.
+
+Checked startup validation is:
+
+- `max_retained_conversation_entries >= (2 × Qe) + (I × 1)`;
+- `max_retained_conversation_bytes >= (2 × Qb) + (I × Bm)`; and
+- `2 <= J <= u32::MAX`.
 
 Every sum/product uses checked wide arithmetic; overflow is
 `ParticipantRetentionCapacityInvalid`. At empty equality, base marker reserve
@@ -1668,12 +1731,155 @@ zero, `None`, and zero claims. `edge_claims { marker_sequence_values: [(value, b
 recovery_attach_sequence: Option<u64>, replacement_terminal_sequence:
 Option<u64>, recovery_attach_order: Option<u64>, replacement_terminal_order:
 Option<u64>, candidate_positions, successor_milestones, occupancy_entries,
-occupancy_bytes }` is fixed-width. Candidate positions are I-bounded.
-`successor_milestones` is an occurrence-bounded array keyed by exact
-`(causal_transaction_order, event_kind, participant_index, occurrence_ordinal)`;
-each entry stores `Pending | Consumed`. Its checked maximum is the finite
-I/phase fixed point (all marker appends, cursor selections, invalidators, and
-successor selections), never a growing set. Marker values identify their exact R-C2 `NonProductM`, `TerminalProduct`, or
+occupancy_bytes, episode_churn_used, episode_churn_limit }` is fixed-width.
+`episode_churn_limit=J`, `episode_churn_used` starts at zero with each new debt
+episode, survives every edge replacement and restart, and clears only with debt.
+Candidate positions are I-bounded.
+`successor_milestones` is an occurrence-bounded array indexed by exact
+`occurrence_ordinal`; each initialized Pending/Consumed slot carries
+`(causal_transaction_order, event_kind, participant_index)`, while Dormant carries
+no causal key. Each fixed slot stores `Dormant | Pending | Consumed`. The base producer
+serializes all `O_max` slots. A churn transaction may initialize only the next
+J-bounded dormant cycle after reserving all of its exact facts; no transaction
+can grow the array or turn Consumed back into Pending.
+
+At episode creation, each of the at-most-I current identity slots receives one
+pre-endowed **base cycle** covering that binding's first fate/marker/closure
+alternatives. An **episode-churn cycle** is any later successful enrollment,
+credential attach or supersession, any second/subsequent marker plan not already
+owned by the current base/churn cycle, or any other optional transaction which,
+while debt is nonzero, changes a binding/fate/marker fact or exact edge payload/
+range. Preflight computes `delta_cycles` as the exact number of distinct new
+binding/fate/closure cycles plus distinct post-base marker cycles introduced by
+the transaction; one transaction that plans k new markers for k identities
+therefore charges k, not one. It atomically adds `delta_cycles` to
+`episode_churn_used` before exposing the changes and pre-endows every charged
+cycle's fate/closure alternatives. An ordinary record or ack
+whose facts do not change the fixed debt plan consumes no churn; if it would
+change a planned range, marker set, or successor payload, it is a churn cycle.
+After the `DeliveredMarkerAwaitingAck` fence, an otherwise eligible optional
+transaction whose checked-wide `episode_churn_used+delta_cycles` overflows or
+exceeds J is refused before order,
+sequence, floor, binding, record, marker, edge, receipt, or provenance mutation
+as `MarkerClosureCapacityExceeded { scope: EpisodeChurnLimit,
+episode_churn_used, episode_churn_limit:J, ... }`. An unrefusable binding-fate
+event uses the fate alternative pre-endowed by the binding cycle that exposed
+that epoch; it cannot create another binding. Every marker/range change caused
+by that fate or by its claim-backed Leave is already part of the same cycle's
+serialized closure alternatives. Claim-backed Leave therefore remains the
+ticket-free terminal successor, so the limit creates no dead end. Every base
+fixed point reserves the current at-most-I binding cycles, and every accepted
+new cycle reserves its own later fate before commit.
+
+Let `R_max=Ce+3×(I+J)×Qe+J`. Ce covers every actual or planned retained entry at
+episode creation. For each of the at most `I+J` base-identity or churn cycles,
+three deliberately loose Q envelopes cover its record-producing attach or
+supersession, fate-terminal, and recovery-or-Leave alternatives. The final J
+covers one later marker record per churn cycle. Thus even alternatives that do
+not coexist have a serialized record fact, and unrelated ordinary records that
+never change the debt plan own no successor occurrence. Projection completion,
+physical-compaction completion, and strict cursor progress each consume at least
+one previously unconsumed participating record, so each class has at most R_max
+unique facts. For each of the `I+J` base-identity or churn cycles there is at most one
+unique fact of each remaining kind: marker append, marker delivery, binding
+fate, fenced recovery, and Leave. Recovery and Leave are counted
+separately because both alternatives must be serialized even though only one
+executes. Thus the number of unique event facts is bounded by
+
+`E_max = (3 × R_max) + 5×(I+J)
+       = 3×Ce + 9×(I+J)×Qe + 5×I + 8×J`.
+
+Pre-delivery supersession transfers one MarkerDelivery plan and charges one
+churn cycle, but fires no event occurrence. After that
+fact is consumed, the delivered-marker supersession fence below permits only ack,
+fate, or Leave, never redelivery to another epoch. A credit cannot own another
+marker until physical compaction. Hence each base-identity or churn cycle contributes at
+most one marker-delivery fact; retargets share the current cycle's one fact,
+including under arbitrary external supersession attempts within J.
+
+One event fact owns one event occurrence irrespective of arrival order. Its
+successor is a deterministic function of the other already recorded facts, but
+the producer must serialize every alternative that could be selected: at most
+the eight complete enum results (`None` plus seven non-None tags). Therefore each
+event fact consumes at most one event slot plus eight keyed selection slots; the
+producer consumes one initial-selection slot. The deliberately loose checked
+bound over the **stored branch tree**, not merely one executed path, is
+
+`O_max = 1 + (9 × E_max)
+       = 1 + 27×Ce + 81×(I+J)×Qe + 45×I + 72×J`.
+
+This array has a reproducible partition. Let
+`D_cycle=9×(9×Qe+8)=81×Qe+72` and
+`B_cycle=9×(9×Qe+5)=81×Qe+45` and
+`O_base=O_max-(J×D_cycle)=1+27×Ce+I×B_cycle`. Ordinal 0 is the producer's
+initial selection. In the next `27×Ce` ordinals, retained/planned record index
+`q` in `0..<Ce` owns three nine-slot groups beginning at `1+27×q`: projection at
+offset 0, compaction at offset 9, and cursor progress at offset 18. Exact record
+indices sort by reserved `delivery_seq`, then backing-class enum and participant
+index for alternatives sharing a reserved value. Base identity index `i` in
+`0..<I` owns the block beginning `1+27×Ce+i×B_cycle`; its first five groups are
+MarkerAppended, MarkerDelivered, BindingFateObserved, FencedRecoveryCommitted,
+and LeaveCommitted, and its remaining `9×Qe` groups are projection, compaction,
+and cursor progress for each of at most `3×Qe` future record facts in that same
+exact sort. These coordinates total exactly `O_base` and replace fixture-local
+hand-packing.
+
+The tail is exactly J contiguous
+Dormant blocks: for each block index `j` in `0..<J`, churn block `j` starts at
+`O_base+j×D_cycle`. Each block has
+`9×Qe+8` nine-slot event groups. Groups 0..4 are respectively MarkerAppended,
+MarkerDelivered, BindingFateObserved, FencedRecoveryCommitted, and
+LeaveCommitted. The remaining `3×(3×Qe+1)` groups are, for each of the
+cycle's at-most-`3×Qe+1` participating record facts in the same exact sort,
+ProjectionCompleted, CompactionCompleted, then CursorProgressed. In every group,
+offset 0 is the event and offsets 1..8 are selections in the fixed tag order
+`None, ObserverProjection, PhysicalCompaction, MarkerDelivery,
+ParticipantCursorProgress, DetachedCredentialRecovery,
+DetachedMarkerRelease, DetachedCursorRelease`.
+
+The group key, not narrative arrival order, owns these alternatives. If fate or
+Leave arrives while an OP or PC witness is current, that lifecycle event consumes
+its event slot plus the selection offset for the unchanged OP/PC; the later
+storage completion consumes its own event slot plus the offset selected from the
+durable fate/Leave fact. The same cross-product applies when ack first replaces
+cursor progress by OP/PC and fate or Leave arrives before that storage witness
+completes. Thus every legal permutation has two separately keyed selections
+(`lifecycle→preserved witness`, then `witness completion→strict suffix`), never
+one slot reused by two parent events. Producers mark every tag reachable under
+these permutations Pending and every impossible tag Consumed. This rule also
+covers Leave-before-existing-OP: Leave preserves that OP, whose completion then
+selects the separately indexed post-Leave OP/PC/None payload.
+
+A transaction charging delta cycles atomically maps its exact new cycles to the
+next delta Dormant blocks in causal/admission order, writes every exact key/
+payload/reserved-value index into the prescribed groups, marks impossible groups
+and selections Consumed, and marks the rest Pending. A retarget does not fire an
+event occurrence: it retires the superseded active cycle's still-Pending plan
+slots as Consumed, transfers every still-fireable sequence/order/position claim,
+and activates the next block. Array length never changes. Restart rejects a
+non-prefix block allocation, a key outside its group, `used` unequal to activated
+block count, or a Pending fact not backed by the exact transferred claims as
+corrupt state.
+
+There is exactly one selection occurrence per `(event occurrence, successor
+enum tag)`, not per payload permutation. A selection slot stores the tag and the
+indices of already-owned position/range facts; it does not duplicate an OP
+`through_seq`, PC range, participant, epoch, or marker value. If live/fate or
+arrival-order facts make the same event choose the same tag with different exact
+payload fields, one deterministic table lookup over those durable facts and
+pre-owned indices constructs the payload while consuming that one tag slot.
+Fixtures call such a slot **shared**. A second same-tag slot for the same event is
+invalid durable state. This is why eight, rather than the number of payload
+permutations, is the exact per-event selection bound.
+
+`occurrence_ordinal` is a fixed-width u128 in `0..<O_max`; checked-u128
+calculation and the complete serialized `O_max` array size are validated before
+participant mode. A checked arithmetic failure or a serialized array above the
+signed participant-state byte maximum returns
+`ParticipantRetentionCapacityInvalid { dimension: SuccessorOccurrenceArray,
+O_max, encoded_bytes, limit }` before traffic. The churn counter and J are
+serialized in this calculation; supersession itself remains absent from the
+event-occurrence kinds under the non-consuming retarget rule below. Marker values identify their exact R-C2 `NonProductM`, `TerminalProduct`, or
 `ExitProduct` backing; recovery fields are exactly RS/RT/RO/RA in the two reserve invariants; order/
 positions are exact R-A2 tuples; and occupancy equals exact post-transfer
 `K_remaining(edge)` in each dimension. Serialization includes every field and fixed maximum byte. No claim is
@@ -1687,10 +1893,13 @@ The complete `repayment_edge` enum is:
 - `MarkerDelivery { participant_id, binding_epoch, marker_delivery_seq }`;
 - `ParticipantCursorProgress { participant_id, binding_epoch, through_seq,
   marker_delivery_seq: Option<DeliverySeq> }`; and
-- `DetachedCredentialRecovery { participant_id, recovery_through_seq,
-  marker_delivery_seq, prior_binding_epoch }`; and
+- `DetachedCredentialRecovery { participant_id, marker_delivery_seq,
+  prior_binding_epoch }` for a marker durably delivered to that prior epoch; and
 - `DetachedMarkerRelease { participant_id, marker_delivery_seq,
-  last_dead_binding_epoch }` for a marker never delivered to any live epoch.
+  last_dead_binding_epoch }` for a marker not delivered to the named last live
+  epoch; and
+- `DetachedCursorRelease { participant_id, last_dead_binding_epoch }` for a
+  no-marker cursor-progress witness invalidated by that epoch's fate.
 
 Every binding/sequence value in a tag is exact and immutable. A planned marker's
 `marker_delivery_seq` is its pre-owned value even before append. On restart the
@@ -1704,7 +1913,12 @@ retained credited marker; therefore `S_actual<=S` in each dimension. Let `C` be 
 identity slots currently owning a **marker capacity credit**. A credit is acquired when a marker is planned and
 survives candidate append, delivery, and acceptance until that exact marker is
 physically compacted. It can end earlier only when Leave cancels a still-unwritten
-candidate in the same transaction. Thus `C` may temporarily include a retired
+candidate in the same transaction. If that cancelled candidate owns the next
+gap-free sequence value, bound Leave atomically transfers that never-appended
+value's backing from `NonProductM` to its one `Left` record and releases the
+otherwise-unused E value; no numeric value is appended twice or returned to an
+unowned pool. If another earlier candidate exists, it must drain first and Leave
+does not fabricate a gap. Thus `C` may temporarily include a retired
 identity whose accepted marker remains retained, and always satisfies `0<=C<=I`.
 One identity cannot own a second marker candidate/record until physical compaction
 (or same-transaction cancellation) releases its credit. Write the componentwise retained baseline as
@@ -1758,19 +1972,22 @@ already owned:
 
 | Stored edge | TOLD event and exact witness | Complete invalidators and atomic successor/effect |
 |---|---|---|
-| `ObserverProjection` | Projection storage completion through exact `through_seq`. | Completion advances o, recomputes floor, materializes only preplanned M/positions, and selects the strict-plan suffix `PhysicalCompaction`, `MarkerDelivery`, or `ParticipantCursorProgress`. Fate, supersession, and Leave do not invalidate this observer witness. |
-| `PhysicalCompaction` | Enabled storage compaction of exact `[from_floor, through_seq]`. | Exact or overlapping floor advance satisfies the covered prefix, releases only credits whose accepted markers are removed, lowers debt, and selects the earliest strict suffix. Participant lifecycle cannot invalidate a storage range. |
-| `MarkerDelivery` | Candidate append/storage completion and final-emitter delivery of the exact marker to the exact binding epoch. | Delivery becomes `ParticipantCursorProgress`; detach/death makes the identity detached and becomes claim-backed `DetachedCredentialRecovery`; supersession atomically retargets exact delivery to its new epoch after full fixed-point preflight; Leave atomically releases the anchor and selects observer/compaction or clears debt. These are the complete invalidators. |
-| `ParticipantCursorProgress` | Exact normal/marker ack from the named binding and through-sequence. | Ack advances only that cursor (marker ack also releases anchor) and selects observer/compaction. Detach/death atomically creates `DetachedCredentialRecovery` for the detached identity; supersession retargets the same through/marker witness to the new epoch after preflight; Leave itself performs anchor/debt effect and successor replacement in its absolute-fit transaction. These are the complete invalidators. |
-| `DetachedCredentialRecovery` | Exact-current tokenized fenced attach or claim-backed Leave after prior fate. | Fenced attach atomically accepts the named marker, transfers its actual terminal/Attached charge from K_remaining into B, releases the anchor, consumes the episode's sole RS/RT/RO/RA quartet into Attach/new T/A, and selects independent `ObserverProjection` or `PhysicalCompaction`, **never `MarkerDelivery`**. Claim-backed Leave likewise transfers actual charge, spends E/X, releases the anchor, and selects observer/compaction or clears debt. Ordinary non-fenced attach while this anchored nonzero-debt edge exists is forbidden and returns `MarkerClosureCapacityExceeded` without mutation. Authority supersession before commit is `StaleAuthority` and leaves the edge current. These are the complete invalidators. |
-| `DetachedMarkerRelease` | Exact-current claim-backed Leave for an undelivered marker whose named binding epoch is dead. | No attach or marker acceptance is legal: fenced proof does not exist and ordinary attach remains forbidden at anchored debt. Leave transfers its actual charge from K_remaining, spends E/X, releases the undelivered anchor, and selects observer/compaction or clears debt subject to debt-zero full-K legality. Repeat fate is a no-op; supersession is `StaleAuthority`. The occurrence plan contains the exact Leave and successor selections. |
+| `ObserverProjection` | Projection storage completion through exact `through_seq`. | Completion advances o, recomputes floor, materializes only preplanned M/positions, and selects the strict-plan suffix `PhysicalCompaction`, `MarkerDelivery`, `ParticipantCursorProgress`, `DetachedMarkerRelease`, or `DetachedCursorRelease` according to already recorded delivery/fate facts. Fate and Leave do not invalidate this observer witness. A credential lifecycle change may preserve the OP only by charging/activating its exact bounded churn blocks; above J it is refused with `EpisodeChurnLimit`. |
+| `PhysicalCompaction` | Enabled storage compaction of exact `[from_floor, through_seq]`. | Exact or overlapping floor advance satisfies the covered prefix, releases only credits whose accepted markers are removed, lowers debt, and selects the earliest strict suffix, including either detached release tag when fate was already recorded. Participant lifecycle cannot invalidate the storage range; any binding change while it remains current charges/activates its exact later fate/closure blocks, or is refused above J. |
+| `MarkerDelivery` | Candidate append/storage completion and final-emitter delivery of the exact marker to the exact binding epoch. | Delivery becomes `ParticipantCursorProgress` with `marker_delivery_seq=Some(exact marker)`. Detach/death **before that delivery** makes the identity detached and selects `DetachedMarkerRelease`; no fenced proof is fabricated. Supersession atomically retargets exact delivery to its new epoch after full fixed-point preflight; Leave atomically releases the anchor and selects observer/compaction or clears debt. These are the complete invalidators. |
+| `ParticipantCursorProgress` | Exact normal/marker ack from the named binding and through-sequence. | Ack advances only that cursor (marker ack also releases anchor) and selects observer/compaction. Detach/death with `marker_delivery_seq=Some(m)` and the durable exact-epoch delivery fact creates `DetachedCredentialRecovery(m)`; with `None` it creates `DetachedCursorRelease`. Supersession with `None` retargets the through-witness to the new epoch. Supersession with `Some(m)` is refused as `MarkerClosureCapacityExceeded { scope: DeliveredMarkerAwaitingAck, ... }`: it may not turn one consumed delivery fact into an unbounded redelivery loop. Leave itself performs anchor/debt effect and successor replacement in its absolute-fit transaction. These are the complete invalidators. |
+| `DetachedCredentialRecovery` | Exact-current tokenized fenced attach or claim-backed Leave after prior fate. | Fenced attach atomically accepts the named marker, transfers its actual terminal/Attached charge from K_remaining into B, releases the anchor, consumes the episode's sole RS/RT/RO/RA quartet into Attach/new T/A, and consumes one churn cycle. Debt-zero/full-K legality selects `None`; otherwise it selects independent `ObserverProjection` or `PhysicalCompaction`, **never `MarkerDelivery`**. If that recovered epoch dies before debt clears, its pre-endowed fate makes the storage suffix select Leave-only `DetachedCursorRelease`; no second recovery quartet is possible. Claim-backed Leave likewise transfers actual charge, spends E/X, releases the anchor, and selects observer/compaction or clears debt. An otherwise-authorized ordinary non-fenced attach while this anchored nonzero-debt edge exists returns `MarkerClosureCapacityExceeded { scope: RecoveryFence, ... }` without mutation. Authority supersession before commit is `StaleAuthority` and leaves the edge current. These are the complete invalidators. |
+| `DetachedMarkerRelease` | Exact-current claim-backed Leave for an undelivered marker whose named binding epoch is dead. | This is an intended Leave-only edge. An otherwise-authorized ordinary attach returns `MarkerClosureCapacityExceeded { scope: RecoveryFence, ... }`; an attach presenting this marker returns `MarkerNotDelivered`, because no durable delivery fact exists. Claim-backed Leave transfers its actual charge from K_remaining, spends E/X, releases the undelivered anchor, and selects observer/compaction or clears debt subject to debt-zero full-K legality. Repeat fate is a no-op; supersession is `StaleAuthority`. The occurrence plan contains the exact Leave and successor selections. |
+| `DetachedCursorRelease` | Exact-current claim-backed Leave after the named binding dies with `marker_delivery_seq=None`. | This is an explicitly intended Leave-only dead end. Its sole participant successor is claim-backed Leave. An otherwise-authorized credential attach with `accept_marker_delivery_seq=None` returns `MarkerClosureCapacityExceeded { scope: RecoveryFence, ... }`; one presenting any marker returns `MarkerMismatch` because this edge owns no marker. Normal/marker ack and ordinary admission require a live binding and return `NoBinding`. Claim-backed Leave transfers its exact one- or two-record charge from K_remaining, spends E/X, removes the soft cursor claim, and selects observer/compaction or clears debt subject to full-K legality. Repeat fate is a no-op and supersession is `StaleAuthority`. |
 
-MarkerAck therefore has two explicit ordinary orderings. If o is behind the
-accepted marker, it atomically replaces `ParticipantCursorProgress` with
-`ObserverProjection`. If o is already through the marker, it atomically stores
-`PhysicalCompaction`; acceptance itself still leaves S_actual, S, C, and debt
-unchanged. Projection without member ack similarly materializes its preclaimed
-marker and moves to delivery/cursor progress rather than losing its witness.
+MarkerAck therefore has two explicit ordinary orderings after the actual-base
+Envelope recomputation. Acceptance itself leaves S_actual, S, and C unchanged.
+If that recomputation reaches debt zero/full-K legality, the closure edge becomes
+`None` even though ordinary projection/compaction work for a retained accepted
+marker may continue outside ClosureDebt. Otherwise, o behind the marker selects
+`ObserverProjection`, while o already through it selects `PhysicalCompaction`.
+Projection without member ack similarly materializes its preclaimed marker and
+moves to delivery/cursor progress rather than losing its witness.
 
 A binding-fate event invalidating delivery and any event satisfying projection,
 cursor, or compaction performs the named debt effect and successor replacement
@@ -1785,19 +2002,65 @@ state in its finite plan; assigns marker backing, credit, causal tuple, the sole
 RS/RT/RO/RA quartet, and exact K_remaining; and serializes the remaining-milestone
 collection. Event kinds are `ProjectionCompleted`, `CompactionCompleted`,
 `MarkerAppended`, `MarkerDelivered`, `CursorProgressed`, `BindingFateObserved`,
-`SupersessionObserved`, `FencedRecoveryCommitted`, `ClaimBackedLeaveCommitted`,
+`FencedRecoveryCommitted`, `LeaveCommitted`,
 and selection of each repayment-edge tag or `None`. Repeated event kinds have
-distinct causal tuples/ordinals. A transition consumes exactly one occurrence and
-may retain only occurrences pre-endowed by the producer; it can never append one. A later allocation that would consume an owned value,
+distinct causal tuples/ordinals. A non-churn event consumes exactly one Pending
+occurrence. A successful churn transaction charges its positive exact delta and
+may initialize only that many next preallocated Dormant blocks; it never changes array length,
+and no event can revive a Consumed slot. A later allocation that would consume an owned value,
 position, credit, or byte/entry must transfer a still-fireable suffix atomically or
 refuse before mutation. It may not borrow E/T/M/A/X or edge claims. At equality,
 an edge fires entirely from those claims or the original optional producer was
 refused by its first sequence/order/closure outcome.
 
+`LeaveCommitted` is the debt episode's sole per-identity Leave fact, whether
+Leave linearizes while the binding is live or after fate. Its keyed selection
+alternatives carry distinct exact live/detached record and floor vectors. The
+detached alternative is the claim-backed class and transfers its displayed
+actual charge from K_remaining; the live-bound alternative is the ordinary
+mandatory-Q class and keeps K fully held. The durable binding-fate bit selects
+the class before capacity/floor preflight, so sharing the event occurrence never
+aliases their accounting. Because the alternatives are mutually exclusive,
+they do not create a second Leave event occurrence.
+
+**Bounded constant-array supersession retarget.** Supersession fires no event
+occurrence and does not claim progress. After the complete churn,
+sequence/order/capacity fixed-point preflight succeeds, its normal ordered
+terminal/Attached pair and generation/order/sequence changes commit while the
+same transaction adds its exact delta, consumes the old plan without firing it,
+activates the next churn block(s), and transfers the current target:
+`MarkerDelivery` retargets delivery; `ParticipantCursorProgress(None)` retargets
+cursor progress. Exact RS/RT/RO/RA and every affected range/position claim move
+to the active block. A gap-free supersession may atomically right-shift a
+still-unmaterialized claim vector to fresh greater values, remove every old
+ownership, and only then use the newly unowned next value for its caller-funded
+record/major. That is reassignment of an unmaterialized claim, not firing RS/RO
+or borrowing A; no appended sequence or allocated tuple is ever reused. A
+`ParticipantCursorProgress(Some(m))` target has consumed its one exact delivery
+fact and is not retargetable: credential supersession refuses with the named
+`DeliveredMarkerAwaitingAck` closure scope before generation/order/sequence
+mutation. When the delivered fence does not apply, the distinct
+`EpisodeChurnLimit` closure scope wins if the proposed delta would exceed J before those
+same mutations. Array length, marker value, credit, and K_remaining are
+byte-identical; active/Consumed/Dormant slot bytes, exact transferred claims,
+ordinary lifecycle counters/history, floor when capacity requires it, and the
+fixed churn counter change exactly as stated. Restart
+reconstructs the single current epoch from that edge; old-epoch delivery/work is
+fenced. At most J valid pre-delivery or no-marker churn cycles therefore use
+constant array storage, while deliver→supersede→redeliver is not a legal cycle.
+The next actual completion, fate, or Leave consumes its Pending strict suffix.
+Within the closure subcheck, `RecoveryFence` precedes
+`DeliveredMarkerAwaitingAck`, which precedes `EpisodeChurnLimit`, which precedes
+componentwise `Capacity`; shared authority,
+token replay/body, connection-slot, receipt/provenance, order, and sequence
+precedence remains R-D1's stated outer order.
+
 Each debt episode stores at most one RS/RT/RO/RA quartet and consumes it exactly
 once. An ordinary attach that could later need DCR must pre-own that death branch
 before the attach commits; if sequence or order capacity cannot hold the quartet,
-the attach refuses its first exhaustion outcome. Once DCR is anchored, ordinary
+or if it cannot transfer the episode's still-unused quartet,
+the attach refuses its first exhaustion/closure outcome rather than allocate a
+second quartet. Once DCR is anchored, ordinary
 non-fenced attach is forbidden. Fenced attach consumes RS/RO and transfers RT/RA
 into the new binding's T/A, but marker acceptance ends the DCR cycle and its
 observer/compaction successor is independent of later binding fate. Claim-backed
@@ -1805,15 +2068,19 @@ Leave ends it directly. No transition re-endows a quartet, and consumed numeric
 values are never reused.
 
 **Closure/induction proof sketch.** Name the lexicographic decreasing measure
-`μ=(unconsumed_successor_occurrences, entry_debt+byte_debt, M)`. The debt-producing
-base commit proves the componentwise Q/K equations and owns a finite milestone
-suffix. Every table event consumes one milestone and can select only a strict
-suffix; a clearing transition sets μ to zero. Within one floor preflight the named
+`μ=(J-episode_churn_used, unconsumed_successor_occurrences,
+entry_debt+byte_debt, M)`. The debt-producing
+base commit proves the componentwise Q/K equations and owns at most `O_max`
+fixed slots. Every churn cycle strictly lowers μ's first component even if it
+initializes Dormant slots; every non-churn table event uses one occurrence and can select only a strict
+suffix; a clearing transition leaves the nonzero-debt domain for terminal bottom
+`⊥` before the stored counter resets. Within one floor preflight the named
 measure `ν=I-|affected_identity_slots|` strictly decreases whenever a new marker
 owner is discovered, so at most I steps close the marker set. Per-row invalidator
 audit is complete as stated in the table: observer/storage witnesses have only
-completion/range advance; delivery/cursor add fate, supersession, and Leave; DCR
-adds all three attach/Leave outcomes. Each invalidation and successor replacement
+completion/range advance; delivery/cursor add fate, constant-space supersession
+retarget, and Leave; the three detached tags name their sole attach/Leave sets.
+Each consuming invalidation and successor replacement
 is one transaction. Induction on μ therefore preserves: nonzero debt has exactly
 one valid tag, exact `K_remaining`, complete claims, and no crash-visible invalid witness.
 
@@ -1849,8 +2116,18 @@ K_remaining. Define the committing-class predicate
 mandatory transactions let `d_f=max(0,B_f+Q+K_f-cap)` and require
 `B_f+K_f<=cap`, `d_f<=Q`, **and** `(d_f!=0 or B_f+Q+K<=cap)`. The final clause is
 debt-zero release legality: an edge may clear only where restoring all K also
-fits componentwise. Then `cap_floor=min { f>=F | Envelope(tx,f) }`, never an envelope
-from another transaction class; `F'=max(F,preferred_floor,cap_floor)`, valid only when `F'<=a`.
+fits componentwise. `Envelope(tx,f)` also includes the committing class's exact
+effect: completion of `PhysicalCompaction { through_seq }` requires
+`f>=through_seq+1`, whereas an append-free ack contributes no artificial floor.
+Let `base_floor=max(F,preferred_floor)`. Because transferring only part of K can
+make the mandatory predicate non-monotone (positive debt can be followed by an
+illegal raw-debt-zero/full-K gap), the search starts at that actual lower bound:
+`cap_floor=min { f>=base_floor | Envelope(tx,f) }`, never the first envelope at
+some lower floor and never an envelope from another transaction class. The
+published equation remains `F'=max(F,preferred_floor,cap_floor)`; by construction
+`F'=cap_floor`, and commit re-evaluates `Envelope(tx,F')` componentwise before
+mutation. Thus no preferred-floor jump can land inside the illegal K-release
+gap. The result is valid only when `F'<=a`.
 Successful commit appends at `H'`, removes exactly `[F,F')`, and stores floor/debt
 atomically. Marker acceptance, fenced provisional recovery, or Leave releases its
 owner's anchor; nothing else does. Observer hard retention forbids
@@ -1869,9 +2146,9 @@ zero-debt envelope. For every mandatory class, the postcondition is the
 absolute-fit plus bounded-`d'` equations above—candidate counted once regardless
 of prior debt. For a marker
 append, one planned slot becomes actual and the debt cannot grow. Failure returns
-`MarkerClosureCapacityExceeded { conversation_id, dimension, required, limit,
+`MarkerClosureCapacityExceeded { conversation_id, scope:Capacity, dimension, required, limit,
 marker_capacity_credits, marker_anchors, entry_debt, byte_debt,
-repayment_edge }` before floor, membership, marker credit/anchor, candidate,
+repayment_edge, episode_churn_used, delta_cycles, episode_churn_limit }` before floor, membership, marker credit/anchor, candidate,
 sequence, debt/edge, or participant mutation.
 
 After preflight and R-C2 sequence checks, one transaction changes floor/membership
@@ -1880,7 +2157,9 @@ and creates one candidate per newly affected member. Simultaneous candidates use
 ascending_participant_index)`. At append, a candidate recomputes
 `abandoned_after`, `abandoned_through`, and `physical_floor_at_decision`, then
 appends `HistoryCompacted` and removes itself. The candidate drain precedes caller
-records.
+records only when that candidate owns an earlier admission tuple. Within one
+causal transaction, its phase-3 `OrdinaryRecord` appends before every phase-4
+`CompactionMarker` it induces; neither rule permits tuple order to reverse.
 
 **Finite termination under consumable reserve.** The trigger fixed point contains
 every marker its own appends induce and absolute-fit reserves all of them. Each
@@ -2002,6 +2281,25 @@ An arm that omits any quantity read by its transition is a **suite defect**, not
 fixture default; H/F/o, L/E/T/M, every cursor/anchor/credit, A/X/order high,
 ClosureDebt/edge claims, caps/S occupancy, binding epoch/generation/secret, and
 all pending candidates/admission orders must be explicit.
+Every acceptance arm uses configured `J=2` unless that arm explicitly varies J;
+this sentence supplies a real shared fixture input, not a production default or
+an omitted transition value.
+
+**Exact supersession-gate bundle Σ(r,p).** Seeded credential supersessions below may
+cite Σ instead of repeating unrelated quota rows. Let `rΣ` be the codec-exact
+byte length of that case's fully stated credential-attach request and `mΣ` the
+codec-exact maximum row metadata for its negotiated schema. Σ means: target
+connection/conversation slot empty with negotiated capacity 2 and occupancy 0;
+server/participant live-receipt limits 4/4 and exact occupancies r/r;
+server/conversation/participant provenance limits 4/4/4 and exact occupancies p/p/p;
+receipt/provenance TTLs 1000/2000ms; no parked row or interest; and parking
+`N=G=4,P=1,R=max(rΣ,32),B=R+mΣ,C=D=4B,RE=16,RF=8,RC(P)=8,WF=R`, so
+`RH(P)=32<=R=WF`, with every checked product exact; each citing case gives exact
+`0<=r,p<4`. The request's target slot,
+token/verifier, source authority, and resulting epoch remain case-specific and
+must still be stated. Identity capacity is not reread because supersession uses
+its already reserved permanent slot; sequence, order, and retention gates remain
+case-specific. These are all non-retention quota inputs read by this producer.
 
 1. Deliver N, let the SDK confirm its contiguous watermark, duplicate N on the
    same session, and prove the guard suppresses the duplicate it can prove.
@@ -2130,8 +2428,8 @@ all pending candidates/admission orders must be explicit.
 
     | Arm | Exact inputs and failed predicate | Required outcome fields |
     |---|---|---|
-    | Nonzero limits | independently set each of `N,C,P,G,D,R,B` to 0 while all others are valid | `ParticipantParkingConfigurationInvalid { dimension: NonzeroLimit, field, actual:0, required_minimum:1 }`; parked phase uses the same dimension/fields |
-    | Row schema | `R=100,metadata=20,B=119` | `ParticipantParkingConfigurationInvalid { dimension: RowSchemaBytes, actual:119, required:120 }` |
+    | Nonzero limits | independently set each of `N,C,P,G,D,R,B,RE` to 0 while all others are valid; also set several to zero and select the first in that fixed order | `ParticipantParkingConfigurationInvalid { dimension: NonzeroLimit, field, actual:0, required_minimum:1 }`; parked phase uses the same dimension/field order |
+    | Row schema | `R=100,M_row=20,B=119` | `ParticipantParkingConfigurationInvalid { dimension: RowSchemaBytes, actual:119, required:120 }` |
     | Product | checked u64 product `u64::MAX×2` | `dimension: CheckedProduct`, factors `u64::MAX/2`, operation Multiply, overflow |
     | Per-conversation bytes | `N=2,B=10,C=21` | `dimension: RowBytesBound`, factors/product `2/10/20`, actual 21 |
     | SDK bytes | `G=3,B=10,D=31` | `dimension: SdkBytesBound`, factors/product `3/10/30`, actual 31 |
@@ -2143,7 +2441,8 @@ all pending candidates/admission orders must be explicit.
     `RH(P)=1+1+4×2=10`, and start with `R=WF=10`. Lower R, then WF, to 9 and assert
     only the two `ParticipantRecoveryHandshakeTooLarge` dimensions and those exact
     u128 operands.
-    In parked phase repeat `NonzeroLimit` for all seven fields plus all five shape arms and assert the same operands under
+    In parked phase repeat `NonzeroLimit` for all eight fields plus the
+    simultaneous-zero ordering arm and all five shape arms, and assert the same operands under
     the corresponding `SdkParkingCapacityIncompatible` dimensions, preserving all
     rows and sending no row or partial handshake.
 
@@ -2194,28 +2493,33 @@ all pending candidates/admission orders must be explicit.
     EOF's candidate ordered first: terminal appends first and the later marker's
     recomputed `abandoned_through` includes it. In both runs the resulting sequence,
     abandonment interval, and cumulative observer projection match that order.
-31. Test-seed both complete snapshots below; caps are deliberately ample so only
-    sequence reserve can refuse:
+31. Test-seed both complete snapshots below; every check other than the named
+    sequence boundary passes:
 
-    | Quantity | Enrollment arm | Floor-trigger arm |
+    | Quantity | Enrollment arm | Ordinary-admission floor-trigger arm |
     |---|---|---|
-    | H/F/o | `H=MAX-2,F=MAX-1` empty, `o=H` | `H=MAX-1,F=H-1`, `o=H` |
-    | L/E/T/M | `0/0/0/0` | `1/1/0/0` |
-    | Canonical budget | pre `{high:MAX-2,remaining:2,E:0,T:0,M:0,RS:0,RT:0,L×T:0,L×RT:0,L_other×E:0}`; rejected enrollment projects `{high:MAX-1,remaining:1,E:1,T:1,M:1,RS:0,RT:0,L×T:1,L×RT:0,L_other×E:0}` | pre `{high:MAX-1,remaining:1,E:1,T:0,M:0,RS:0,RT:0,L×T:0,L×RT:0,L_other×E:0}`; rejected floor projects the same high with `M:1`, requiring 2 |
-    | Cursors/anchors/credits | none | P0 cursor `F-1=H-2` (`cursor+1=F` before trigger); none/none |
-    | A/X/order | `0/0`, order high absent | `0/1`, order high 100 with ample remaining values |
+    | H/F/o | `H=MAX-2,F=MAX-1` empty, `o=H` | `H=MAX-4,F=H-1=MAX-5,o=H`; two retained nonmarkers at F..H |
+    | L/E/T/M | `0/0/0/0` | `1/1/1/0`; P0 is bound |
+    | Canonical budget | pre `{high_watermark:MAX-2,remaining:2,E:0,T:0,M:0,RS:0,RT:0,L_times_T:0,L_times_RT:0,L_other_times_E:0}`; rejected enrollment projects `{high_watermark:MAX-1,remaining:1,E:1,T:1,M:1,RS:0,RT:0,L_times_T:1,L_times_RT:0,L_other_times_E:0}` | pre `{high_watermark:MAX-4,remaining:4,E:1,T:1,M:0,RS:0,RT:0,L_times_T:1,L_times_RT:0,L_other_times_E:0}`; rejected admission projects `{high_watermark:MAX-3,remaining:3,E:1,T:1,M:1,RS:0,RT:0,L_times_T:1,L_times_RT:0,L_other_times_E:0}`, requiring 4 |
+    | Cursors/anchors/credits | none | P0 cursor `F-1=MAX-6`, so `cursor+1=F` and no marker exists before the trigger; no anchor/credit |
+    | A/X/order | `0/0`, order high absent | `A=X=1,RO=RA=0`, order high 100, remaining `MAX-100`, reserved claims 2 |
     | Debt/edge | `(0,0)`, `None`, zero claims | `(0,0)`, `None`, zero claims |
-    | Caps/S | `I=1,Q=(2,2Bm)`, caps `(16,16Bm)`, `S=(0,0)` | `I=1,Q=(2,2Bm)`, caps `(7,16Bm)`; two retained entries, `S=(2,2Bm),C=0,B=(3,3Bm)`, so entry `B+Q+K=7` |
-    | Identity/binding | no identity | P0 index 0 detached, generation 9, secret `K9`, no binding epoch |
+    | Caps/S/floor | `I=1,Q=K=(2,2Bm)`, caps `(16,16Bm)`, `S=(0,0),C=0,B=(1,Bm)`, K free | set `Bm=1` and every retained/ordinary record cost to `(1,1)`; `I=1,Q=K=(2,2),cap=(7,7)`; pre `S_actual=S=(2,2),C=0,B=(3,3)`, K free, `preferred_floor=cap_floor=F`; projected append/removal/plan has `S'=(3,3),C'=1,B'=(3,3)`, `preferred_floor=F`, `cap_floor=F+1` in both dimensions, hence `F'=F+1` if it could commit |
+    | Identity/binding | no identity, slot/cell/index sets empty | P0 index 0, generation 9/secret `K9`, exact live binding epoch e9, detach cell Empty; no receipt/fingerprint/token cell is involved |
     | Candidates | none | none |
 
     In the first arm use ordinary enrollment. Its `Attached` plus resulting E/T,
     cursor-0 `M`, `L×T`, and `L_other×E` claims exceed the one post-append value, so the
     whole mint refuses `ConversationSequenceExhausted` with all ten canonical
-    budget fields. Separately test-seed a
-    valid near-boundary member snapshot above and make a production floor trigger newly
-    overtake members; refuse it atomically, preserve floor/cursors/claims, and
-    later append every already owed marker.
+    budget fields. In the second arm send one valid small ordinary
+    `RecordAdmission`. Its append
+    would make B=4 at F, so that operation's own zero-debt envelope requires
+    `cap_floor=F+1`. Removing the first old nonmarker and planning the newly
+    overtaken P0 marker yields the displayed `S'=3,C'=1,B'=3`, but only three
+    post-append sequence values remain against E+T+M+L_times_T=4. Return
+    `ConversationSequenceExhausted` with the displayed ten fields and preserve
+    H/F/o, both old records, cursor, binding, every claim, and the empty candidate/
+    credit/anchor state byte-for-byte.
 32. With varied row sizes, hit per-conversation row cap N while below byte cap C
     and verify exact full-row accounting. Separately configure `C<N×B` and hit C
     below N with large rows. Repeat at SDK-wide parked-conversation, row, and byte
@@ -2327,25 +2631,52 @@ all pending candidates/admission orders must be explicit.
 
     | Quantity | Park-order arm | Transaction-order arm |
     |---|---|---|
-    | H/F/o; L/E/T/M | `1/2/1; 1/1/1/0` | `100/101/100; 1/1/1/0` |
-    | Canonical budget | `{high:1,remaining:MAX-1,E:1,T:1,M:0,RS:0,RT:0,L×T:1,L×RT:0,L_other×E:0}` | `{high:100,remaining:MAX-100,E:1,T:1,M:0,RS:0,RT:0,L×T:1,L×RT:0,L_other×E:0}` |
-    | Cursors/anchors/credits | P0 cursor 1 after its Attached was projected, acked, and compacted; none/none | P0 cursor 100; none/none |
-    | A/X/order | `1/1`, order high 10 | `1/1`, order high `MAX-2`, remaining 2 |
-    | Debt/edge | `(0,0)`, `None`, zero claims | same |
-    | Caps/S | `I=1,Q=(2,2Bm)`, caps `(16,16Bm)`, `S_actual=S=0,C=0,B=(1,Bm)`, K free | same |
-    | Identity | P0 index 0, epoch `(11,2; generation 4)`, secret `K4` | P0 index 0, epoch `(11,3; generation 5)`, secret `K5` |
-    | Pending rows/candidates | one `Reserved` ordinary row at park order `MAX-1`: request 24 bytes, full row 48 bytes; `N=G=4,P=1,C=D=256,B=64,R=32`, occupied rows/conversations/bytes `1/1/48` with room for the MAX allocation and next attempted row; no server candidate | no parked row and no candidate |
+    | H/F/o; floor | `H=1,F=2,o=1`, empty retained log; `preferred_floor=cap_floor=F` | `H=100,F=101,o=100`, empty retained log; `preferred_floor=cap_floor=F` |
+    | Members/budget | `L=E=T=1,M=RS=RT=0`; `{ high_watermark:1,remaining:MAX-1,E:1,T:1,M:0,RS:0,RT:0,L_times_T:1,L_times_RT:0,L_other_times_E:0 }` | `L=E=T=1,M=RS=RT=0`; `{ high_watermark:100,remaining:MAX-100,E:1,T:1,M:0,RS:0,RT:0,L_times_T:1,L_times_RT:0,L_other_times_E:0 }` |
+    | Cursor/marker state | P0 cursor 1 after its Attached was projected, acked, and compacted; no marker anchor, capacity credit, pending marker cell, or marker candidate | P0 cursor 100; no marker anchor, capacity credit, pending marker cell, or marker candidate |
+    | Order claims | `A=X=1,RO=RA=0`; transaction-order high 10, remaining `MAX-10`, reserved claims 2; no immutable candidate tuple | `A=X=1,RO=RA=0`; transaction-order high `MAX-2`, remaining 2, reserved claims 2; no immutable candidate tuple |
+    | Debt/edge/occurrences | `d=(0,0)`, edge `None`, `K_remaining=(0,0)`, no edge claims, empty successor-occurrence array | same |
+    | Retention | `I=1,Q=K=(2,2Bm)`, cap `(16,16Bm)`; `S_actual=S=0,C=0,B=(1,Bm)`, K fully free | same |
+    | Identity/authority/cells | P0 index 0, bound epoch `(server_incarnation:11,connection_ordinal:2,generation:4)`, exact secret K4; detach cell `Empty`; receipt, provenance, fingerprint, and token cells empty; no pending terminal row | P0 index 0, bound epoch `(server_incarnation:11,connection_ordinal:3,generation:5)`, exact secret K5; detach cell `Empty`; receipt, provenance, fingerprint, and token cells empty; no pending terminal row |
+    | SDK parking state | one known-never-sent `Reserved` ordinary row for this conversation at park order `MAX-1`, identified locally as row p43a, carrying P0/generation 4 authority, 24 encoded request bytes, and 48 full-row bytes; p43a is not a wire token or encoded field; counter high `MAX-1`, exhausted false | no parked row or interest slot; counter 0, exhausted false under the empty-set reset rule |
+    | Parking configuration/accounting | `N=G=4,P=1,C=D=256,B=64,R=32,RE=16,RF=8,RC(P)=8,WF=128`; `RH(P)=32`; occupied rows/conversations/full-row bytes `1/1/48`, leaving room for one more 48-byte row at MAX and making the following attempted row fail only on the exhausted flag | the same valid signed configuration; occupied rows/conversations/full-row bytes `0/0/0` |
 
-    For `park_order`, allocate MAX, prove the next reservation returns
-    `SdkParkOrderExhausted`, then empty the set transactionally and prove only that
-    counter resets. In the second snapshot, exact
-    `order_remaining=A+X=2`. Optional record/enrollment/attach work returns
-    `ConversationOrderExhausted` with high/remaining/reserved/resulting fields;
+    For `park_order`, the exact second input is SDK-local row p43b carrying a
+    valid ordinary `RecordAdmission` for this same conversation, P0/generation4
+    and the displayed binding epoch, a 24-byte canonical request (`24<=R=32`),
+    and a 48-byte full-row encoding. It targets the already armed conversation
+    interest, has not previously been reserved or sent, and all authority,
+    request-size, row-count, conversation-count, and byte gates pass. Reserve
+    that second row at MAX, atomically set the
+    exhausted flag, and prove the next otherwise byte-identical local row p43c reservation returns
+    `SdkParkOrderExhausted`. Then terminalize/delete both rows and release their
+    ordinary row/byte/interest occupancy; emptying the set alone leaves the
+    durable counter/flag unchanged. Submit local row p43d next, byte-identical to
+    p43b: P0/generation4 and the displayed binding epoch, a 24-byte canonical
+    request, and a 48-byte full-row encoding under the same ample gates. That
+    reservation transaction alone atomically resets the empty-set park counter,
+    allocates park order 0, and clears the exhausted flag without changing
+    transaction order or any server counter. In the
+    second snapshot, exact
+    `order_remaining=A+X=2`. One exact small ordinary `RecordAdmission` presents
+    only its defined wire fields: this conversation, P0/generation5, and a
+    one-byte payload. Under the fixture's fixed log schema its exact appended
+    retention charge is `(1,Bm)`; the server reads no attempt token or SDK-local
+    call id. The displayed live binding epoch, request size, retention, observer,
+    sequence, and authority gates all pass, but it requires one unreserved caller major.
+    It would leave `order_remaining=1<A+X=2`, so it returns
+    `ConversationOrderExhausted { conversation_id:C43,
+    counter:TransactionOrder,high:MAX-2,next_value:MAX-1,order_remaining:2,
+    reserved_claims:2,scope:OrdinaryRecordAdmission,required_majors:1,
+    resulting_order_remaining:1,resulting_reserved_claims:2 }`;
     the independent sequence check serializes all ten canonical budget fields and
-    no mutation. A real connection fate consumes `A`, assigns `MAX-1` to its
+    no mutation. An exact EOF read on the displayed binding epoch records
+    `event_kind:Died,original_cause:ConnectionLost`, consumes `A`, assigns `MAX-1` to its
     terminal plus every reconstructed marker, and may crash/restart before its
     already ordered candidate drains without another allocation. Exact-current
-    detached Leave then consumes `X`, assigns MAX to `Left`, and leaves `A=X=0`.
+    detached Leave then presents exact token L43 with a permanent verifier over
+    canonical body `(P0,generation5,K5)`, consumes `X`, assigns MAX to `Left`,
+    and leaves `A=X=0`; its token cell was empty in the snapshot.
     Every later new-major operation refuses, append-free work remains admissible,
     nothing wraps, and `transaction_order` never resets.
 44. First prove public detached Leave normally. Then test-seed this complete
@@ -2364,30 +2695,73 @@ all pending candidates/admission orders must be explicit.
     Lower generation and wrong Leave secret are `StaleAuthority`; fresh post-retire
     token is `Retired`. Crash/lost-response sees all-old or all-new and stable
     `LeaveCommitted`.
-45. Test-seed two complete, history-reachable arms; `F=h-2`, P0 cursor
-    `h-4`, and marker h is delivered-unaccepted, so `cursor+1=h-3<F` proves the
-    marker's cap-floor cause. All cells/candidates not named are explicitly empty.
+45. Use `h=100`, unit entry/byte charges `(1,Bm)`, `I=1,J=2`, and
+    `Q=K=(2,2Bm)`. Public history strictly overtook P0 at cursor h-4, appended
+    marker h to live epoch C1, and has **not** delivered it. P0 is index0,
+    generation7/secret K7, with `L=E=T=A=X=1`, all RS/RT/RO/RA zero, empty
+    detach/receipt/fingerprint/token cells, and ample sequence/order space.
+    Exact U45 covers `(P0,generation7,K7,target C2,
+    accept_marker_delivery_seq:None)` under Σ(0,0); exact V45 covers the later
+    `(P0,generation8,K8,target C3,accept_marker_delivery_seq:Some(h))` under
+    Σ(1,1). Distinct permanent Leave verifiers L45-C2/L45-C3 cover canonical
+    bodies `(P0,generation8,K8)` and `(P0,generation9,K9)`. Both target slots and
+    every named token cell are empty before their transactions.
 
-    **Boundary refusal.** At `I=1,Q=K=(2,2Bm),cap=(5,5Bm)`, marker-only
-    `S=C=B=(1,Bm)` is zero debt. A proposed optional producer whose successor is
-    full-debt DCR must simulate fenced charge `(2,2Bm)`, C2 fate, and eventual
-    release. That suffix reaches `B=3,K_remaining=0,d=0` while
-    `B+Q+K=7>5`; N1 makes the producer return `MarkerClosureCapacityExceeded`
-    with the entire seeded snapshot unchanged.
+    At the legal minimum `Ce=cap=5`, retain marker h only with `F=H=h,o=h-1`,
+    `S=B=1,C=1`, debt zero and K free. U45's supersession pair h+1/h+2 would
+    give `B=3,K_remaining=2,debt=Q` and retarget the undelivered marker. But its
+    complete DCR fixed point has an unappendable fate terminal, so fenced recovery
+    would append terminal+Attached charge2, exhaust K, and expose a debtful binding
+    with positive `exit_charge`. The recovery-exposure theorem therefore makes
+    the **producer** return `MarkerClosureCapacityExceeded { scope:Capacity,
+    dimension:Entries,required:6,limit:5,... }` before major21, sequence,
+    generation, receipt, floor, marker target, debt, or occurrence mutation. The
+    pre-state remains byte-identical; no impossible minimum-cap transfer is seeded.
 
-    **Farther-cap commit.** With cap `(7,7Bm)` and two additional retained
-    nonmarkers, pre capacity is exactly `S=(3,3Bm),C=1,B=(3,3Bm)`, zero debt.
-    The exact-Q producer gives `B=5,K_remaining=K,d=Q`. Fenced recovery transfers
-    terminal+Attached charge 2, giving `B=7,K_remaining=0,d=Q`, accepts the marker,
-    and selects `ObserverProjection { through_seq }`. C2 fate creates only bounded
-    PendingFinalization; no live-binding ack is asserted. Observer projection and
-    storage compaction remove four charged prefix records, reaching
-    `B=3,d=0` and legal full-K release `3+2+2=7`. Only then does detached Leave,
-    now no-edge, append its pending terminal+Left while removing two old records,
-    preserving `B=3` and the zero-debt envelope. Every floor row states its exact
-    cap_floor from the retained sequence fixture; every occurrence is keyed by its
-    causal tuple. Crash checks cover producer refusal, transfer, fate, release, and
-    Leave. No post-fate ack or second quartet is invented.
+    The successful farther arm uses `Ce=cap=7`, retained nonmarkers h-2/h-1 plus
+    marker h, `F=h-2,o=h-3`, cursor h-4 (`cursor+1=h-3<F`),
+    `S=B=3,C=1`, and zero debt. U45 commits C1→C2 at major21 and h+1/h+2,
+    retargets the still-undelivered marker, stores debt Q/K, and selects OP through
+    h+2 followed by exact marker delivery to C2. Its post-budget is
+    `{ high_watermark:h+2,remaining:MAX-(h+2),E:1,T:1,M:0,RS:1,RT:1,
+    L_times_T:1,L_times_RT:1,L_other_times_E:0 }`; T/RS own h+3/h+4.
+
+    In every C2 fate arm, exact EOF on binding epoch C2 records
+    `event_kind:Died,original_cause:ConnectionLost`. If that fate occurs after
+    OP/delivery, major22 terminal h+3 appends while the
+    actual-base search moves F h-2→h-1, removing only h-2; the state remains
+    `B=5,K_remaining=2,debt=2` and selects DCR. V45 then appends only Attached
+    h+4, transfers charge1 (`K_remaining:2→1`), accepts marker h, moves
+    F h-1→h+1 by removing h-1/marker h, and reaches `B=5,debt=1`. It consumes
+    one churn cycle and activates block0 with an exact OP through h+4 plus the
+    recovered fate/live-Leave/detached-Leave cross-product; `K_remaining=1`
+    equals its exact one-record detached exit charge. After OP and C3 cursor
+    progress through h+2, `base_floor=cap_floor=F'=h+3` removes h+1/h+2 and
+    yields `B=3,debt=0,edge=None`; full K release is `3+2+2=7`.
+
+    If C2 fate precedes initial OP/delivery, its terminal remains Pending and
+    BindingFateObserved preserves that OP; OP completion separately selects DMR.
+    A detached Leave before OP appends the pending terminal h+3 and Left h+4,
+    transfers exact charge2 from K, preserves OP, then OP completion moves
+    `F'=h+3`, removes h-2..h+2, and selects None at `B=3`; a detached Leave after
+    OP/fate appends only Left h+4, transfers charge1, and reaches the same legal
+    full-K state directly. No fenced token is eligible on DMR.
+
+    A live C2 Leave before initial OP is `ObserverBackpressure`: its actual legal
+    `cap_floor=h-1` exceeds `o+1=h-2`. After OP it uses the ordinary mandatory-Q
+    class (not claim-backed), keeps K held, appends Left h+3, and
+    `preferred_floor=cap_floor=F'=h+3` removes h-2..h+2; `B=2,debt=0` and full-K
+    fit `2+2+2<=7` select None. MarkerAck is eligible only after OP/delivery;
+    `base_floor=cap_floor=F'=h+1` compacts exact h-2..h, leaves h+1/h+2 at
+    `B=3`, and clears debt/full K at equality.
+
+    Here `O_max=865,O_base=397`; block0/1 are Dormant at 397..630/631..864.
+    The base and activated blocks use the normative group coordinates, with all
+    reachable witness-preservation tags Pending: fate→existing OP and later
+    OP→DMR, Leave→existing OP and later OP→None, MarkerAck→None, and the
+    corresponding direct arms.
+    Every other tag is Consumed. Crash before/after each producer, OP, delivery,
+    fate, recovery, Leave, ack, cursor, and compaction sees one complete vector.
 46. Through public operations enroll P (`E=1,T=1`), detach (`E=1,T=0`), reattach
     (`E=1,T=1`), and detach again (`E=1,T=0`); at each commit recompute every
     reserve term and prove no cycle creates, loses, or double-spends the flat exit
@@ -2400,53 +2774,164 @@ all pending candidates/admission orders must be explicit.
 
     | Quantity | Arm A | Arm B | Arm C (durable B result) | Arm D |
     |---|---|---|---|---|
-    | H/F/o | `MAX-1/MAX/MAX-1` empty | `h=MAX-6; F=h-4; o=F` | `h+1; F'=F+1; o=F` | `MAX-3/MAX-2/MAX-3` empty |
-    | L/E/T/M | `1/1/0/0`, RS/RT 0 | `1/1/1/0`, RS/RT 1/1 | `1/1/0/1`, RS/RT 1/1 | `1/1/1/0`, RS/RT 0 |
-    | Cursor; anchor/credit | P0=H; none | P0=F-1; none | unchanged; planned P0 credit | P0=H; none |
-    | A/X/RO/RA; order | `0/1/0/0`, high100 | `1/1/1/1`, ample high | `0/1/1/1`; marker uses fate major | `1/1/0/0`, high100 |
-    | Debt/edge | zero/None/K free | Q; `ObserverProjection { through_seq:h }`, full quartet/milestones, K_remaining 2 | Q; same OP/quartet, K_remaining 2 | zero/None/K free |
-    | Caps/S | A/D: `I=1,Q=(2,2Bm),cap=(10,10Bm),S=0`; B: cap `(8,8Bm)`, `S_actual=S=5,C=0,B=6`; C: `S_actual=5,S=6,C=1,B=6` | — | — | — |
-    | Identity/candidates | P0 detached gen3/K3; none | P0 bound `(20,1;gen4)`/K4; none | P0 detached; marker candidate whose value atomically transitioned `TerminalProduct(T)→NonProductM`, with causal-origin metadata/tuple | P0 bound `(20,2;gen5)`/K5; none |
+    | H/F/o; cap floor | `MAX-1/MAX/MAX-1` empty; `cap_floor=F` | `h=MAX-6; F=h-4; o=F`; pre `cap_floor=F` | common post-EOF/post-OP checkpoint `H=h+1,F'=F+1,o=h`; fate class `cap_floor=F+1` | `MAX-3/MAX-2/MAX-3` empty; `cap_floor=F` |
+    | L/E/T/M | `1/1/0/0`, RS/RT 0 | `1/1/1/0`, RS/RT 1/1 | `1/1/0/1`, RS/RT **0/0** after undelivered fate releases the DCR branch | `1/1/1/0`, RS/RT 0 |
+    | Canonical budget | `{high_watermark:MAX-1,remaining:1,E:1,T:0,M:0,RS:0,RT:0,L_times_T:0,L_times_RT:0,L_other_times_E:0}` | `{high_watermark:h,remaining:6,E:1,T:1,M:0,RS:1,RT:1,L_times_T:1,L_times_RT:1,L_other_times_E:0}` | `{high_watermark:h+1,remaining:5,E:1,T:0,M:1,RS:0,RT:0,L_times_T:0,L_times_RT:0,L_other_times_E:0}` | `{high_watermark:MAX-3,remaining:3,E:1,T:1,M:0,RS:0,RT:0,L_times_T:1,L_times_RT:0,L_other_times_E:0}` |
+    | Cursor; anchor/credit | P0=H; none/none | P0=F-1, so equality before fate; none/none | unchanged cursor; one planned undelivered P0 anchor/credit | P0=H; none/none |
+    | A/X/RO/RA; order | `0/1/0/0`, high100 | `1/1/1/1`, high200, remaining `MAX-200`, reserved claims 4 | `0/1/0/0`, high201; terminal and marker share causal major201 (terminal phase0, marker phase4/index0), X owns the next value 202, and quartet order claims are released | `1/1/0/0`, high100 |
+    | Debt/edge/occurrences | zero/None/K free; occurrence array empty | Q; `ObserverProjection { through_seq:h }`, K_remaining 2, `episode_churn_used=0,limit=J`. For `O_max=892,O_base=424`, normative base-coordinate groups keep the exact fate→preserved OP/PC, OP→PC, PC→marker, marker append→DMR, live Leave→preserved OP/PC, and later detached Leave→direct None tags Pending; direct OP→DMR and PC→DMR plus every other impossible base tag are Consumed. Churn blocks 0/1 are Dormant at 424..657/658..891 | Q/K_remaining 2, `episode_churn_used=0,limit=J`; fate's first marker uses the pre-endowed base-identity cycle. Both OP and fate event occurrences are Consumed at this common checkpoint; exact `PhysicalCompaction { from_floor:F+1,through_seq:F+1 }` is current, followed by marker append then DMR. The remaining coordinate groups are Pending/Consumed identically in both orderings; both churn blocks remain Dormant | zero/None/K free; occurrence array empty |
+    | Caps/S | `Ce=10,I=1,J=2,Q=K=(2,2Bm),cap=(10,10Bm),S_actual=S=0,C=0,B=(1,Bm)` | `Ce=8`, cap `(8,8Bm)`, `S_actual=S=5,C=0,B=6` | `S_actual=5,S=6,C=1,B=6` | same as A |
+    | Identity/cells/candidates | P0 detached gen3/K3, no binding; detach/receipt/fingerprint/token cells empty; no candidate | P0 bound `(20,1;gen4)`/K4; cells empty; no candidate | P0 detached after exact terminal; cells empty; one marker candidate with value h+2 atomically transferred `TerminalProduct(T)→NonProductM`, exact terminal-causal tuple | P0 bound `(20,2;gen5)`/K5; cells empty; no candidate |
 
-    Arm A allocates Left at MAX. In B the canonical pre-budget is
-    `{high:h,remaining:6,E:1,T:1,M:0,RS:1,RT:1,L×T:1,L×RT:1,L_other×E:0}`.
+    Arm B's six sequence positions h+1..MAX are exactly
+    `[T,L_times_T,RS,RT,L_times_RT,E]`; consequently
+    `recovery_attach_sequence=h+3` and
+    `replacement_terminal_sequence=h+4`. Its four order positions 201..204 are
+    exactly `[A,RO,RA,X]`, so `recovery_attach_order=202` and
+    `replacement_terminal_order=203`. Fate consumes A=201, releases RO/RA for
+    the undelivered-marker branch, and atomically shifts X from 204 to the freed
+    next value 202. In sequence space it consumes T h+1, transfers
+    L_times_T h+2 into M, releases RS/RT/L_times_RT at h+3..h+5, and atomically
+    shifts E from MAX to h+3. Thus marker h+2 and later L47-C Left h+3 remain
+    gap-free; this is also why Arm C can state X=202 without an unowned gap.
+
+    Exact fresh Leave tokens L47-A, L47-C, and L47-D have distinct permanent
+    non-reversible verifiers over canonical bodies `(P0,generation3,K3)`,
+    `(P0,generation4,K4)`, and `(P0,generation5,K5)` respectively. Each named
+    arm presents its matching token/body; its Leave-token cell is empty before
+    commit, the request codec is canonical, and every unrelated receipt,
+    fingerprint, detach, and token lookup misses exactly as the table states.
+
+    Arm A allocates Left at MAX. In B the displayed canonical pre-budget owns all
+    six remaining values.
     EOF appends at h+1 and transfers the L×T marker into M. Without removal the
     tentative `B'=7` fails mandatory fit `7+K_remaining(2)>8`; removing exactly
     the first retained entry and planning its credited marker yields `B'=6`, fit
     `6+2=8`, debt Q, and exact `cap_floor=F+1`. C's restart codec asserts backing `NonProductM` plus separate terminal-causal metadata; marker append changes only
-    S_actual `5→6`, then M `1→0`. Its canonical post-budget is
-    `{high:h+1,remaining:5,E:1,T:0,M:1,RS:1,RT:1,L×T:0,L×RT:1,L_other×E:0}`.
-    Detached Leave later allocates its claimed value. Arm D remains
-    `remaining=3=E+T+L×T`; bound Leave appends one Left at MAX-2 and discharges
+    S_actual `5→6`, then M `1→0`. Because the marker is not delivered before the
+    epoch dies, W1 selects DMR and atomically releases RS/RT/RO/RA and L_times_RT;
+    it never preserves a phantom fenced-recovery branch. In the EOF-first
+    ordering, EOF reaches an intermediate `o=F` state while OP remains current;
+    OP completion then advances o to h and selects PC at F+1. In the OP-first
+    ordering, OP first selects PC at F; EOF's exact `cap_floor=F+1` satisfies
+    that range and selects the same next PC at F+1. Thus both orderings consume
+    distinct event/selection slots, append terminal h+1 before exact marker h+2,
+    and converge only at the displayed common C checkpoint with monotonic `o=h`. Detached
+    claim-backed L47-C later consumes E through DMR, appends only Left because
+    the terminal is durable, and transfers that exact one-record charge from
+    K_remaining. Arm D remains
+    `remaining=3=E+T+L_times_T`; bound Leave appends one Left at MAX-2 and discharges
     E/T. Assert exact payload fields, cap_floor, no wrap, and no hidden default.
-48. At `I=1,Q=(2,2Bm),cap=(5,5Bm)`, use a retained prefix of two
-    nonmarkers plus one delivered marker: exactly
-    `S_actual=S=(3,3Bm),C=1,B=(3,3Bm)`, debt Q, and
-    `K_remaining=(2,2Bm)`, so fit is `3+2=5`. Before and after MarkerAck, capacity
-    is unchanged. Observer-behind selects exact `ObserverProjection`; projection
-    selects `PhysicalCompaction { from_floor:F, through_seq:marker }`.
-    Observer-ahead selects that PCP directly. Each edge carries the same exact
-    milestones/occupancy. For the compaction step, `cap_floor=F` and
-    `preferred_floor=marker+1`; removing both nonmarkers and the accepted marker
-    gives `S_actual:S 3→0`, `C:1→0`, `B:3→1`, debt `2→0`, edge None,
-    `K_remaining:2→0`, and K free `0→2`. Crash both sides of every commit; no
-    acceptance can return a capacity outcome or expose an invalid witness.
-49. At `I=1,Q=K=(2,2Bm),cap=(5,5Bm)`, test-seed an exact
-    undelivered-marker state: two nonmarkers plus marker give capacity exactly
-    `S=(3,3Bm),C=1,B=(3,3Bm)`, debt Q, `K_remaining=K`, and edge
-    `DetachedMarkerRelease { participant_id:P0, marker_delivery_seq:m,
-    last_dead_binding_epoch:e }`. Fenced and ordinary attach are ineligible.
-    Exact-current claim-backed Leave appends pending terminal+Left charge 2,
-    transfers K `2→0`, and yields `B=5,d=2`, fit 5. With no members,
-    `m_floor=H'`; after observer progress, compaction removes the marker and four
-    nonmarker charges to `B=1,d=0`, where full-K release is legal because
-    `1+2+2=5`. State cap_floor and preferred_floor at both commits.
+48. Test-seed two complete observer-order arms at `h=100`. The public marker
+    history is exact. With retained unit nonmarkers h-3/h-2, `F=h-3`, P0 cursor
+    h-4 (`cursor+1=F`), and otherwise ample sequence/order authority, valid
+    ordinary admission at major29 appends h-1. Its zero-debt capacity search
+    removes h-3, sets `cap_floor=F'=h-2`, strictly overtakes P0, and plans
+    `NonProductM` marker h with exact causal tuple
+    `(29,CompactionMarker,0)`; the emitter then appends h. Thus the
+    retained prefix is nonmarkers h-2/h-1 plus the undelivered credited marker h,
+    and `edge_claims` retains that backing enum and tuple. Exact credential token U48,
+    whose canonical request explicitly carries `accept_marker_delivery_seq:None`,
+    then superseded e5→e6 at major30, appended terminal h+1/Attached h+2, retargeted
+    the still-undelivered marker, and only afterward delivered marker h to e6
+    without acceptance. U48's canonical generation5/K5 body, Σ(0,0) quota
+    inputs, receipt, provenance, and permanent verifier are all exact. Thus
+    `H=h+2,F=h-2`; the five retained rows are h-2..h+2,
+    `S_actual=S=B=(5,5Bm),C=1`, and P0 is index0, generation6/K6 at e6.
 
-    Separately, from marker-only `S=C=B=1` propose an exact-Q supersession. Its
-    complete fate-before-delivery simulation must select `DetachedMarkerRelease`,
-    not DCR; it reserves the exact claim-backed Leave occurrences or refuses the
-    original producer. A projected state with `B'=5,K_remaining=2` fails fit
-    `7>5` before mutation. No arm claims fenced recovery from an undelivered marker.
+    Use `Ce=cap=7,I=1,J=2,Q=K=(2,2Bm)`, debt Q,
+    `K_remaining=K`, `episode_churn_used=0`, and edge
+    `ParticipantCursorProgress { participant_id:P0,binding_epoch:e6,
+    through_seq:h,marker_delivery_seq:Some(h) }`, with
+    `edge_claims.marker_sequence_values[0]=
+    (h,NonProductM,(29,CompactionMarker,0))`. The canonical budget at high
+    h+2 has `E=T=RS=RT=L_times_T=L_times_RT=1`, `M=L_other_times_E=0`;
+    exact sequence claims h+3..h+8 are `[T,RS,RT,L_times_T,L_times_RT,E]`;
+    `A,RO,RA,X` own majors31..34 after order high30. U48's
+    receipt/provenance occupy one slot each.
+    Exact V48 covers `(P0,generation6,K6,target e7,
+    accept_marker_delivery_seq:Some(h))` under Σ(1,1), with empty target and
+    projected generation7/K7. Exact L48-E6/L48-E7 have distinct permanent
+    verifiers over `(P0,generation6,K6)` and `(P0,generation7,K7)`.
+    Before each tested first use, P0's detach cell, V48's attempt-token cell, and
+    both Leave-token cells are Empty; the e7 target slot is empty. U48 alone is already committed
+    with the stated live receipt/provenance, so exact U48 replay reads that cell
+    and no V48/Leave arm silently inherits it.
+    The behind arm has `o=h-1`; the ahead arm has `o=h`.
+
+    MarkerAck changes no S/C value. Behind has `base_floor=cap_floor=F'=h`,
+    removes h-2/h-1, retains the accepted marker plus h+1/h+2, and reaches
+    `B=3`; ahead has `F'=h+1`, also removes the marker, and likewise reaches
+    `B=3`. Both clear debt/edge with full-K equality `3+2+2=7`; any later marker
+    projection/compaction is ordinary zero-debt work.
+
+    If exact EOF on binding epoch e6 records
+    `event_kind:Died,original_cause:ConnectionLost`, fate wins: major31 terminal
+    h+3 appends while the actual-base search moves
+    F h-2→h-1, removing h-2; it remains `B=5,K_remaining=2,debt=2` and selects
+    DCR. V48 then appends only Attached h+4, transfers exact charge1
+    (`K_remaining=1`), accepts marker h, and moves F to h (behind) or h+1
+    (ahead). Both end at `B=5,debt=1`, consume churn 0→1, and activate block0
+    with OP through h+4 and the recovered cursor/fate/Leave cross-product.
+    OP plus cursor progress through h+2 later gives `F'=h+3`, removes h+1/h+2,
+    and reaches `B=3,debt=0` with full-K equality7.
+
+    Exact detached L48-E6 after that fate appends only Left h+4 and transfers
+    charge1 to `K_remaining=1`; F becomes h (behind) or h+1 (ahead), leaving
+    `B=5,debt=1` and OP through h+4. Completion removes the remaining suffix and
+    reaches a full-K state. Live L48-E6 is the ordinary mandatory-Q class: it
+    appends Left h+3 with K held, moves F to h/h+1, reaches `B=4,debt=1`, and
+    likewise selects OP. If ack wins either race, it clears ClosureDebt first and
+    the later fate/Leave is an ordinary zero-debt lifecycle transaction.
+
+    Here `O_max=865,O_base=397`; block0/1 are Dormant at 397..630/631..864.
+    The base-coordinate groups keep exactly the PCP→None, fate→DCR,
+    recovery→OP, live/detached Leave→direct OP, and
+    completion→strict-suffix tags Pending; all impossible tags are Consumed.
+    Crash both sides of every ack, projection, fate, Leave, recovery, cursor, and
+    compaction transaction; no acceptance returns capacity or exposes an invalid
+    K/floor witness.
+49. Test-seed this complete undelivered-marker state with `h=100` and unit Bm
+    charges. Its public causal history is exact. A prior detached attach left one
+    Attached row h-3 at `F=h-3` with P0 cursor h-4 (`cursor+1=F`) and a bounded
+    debt edge. Credential supersession e8→e9 at major20 appends e8's terminal
+    h-2 and e9's Attached h-1. At cap5 its actual-base search must remove h-3,
+    sets `cap_floor=F'=h-2`, strictly overtakes P0, and plans `NonProductM`
+    marker h with exact causal tuple `(20,CompactionMarker,0)`.
+    The emitter appends h but does not deliver it. Both earlier attach
+    receipt/provenance pairs expire at their admitted deadlines before this seed,
+    leaving the empty cells stated below. Epoch e9's fate at major21 then stores
+    the exact pending terminal `(21,BindingTerminal,0)` with
+    `event_kind:Died,original_cause:ConnectionLost,binding_epoch:e9`, and selects
+    DMR; it does not fabricate a delivery fact. The complete seed is:
+
+    | Quantity | Exact value |
+    |---|---|
+    | H/F/o/floor | `H=h,F=h-2,o=h-3`; P0 cursor h-4, so `cursor+1=h-3<F` |
+    | Members/budget | `L=E=T=1,M=RS=RT=0`; `{ high_watermark:h,remaining:MAX-h,E:1,T:1,M:0,RS:0,RT:0,L_times_T:1,L_times_RT:0,L_other_times_E:0 }` |
+    | Order | `A=0,X=1,RO=RA=0`; the allocated pending-terminal tuple is major21, so order high is 21; X owns the next value 22 and no tuple intervenes |
+    | Capacity | `Ce=5,I=1,J=2,Q=K=(2,2Bm),cap=(5,5Bm)`; `S_actual=S=B=(3,3Bm),C=1`, debt Q, `K_remaining=K` |
+    | Edge/occurrences | `DetachedMarkerRelease { participant_id:P0,marker_delivery_seq:h,last_dead_binding_epoch:e9 }`; `edge_claims.marker_sequence_values[0]=(h,NonProductM,(20,CompactionMarker,0))`; `episode_churn_used=1,limit=J`; for `O_max=811,O_base=343`, the supersession activated block0 at 343..576, whose exact LeaveCommitted→OP, ProjectionCompleted→PC, and CompactionCompleted→None tags remain Pending while its other tags and the superseded base-cycle tags are Consumed; block1 at 577..810 remains Dormant (this Leave-only edge cannot activate it) |
+    | Authority/cells | P0 index0 detached, generation 9/secret K9; exact PendingFinalization candidate `(21,BindingTerminal,0,event_kind:Died,original_cause:ConnectionLost,binding_epoch:e9)` is the sole candidate; the test request presents Leave token L49, generation9/secret K9, and its canonical body/verifier input; server detach/receipt/fingerprint/token cells and other anchors/credits are empty before commit |
+
+    In independent arms, fresh tokens U49-N/U49-M have Empty attempt cells and
+    exact canonical bodies `(P0,generation9,K9,target e10)` under Σ(0,0), with
+    e10 empty and all unrelated gates ample. U49-N presents
+    `accept_marker_delivery_seq=None` and returns the generic closure row with
+    `scope:RecoveryFence`; U49-M presents `Some(h)` and returns
+    `MarkerNotDelivered`.
+    Both preserve the full seed. Exact-current claim-backed Leave
+    consumes block0's LeaveCommitted event/OP selection and atomically
+    appends terminal h+1 plus Left h+2. Its
+    exact charge `(2,2Bm)` transfers K `2→0`, releases T/E and the marker anchor,
+    and yields `S=B=(5,5Bm),C=1,d=Q`, fit 5, with the all-zero post-budget at
+    `high_watermark=h+2`. With no members `m=H'=h+2`; because `o=h-3`,
+    `preferred_floor=cap_floor=F=h-2` for the Leave and no intermediate floor is
+    visible. It selects OP through h+2. After projection sets o=h+2, exact
+    compaction `[h-2,h+2]` has `preferred_floor=cap_floor=F'=h+3`, removes all
+    five charges, and reaches `S=0,C=0,B=(1,Bm),d=0,edge=None`, where full-K
+    release is exact `1+2+2=5`. Crashes around every occurrence expose only a
+    complete prefix, and no arm claims fenced recovery from the undelivered marker.
 50. Replace and adversarially test all thirteen sweep-classified LAW-1
     families. Preserve prior arms and distinguish the TypeScript executing timer
     loop from `«SDK-RECONNECT-DELAY-CONTRACT»`: for Rust and Gleam, a fresh
@@ -2456,18 +2941,86 @@ all pending candidates/admission orders must be explicit.
     `172/43/27/109` for underscore-tolerant reconnect/retry/backoff/delay.
     Independently AST/CFG-audit every clock/timeout/sleep/probe/retry/sweep/scan
     loop or callback; every unmatched wait shape fails.
-51. At the old equality, projected attachment still refuses because its
-    death branch needs RS/RT/L×RT and RO/RA. The farther-max commit arm instead
-    uses `h=MAX-7`: attach appends at MAX-6 and leaves six values exactly for
-    `{E:1,T:1,M:0,RS:1,RT:1,L×T:1,L×RT:1,L_other×E:0}`. Since cursor h and
-    `F'=h+1`, equality is not an overtake; no marker, credit, or candidate exists.
-    Capacity is `I=1,Q=2,cap=5,S_actual=S=1,C=0,B=2`, debt1,
-    `K_remaining=2`, with `ObserverProjection { through_seq:MAX-6 }`.
-    Order remaining four is owned by A/X/RO/RA. The occurrence table separately
-    keys both reachable `ParticipantCursorProgress` selections and every repeated
-    event by causal tuple/ordinal. Ack-before-OP can cancel no marker because none
-    was planned; fate-before-OP consumes only the pre-owned death branch. Restart
-    codec assertions prove M remains zero.
+51. Test-seed the complete **pre-attach** state with `h=MAX-7`: `H=h,F=h+1`
+    empty, `o=h`; detached P0 cursor h; `L=E=1,T=M=RS=RT=0`; canonical budget
+    `{ high_watermark:h,remaining:7,E:1,T:0,M:0,RS:0,RT:0,
+    L_times_T:0,L_times_RT:0,L_other_times_E:0 }`. Capacity is
+    `Ce=5,I=1,J=2,Q=K=(2,2Bm),cap=(5,5Bm),S_actual=S=0,C=0,B=(1,Bm)`, debt zero/None,
+    K free. P0 is index0, detached generation 5/secret K5; target binding slot,
+    detach cell, receipt/fingerprint/token cells, candidates, anchor, and credit
+    are empty. Exact token U51 presents generation5/secret K5,
+    `accept_marker_delivery_seq:None`, and empty target e6; its canonical verifier
+    input is exact, the server token cell is empty before commit, and success
+    persists that cell while producing generation6/secret K6. Exact Leave token
+    L51 and its permanent non-reversible verifier cover canonical body
+    `(P0,generation6,secret K6)` for both the live and later detached Leave arms.
+    `A=0,X=1,RO=RA=0`, order high100. The remaining attach gates are
+    exact: connection conversation capacity/occupancy is 2/0; live-receipt
+    server/participant limits and occupancies are 2/2 and 0/0; provenance
+    server/conversation/participant limits and occupancies are 2/2/2 and 0/0/0;
+    receipt/provenance TTLs are 1000/2000ms; and parking is empty under the valid
+    `N=G=4,P=1,C=D=256,B=64,R=32,RE=16,RF=8,RC(P)=8,WF=128`
+    configuration (`RH(P)=32`).
+
+    A production detached credential attach appends Attached h+1 (`MAX-6`). Its
+    exact post-budget is `{ high_watermark:h+1,remaining:6,E:1,T:1,M:0,RS:1,
+    RT:1,L_times_T:1,L_times_RT:1,L_other_times_E:0 }`; post order claims are
+    `A=X=RO=RA=1`. It binds exact epoch e6, persists the receipt, and reaches
+    `S_actual=S=(1,Bm),C=0,B=(2,2Bm),d=(1,Bm),K_remaining=K,
+    episode_churn_used=0,episode_churn_limit=J` with
+    `ObserverProjection { through_seq:h+1 }`. Here
+    transaction-order high is 101; order positions 102..105 are exactly
+    `[A,RO,RA,X]`, so `recovery_attach_order=103` and
+    `replacement_terminal_order=104`. Sequence positions h+2..MAX are exactly
+    `[T,RS,RT,L_times_T,L_times_RT,E]`, so
+    `recovery_attach_sequence=h+3` and
+    `replacement_terminal_sequence=h+4`. Exact EOF on binding epoch e6 records
+    `event_kind:Died,original_cause:ConnectionLost`; this no-marker fate consumes T/A at
+    h+2/102, releases RS/RT/RO/RA and both products, and shifts X from 105 to
+    the freed next major 103 plus E from MAX to the freed next sequence h+3.
+    Here
+    `preferred_floor=cap_floor=F'=h+1`: cursor+1=F' is equality, so M, marker
+    credit, anchor, and candidate all remain zero. The same otherwise complete
+    seed with `h=MAX-6` is the old equality refusal: the append leaves five values
+    against the displayed six resulting claims and returns the ten-field
+    `ConversationSequenceExhausted` before mutation.
+
+    Here `O_max=811,O_base=343`; block0/1 are Dormant at
+    343..576/577..810. The base-coordinate groups keep every legal tag Pending:
+    ack-before-OP preserves/selects OP then PC; OP-before-ack selects PCP(None)
+    then PC; fate before either OP or PC preserves that witness and its completion
+    selects DetachedCursorRelease; live or detached Leave before an existing OP/PC
+    preserves it and its completion selects the distinct post-Leave suffix. Direct
+    fate/Leave arms and every final None are separately keyed. All impossible
+    tags are Consumed, so no parent event shares a selection occurrence.
+
+    That already-pinned fate appends the claimed terminal at h+2 without a floor
+    move or marker, releases unused RS/RT/RO/RA and both product branches, and
+    records `DetachedCursorRelease` as OP's strict suffix. Its post-budget is
+    `{ high_watermark:h+2,remaining:5,E:1,T:0,M:0,RS:0,RT:0,
+    L_times_T:0,L_times_RT:0,L_other_times_E:0 }`.
+    If live bound Leave wins before fate, the ordinary mandatory-Q alternative
+    appends one-record Left h+2 with K still fully held. Before initial OP completion its floor stays
+    h+1 and B=3/debt Q (`m=H'=h+2`, o=h); after OP o=h+1 gives
+    `base_floor=cap_floor=F'=h+2`, removes Attached h+1, and reaches B=2/debt1.
+    Leave-before-OP preserves the old OP; its completion selects the separately
+    keyed post-Leave OP. Both paths later remove Left and reach full-K equality.
+
+    If fate wins first, fresh credential tokens U51-N/U51-M have Empty attempt
+    cells and exact canonical bodies over `(P0,generation6,K6,target e7)` under
+    Σ(1,1), with e7 empty and every other attach gate ample. U51-N presents
+    `accept_marker_delivery_seq=None` and returns
+    `MarkerClosureCapacityExceeded { scope:RecoveryFence, ... }`; U51-M presents
+    `Some(h+1)` and returns `MarkerMismatch`, because this DCursor edge owns no
+    marker. Normal/marker ack and ordinary admission return `NoBinding`. Each
+    refusal preserves the edge, counters, cells, floor, and claims byte-for-byte.
+    Exact-current detached L51 then appends only Left h+3 because
+    the terminal is already durable. It transfers charge1 from K (`2→1`). Before
+    initial OP, `F'=h+1,B=4,debt=2`; after OP, `F'=h+2` removes Attached and gives
+    `B=3,debt=1`. Both select an OP through h+3 whose completion reaches
+    `B=1,debt=0` and full-K equality `1+2+2=5`. This detached claim-backed Leave
+    is the sole participant successor. Restart assertions cover every branch and
+    prove M and marker_delivery_seq remain absent.
 52. Validate one-shot recovery at both lifecycle phases. Choose legal u64 inputs
     with `RH(P)==R==WF`; initial one-byte R/WF reductions return only the matching
     `ParticipantRecoveryHandshakeTooLarge`. With one parked row, downward R/WF
@@ -2495,6 +3048,145 @@ all pending candidates/admission orders must be explicit.
     Crash with all candidates durable and restart: reconstruction is byte-identical
     and drains the same sequence. Attempt a duplicate full tuple and classify the
     snapshot as corrupt rather than overwrite a candidate.
+
+    At retention startup, otherwise-valid configurations with J=-1, J=0, and J=1 each
+    return `ParticipantRetentionCapacityInvalid {
+    dimension:EpisodeChurnLimit,configured:J,required_minimum:2,
+    required_maximum:u32::MAX }`; a parsed value `u32::MAX+1` returns the same
+    dimension and bounds. J=2 proceeds to the checked occurrence-array
+    calculation. No participant state or wire traffic exists on any refusal.
+
+    In a separate legal-history arm use `Ce=20,I=3,J=2,Qe=2`, hence
+    `O_max=1630,D_cycle=234,O_base=1162`. After all three base identities have
+    accepted and physically compacted their first markers, retain fifteen unit
+    nonmarkers, no credit, and three current members at `cursor+1=F`; thus
+    `S=15,C=0,B=18`. In the scalar entry dimension, `cap=20,Q=K=2,d=2`; exact
+    `PhysicalCompaction { from_floor:F,through_seq:F }` is current; all
+    sequence/order, receipt/provenance, connection-slot, and token
+    gates below are ample. A wire credential supersession for P0 presents exact
+    generation/secret/token U54-multi, an empty target and Empty attempt-token
+    cell, `accept_marker_delivery_seq:None`, and exact Σ(0,0). Its two-record
+    projection makes `B'=20`; absolute fit requires
+    removal of exactly two leading nonmarkers, so `cap_floor=F+2` would strictly
+    overtake all three equality cursors and plan three post-base markers. The
+    transaction therefore introduces one new binding cycle plus three distinct
+    post-base marker cycles: all three identities consumed their earlier base
+    marker alternatives, so P0's new binding cycle does not re-endow P0's second
+    marker cycle. Exact `delta_cycles=1+3=4`, not one. Checked `0+4>J`
+    returns `scope:EpisodeChurnLimit` before allocating either Dormant block,
+    major/sequence, floor, binding, records, credits, or markers. This is the
+    adversarial multi-marker wire trigger for the delta rule.
+
+    Separately use `h=100,r=200,Ce=12,I=1,J=2,Q=(2,8)`, `K=(2,8)`,
+    `marker_max=(1,4)`, and caps `(12,48)`. Direct substitution gives
+    `O_max=1+27(12)+81(1+2)(2)+45(1)+72(2)=1000`,
+    `D_cycle=234`, and `O_base=532`.
+
+    The legal public prefix is exact. Before overtake, `H=h-6,F=h-11,o=h-6`,
+    P0 cursor is h-11, and retained h-11/h-10 cost 1/11 bytes while h-9..h-6
+    each cost four. Thus `S=(6,28),C=0,B=(7,32)` and
+    `B+Q+K=(11,48)`. A four-byte ordinary record tentatively gives B `(8,36)`.
+    Removing h-11 alone leaves B bytes 35 and `35+8+8=51>48`; removing h-11
+    and h-10 gives B `(6,24)` and `B+Q+K=(10,40)`. Hence that transaction's
+    `base_floor=max(F,h-10)=h-10`, `cap_floor=F'=h-9`, and
+    `cursor+1=h-10<F'` strictly overtakes P0. The causal phase-3 caller record
+    appends at h-5, followed by its planned phase-4 `NonProductM` marker at
+    `m54=h-4`, exactly matching the reserved tuple order.
+    Ordinary h-3/h-2 then yields eight four-byte retained rows h-9..h-2,
+    `C=1,B=(8,32)`, zero debt, and exact envelope `(12,48)`.
+
+    A base exact-Q supersession from generation9/e_prev to generation10/e0 now
+    appends terminal h-1 and Attached h at caller major r. Before it, sequence
+    high h-2 owns `[T,L×T,E]` at h-1/h/h+1 and order high r-1 owns `[A,X]`
+    at r/r+1. The atomic transaction fires T at h-1, moves every surviving/new
+    sequence claim to h+1..h+6 in exact `[T,RS,RT,L×T,L×RT,E]` order,
+    frees h for Attached, moves/creates `[A,RO,RA,X]` at r+1..r+4, frees r as
+    the unreserved caller major, and retargets the still-undelivered marker to
+    e0. Old claim ownership is removed before either freed value is appended;
+    RS/RO do not fire. The base receipt/provenance expire at their admitted
+    deadlines before this snapshot. The result has `F=h-9,o=h`, cursor h-11,
+    ten four-byte rows h-9..h, `S_actual=S=B=(10,40),C=1`,
+    `K_remaining=K,debt=Q`, sequence high h, and order high r.
+
+    The current edge is `MarkerDelivery(P0,e0,m54)` with
+    `episode_churn_used=0,episode_churn_limit=2`. Under the normative coordinate
+    map, its base-identity groups keep Pending the exact MarkerDelivered→PCP,
+    BindingFateObserved→DMR/DCR, FencedRecoveryCommitted→None, and
+    LeaveCommitted→None tags plus every record-fact cross-order tag required by
+    the witness-preservation rule; MarkerAppended is already Consumed. Every
+    other base slot is Consumed. Churn blocks 0/1 are exact Dormant ranges
+    532..765 and 766..999. Every tested fate is exact EOF on its named binding:
+    e0 for the base arm and e2 after both churn cycles, each recording
+    `event_kind:Died,original_cause:ConnectionLost`. On the base recovery branch,
+    fate appends terminal
+    h+1 and its mandatory `cap_floor=F'=h-8` removes h-9, preserving
+    `B=10,K_remaining=2,debt=2`. Recovery then appends only Attached h+2,
+    transfers one K charge, accepts marker m54, and its resulting cursor makes
+    `preferred_floor=F'=h-3`. Removing the then-current h-8..h-4, including m54,
+    yields `B=(7,28),debt=0`; full-K release is
+    `(7,28)+(2,8)+(2,8)=(11,44)<=cap(12,48)`, hence its selector is None.
+    Live or detached base Leave likewise reaches a full-K-legal None state.
+
+    Exact attach tokens A54-1/A54-2 and verifiers cover respectively
+    `(P0,generation10,K10,target e1,accept_marker_delivery_seq:None)` under
+    Σ(0,0) and `(P0,generation11,K11,target e2,
+    accept_marker_delivery_seq:None)` under Σ(1,1), producing generation11/K11
+    and generation12/K12 in distinct empty target slots. For k=0,1,2, exact
+    fenced token R54-k covers the corresponding current generation/secret and an
+    empty recovery target with `accept_marker_delivery_seq:Some(m54)` under
+    Σ(k,k); exact Leave token L54-k and its permanent verifier cover that same
+    current generation/secret. In each independent first-use arm the named
+    A54/R54 attempt-token cell and L54 Leave-token cell are Empty before commit;
+    only the explicitly preceding generation's live receipt/provenance occupies
+    the Σ(k,k) counts. Thus every active base/block recovery/Leave arm
+    has wire authority and exact quota inputs even when another branch is tested.
+
+    Perform two valid credential supersessions e0→e1 and e1→e2 before delivery.
+    The first atomically shifts `[A,RO,RA,X]` from r+1..r+4 to r+2..r+5,
+    freeing and assigning r+1 as its sole unreserved caller major; A does not
+    fire. It fires T at h+1 for the old terminal, shifts every surviving/new
+    sequence claim to h+3..h+8 in exact `[T,RS,RT,L×T,L×RT,E]` order, and
+    only then appends Attached at freed h+2. In particular RS h+2 moves to h+4,
+    RT h+3 to h+5, and E h+6 to h+8; no recovery claim fires. It removes exact
+    prefix `[h-9,h-8]`, sets F=h-7, retires the base plan, and activates block0.
+    The second similarly shifts the order vector to r+3..r+6 and assigns freed
+    caller major r+2 without firing A; it fires T h+3, shifts the sequence vector
+    to h+5..h+10, appends Attached at freed h+4, removes `[h-7,h-6]`, sets
+    F=h-5<m54=h-4, retires block0, and activates block1. Each transaction
+    keeps `S=B=10,C=1,K_remaining=2,debt=2`, advances generation/high watermarks,
+    and increments churn 0→1→2. Marker/credit are unchanged, but the fixed array
+    state and exact claims change as displayed; μ strictly decreases. Crash after
+    each and prove restart reconstructs the one active block/edge and fences old
+    work. A third pre-delivery
+    e2→e3 attempt returns the generic `MarkerClosureCapacityExceeded` row with
+    `scope:EpisodeChurnLimit,episode_churn_used:2,delta_cycles:1,
+    episode_churn_limit:2` and every
+    other generic field populated from this exact edge before generation/
+    sequence/order/floor/history/array mutation and without firing an event
+    occurrence. Deliver m54 to e2 once, then repeat e2→e3: the earlier closure
+    subcheck now returns `scope:DeliveredMarkerAwaitingAck` with the exact generic
+    fields and byte-identical generation, edge, counters, history, and array.
+    Then observe e2 fate and complete exact-current claim-backed Leave through
+    DCR. At used=J, fenced recovery is a named `EpisodeChurnLimit` refusal and
+    Leave remains the ticket-free legal successor. Fate first appends its
+    pre-owned terminal at h+5; the fate transaction's exact
+    `base_floor=cap_floor=F'=h-4` removes the unanchored h-5 row, retains marker
+    m54 at the new floor, and keeps `B=10,K_remaining=2,debt=2` under DCR.
+    Leave then cancels rather than fires RS, atomically transfers E backing from
+    h+10 to the now-free h+6, appends only Left h+6, and releases RT/products
+    h+7..h+9 plus old E position h+10. Fate uses
+    transferred A r+3; Leave uses X r+6 and releases unused RO/RA r+4/r+5, so no
+    candidate tuple lies between. Exact charge `(1,4)` transfers K_remaining
+    from `(2,8)` to `(1,4)`.
+    With no members `m=H'=h+6`, `o=h`, `preferred_floor=h+1`, and the actual-base
+    search gives `cap_floor=F'=h+1`; exact removal h-4..h (including the marker)
+    leaves h+1..h+6 with `S=(6,24),C=0,B=(7,28),debt=0,edge=None` and full-K
+    release `(7,28)+(2,8)+(2,8)=(11,44)<=cap(12,48)`.
+    Only delivery, fate, Leave,
+    and their suffixes fire event occurrences.
+    This exercises repeated retarget, its finite typed bound, and the
+    deliver→supersede→redeliver fence; no retry can grow either fixed array or
+    retained history past the configured capacity.
 55. With `I=3,Qe=2`, retain the existing arm where the leaver's terminal is last:
     drain earlier terminals/markers, then the legal two-record core and exit markers.
     Add the permutation `P-own terminal major=10`, unrelated terminal major=11`,
@@ -2504,23 +3196,126 @@ all pending candidates/admission orders must be explicit.
     and after P's separate terminal and before/after Left; each prefix is valid and
     exact replay's `prior_terminal_delivery_seq` names the major-10 record. Both
     arms are Q-bounded and converge to the same ordered log/tombstone.
-56. Test-seed two complete PCP-ordering arms. The equality producer at
-    `H=MAX-6` is refused: its six remaining values cannot cover
-    `E=1,T=1,NonProductM=1,RS=1,RT=1,L×T=1,L×RT=1` (required 7).
+56. Test-seed two complete PCP-ordering arms; every record below costs `(1,Bm)`.
+    For the equality-refusal arm let
+    `g=MAX-6`. Its exact pre-producer snapshot has `H=o=g-2=MAX-8,F=g-3`
+    and retains P1's accepted marker g-3 followed by P1's `Left` at g-2. Retired
+    identity P1 (index1, retired generation3) stores prior terminal g-4, Left g-2,
+    permanent enrollment-token fingerprint mapping `EF56-P1→P1`, leave token
+    L56-P1 with its distinct permanent non-reversible Leave verifier, and no
+    secret, live binding, detach, receipt, or provenance cell; its retained marker
+    owns `C=1`. Live P0 (index0) is bound at e4, generation4/secret K4, with cursor
+    g-4, so `cursor+1=F`; `L=E=T=A=X=1` and
+    `M=RS=RT=RO=RA=0`. The pre-budget is
+    `{ high_watermark:g-2,remaining:8,E:1,T:1,M:0,RS:0,RT:0,
+    L_times_T:1,L_times_RT:0,L_other_times_E:0 }`. With
+    `Ce=7,I=2,J=2,Q=K=(2,2Bm),cap=(7,7Bm)`, the retained state is
+    `S_actual=S=(2,2Bm),C=1,B=(3,3Bm)`, debt zero/None, K free. Order high is 39,
+    remaining `MAX-39`, and no candidate or successor occurrence exists; both
+    P0's detach/receipt/fingerprint/token cells are empty; P1 has exactly the
+    tombstone fields just stated and no other durable identity state.
+    The e5 target connection/conversation slot is empty; exact token U56 and its
+    canonical verifier cover `(P0,generation4,secret K4,target e5,
+    accept_marker_delivery_seq:None)` under Σ(0,0), with projected
+    generation5/secret K5.
 
-    The commit arm uses `h=MAX-7,F=h-1,o=h`, P0 cursor h-2, cap5,
-    `S=2,C=0,B=3`, debt Q/K, and
-    `PhysicalCompaction { from_floor:h-1,through_seq:h }`. Its exact budget is
-    `{high:h,remaining:7,E:1,T:1,M:1,RS:1,RT:1,L×T:1,L×RT:1,L_other×E:0}`;
-    M's distinct value is NonProductM backed by PCP, while the T-product is
-    separate. PCP-first consumes M and may materialize the marker before startup;
-    fate-first appends the terminal, releases the credit-blocked T-product, and
-    PCP later consumes M. Both orders are pre-endowed occurrences. After fate the
-    dead epoch can select only `DetachedMarkerRelease`, never DCR; RS/RT and their
-    order/product claims release unused. The post positional reserve is
-    `5=1+0+1+1+1+0+1+0` (E,T,M,RS,RT,L×T,L×RT,L_other×E), with one additional
-    unallocated value because post remaining is 6. Every from_floor update,
-    cap_floor, enum transition, and restart codec byte is asserted.
+    The production trigger is exact-Q supersession e4→e5 at major40.
+    It would append P0's old terminal at g-1 and Attached at g, reserve the one
+    RS/RT/RO/RA quartet, and preplan compaction of P1's accepted marker g-3,
+    retention of P1's later Left g-2, and P0's `NonProductM` marker at g+1. Its canonical resulting budget is
+    `{ high_watermark:g,remaining:6,E:1,T:1,M:1,RS:1,RT:1,
+    L_times_T:1,L_times_RT:1,L_other_times_E:0 }`. The six values g+1..MAX
+    cannot own those seven displayed positions, so
+    the sequence check wins even though every later projection is exact: after
+    the two appends plus planned P0 marker, `S_actual=(4,4Bm),S=(5,5Bm),C=2,
+    B=(5,5Bm),K_remaining=K,d=Q`, absolute fit is `5+2=7`, and the first edge
+    would be `PhysicalCompaction { from_floor:g-3,through_seq:g-3 }`; after that
+    removal/credit swap, `S_actual=(3,3Bm),S=(4,4Bm),C=1,B=(5,5Bm)` and the next
+    exact range is g-2 alone. Resulting order high would be 40 with
+    `A=X=RO=RA=1`.
+    `ConversationSequenceExhausted` returns that exact ten-field payload before
+    allocating major40, appending either record, changing either identity, or
+    creating debt, candidates, credits, or occurrences. Every byte of the
+    complete pre-snapshot remains unchanged.
+
+    The successful arm uses `h=MAX-7`, `Ce=cap=8`, and a legal history with P1's
+    accepted marker h-4, P1 Left h-3, one ordinary nonmarker h-2, then the
+    supersession records h-1/h. Exact-Q supersession e4→e5 at major40 stored
+    debt Q/K and a compaction witness for marker h-4. Its completion removed h-4,
+    advanced F to h-3, released P1's credit, strictly overtook P0 at cursor h-5
+    (`cursor+1=h-4<F`), planned P0's marker h+1, and atomically selected the next
+    exact physical range containing P1's Left h-3 only. This independent arm used empty e5 target slot,
+    exact token U56-C and canonical `(P0,generation4,secret K4,target e5,
+    accept_marker_delivery_seq:None)` verifier under Σ(0,0), producing the
+    displayed generation5/secret K5. The complete seed
+    after that legal prefix is:
+
+    | Quantity | Exact value |
+    |---|---|
+    | H/F/o/cursor | `H=h,F=h-3,o=h`; retained P1 Left h-3, ordinary h-2, then supersession h-1/h; P0 cursor h-5, so `cursor+1=h-4<F`; earliest anchor a=h+1 |
+    | Marker charge | planned `NonProductM` at sequence h+1/causal major40 phase4 index0; `S_actual=(4,4Bm),S=(5,5Bm),C=1,B=(6,6Bm)` because I=2 |
+    | Budget/positions | `{ high_watermark:h,remaining:7,E:1,T:1,M:1,RS:1,RT:1,L_times_T:1,L_times_RT:1,L_other_times_E:0 }`; exact ownership is M h+1, T h+2, RS h+3, E h+4, RT h+5, L_times_T h+6, L_times_RT MAX |
+    | Member/authority | `L=E=1`; P0 index0 is bound at e5, generation5/secret K5 with detach cell Empty and U56-C live receipt/token verifier plus provenance fingerprint at exact deadlines t0+1000/t0+2000 (post occupancies 1/1); P1 index1 is retired generation3 with prior terminal h-5, compacted marker h-4, Left h-3, permanent enrollment-token fingerprint mapping `EF56-P1-C→P1`, leave token L56-P1-C with its distinct permanent non-reversible Leave verifier, no secret/live cells, and released marker credit |
+    | Order/candidates | high40, remaining `MAX-40`, `A=X=RO=RA=1`; marker tuple `(40,CompactionMarker,0)` precedes the future fate-terminal major41; no other candidate |
+    | Capacity/edge | `Ce=8,I=2,J=2,Q=K=(2,2Bm),cap=(8,8Bm)`, debt Q, `K_remaining=K`, `episode_churn_used=0,limit=J`; the first P0 marker belongs to its pre-endowed base-identity cycle; `PhysicalCompaction { from_floor:h-3,through_seq:h-3 }` |
+    | Occurrences | `O_max=1099,O_base=631`; normative base-coordinate groups keep PC→marker work, fate→preserved PC/DMR/DCR, marker append/delivery, ack, live/detached Leave, recovery, and every cross-order selection Pending; all impossible base tags Consumed; churn blocks 0/1 Dormant at 631..864/865..1098 |
+
+    Exact fenced token V56-C and its verifier cover
+    `(P0,generation5,secret K5,target e6,accept_marker_delivery_seq:Some(h+1))`
+    under Σ(1,1), with empty e6 target and projected generation6/secret K6.
+    Exact Leave tokens L56-P0-E5/L56-P0-E6 and distinct permanent verifiers cover
+    canonical current bodies `(P0,generation5,K5)` and `(P0,generation6,K6)` for
+    the base and post-recovery zero-debt Leave arms. Before each tested first
+    use, V56-C's attempt-token cell and both Leave-token cells are Empty; P0's
+    detach cell is Empty. U56-C alone owns the stated live receipt/provenance.
+
+    Every tested P0 fate is exact EOF on binding epoch e5 and records
+    `event_kind:Died,original_cause:ConnectionLost`. PC-first has exact
+    `base_floor=cap_floor=h-2`, so
+    `F'=max(h-3,h-4,h-2)=h-2`; it removes P1's Left h-3, retains the ordinary
+    h-2 and both
+    supersession records h-1/h, preserves the planned marker charge/credit, then
+    appends marker h+1 before any later terminal.
+    If fate arrives first, the tentative terminal gives `B=(7,7Bm)` and absolute
+    fit fails because `B+K_remaining=(9,9Bm)>cap=(8,8Bm)`; it persists the exact major41
+    `PendingFinalization` while its keyed selection retains the storage range. PC then
+    completes, marker h+1 appends, and the already ordered terminal drains at
+    h+2. If PC completes first, the marker likewise appends at h+1;
+    fate-before-delivery appends terminal h+2. Thus both tested arrival orders
+    have one fixed assignment and one log order—never the unreserved reverse
+    permutation.
+
+    In those two arms the named epoch did not receive the marker, so fate selects
+    DMR, never DCR; marker delivery before fate is the separately backed DCR
+    alternative. After marker and terminal append the canonical budget is
+    `{ high_watermark:h+2,remaining:5,E:1,T:0,M:0,RS:0,RT:0,
+    L_times_T:0,L_times_RT:0,L_other_times_E:0 }`: required reserve 1 and four
+    free values. Capacity is `S_actual=S=(5,5Bm),C=1,B=(6,6Bm),d=Q,
+    K_remaining=K` under DMR.
+
+    Exact detached Leave appends only Left h+3: DMR fate has already released RS,
+    so it transfers E backing h+4 onto that free next value, then transfers
+    charge1 from K.
+    With no members `preferred_floor=h+1`; exact removal h-2..h leaves marker,
+    terminal, and Left at `B=4,K_remaining=1,d=0`, and full-K equality
+    `4+2+2=8` clears the edge. Delivery-win V56-C instead consumes RS h+3 for
+    Attached, transfers the same charge1, accepts marker, and reaches the same
+    `F'=h+1,B=4` full-K state; recovery therefore selects None and does not expose
+    a debtful block0 binding.
+
+    The shared live-bound Leave fact uses the ordinary-Q alternative. Before PC it atomically
+    cancels the unwritten marker, transfers h+1's backing to one-record Left,
+    has no members (`m=H'=h+1`, o=h), uses
+    `base_floor=cap_floor=F'=h+1`, removes h-3..h, and reaches `S=1,C=0,B=3`,
+    debt zero/full-K fit 7<=8. After PC but before marker append it
+    makes the same transfer and removes h-2..h. After marker
+    append it appends Left h+2 (`m=H'=h+2`, o=h), uses
+    `base_floor=cap_floor=F'=h+1`, removes h-2..h and retains
+    marker h+1 plus Left h+2 at `B=3`, and consumes the same slot. These mutually exclusive
+    result vectors are selected by pre-owned fact indices and keep K fully held;
+    only the detached/recovery alternatives transfer exact K charge.
+    Every from_floor, cap_floor, event/selection occurrence, release, and restart
+    codec byte is asserted in both tested arrival orders.
 
 A reviewer refutes R-C0–R-C5 by finding an exactly-once application-effect
 claim, changed delivery key, ghost enrollment, `Bound` on an unbound replacement
@@ -2554,7 +3349,7 @@ authentication/version failures remain R-D2 pre-participant outcomes.
 | SDK restart/renegotiation with parked rows present | `SdkParkingCapacityIncompatible` | scope; offending dimension (`NonzeroLimit`, `RowSchemaBytes`, `CheckedProduct`, `RowBytesBound`, `SdkBytesBound`, `RecoverableSlots`, `ConversationRows`, `ConversationBytes`, `SdkConversations`, `SdkRows`, `SdkBytes`, `RequestBytes`, `RowBytes`, `RecoveryHandshakeRequestBytes`, or `RecoveryHandshakeWireFrameBytes`); exact operands; conversation id/park order when applicable; actual/limit; recovery fields and exact u128 encoded bytes | Parked-phase only; preserve every row and interest; send no row and no partial handshake; require correction. |
 | Startup/first negotiation configuration shape | `ParticipantParkingConfigurationInvalid` | dimension (`NonzeroLimit`, `RowSchemaBytes`, `CheckedProduct`, `RowBytesBound`, `SdkBytesBound`, or `RecoverableSlots`) and exact factors/product/actual/required/limit operands appropriate to it | Initial-phase only; configuration-shape precedence before RH size; refuse before traffic, rows, interests, or handshake bytes. |
 | Startup/first negotiation, or restart/renegotiation with no parked row | `ParticipantRecoveryHandshakeTooLarge` | max entries P, framing bytes `RF+RC(P)`, entry bytes RE, exact u128 `RH(P)`, R, WF, dimension (`RequestBytes` or `WireFrameBytes`) | Initial-phase only; refuse participant mode/configuration before traffic; no rows are created/discarded and no chunk protocol runs. |
-| Participant retention startup validation | `ParticipantRetentionCapacityInvalid` | entry/byte dimension, configured cap, checked `2Q+I×marker` required value or overflow discriminant | Refuse participant mode before traffic; no conversation state exists. |
+| Participant retention startup validation | `ParticipantRetentionCapacityInvalid` | entry/byte dimension, configured cap, checked `2Q+I×marker` required value or overflow discriminant; `EpisodeChurnLimit` with configured `max_debt_episode_churn` J and required bounds `2..=u32::MAX`; or `SuccessorOccurrenceArray` with checked `O_max`, encoded bytes, and signed participant-state byte limit | Refuse participant mode before traffic; no conversation state exists. |
 | Participant connection-incarnation mint | `ConnectionIncarnationExhausted` | exhausted component (`ServerIncarnation` or `ConnectionOrdinal`), current u64 value, attempted server incarnation when applicable | Refuse new participant connections/startup before first participant use; preserve all durable identities and never wrap/reuse. |
 | Server startup binding recovery | `BindingRecoveryCommitted` | participant/conversation, recovered binding epoch, `UncleanServerRestart` cause/prior server incarnation, assigned major, finalization (`Appended { delivery_seq }` or `Pending { admission_order }`), repayment edge | Internal durable success; exact restart replay is idempotent, receipt status is UnboundReceipt, and no wire retry/poll is created. |
 | Any exact token-keyed receipt/cell/Leave tombstone with applicable authority verified but changed canonical non-secret body | `AttemptTokenBodyConflict` | token, operation, conversation id, optional presented participant/generation/marker sequence, conflict (`Generation`, `MarkerDeliverySequence`, `CanonicalBody`) | This row applies to enrollment, attach, and Leave only; detach has no non-key body field. Verifier-before-result/tombstone refusal discloses no stored body, secret, receipt, current slot, or `LeaveCommitted`, and mutates nothing. |
@@ -2566,7 +3361,7 @@ authentication/version failures remain R-D2 pre-participant outcomes.
 | New detach with **no Pending cell**, Leave while a different live binding epoch exists, normal ack, marker ack, or ordinary admission after exact-token lookup misses | `NoBinding` | presented conversation id, participant id, generation | Terminal; no other binding disclosed and no state change. Detached exact-credential Leave is eligible; any Pending detach cell is classified at step 0b first. |
 | Any listed participant-id operation with a live generation mismatch, or any secret-bearing operation with equal generation and wrong secret | `StaleAuthority` | presented participant id/generation and current generation; operation-specific token/boundary when present; no secret-derived detail | Terminal under invalid authority; equal generation fields classify secret mismatch without a new oracle. No state changes. |
 | Any listed participant-id operation whose presented id has a tombstone | operation-specific `Retired` | presented participant id/generation, retired generation, and operation-specific token/boundary | Terminal tombstone result; no secret, binding, live cursor, or state change. |
-| Any closure-checked admission | `MarkerClosureCapacityExceeded` | conversation id, entry/byte dimension, checked required, configured limit, marker capacity-credit count, anchor count, entry/byte `ClosureDebt`, repayment-edge tag, edge sequence/order-position claim counts, exact edge K_remaining occupancy claim, and K headroom | No floor, membership, credit, participant, candidate, sequence, edge, or debt mutation; terminal for every unaccepted request, with no SDK park or automatic retry. Already accepted server candidates and claimed terminal paths remain event-driven. Marker acceptance itself never has this outcome. |
+| Any closure-checked admission | `MarkerClosureCapacityExceeded` | conversation id, scope (`Capacity`, `RecoveryFence`, `DeliveredMarkerAwaitingAck`, or `EpisodeChurnLimit`), entry/byte dimension and checked required/configured capacity only for `Capacity`; `episode_churn_used`, `delta_cycles`, and `episode_churn_limit` for every scope; marker capacity-credit count, anchor count, entry/byte `ClosureDebt`, repayment-edge tag, edge sequence/order-position claim counts, exact edge K_remaining occupancy claim, and K headroom | No floor, membership, credit, participant, candidate, sequence, edge, receipt/provenance, or debt mutation; terminal for every unaccepted request, with no SDK park or automatic retry. `RecoveryFence` is triggered exactly when otherwise-valid credential attach omits the fenced marker required by DCR, or targets DMR/DCursor's declared Leave-only edge without a usable delivered marker; an explicit bad marker instead takes `MarkerNotDelivered`/`MarkerMismatch`. It precedes the other closure scopes. `DeliveredMarkerAwaitingAck` fences re-endowment of a consumed exact-epoch delivery occurrence and precedes the budget test. Otherwise `EpisodeChurnLimit` is triggered iff a plan-changing optional lifecycle/marker transaction's checked `episode_churn_used+delta_cycles` overflows or exceeds J. Already accepted server candidates, unrefusable fates, claim-backed Leave, and claimed terminal paths remain event-driven. Marker acceptance itself never has this outcome. |
 | Enrollment attach | `EnrollBound` | enrollment token, participant id, generation `1`, secret, receipt/provenance deadlines, exact binding epoch | Success; persist before exposing `Bound`; replay same token only after unknown response. |
 | Enrollment attach | `EnrollUnboundReceipt` | same credential fields and origin binding epoch | Persist, then fresh-token credential attach; never expose binding. |
 | Enrollment attach | `EnrollmentKnown` | enrollment token, participant id, current generation | Committed identity, no secret/binding; use a valid current-or-newer credential or enter `CredentialRecoveryLost`; never remint. |
@@ -2582,7 +3377,7 @@ authentication/version failures remain R-D2 pre-participant outcomes.
 | Credential attach | `StaleAuthority` | token, presented/current generations | Terminal for this request; preserve current durable credential. |
 | Credential attach | `GenerationExhausted` | token, participant id, current generation `u64::MAX` | Terminal for attach with no commit/wrap; preserve current secret and enter `CapabilityGenerationExhausted`, from which only exact-token status or exact-current terminal Leave (bound or detached) is allowed. |
 | Credential attach with `accept_marker_delivery_seq` | `MarkerNotDelivered` / `MarkerMismatch` | token, participant id/generation, presented marker seq, retained/delivered marker seq when non-secret, reason | Terminal for this attach attempt; no marker accept, cursor, floor, rotation, record, or binding mutation. |
-| Credential attach | `ReceiptCapacityExceeded` / `ObserverBackpressure` / `ConversationSequenceExhausted` | token plus capacity/epoch fields; exhaustion adds the canonical resulting `SequenceBudget` payload and required record cost | Capacity is surfaced; backpressure enters a shared epoch; reserve exhaustion precedes rotation, binding, floor, and marker changes. Detached attach may consume closure Q but never sequence/order claims it did not reserve. |
+| Credential attach | `ReceiptCapacityExceeded` / `ObserverBackpressure` / `ConversationSequenceExhausted` / `MarkerClosureCapacityExceeded` | token plus capacity/epoch fields; exhaustion adds the canonical resulting `SequenceBudget` payload and required record cost; closure refusal uses the generic row including `RecoveryFence`, `DeliveredMarkerAwaitingAck`, and `EpisodeChurnLimit` | Capacity is surfaced; backpressure enters a shared epoch; reserve exhaustion precedes rotation, binding, floor, and marker changes. Detached attach may consume closure Q but never sequence/order claims it did not reserve; live supersession cannot bypass a recovery fence, re-endow a delivered-but-unaccepted marker occurrence, or exceed J. |
 | Receipt replay | `Bound` / `UnboundReceipt` | exact token plus live receipt fields and origin binding epoch | `Bound` only if the exact participant/epoch still occupies its origin slot; every empty/replaced/later-epoch slot, including on the same connection, is `UnboundReceipt`, then persist-and-fresh-attach. |
 | Receipt replay | `ReceiptExpired` | exact fingerprint, reason, result/current generations | Exact only inside provenance window; not retryable; preserve newer credential or `CredentialRecoveryLost`. |
 | Receipt replay | `StaleAuthority` | fresh token absent from complete in-window set, presented/current generations | Proves no commit for this token; not retryable. |
@@ -2771,14 +3566,14 @@ facts, except where §7 names a genuine gate.
 
 ## 7. Named sockets and decision register
 
-R15 distinguishes decisions made by the draft from genuine unknowns. A
+R16 distinguishes decisions made by the draft from genuine unknowns. A
 **decided-by-draft** row has one candidate answer and may change only by explicit
 key refusal/revision. A **genuinely-open** row names unavailable platform
 evidence, an implementation linearization mechanism, a layer-above policy, or
 an owner migration decision. Open rows are not permission for implementations
 to choose incompatible semantics silently.
 
-| Socket | Status | R15 answer or reason openness is genuine | Closure/refutation evidence |
+| Socket | Status | R16 answer or reason openness is genuine | Closure/refutation evidence |
 |---|---|---|---|
 | `«ATTACH-TRANSACTION»` | **decided-by-draft** | Attach, detach, and Leave use mandatory write-ahead tokens and one serialized participant state. The identity slot's detach cell is `Empty`, token-bearing `Pending` without a sequence, or `Committed` with the exact binding epoch/sequence; it is the sole stable-echo source until next attach/Leave. | All send/commit/response windows, same/different token while Pending, crash around Pending→Committed, echo after binding removal, stale replay after replacement death, detach loss across attach/Leave, replacement recovery, and terminal receipt tests. |
 | `«RECEIPT-LIFETIME»` | **decided-by-draft** | Signed receipt TTL/count and non-secret provenance TTL/count caps bound both bodies and classifiers. Cleanup uses admitted deadlines; TTL is the maximum supported recovery outage and expiry may enter `CredentialRecoveryLost`. | Delayed generation, crash order, exact/unknown before/after provenance, cap exhaustion, composed outage, and no-sweep tests. |
@@ -2834,17 +3629,22 @@ startup recovery—and prove each is driven by admitted work, reply/data readine
 connection fate, explicit shutdown/process exit, one admitted deadline, or an
 existing domain event rather than change detection.
 
-### R15 define-what-you-name and coherence audits
+### R16 define-what-you-name and coherence audits
 
 The drafter ran the standing name audit over this complete artifact. Extraction
 between Unicode U+00AB/U+00BB yields 38 unique guillemet names: 36 exact register
 rows plus exactly the two §6 SDK gate names permitted above; there is no
 unregistered socket. The typed-name audit requires every declaration-shaped use
-to resolve to its normative field/phase/outcome table. The r15 delta resolves
-u64/u128 RF/RC/RE/WF/RH and lifecycle phase in R-A4; B/K_remaining, the marker-
-backing enum, canonical SequenceBudget, RS/RT/RO/RA, successor event/selection
-milestones, edge tags, and decreasing measures in R-A2/R-C2/R-C4; the non-secret
-detach verifier in R-C0; and every reachable outcome/dimension in R-D1.
+to resolve to its normative field/phase/outcome table. The retained R15 delta
+resolves u64/u128 RF/RC/RE/WF/RH and lifecycle phase in R-A4; B/K_remaining,
+marker backing, canonical SequenceBudget, RS/RT/RO/RA, successor occurrences,
+edge tags, and decreasing measures in R-A2/R-C2/R-C4; the non-secret detach
+verifier in R-C0; and every reachable outcome/dimension in R-D1. R16 additionally
+resolves the three detached-edge fate classes, Ce/J, the persisted episode-churn
+counter, Dormant occurrence slots, checked `O_max`, supersession retargeting, all W6 seed inputs and charge positions, and RE in both phase-specific
+nonzero-limit taxonomies. It also resolves `RecoveryFence` as the exact closure
+scope for an otherwise-authorized no-marker credential attach against DMR or
+DCursor, with concrete wire arms in cases 49 and 51.
 
 Shared concepts have one definition and citations elsewhere:
 
@@ -2856,13 +3656,17 @@ Shared concepts have one definition and citations elsewhere:
 
 The exhaustive-outcome pass searched every `returns`, `return`, `outcome`, and
 new discriminant. `ParticipantParkingConfigurationInvalid` has six dimension
-classes (including all seven `NonzeroLimit` fields) and case-25 arms; parked
+classes (including all eight deterministically ordered `NonzeroLimit` fields)
+and case-25 arms; parked
 equivalents use explicit dimensions. Reconnect
 delay has the fresh-fate trigger and case 50. Every trigger has an outcome and no
-new outcome lacks a trigger/case. Detach has no unencodable secret arm.
+new outcome lacks a trigger/case. `RecoveryFence` is a scope of the existing
+closure outcome, not a new family: cases 49/51 trigger it with exact tokens,
+bodies, targets, Options, and quota inputs, while explicit bad-marker requests
+take `MarkerNotDelivered`/`MarkerMismatch`. Detach has no unencodable secret arm.
 
 Acceptance references remain contiguous 1–56. Every test-seeded boundary is
-enumerated here: cases **21, 26, 31, 42 (allocator-only), 43, 44, 45, 47, 49, 51, and 56**. Each names every
+enumerated here: cases **21, 26, 31, 42 (allocator-only), 43, 44, 45, 47, 48, 49, 51, and 56**. Each names every
 quantity read by its transition. Re-derived cases 21/25/26/31/37/43/44/45/47/48/
 49/51/56 were arithmetically re-run against the displayed pre/post formulas; every
 floor-moving step states cap_floor. The row-by-row invalidator, guillemet-socket,
@@ -2871,11 +3675,12 @@ quantity, backing class, quartet, or superseded minimum. Idle cost is closed, an
 the 21-count LAW-1 sweep plus case 50 covers lexical and structural waits.
 ---
 
-**Gate posture:** DESIGN DRAFT R15. All earlier-round decisions remain in force.
-R15 closes N1–N12: full-K debt release, occurrence-backed successors,
-undelivered-marker release, both PCP orderings, causal marker backing, nonzero
-parking taxonomy, complete detach schema, accepted/no-retry TS pressure,
-history-reachable seeded fixtures, and corrected names/positional encodings.
+**Gate posture:** DESIGN DRAFT R16. All earlier-round decisions remain in force.
+R16 preserves R15's N1–N12 closures and closes W1–W7: exact pre-delivery,
+delivered-marker, and no-marker fate edges; reachable minimum/farther full-K
+release arms; planned-marker positional accounting; a checked occurrence bound
+with a fixed-array, J-bounded supersession retarget plan; a production-triggered floor arm;
+complete seeded snapshots; and RE in the eight-field nonzero-limit taxonomy.
 Reviewer key plus Hermes Crumpet's liminal domain-owner key are still required;
 until both turn, this document is not ratified and grants no implementation
 authority.
