@@ -175,9 +175,9 @@ dependencies = [
 
 [[package]]
 name = "beamr"
-version = "0.14.0"
+version = "0.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b7d280e5a30ca35e5d7c5989fa7727b2fb3fa656a3cbb092807f0af0237439b"
+checksum = "ee5686169aebff64e53c85a6b4ffb8a6cf4ac07a0d293d780a41cda0d21b1e12"
 dependencies = [
  "base64",
  "cranelift-codegen",
@@ -1125,10 +1125,10 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "liminal-rs"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "async-trait",
- "beamr 0.14.0",
+ "beamr 0.15.2",
  "chrono",
  "haematite",
  "jsonschema",
@@ -1158,7 +1158,7 @@ version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
- "beamr 0.14.0",
+ "beamr 0.15.2",
  "clap",
  "futures-core",
  "haematite",
