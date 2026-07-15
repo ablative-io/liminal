@@ -8,10 +8,13 @@ mod push;
 mod request;
 mod response;
 mod sequence_budget;
+mod server_codec;
 mod tags;
 
 #[cfg(test)]
 mod codec_tests;
+#[cfg(test)]
+mod server_codec_tests;
 #[cfg(test)]
 mod tags_tests;
 
@@ -20,9 +23,11 @@ pub use closure::{
     MarkerClosureCapacityExceeded, ParticipantCursorProgressEdge, RepaymentEdge,
 };
 pub use codec::{
-    CodecError, FRAME_MAX, GENERIC_HEADER_LEN, PARTICIPANT_FRAME_OVERHEAD, PARTICIPANT_FRAME_TYPE,
-    PARTICIPANT_PREFIX_LEN, PRECAP_PARTICIPANT_FRAME_MAX, ParticipantFrame, ReceiverDirection,
-    complete_frame_bytes, decode, encode, encoded_len,
+    AuthenticationState, CodecError, FRAME_MAX, GENERIC_HEADER_LEN, InboundGateContext,
+    InboundGateError, MIN_PARTICIPANT_FRAME_MAX, NegotiatedParticipantCapability,
+    PARTICIPANT_FRAME_OVERHEAD, PARTICIPANT_FRAME_TYPE, PARTICIPANT_PREFIX_LEN,
+    PRECAP_PARTICIPANT_FRAME_MAX, ParticipantCapabilityState, ParticipantFrame, ReceiverDirection,
+    ValidatedFrameLimit, complete_frame_bytes, decode, encode, encoded_len, gate_inbound,
 };
 pub use envelope::{
     AttachEnvelope, DetachEnvelope, EnrollmentEnvelope, LeaveEnvelope, MarkerAckEnvelope,
@@ -40,6 +45,7 @@ pub use request::{
 };
 pub use response::*;
 pub use sequence_budget::SequenceBudget;
+pub use server_codec::{decode_server_value_body, encode_server_value_body};
 pub use tags::{
     AckGapReason, AckRegressionReason, AttemptConflict, AttemptOperation, AuthorityStateTag,
     BindingStateTag, ClientDiscriminant, CloseCause, CloseCauseTag, ClosureScope, Counter,

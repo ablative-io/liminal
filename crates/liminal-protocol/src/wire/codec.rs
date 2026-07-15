@@ -5,8 +5,9 @@ use super::{
     CloseCauseTag, ConnectionIncarnation, CredentialAttachRequest, DecodeClass, DetachAttemptToken,
     DetachRequest, DetachedCause, DiedCause, EnrollmentRequest, EnrollmentToken, Generation,
     LeaveAttemptToken, LeaveRequest, MarkerAck, ObserverRecoveryHandshake, ObserverRefusal,
-    ParticipantAck, ParticipantDelivery, ParticipantRecord, ProtocolVersion, PushDiscriminant,
-    RecordAdmission, RecordKind, ServerPush, ServerValue,
+    ParticipantAck, ParticipantDelivery, ParticipantRecord, ParticipantTransportRejected,
+    ProtocolVersion, PushDiscriminant, RecordAdmission, RecordKind, ServerDiscriminant, ServerPush,
+    ServerValue, TransportRejectionReason,
 };
 
 /// Stable generic frame type assigned to participant traffic.
@@ -27,6 +28,9 @@ pub const FRAME_MAX: u64 = 4_294_967_305;
 /// Allocation ceiling used before participant capability is stored.
 pub const PRECAP_PARTICIPANT_FRAME_MAX: u64 = 1_048_576;
 
+/// Smallest valid complete participant-frame allocation limit.
+pub const MIN_PARTICIPANT_FRAME_MAX: u64 = 16;
+
 /// Receiver whose direction registry is used during decoding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiverDirection {
@@ -34,6 +38,96 @@ pub enum ReceiverDirection {
     Server,
     /// SDK receiver; server values and pushes are assigned.
     Client,
+}
+
+/// Complete-frame allocation limit proven valid for the participant gate.
+///
+/// Construction enforces the R-D2 range `16..=FRAME_MAX`, so an inbound gate
+/// can compare the declared complete size before allocating its selected body.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValidatedFrameLimit(u64);
+
+impl ValidatedFrameLimit {
+    /// Validates one negotiated complete-frame limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CodecError::InvalidFrameLimit`] when `max_frame_bytes` is
+    /// outside `16..=FRAME_MAX`.
+    pub const fn new(max_frame_bytes: u64) -> Result<Self, CodecError> {
+        if max_frame_bytes < MIN_PARTICIPANT_FRAME_MAX || max_frame_bytes > FRAME_MAX {
+            return Err(CodecError::InvalidFrameLimit { max_frame_bytes });
+        }
+        Ok(Self(max_frame_bytes))
+    }
+
+    /// Returns the validated complete-frame limit.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Connection authentication state presented to the inbound participant gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AuthenticationState {
+    /// Shared connection authentication has not succeeded.
+    Unauthenticated,
+    /// Shared connection authentication has succeeded.
+    Authenticated,
+}
+
+/// Stored negotiated participant capability.
+///
+/// The private fields ensure this session's only supported capability is
+/// exactly protocol v1.0 with an already-validated complete-frame limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NegotiatedParticipantCapability {
+    protocol_version: ProtocolVersion,
+    max_frame_bytes: ValidatedFrameLimit,
+}
+
+impl NegotiatedParticipantCapability {
+    /// Constructs the currently supported `participant-v1` capability.
+    #[must_use]
+    pub const fn v1(max_frame_bytes: ValidatedFrameLimit) -> Self {
+        Self {
+            protocol_version: ProtocolVersion::V1,
+            max_frame_bytes,
+        }
+    }
+
+    /// Returns the negotiated participant protocol version.
+    #[must_use]
+    pub const fn protocol_version(self) -> ProtocolVersion {
+        self.protocol_version
+    }
+
+    /// Returns the negotiated complete-frame allocation limit.
+    #[must_use]
+    pub const fn max_frame_bytes(self) -> ValidatedFrameLimit {
+        self.max_frame_bytes
+    }
+}
+
+/// Participant-capability state presented to the inbound gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParticipantCapabilityState {
+    /// No participant capability is stored; the pre-capability ceiling applies.
+    Missing,
+    /// The `participant-v1` capability is stored.
+    Negotiated(NegotiatedParticipantCapability),
+}
+
+/// Complete connection context needed by the inbound participant gate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InboundGateContext {
+    /// Registry direction selected by the local receiver.
+    pub receiver: ReceiverDirection,
+    /// Shared connection authentication state.
+    pub authentication: AuthenticationState,
+    /// Stored participant capability, if negotiation succeeded.
+    pub participant_capability: ParticipantCapabilityState,
 }
 
 /// One complete typed participant frame.
@@ -47,9 +141,30 @@ pub enum ParticipantFrame {
     ServerPush(ServerPush),
 }
 
+/// Result category for failures before or during the participant inbound gate.
+///
+/// A non-participant outer frame is returned separately so the caller can
+/// preserve the generic transport's unknown-frame behavior. It is never
+/// converted into a participant transport rejection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InboundGateError {
+    /// The generic outer type is not the participant frame type.
+    NotParticipantFrame {
+        /// Unrecognized or differently assigned generic outer type.
+        frame_type: u8,
+    },
+    /// One of the five exact participant transport rejection schemas.
+    ParticipantRejected(ParticipantTransportRejected),
+}
+
 /// Deterministic participant codec failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodecError {
+    /// The generic outer type is not assigned to participant traffic.
+    NotParticipantFrame {
+        /// Observed generic frame type.
+        frame_type: u8,
+    },
     /// A structural body or framing failure with the canonical decode class.
     Decode {
         /// Exact failure class.
@@ -73,8 +188,11 @@ pub enum CodecError {
     LengthOverflow,
     /// A typed value violates a field-domain invariant.
     InvalidValue,
-    /// Server semantic bodies are reserved for the next codec increment.
-    ServerValuePending,
+    /// A negotiated complete-frame limit lies outside `16..=FRAME_MAX`.
+    InvalidFrameLimit {
+        /// Rejected complete-frame limit.
+        max_frame_bytes: u64,
+    },
 }
 
 /// Computes complete bytes from a generic-header payload length.
@@ -83,13 +201,80 @@ pub fn complete_frame_bytes(payload_length: u32) -> u64 {
     10 + u64::from(payload_length)
 }
 
+/// Applies the total R-D2 inbound gate to one declared complete frame.
+///
+/// The outer type is classified first. For participant frames, the declared
+/// complete size is then checked against the negotiated limit (or the fixed
+/// pre-capability ceiling) before structural body decoding can allocate.
+/// Structural failures map to their exact transport-rejection reason. Only
+/// after a complete structural decode does the gate test authentication and
+/// participant capability, in that order.
+///
+/// An SDK-side, structurally valid v1
+/// [`ServerValue::ParticipantTransportRejected`] bypasses the two local state
+/// checks. This is the sole receive-side exception defined by R-D2.
+///
+/// # Errors
+///
+/// Returns [`InboundGateError::NotParticipantFrame`] without applying any
+/// participant rule when the outer type differs. Otherwise returns the exact
+/// pre-semantic [`ParticipantTransportRejected`] selected by R-D2 inside
+/// [`InboundGateError::ParticipantRejected`].
+pub fn gate_inbound(
+    input: &[u8],
+    context: InboundGateContext,
+) -> Result<ParticipantFrame, InboundGateError> {
+    if let Some(frame_type) = input.first().copied() {
+        if frame_type != PARTICIPANT_FRAME_TYPE {
+            return Err(InboundGateError::NotParticipantFrame { frame_type });
+        }
+    }
+
+    let max_frame_bytes = match context.participant_capability {
+        ParticipantCapabilityState::Missing => PRECAP_PARTICIPANT_FRAME_MAX,
+        ParticipantCapabilityState::Negotiated(capability) => capability.max_frame_bytes().get(),
+    };
+
+    if let Some(complete_frame_bytes) = declared_complete_frame_bytes(input) {
+        if complete_frame_bytes > max_frame_bytes {
+            return Err(gate_rejection(TransportRejectionReason::FrameTooLarge {
+                complete_frame_bytes,
+                max_frame_bytes,
+            }));
+        }
+    }
+
+    let frame = decode(input, context.receiver).map_err(codec_gate_error)?;
+    if matches!(
+        (&frame, context.receiver),
+        (
+            ParticipantFrame::ServerValue(ServerValue::ParticipantTransportRejected(_)),
+            ReceiverDirection::Client
+        )
+    ) {
+        return Ok(frame);
+    }
+
+    if context.authentication == AuthenticationState::Unauthenticated {
+        return Err(gate_rejection(
+            TransportRejectionReason::AuthenticationFailed,
+        ));
+    }
+    if context.participant_capability == ParticipantCapabilityState::Missing {
+        return Err(gate_rejection(
+            TransportRejectionReason::ParticipantCapabilityRequired,
+        ));
+    }
+
+    Ok(frame)
+}
+
 /// Returns the exact complete-frame encoded length.
 ///
 /// # Errors
 ///
 /// Returns [`CodecError::LengthOverflow`] when a selected variable body cannot
-/// fit the generic frame's `u32` payload length. Server semantic values return
-/// [`CodecError::ServerValuePending`] until their body codec is added.
+/// fit the generic frame's `u32` payload length.
 pub fn encoded_len(frame: &ParticipantFrame) -> Result<usize, CodecError> {
     let mut size = SizeSink::default();
     encode_body(frame, &mut size)?;
@@ -105,7 +290,8 @@ pub fn encoded_len(frame: &ParticipantFrame) -> Result<usize, CodecError> {
 /// Encodes one complete participant frame into caller-provided storage.
 ///
 /// The generic header, v1.0 structural prefix, and selected body are emitted in
-/// network byte order. The function performs no allocation.
+/// network byte order. Client requests and pushed values encode without
+/// allocation; semantic server values use one temporary exact-body buffer.
 ///
 /// # Errors
 ///
@@ -148,20 +334,25 @@ pub fn encode(frame: &ParticipantFrame, output: &mut [u8]) -> Result<usize, Code
 ///
 /// # Errors
 ///
-/// Returns the contract's canonical structural class, or
-/// [`CodecError::UnsupportedVersion`] before discriminant/body decoding. Server
-/// semantic bodies currently return [`CodecError::ServerValuePending`].
+/// Returns [`CodecError::NotParticipantFrame`] before participant framing when
+/// the generic outer type differs, the contract's canonical structural class,
+/// or [`CodecError::UnsupportedVersion`] before discriminant/body decoding.
 pub fn decode(input: &[u8], receiver: ReceiverDirection) -> Result<ParticipantFrame, CodecError> {
+    if let Some(frame_type) = input.first().copied() {
+        if frame_type != PARTICIPANT_FRAME_TYPE {
+            return Err(CodecError::NotParticipantFrame { frame_type });
+        }
+    }
     if input.len() < GENERIC_HEADER_LEN {
         return Err(decode_error(DecodeClass::Framing));
     }
 
     let mut header = Reader::new(input);
-    let frame_type = header.take_u8()?;
+    let _frame_type = header.take_u8()?;
     let flags = header.take_u8()?;
     let stream_id = header.take_u32()?;
     let payload_len = header.take_u32()?;
-    if frame_type != PARTICIPANT_FRAME_TYPE || flags != 0 || stream_id != 0 || payload_len < 6 {
+    if flags != 0 || stream_id != 0 || payload_len < 6 {
         return Err(decode_error(DecodeClass::Framing));
     }
 
@@ -199,10 +390,51 @@ pub fn decode(input: &[u8], receiver: ReceiverDirection) -> Result<ParticipantFr
             if let Ok(tag) = PushDiscriminant::try_from(discriminant) {
                 return decode_server_push(tag, body).map(ParticipantFrame::ServerPush);
             }
-            if (0x0100..=0x0124).contains(&discriminant) {
-                return Err(CodecError::ServerValuePending);
+            if let Ok(tag) = ServerDiscriminant::try_from(discriminant) {
+                let (value, _) = super::server_codec::decode_server_value_body(tag, version, body)?;
+                return Ok(ParticipantFrame::ServerValue(value));
             }
             Err(decode_error(DecodeClass::UnknownDiscriminant))
+        }
+    }
+}
+
+fn declared_complete_frame_bytes(input: &[u8]) -> Option<u64> {
+    let payload_length = input.get(6..GENERIC_HEADER_LEN)?;
+    let payload_length = <[u8; 4]>::try_from(payload_length).ok()?;
+    Some(complete_frame_bytes(u32::from_be_bytes(payload_length)))
+}
+
+const fn transport_rejection(reason: TransportRejectionReason) -> ParticipantTransportRejected {
+    ParticipantTransportRejected { reason }
+}
+
+const fn gate_rejection(reason: TransportRejectionReason) -> InboundGateError {
+    InboundGateError::ParticipantRejected(transport_rejection(reason))
+}
+
+const fn codec_gate_error(error: CodecError) -> InboundGateError {
+    match error {
+        CodecError::NotParticipantFrame { frame_type } => {
+            InboundGateError::NotParticipantFrame { frame_type }
+        }
+        CodecError::Decode { class } => gate_rejection(TransportRejectionReason::DecodeFailed {
+            decode_class: class,
+        }),
+        CodecError::UnsupportedVersion {
+            presented,
+            supported,
+        } => gate_rejection(TransportRejectionReason::UnsupportedVersion {
+            presented_version: presented,
+            supported_version: supported,
+        }),
+        CodecError::OutputTooSmall { .. }
+        | CodecError::LengthOverflow
+        | CodecError::InvalidValue
+        | CodecError::InvalidFrameLimit { .. } => {
+            gate_rejection(TransportRejectionReason::DecodeFailed {
+                decode_class: DecodeClass::InvalidField,
+            })
         }
     }
 }
@@ -219,7 +451,11 @@ fn encode_body<S: Sink>(frame: &ParticipantFrame, sink: &mut S) -> Result<(), Co
     match frame {
         ParticipantFrame::ClientRequest(value) => encode_client_request(value, sink),
         ParticipantFrame::ServerPush(value) => encode_server_push(value, sink),
-        ParticipantFrame::ServerValue(_) => Err(CodecError::ServerValuePending),
+        ParticipantFrame::ServerValue(value) => {
+            let (_, body) =
+                super::server_codec::encode_server_value_body(value, ProtocolVersion::V1)?;
+            sink.put(&body)
+        }
     }
 }
 

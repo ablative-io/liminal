@@ -2,7 +2,8 @@ use alloc::string::String;
 
 use super::keepalive::{
     AcceptedSocketKeepaliveReason, KeepaliveCertificationFailed, KeepaliveField, KeepaliveOption,
-    KeepalivePhase, KeepaliveValue, PlatformName, StartupKeepaliveReason,
+    KeepalivePhase, KeepaliveReadbackMismatch, NumericKeepaliveOption, PlatformName,
+    StartupKeepaliveReason,
 };
 
 fn platform() -> PlatformName {
@@ -60,9 +61,11 @@ fn accepted_socket_phase_has_exactly_the_three_runtime_reason_shapes() {
             os_error: 5,
         },
         AcceptedSocketKeepaliveReason::ReadbackMismatch {
-            option: KeepaliveOption::Count,
-            requested: KeepaliveValue::Unsigned(3),
-            effective: KeepaliveValue::Unsigned(2),
+            mismatch: KeepaliveReadbackMismatch::Numeric {
+                option: NumericKeepaliveOption::Count,
+                requested: 3,
+                effective: 2,
+            },
             platform: platform(),
         },
     ];

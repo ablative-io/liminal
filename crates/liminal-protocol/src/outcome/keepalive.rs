@@ -57,13 +57,36 @@ pub enum KeepalivePhase {
     AcceptedSocket,
 }
 
-/// Typed read-back value.
+/// Type-safe read-back mismatch body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum KeepaliveValue {
-    /// Boolean enablement used only for `SO_KEEPALIVE`.
-    Enabled(bool),
-    /// Unsigned value used by idle, interval, and count options.
-    Unsigned(u64),
+pub enum KeepaliveReadbackMismatch {
+    /// Boolean `SO_KEEPALIVE` mismatch.
+    SoKeepalive {
+        /// Requested enablement.
+        requested: bool,
+        /// Effective enablement.
+        effective: bool,
+    },
+    /// Numeric keepalive-option mismatch.
+    Numeric {
+        /// Idle, interval, or count option; `SO_KEEPALIVE` is absent by type.
+        option: NumericKeepaliveOption,
+        /// Requested unsigned value.
+        requested: u64,
+        /// Effective unsigned value.
+        effective: u64,
+    },
+}
+
+/// Numeric socket options; boolean `SO_KEEPALIVE` is deliberately absent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumericKeepaliveOption {
+    /// Platform idle-time option.
+    Idle,
+    /// Platform probe-interval option.
+    Interval,
+    /// Platform probe-count option.
+    Count,
 }
 
 /// Startup-only keepalive validation or support failure.
@@ -139,12 +162,8 @@ pub enum AcceptedSocketKeepaliveReason {
     },
     /// Read-back value differs from the exact requested value.
     ReadbackMismatch {
-        /// First option whose read-back differed.
-        option: KeepaliveOption,
-        /// Exact requested typed value.
-        requested: KeepaliveValue,
-        /// Exact effective typed value.
-        effective: KeepaliveValue,
+        /// Exact option-specific requested/effective pair.
+        mismatch: KeepaliveReadbackMismatch,
         /// Signed target-platform descriptor.
         platform: PlatformName,
     },

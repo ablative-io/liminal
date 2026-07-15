@@ -85,13 +85,28 @@ pub enum AttemptTokenBodyConflict {
     },
 }
 
-/// Generic semantic connection-conversation capacity refusal (`0x0102`).
+/// Connection-conversation capacity refusal shared by two exact wire routes.
+///
+/// The semantic-request arm is carried by `0x0102`; the observer-recovery arm
+/// is carried by `0x0124`. Keeping both schemas under this one named outcome
+/// follows the frozen contract's R-D1 register while the variants prevent the
+/// two different bodies from being confused.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ConnectionConversationCapacityExceeded {
-    /// Exact triggering request envelope.
-    pub request: ResponseEnvelope,
-    /// Negotiated connection-conversation limit.
-    pub limit: u64,
+pub enum ConnectionConversationCapacityExceeded {
+    /// Decoded semantic request with its exact common envelope (`0x0102`).
+    SemanticRequest {
+        /// Exact triggering request envelope.
+        request: ResponseEnvelope,
+        /// Negotiated connection-conversation limit.
+        limit: u64,
+    },
+    /// Observer-recovery request-index preflight refusal (`0x0124`).
+    ObserverRecovery {
+        /// First request-ordered conversation that would exceed the limit.
+        conversation_id: ConversationId,
+        /// Signed connection-conversation limit.
+        limit: u64,
+    },
 }
 
 /// Exact binding-slot occupancy response; occupying identity is never disclosed.
@@ -134,26 +149,95 @@ pub enum OrderAllocatingEnvelope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConversationOrderExhausted {
     /// Exact triggering request envelope.
-    pub request: OrderAllocatingEnvelope,
-    /// Counter is always [`Counter::TransactionOrder`].
-    pub counter: Counter,
+    request: OrderAllocatingEnvelope,
     /// Current high allocated major.
-    pub high: u64,
-    /// Checked next major, absent after maximum allocation.
-    pub next_value: Option<u64>,
+    high: u64,
     /// Current unreserved majors remaining.
-    pub order_remaining: u128,
+    order_remaining: u128,
     /// Current `A + X + RO + RA` claims.
-    pub reserved_claims: u128,
+    reserved_claims: u128,
     /// Simulated remaining majors.
-    pub resulting_order_remaining: u128,
+    resulting_order_remaining: u128,
     /// Simulated four-term reserved claims.
-    pub resulting_reserved_claims: u128,
+    resulting_reserved_claims: u128,
 }
 
 impl ConversationOrderExhausted {
     /// Exact required-major count serialized by protocol v1.
     pub const REQUIRED_MAJORS: u64 = 1;
+
+    /// Constructs the canonical order-exhaustion snapshot.
+    ///
+    /// The counter and checked next value are derived rather than accepted from
+    /// the caller, making `next_value = Some(high + 1)` (or `None` exactly at
+    /// `u64::MAX`) structural.
+    #[must_use]
+    pub const fn new(
+        request: OrderAllocatingEnvelope,
+        high: u64,
+        order_remaining: u128,
+        reserved_claims: u128,
+        resulting_order_remaining: u128,
+        resulting_reserved_claims: u128,
+    ) -> Self {
+        Self {
+            request,
+            high,
+            order_remaining,
+            reserved_claims,
+            resulting_order_remaining,
+            resulting_reserved_claims,
+        }
+    }
+
+    /// Exact triggering request envelope.
+    #[must_use]
+    pub const fn request(&self) -> &OrderAllocatingEnvelope {
+        &self.request
+    }
+
+    /// Fixed counter selector.
+    #[must_use]
+    pub const fn counter(&self) -> Counter {
+        let _ = self;
+        Counter::TransactionOrder
+    }
+
+    /// Current high allocated major.
+    #[must_use]
+    pub const fn high(&self) -> u64 {
+        self.high
+    }
+
+    /// Checked next major, absent exactly after allocation of `u64::MAX`.
+    #[must_use]
+    pub const fn next_value(&self) -> Option<u64> {
+        self.high.checked_add(1)
+    }
+
+    /// Current unreserved majors remaining.
+    #[must_use]
+    pub const fn order_remaining(&self) -> u128 {
+        self.order_remaining
+    }
+
+    /// Current `A + X + RO + RA` claims.
+    #[must_use]
+    pub const fn reserved_claims(&self) -> u128 {
+        self.reserved_claims
+    }
+
+    /// Simulated remaining majors.
+    #[must_use]
+    pub const fn resulting_order_remaining(&self) -> u128 {
+        self.resulting_order_remaining
+    }
+
+    /// Simulated four-term reserved claims.
+    #[must_use]
+    pub const fn resulting_reserved_claims(&self) -> u128 {
+        self.resulting_reserved_claims
+    }
 }
 
 /// Participant-naming envelopes eligible for unknown/retired classification.
@@ -261,6 +345,34 @@ impl TerminalizedDetachCell {
             detach_attempt_token: state.token(),
             current_generation,
             committed_binding_epoch: state.committed_binding_epoch(),
+            binding_state,
+        }
+    }
+
+    /// Reconstructs the same response from an already-selected wire union arm.
+    ///
+    /// The authority argument is constructible only inside the server-value
+    /// decoder. Ordinary semantic code must use [`Self::from_terminalized_state`],
+    /// preserving the compile-time guarantee mandated by
+    /// `docs/design/LP-EXTRACTION-GOAL.md`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) const fn from_wire_decode(
+        _authority: super::server_codec::TerminalizedWireDecodeAuthority,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        capability_generation: Generation,
+        detach_attempt_token: DetachAttemptToken,
+        current_generation: Generation,
+        committed_binding_epoch: BindingEpoch,
+        binding_state: BindingStateView,
+    ) -> Self {
+        Self {
+            conversation_id,
+            participant_id,
+            capability_generation,
+            detach_attempt_token,
+            current_generation,
+            committed_binding_epoch,
             binding_state,
         }
     }
@@ -674,9 +786,55 @@ impl IdentityCapacityExceeded {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObserverBackpressureState {
     /// Refusal epoch.
-    pub backpressure_epoch: ObserverEpoch,
+    backpressure_epoch: ObserverEpoch,
     /// Observer progress captured by the refusal.
-    pub observer_progress: DeliverySeq,
+    observer_progress: DeliverySeq,
+}
+
+impl ObserverBackpressureState {
+    /// Constructs an initial refusal at the current observer-progress baseline.
+    ///
+    /// An initial refusal epoch is exactly the progress value observed by the
+    /// serialized operation.
+    #[must_use]
+    pub const fn initial(observer_progress: DeliverySeq) -> Self {
+        Self {
+            backpressure_epoch: observer_progress,
+            observer_progress,
+        }
+    }
+
+    /// Reconstructs an exact-token replay refusal at its current baseline.
+    ///
+    /// Pending replay at greater progress must drain or atomically rewrite the
+    /// cell epoch to that progress before responding. It therefore returns
+    /// `None` for any inequality.
+    #[must_use]
+    pub const fn replay(
+        backpressure_epoch: ObserverEpoch,
+        observer_progress: DeliverySeq,
+    ) -> Option<Self> {
+        if backpressure_epoch == observer_progress {
+            Some(Self {
+                backpressure_epoch,
+                observer_progress,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Refusal epoch serialized in the response.
+    #[must_use]
+    pub const fn backpressure_epoch(self) -> ObserverEpoch {
+        self.backpressure_epoch
+    }
+
+    /// Observer progress captured by the refusal.
+    #[must_use]
+    pub const fn observer_progress(self) -> DeliverySeq {
+        self.observer_progress
+    }
 }
 
 /// Exact operation-specific observer-backpressure payload.
@@ -747,27 +905,176 @@ pub struct ConversationSequenceExhausted {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachBound {
     /// Conversation from the request.
-    pub conversation_id: ConversationId,
+    conversation_id: ConversationId,
     /// Attach token echoed as the result token.
-    pub token: AttachAttemptToken,
+    token: AttachAttemptToken,
     /// Participant from the request.
-    pub participant_id: ParticipantId,
+    participant_id: ParticipantId,
     /// Originally presented generation.
-    pub request_generation: Generation,
-    /// Newly minted result generation.
-    pub capability_generation: Generation,
+    request_generation: Generation,
     /// Newly minted attach secret.
-    pub attach_secret: AttachSecret,
+    attach_secret: AttachSecret,
     /// Origin binding epoch.
-    pub origin_binding_epoch: BindingEpoch,
+    origin_binding_epoch: BindingEpoch,
     /// Persisted participant cursor.
-    pub persisted_cursor: DeliverySeq,
+    persisted_cursor: DeliverySeq,
     /// Marker accepted atomically by recovery.
-    pub accepted_marker_delivery_seq: Option<DeliverySeq>,
+    accepted_marker_delivery_seq: Option<DeliverySeq>,
     /// Receipt deadline.
-    pub receipt_expires_at: u128,
+    receipt_expires_at: u128,
     /// Provenance deadline.
-    pub provenance_expires_at: u128,
+    provenance_expires_at: u128,
+}
+
+impl AttachBound {
+    /// Constructs an ordinary attach receipt.
+    ///
+    /// Returns `None` unless the origin epoch carries the exact checked
+    /// successor of `request_generation`. Ordinary attach structurally records
+    /// no accepted marker and preserves the supplied cursor.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn ordinary(
+        conversation_id: ConversationId,
+        token: AttachAttemptToken,
+        participant_id: ParticipantId,
+        request_generation: Generation,
+        attach_secret: AttachSecret,
+        origin_binding_epoch: BindingEpoch,
+        persisted_cursor: DeliverySeq,
+        receipt_expires_at: u128,
+        provenance_expires_at: u128,
+    ) -> Option<Self> {
+        if !is_successor_generation(
+            request_generation,
+            origin_binding_epoch.capability_generation,
+        ) {
+            return None;
+        }
+        Some(Self {
+            conversation_id,
+            token,
+            participant_id,
+            request_generation,
+            attach_secret,
+            origin_binding_epoch,
+            persisted_cursor,
+            accepted_marker_delivery_seq: None,
+            receipt_expires_at,
+            provenance_expires_at,
+        })
+    }
+
+    /// Constructs a fenced-recovery attach receipt.
+    ///
+    /// Returns `None` unless the origin epoch carries the exact checked
+    /// successor of `request_generation`. The accepted marker is also the
+    /// resulting persisted cursor by construction.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn fenced(
+        conversation_id: ConversationId,
+        token: AttachAttemptToken,
+        participant_id: ParticipantId,
+        request_generation: Generation,
+        attach_secret: AttachSecret,
+        origin_binding_epoch: BindingEpoch,
+        accepted_marker_delivery_seq: DeliverySeq,
+        receipt_expires_at: u128,
+        provenance_expires_at: u128,
+    ) -> Option<Self> {
+        if !is_successor_generation(
+            request_generation,
+            origin_binding_epoch.capability_generation,
+        ) {
+            return None;
+        }
+        Some(Self {
+            conversation_id,
+            token,
+            participant_id,
+            request_generation,
+            attach_secret,
+            origin_binding_epoch,
+            persisted_cursor: accepted_marker_delivery_seq,
+            accepted_marker_delivery_seq: Some(accepted_marker_delivery_seq),
+            receipt_expires_at,
+            provenance_expires_at,
+        })
+    }
+
+    /// Conversation from the request.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    /// Attach token echoed as the result token.
+    #[must_use]
+    pub const fn token(&self) -> AttachAttemptToken {
+        self.token
+    }
+
+    /// Participant from the request.
+    #[must_use]
+    pub const fn participant_id(&self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Originally presented generation.
+    #[must_use]
+    pub const fn request_generation(&self) -> Generation {
+        self.request_generation
+    }
+
+    /// Exact successor capability generation.
+    #[must_use]
+    pub const fn capability_generation(&self) -> Generation {
+        self.origin_binding_epoch.capability_generation
+    }
+
+    /// Newly minted attach secret.
+    #[must_use]
+    pub const fn attach_secret(&self) -> AttachSecret {
+        self.attach_secret
+    }
+
+    /// Origin binding epoch carrying the result generation.
+    #[must_use]
+    pub const fn origin_binding_epoch(&self) -> BindingEpoch {
+        self.origin_binding_epoch
+    }
+
+    /// Persisted participant cursor.
+    #[must_use]
+    pub const fn persisted_cursor(&self) -> DeliverySeq {
+        self.persisted_cursor
+    }
+
+    /// Marker accepted atomically by recovery, if this was the fenced path.
+    #[must_use]
+    pub const fn accepted_marker_delivery_seq(&self) -> Option<DeliverySeq> {
+        self.accepted_marker_delivery_seq
+    }
+
+    /// Receipt deadline.
+    #[must_use]
+    pub const fn receipt_expires_at(&self) -> u128 {
+        self.receipt_expires_at
+    }
+
+    /// Provenance deadline.
+    #[must_use]
+    pub const fn provenance_expires_at(&self) -> u128 {
+        self.provenance_expires_at
+    }
+}
+
+const fn is_successor_generation(previous: Generation, successor: Generation) -> bool {
+    match previous.get().checked_add(1) {
+        Some(expected) => successor.get() == expected,
+        None => false,
+    }
 }
 
 /// Attach receipt is no longer known after provenance expiry.
@@ -876,69 +1183,84 @@ pub struct MarkerMismatch {
 /// Complete canonical receipt replay payload used by Bound/UnboundReceipt.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiptReplay {
-    /// Enrollment receipt replay; request generation is encoded `None`.
-    Enrollment {
-        /// Conversation from the request.
-        conversation_id: ConversationId,
-        /// Enrollment token.
-        token: EnrollmentToken,
-        /// Participant result.
-        participant_id: ParticipantId,
-        /// Result generation.
-        capability_generation: Generation,
-        /// Stored attach secret.
-        attach_secret: AttachSecret,
-        /// Origin binding epoch.
-        origin_binding_epoch: BindingEpoch,
-        /// Persisted cursor.
-        persisted_cursor: DeliverySeq,
-        /// Receipt deadline.
-        receipt_expires_at: u128,
-        /// Provenance deadline.
-        provenance_expires_at: u128,
-    },
-    /// Credential-attach receipt replay.
-    CredentialAttach {
-        /// Conversation from the request.
-        conversation_id: ConversationId,
-        /// Attach token.
-        token: AttachAttemptToken,
-        /// Participant result.
-        participant_id: ParticipantId,
-        /// Originally presented generation.
-        request_generation: Generation,
-        /// Result generation.
-        capability_generation: Generation,
-        /// Stored attach secret.
-        attach_secret: AttachSecret,
-        /// Origin binding epoch.
-        origin_binding_epoch: BindingEpoch,
-        /// Persisted cursor.
-        persisted_cursor: DeliverySeq,
-        /// Marker accepted by the original attach.
-        accepted_marker_delivery_seq: Option<DeliverySeq>,
-        /// Receipt deadline.
-        receipt_expires_at: u128,
-        /// Provenance deadline.
-        provenance_expires_at: u128,
-    },
+    /// Enrollment canonical receipt; generation/cursor/marker constants are
+    /// enforced by [`EnrollBound`].
+    Enrollment(EnrollBound),
+    /// Credential-attach canonical receipt; successor generation and
+    /// cursor/marker relations are enforced by [`AttachBound`].
+    CredentialAttach(AttachBound),
 }
 
 /// Stable committed detach response.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DetachCommitted {
     /// Conversation from the request.
-    pub conversation_id: ConversationId,
+    conversation_id: ConversationId,
     /// Participant from the request.
-    pub participant_id: ParticipantId,
-    /// Presented generation.
-    pub capability_generation: Generation,
+    participant_id: ParticipantId,
     /// Committed detach token.
-    pub detach_attempt_token: DetachAttemptToken,
+    detach_attempt_token: DetachAttemptToken,
     /// Binding epoch ended by detach.
-    pub committed_binding_epoch: BindingEpoch,
+    committed_binding_epoch: BindingEpoch,
     /// Assigned Detached delivery sequence.
-    pub detached_delivery_seq: DeliverySeq,
+    detached_delivery_seq: DeliverySeq,
+}
+
+impl DetachCommitted {
+    /// Constructs a detach result and derives its presented generation from
+    /// the binding epoch it ended.
+    #[must_use]
+    pub const fn new(
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        detach_attempt_token: DetachAttemptToken,
+        committed_binding_epoch: BindingEpoch,
+        detached_delivery_seq: DeliverySeq,
+    ) -> Self {
+        Self {
+            conversation_id,
+            participant_id,
+            detach_attempt_token,
+            committed_binding_epoch,
+            detached_delivery_seq,
+        }
+    }
+
+    /// Conversation from the request.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    /// Participant from the request.
+    #[must_use]
+    pub const fn participant_id(&self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Presented generation, equal to the committed binding epoch generation.
+    #[must_use]
+    pub const fn capability_generation(&self) -> Generation {
+        self.committed_binding_epoch.capability_generation
+    }
+
+    /// Committed detach token.
+    #[must_use]
+    pub const fn detach_attempt_token(&self) -> DetachAttemptToken {
+        self.detach_attempt_token
+    }
+
+    /// Binding epoch ended by detach.
+    #[must_use]
+    pub const fn committed_binding_epoch(&self) -> BindingEpoch {
+        self.committed_binding_epoch
+    }
+
+    /// Assigned Detached delivery sequence.
+    #[must_use]
+    pub const fn detached_delivery_seq(&self) -> DeliverySeq {
+        self.detached_delivery_seq
+    }
 }
 
 /// Different detach token encountered an existing pending cell.
@@ -960,91 +1282,323 @@ pub struct DetachInProgress {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AckCommitted {
     /// Request envelope.
-    pub request: ParticipantAckEnvelope,
-    /// Resulting committed cursor.
-    pub current_cursor: DeliverySeq,
+    request: ParticipantAckEnvelope,
+}
+
+impl AckCommitted {
+    /// Constructs a committed acknowledgement whose cursor is the requested
+    /// cumulative boundary.
+    #[must_use]
+    pub const fn new(request: ParticipantAckEnvelope) -> Self {
+        Self { request }
+    }
+
+    /// Request envelope.
+    #[must_use]
+    pub const fn request(&self) -> &ParticipantAckEnvelope {
+        &self.request
+    }
+
+    /// Resulting committed cursor, equal to `request.through_seq`.
+    #[must_use]
+    pub const fn current_cursor(&self) -> DeliverySeq {
+        self.request.through_seq
+    }
 }
 
 /// Idempotent normal or marker acknowledgement.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AckNoOp {
     /// Continuous acknowledgement.
-    ParticipantAck {
-        /// Request envelope.
-        request: ParticipantAckEnvelope,
-        /// Unchanged cursor.
-        current_cursor: DeliverySeq,
-    },
+    ParticipantAck(ParticipantAckEnvelope),
     /// Marker acknowledgement.
-    MarkerAck {
-        /// Request envelope.
-        request: MarkerAckEnvelope,
-        /// Unchanged cursor.
-        current_cursor: DeliverySeq,
-    },
+    MarkerAck(MarkerAckEnvelope),
+}
+
+impl AckNoOp {
+    /// Constructs an idempotent continuous acknowledgement at its requested
+    /// cursor.
+    #[must_use]
+    pub const fn participant_ack(request: ParticipantAckEnvelope) -> Self {
+        Self::ParticipantAck(request)
+    }
+
+    /// Constructs an idempotent marker acknowledgement at its requested
+    /// marker cursor.
+    #[must_use]
+    pub const fn marker_ack(request: MarkerAckEnvelope) -> Self {
+        Self::MarkerAck(request)
+    }
+
+    /// Unchanged cursor, derived from the selected request envelope.
+    #[must_use]
+    pub const fn current_cursor(&self) -> DeliverySeq {
+        match self {
+            Self::ParticipantAck(request) => request.through_seq,
+            Self::MarkerAck(request) => request.marker_delivery_seq,
+        }
+    }
 }
 
 /// Continuous acknowledgement crossed a gap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AckGap {
     /// Request envelope.
-    pub request: ParticipantAckEnvelope,
+    request: ParticipantAckEnvelope,
     /// Unchanged cursor.
-    pub current_cursor: DeliverySeq,
-    /// Singleton gap reason.
-    pub reason: AckGapReason,
+    current_cursor: DeliverySeq,
+}
+
+impl AckGap {
+    /// Constructs a gap refusal for a requested boundary above the unchanged
+    /// cursor.
+    #[must_use]
+    pub const fn new(request: ParticipantAckEnvelope, current_cursor: DeliverySeq) -> Option<Self> {
+        if request.through_seq > current_cursor {
+            Some(Self {
+                request,
+                current_cursor,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Request envelope.
+    #[must_use]
+    pub const fn request(&self) -> &ParticipantAckEnvelope {
+        &self.request
+    }
+
+    /// Unchanged cursor.
+    #[must_use]
+    pub const fn current_cursor(&self) -> DeliverySeq {
+        self.current_cursor
+    }
+
+    /// Fixed gap reason.
+    #[must_use]
+    pub const fn reason(&self) -> AckGapReason {
+        let _ = self;
+        AckGapReason::NotContiguouslyAvailable
+    }
 }
 
 /// Continuous acknowledgement regressed below the cursor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AckRegression {
     /// Request envelope.
-    pub request: ParticipantAckEnvelope,
+    request: ParticipantAckEnvelope,
     /// Unchanged cursor.
-    pub current_cursor: DeliverySeq,
-    /// Singleton regression reason.
-    pub reason: AckRegressionReason,
+    current_cursor: DeliverySeq,
+}
+
+impl AckRegression {
+    /// Constructs a regression refusal for a requested boundary below the
+    /// unchanged cursor.
+    #[must_use]
+    pub const fn new(request: ParticipantAckEnvelope, current_cursor: DeliverySeq) -> Option<Self> {
+        if request.through_seq < current_cursor {
+            Some(Self {
+                request,
+                current_cursor,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Request envelope.
+    #[must_use]
+    pub const fn request(&self) -> &ParticipantAckEnvelope {
+        &self.request
+    }
+
+    /// Unchanged cursor.
+    #[must_use]
+    pub const fn current_cursor(&self) -> DeliverySeq {
+        self.current_cursor
+    }
+
+    /// Fixed regression reason.
+    #[must_use]
+    pub const fn reason(&self) -> AckRegressionReason {
+        let _ = self;
+        AckRegressionReason::BelowCursor
+    }
 }
 
 /// Permanent terminal Leave result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LeaveCommitted {
     /// Conversation from the request.
-    pub conversation_id: ConversationId,
+    conversation_id: ConversationId,
     /// Committed Leave token.
-    pub leave_attempt_token: LeaveAttemptToken,
+    leave_attempt_token: LeaveAttemptToken,
     /// Retired participant.
-    pub participant_id: ParticipantId,
-    /// Presented generation.
-    pub presented_generation: Generation,
+    participant_id: ParticipantId,
     /// Permanent retired generation.
-    pub retired_generation: Generation,
+    retired_generation: Generation,
     /// Active binding ended by this same commit, if any.
-    pub ended_binding_epoch: Option<BindingEpoch>,
+    ended_binding_epoch: Option<BindingEpoch>,
     /// Earlier binding-terminal record, if one exists.
-    pub prior_terminal_delivery_seq: Option<DeliverySeq>,
+    prior_terminal_delivery_seq: Option<DeliverySeq>,
     /// Assigned Left delivery sequence.
-    pub left_delivery_seq: DeliverySeq,
+    left_delivery_seq: DeliverySeq,
+}
+
+impl LeaveCommitted {
+    /// Constructs a terminal Leave outcome from its authoritative durable
+    /// values.
+    ///
+    /// Returns `None` when a supplied active binding carries another
+    /// generation or when a prior terminal is not strictly before `Left`.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub const fn new(
+        conversation_id: ConversationId,
+        leave_attempt_token: LeaveAttemptToken,
+        participant_id: ParticipantId,
+        retired_generation: Generation,
+        ended_binding_epoch: Option<BindingEpoch>,
+        prior_terminal_delivery_seq: Option<DeliverySeq>,
+        left_delivery_seq: DeliverySeq,
+    ) -> Option<Self> {
+        if let Some(epoch) = ended_binding_epoch
+            && epoch.capability_generation.get() != retired_generation.get()
+        {
+            return None;
+        }
+        if let Some(prior) = prior_terminal_delivery_seq
+            && prior >= left_delivery_seq
+        {
+            return None;
+        }
+        Some(Self {
+            conversation_id,
+            leave_attempt_token,
+            participant_id,
+            retired_generation,
+            ended_binding_epoch,
+            prior_terminal_delivery_seq,
+            left_delivery_seq,
+        })
+    }
+
+    /// Conversation from the request.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    /// Committed Leave token.
+    #[must_use]
+    pub const fn leave_attempt_token(&self) -> LeaveAttemptToken {
+        self.leave_attempt_token
+    }
+
+    /// Retired participant.
+    #[must_use]
+    pub const fn participant_id(&self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Presented generation, equal to the permanent retired generation.
+    #[must_use]
+    pub const fn presented_generation(&self) -> Generation {
+        self.retired_generation
+    }
+
+    /// Permanent retired generation.
+    #[must_use]
+    pub const fn retired_generation(&self) -> Generation {
+        self.retired_generation
+    }
+
+    /// Active binding ended by this same commit, if any.
+    #[must_use]
+    pub const fn ended_binding_epoch(&self) -> Option<BindingEpoch> {
+        self.ended_binding_epoch
+    }
+
+    /// Earlier binding-terminal record, if one exists.
+    #[must_use]
+    pub const fn prior_terminal_delivery_seq(&self) -> Option<DeliverySeq> {
+        self.prior_terminal_delivery_seq
+    }
+
+    /// Assigned Left delivery sequence.
+    #[must_use]
+    pub const fn left_delivery_seq(&self) -> DeliverySeq {
+        self.left_delivery_seq
+    }
 }
 
 /// Marker acknowledgement advanced the cursor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarkerAckCommitted {
     /// Marker-ack request envelope.
-    pub request: MarkerAckEnvelope,
-    /// Resulting marker cursor.
-    pub current_cursor: DeliverySeq,
+    request: MarkerAckEnvelope,
+}
+
+impl MarkerAckCommitted {
+    /// Constructs a committed marker acknowledgement whose cursor is the
+    /// requested marker.
+    #[must_use]
+    pub const fn new(request: MarkerAckEnvelope) -> Self {
+        Self { request }
+    }
+
+    /// Marker-ack request envelope.
+    #[must_use]
+    pub const fn request(&self) -> &MarkerAckEnvelope {
+        &self.request
+    }
+
+    /// Resulting marker cursor, equal to `request.marker_delivery_seq`.
+    #[must_use]
+    pub const fn current_cursor(&self) -> DeliverySeq {
+        self.request.marker_delivery_seq
+    }
 }
 
 /// Ordinary record commit result.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordCommitted {
     /// Request envelope, without opaque payload.
-    pub request: RecordAdmissionEnvelope,
-    /// Verified sender; equal to the request participant.
-    pub sender_participant_id: ParticipantId,
+    request: RecordAdmissionEnvelope,
     /// Assigned record sequence.
-    pub delivery_seq: DeliverySeq,
+    delivery_seq: DeliverySeq,
+}
+
+impl RecordCommitted {
+    /// Constructs an ordinary commit and derives its verified sender from the
+    /// authoritative request envelope.
+    #[must_use]
+    pub const fn new(request: RecordAdmissionEnvelope, delivery_seq: DeliverySeq) -> Self {
+        Self {
+            request,
+            delivery_seq,
+        }
+    }
+
+    /// Request envelope, without opaque payload.
+    #[must_use]
+    pub const fn request(&self) -> &RecordAdmissionEnvelope {
+        &self.request
+    }
+
+    /// Verified sender, exactly the request participant.
+    #[must_use]
+    pub const fn sender_participant_id(&self) -> ParticipantId {
+        self.request.participant_id
+    }
+
+    /// Assigned record sequence.
+    #[must_use]
+    pub const fn delivery_seq(&self) -> DeliverySeq {
+        self.delivery_seq
+    }
 }
 
 /// Ordinary record exceeds configured entry or byte maximum.
@@ -1148,15 +1702,6 @@ impl InvalidObserverEpochList {
     }
 }
 
-/// Recovery-batch connection-capacity refusal (`0x0124`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObserverRecoveryConnectionCapacityExceeded {
-    /// First request-ordered conversation that would exceed the limit.
-    pub conversation_id: ConversationId,
-    /// Signed connection-conversation limit.
-    pub limit: u64,
-}
-
 /// Exhaustive server-to-client semantic participant value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ServerValue {
@@ -1164,7 +1709,7 @@ pub enum ServerValue {
     ParticipantTransportRejected(ParticipantTransportRejected),
     /// `0x0101`.
     AttemptTokenBodyConflict(AttemptTokenBodyConflict),
-    /// `0x0102`.
+    /// `0x0102` or `0x0124`, selected by the inner exact schema.
     ConnectionConversationCapacityExceeded(ConnectionConversationCapacityExceeded),
     /// `0x0103`.
     ConnectionConversationBindingOccupied(ConnectionConversationBindingOccupied),
@@ -1232,8 +1777,6 @@ pub enum ServerValue {
     InvalidObserverEpoch(InvalidObserverEpoch),
     /// `0x0123`.
     InvalidObserverEpochList(InvalidObserverEpochList),
-    /// `0x0124`; semantic meaning is connection-conversation capacity exceeded.
-    ObserverRecoveryConnectionCapacityExceeded(ObserverRecoveryConnectionCapacityExceeded),
 }
 
 impl ServerValue {
@@ -1245,9 +1788,14 @@ impl ServerValue {
                 ServerDiscriminant::ParticipantTransportRejected
             }
             Self::AttemptTokenBodyConflict(_) => ServerDiscriminant::AttemptTokenBodyConflict,
-            Self::ConnectionConversationCapacityExceeded(_) => {
-                ServerDiscriminant::ConnectionConversationCapacityExceeded
-            }
+            Self::ConnectionConversationCapacityExceeded(value) => match value {
+                ConnectionConversationCapacityExceeded::SemanticRequest { .. } => {
+                    ServerDiscriminant::ConnectionConversationCapacityExceeded
+                }
+                ConnectionConversationCapacityExceeded::ObserverRecovery { .. } => {
+                    ServerDiscriminant::ObserverRecoveryConnectionCapacityExceeded
+                }
+            },
             Self::ConnectionConversationBindingOccupied(_) => {
                 ServerDiscriminant::ConnectionConversationBindingOccupied
             }
@@ -1287,9 +1835,6 @@ impl ServerValue {
             Self::ObserverRecoveryAccepted(_) => ServerDiscriminant::ObserverRecoveryAccepted,
             Self::InvalidObserverEpoch(_) => ServerDiscriminant::InvalidObserverEpoch,
             Self::InvalidObserverEpochList(_) => ServerDiscriminant::InvalidObserverEpochList,
-            Self::ObserverRecoveryConnectionCapacityExceeded(_) => {
-                ServerDiscriminant::ObserverRecoveryConnectionCapacityExceeded
-            }
         }
     }
 
@@ -1301,17 +1846,19 @@ impl ServerValue {
             Self::ParticipantTransportRejected(_)
             | Self::ObserverRecoveryAccepted(_)
             | Self::InvalidObserverEpoch(_)
-            | Self::InvalidObserverEpochList(_)
-            | Self::ObserverRecoveryConnectionCapacityExceeded(_) => None,
+            | Self::InvalidObserverEpochList(_) => None,
             Self::AttemptTokenBodyConflict(value) => Some(match value {
                 AttemptTokenBodyConflict::CredentialAttach { .. } => {
                     ClientDiscriminant::CredentialAttachRequest
                 }
                 AttemptTokenBodyConflict::Leave { .. } => ClientDiscriminant::LeaveRequest,
             }),
-            Self::ConnectionConversationCapacityExceeded(value) => {
-                Some(value.request.originating_request())
-            }
+            Self::ConnectionConversationCapacityExceeded(value) => match value {
+                ConnectionConversationCapacityExceeded::SemanticRequest { request, .. } => {
+                    Some(request.originating_request())
+                }
+                ConnectionConversationCapacityExceeded::ObserverRecovery { .. } => None,
+            },
             Self::ConnectionConversationBindingOccupied(value) => Some(match value {
                 ConnectionConversationBindingOccupied::Enrollment { .. } => {
                     ClientDiscriminant::EnrollmentRequest
@@ -1320,7 +1867,7 @@ impl ServerValue {
                     ClientDiscriminant::CredentialAttachRequest
                 }
             }),
-            Self::ConversationOrderExhausted(value) => Some(match &value.request {
+            Self::ConversationOrderExhausted(value) => Some(match value.request() {
                 OrderAllocatingEnvelope::Enrollment(_) => ClientDiscriminant::EnrollmentRequest,
                 OrderAllocatingEnvelope::CredentialAttach(_) => {
                     ClientDiscriminant::CredentialAttachRequest
@@ -1381,10 +1928,8 @@ impl ServerValue {
             Self::MarkerNotDelivered(value) => Some(marker_proof_origin(&value.request)),
             Self::MarkerMismatch(value) => Some(marker_proof_origin(&value.request)),
             Self::Bound(value) | Self::UnboundReceipt(value) => Some(match value {
-                ReceiptReplay::Enrollment { .. } => ClientDiscriminant::EnrollmentRequest,
-                ReceiptReplay::CredentialAttach { .. } => {
-                    ClientDiscriminant::CredentialAttachRequest
-                }
+                ReceiptReplay::Enrollment(_) => ClientDiscriminant::EnrollmentRequest,
+                ReceiptReplay::CredentialAttach(_) => ClientDiscriminant::CredentialAttachRequest,
             }),
             Self::DetachCommitted(_) | Self::DetachInProgress(_) => {
                 Some(ClientDiscriminant::DetachRequest)
@@ -1393,8 +1938,8 @@ impl ServerValue {
                 Some(ClientDiscriminant::ParticipantAck)
             }
             Self::AckNoOp(value) => Some(match value {
-                AckNoOp::ParticipantAck { .. } => ClientDiscriminant::ParticipantAck,
-                AckNoOp::MarkerAck { .. } => ClientDiscriminant::MarkerAck,
+                AckNoOp::ParticipantAck(_) => ClientDiscriminant::ParticipantAck,
+                AckNoOp::MarkerAck(_) => ClientDiscriminant::MarkerAck,
             }),
             Self::LeaveCommitted(_) => Some(ClientDiscriminant::LeaveRequest),
             Self::MarkerAckCommitted(_) => Some(ClientDiscriminant::MarkerAck),

@@ -183,8 +183,20 @@ pub enum RecoveryHandshakeDimension {
 /// Initial-phase recovery handshake cannot fit the signed limits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParticipantRecoveryHandshakeTooLarge {
-    /// Complete exact widened sizing operands.
-    pub operands: HandshakeSizeOperands,
+    /// Maximum recovery entries `P`.
+    pub max_entries: u64,
+    /// Exact widened `u128(RF) + u128(RC(P))` bytes.
+    pub framing_bytes: u128,
+    /// Recovery request-entry schema bytes `RE`.
+    pub request_entry_bytes: u64,
+    /// Recovery response status-entry schema bytes `SE`.
+    pub response_entry_bytes: u64,
+    /// Recovery error-response schema bytes `EE`.
+    pub error_response_bytes: u64,
+    /// Exact widened request bytes `RH(P)`.
+    pub request_encoded_bytes: u128,
+    /// Exact widened response bytes `SH(P)`.
+    pub response_encoded_bytes: u128,
     /// Signed participant request limit `R`.
     pub request_limit: u64,
     /// Signed negotiated wire-frame limit `WF`.

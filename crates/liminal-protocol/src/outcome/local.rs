@@ -1,4 +1,4 @@
-use crate::wire::{ConversationId, Generation, ParticipantId};
+use crate::wire::{AttachBound, ConversationId, DetachEnvelope, Generation, ParticipantId};
 
 /// Complete SDK-local participant request exceeded `min(R, WF)`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,6 +146,59 @@ pub struct CredentialRecoveryLost {
     pub participant_id: ParticipantId,
     /// Last credential generation durably known by the SDK.
     pub last_known_generation: Generation,
+}
+
+/// SDK authority for replaying a detach whose response may have been lost.
+///
+/// Receiving a newer matching [`AttachBound`] consumes this authority through
+/// [`Self::supersede`]; the old detach token must never be resent afterward.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SdkDetachReplayAuthority {
+    request: DetachEnvelope,
+}
+
+impl SdkDetachReplayAuthority {
+    /// Creates replay authority from the exact write-ahead detach request.
+    #[must_use]
+    pub const fn new(request: DetachEnvelope) -> Self {
+        Self { request }
+    }
+
+    /// Exact detach request whose unknown result remains replayable.
+    #[must_use]
+    pub const fn request(&self) -> &DetachEnvelope {
+        &self.request
+    }
+
+    /// Terminalizes this replay authority after a newer matching attach.
+    ///
+    /// The active authority is returned unchanged when the attach belongs to a
+    /// different conversation or participant, or its result generation is not
+    /// newer than the detach generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns this unchanged authority when `attach` is not a matching newer
+    /// result for the same conversation and participant.
+    pub fn supersede(self, attach: &AttachBound) -> Result<AuthoritySuperseded, Self> {
+        if attach.conversation_id() == self.request.conversation_id
+            && attach.participant_id() == self.request.participant_id
+            && attach.capability_generation() > self.request.capability_generation
+        {
+            Ok(AuthoritySuperseded { _sealed: () })
+        } else {
+            Err(self)
+        }
+    }
+}
+
+/// Terminal SDK state for an old detach token superseded by a newer attach.
+///
+/// This no-payload marker is constructible only by consuming
+/// [`SdkDetachReplayAuthority`] with a matching newer [`AttachBound`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuthoritySuperseded {
+    _sealed: (),
 }
 
 /// Reconnect lifecycle state required by the no-permit result.

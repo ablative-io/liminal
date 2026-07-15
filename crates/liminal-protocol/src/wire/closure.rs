@@ -126,14 +126,14 @@ pub struct ClosureSnapshot {
     pub k_headroom: WideResourceVector,
     /// Activated churn cycles already used.
     ///
-    /// `docs/design/LP-EXTRACTION-GOAL.md` requires excluding the occurrence
-    /// array. The frozen contract stores this counter as the same `u32` domain
-    /// as `J`; this is the chosen wire interpretation where R-D1 is terse.
-    pub episode_churn_used: u32,
+    /// This is a protocol count and therefore uses the frozen primitive
+    /// register's `u64` width. R-C4's tighter `u32::MAX` bound constrains valid
+    /// values but does not narrow their serialized representation.
+    pub episode_churn_used: u64,
     /// Churn cycles this transaction would add.
     pub delta_cycles: u64,
-    /// Configured episode churn limit, interpreted in the stored `u32` domain.
-    pub episode_churn_limit: u32,
+    /// Configured episode churn limit in the protocol's `u64` limit domain.
+    pub episode_churn_limit: u64,
 }
 
 /// Capacity-specific closure refusal suffix.

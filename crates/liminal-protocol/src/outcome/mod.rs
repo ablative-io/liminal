@@ -32,12 +32,14 @@ pub use internal::{
 };
 pub use keepalive::{
     AcceptedSocketKeepaliveReason, KeepaliveCertificationFailed, KeepaliveField, KeepaliveOption,
-    KeepalivePhase, KeepaliveValue, PlatformName, StartupKeepaliveReason,
+    KeepalivePhase, KeepaliveReadbackMismatch, NumericKeepaliveOption, PlatformName,
+    StartupKeepaliveReason,
 };
 pub use local::{
-    CredentialRecoveryLost, ParkOrderCounter, ReconnectDelayResult, ReconnectRequiredEvent,
-    ReconnectState, RecordAdmissionOperation, RecordAdmissionUnknown,
-    SdkObserverParkCapacityExceeded, SdkParkOrderExhausted, SdkParticipantRequestTooLarge,
+    AuthoritySuperseded, CredentialRecoveryLost, ParkOrderCounter, ReconnectDelayResult,
+    ReconnectRequiredEvent, ReconnectState, RecordAdmissionOperation, RecordAdmissionUnknown,
+    SdkDetachReplayAuthority, SdkObserverParkCapacityExceeded, SdkParkOrderExhausted,
+    SdkParticipantRequestTooLarge,
 };
 pub use parking::{
     CheckedMultiplyOverflow, CheckedOperation, HandshakeSizeOperands, ParkingLimitField,
@@ -62,9 +64,9 @@ pub use crate::wire::{
     MarkerAckProof, MarkerClosureCapacityExceeded, MarkerMismatch, MarkerMismatchBody,
     MarkerNotDelivered, MarkerProofRequest, NoBinding, ObserverBackpressure,
     ObserverBackpressureState, ObserverProgressStatus, ObserverRecoveryAccepted,
-    ObserverRecoveryConnectionCapacityExceeded, OrderAllocatingEnvelope, ParticipantDelivery,
-    ParticipantRecord, ParticipantReferenceEnvelope, ParticipantTransportRejected,
-    ParticipantUnknown, ReceiptCapacityExceeded, ReceiptExpired, ReceiptReplay, RecordCommitted,
-    RecordTooLarge, Retired, SequenceAllocatingEnvelope, SequenceBudget, ServerPush, ServerValue,
-    StaleAuthority, StaleOrUnknownReceipt, TerminalizedDetachCell, TransportRejectionReason,
+    OrderAllocatingEnvelope, ParticipantDelivery, ParticipantRecord, ParticipantReferenceEnvelope,
+    ParticipantTransportRejected, ParticipantUnknown, ReceiptCapacityExceeded, ReceiptExpired,
+    ReceiptReplay, RecordCommitted, RecordTooLarge, Retired, SequenceAllocatingEnvelope,
+    SequenceBudget, ServerPush, ServerValue, StaleAuthority, StaleOrUnknownReceipt,
+    TerminalizedDetachCell, TransportRejectionReason,
 };

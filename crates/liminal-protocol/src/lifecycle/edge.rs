@@ -1,5 +1,5 @@
-use crate::algebra::WideResourceVector;
-use crate::wire::{BindingEpoch, DeliverySeq, ParticipantId};
+use crate::algebra::{ResourceVector, WideResourceVector};
+use crate::wire::{BindingEpoch, DeliverySeq, ParticipantId, ParticipantIndex};
 
 /// Nonzero componentwise closure debt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26,52 +26,181 @@ impl ClosureDebt {
 /// Observer-projection witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObserverProjection {
-    /// Projection must complete through this sequence.
-    pub through_seq: DeliverySeq,
+    through_seq: DeliverySeq,
+}
+
+impl ObserverProjection {
+    /// Creates an exact observer-projection witness.
+    #[must_use]
+    pub const fn new(through_seq: DeliverySeq) -> Self {
+        Self { through_seq }
+    }
+
+    /// Returns the exact projection boundary.
+    #[must_use]
+    pub const fn through_seq(self) -> DeliverySeq {
+        self.through_seq
+    }
 }
 
 /// Physical-compaction range witness.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PhysicalCompaction {
-    /// Floor before required compaction.
-    pub from_floor: DeliverySeq,
-    /// Inclusive required compaction boundary.
-    pub through_seq: DeliverySeq,
+    from_floor: DeliverySeq,
+    through_seq: DeliverySeq,
 }
 
-/// Exact marker delivery witness.
+impl PhysicalCompaction {
+    /// Creates a nonempty, ordered compaction range.
+    #[must_use]
+    pub const fn new(from_floor: DeliverySeq, through_seq: DeliverySeq) -> Option<Self> {
+        if from_floor <= through_seq {
+            Some(Self {
+                from_floor,
+                through_seq,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the exact first sequence in the compaction range.
+    #[must_use]
+    pub const fn from_floor(self) -> DeliverySeq {
+        self.from_floor
+    }
+
+    /// Returns the exact inclusive compaction boundary.
+    #[must_use]
+    pub const fn through_seq(self) -> DeliverySeq {
+        self.through_seq
+    }
+}
+
+/// Exact marker-delivery witness.
+// The frozen tag spells this required field `marker_delivery_seq`.
+#[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerDelivery {
-    /// Affected participant.
-    pub participant_id: ParticipantId,
-    /// Binding epoch that must receive the marker.
-    pub binding_epoch: BindingEpoch,
-    /// Marker sequence.
-    pub marker_delivery_seq: DeliverySeq,
+    participant_id: ParticipantId,
+    binding_epoch: BindingEpoch,
+    marker_delivery_seq: DeliverySeq,
+}
+
+impl MarkerDelivery {
+    /// Creates a planned exact marker-delivery witness.
+    #[must_use]
+    pub const fn new(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        marker_delivery_seq: DeliverySeq,
+    ) -> Self {
+        Self {
+            participant_id,
+            binding_epoch,
+            marker_delivery_seq,
+        }
+    }
+
+    /// Returns the marker owner.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the exact delivery epoch.
+    #[must_use]
+    pub const fn binding_epoch(self) -> BindingEpoch {
+        self.binding_epoch
+    }
+
+    /// Returns the exact marker sequence.
+    #[must_use]
+    pub const fn marker_delivery_seq(self) -> DeliverySeq {
+        self.marker_delivery_seq
+    }
 }
 
 /// Continuous cursor-progress witness with no delivered marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorProgressContinuous {
-    /// Affected participant.
-    pub participant_id: ParticipantId,
-    /// Binding epoch owning the cursor witness.
-    pub binding_epoch: BindingEpoch,
-    /// Required cumulative boundary.
-    pub through_seq: DeliverySeq,
+    participant_id: ParticipantId,
+    binding_epoch: BindingEpoch,
+    through_seq: DeliverySeq,
+}
+
+impl CursorProgressContinuous {
+    /// Creates an exact current-epoch continuous-cursor witness.
+    #[must_use]
+    pub const fn new(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        through_seq: DeliverySeq,
+    ) -> Self {
+        Self {
+            participant_id,
+            binding_epoch,
+            through_seq,
+        }
+    }
+
+    /// Returns the participant whose cursor is required.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the exact binding epoch.
+    #[must_use]
+    pub const fn binding_epoch(self) -> BindingEpoch {
+        self.binding_epoch
+    }
+
+    /// Returns the required cumulative boundary.
+    #[must_use]
+    pub const fn through_seq(self) -> DeliverySeq {
+        self.through_seq
+    }
 }
 
 /// Marker-backed cursor-progress witness.
+///
+/// This value has no public constructor. It is produced only by consuming an
+/// exact [`MarkerDelivery`] with its matching [`Event::marker_delivered`]. That
+/// makes the durable exact-epoch delivery fact required by the frozen contract
+/// a type-level precondition for detached credential recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorProgressMarker {
-    /// Affected participant.
-    pub participant_id: ParticipantId,
-    /// Binding epoch that received the marker.
-    pub binding_epoch: BindingEpoch,
-    /// Required cumulative boundary.
-    pub through_seq: DeliverySeq,
-    /// Exact delivered marker.
-    pub marker_delivery_seq: DeliverySeq,
+    participant_id: ParticipantId,
+    binding_epoch: BindingEpoch,
+    through_seq: DeliverySeq,
+    marker_delivery_seq: DeliverySeq,
+}
+
+impl CursorProgressMarker {
+    /// Returns the participant whose marker must be accepted.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the exact epoch that received the marker.
+    #[must_use]
+    pub const fn binding_epoch(self) -> BindingEpoch {
+        self.binding_epoch
+    }
+
+    /// Returns the required cumulative boundary.
+    #[must_use]
+    pub const fn through_seq(self) -> DeliverySeq {
+        self.through_seq
+    }
+
+    /// Returns the exact delivered marker.
+    #[must_use]
+    pub const fn marker_delivery_seq(self) -> DeliverySeq {
+        self.marker_delivery_seq
+    }
 }
 
 /// Cursor progress split into typestates rather than an optional marker bag.
@@ -79,39 +208,146 @@ pub struct CursorProgressMarker {
 pub enum ParticipantCursorProgress {
     /// Continuous cursor witness.
     Continuous(CursorProgressContinuous),
-    /// Exact marker acknowledgement witness.
+    /// Exact marker acknowledgement witness, derivable only from delivery.
     Marker(CursorProgressMarker),
 }
 
+impl ParticipantCursorProgress {
+    /// Creates a continuous, no-marker cursor witness.
+    #[must_use]
+    pub const fn continuous(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        through_seq: DeliverySeq,
+    ) -> Self {
+        Self::Continuous(CursorProgressContinuous::new(
+            participant_id,
+            binding_epoch,
+            through_seq,
+        ))
+    }
+
+    /// Returns the participant whose cursor is required.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        match self {
+            Self::Continuous(value) => value.participant_id,
+            Self::Marker(value) => value.participant_id,
+        }
+    }
+
+    /// Returns the exact binding epoch.
+    #[must_use]
+    pub const fn binding_epoch(self) -> BindingEpoch {
+        match self {
+            Self::Continuous(value) => value.binding_epoch,
+            Self::Marker(value) => value.binding_epoch,
+        }
+    }
+
+    /// Returns the required cumulative boundary.
+    #[must_use]
+    pub const fn through_seq(self) -> DeliverySeq {
+        match self {
+            Self::Continuous(value) => value.through_seq,
+            Self::Marker(value) => value.through_seq,
+        }
+    }
+
+    /// Returns the exact delivered marker when this is marker-backed.
+    #[must_use]
+    pub const fn marker_delivery_seq(self) -> Option<DeliverySeq> {
+        match self {
+            Self::Continuous(_) => None,
+            Self::Marker(value) => Some(value.marker_delivery_seq),
+        }
+    }
+}
+
 /// Detached fenced credential-recovery witness.
+///
+/// This state is produced only by the exact binding fate of a marker-backed
+/// cursor witness; callers cannot fabricate a durable delivery fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DetachedCredentialRecovery {
-    /// Detached participant.
-    pub participant_id: ParticipantId,
-    /// Delivered marker anchoring recovery.
-    pub marker_delivery_seq: DeliverySeq,
-    /// Prior dead binding epoch.
-    pub prior_binding_epoch: BindingEpoch,
+    participant_id: ParticipantId,
+    marker_delivery_seq: DeliverySeq,
+    prior_binding_epoch: BindingEpoch,
+}
+
+impl DetachedCredentialRecovery {
+    /// Returns the detached participant.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the delivered recovery marker.
+    #[must_use]
+    pub const fn marker_delivery_seq(self) -> DeliverySeq {
+        self.marker_delivery_seq
+    }
+
+    /// Returns the prior authoritative epoch.
+    #[must_use]
+    pub const fn prior_binding_epoch(self) -> BindingEpoch {
+        self.prior_binding_epoch
+    }
 }
 
 /// Leave-only undelivered-marker release witness.
+///
+/// This state is produced only when exact binding fate consumes a marker that
+/// has not reached [`CursorProgressMarker`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DetachedMarkerRelease {
-    /// Detached participant.
-    pub participant_id: ParticipantId,
-    /// Undelivered marker anchor.
-    pub marker_delivery_seq: DeliverySeq,
-    /// Last dead binding epoch.
-    pub last_dead_binding_epoch: BindingEpoch,
+    participant_id: ParticipantId,
+    marker_delivery_seq: DeliverySeq,
+    last_dead_binding_epoch: BindingEpoch,
+}
+
+impl DetachedMarkerRelease {
+    /// Returns the detached participant.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the undelivered marker.
+    #[must_use]
+    pub const fn marker_delivery_seq(self) -> DeliverySeq {
+        self.marker_delivery_seq
+    }
+
+    /// Returns the dead binding epoch.
+    #[must_use]
+    pub const fn last_dead_binding_epoch(self) -> BindingEpoch {
+        self.last_dead_binding_epoch
+    }
 }
 
 /// Leave-only detached-cursor release witness.
+///
+/// This state is produced only when exact binding fate consumes a continuous
+/// cursor witness with no marker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DetachedCursorRelease {
-    /// Detached participant.
-    pub participant_id: ParticipantId,
-    /// Last dead binding epoch.
-    pub last_dead_binding_epoch: BindingEpoch,
+    participant_id: ParticipantId,
+    last_dead_binding_epoch: BindingEpoch,
+}
+
+impl DetachedCursorRelease {
+    /// Returns the detached participant.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the dead binding epoch.
+    #[must_use]
+    pub const fn last_dead_binding_epoch(self) -> BindingEpoch {
+        self.last_dead_binding_epoch
+    }
 }
 
 /// Exact seven non-clear stored edge kinds.
@@ -147,90 +383,112 @@ pub enum ClosureState {
     },
 }
 
-/// Successor set after debt completion or detached Leave.
+/// Validated completion restricted to clear, observer projection, or physical
+/// compaction.
+///
+/// Fields are private so DCR, marker delivery, PCP, DMR, and `DCursor` cannot be
+/// smuggled through a detached attach or Leave completion.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DebtCompletion {
-    /// Debt cleared.
-    Clear,
-    /// Observer projection remains.
-    ObserverProjection(ObserverProjection),
-    /// Physical compaction remains.
-    PhysicalCompaction(PhysicalCompaction),
+pub struct DebtCompletion(ClosureState);
+
+impl DebtCompletion {
+    /// Selects the only legal edge-free state.
+    #[must_use]
+    pub const fn clear() -> Self {
+        Self(ClosureState::Clear)
+    }
+
+    /// Selects an independent observer-projection successor under nonzero debt.
+    #[must_use]
+    pub const fn observer_projection(debt: ClosureDebt, edge: ObserverProjection) -> Self {
+        Self(ClosureState::Owed {
+            debt,
+            edge: StoredEdge::ObserverProjection(edge),
+        })
+    }
+
+    /// Selects an independent physical-compaction successor under nonzero debt.
+    #[must_use]
+    pub const fn physical_compaction(debt: ClosureDebt, edge: PhysicalCompaction) -> Self {
+        Self(ClosureState::Owed {
+            debt,
+            edge: StoredEdge::PhysicalCompaction(edge),
+        })
+    }
+
+    /// Returns the validated closure state.
+    #[must_use]
+    pub const fn into_state(self) -> ClosureState {
+        self.0
+    }
 }
 
-/// OP/PC completion successor set; direct DCR is absent by construction.
+/// Opaque proof that an exact marker-fenced attach committed.
+///
+/// Only [`DetachedCredentialRecovery::fenced_attach`] constructs this value.
+/// Ordinary attach therefore cannot fabricate marker acceptance or advance a
+/// cursor merely by presenting a marker sequence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProjectionCompactionSuccessor {
-    /// Debt cleared.
-    Clear,
-    /// Later observer projection.
-    ObserverProjection(ObserverProjection),
-    /// Later physical compaction.
-    PhysicalCompaction(PhysicalCompaction),
-    /// Marker delivery.
-    MarkerDelivery(MarkerDelivery),
-    /// Participant cursor progress.
-    ParticipantCursorProgress(ParticipantCursorProgress),
-    /// Detached marker release.
-    DetachedMarkerRelease(DetachedMarkerRelease),
-    /// Detached cursor release.
-    DetachedCursorRelease(DetachedCursorRelease),
+pub struct FencedAttachCommit {
+    participant_id: ParticipantId,
+    marker_delivery_seq: DeliverySeq,
+    prior_binding_epoch: BindingEpoch,
+    new_binding_epoch: BindingEpoch,
+    next_state: ClosureState,
 }
 
-impl ObserverProjection {
-    /// Applies projection and atomically selects its typed successor.
+impl FencedAttachCommit {
+    /// Returns the participant whose fenced recovery committed.
     #[must_use]
-    pub const fn complete(
-        self,
-        successor: ProjectionCompactionSuccessor,
-    ) -> ProjectionCompactionSuccessor {
-        let _ = self;
-        successor
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the exact delivered marker accepted by the commit.
+    #[must_use]
+    pub const fn marker_delivery_seq(self) -> DeliverySeq {
+        self.marker_delivery_seq
+    }
+
+    /// Returns the exact dead binding epoch that durably received the marker.
+    #[must_use]
+    pub const fn prior_binding_epoch(self) -> BindingEpoch {
+        self.prior_binding_epoch
+    }
+
+    /// Returns the exact newly committed authoritative binding epoch.
+    #[must_use]
+    pub const fn new_binding_epoch(self) -> BindingEpoch {
+        self.new_binding_epoch
+    }
+
+    /// Returns the measured clear, observer-projection, or compaction successor.
+    #[must_use]
+    pub const fn next_state(self) -> ClosureState {
+        self.next_state
     }
 }
 
-impl PhysicalCompaction {
-    /// Applies compaction and atomically selects its typed successor.
-    #[must_use]
-    pub const fn complete(
-        self,
-        successor: ProjectionCompactionSuccessor,
-    ) -> ProjectionCompactionSuccessor {
-        let _ = self;
-        successor
-    }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SuccessorUse {
+    ObserverCompletion,
+    ObserverMarkerAppend,
+    PhysicalCompletion,
+    PhysicalCover,
+    CursorGreaterAck,
 }
 
-impl MarkerDelivery {
-    /// Final-emitter delivery becomes exact marker-backed cursor progress.
-    #[must_use]
-    pub const fn delivered(self, through_seq: DeliverySeq) -> CursorProgressMarker {
-        CursorProgressMarker {
-            participant_id: self.participant_id,
-            binding_epoch: self.binding_epoch,
-            through_seq,
-            marker_delivery_seq: self.marker_delivery_seq,
-        }
-    }
-
-    /// Binding fate before delivery becomes Leave-only detached marker release.
-    #[must_use]
-    pub const fn binding_fate(self) -> DetachedMarkerRelease {
-        DetachedMarkerRelease {
-            participant_id: self.participant_id,
-            marker_delivery_seq: self.marker_delivery_seq,
-            last_dead_binding_epoch: self.binding_epoch,
-        }
-    }
-
-    /// Charged supersession retargets exact delivery to a new binding epoch.
-    #[must_use]
-    pub const fn retarget(self, binding_epoch: BindingEpoch) -> Self {
-        Self {
-            binding_epoch,
-            ..self
-        }
-    }
+/// Strict/later successor authority for OP, PC, and greater cumulative ack.
+///
+/// The predecessor, consumed event, and validated resulting state are private.
+/// A value can be obtained only from the exact predecessor edge's builder, so a
+/// caller cannot substitute an earlier edge or direct DCR at application time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProjectionCompactionSuccessor {
+    predecessor: StoredEdge,
+    event: Event,
+    use_kind: SuccessorUse,
+    state: ClosureState,
 }
 
 /// Fate successor selected solely from cursor-progress typestate.
@@ -242,19 +500,1102 @@ pub enum CursorFateSuccessor {
     DetachedCursorRelease(DetachedCursorRelease),
 }
 
-impl ParticipantCursorProgress {
-    /// Completion can select only clear, observer projection, or compaction.
+impl CursorFateSuccessor {
+    /// Converts the derived fate into its stored edge.
     #[must_use]
-    pub const fn complete(self, successor: DebtCompletion) -> DebtCompletion {
-        let _ = self;
-        successor
+    pub const fn into_stored_edge(self) -> StoredEdge {
+        match self {
+            Self::DetachedCredentialRecovery(value) => {
+                StoredEdge::DetachedCredentialRecovery(value)
+            }
+            Self::DetachedCursorRelease(value) => StoredEdge::DetachedCursorRelease(value),
+        }
+    }
+}
+
+/// Exact refusal selected by a detached edge or charged retarget check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DetachedAttachRefusal {
+    /// Ordinary attach violates the recovery fence.
+    RecoveryFence,
+    /// Presented marker was never delivered.
+    MarkerNotDelivered,
+    /// Edge owns no matching marker.
+    MarkerMismatch,
+    /// Marker-backed PCP must be acknowledged before supersession.
+    DeliveredMarkerAwaitingAck,
+    /// The proposed positive churn delta exceeds the episode limit.
+    EpisodeChurnLimit,
+    /// The proposed binding epoch does not immediately supersede this epoch.
+    StaleAuthority,
+    /// Binding-required work cannot run for a detached edge owner.
+    NoBinding,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DetachedClaimTarget {
+    CredentialRecovery {
+        marker_delivery_seq: DeliverySeq,
+        binding_epoch: BindingEpoch,
+    },
+    MarkerRelease {
+        marker_delivery_seq: DeliverySeq,
+        binding_epoch: BindingEpoch,
+    },
+    CursorRelease {
+        binding_epoch: BindingEpoch,
+    },
+}
+
+/// Validated evidence for an exact-current K-backed detached Leave.
+///
+/// There is no public constructor. Each detached edge validates participant,
+/// exact edge target, positive actual record charge, remaining K, and the
+/// available exit claim before producing this edge-bound value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KClaimBackedDetachedLeave {
+    participant_id: ParticipantId,
+    target: DetachedClaimTarget,
+    actual_charge: ResourceVector,
+}
+
+impl KClaimBackedDetachedLeave {
+    /// Returns the exact detached participant.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
     }
 
-    /// Binding fate selects DCR only from marker-backed state and `DCursor` only
-    /// from continuous state.
+    /// Returns the exact charge already checked against remaining K.
     #[must_use]
-    pub const fn binding_fate(self) -> CursorFateSuccessor {
-        match self {
+    pub const fn actual_charge(self) -> ResourceVector {
+        self.actual_charge
+    }
+}
+
+/// Opaque typed completion event.
+///
+/// Constructors validate each event's local scalar shape. Edge transitions then
+/// consume the event and match its participant, binding, marker, range, and
+/// boundary against the exact stored predecessor. The private kind set is the
+/// frozen eight-kind register: marker and normal acknowledgements share
+/// `CursorProgressed`, while live and detached alternatives share
+/// `LeaveCommitted`; the convenience constructors do not invent occurrences.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Event(EventKind);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EventKind {
+    ProjectionCompleted {
+        through_seq: DeliverySeq,
+    },
+    CompactionCompleted {
+        from_floor: DeliverySeq,
+        through_seq: DeliverySeq,
+        resulting_floor: DeliverySeq,
+    },
+    MarkerAppended {
+        marker_delivery_seq: DeliverySeq,
+        resulting_projection_through: DeliverySeq,
+    },
+    MarkerDelivered {
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        marker_delivery_seq: DeliverySeq,
+    },
+    CursorProgressed {
+        participant_index: ParticipantIndex,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        progress: CursorProgressEvent,
+        resulting_floor: DeliverySeq,
+    },
+    BindingFateObserved {
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        resulting_floor: DeliverySeq,
+    },
+    LeaveCommitted {
+        participant_id: ParticipantId,
+        authority: LeaveAuthority,
+        resulting_floor: DeliverySeq,
+    },
+    FencedRecoveryCommitted {
+        participant_id: ParticipantId,
+        marker_delivery_seq: DeliverySeq,
+        prior_binding_epoch: BindingEpoch,
+        new_binding_epoch: BindingEpoch,
+        resulting_floor: DeliverySeq,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CursorProgressEvent {
+    Normal {
+        previous_cursor: DeliverySeq,
+        through_seq: DeliverySeq,
+    },
+    Marker {
+        marker_delivery_seq: DeliverySeq,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LeaveAuthority {
+    Live(BindingEpoch),
+    Detached,
+}
+
+impl Event {
+    /// Records observer projection through an exact sequence.
+    #[must_use]
+    pub const fn projection_completed(through_seq: DeliverySeq) -> Self {
+        Self(EventKind::ProjectionCompleted { through_seq })
+    }
+
+    /// Records exact physical compaction and its resulting floor.
+    #[must_use]
+    pub const fn compaction_completed(
+        from_floor: DeliverySeq,
+        through_seq: DeliverySeq,
+        resulting_floor: DeliverySeq,
+    ) -> Option<Self> {
+        if from_floor <= through_seq && resulting_floor > through_seq {
+            Some(Self(EventKind::CompactionCompleted {
+                from_floor,
+                through_seq,
+                resulting_floor,
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Records a preclaimed marker append that extends an OP suffix.
+    #[must_use]
+    pub const fn marker_appended(
+        marker_delivery_seq: DeliverySeq,
+        resulting_projection_through: DeliverySeq,
+    ) -> Self {
+        Self(EventKind::MarkerAppended {
+            marker_delivery_seq,
+            resulting_projection_through,
+        })
+    }
+
+    /// Records final-emitter delivery of an exact marker to an exact epoch.
+    #[must_use]
+    pub const fn marker_delivered(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        marker_delivery_seq: DeliverySeq,
+    ) -> Self {
+        Self(EventKind::MarkerDelivered {
+            participant_id,
+            binding_epoch,
+            marker_delivery_seq,
+        })
+    }
+
+    /// Records a strictly advancing cumulative normal ack.
+    ///
+    /// V1's permanent participant id is the participant index, so the stored
+    /// occurrence key is derived from `participant_id` rather than accepted as
+    /// an independently forgeable value.
+    #[must_use]
+    pub const fn cursor_progressed(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        previous_cursor: DeliverySeq,
+        through_seq: DeliverySeq,
+        resulting_floor: DeliverySeq,
+    ) -> Option<Self> {
+        if through_seq > previous_cursor {
+            Some(Self(EventKind::CursorProgressed {
+                participant_index: participant_id,
+                participant_id,
+                binding_epoch,
+                progress: CursorProgressEvent::Normal {
+                    previous_cursor,
+                    through_seq,
+                },
+                resulting_floor,
+            }))
+        } else {
+            None
+        }
+    }
+
+    /// Records acceptance of one exact delivered marker, deriving its
+    /// participant-index occurrence key from the permanent participant id.
+    #[must_use]
+    pub const fn marker_acknowledged(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        marker_delivery_seq: DeliverySeq,
+        resulting_floor: DeliverySeq,
+    ) -> Self {
+        Self(EventKind::CursorProgressed {
+            participant_index: participant_id,
+            participant_id,
+            binding_epoch,
+            progress: CursorProgressEvent::Marker {
+                marker_delivery_seq,
+            },
+            resulting_floor,
+        })
+    }
+
+    /// Records exact binding fate and its measured floor effect.
+    #[must_use]
+    pub const fn binding_fate_observed(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        resulting_floor: DeliverySeq,
+    ) -> Self {
+        Self(EventKind::BindingFateObserved {
+            participant_id,
+            binding_epoch,
+            resulting_floor,
+        })
+    }
+
+    /// Records a live-bound Leave and its measured floor effect.
+    #[must_use]
+    pub const fn live_leave_committed(
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        resulting_floor: DeliverySeq,
+    ) -> Self {
+        Self(EventKind::LeaveCommitted {
+            participant_id,
+            authority: LeaveAuthority::Live(binding_epoch),
+            resulting_floor,
+        })
+    }
+
+    /// Records a detached Leave and its measured floor effect.
+    #[must_use]
+    pub const fn detached_leave_committed(
+        participant_id: ParticipantId,
+        resulting_floor: DeliverySeq,
+    ) -> Self {
+        Self(EventKind::LeaveCommitted {
+            participant_id,
+            authority: LeaveAuthority::Detached,
+            resulting_floor,
+        })
+    }
+
+    /// Records exact fenced recovery into a new binding epoch.
+    #[must_use]
+    pub const fn fenced_recovery_committed(
+        participant_id: ParticipantId,
+        marker_delivery_seq: DeliverySeq,
+        prior_binding_epoch: BindingEpoch,
+        new_binding_epoch: BindingEpoch,
+        resulting_floor: DeliverySeq,
+    ) -> Self {
+        Self(EventKind::FencedRecoveryCommitted {
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+            new_binding_epoch,
+            resulting_floor,
+        })
+    }
+}
+
+impl ObserverProjection {
+    /// Validates clear selection after this exact projection completes.
+    #[must_use]
+    pub const fn clear_after_completion(
+        &self,
+        event: &Event,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        if projection_completion_boundary(*self, *event).is_some() {
+            Some(ProjectionCompactionSuccessor {
+                predecessor: StoredEdge::ObserverProjection(*self),
+                event: *event,
+                use_kind: SuccessorUse::ObserverCompletion,
+                state: ClosureState::Clear,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Validates a non-DCR strict suffix after this exact projection completes.
+    #[must_use]
+    pub const fn strict_after_completion(
+        &self,
+        event: &Event,
+        debt: ClosureDebt,
+        edge: StoredEdge,
+        successor_boundary: DeliverySeq,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        let Some(completed_through) = projection_completion_boundary(*self, *event) else {
+            return None;
+        };
+        if successor_boundary <= completed_through
+            || !strict_edge_matches_boundary(edge, successor_boundary)
+        {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::ObserverProjection(*self),
+            event: *event,
+            use_kind: SuccessorUse::ObserverCompletion,
+            state: ClosureState::Owed { debt, edge },
+        })
+    }
+
+    /// Consumes exact projection completion and its predecessor-bound successor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state when the event or successor authority
+    /// was not built for this exact projection.
+    pub fn complete(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: ProjectionCompactionSuccessor,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ObserverProjection(self));
+        if successor.predecessor == StoredEdge::ObserverProjection(self)
+            && successor.event == event
+            && successor.use_kind == SuccessorUse::ObserverCompletion
+            && projection_completion_boundary(self, event).is_some()
+        {
+            Ok(successor.state)
+        } else {
+            Err(original)
+        }
+    }
+
+    /// Validates the exact later OP selected by a preclaimed marker append.
+    #[must_use]
+    pub const fn later_projection_after_marker(
+        &self,
+        event: &Event,
+        debt: ClosureDebt,
+        successor: Self,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        let EventKind::MarkerAppended {
+            marker_delivery_seq,
+            resulting_projection_through,
+        } = event.0
+        else {
+            return None;
+        };
+        if marker_delivery_seq <= self.through_seq
+            || resulting_projection_through < marker_delivery_seq
+            || successor.through_seq != resulting_projection_through
+        {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::ObserverProjection(*self),
+            event: *event,
+            use_kind: SuccessorUse::ObserverMarkerAppend,
+            state: owed(debt, StoredEdge::ObserverProjection(successor)),
+        })
+    }
+
+    /// Consumes the marker occurrence and atomically installs its exact later OP.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state when the event-bound successor was
+    /// built for another projection or occurrence.
+    pub fn marker_appended(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: ProjectionCompactionSuccessor,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ObserverProjection(self));
+        if successor.predecessor == StoredEdge::ObserverProjection(self)
+            && successor.event == event
+            && successor.use_kind == SuccessorUse::ObserverMarkerAppend
+        {
+            Ok(successor.state)
+        } else {
+            Err(original)
+        }
+    }
+
+    /// Consumes an independently valid cursor, marker, fate, or Leave event and
+    /// preserves this exact OP while debt remains, or clears it with debt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state for an event outside those independent
+    /// invalidator classes.
+    pub const fn independent_event(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ObserverProjection(self));
+        if !matches!(
+            event.0,
+            EventKind::CursorProgressed { .. }
+                | EventKind::BindingFateObserved { .. }
+                | EventKind::LeaveCommitted { .. }
+        ) {
+            return Err(original);
+        }
+        Ok(preserve_or_clear(
+            resulting_debt,
+            StoredEdge::ObserverProjection(self),
+        ))
+    }
+
+    /// Applies a binding change only after a positive charged churn preflight.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged state and `EpisodeChurnLimit` when the delta is
+    /// zero or would exceed the episode limit.
+    pub const fn charged_binding_change(
+        self,
+        debt: ClosureDebt,
+        episode_churn_used: u64,
+        delta_cycles: u64,
+        episode_churn_limit: u64,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, (ClosureState, DetachedAttachRefusal)> {
+        let original = owed(debt, StoredEdge::ObserverProjection(self));
+        if !charged_churn_fits(episode_churn_used, delta_cycles, episode_churn_limit) {
+            return Err((original, DetachedAttachRefusal::EpisodeChurnLimit));
+        }
+        Ok(preserve_or_clear(
+            resulting_debt,
+            StoredEdge::ObserverProjection(self),
+        ))
+    }
+}
+
+impl PhysicalCompaction {
+    /// Validates clear selection after exact PC completion.
+    #[must_use]
+    pub const fn clear_after_completion(
+        &self,
+        event: &Event,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        if physical_completion_floor(*self, *event).is_some() {
+            Some(ProjectionCompactionSuccessor {
+                predecessor: StoredEdge::PhysicalCompaction(*self),
+                event: *event,
+                use_kind: SuccessorUse::PhysicalCompletion,
+                state: ClosureState::Clear,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Validates a non-DCR strict suffix after exact PC completion.
+    #[must_use]
+    pub const fn strict_after_completion(
+        &self,
+        event: &Event,
+        debt: ClosureDebt,
+        edge: StoredEdge,
+        successor_boundary: DeliverySeq,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        let Some(resulting_floor) = physical_completion_floor(*self, *event) else {
+            return None;
+        };
+        if successor_boundary < resulting_floor
+            || !strict_edge_matches_boundary(edge, successor_boundary)
+        {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::PhysicalCompaction(*self),
+            event: *event,
+            use_kind: SuccessorUse::PhysicalCompletion,
+            state: ClosureState::Owed { debt, edge },
+        })
+    }
+
+    /// Consumes exact PC completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state when the event or successor authority
+    /// does not belong to this exact compaction range.
+    pub fn complete(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: ProjectionCompactionSuccessor,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::PhysicalCompaction(self));
+        if successor.predecessor == StoredEdge::PhysicalCompaction(self)
+            && successor.event == event
+            && successor.use_kind == SuccessorUse::PhysicalCompletion
+            && physical_completion_floor(self, event).is_some()
+        {
+            Ok(successor.state)
+        } else {
+            Err(original)
+        }
+    }
+
+    /// Applies an advancing ack, fate, or Leave whose resulting floor does not
+    /// cover this PC, preserving the exact range while debt remains.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state when the event is not a progress class
+    /// or its resulting floor covers the stored range.
+    pub const fn preserve_progress(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: ClosureDebt,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::PhysicalCompaction(self));
+        let Some(resulting_floor) = progress_event_floor(event) else {
+            return Err(original);
+        };
+        if resulting_floor > self.through_seq {
+            return Err(original);
+        }
+        Ok(owed(resulting_debt, StoredEdge::PhysicalCompaction(self)))
+    }
+
+    /// Validates clear selection when an ack, fate, or Leave covers this PC.
+    #[must_use]
+    pub const fn clear_after_progress(
+        &self,
+        event: &Event,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        let Some(resulting_floor) = progress_event_floor(*event) else {
+            return None;
+        };
+        if resulting_floor <= self.through_seq {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::PhysicalCompaction(*self),
+            event: *event,
+            use_kind: SuccessorUse::PhysicalCover,
+            state: ClosureState::Clear,
+        })
+    }
+
+    /// Validates a strict non-DCR suffix when an ack, fate, or Leave covers PC.
+    #[must_use]
+    pub const fn strict_after_progress(
+        &self,
+        event: &Event,
+        debt: ClosureDebt,
+        edge: StoredEdge,
+        successor_boundary: DeliverySeq,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        let Some(resulting_floor) = progress_event_floor(*event) else {
+            return None;
+        };
+        if resulting_floor <= self.through_seq
+            || successor_boundary < resulting_floor
+            || !strict_edge_matches_boundary(edge, successor_boundary)
+        {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::PhysicalCompaction(*self),
+            event: *event,
+            use_kind: SuccessorUse::PhysicalCover,
+            state: ClosureState::Owed { debt, edge },
+        })
+    }
+
+    /// Consumes the covering ack/fate/Leave event and its validated suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state when the successor authority is not
+    /// bound to this range and event.
+    pub fn covered_by_progress(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: ProjectionCompactionSuccessor,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::PhysicalCompaction(self));
+        if successor.predecessor == StoredEdge::PhysicalCompaction(self)
+            && successor.event == event
+            && successor.use_kind == SuccessorUse::PhysicalCover
+        {
+            Ok(successor.state)
+        } else {
+            Err(original)
+        }
+    }
+
+    /// No-op and refused acknowledgements consume no event and preserve exact PC.
+    #[must_use]
+    pub const fn unchanged(self, debt: ClosureDebt) -> ClosureState {
+        owed(debt, StoredEdge::PhysicalCompaction(self))
+    }
+
+    /// Applies a charged binding change that leaves this PC range uncovered.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged state with the precise churn or stale-selection
+    /// refusal when charging fails or the measured floor covers the range.
+    pub const fn charged_binding_change_preserving(
+        self,
+        debt: ClosureDebt,
+        episode_churn_used: u64,
+        delta_cycles: u64,
+        episode_churn_limit: u64,
+        resulting_floor: DeliverySeq,
+        resulting_debt: ClosureDebt,
+    ) -> Result<ClosureState, (ClosureState, DetachedAttachRefusal)> {
+        let original = owed(debt, StoredEdge::PhysicalCompaction(self));
+        if !charged_churn_fits(episode_churn_used, delta_cycles, episode_churn_limit) {
+            return Err((original, DetachedAttachRefusal::EpisodeChurnLimit));
+        }
+        if resulting_floor > self.through_seq {
+            return Err((original, DetachedAttachRefusal::StaleAuthority));
+        }
+        Ok(owed(resulting_debt, StoredEdge::PhysicalCompaction(self)))
+    }
+
+    /// Applies a charged binding change whose measured floor covers this PC.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged state with the precise churn or stale-selection
+    /// refusal when charging fails or the proposed strict suffix is invalid.
+    #[allow(clippy::too_many_arguments)]
+    pub const fn charged_binding_change_covering(
+        self,
+        debt: ClosureDebt,
+        episode_churn_used: u64,
+        delta_cycles: u64,
+        episode_churn_limit: u64,
+        resulting_floor: DeliverySeq,
+        resulting_debt: ClosureDebt,
+        edge: StoredEdge,
+        successor_boundary: DeliverySeq,
+    ) -> Result<ClosureState, (ClosureState, DetachedAttachRefusal)> {
+        let original = owed(debt, StoredEdge::PhysicalCompaction(self));
+        if !charged_churn_fits(episode_churn_used, delta_cycles, episode_churn_limit) {
+            return Err((original, DetachedAttachRefusal::EpisodeChurnLimit));
+        }
+        if resulting_floor <= self.through_seq
+            || successor_boundary < resulting_floor
+            || !strict_edge_matches_boundary(edge, successor_boundary)
+        {
+            return Err((original, DetachedAttachRefusal::StaleAuthority));
+        }
+        Ok(owed(resulting_debt, edge))
+    }
+}
+
+impl MarkerDelivery {
+    /// Consumes exact final-emitter delivery and derives marker-backed PCP.
+    ///
+    /// The PCP boundary is the delivered marker itself; callers cannot supply a
+    /// different cursor witness.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless participant, epoch, and marker
+    /// exactly match this delivery witness.
+    pub fn delivered(self, debt: ClosureDebt, event: Event) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::MarkerDelivery(self));
+        let EventKind::MarkerDelivered {
+            participant_id,
+            binding_epoch,
+            marker_delivery_seq,
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if participant_id != self.participant_id
+            || binding_epoch != self.binding_epoch
+            || marker_delivery_seq != self.marker_delivery_seq
+        {
+            return Err(original);
+        }
+        let progress = CursorProgressMarker {
+            participant_id,
+            binding_epoch,
+            through_seq: marker_delivery_seq,
+            marker_delivery_seq,
+        };
+        Ok(owed(
+            debt,
+            StoredEdge::ParticipantCursorProgress(ParticipantCursorProgress::Marker(progress)),
+        ))
+    }
+
+    /// Applies a lower normal ack, projection, or compaction below the anchor,
+    /// preserving exact delivery while debt remains or clearing it with debt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state when the event is not a permitted lower
+    /// progress event or reaches the marker anchor.
+    pub const fn lower_progress(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::MarkerDelivery(self));
+        let is_lower = match event.0 {
+            EventKind::CursorProgressed {
+                progress: CursorProgressEvent::Normal { through_seq, .. },
+                ..
+            }
+            | EventKind::ProjectionCompleted { through_seq } => {
+                through_seq < self.marker_delivery_seq
+            }
+            EventKind::CompactionCompleted {
+                through_seq,
+                resulting_floor,
+                ..
+            } => {
+                through_seq < self.marker_delivery_seq
+                    && resulting_floor <= self.marker_delivery_seq
+            }
+            _ => false,
+        };
+        if !is_lower {
+            return Err(original);
+        }
+        Ok(preserve_or_clear(
+            resulting_debt,
+            StoredEdge::MarkerDelivery(self),
+        ))
+    }
+
+    /// Consumes exact pre-delivery binding fate and derives Leave-only DMR.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless fate names the exact participant
+    /// and binding epoch targeted by this undelivered marker.
+    pub fn binding_fate(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::MarkerDelivery(self));
+        let EventKind::BindingFateObserved {
+            participant_id,
+            binding_epoch,
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if participant_id != self.participant_id || binding_epoch != self.binding_epoch {
+            return Err(original);
+        }
+        Ok(owed(
+            debt,
+            StoredEdge::DetachedMarkerRelease(DetachedMarkerRelease {
+                participant_id,
+                marker_delivery_seq: self.marker_delivery_seq,
+                last_dead_binding_epoch: binding_epoch,
+            }),
+        ))
+    }
+
+    /// Retargets undelivered marker delivery after exact charged supersession.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged delivery with `EpisodeChurnLimit` or
+    /// `StaleAuthority` when charged churn or the next-generation check fails.
+    pub const fn retarget(
+        self,
+        new_binding_epoch: BindingEpoch,
+        episode_churn_used: u64,
+        delta_cycles: u64,
+        episode_churn_limit: u64,
+    ) -> Result<Self, (Self, DetachedAttachRefusal)> {
+        if !charged_churn_fits(episode_churn_used, delta_cycles, episode_churn_limit) {
+            return Err((self, DetachedAttachRefusal::EpisodeChurnLimit));
+        }
+        if !is_next_generation(self.binding_epoch, new_binding_epoch) {
+            return Err((self, DetachedAttachRefusal::StaleAuthority));
+        }
+        Ok(Self {
+            binding_epoch: new_binding_epoch,
+            ..self
+        })
+    }
+
+    /// Consumes exact live Leave and installs only clear/OP/PC.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless Leave names the exact live
+    /// participant and binding epoch.
+    pub fn leave(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: DebtCompletion,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::MarkerDelivery(self));
+        let EventKind::LeaveCommitted {
+            participant_id,
+            authority: LeaveAuthority::Live(binding_epoch),
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if participant_id != self.participant_id || binding_epoch != self.binding_epoch {
+            return Err(original);
+        }
+        Ok(successor.into_state())
+    }
+}
+
+impl ParticipantCursorProgress {
+    /// Consumes an equal normal ack or exact marker ack and selects only
+    /// clear/OP/PC.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless the ack kind, participant,
+    /// epoch, and boundary exactly satisfy this cursor witness.
+    pub fn complete_ack(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: DebtCompletion,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ParticipantCursorProgress(self));
+        let exact = match (self, event.0) {
+            (
+                Self::Continuous(value),
+                EventKind::CursorProgressed {
+                    participant_id,
+                    binding_epoch,
+                    progress: CursorProgressEvent::Normal { through_seq, .. },
+                    ..
+                },
+            ) => {
+                participant_id == value.participant_id
+                    && binding_epoch == value.binding_epoch
+                    && through_seq == value.through_seq
+            }
+            (
+                Self::Marker(value),
+                EventKind::CursorProgressed {
+                    participant_id,
+                    binding_epoch,
+                    progress: CursorProgressEvent::Normal { through_seq, .. },
+                    ..
+                },
+            ) => {
+                participant_id == value.participant_id
+                    && binding_epoch == value.binding_epoch
+                    && through_seq == value.through_seq
+            }
+            (
+                Self::Marker(value),
+                EventKind::CursorProgressed {
+                    participant_id,
+                    binding_epoch,
+                    progress:
+                        CursorProgressEvent::Marker {
+                            marker_delivery_seq,
+                        },
+                    ..
+                },
+            ) => {
+                participant_id == value.participant_id
+                    && binding_epoch == value.binding_epoch
+                    && marker_delivery_seq == value.marker_delivery_seq
+            }
+            _ => false,
+        };
+        if exact {
+            Ok(successor.into_state())
+        } else {
+            Err(original)
+        }
+    }
+
+    /// Consumes a lesser advancing normal ack and preserves this exact PCP.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless the event is a matching current-
+    /// epoch normal ack strictly below the stored boundary.
+    pub fn lesser_ack(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: ClosureDebt,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ParticipantCursorProgress(self));
+        let EventKind::CursorProgressed {
+            participant_id,
+            binding_epoch,
+            progress: CursorProgressEvent::Normal { through_seq, .. },
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if participant_id != self.participant_id()
+            || binding_epoch != self.binding_epoch()
+            || through_seq >= self.through_seq()
+        {
+            return Err(original);
+        }
+        Ok(owed(
+            resulting_debt,
+            StoredEdge::ParticipantCursorProgress(self),
+        ))
+    }
+
+    /// Validates clear selection for one greater cumulative normal ack.
+    #[must_use]
+    pub fn clear_after_greater_ack(&self, event: &Event) -> Option<ProjectionCompactionSuccessor> {
+        if !greater_ack_matches(*self, *event) {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::ParticipantCursorProgress(*self),
+            event: *event,
+            use_kind: SuccessorUse::CursorGreaterAck,
+            state: ClosureState::Clear,
+        })
+    }
+
+    /// Validates a strict non-DCR suffix for one greater cumulative normal ack.
+    #[must_use]
+    pub fn strict_after_greater_ack(
+        &self,
+        event: &Event,
+        debt: ClosureDebt,
+        edge: StoredEdge,
+        successor_boundary: DeliverySeq,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        if !greater_ack_matches(*self, *event)
+            || successor_boundary <= cursor_event_boundary(*event)
+            || !strict_edge_matches_boundary(edge, successor_boundary)
+        {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::ParticipantCursorProgress(*self),
+            event: *event,
+            use_kind: SuccessorUse::CursorGreaterAck,
+            state: ClosureState::Owed { debt, edge },
+        })
+    }
+
+    /// Consumes a greater cumulative normal ack and its predecessor-bound suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless the advancing event and strict
+    /// successor authority are both bound to this cursor witness.
+    pub fn greater_ack(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: ProjectionCompactionSuccessor,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ParticipantCursorProgress(self));
+        if successor.predecessor == StoredEdge::ParticipantCursorProgress(self)
+            && successor.event == event
+            && successor.use_kind == SuccessorUse::CursorGreaterAck
+            && greater_ack_matches(self, event)
+        {
+            Ok(successor.state)
+        } else {
+            Err(original)
+        }
+    }
+
+    /// No-op, `AckGap`, and `AckRegression` consume no event and preserve exact PCP.
+    #[must_use]
+    pub const fn unchanged(self, debt: ClosureDebt) -> ClosureState {
+        owed(debt, StoredEdge::ParticipantCursorProgress(self))
+    }
+
+    /// Consumes independent projection/compaction completion and preserves PCP
+    /// while debt remains, or clears it. Compaction cannot cross an unaccepted
+    /// marker anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state for another event class or for a
+    /// compaction that reaches an unaccepted marker.
+    pub const fn storage_progress(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ParticipantCursorProgress(self));
+        let valid = match event.0 {
+            EventKind::ProjectionCompleted { .. } => true,
+            EventKind::CompactionCompleted {
+                through_seq,
+                resulting_floor,
+                ..
+            } => match self.marker_delivery_seq() {
+                None => true,
+                Some(marker) => through_seq < marker && resulting_floor <= marker,
+            },
+            _ => false,
+        };
+        if !valid {
+            return Err(original);
+        }
+        Ok(preserve_or_clear(
+            resulting_debt,
+            StoredEdge::ParticipantCursorProgress(self),
+        ))
+    }
+
+    /// Consumes exact binding fate and derives DCR only from marker-backed PCP,
+    /// or `DCursor` only from continuous PCP.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless fate names the exact participant
+    /// and binding epoch carried by this cursor witness.
+    pub fn binding_fate(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+    ) -> Result<CursorFateSuccessor, ClosureState> {
+        let original = owed(debt, StoredEdge::ParticipantCursorProgress(self));
+        let EventKind::BindingFateObserved {
+            participant_id,
+            binding_epoch,
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if participant_id != self.participant_id() || binding_epoch != self.binding_epoch() {
+            return Err(original);
+        }
+        Ok(match self {
             Self::Continuous(value) => {
                 CursorFateSuccessor::DetachedCursorRelease(DetachedCursorRelease {
                     participant_id: value.participant_id,
@@ -268,54 +1609,208 @@ impl ParticipantCursorProgress {
                     prior_binding_epoch: value.binding_epoch,
                 })
             }
+        })
+    }
+
+    /// Retargets only continuous PCP after exact charged supersession.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged cursor and the exact delivered-marker, churn, or
+    /// stale-authority refusal when retargeting is forbidden.
+    pub const fn retarget(
+        self,
+        new_binding_epoch: BindingEpoch,
+        episode_churn_used: u64,
+        delta_cycles: u64,
+        episode_churn_limit: u64,
+    ) -> Result<Self, (Self, DetachedAttachRefusal)> {
+        let Self::Continuous(value) = self else {
+            return Err((self, DetachedAttachRefusal::DeliveredMarkerAwaitingAck));
+        };
+        if !charged_churn_fits(episode_churn_used, delta_cycles, episode_churn_limit) {
+            return Err((self, DetachedAttachRefusal::EpisodeChurnLimit));
         }
+        if !is_next_generation(value.binding_epoch, new_binding_epoch) {
+            return Err((self, DetachedAttachRefusal::StaleAuthority));
+        }
+        Ok(Self::Continuous(CursorProgressContinuous {
+            binding_epoch: new_binding_epoch,
+            ..value
+        }))
+    }
+
+    /// Consumes exact live Leave and installs its measured clear/OP/PC result.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless Leave names the exact live
+    /// participant and binding epoch.
+    pub fn leave(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: DebtCompletion,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ParticipantCursorProgress(self));
+        let EventKind::LeaveCommitted {
+            participant_id,
+            authority: LeaveAuthority::Live(binding_epoch),
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if participant_id != self.participant_id() || binding_epoch != self.binding_epoch() {
+            return Err(original);
+        }
+        Ok(successor.into_state())
     }
 }
 
-impl CursorProgressContinuous {
-    /// Charged supersession retargets a continuous cursor witness.
+impl DetachedCredentialRecovery {
+    /// Validates exact-current K and exit claims for detached Leave.
     #[must_use]
-    pub const fn retarget(self, binding_epoch: BindingEpoch) -> Self {
-        Self {
-            binding_epoch,
-            ..self
-        }
+    pub const fn validate_leave_claim(
+        &self,
+        participant_id: ParticipantId,
+        actual_charge: ResourceVector,
+        remaining_k: ResourceVector,
+        exit_claims: u64,
+    ) -> Option<KClaimBackedDetachedLeave> {
+        validate_detached_claim(
+            self.participant_id,
+            DetachedClaimTarget::CredentialRecovery {
+                marker_delivery_seq: self.marker_delivery_seq,
+                binding_epoch: self.prior_binding_epoch,
+            },
+            participant_id,
+            actual_charge,
+            remaining_k,
+            exit_claims,
+        )
     }
-}
 
-/// Detached attach refusal enforced by stored-edge typestate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DetachedAttachRefusal {
-    /// Ordinary attach violates the recovery fence.
-    RecoveryFence,
-    /// Presented marker was never delivered.
-    MarkerNotDelivered,
-    /// Edge owns no matching marker.
-    MarkerMismatch,
-    /// Marker-backed PCP must be acknowledged before supersession.
-    DeliveredMarkerAwaitingAck,
-}
+    /// Consumes exact fenced recovery and installs only clear/OP/PC.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless the event names the exact marker,
+    /// prior epoch, participant, and immediate next generation.
+    pub fn fenced_attach(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: DebtCompletion,
+    ) -> Result<FencedAttachCommit, ClosureState> {
+        let original = owed(debt, StoredEdge::DetachedCredentialRecovery(self));
+        let EventKind::FencedRecoveryCommitted {
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+            new_binding_epoch,
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if participant_id != self.participant_id
+            || marker_delivery_seq != self.marker_delivery_seq
+            || prior_binding_epoch != self.prior_binding_epoch
+            || !is_next_generation(prior_binding_epoch, new_binding_epoch)
+        {
+            return Err(original);
+        }
+        Ok(FencedAttachCommit {
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+            new_binding_epoch,
+            next_state: successor.into_state(),
+        })
+    }
 
-impl CursorProgressMarker {
-    /// Supersession is always refused until the delivered marker is accepted.
+    /// Consumes exact K-backed detached Leave and installs only clear/OP/PC.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless the Leave and private claim
+    /// authority are bound to this exact recovery edge.
+    pub fn detached_leave(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        evidence: KClaimBackedDetachedLeave,
+        successor: DebtCompletion,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::DetachedCredentialRecovery(self));
+        let EventKind::LeaveCommitted {
+            participant_id,
+            authority: LeaveAuthority::Detached,
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        let target = DetachedClaimTarget::CredentialRecovery {
+            marker_delivery_seq: self.marker_delivery_seq,
+            binding_epoch: self.prior_binding_epoch,
+        };
+        if participant_id != self.participant_id
+            || evidence.participant_id != self.participant_id
+            || evidence.target != target
+        {
+            return Err(original);
+        }
+        Ok(successor.into_state())
+    }
+
+    /// Ordinary non-fenced attach is refused without mutation.
     #[must_use]
-    pub const fn supersession_refusal(self) -> DetachedAttachRefusal {
+    pub const fn ordinary_attach_refusal(self) -> DetachedAttachRefusal {
         let _ = self;
-        DetachedAttachRefusal::DeliveredMarkerAwaitingAck
+        DetachedAttachRefusal::RecoveryFence
     }
-}
 
-/// Evidence for the sole successful participant transition out of a Leave-only edge.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct KClaimBackedDetachedLeave {
-    participant_id: ParticipantId,
-}
-
-impl KClaimBackedDetachedLeave {
-    /// Creates evidence after authority and K-claim verification.
+    /// An explicit marker is eligible only when it is the exact recovery marker.
     #[must_use]
-    pub const fn verified(participant_id: ParticipantId) -> Self {
-        Self { participant_id }
+    pub const fn marker_attach_refusal(
+        self,
+        presented_marker: DeliverySeq,
+    ) -> Option<DetachedAttachRefusal> {
+        if presented_marker == self.marker_delivery_seq {
+            None
+        } else {
+            Some(DetachedAttachRefusal::MarkerMismatch)
+        }
+    }
+
+    /// Authority supersession before commit preserves DCR and is stale.
+    #[must_use]
+    pub const fn authority_superseded(self) -> (Self, DetachedAttachRefusal) {
+        (self, DetachedAttachRefusal::StaleAuthority)
+    }
+
+    /// Applies only an unrelated participant event, preserving this edge while
+    /// debt remains or clearing it with debt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state for a non-participant event or an event
+    /// owned by this detached participant.
+    pub const fn unrelated_event(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, ClosureState> {
+        unrelated_detached_event(
+            StoredEdge::DetachedCredentialRecovery(self),
+            self.participant_id,
+            debt,
+            event,
+            resulting_debt,
+        )
     }
 }
 
@@ -324,70 +1819,154 @@ mod sealed {
 }
 
 /// Sealed intended-dead-end contract for DMR and `DCursor`.
-pub trait LeaveOnlyEdge: sealed::Sealed + Sized {
-    /// Sole successful participant successor: exact-current K-backed detached Leave.
+pub trait LeaveOnlyEdge: sealed::Sealed + Sized + Copy {
+    /// Returns the exact owner of this Leave-only edge.
+    fn participant_id(self) -> ParticipantId;
+
+    /// Validates participant, exact target, actual charge, remaining K, and the
+    /// available exit claim before creating private Leave authority.
+    fn validate_leave_claim(
+        &self,
+        participant_id: ParticipantId,
+        actual_charge: ResourceVector,
+        remaining_k: ResourceVector,
+        exit_claims: u64,
+    ) -> Option<KClaimBackedDetachedLeave>;
+
+    /// Sole successful owner transition: exact-current K-backed detached Leave.
     ///
     /// # Errors
     ///
-    /// Returns the unchanged edge when evidence names another participant.
+    /// Returns the unchanged owed state unless the Leave and private claim
+    /// authority both name this exact Leave-only edge.
     fn leave(
         self,
+        debt: ClosureDebt,
+        event: Event,
         evidence: KClaimBackedDetachedLeave,
         successor: DebtCompletion,
-    ) -> Result<DebtCompletion, Self>;
+    ) -> Result<ClosureState, ClosureState>;
+
+    /// Repeat exact fate is an event-consuming no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged edge when the event is not fate for its exact owner
+    /// and last dead binding epoch.
+    fn repeat_fate(self, event: Event) -> Result<Self, Self>;
+
+    /// Supersession is stale and preserves the exact edge.
+    fn authority_superseded(self) -> (Self, DetachedAttachRefusal) {
+        (self, DetachedAttachRefusal::StaleAuthority)
+    }
+
+    /// Normal/marker ack and ordinary admission have no binding authority.
+    fn binding_required_refusal(self) -> DetachedAttachRefusal {
+        let _ = self;
+        DetachedAttachRefusal::NoBinding
+    }
+
+    /// Applies an unrelated participant event, preserving this edge while debt
+    /// remains or clearing it with debt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state for a non-participant event or an event
+    /// owned by this detached participant.
+    fn unrelated_event(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, ClosureState>;
 }
 
 impl sealed::Sealed for DetachedMarkerRelease {}
 impl sealed::Sealed for DetachedCursorRelease {}
 
 impl LeaveOnlyEdge for DetachedMarkerRelease {
+    fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    fn validate_leave_claim(
+        &self,
+        participant_id: ParticipantId,
+        actual_charge: ResourceVector,
+        remaining_k: ResourceVector,
+        exit_claims: u64,
+    ) -> Option<KClaimBackedDetachedLeave> {
+        validate_detached_claim(
+            self.participant_id,
+            DetachedClaimTarget::MarkerRelease {
+                marker_delivery_seq: self.marker_delivery_seq,
+                binding_epoch: self.last_dead_binding_epoch,
+            },
+            participant_id,
+            actual_charge,
+            remaining_k,
+            exit_claims,
+        )
+    }
+
     fn leave(
         self,
+        debt: ClosureDebt,
+        event: Event,
         evidence: KClaimBackedDetachedLeave,
         successor: DebtCompletion,
-    ) -> Result<DebtCompletion, Self> {
-        if evidence.participant_id == self.participant_id {
-            Ok(successor)
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::DetachedMarkerRelease(self));
+        let EventKind::LeaveCommitted {
+            participant_id,
+            authority: LeaveAuthority::Detached,
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        let target = DetachedClaimTarget::MarkerRelease {
+            marker_delivery_seq: self.marker_delivery_seq,
+            binding_epoch: self.last_dead_binding_epoch,
+        };
+        if participant_id != self.participant_id
+            || evidence.participant_id != self.participant_id
+            || evidence.target != target
+        {
+            return Err(original);
+        }
+        Ok(successor.into_state())
+    }
+
+    fn repeat_fate(self, event: Event) -> Result<Self, Self> {
+        let EventKind::BindingFateObserved {
+            participant_id,
+            binding_epoch,
+            ..
+        } = event.0
+        else {
+            return Err(self);
+        };
+        if participant_id == self.participant_id && binding_epoch == self.last_dead_binding_epoch {
+            Ok(self)
         } else {
             Err(self)
         }
     }
-}
 
-impl LeaveOnlyEdge for DetachedCursorRelease {
-    fn leave(
+    fn unrelated_event(
         self,
-        evidence: KClaimBackedDetachedLeave,
-        successor: DebtCompletion,
-    ) -> Result<DebtCompletion, Self> {
-        if evidence.participant_id == self.participant_id {
-            Ok(successor)
-        } else {
-            Err(self)
-        }
-    }
-}
-
-impl DetachedCredentialRecovery {
-    /// Fenced attach transfers K-backed charge and selects only clear/OP/PC.
-    #[must_use]
-    pub const fn fenced_attach(self, successor: DebtCompletion) -> DebtCompletion {
-        let _ = self;
-        successor
-    }
-
-    /// K-backed detached Leave selects only clear/OP/PC.
-    #[must_use]
-    pub const fn detached_leave(self, successor: DebtCompletion) -> DebtCompletion {
-        let _ = self;
-        successor
-    }
-
-    /// Ordinary non-fenced attach is refused by `RecoveryFence`.
-    #[must_use]
-    pub const fn ordinary_attach_refusal(self) -> DetachedAttachRefusal {
-        let _ = self;
-        DetachedAttachRefusal::RecoveryFence
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, ClosureState> {
+        unrelated_detached_event(
+            StoredEdge::DetachedMarkerRelease(self),
+            self.participant_id,
+            debt,
+            event,
+            resulting_debt,
+        )
     }
 }
 
@@ -399,11 +1978,102 @@ impl DetachedMarkerRelease {
         DetachedAttachRefusal::RecoveryFence
     }
 
-    /// Presenting the undelivered marker is explicitly `MarkerNotDelivered`.
+    /// The exact undelivered marker selects `MarkerNotDelivered`; another marker
+    /// selects `MarkerMismatch` without fabricating an expected delivery fact.
     #[must_use]
-    pub const fn marker_attach_refusal(self) -> DetachedAttachRefusal {
-        let _ = self;
-        DetachedAttachRefusal::MarkerNotDelivered
+    pub const fn marker_attach_refusal(
+        self,
+        presented_marker: DeliverySeq,
+    ) -> DetachedAttachRefusal {
+        if presented_marker == self.marker_delivery_seq {
+            DetachedAttachRefusal::MarkerNotDelivered
+        } else {
+            DetachedAttachRefusal::MarkerMismatch
+        }
+    }
+}
+
+impl LeaveOnlyEdge for DetachedCursorRelease {
+    fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    fn validate_leave_claim(
+        &self,
+        participant_id: ParticipantId,
+        actual_charge: ResourceVector,
+        remaining_k: ResourceVector,
+        exit_claims: u64,
+    ) -> Option<KClaimBackedDetachedLeave> {
+        validate_detached_claim(
+            self.participant_id,
+            DetachedClaimTarget::CursorRelease {
+                binding_epoch: self.last_dead_binding_epoch,
+            },
+            participant_id,
+            actual_charge,
+            remaining_k,
+            exit_claims,
+        )
+    }
+
+    fn leave(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        evidence: KClaimBackedDetachedLeave,
+        successor: DebtCompletion,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::DetachedCursorRelease(self));
+        let EventKind::LeaveCommitted {
+            participant_id,
+            authority: LeaveAuthority::Detached,
+            ..
+        } = event.0
+        else {
+            return Err(original);
+        };
+        let target = DetachedClaimTarget::CursorRelease {
+            binding_epoch: self.last_dead_binding_epoch,
+        };
+        if participant_id != self.participant_id
+            || evidence.participant_id != self.participant_id
+            || evidence.target != target
+        {
+            return Err(original);
+        }
+        Ok(successor.into_state())
+    }
+
+    fn repeat_fate(self, event: Event) -> Result<Self, Self> {
+        let EventKind::BindingFateObserved {
+            participant_id,
+            binding_epoch,
+            ..
+        } = event.0
+        else {
+            return Err(self);
+        };
+        if participant_id == self.participant_id && binding_epoch == self.last_dead_binding_epoch {
+            Ok(self)
+        } else {
+            Err(self)
+        }
+    }
+
+    fn unrelated_event(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+    ) -> Result<ClosureState, ClosureState> {
+        unrelated_detached_event(
+            StoredEdge::DetachedCursorRelease(self),
+            self.participant_id,
+            debt,
+            event,
+            resulting_debt,
+        )
     }
 }
 
@@ -423,53 +2093,173 @@ impl DetachedCursorRelease {
     }
 }
 
-/// Typed completion events retained after excluding occurrence-array storage.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Event {
-    /// Observer projection completed.
-    ProjectionCompleted {
-        /// Completed projection boundary.
-        through_seq: DeliverySeq,
-    },
-    /// Physical compaction completed.
-    CompactionCompleted {
-        /// Completed range start.
-        from_floor: DeliverySeq,
-        /// Completed range end.
-        through_seq: DeliverySeq,
-    },
-    /// Marker append completed.
-    MarkerAppended {
-        /// Appended marker sequence.
-        marker_delivery_seq: DeliverySeq,
-    },
-    /// Marker delivery completed.
-    MarkerDelivered {
-        /// Recipient participant.
-        participant_id: ParticipantId,
-        /// Delivered marker sequence.
-        marker_delivery_seq: DeliverySeq,
-    },
-    /// Participant-scoped cursor progress completed.
-    CursorProgressed {
-        /// Participant index.
-        participant_index: ParticipantId,
-        /// Committed boundary.
-        boundary: DeliverySeq,
-    },
-    /// Binding fate was observed.
-    BindingFateObserved {
-        /// Affected participant.
-        participant_id: ParticipantId,
-    },
-    /// Fenced recovery committed.
-    FencedRecoveryCommitted {
-        /// Recovered participant.
-        participant_id: ParticipantId,
-    },
-    /// Terminal Leave committed.
-    LeaveCommitted {
-        /// Retired participant.
-        participant_id: ParticipantId,
-    },
+const fn owed(debt: ClosureDebt, edge: StoredEdge) -> ClosureState {
+    ClosureState::Owed { debt, edge }
+}
+
+const fn preserve_or_clear(resulting_debt: Option<ClosureDebt>, edge: StoredEdge) -> ClosureState {
+    match resulting_debt {
+        Some(debt) => owed(debt, edge),
+        None => ClosureState::Clear,
+    }
+}
+
+const fn projection_completion_boundary(
+    edge: ObserverProjection,
+    event: Event,
+) -> Option<DeliverySeq> {
+    let EventKind::ProjectionCompleted { through_seq } = event.0 else {
+        return None;
+    };
+    if through_seq == edge.through_seq {
+        Some(through_seq)
+    } else {
+        None
+    }
+}
+
+const fn physical_completion_floor(edge: PhysicalCompaction, event: Event) -> Option<DeliverySeq> {
+    match event.0 {
+        EventKind::CompactionCompleted {
+            from_floor,
+            through_seq,
+            resulting_floor,
+        } if from_floor == edge.from_floor
+            && through_seq == edge.through_seq
+            && resulting_floor > edge.through_seq =>
+        {
+            Some(resulting_floor)
+        }
+        _ => None,
+    }
+}
+
+const fn progress_event_floor(event: Event) -> Option<DeliverySeq> {
+    match event.0 {
+        EventKind::CursorProgressed {
+            resulting_floor, ..
+        }
+        | EventKind::BindingFateObserved {
+            resulting_floor, ..
+        }
+        | EventKind::LeaveCommitted {
+            resulting_floor, ..
+        } => Some(resulting_floor),
+        _ => None,
+    }
+}
+
+const fn cursor_event_boundary(event: Event) -> DeliverySeq {
+    match event.0 {
+        EventKind::CursorProgressed {
+            progress: CursorProgressEvent::Normal { through_seq, .. },
+            ..
+        } => through_seq,
+        _ => 0,
+    }
+}
+
+fn greater_ack_matches(edge: ParticipantCursorProgress, event: Event) -> bool {
+    let EventKind::CursorProgressed {
+        participant_id,
+        binding_epoch,
+        progress:
+            CursorProgressEvent::Normal {
+                previous_cursor,
+                through_seq,
+            },
+        ..
+    } = event.0
+    else {
+        return false;
+    };
+    participant_id == edge.participant_id()
+        && binding_epoch == edge.binding_epoch()
+        && previous_cursor < edge.through_seq()
+        && through_seq > edge.through_seq()
+}
+
+const fn strict_edge_matches_boundary(edge: StoredEdge, boundary: DeliverySeq) -> bool {
+    match edge {
+        StoredEdge::ObserverProjection(value) => value.through_seq == boundary,
+        StoredEdge::PhysicalCompaction(value) => value.through_seq == boundary,
+        StoredEdge::MarkerDelivery(value) => value.marker_delivery_seq == boundary,
+        StoredEdge::ParticipantCursorProgress(value) => value.through_seq() == boundary,
+        StoredEdge::DetachedCredentialRecovery(_) => false,
+        StoredEdge::DetachedMarkerRelease(value) => value.marker_delivery_seq == boundary,
+        // DCursor has no sequence field in the frozen tag. The explicit boundary
+        // supplied to the predecessor-bound successor is its typed causal-order
+        // witness under LP-EXTRACTION-GOAL.md Fix 2.
+        StoredEdge::DetachedCursorRelease(_) => true,
+    }
+}
+
+const fn charged_churn_fits(used: u64, delta: u64, limit: u64) -> bool {
+    delta > 0 && widen_u64(used) + widen_u64(delta) <= widen_u64(limit)
+}
+
+#[allow(clippy::cast_lossless)]
+const fn widen_u64(value: u64) -> u128 {
+    value as u128
+}
+
+const fn is_next_generation(old: BindingEpoch, new: BindingEpoch) -> bool {
+    match old.capability_generation.get().checked_add(1) {
+        Some(expected) => new.capability_generation.get() == expected,
+        None => false,
+    }
+}
+
+const fn validate_detached_claim(
+    owner: ParticipantId,
+    target: DetachedClaimTarget,
+    participant_id: ParticipantId,
+    actual_charge: ResourceVector,
+    remaining_k: ResourceVector,
+    exit_claims: u64,
+) -> Option<KClaimBackedDetachedLeave> {
+    if participant_id != owner
+        || actual_charge.entries == 0
+        || actual_charge.bytes == 0
+        || actual_charge.entries > remaining_k.entries
+        || actual_charge.bytes > remaining_k.bytes
+        || exit_claims == 0
+    {
+        return None;
+    }
+    Some(KClaimBackedDetachedLeave {
+        participant_id,
+        target,
+        actual_charge,
+    })
+}
+
+const fn event_participant(event: Event) -> Option<ParticipantId> {
+    match event.0 {
+        EventKind::MarkerDelivered { participant_id, .. }
+        | EventKind::CursorProgressed { participant_id, .. }
+        | EventKind::BindingFateObserved { participant_id, .. }
+        | EventKind::LeaveCommitted { participant_id, .. }
+        | EventKind::FencedRecoveryCommitted { participant_id, .. } => Some(participant_id),
+        EventKind::ProjectionCompleted { .. }
+        | EventKind::CompactionCompleted { .. }
+        | EventKind::MarkerAppended { .. } => None,
+    }
+}
+
+const fn unrelated_detached_event(
+    edge: StoredEdge,
+    owner: ParticipantId,
+    debt: ClosureDebt,
+    event: Event,
+    resulting_debt: Option<ClosureDebt>,
+) -> Result<ClosureState, ClosureState> {
+    let original = owed(debt, edge);
+    let Some(participant_id) = event_participant(event) else {
+        return Err(original);
+    };
+    if participant_id == owner {
+        return Err(original);
+    }
+    Ok(preserve_or_clear(resulting_debt, edge))
 }

@@ -175,13 +175,19 @@ fn all_eighteen_parked_configuration_dimensions_are_constructible() {
 #[test]
 fn handshake_failure_keeps_both_limits_and_all_widened_operands() {
     let outcome = ParticipantRecoveryHandshakeTooLarge {
-        operands: HANDSHAKE,
+        max_entries: HANDSHAKE.max_entries,
+        framing_bytes: HANDSHAKE.framing_bytes,
+        request_entry_bytes: HANDSHAKE.request_entry_bytes,
+        response_entry_bytes: HANDSHAKE.response_entry_bytes,
+        error_response_bytes: HANDSHAKE.error_response_bytes,
+        request_encoded_bytes: HANDSHAKE.request_encoded_bytes,
+        response_encoded_bytes: HANDSHAKE.response_encoded_bytes,
         request_limit: 75,
         wire_frame_limit: 100,
         dimension: RecoveryHandshakeDimension::RequestBytes,
     };
 
-    assert_eq!(outcome.operands.request_encoded_bytes, 76);
+    assert_eq!(outcome.request_encoded_bytes, 76);
     assert_eq!(outcome.request_limit, 75);
     assert_eq!(outcome.wire_frame_limit, 100);
 }

@@ -31,11 +31,7 @@ fn binding_recovery_carries_only_unclean_restart_cause() -> Result<(), &'static 
         cause,
         assigned_transaction_order: 13,
         finalization: BindingRecoveryFinalization::Pending {
-            admission_order: AdmissionOrder {
-                transaction_order: 13,
-                candidate_phase: CandidatePhase::BindingTerminal as u8,
-                participant_index: 2,
-            },
+            admission_order: AdmissionOrder::new(13, CandidatePhase::BindingTerminal, 2),
         },
         repayment_edge: RepaymentEdge::None,
     };

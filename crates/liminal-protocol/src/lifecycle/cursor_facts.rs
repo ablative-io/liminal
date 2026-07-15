@@ -1,6 +1,11 @@
 use alloc::{collections::BTreeMap, vec::Vec};
 
-use crate::wire::{DeliverySeq, ParticipantIndex};
+use crate::wire::{
+    AckCommitted, AckGap, AckNoOp, AckRegression, BindingEpoch, ConversationId, DeliverySeq,
+    ParticipantAck, ParticipantAckEnvelope, ParticipantId, ParticipantIndex,
+};
+
+use super::edge::ClosureDebt;
 
 /// Participant-scoped cursor progress key mandated by extraction Fix 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -26,9 +31,122 @@ pub struct CursorProgressFacts {
     facts: BTreeMap<CursorProgressKey, CursorProgressFact>,
 }
 
+/// One currently bound participant's durable cumulative-cursor state.
+///
+/// All fields are private so cursor advancement can occur only through the
+/// monotonic cumulative-ack transition below.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BoundParticipantCursor {
+    participant_id: ParticipantId,
+    active_binding_epoch: BindingEpoch,
+    cursor: DeliverySeq,
+}
+
+impl BoundParticipantCursor {
+    /// Creates one bound participant cursor at its already-durable position.
+    #[must_use]
+    pub const fn new(
+        participant_id: ParticipantId,
+        active_binding_epoch: BindingEpoch,
+        cursor: DeliverySeq,
+    ) -> Self {
+        Self {
+            participant_id,
+            active_binding_epoch,
+            cursor,
+        }
+    }
+
+    /// Returns the participant's permanent index.
+    #[must_use]
+    pub const fn participant_index(self) -> ParticipantIndex {
+        self.participant_id
+    }
+
+    /// Returns the participant's permanent identifier.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.participant_id
+    }
+
+    /// Returns the binding epoch authorized to advance this cursor.
+    #[must_use]
+    pub const fn active_binding_epoch(self) -> BindingEpoch {
+        self.active_binding_epoch
+    }
+
+    /// Returns the durable cumulative cursor.
+    #[must_use]
+    pub const fn cursor(self) -> DeliverySeq {
+        self.cursor
+    }
+
+    const fn advance_to(&mut self, boundary: DeliverySeq) {
+        if boundary > self.cursor {
+            self.cursor = boundary;
+        }
+    }
+}
+
+/// Construction failure for a participant-scoped nonzero-debt episode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorEpisodeBuildError {
+    /// Two cursor states name the same permanent participant identifier/index.
+    DuplicateParticipant {
+        /// Repeated permanent participant identifier and index.
+        participant_id: ParticipantId,
+    },
+}
+
+/// Authority failure before a cumulative-ack transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CumulativeAckAuthorizationError {
+    /// The episode does not contain the selected permanent participant index.
+    ParticipantIndexUnknown,
+    /// The request names another conversation.
+    ConversationMismatch,
+    /// The request identifier does not match the selected participant index.
+    ParticipantMismatch,
+    /// The request generation does not match the active binding epoch.
+    GenerationMismatch,
+    /// The receiving connection does not own the participant's active epoch.
+    BindingEpochMismatch,
+    /// A fixed wire-outcome constructor rejected an already-proven cursor relation.
+    CursorRelationInvariant,
+}
+
+/// Exhaustive outcome of an authority-checked normal cumulative ack.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CumulativeAckOutcome {
+    /// The cursor advanced and its participant-scoped fact was consumed.
+    Committed(AckCommitted),
+    /// The request exactly repeated the durable cursor.
+    NoOp(AckNoOp),
+    /// The request crossed a boundary not offered contiguously to this epoch.
+    Gap(AckGap),
+    /// The request boundary was below the durable cursor.
+    Regression(AckRegression),
+}
+
+/// Participant-scoped cursor accounting for one provably nonzero-debt episode.
+///
+/// The wrapper requires [`ClosureDebt`], whose constructor rejects componentwise
+/// zero. Unlike the frozen document's defective fixed occurrence array, its
+/// progress facts are variable and keyed by `(participant_index, boundary)` as
+/// mandated by `docs/design/LP-EXTRACTION-GOAL.md` Fix 2.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonzeroDebtCursorEpisode {
+    conversation_id: ConversationId,
+    debt: ClosureDebt,
+    participants: BTreeMap<ParticipantIndex, BoundParticipantCursor>,
+    facts: CursorProgressFacts,
+}
+
 /// Deterministic cursor-fact serialization failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorFactEncodeError {
+    /// Participant count cannot fit the variable format's `u32` count.
+    TooManyParticipants,
     /// Fact count cannot fit the variable format's `u32` count.
     TooManyFacts,
     /// Encoded byte length overflowed the platform allocation domain.
@@ -117,6 +235,211 @@ impl CursorProgressFacts {
         let mut bytes = Vec::with_capacity(capacity);
         bytes.extend_from_slice(&count.to_be_bytes());
         for (key, fact) in &self.facts {
+            bytes.extend_from_slice(&key.participant_index.to_be_bytes());
+            bytes.extend_from_slice(&key.boundary.to_be_bytes());
+            bytes.push(match fact {
+                CursorProgressFact::Pending => 0,
+                CursorProgressFact::Consumed => 1,
+            });
+        }
+        Ok(bytes)
+    }
+}
+
+impl NonzeroDebtCursorEpisode {
+    /// Creates one nonzero-debt episode with uniquely indexed bound members.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CursorEpisodeBuildError`] when two supplied states repeat the
+    /// permanent participant identifier, which is exactly its index in v1.
+    pub fn new(
+        conversation_id: ConversationId,
+        debt: ClosureDebt,
+        participants: Vec<BoundParticipantCursor>,
+    ) -> Result<Self, CursorEpisodeBuildError> {
+        let mut indexed = BTreeMap::new();
+        for participant in participants {
+            if indexed.contains_key(&participant.participant_id) {
+                return Err(CursorEpisodeBuildError::DuplicateParticipant {
+                    participant_id: participant.participant_id,
+                });
+            }
+            indexed.insert(participant.participant_id, participant);
+        }
+
+        Ok(Self {
+            conversation_id,
+            debt,
+            participants: indexed,
+            facts: CursorProgressFacts::new(),
+        })
+    }
+
+    /// Returns the exact nonzero debt proving this episode is active.
+    #[must_use]
+    pub const fn debt(&self) -> ClosureDebt {
+        self.debt
+    }
+
+    /// Returns one indexed bound participant cursor.
+    #[must_use]
+    pub fn participant(
+        &self,
+        participant_index: ParticipantIndex,
+    ) -> Option<BoundParticipantCursor> {
+        self.participants.get(&participant_index).copied()
+    }
+
+    /// Returns the participant-scoped cursor fact map.
+    #[must_use]
+    pub const fn facts(&self) -> &CursorProgressFacts {
+        &self.facts
+    }
+
+    /// Applies one authority-checked cumulative normal acknowledgement.
+    ///
+    /// `receiving_binding_epoch` identifies the connection epoch on which the
+    /// request arrived. `contiguously_available_through` is the greatest
+    /// sequence offered without a gap to that exact epoch. A successful advance
+    /// records and consumes the fact keyed by the selected participant index and
+    /// requested boundary; any lower pending facts for that participant are
+    /// consumed in the same transition. Another participant's equal boundary is
+    /// never touched.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CumulativeAckAuthorizationError`] before any mutation when the
+    /// conversation, participant, generation, or active binding epoch differs.
+    pub fn acknowledge(
+        &mut self,
+        participant_index: ParticipantIndex,
+        receiving_binding_epoch: BindingEpoch,
+        request: &ParticipantAck,
+        contiguously_available_through: DeliverySeq,
+    ) -> Result<CumulativeAckOutcome, CumulativeAckAuthorizationError> {
+        let Some(participant) = self.participants.get(&participant_index).copied() else {
+            return Err(CumulativeAckAuthorizationError::ParticipantIndexUnknown);
+        };
+        if request.conversation_id != self.conversation_id {
+            return Err(CumulativeAckAuthorizationError::ConversationMismatch);
+        }
+        if request.participant_id != participant.participant_id {
+            return Err(CumulativeAckAuthorizationError::ParticipantMismatch);
+        }
+        if request.capability_generation != participant.active_binding_epoch.capability_generation {
+            return Err(CumulativeAckAuthorizationError::GenerationMismatch);
+        }
+        if receiving_binding_epoch != participant.active_binding_epoch {
+            return Err(CumulativeAckAuthorizationError::BindingEpochMismatch);
+        }
+
+        let current_cursor = participant.cursor;
+        let through_seq = request.through_seq;
+        let envelope = ParticipantAckEnvelope {
+            conversation_id: request.conversation_id,
+            participant_id: request.participant_id,
+            capability_generation: request.capability_generation,
+            through_seq,
+        };
+
+        if through_seq < current_cursor {
+            return AckRegression::new(envelope, current_cursor)
+                .map(CumulativeAckOutcome::Regression)
+                .ok_or(CumulativeAckAuthorizationError::CursorRelationInvariant);
+        }
+        if through_seq == current_cursor {
+            return Ok(CumulativeAckOutcome::NoOp(AckNoOp::participant_ack(
+                envelope,
+            )));
+        }
+        if through_seq > contiguously_available_through {
+            return AckGap::new(envelope, current_cursor)
+                .map(CumulativeAckOutcome::Gap)
+                .ok_or(CumulativeAckAuthorizationError::CursorRelationInvariant);
+        }
+
+        let Some(stored) = self.participants.get_mut(&participant_index) else {
+            return Err(CumulativeAckAuthorizationError::ParticipantIndexUnknown);
+        };
+        stored.advance_to(through_seq);
+        let key = CursorProgressKey {
+            participant_index,
+            boundary: through_seq,
+        };
+        self.facts.record(key);
+        let _ = self.facts.consume_through(participant_index, through_seq);
+
+        Ok(CumulativeAckOutcome::Committed(AckCommitted::new(envelope)))
+    }
+
+    /// Deterministically serializes the active debt, bound cursors, and facts.
+    ///
+    /// Format: conversation id, debt entries/bytes as two u128 values,
+    /// participant count as u32, participants in index order, then fact count as
+    /// u32 and facts in `(participant_index, boundary)` order. A participant is
+    /// five u64 values: its one canonical identifier/index, server incarnation,
+    /// connection ordinal, generation, and cursor. A fact retains the 17-byte
+    /// format documented by [`CursorProgressFacts::encode`]. This is lifecycle
+    /// storage, not the participant network frame format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CursorFactEncodeError`] if either count or the exact allocation
+    /// length cannot be represented.
+    pub fn encode(&self) -> Result<Vec<u8>, CursorFactEncodeError> {
+        let participant_count = u32::try_from(self.participants.len())
+            .map_err(|_| CursorFactEncodeError::TooManyParticipants)?;
+        let fact_count =
+            u32::try_from(self.facts.len()).map_err(|_| CursorFactEncodeError::TooManyFacts)?;
+        let participant_bytes = self
+            .participants
+            .len()
+            .checked_mul(40)
+            .ok_or(CursorFactEncodeError::LengthOverflow)?;
+        let fact_bytes = self
+            .facts
+            .len()
+            .checked_mul(17)
+            .ok_or(CursorFactEncodeError::LengthOverflow)?;
+        let capacity = 48_usize
+            .checked_add(participant_bytes)
+            .and_then(|length| length.checked_add(fact_bytes))
+            .ok_or(CursorFactEncodeError::LengthOverflow)?;
+
+        let debt = self.debt.value();
+        let mut bytes = Vec::with_capacity(capacity);
+        bytes.extend_from_slice(&self.conversation_id.to_be_bytes());
+        bytes.extend_from_slice(&debt.entries.to_be_bytes());
+        bytes.extend_from_slice(&debt.bytes.to_be_bytes());
+        bytes.extend_from_slice(&participant_count.to_be_bytes());
+        for participant in self.participants.values() {
+            bytes.extend_from_slice(&participant.participant_id.to_be_bytes());
+            bytes.extend_from_slice(
+                &participant
+                    .active_binding_epoch
+                    .connection_incarnation
+                    .server_incarnation
+                    .to_be_bytes(),
+            );
+            bytes.extend_from_slice(
+                &participant
+                    .active_binding_epoch
+                    .connection_incarnation
+                    .connection_ordinal
+                    .to_be_bytes(),
+            );
+            bytes.extend_from_slice(
+                &participant
+                    .active_binding_epoch
+                    .capability_generation
+                    .get()
+                    .to_be_bytes(),
+            );
+            bytes.extend_from_slice(&participant.cursor.to_be_bytes());
+        }
+        bytes.extend_from_slice(&fact_count.to_be_bytes());
+        for (key, fact) in &self.facts.facts {
             bytes.extend_from_slice(&key.participant_index.to_be_bytes());
             bytes.extend_from_slice(&key.boundary.to_be_bytes());
             bytes.push(match fact {
