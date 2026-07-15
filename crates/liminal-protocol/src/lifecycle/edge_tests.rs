@@ -3,6 +3,7 @@
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{BindingEpoch, ConnectionIncarnation, Generation};
 
+use super::edge::RecoveredBindingFateTransition;
 use super::{
     ClosureDebt, ClosureState, CursorFateSuccessor, DebtCompletion, DetachedAttachRefusal,
     DetachedCredentialRecovery, DetachedCursorRelease, DetachedMarkerRelease, Event, LeaveOnlyEdge,
@@ -696,6 +697,151 @@ fn detached_recovery_fence_proof_binds_every_authority_field() {
     assert_eq!(
         recovery.authority_superseded(),
         (recovery, DetachedAttachRefusal::StaleAuthority)
+    );
+}
+
+#[test]
+fn fenced_recovery_fate_preserves_op_authority_until_exact_completion() {
+    let recovery_debt = debt(2, 20);
+    let attached_debt = debt(2, 18);
+    let fate_debt = debt(2, 16);
+    let completion_debt = debt(1, 8);
+    let prior_epoch = epoch(2);
+    let recovered_epoch = epoch(3);
+    let recovery = credential_recovery(4, prior_epoch, 14, recovery_debt);
+    let projection = ObserverProjection::new(15);
+    let commit = recovery
+        .fenced_attach(
+            recovery_debt,
+            Event::fenced_recovery_committed(4, 14, prior_epoch, recovered_epoch, 15),
+            DebtCompletion::observer_projection(attached_debt, projection),
+        )
+        .expect("exact fenced attach installs nonzero-debt OP");
+
+    assert_eq!(
+        commit.recovered_binding_fate(Event::binding_fate_observed(5, recovered_epoch, 15,)),
+        Err(commit.next_state()),
+        "another participant cannot consume the recovered epoch's fate"
+    );
+    assert_eq!(
+        commit.recovered_binding_fate(Event::binding_fate_observed(4, epoch(4), 15)),
+        Err(commit.next_state()),
+        "only the exact newly committed epoch can derive the cursor suffix"
+    );
+
+    let authority = commit
+        .recovered_binding_fate(Event::binding_fate_observed(4, recovered_epoch, 15))
+        .expect("exact recovered-epoch fate derives suffix authority");
+    assert_eq!(authority.participant_id(), 4);
+    assert_eq!(authority.last_dead_binding_epoch(), recovered_epoch);
+    assert_eq!(authority.predecessor_state(), commit.next_state());
+
+    let authority = projection
+        .apply_recovered_binding_fate(recovery_debt, fate_debt, authority)
+        .expect_err("authority is bound to the exact post-attach debt");
+    let transition = projection
+        .apply_recovered_binding_fate(attached_debt, fate_debt, authority)
+        .expect("OP preserves fate's exact cursor suffix");
+    let RecoveredBindingFateTransition::PendingStorage(pending) = transition else {
+        panic!("OP fate must remain pending until projection completion")
+    };
+    assert_eq!(
+        pending.current_state(),
+        owed(fate_debt, StoredEdge::ObserverProjection(projection))
+    );
+    assert_eq!(pending.participant_id(), 4);
+    assert_eq!(pending.last_dead_binding_epoch(), recovered_epoch);
+
+    let pending = projection
+        .complete_after_recovered_binding_fate(
+            Event::projection_completed(14),
+            Some(completion_debt),
+            pending,
+        )
+        .expect_err("an inexact OP completion must reissue latent authority");
+    let state = projection
+        .complete_after_recovered_binding_fate(
+            Event::projection_completed(15),
+            Some(completion_debt),
+            pending,
+        )
+        .expect("exact OP completion consumes latent cursor authority");
+    let ClosureState::Owed {
+        debt: actual_debt,
+        edge: StoredEdge::DetachedCursorRelease(release),
+    } = state
+    else {
+        panic!("OP completion did not select recovered DCursor: {state:?}")
+    };
+    assert_eq!(actual_debt, completion_debt);
+    assert_eq!(release.participant_id(), 4);
+    assert_eq!(release.last_dead_binding_epoch(), recovered_epoch);
+}
+
+#[test]
+fn fenced_recovery_fate_preserves_or_covers_pc_with_exact_cursor_authority() {
+    let recovery_debt = debt(2, 20);
+    let attached_debt = debt(2, 18);
+    let fate_debt = debt(2, 16);
+    let completion_debt = debt(1, 8);
+    let prior_epoch = epoch(2);
+    let recovered_epoch = epoch(3);
+    let recovery = credential_recovery(4, prior_epoch, 14, recovery_debt);
+    let physical = compaction(10, 15);
+    let commit = recovery
+        .fenced_attach(
+            recovery_debt,
+            Event::fenced_recovery_committed(4, 14, prior_epoch, recovered_epoch, 10),
+            DebtCompletion::physical_compaction(attached_debt, physical),
+        )
+        .expect("exact fenced attach installs nonzero-debt PC");
+
+    let authority = commit
+        .recovered_binding_fate(Event::binding_fate_observed(4, recovered_epoch, 15))
+        .expect("fate at the PC boundary derives exact suffix authority");
+    let authority = compaction(10, 14)
+        .apply_recovered_binding_fate(attached_debt, fate_debt, authority)
+        .expect_err("another PC range must return the authority unconsumed");
+    let transition = physical
+        .apply_recovered_binding_fate(attached_debt, fate_debt, authority)
+        .expect("a non-covering fate preserves exact PC");
+    let RecoveredBindingFateTransition::PendingStorage(pending) = transition else {
+        panic!("a fate floor at through_seq must preserve PC")
+    };
+    assert_eq!(
+        pending.current_state(),
+        owed(fate_debt, StoredEdge::PhysicalCompaction(physical))
+    );
+    let completion = Event::compaction_completed(10, 15, 16).expect("exact PC completion");
+    let state = physical
+        .complete_after_recovered_binding_fate(completion, Some(completion_debt), pending)
+        .expect("exact PC completion consumes latent cursor authority");
+    let ClosureState::Owed {
+        debt: actual_debt,
+        edge: StoredEdge::DetachedCursorRelease(release),
+    } = state
+    else {
+        panic!("PC completion did not select recovered DCursor: {state:?}")
+    };
+    assert_eq!(actual_debt, completion_debt);
+    assert_eq!(release.participant_id(), 4);
+    assert_eq!(release.last_dead_binding_epoch(), recovered_epoch);
+
+    let covering_authority = commit
+        .recovered_binding_fate(Event::binding_fate_observed(4, recovered_epoch, 16))
+        .expect("covering fate derives a fresh replay-identical authority");
+    let covering = physical
+        .apply_recovered_binding_fate(attached_debt, fate_debt, covering_authority)
+        .expect("a greater fate floor covers PC");
+    let RecoveredBindingFateTransition::DetachedCursorRelease(released) = covering else {
+        panic!("a fate floor beyond through_seq must cover PC")
+    };
+    assert_eq!(released.debt(), fate_debt);
+    assert_eq!(released.edge().participant_id(), 4);
+    assert_eq!(released.edge().last_dead_binding_epoch(), recovered_epoch);
+    assert_eq!(
+        released.into_state(),
+        owed(fate_debt, StoredEdge::DetachedCursorRelease(release))
     );
 }
 

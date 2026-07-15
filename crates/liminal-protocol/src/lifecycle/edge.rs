@@ -467,6 +467,172 @@ impl FencedAttachCommit {
     pub const fn next_state(self) -> ClosureState {
         self.next_state
     }
+
+    /// Validates the exact fate of this commit's recovered binding epoch.
+    ///
+    /// The returned authority retains both the fenced-attach provenance and its
+    /// exact nonzero-debt OP/PC successor. It must be consumed by that stored
+    /// edge's recovered-fate transition, so a fate that precedes storage
+    /// completion cannot lose the required `DetachedCursorRelease` suffix.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged post-attach state unless the event names this
+    /// participant and the exact newly committed binding epoch, or when the
+    /// fenced attach had already cleared debt.
+    pub fn recovered_binding_fate(
+        self,
+        event: Event,
+    ) -> Result<RecoveredBindingFate, ClosureState> {
+        let EventKind::BindingFateObserved {
+            participant_id,
+            binding_epoch,
+            resulting_floor,
+        } = event.0
+        else {
+            return Err(self.next_state);
+        };
+        if participant_id != self.participant_id || binding_epoch != self.new_binding_epoch {
+            return Err(self.next_state);
+        }
+        let ClosureState::Owed { debt, edge } = self.next_state else {
+            return Err(self.next_state);
+        };
+        let predecessor = match edge {
+            StoredEdge::ObserverProjection(value) => {
+                RecoveredStorageEdge::ObserverProjection(value)
+            }
+            StoredEdge::PhysicalCompaction(value) => {
+                RecoveredStorageEdge::PhysicalCompaction(value)
+            }
+            _ => return Err(self.next_state),
+        };
+        Ok(RecoveredBindingFate {
+            predecessor_debt: debt,
+            predecessor,
+            resulting_floor,
+            release: DetachedCursorRelease {
+                participant_id,
+                last_dead_binding_epoch: binding_epoch,
+            },
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveredStorageEdge {
+    ObserverProjection(ObserverProjection),
+    PhysicalCompaction(PhysicalCompaction),
+}
+
+impl RecoveredStorageEdge {
+    const fn into_stored_edge(self) -> StoredEdge {
+        match self {
+            Self::ObserverProjection(value) => StoredEdge::ObserverProjection(value),
+            Self::PhysicalCompaction(value) => StoredEdge::PhysicalCompaction(value),
+        }
+    }
+}
+
+/// Exact recovered-binding fate authority derived from a fenced attach.
+///
+/// Fields are private: only [`FencedAttachCommit::recovered_binding_fate`] can
+/// bind a no-marker cursor release to the newly recovered epoch and the exact
+/// OP/PC state installed by that attach.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecoveredBindingFate {
+    predecessor_debt: ClosureDebt,
+    predecessor: RecoveredStorageEdge,
+    resulting_floor: DeliverySeq,
+    release: DetachedCursorRelease,
+}
+
+impl RecoveredBindingFate {
+    /// Returns the exact post-attach state to which this authority is bound.
+    #[must_use]
+    pub const fn predecessor_state(&self) -> ClosureState {
+        owed(self.predecessor_debt, self.predecessor.into_stored_edge())
+    }
+
+    /// Returns the participant whose recovered binding died.
+    #[must_use]
+    pub const fn participant_id(&self) -> ParticipantId {
+        self.release.participant_id
+    }
+
+    /// Returns the exact recovered epoch whose fate was observed.
+    #[must_use]
+    pub const fn last_dead_binding_epoch(&self) -> BindingEpoch {
+        self.release.last_dead_binding_epoch
+    }
+}
+
+/// Latent cursor-release suffix while an earlier OP/PC witness remains stored.
+///
+/// This opaque value must survive alongside the preserved storage edge. Exact
+/// completion of that edge consumes it and installs `DetachedCursorRelease`, or
+/// clears it only when closure debt reaches zero.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingRecoveredCursorRelease {
+    debt: ClosureDebt,
+    predecessor: RecoveredStorageEdge,
+    release: DetachedCursorRelease,
+}
+
+impl PendingRecoveredCursorRelease {
+    /// Returns the exact OP/PC state that remains current before completion.
+    #[must_use]
+    pub const fn current_state(&self) -> ClosureState {
+        owed(self.debt, self.predecessor.into_stored_edge())
+    }
+
+    /// Returns the participant whose cursor release is pending.
+    #[must_use]
+    pub const fn participant_id(&self) -> ParticipantId {
+        self.release.participant_id
+    }
+
+    /// Returns the exact recovered epoch whose cursor release is pending.
+    #[must_use]
+    pub const fn last_dead_binding_epoch(&self) -> BindingEpoch {
+        self.release.last_dead_binding_epoch
+    }
+}
+
+/// Exact released state when recovered fate covers storage immediately.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecoveredCursorRelease {
+    debt: ClosureDebt,
+    release: DetachedCursorRelease,
+}
+
+impl RecoveredCursorRelease {
+    /// Returns the nonzero debt carried by the cursor-release edge.
+    #[must_use]
+    pub const fn debt(&self) -> ClosureDebt {
+        self.debt
+    }
+
+    /// Returns the exact derived cursor-release witness.
+    #[must_use]
+    pub const fn edge(&self) -> DetachedCursorRelease {
+        self.release
+    }
+
+    /// Installs the exact derived cursor-release state.
+    #[must_use]
+    pub const fn into_state(self) -> ClosureState {
+        owed(self.debt, StoredEdge::DetachedCursorRelease(self.release))
+    }
+}
+
+/// Preserve-or-cover result for recovered binding fate against OP/PC.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecoveredBindingFateTransition {
+    /// Storage remains current and carries a latent cursor-release suffix.
+    PendingStorage(PendingRecoveredCursorRelease),
+    /// The fate floor covered storage and selected cursor release immediately.
+    DetachedCursorRelease(RecoveredCursorRelease),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -807,6 +973,59 @@ impl Event {
 }
 
 impl ObserverProjection {
+    /// Applies recovered binding fate while this exact OP remains incomplete.
+    ///
+    /// OP is independent of binding fate, so nonzero debt preserves it and the
+    /// returned opaque value retains the exact `DetachedCursorRelease` suffix
+    /// until projection completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unconsumed authority unless it was derived for this exact OP
+    /// and its exact post-attach debt.
+    pub fn apply_recovered_binding_fate(
+        self,
+        debt: ClosureDebt,
+        resulting_debt: ClosureDebt,
+        authority: RecoveredBindingFate,
+    ) -> Result<RecoveredBindingFateTransition, RecoveredBindingFate> {
+        if authority.predecessor != RecoveredStorageEdge::ObserverProjection(self)
+            || authority.predecessor_debt != debt
+        {
+            return Err(authority);
+        }
+        Ok(RecoveredBindingFateTransition::PendingStorage(
+            PendingRecoveredCursorRelease {
+                debt: resulting_debt,
+                predecessor: RecoveredStorageEdge::ObserverProjection(self),
+                release: authority.release,
+            },
+        ))
+    }
+
+    /// Consumes a latent recovered cursor suffix on exact OP completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pending authority intact unless it belongs to this exact OP
+    /// and the completion event reaches its exact boundary.
+    pub fn complete_after_recovered_binding_fate(
+        self,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+        pending: PendingRecoveredCursorRelease,
+    ) -> Result<ClosureState, PendingRecoveredCursorRelease> {
+        if pending.predecessor != RecoveredStorageEdge::ObserverProjection(self)
+            || projection_completion_boundary(self, event).is_none()
+        {
+            return Err(pending);
+        }
+        Ok(preserve_or_clear(
+            resulting_debt,
+            StoredEdge::DetachedCursorRelease(pending.release),
+        ))
+    }
+
     /// Validates clear selection after this exact projection completes.
     #[must_use]
     pub const fn clear_after_completion(
@@ -980,6 +1199,68 @@ impl ObserverProjection {
 }
 
 impl PhysicalCompaction {
+    /// Applies recovered binding fate by preserving or covering this exact PC.
+    ///
+    /// A fate floor at or below `through_seq` preserves PC and returns a latent
+    /// cursor-release suffix. A greater floor covers PC immediately and selects
+    /// the exact cursor release derived from the fenced attach.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unconsumed authority unless it was derived for this exact PC
+    /// and its exact post-attach debt.
+    pub fn apply_recovered_binding_fate(
+        self,
+        debt: ClosureDebt,
+        resulting_debt: ClosureDebt,
+        authority: RecoveredBindingFate,
+    ) -> Result<RecoveredBindingFateTransition, RecoveredBindingFate> {
+        if authority.predecessor != RecoveredStorageEdge::PhysicalCompaction(self)
+            || authority.predecessor_debt != debt
+        {
+            return Err(authority);
+        }
+        if authority.resulting_floor > self.through_seq {
+            Ok(RecoveredBindingFateTransition::DetachedCursorRelease(
+                RecoveredCursorRelease {
+                    debt: resulting_debt,
+                    release: authority.release,
+                },
+            ))
+        } else {
+            Ok(RecoveredBindingFateTransition::PendingStorage(
+                PendingRecoveredCursorRelease {
+                    debt: resulting_debt,
+                    predecessor: RecoveredStorageEdge::PhysicalCompaction(self),
+                    release: authority.release,
+                },
+            ))
+        }
+    }
+
+    /// Consumes a latent recovered cursor suffix on exact PC completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pending authority intact unless it belongs to this exact PC
+    /// and the completion event covers its exact stored range.
+    pub fn complete_after_recovered_binding_fate(
+        self,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+        pending: PendingRecoveredCursorRelease,
+    ) -> Result<ClosureState, PendingRecoveredCursorRelease> {
+        if pending.predecessor != RecoveredStorageEdge::PhysicalCompaction(self)
+            || physical_completion_floor(self, event).is_none()
+        {
+            return Err(pending);
+        }
+        Ok(preserve_or_clear(
+            resulting_debt,
+            StoredEdge::DetachedCursorRelease(pending.release),
+        ))
+    }
+
     /// Validates clear selection after exact PC completion.
     #[must_use]
     pub const fn clear_after_completion(
