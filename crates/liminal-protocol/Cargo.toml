@@ -10,3 +10,6 @@ description = "Shared participant-lifecycle protocol types for liminal"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+proptest = "1"
