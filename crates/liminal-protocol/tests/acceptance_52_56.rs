@@ -1004,6 +1004,27 @@ enum RecordKind54 {
     Marker,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SequenceClaimKind54 {
+    Exit(u64),
+    Terminal(u64),
+    Marker(u64),
+    LiveTimesTerminal {
+        live_participant: u64,
+        terminal_participant: u64,
+    },
+    OtherTimesExit {
+        other_participant: u64,
+        exiting_participant: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SequenceClaim54 {
+    sequence: u64,
+    kind: SequenceClaimKind54,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ShutdownSnapshot54 {
     high: u64,
@@ -1011,6 +1032,7 @@ struct ShutdownSnapshot54 {
     observer: u64,
     records: Vec<OrderedRecord>,
     marker_candidates: Vec<OrderedRecord>,
+    sequence_claims: Vec<SequenceClaim54>,
     edge: StoredEdge,
 }
 
@@ -1044,8 +1066,58 @@ impl ShutdownSnapshot54 {
                 participant: P1,
             },
         ];
+        post.sequence_claims = vec![
+            SequenceClaim54 {
+                sequence: 5,
+                kind: SequenceClaimKind54::Marker(P0),
+            },
+            SequenceClaim54 {
+                sequence: 6,
+                kind: SequenceClaimKind54::Marker(P1),
+            },
+            SequenceClaim54 {
+                sequence: 7,
+                kind: SequenceClaimKind54::Exit(P0),
+            },
+            SequenceClaim54 {
+                sequence: 8,
+                kind: SequenceClaimKind54::Exit(P1),
+            },
+            SequenceClaim54 {
+                sequence: 9,
+                kind: SequenceClaimKind54::OtherTimesExit {
+                    other_participant: P1,
+                    exiting_participant: P0,
+                },
+            },
+            SequenceClaim54 {
+                sequence: 10,
+                kind: SequenceClaimKind54::OtherTimesExit {
+                    other_participant: P0,
+                    exiting_participant: P1,
+                },
+            },
+        ];
         post.edge = StoredEdge::ObserverProjection(ObserverProjection::new(4));
         post
+    }
+
+    fn sequence_budget(&self) -> SequenceBudget {
+        let mut e = 0;
+        let mut t = 0;
+        let mut m = 0;
+        let mut l_times_t = 0;
+        let mut l_other_times_e = 0;
+        for claim in &self.sequence_claims {
+            match claim.kind {
+                SequenceClaimKind54::Exit(_) => e += 1,
+                SequenceClaimKind54::Terminal(_) => t += 1,
+                SequenceClaimKind54::Marker(_) => m += 1,
+                SequenceClaimKind54::LiveTimesTerminal { .. } => l_times_t += 1,
+                SequenceClaimKind54::OtherTimesExit { .. } => l_other_times_e += 1,
+            }
+        }
+        sequence_budget(self.high, e, t, m, 0, 0, l_times_t, 0, l_other_times_e)
     }
 
     fn append_marker(&mut self, sequence: u64) {
@@ -1170,6 +1242,66 @@ fn acceptance_case_54_multi_binding_shutdown_families_and_participant_scoped_pro
             },
         ],
         marker_candidates: Vec::new(),
+        sequence_claims: vec![
+            SequenceClaim54 {
+                sequence: 3,
+                kind: SequenceClaimKind54::Terminal(P0),
+            },
+            SequenceClaim54 {
+                sequence: 4,
+                kind: SequenceClaimKind54::Terminal(P1),
+            },
+            SequenceClaim54 {
+                sequence: 5,
+                kind: SequenceClaimKind54::LiveTimesTerminal {
+                    live_participant: P0,
+                    terminal_participant: P0,
+                },
+            },
+            SequenceClaim54 {
+                sequence: 6,
+                kind: SequenceClaimKind54::LiveTimesTerminal {
+                    live_participant: P1,
+                    terminal_participant: P0,
+                },
+            },
+            SequenceClaim54 {
+                sequence: 7,
+                kind: SequenceClaimKind54::LiveTimesTerminal {
+                    live_participant: P0,
+                    terminal_participant: P1,
+                },
+            },
+            SequenceClaim54 {
+                sequence: 8,
+                kind: SequenceClaimKind54::LiveTimesTerminal {
+                    live_participant: P1,
+                    terminal_participant: P1,
+                },
+            },
+            SequenceClaim54 {
+                sequence: 9,
+                kind: SequenceClaimKind54::Exit(P0),
+            },
+            SequenceClaim54 {
+                sequence: 10,
+                kind: SequenceClaimKind54::Exit(P1),
+            },
+            SequenceClaim54 {
+                sequence: 11,
+                kind: SequenceClaimKind54::OtherTimesExit {
+                    other_participant: P1,
+                    exiting_participant: P0,
+                },
+            },
+            SequenceClaim54 {
+                sequence: 12,
+                kind: SequenceClaimKind54::OtherTimesExit {
+                    other_participant: P0,
+                    exiting_participant: P1,
+                },
+            },
+        ],
         edge: StoredEdge::ObserverProjection(ObserverProjection::new(2)),
     };
     let crash_before = pre_shutdown.clone();
@@ -1200,10 +1332,25 @@ fn acceptance_case_54_multi_binding_shutdown_families_and_participant_scoped_pro
     let post_batch_capacity = mandatory_capacity(post_batch_baseline, q, k, cap);
     assert_eq!(post_batch_capacity.debt, wide_uniform(2));
     assert!(post_batch_capacity.is_legal());
+    let actual_post_shutdown_budget = post_batch.sequence_budget();
     assert_eq!(
-        sequence_budget(4, 2, 0, 2, 0, 0, 0, 0, 2),
-        sequence_budget(4, 2, 0, 2, 0, 0, 0, 0, 2)
+        actual_post_shutdown_budget,
+        SequenceBudget {
+            high_watermark: 4,
+            remaining: u64::MAX - 4,
+            e: 2,
+            t: 0,
+            m: 2,
+            rs: 0,
+            rt: 0,
+            l_times_t: 0,
+            l_times_rt: 0,
+            l_other_times_e: 2,
+        }
     );
+    let reserve_total = u128::try_from(post_batch.sequence_claims.len())
+        .expect("fixture reserve count fits the widened domain");
+    assert_eq!(reserve_total, 6);
 
     // One representative linear extension: M5<P5<P4<M6<P6. Delayed P4
     // advances o but preserves the already selected OP6.
@@ -1683,6 +1830,298 @@ fn relocate_after_p1_leave(r: u64) -> (u64, BTreeMap<OrderHandle56, u64>) {
     (r + 3, positions)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecordKind56 {
+    Left,
+    Ordinary,
+    BindingTerminal,
+    Attached,
+    Marker,
+    DiedTerminal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DurableRecord56 {
+    sequence: u64,
+    kind: RecordKind56,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PcpOrderingSnapshot56 {
+    conversation_id: u64,
+    participant_id: u64,
+    binding_epoch: BindingEpoch,
+    seed_high: u64,
+    high: u64,
+    floor: u64,
+    observer: u64,
+    log: Vec<DurableRecord56>,
+    retained: Vec<u64>,
+    edge: StoredEdge,
+    planned_marker: MarkerDelivery,
+    marker_pending_append: bool,
+    marker_credits: u64,
+    pending_finalization: Option<PendingFinalization>,
+    fate_observed: bool,
+    debt: ClosureDebt,
+    k_remaining: ResourceVector,
+}
+
+impl PcpOrderingSnapshot56 {
+    fn seed(
+        conversation_id: u64,
+        participant_id: u64,
+        binding_epoch: BindingEpoch,
+        high: u64,
+        debt: ClosureDebt,
+        compaction: PhysicalCompaction,
+        marker: MarkerDelivery,
+    ) -> Self {
+        Self {
+            conversation_id,
+            participant_id,
+            binding_epoch,
+            seed_high: high,
+            high,
+            floor: high - 3,
+            observer: high,
+            log: vec![
+                DurableRecord56 {
+                    sequence: high - 3,
+                    kind: RecordKind56::Left,
+                },
+                DurableRecord56 {
+                    sequence: high - 2,
+                    kind: RecordKind56::Ordinary,
+                },
+                DurableRecord56 {
+                    sequence: high - 1,
+                    kind: RecordKind56::BindingTerminal,
+                },
+                DurableRecord56 {
+                    sequence: high,
+                    kind: RecordKind56::Attached,
+                },
+            ],
+            retained: vec![high - 3, high - 2, high - 1, high],
+            edge: StoredEdge::PhysicalCompaction(compaction),
+            planned_marker: marker,
+            marker_pending_append: true,
+            marker_credits: 1,
+            pending_finalization: None,
+            fate_observed: false,
+            debt,
+            k_remaining: uniform(2),
+        }
+    }
+
+    fn baseline(&self) -> WideResourceVector {
+        let planned_rows = self.retained.len() + usize::from(self.marker_pending_append);
+        retained_baseline(
+            uniform(u64::try_from(planned_rows).expect("case 56 retained count fits u64")),
+            2,
+            self.marker_credits,
+            uniform(1),
+        )
+        .expect("case 56 has no excess marker credit")
+    }
+
+    fn persist_fate_before_storage(mut self) -> Self {
+        assert!(!self.fate_observed);
+        assert!(self.pending_finalization.is_none());
+        let StoredEdge::PhysicalCompaction(compaction) = self.edge else {
+            panic!("fate-first begins while the exact PC is current")
+        };
+        let pending = pending_fate(
+            self.conversation_id,
+            self.participant_id,
+            self.binding_epoch,
+            self.seed_high - 5,
+        );
+        assert_eq!(pending.participant_id(), self.participant_id);
+        assert_eq!(pending.binding_epoch(), self.binding_epoch);
+        assert_eq!(
+            pending.admission_order().transaction_order(),
+            self.seed_high - 5
+        );
+
+        let terminal_tentative = retained_baseline(
+            uniform(
+                u64::try_from(self.retained.len() + 2)
+                    .expect("retained rows plus marker and terminal fit u64"),
+            ),
+            2,
+            self.marker_credits,
+            uniform(1),
+        )
+        .expect("the tentative terminal preserves the one marker credit");
+        assert_eq!(terminal_tentative, wide_uniform(7));
+        let terminal_and_k = WideResourceVector::new(
+            terminal_tentative.entries + u128::from(self.k_remaining.entries),
+            terminal_tentative.bytes + u128::from(self.k_remaining.bytes),
+        );
+        assert_eq!(terminal_and_k, wide_uniform(9));
+        assert!(terminal_and_k.entries > 8);
+        assert!(terminal_and_k.bytes > u128::from(uniform(8).bytes));
+
+        let event = Event::binding_fate_observed(
+            self.participant_id,
+            self.binding_epoch,
+            self.seed_high - 3,
+        );
+        assert_eq!(
+            compaction
+                .preserve_progress(self.debt, event, self.debt)
+                .expect("pending fate preserves the still-required PC"),
+            ClosureState::Owed {
+                debt: self.debt,
+                edge: StoredEdge::PhysicalCompaction(compaction),
+            }
+        );
+        self.pending_finalization = Some(pending);
+        self.fate_observed = true;
+        self
+    }
+
+    fn complete_compaction(mut self) -> Self {
+        let StoredEdge::PhysicalCompaction(compaction) = self.edge else {
+            panic!("PC completion consumes the exact stored range")
+        };
+        let event =
+            Event::compaction_completed(self.seed_high - 3, self.seed_high - 3, self.seed_high - 2)
+                .expect("case 56 completion advances the floor");
+        let successor = compaction
+            .strict_after_completion(
+                &event,
+                self.debt,
+                StoredEdge::MarkerDelivery(self.planned_marker),
+                self.seed_high + 1,
+            )
+            .expect("PC owns the exact marker successor at h+1");
+        let state = compaction
+            .complete(self.debt, event, successor)
+            .expect("PC completion installs the marker suffix");
+        assert_eq!(
+            state,
+            ClosureState::Owed {
+                debt: self.debt,
+                edge: StoredEdge::MarkerDelivery(self.planned_marker),
+            }
+        );
+        assert_eq!(self.retained.remove(0), self.seed_high - 3);
+        self.floor = self.seed_high - 2;
+        self.edge = StoredEdge::MarkerDelivery(self.planned_marker);
+        self
+    }
+
+    fn append_marker(mut self) -> Self {
+        assert!(self.marker_pending_append);
+        assert_eq!(self.high, self.seed_high);
+        assert_eq!(self.edge, StoredEdge::MarkerDelivery(self.planned_marker));
+        assert_eq!(self.planned_marker.participant_id(), self.participant_id);
+        assert_eq!(self.planned_marker.binding_epoch(), self.binding_epoch);
+        assert_eq!(
+            self.planned_marker.marker_delivery_seq(),
+            self.seed_high + 1
+        );
+        self.high = self.seed_high + 1;
+        self.log.push(DurableRecord56 {
+            sequence: self.high,
+            kind: RecordKind56::Marker,
+        });
+        self.retained.push(self.high);
+        self.marker_pending_append = false;
+        self
+    }
+
+    fn drain_pending_terminal(mut self) -> Self {
+        assert!(self.fate_observed);
+        let pending = self
+            .pending_finalization
+            .take()
+            .expect("fate-first persists the exact terminal authority");
+        let committed = pending.commit(self.seed_high + 2);
+        assert_eq!(committed.participant_id(), self.participant_id);
+        assert_eq!(committed.binding_epoch(), self.binding_epoch);
+        assert_eq!(
+            committed.admission_order().transaction_order(),
+            self.seed_high - 5
+        );
+        assert_eq!(committed.delivery_seq(), self.seed_high + 2);
+        self.install_terminal_and_dmr()
+    }
+
+    fn commit_fate_after_marker(mut self) -> Self {
+        assert!(!self.fate_observed);
+        assert!(self.pending_finalization.is_none());
+        let active = ActiveBinding {
+            participant_id: self.participant_id,
+            conversation_id: self.conversation_id,
+            binding_epoch: self.binding_epoch,
+        };
+        let transition = active.connection_lost(BindingTerminalDisposition::Committed(
+            CommittedBindingTerminalPosition::new(self.seed_high - 5, self.seed_high + 2),
+        ));
+        let liminal_protocol::lifecycle::DiedBindingTransition::Committed(committed) = transition
+        else {
+            panic!("PC-first fate commits its terminal immediately")
+        };
+        assert_eq!(committed.participant_id(), self.participant_id);
+        assert_eq!(committed.binding_epoch(), self.binding_epoch);
+        assert_eq!(
+            committed.admission_order().transaction_order(),
+            self.seed_high - 5
+        );
+        assert_eq!(committed.delivery_seq(), self.seed_high + 2);
+        self.fate_observed = true;
+        self.install_terminal_and_dmr()
+    }
+
+    fn install_terminal_and_dmr(mut self) -> Self {
+        assert_eq!(self.high, self.seed_high + 1);
+        let StoredEdge::MarkerDelivery(marker) = self.edge else {
+            panic!("undelivered marker owns the fate-to-DMR transition")
+        };
+        let fate = Event::binding_fate_observed(
+            self.participant_id,
+            self.binding_epoch,
+            self.seed_high - 3,
+        );
+        let dmr_state = marker
+            .binding_fate(self.debt, fate)
+            .expect("exact undelivered-marker fate derives DMR");
+        let ClosureState::Owed {
+            debt,
+            edge: StoredEdge::DetachedMarkerRelease(dmr),
+        } = dmr_state
+        else {
+            panic!("case 56 fate must retain debt under DMR")
+        };
+        assert_eq!(debt, self.debt);
+        assert_eq!(dmr.participant_id(), self.participant_id);
+        assert_eq!(dmr.marker_delivery_seq(), self.seed_high + 1);
+        assert_eq!(dmr.last_dead_binding_epoch(), self.binding_epoch);
+        self.high = self.seed_high + 2;
+        self.log.push(DurableRecord56 {
+            sequence: self.high,
+            kind: RecordKind56::DiedTerminal,
+        });
+        self.retained.push(self.high);
+        self.edge = StoredEdge::DetachedMarkerRelease(dmr);
+        self
+    }
+}
+
+fn replay_transition56<F>(prestate: &PcpOrderingSnapshot56, transition: F) -> PcpOrderingSnapshot56
+where
+    F: Fn(PcpOrderingSnapshot56) -> PcpOrderingSnapshot56,
+{
+    let committed = transition(prestate.clone());
+    let replayed = transition(prestate.clone());
+    assert_eq!(committed, replayed);
+    committed
+}
+
 #[test]
 fn acceptance_case_56_sequence_equality_and_pcp_ordering_without_occurrence_array() {
     // Frozen PARTICIPANT-CONTRACT.md lines 5359-5535. Per
@@ -1796,50 +2235,113 @@ fn acceptance_case_56_sequence_equality_and_pcp_ordering_without_occurrence_arra
     let debt_two = closure_debt(2);
     let pc = PhysicalCompaction::new(h - 3, h - 3).expect("single-row P1 Left range is nonempty");
     let marker = MarkerDelivery::new(P1, e5, h + 1);
-    let pc_event = Event::compaction_completed(h - 3, h - 3, h - 2)
-        .expect("physical completion advances the floor");
-    let marker_successor = pc
-        .strict_after_completion(
-            &pc_event,
-            debt_two,
-            StoredEdge::MarkerDelivery(marker),
-            h + 1,
-        )
-        .expect("PC selects the preplanned marker at h+1");
-    let pc_first = pc
-        .complete(debt_two, pc_event, marker_successor)
-        .expect("PC-first installs exact marker delivery");
-    assert_eq!(
-        pc_first,
-        ClosureState::Owed {
-            debt: debt_two,
-            edge: StoredEdge::MarkerDelivery(marker),
-        }
+    let fate_first_seed = PcpOrderingSnapshot56::seed(C56S, P1, e5, h, debt_two, pc, marker);
+    let fate_pending = replay_transition56(
+        &fate_first_seed,
+        PcpOrderingSnapshot56::persist_fate_before_storage,
+    );
+    assert_eq!(fate_pending.high, h);
+    assert_eq!(fate_pending.floor, h - 3);
+    assert_eq!(fate_pending.log, fate_first_seed.log);
+    assert_eq!(fate_pending.baseline(), wide_uniform(6));
+    let persisted = fate_pending
+        .pending_finalization
+        .expect("fate-first has a durable pending terminal");
+    assert_eq!(persisted.participant_id(), P1);
+    assert_eq!(persisted.binding_epoch(), e5);
+    assert_eq!(persisted.admission_order().transaction_order(), h - 5);
+    assert_eq!(fate_pending.edge, StoredEdge::PhysicalCompaction(pc));
+
+    let fate_pc_completed =
+        replay_transition56(&fate_pending, PcpOrderingSnapshot56::complete_compaction);
+    assert_eq!(fate_pc_completed.high, h);
+    assert_eq!(fate_pc_completed.floor, h - 2);
+    assert_eq!(fate_pc_completed.retained, [h - 2, h - 1, h]);
+    assert_eq!(fate_pc_completed.pending_finalization, Some(persisted));
+    assert_eq!(fate_pc_completed.edge, StoredEdge::MarkerDelivery(marker));
+
+    let fate_marker_appended =
+        replay_transition56(&fate_pc_completed, PcpOrderingSnapshot56::append_marker);
+    assert_eq!(fate_marker_appended.high, h + 1);
+    assert_eq!(fate_marker_appended.retained, [h - 2, h - 1, h, h + 1]);
+    assert_eq!(fate_marker_appended.pending_finalization, Some(persisted));
+    let fate_first_final = replay_transition56(
+        &fate_marker_appended,
+        PcpOrderingSnapshot56::drain_pending_terminal,
     );
 
-    let fate_event = Event::binding_fate_observed(P1, e5, h - 3);
-    let fate_first = pc
-        .preserve_progress(debt_two, fate_event, debt_two)
-        .expect("fate at F cannot cover PC before storage drains");
-    assert_eq!(
-        fate_first,
-        ClosureState::Owed {
-            debt: debt_two,
-            edge: StoredEdge::PhysicalCompaction(pc),
-        }
+    let pc_first_seed = PcpOrderingSnapshot56::seed(C56S, P1, e5, h, debt_two, pc, marker);
+    assert!(pc_first_seed.pending_finalization.is_none());
+    let pc_completed =
+        replay_transition56(&pc_first_seed, PcpOrderingSnapshot56::complete_compaction);
+    assert_eq!(pc_completed.high, h);
+    assert_eq!(pc_completed.floor, h - 2);
+    assert_eq!(pc_completed.retained, [h - 2, h - 1, h]);
+    assert!(!pc_completed.fate_observed);
+    let pc_marker_appended =
+        replay_transition56(&pc_completed, PcpOrderingSnapshot56::append_marker);
+    assert_eq!(pc_marker_appended.high, h + 1);
+    assert!(pc_marker_appended.pending_finalization.is_none());
+    assert!(!pc_marker_appended.fate_observed);
+    let pc_first_final = replay_transition56(
+        &pc_marker_appended,
+        PcpOrderingSnapshot56::commit_fate_after_marker,
     );
-    let dmr_pc_first = marker
-        .binding_fate(debt_two, fate_event)
-        .expect("PC-first then fate derives DMR");
-    let dmr_fate_first = marker
-        .binding_fate(debt_two, fate_event)
-        .expect("fate-first pending terminal drains after the same marker");
-    assert_eq!(dmr_pc_first, dmr_fate_first);
-    let ClosureState::Owed {
-        edge: StoredEdge::DetachedMarkerRelease(dmr),
-        ..
-    } = dmr_pc_first
-    else {
+
+    let expected_complete_log = vec![
+        DurableRecord56 {
+            sequence: h - 3,
+            kind: RecordKind56::Left,
+        },
+        DurableRecord56 {
+            sequence: h - 2,
+            kind: RecordKind56::Ordinary,
+        },
+        DurableRecord56 {
+            sequence: h - 1,
+            kind: RecordKind56::BindingTerminal,
+        },
+        DurableRecord56 {
+            sequence: h,
+            kind: RecordKind56::Attached,
+        },
+        DurableRecord56 {
+            sequence: h + 1,
+            kind: RecordKind56::Marker,
+        },
+        DurableRecord56 {
+            sequence: h + 2,
+            kind: RecordKind56::DiedTerminal,
+        },
+    ];
+    for completed in [&fate_first_final, &pc_first_final] {
+        assert_eq!(completed.log, expected_complete_log);
+        assert_eq!(completed.high, h + 2);
+        assert_eq!(completed.floor, h - 2);
+        assert_eq!(completed.observer, h);
+        assert_eq!(completed.retained, [h - 2, h - 1, h, h + 1, h + 2]);
+        assert!(!completed.marker_pending_append);
+        assert!(completed.pending_finalization.is_none());
+        assert!(completed.fate_observed);
+        assert_eq!(completed.baseline(), wide_uniform(6));
+        assert_eq!(completed.k_remaining, uniform(2));
+        let completed_capacity = mandatory_capacity(
+            completed.baseline(),
+            uniform(2),
+            completed.k_remaining,
+            uniform(8),
+        );
+        assert_eq!(completed_capacity.debt, wide_uniform(2));
+        assert!(completed_capacity.is_legal());
+        let StoredEdge::DetachedMarkerRelease(completed_dmr) = completed.edge else {
+            panic!("both arrival orders finish at exact DMR")
+        };
+        assert_eq!(completed_dmr.participant_id(), P1);
+        assert_eq!(completed_dmr.marker_delivery_seq(), h + 1);
+        assert_eq!(completed_dmr.last_dead_binding_epoch(), e5);
+    }
+    assert_eq!(fate_first_final, pc_first_final);
+    let StoredEdge::DetachedMarkerRelease(dmr) = pc_first_final.edge else {
         panic!("undelivered e5 marker must select DMR")
     };
     let leave_claim = dmr
@@ -1848,7 +2350,7 @@ fn acceptance_case_56_sequence_equality_and_pcp_ordering_without_occurrence_arra
     assert_eq!(
         dmr.leave(
             debt_two,
-            Event::detached_leave_committed(P1, h + 1),
+            Event::detached_leave_committed(P1, h + 3),
             leave_claim,
             DebtCompletion::clear(),
         )
