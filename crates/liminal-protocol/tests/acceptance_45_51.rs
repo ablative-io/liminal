@@ -843,11 +843,7 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
     }
     impl ReserveTerms {
         fn for_live_binding(binding_state: BindingState) -> Self {
-            let t = if matches!(binding_state, BindingState::Bound(_)) {
-                1
-            } else {
-                0
-            };
+            let t = u64::from(matches!(binding_state, BindingState::Bound(_)));
             Self {
                 live_members: 1,
                 e: 1,
@@ -1062,12 +1058,8 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
         Died(u64),
         Left(u64),
     }
-    let leave_first_left = leave_first_tombstone
-        .committed_result()
-        .left_delivery_seq();
-    let death_first_left = death_first_tombstone
-        .committed_result()
-        .left_delivery_seq();
+    let leave_first_left = leave_first_tombstone.committed_result().left_delivery_seq();
+    let death_first_left = death_first_tombstone.committed_result().left_delivery_seq();
     let death_first_died = died.delivery_seq();
     let leave_first_prefixes = [vec![], vec![CrashVisibleRecord::Left(leave_first_left)]];
     let death_first_prefixes = [
@@ -1078,12 +1070,9 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
             CrashVisibleRecord::Left(death_first_left),
         ],
     ];
-    assert!(
-        leave_first_prefixes.iter().all(|prefix| {
-            prefix.is_empty()
-                || prefix.as_slice() == [CrashVisibleRecord::Left(leave_first_left)]
-        })
-    );
+    assert!(leave_first_prefixes.iter().all(|prefix| {
+        prefix.is_empty() || prefix.as_slice() == [CrashVisibleRecord::Left(leave_first_left)]
+    }));
     assert!(
         death_first_prefixes
             .windows(2)
