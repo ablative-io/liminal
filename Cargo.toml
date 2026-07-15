@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/liminal",
+    "crates/liminal-protocol",
     "crates/liminal-sdk",
     "crates/liminal-server",
     "sdks/liminal-ts/wasm-src",

@@ -1,0 +1,1 @@
+//! Participant operation outcome types.
