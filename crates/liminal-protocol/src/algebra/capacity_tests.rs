@@ -27,7 +27,7 @@ fn baseline_and_zero_debt_admission_match_case_21() {
 #[test]
 fn startup_equality_enrollment_borrows_its_actual_charge() {
     let result = mandatory_capacity(
-        ResourceVector::new(2, 8 * U),
+        ResourceVector::new(2, 8 * U).widen(),
         Q,
         K,
         ResourceVector::new(5, 20 * U),
@@ -53,7 +53,7 @@ fn marker_credit_keeps_the_baseline_constant() {
 #[test]
 fn exact_q_supersession_reaches_the_mandatory_bound() {
     let result = mandatory_capacity(
-        ResourceVector::new(10, 40 * U),
+        ResourceVector::new(10, 40 * U).widen(),
         Q,
         K,
         ResourceVector::new(12, 48 * U),
@@ -105,7 +105,7 @@ fn byte_budget_walk_preserves_the_printed_totals() {
 #[test]
 fn recovery_charge_moves_from_k_to_baseline_once() {
     let transfer = recovery_transfer(
-        ResourceVector::new(4, 16 * U),
+        ResourceVector::new(4, 16 * U).widen(),
         K,
         ResourceVector::new(1, 4 * U),
     )
@@ -131,4 +131,44 @@ fn recovery_charge_moves_from_k_to_baseline_once() {
 #[test]
 fn baseline_rejects_more_credits_than_identities() {
     assert!(retained_baseline(ResourceVector::new(0, 0), 1, 2, MARKER_MAX).is_err());
+}
+
+#[test]
+fn retained_baseline_feeds_mandatory_capacity_without_narrowing() {
+    let baseline = retained_baseline(ResourceVector::new(3, 12 * U), 2, 1, MARKER_MAX)
+        .expect("the fixture satisfies C <= I");
+    let result = mandatory_capacity(baseline, Q, K, ResourceVector::new(8, 32 * U));
+
+    assert_eq!(baseline, WideResourceVector::new(4, 16 * u128::from(U)));
+    assert_eq!(result.debt, WideResourceVector::new(0, 0));
+    assert!(result.is_legal());
+}
+
+#[test]
+fn widened_overflow_is_a_capacity_failure_not_a_wrapped_success() {
+    let baseline = WideResourceVector::new(u128::MAX, u128::MAX);
+    let mandatory = mandatory_capacity(
+        baseline,
+        ResourceVector::new(1, 1),
+        ResourceVector::new(1, 1),
+        ResourceVector::new(u64::MAX, u64::MAX),
+    );
+    assert_eq!(
+        mandatory.debt,
+        WideResourceVector::new(u128::MAX, u128::MAX)
+    );
+    assert!(!mandatory.absolute_fit);
+    assert!(!mandatory.debt_within_mandatory_bound);
+    assert!(!mandatory.is_legal());
+
+    assert_eq!(
+        recovery_transfer(
+            WideResourceVector::new(u128::MAX, 0),
+            ResourceVector::new(1, 1),
+            ResourceVector::new(1, 1),
+        )
+        .expect_err("entry addition overflows first")
+        .dimension,
+        ResourceDimension::Entries
+    );
 }

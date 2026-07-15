@@ -82,7 +82,7 @@ pub const fn zero_debt_admission(
 /// `B' + K_remaining' <= cap`, and the debt bound `d' <= Q`.
 #[must_use]
 pub const fn mandatory_capacity(
-    resulting_baseline: ResourceVector,
+    resulting_baseline: WideResourceVector,
     mandatory_bound: ResourceVector,
     remaining_recovery_claim: ResourceVector,
     configured_cap: ResourceVector,
@@ -115,9 +115,9 @@ pub const fn mandatory_capacity(
 /// # Errors
 ///
 /// Returns [`RecoveryTransferError`] for the first component in which `r`
-/// exceeds `K_remaining`.
+/// exceeds `K_remaining` or the widened baseline sum is unrepresentable.
 pub const fn recovery_transfer(
-    baseline_after_removals: ResourceVector,
+    baseline_after_removals: WideResourceVector,
     remaining_recovery_claim: ResourceVector,
     charge: ResourceVector,
 ) -> Result<RecoveryTransfer, RecoveryTransferError> {
@@ -132,11 +132,25 @@ pub const fn recovery_transfer(
         });
     }
 
+    let Some(entries) = baseline_after_removals
+        .entries
+        .checked_add(widen_u64(charge.entries))
+    else {
+        return Err(RecoveryTransferError {
+            dimension: ResourceDimension::Entries,
+        });
+    };
+    let Some(bytes) = baseline_after_removals
+        .bytes
+        .checked_add(widen_u64(charge.bytes))
+    else {
+        return Err(RecoveryTransferError {
+            dimension: ResourceDimension::Bytes,
+        });
+    };
+
     Ok(RecoveryTransfer {
-        baseline: WideResourceVector::new(
-            widen_u64(baseline_after_removals.entries) + widen_u64(charge.entries),
-            widen_u64(baseline_after_removals.bytes) + widen_u64(charge.bytes),
-        ),
+        baseline: WideResourceVector::new(entries, bytes),
         remaining_recovery_claim: ResourceVector::new(
             remaining_recovery_claim.entries - charge.entries,
             remaining_recovery_claim.bytes - charge.bytes,
@@ -178,15 +192,24 @@ struct MandatoryComponent {
     debt_within_bound: bool,
 }
 
-const fn mandatory_component(baseline: u64, q: u64, k: u64, cap: u64) -> MandatoryComponent {
-    let baseline = widen_u64(baseline);
+const fn mandatory_component(baseline: u128, q: u64, k: u64, cap: u64) -> MandatoryComponent {
     let q = widen_u64(q);
     let k = widen_u64(k);
     let cap = widen_u64(cap);
-    let debt = (baseline + q + k).saturating_sub(cap);
+    let debt = match baseline.checked_add(q) {
+        Some(with_q) => match with_q.checked_add(k) {
+            Some(required) => required.saturating_sub(cap),
+            None => u128::MAX,
+        },
+        None => u128::MAX,
+    };
+    let absolute_fit = match baseline.checked_add(k) {
+        Some(required) => required <= cap,
+        None => false,
+    };
     MandatoryComponent {
         debt,
-        absolute_fit: baseline + k <= cap,
+        absolute_fit,
         debt_within_bound: debt <= q,
     }
 }

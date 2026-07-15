@@ -116,10 +116,11 @@ pub struct RecoveryTransfer {
     pub remaining_recovery_claim: ResourceVector,
 }
 
-/// Invalid recovery-charge transfer.
+/// Invalid or unrepresentable recovery-charge transfer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoveryTransferError {
-    /// First component in which the transferred charge exceeded the claim.
+    /// First component in which the transferred charge exceeded the claim or
+    /// the widened post-transfer baseline overflowed.
     pub dimension: ResourceDimension,
 }
 
