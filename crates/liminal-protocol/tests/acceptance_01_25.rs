@@ -257,23 +257,210 @@ fn acceptance_05_replay_live_cutover_is_lossless_and_ordered() {
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct MarkerFixture {
-    cursor: u64,
-    retained: BTreeSet<u64>,
-    marker: ParticipantDelivery,
-    marker_delivered: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactionLiveOrdering {
+    CompactionThenLiveCommit,
+    LiveCommitRacesCandidateDrain,
 }
 
-impl MarkerFixture {
-    fn accept(&mut self) -> Result<MarkerAckCommitted, AckGap> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactionRaceOperation {
+    CompactionCandidateDrain,
+    LiveCommit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompactionCandidateState {
+    Pending,
+    Completed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LiveCommitState {
+    NotSubmitted,
+    PendingCandidateDrain,
+    Appended,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkerConfirmationState {
+    NotDelivered,
+    Delivered,
+    AwaitingConfirmation,
+    CrashedAwaitingRedelivery,
+    RedeliveredAwaitingConfirmation,
+    Confirmed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PersistedMarkerDelivery {
+    key: (u64, u64),
+    body: ParticipantRecord,
+    encoded_frame: Vec<u8>,
+}
+
+impl PersistedMarkerDelivery {
+    fn new(delivery: &ParticipantDelivery) -> Self {
+        let frame = ParticipantFrame::ServerPush(ServerPush::ParticipantDelivery(delivery.clone()));
+        let mut encoded_frame =
+            vec![0; encoded_len(&frame).expect("marker frame has a canonical encoding")];
+        encode(&frame, &mut encoded_frame).expect("sized marker buffer accepts its encoding");
+        Self {
+            key: (delivery.conversation_id, delivery.delivery_seq),
+            body: delivery.record.clone(),
+            encoded_frame,
+        }
+    }
+
+    fn decode_delivery(&self) -> ParticipantDelivery {
+        let decoded = decode(&self.encoded_frame, ReceiverDirection::Client)
+            .expect("persisted canonical marker decodes after recovery");
+        let ParticipantFrame::ServerPush(ServerPush::ParticipantDelivery(delivery)) = decoded
+        else {
+            panic!("persisted marker bytes decoded as a different frame kind");
+        };
+        assert_eq!((delivery.conversation_id, delivery.delivery_seq), self.key);
+        assert_eq!(delivery.record, self.body);
+        delivery
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct MarkerReplayHarness {
+    high_watermark: u64,
+    cursor: u64,
+    compaction_candidate: CompactionCandidateState,
+    live_commit: LiveCommitState,
+    operation_trace: Vec<CompactionRaceOperation>,
+    append_log: Vec<ParticipantDelivery>,
+    persisted_marker: Option<PersistedMarkerDelivery>,
+    accepted_marker: Option<PersistedMarkerDelivery>,
+    marker_confirmation: MarkerConfirmationState,
+    retained_physical: BTreeSet<u64>,
+    abandoned_sequences: BTreeSet<u64>,
+    delivered_ordinary_keys: BTreeSet<(u64, u64)>,
+    cursor_transitions: Vec<(u64, u64)>,
+    queued_live: Option<ParticipantDelivery>,
+}
+
+impl MarkerReplayHarness {
+    fn for_ordering(ordering: CompactionLiveOrdering) -> Self {
+        let mut fixture = Self {
+            high_watermark: 29,
+            cursor: 10,
+            compaction_candidate: CompactionCandidateState::Pending,
+            live_commit: LiveCommitState::NotSubmitted,
+            operation_trace: Vec::new(),
+            append_log: Vec::new(),
+            persisted_marker: None,
+            accepted_marker: None,
+            marker_confirmation: MarkerConfirmationState::NotDelivered,
+            retained_physical: (20..=29).collect(),
+            abandoned_sequences: BTreeSet::new(),
+            delivered_ordinary_keys: (1..=10).map(|sequence| (106, sequence)).collect(),
+            cursor_transitions: Vec::new(),
+            queued_live: None,
+        };
+        match ordering {
+            CompactionLiveOrdering::CompactionThenLiveCommit => {
+                fixture.complete_compaction_candidate();
+                fixture.commit_live_record();
+            }
+            CompactionLiveOrdering::LiveCommitRacesCandidateDrain => {
+                fixture.commit_live_record();
+                fixture.complete_compaction_candidate();
+            }
+        }
+        fixture
+    }
+
+    const fn next_sequence(&mut self) -> u64 {
+        self.high_watermark += 1;
+        self.high_watermark
+    }
+
+    fn complete_compaction_candidate(&mut self) {
+        self.operation_trace
+            .push(CompactionRaceOperation::CompactionCandidateDrain);
+        assert_eq!(self.compaction_candidate, CompactionCandidateState::Pending);
+        let marker = round_trip_delivery(ParticipantDelivery {
+            conversation_id: 106,
+            delivery_seq: self.next_sequence(),
+            record: ParticipantRecord::HistoryCompacted {
+                affected_participant_id: 6,
+                abandoned_after: self.cursor,
+                abandoned_through: 29,
+                physical_floor_at_decision: 20,
+            },
+        });
+        self.persisted_marker = Some(PersistedMarkerDelivery::new(&marker));
+        self.append_log.push(marker);
+        self.compaction_candidate = CompactionCandidateState::Completed;
+        if self.live_commit == LiveCommitState::PendingCandidateDrain {
+            self.append_live_record();
+            self.live_commit = LiveCommitState::Appended;
+        }
+    }
+
+    fn commit_live_record(&mut self) {
+        self.operation_trace
+            .push(CompactionRaceOperation::LiveCommit);
+        assert_eq!(self.live_commit, LiveCommitState::NotSubmitted);
+        if self.compaction_candidate == CompactionCandidateState::Pending {
+            self.live_commit = LiveCommitState::PendingCandidateDrain;
+        } else {
+            self.append_live_record();
+            self.live_commit = LiveCommitState::Appended;
+        }
+    }
+
+    fn append_live_record(&mut self) {
+        let live = round_trip_delivery(ordinary_delivery(106, self.next_sequence(), 0x31));
+        self.append_log.push(live.clone());
+        self.queued_live = Some(live);
+    }
+
+    fn deliver_marker(&mut self) -> (Vec<u8>, DeliveryDisposition) {
+        let persisted = self
+            .persisted_marker
+            .as_ref()
+            .expect("candidate drain persists the marker before delivery");
+        let disposition = if let Some(accepted) = &self.accepted_marker {
+            assert_eq!(
+                self.marker_confirmation,
+                MarkerConfirmationState::CrashedAwaitingRedelivery
+            );
+            assert_eq!(accepted.key, persisted.key);
+            assert_eq!(accepted.body, persisted.body);
+            assert_eq!(accepted.encoded_frame, persisted.encoded_frame);
+            self.marker_confirmation = MarkerConfirmationState::RedeliveredAwaitingConfirmation;
+            DeliveryDisposition::ProvenDuplicate
+        } else {
+            assert_eq!(
+                self.marker_confirmation,
+                MarkerConfirmationState::NotDelivered
+            );
+            self.marker_confirmation = MarkerConfirmationState::Delivered;
+            DeliveryDisposition::Applied
+        };
+        let delivery = persisted.decode_delivery();
+        assert_eq!(delivery.delivery_seq, 30);
+        (persisted.encoded_frame.clone(), disposition)
+    }
+
+    fn accept_marker(&mut self) -> Result<MarkerAckCommitted, AckGap> {
+        let persisted = self
+            .persisted_marker
+            .as_ref()
+            .expect("candidate drain persists the marker before acceptance")
+            .clone();
         let request = MarkerAckEnvelope {
-            conversation_id: self.marker.conversation_id,
+            conversation_id: persisted.key.0,
             participant_id: 6,
             capability_generation: Generation::ONE,
-            marker_delivery_seq: self.marker.delivery_seq,
+            marker_delivery_seq: persisted.key.1,
         };
-        if !self.marker_delivered {
+        if self.marker_confirmation != MarkerConfirmationState::Delivered {
             return Err(AckGap::new(
                 ParticipantAckEnvelope {
                     conversation_id: request.conversation_id,
@@ -285,55 +472,209 @@ impl MarkerFixture {
             )
             .expect("undelivered marker is above cursor"));
         }
+
+        let delivery = persisted.decode_delivery();
+        let ParticipantRecord::HistoryCompacted {
+            affected_participant_id,
+            abandoned_after,
+            abandoned_through,
+            physical_floor_at_decision,
+        } = delivery.record
+        else {
+            panic!("persisted marker has the wrong record kind");
+        };
+        assert_eq!(affected_participant_id, request.participant_id);
+        assert_eq!(abandoned_after, self.cursor);
+        assert_eq!(abandoned_through, 29);
+        assert_eq!(physical_floor_at_decision, 20);
+        self.abandoned_sequences
+            .extend((abandoned_after + 1)..=abandoned_through);
+        self.cursor_transitions
+            .push((self.cursor, request.marker_delivery_seq));
         self.cursor = request.marker_delivery_seq;
-        self.retained.clear();
+        self.retained_physical.clear();
+        self.accepted_marker = Some(persisted);
+        self.marker_confirmation = MarkerConfirmationState::AwaitingConfirmation;
         Ok(MarkerAckCommitted::new(request))
     }
+
+    fn crash_before_confirmation(mut self) -> Self {
+        assert_eq!(
+            self.marker_confirmation,
+            MarkerConfirmationState::AwaitingConfirmation
+        );
+        self.marker_confirmation = MarkerConfirmationState::CrashedAwaitingRedelivery;
+        self
+    }
+
+    fn confirm_replayed_ack(&mut self) {
+        assert_eq!(
+            self.marker_confirmation,
+            MarkerConfirmationState::RedeliveredAwaitingConfirmation
+        );
+        self.marker_confirmation = MarkerConfirmationState::Confirmed;
+    }
+
+    fn deliver_live_record(&mut self) -> Option<ParticipantDelivery> {
+        if self.marker_confirmation != MarkerConfirmationState::Confirmed {
+            return None;
+        }
+        let live = self.queued_live.take()?;
+        assert_eq!(live.delivery_seq, self.cursor + 1);
+        self.cursor_transitions
+            .push((self.cursor, live.delivery_seq));
+        self.cursor = live.delivery_seq;
+        self.delivered_ordinary_keys
+            .insert((live.conversation_id, live.delivery_seq));
+        Some(live)
+    }
+}
+
+fn assert_compaction_race_log(replay: &MarkerReplayHarness, ordering: CompactionLiveOrdering) {
+    let expected_operations = match ordering {
+        CompactionLiveOrdering::CompactionThenLiveCommit => vec![
+            CompactionRaceOperation::CompactionCandidateDrain,
+            CompactionRaceOperation::LiveCommit,
+        ],
+        CompactionLiveOrdering::LiveCommitRacesCandidateDrain => vec![
+            CompactionRaceOperation::LiveCommit,
+            CompactionRaceOperation::CompactionCandidateDrain,
+        ],
+    };
+    assert_eq!(replay.operation_trace, expected_operations);
+    assert_eq!(
+        replay
+            .append_log
+            .iter()
+            .map(|delivery| delivery.delivery_seq)
+            .collect::<Vec<_>>(),
+        vec![30, 31]
+    );
+    assert_eq!(
+        replay.append_log[0].record,
+        ParticipantRecord::HistoryCompacted {
+            affected_participant_id: 6,
+            abandoned_after: 10,
+            abandoned_through: 29,
+            physical_floor_at_decision: 20,
+        }
+    );
+    assert_eq!(
+        replay.append_log[1].record,
+        ParticipantRecord::OrdinaryRecord {
+            sender_participant_id: 7,
+            payload: vec![0x31],
+        }
+    );
+}
+
+fn exercise_marker_accept_and_replay(ordering: CompactionLiveOrdering) {
+    let mut replay = MarkerReplayHarness::for_ordering(ordering);
+    assert_compaction_race_log(&replay, ordering);
+    assert_eq!(replay.retained_physical, (20..=29).collect());
+    assert_eq!(
+        replay.delivered_ordinary_keys,
+        (1..=10).map(|sequence| (106, sequence)).collect()
+    );
+
+    let (first_encoding, first_delivery) = replay.deliver_marker();
+    assert_eq!(first_delivery, DeliveryDisposition::Applied);
+    let committed = replay
+        .accept_marker()
+        .expect("the delivered marker can be accepted");
+    assert_eq!(committed.current_cursor(), 30);
+    assert_eq!(replay.cursor, 30);
+    assert_eq!(replay.abandoned_sequences, (11..=29).collect());
+    assert!(replay.retained_physical.is_empty());
+    assert_eq!(replay.cursor_transitions, vec![(10, 30)]);
+    assert_eq!(
+        replay
+            .delivered_ordinary_keys
+            .iter()
+            .map(|(_, sequence)| *sequence)
+            .collect::<BTreeSet<_>>(),
+        (1..=10).collect()
+    );
+
+    let mut recovered = replay.crash_before_confirmation();
+    let (replayed_encoding, replay_delivery) = recovered.deliver_marker();
+    assert_eq!(replay_delivery, DeliveryDisposition::ProvenDuplicate);
+    assert_eq!(replayed_encoding, first_encoding);
+    assert_eq!(recovered.cursor_transitions, vec![(10, 30)]);
+    let accepted = recovered
+        .accepted_marker
+        .as_ref()
+        .expect("accepted marker key and body survive the crash");
+    let persisted = recovered
+        .persisted_marker
+        .as_ref()
+        .expect("server delivery journal survives the crash");
+    assert_eq!(accepted.key, (106, 30));
+    assert_eq!(accepted.key, persisted.key);
+    assert_eq!(accepted.body, persisted.body);
+    recovered.confirm_replayed_ack();
+
+    let live = recovered
+        .deliver_live_record()
+        .expect("live delivery remains queued behind marker confirmation");
+    assert_eq!(live.delivery_seq, 31);
+    assert_eq!(recovered.cursor, 31);
+    assert_eq!(recovered.cursor_transitions, vec![(10, 30), (30, 31)]);
+    assert_eq!(
+        recovered
+            .cursor_transitions
+            .iter()
+            .filter(|transition| **transition == (10, 30))
+            .count(),
+        1
+    );
+    assert_eq!(recovered.abandoned_sequences, (11..=29).collect());
+    assert!(
+        recovered
+            .delivered_ordinary_keys
+            .is_disjoint(&(11..=29).map(|sequence| (106, sequence)).collect())
+    );
+    assert_eq!(
+        recovered.delivered_ordinary_keys,
+        (1..=10)
+            .chain(std::iter::once(31))
+            .map(|sequence| (106, sequence))
+            .collect()
+    );
+}
+
+fn exercise_marker_decline(ordering: CompactionLiveOrdering) {
+    let mut declined = MarkerReplayHarness::for_ordering(ordering);
+    assert_compaction_race_log(&declined, ordering);
+    let (_, declined_delivery) = declined.deliver_marker();
+    assert_eq!(declined_delivery, DeliveryDisposition::Applied);
+    assert_eq!(declined.cursor, 10);
+    assert_eq!(declined.retained_physical, (20..=29).collect());
+    assert!(declined.abandoned_sequences.is_empty());
+    assert_eq!(declined.deliver_live_record(), None);
+    assert_eq!(declined.retained_physical, (20..=29).collect());
 }
 
 // Frozen contract lines 3357-3365.
 #[test]
 fn acceptance_06_history_compaction_marker_accept_decline_and_replay() {
-    let marker = round_trip_delivery(ParticipantDelivery {
-        conversation_id: 106,
-        delivery_seq: 30,
-        record: ParticipantRecord::HistoryCompacted {
-            affected_participant_id: 6,
-            abandoned_after: 10,
-            abandoned_through: 29,
-            physical_floor_at_decision: 20,
-        },
-    });
-    let retained: BTreeSet<_> = (20..=29).collect();
-    let fixture = MarkerFixture {
-        cursor: 10,
-        retained,
-        marker,
-        marker_delivered: true,
-    };
-    assert_eq!(fixture.retained, (20..=29).collect());
+    for ordering in [
+        CompactionLiveOrdering::CompactionThenLiveCommit,
+        CompactionLiveOrdering::LiveCommitRacesCandidateDrain,
+    ] {
+        exercise_marker_accept_and_replay(ordering);
+        exercise_marker_decline(ordering);
+    }
 
-    let declined = fixture.clone();
-    assert_eq!(declined.cursor, 10);
-    assert_eq!(declined.retained, (20..=29).collect());
-
-    let mut accepted = fixture.clone();
-    let committed = accepted.accept().expect("delivered marker can be accepted");
-    assert_eq!(committed.current_cursor(), 30);
-    assert_eq!(accepted.cursor, 30);
-    assert!(accepted.retained.is_empty());
-    assert_eq!(accepted.marker, fixture.marker); // loss/replay preserves the key and body
-
-    let live = round_trip_delivery(ordinary_delivery(106, 31, 0x31));
-    assert_eq!(live.delivery_seq, accepted.cursor + 1);
-
-    let mut undelivered = fixture;
-    undelivered.marker_delivered = false;
+    let mut undelivered =
+        MarkerReplayHarness::for_ordering(CompactionLiveOrdering::LiveCommitRacesCandidateDrain);
     let gap = undelivered
-        .accept()
+        .accept_marker()
         .expect_err("normal ack cannot invent marker delivery");
     assert_eq!(gap.current_cursor(), 10);
-    assert_eq!(undelivered.retained, (20..=29).collect());
+    assert_eq!(undelivered.retained_physical, (20..=29).collect());
+    assert!(undelivered.abandoned_sequences.is_empty());
+    assert!(undelivered.cursor_transitions.is_empty());
 }
 
 // Frozen contract lines 3366-3367.
