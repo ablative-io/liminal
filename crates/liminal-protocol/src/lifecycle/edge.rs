@@ -122,6 +122,22 @@ impl MarkerDelivery {
 }
 
 /// Continuous cursor-progress witness with no delivered marker.
+///
+/// This witness deliberately has no public constructor. A caller outside this
+/// crate cannot turn raw participant/epoch values into executable binding-fate
+/// authority; recovered-epoch fate must instead originate from
+/// [`FencedAttachCommit::recovered_binding_fate`].
+///
+/// ```compile_fail
+/// use liminal_protocol::{
+///     lifecycle::CursorProgressContinuous,
+///     wire::BindingEpoch,
+/// };
+///
+/// fn fabricate(epoch: BindingEpoch) {
+///     let _ = CursorProgressContinuous::new(7, epoch, 11);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorProgressContinuous {
     participant_id: ParticipantId,
@@ -130,9 +146,10 @@ pub struct CursorProgressContinuous {
 }
 
 impl CursorProgressContinuous {
-    /// Creates an exact current-epoch continuous-cursor witness.
+    /// Creates an exact current-epoch continuous-cursor witness internally.
+    #[cfg(test)]
     #[must_use]
-    pub const fn new(
+    pub(crate) const fn new(
         participant_id: ParticipantId,
         binding_epoch: BindingEpoch,
         through_seq: DeliverySeq,
@@ -204,6 +221,20 @@ impl CursorProgressMarker {
 }
 
 /// Cursor progress split into typestates rather than an optional marker bag.
+///
+/// Continuous construction is crate-private so matching raw participant and
+/// epoch values cannot fabricate `DetachedCursorRelease` authority.
+///
+/// ```compile_fail
+/// use liminal_protocol::{
+///     lifecycle::ParticipantCursorProgress,
+///     wire::BindingEpoch,
+/// };
+///
+/// fn fabricate(epoch: BindingEpoch) {
+///     let _ = ParticipantCursorProgress::continuous(7, epoch, 11);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParticipantCursorProgress {
     /// Continuous cursor witness.
@@ -213,9 +244,10 @@ pub enum ParticipantCursorProgress {
 }
 
 impl ParticipantCursorProgress {
-    /// Creates a continuous, no-marker cursor witness.
+    /// Creates a continuous, no-marker cursor witness internally.
+    #[cfg(test)]
     #[must_use]
-    pub const fn continuous(
+    pub(crate) const fn continuous(
         participant_id: ParticipantId,
         binding_epoch: BindingEpoch,
         through_seq: DeliverySeq,
@@ -1853,7 +1885,12 @@ impl ParticipantCursorProgress {
     }
 
     /// Consumes exact binding fate and derives DCR only from marker-backed PCP,
-    /// or `DCursor` only from continuous PCP.
+    /// or `DCursor` only from a crate-derived continuous PCP.
+    ///
+    /// Continuous construction is not part of the public API. In particular,
+    /// the fate of an epoch committed by fenced attach must use
+    /// [`FencedAttachCommit::recovered_binding_fate`] instead of this raw-event
+    /// transition.
     ///
     /// # Errors
     ///
