@@ -1,5 +1,5 @@
 use crate::algebra::{ResourceVector, WideResourceVector};
-use crate::wire::{BindingEpoch, DeliverySeq, ParticipantId, ParticipantIndex};
+use crate::wire::{BindingEpoch, ConversationId, DeliverySeq, ParticipantId, ParticipantIndex};
 
 use super::{
     ActiveBinding, CommittedDiedTerminal,
@@ -105,6 +105,7 @@ impl PhysicalCompaction {
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerDelivery {
+    conversation_id: ConversationId,
     participant_id: ParticipantId,
     binding_epoch: BindingEpoch,
     marker_delivery_seq: DeliverySeq,
@@ -122,10 +123,12 @@ impl MarkerDelivery {
     pub(super) const fn successor_from_validated_candidate(
         candidate: ValidatedMarkerCandidate,
     ) -> StoredEdge {
+        let conversation_id = candidate.conversation_id();
         let participant_id = candidate.participant_id();
         let marker_delivery_seq = candidate.delivery_seq();
         let successor = match candidate.target_binding() {
             super::FrontierBinding::Bound(binding_epoch) => StoredEdge::MarkerDelivery(Self {
+                conversation_id,
                 participant_id,
                 binding_epoch,
                 marker_delivery_seq,
@@ -146,10 +149,17 @@ impl MarkerDelivery {
     #[must_use]
     pub(super) const fn from_validated_record(record: &ValidatedMarkerRecord) -> Self {
         Self {
+            conversation_id: record.conversation_id(),
             participant_id: record.participant_id(),
             binding_epoch: record.binding_epoch(),
             marker_delivery_seq: record.delivery_seq(),
         }
+    }
+
+    /// Returns the conversation whose frontier authority minted this delivery.
+    #[must_use]
+    pub const fn conversation_id(self) -> ConversationId {
+        self.conversation_id
     }
 
     /// Returns the marker owner.
@@ -422,6 +432,7 @@ impl CursorProgressContinuous {
 /// a type-level precondition for detached credential recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CursorProgressMarker {
+    conversation_id: ConversationId,
     participant_id: ParticipantId,
     binding_epoch: BindingEpoch,
     through_seq: DeliverySeq,
@@ -429,6 +440,12 @@ pub struct CursorProgressMarker {
 }
 
 impl CursorProgressMarker {
+    /// Returns the conversation inherited from the exact marker delivery.
+    #[must_use]
+    pub const fn conversation_id(self) -> ConversationId {
+        self.conversation_id
+    }
+
     /// Returns the participant whose marker must be accepted.
     #[must_use]
     pub const fn participant_id(self) -> ParticipantId {
@@ -555,12 +572,19 @@ impl ParticipantCursorProgress {
 /// cursor witness; callers cannot fabricate a durable delivery fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DetachedCredentialRecovery {
+    conversation_id: ConversationId,
     participant_id: ParticipantId,
     marker_delivery_seq: DeliverySeq,
     prior_binding_epoch: BindingEpoch,
 }
 
 impl DetachedCredentialRecovery {
+    /// Returns the conversation inherited from the marker-backed cursor witness.
+    #[must_use]
+    pub const fn conversation_id(self) -> ConversationId {
+        self.conversation_id
+    }
+
     /// Returns the detached participant.
     #[must_use]
     pub const fn participant_id(self) -> ParticipantId {
@@ -860,6 +884,7 @@ impl OrdinaryBindingAuthority {
             return Err(self);
         }
         Ok(OrdinaryBindingFate {
+            conversation_id: self.binding.conversation_id,
             through_seq: self.through_seq,
             resulting_floor,
             release: DetachedCursorRelease {
@@ -877,16 +902,35 @@ impl OrdinaryBindingAuthority {
 /// executing it cannot bypass [`FencedAttachCommit::recovered_binding_fate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingFate {
+    conversation_id: ConversationId,
     through_seq: DeliverySeq,
     resulting_floor: DeliverySeq,
     release: DetachedCursorRelease,
 }
 
 impl OrdinaryBindingFate {
+    /// Returns the conversation validated against the committed `Died` terminal.
+    #[must_use]
+    pub const fn conversation_id(self) -> ConversationId {
+        self.conversation_id
+    }
+
     /// Returns the durable cursor preceding the ordinary binding's death.
     #[must_use]
     pub const fn through_seq(self) -> DeliverySeq {
         self.through_seq
+    }
+
+    /// Returns the participant whose ordinary binding died.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.release.participant_id
+    }
+
+    /// Returns the exact dead binding epoch whose fate was observed.
+    #[must_use]
+    pub const fn last_dead_binding_epoch(self) -> BindingEpoch {
+        self.release.last_dead_binding_epoch
     }
 
     /// Returns the measured floor from the binding-fate transaction.
@@ -909,6 +953,7 @@ impl OrdinaryBindingFate {
 /// cursor merely by presenting a marker sequence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FencedAttachCommit {
+    conversation_id: ConversationId,
     participant_id: ParticipantId,
     marker_delivery_seq: DeliverySeq,
     prior_binding_epoch: BindingEpoch,
@@ -917,6 +962,12 @@ pub struct FencedAttachCommit {
 }
 
 impl FencedAttachCommit {
+    /// Returns the conversation inherited from the consumed recovery edge.
+    #[must_use]
+    pub const fn conversation_id(self) -> ConversationId {
+        self.conversation_id
+    }
+
     /// Returns the participant whose fenced recovery committed.
     #[must_use]
     pub const fn participant_id(self) -> ParticipantId {
@@ -987,6 +1038,7 @@ impl FencedAttachCommit {
             _ => return Err(self.next_state),
         };
         Ok(RecoveredBindingFate {
+            conversation_id: self.conversation_id,
             predecessor_debt: debt,
             predecessor,
             resulting_floor,
@@ -1020,6 +1072,7 @@ impl RecoveredStorageEdge {
 /// OP/PC state installed by that attach.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RecoveredBindingFate {
+    conversation_id: ConversationId,
     predecessor_debt: ClosureDebt,
     predecessor: RecoveredStorageEdge,
     resulting_floor: DeliverySeq,
@@ -1027,6 +1080,12 @@ pub struct RecoveredBindingFate {
 }
 
 impl RecoveredBindingFate {
+    /// Returns the conversation inherited from the fenced-attach provenance.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
     /// Returns the exact post-attach state to which this authority is bound.
     #[must_use]
     pub const fn predecessor_state(&self) -> ClosureState {
@@ -1043,6 +1102,12 @@ impl RecoveredBindingFate {
     #[must_use]
     pub const fn last_dead_binding_epoch(&self) -> BindingEpoch {
         self.release.last_dead_binding_epoch
+    }
+
+    /// Returns the floor measured in the binding-fate transaction.
+    #[must_use]
+    pub const fn resulting_floor(&self) -> DeliverySeq {
+        self.resulting_floor
     }
 }
 
@@ -2164,6 +2229,7 @@ impl MarkerDelivery {
             return Err(original);
         }
         let progress = CursorProgressMarker {
+            conversation_id: self.conversation_id,
             participant_id,
             binding_epoch,
             through_seq: marker_delivery_seq,
@@ -2539,6 +2605,7 @@ impl ParticipantCursorProgress {
         }
         Ok(CursorFateSuccessor::DetachedCredentialRecovery(
             DetachedCredentialRecovery {
+                conversation_id: value.conversation_id,
                 participant_id: value.participant_id,
                 marker_delivery_seq: value.marker_delivery_seq,
                 prior_binding_epoch: value.binding_epoch,
@@ -2656,6 +2723,7 @@ impl DetachedCredentialRecovery {
             return Err(original);
         }
         Ok(FencedAttachCommit {
+            conversation_id: self.conversation_id,
             participant_id,
             marker_delivery_seq,
             prior_binding_epoch,

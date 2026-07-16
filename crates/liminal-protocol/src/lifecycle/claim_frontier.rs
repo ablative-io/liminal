@@ -373,7 +373,6 @@ struct HistoricalMarkerDeliveryAuthority {
 }
 
 impl HistoricalCausalAuthority {
-    #[cfg(test)]
     pub(super) const fn from_committed_terminal(terminal: super::CommittedBindingTerminal) -> Self {
         Self {
             conversation_id: terminal.conversation_id(),
@@ -385,7 +384,6 @@ impl HistoricalCausalAuthority {
         }
     }
 
-    #[cfg(test)]
     pub(super) const fn from_retired<EF, V, LF>(
         retired: &super::RetiredIdentity<EF, V, LF>,
     ) -> Self {
@@ -440,7 +438,6 @@ impl ValidatedConversationHistory {
         }
     }
 
-    #[cfg(test)]
     pub(super) const fn new(
         causal_authorities: Vec<HistoricalCausalAuthority>,
         binding_origins: Vec<BindingOrigin>,
@@ -452,7 +449,6 @@ impl ValidatedConversationHistory {
         }
     }
 
-    #[cfg(test)]
     pub(super) fn ordinary_origin(
         &self,
         conversation_id: ConversationId,
@@ -1202,13 +1198,6 @@ pub(super) struct ClaimFrontiersPrevalidated {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "executable marker-record requests are issued only by crate-owned restore tests"
-    )
-)]
 enum MarkerRecordUse {
     Planned(FrontierBinding),
     Delivered(FrontierBinding),
@@ -1226,13 +1215,6 @@ pub(super) struct MarkerRecordRequest {
     use_kind: MarkerRecordUse,
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "external restore data cannot construct executable marker-record requests"
-    )
-)]
 impl MarkerRecordRequest {
     /// Requests an undelivered planned marker in its exact current target state.
     pub(super) const fn planned(
@@ -3250,7 +3232,6 @@ fn consume_leave_order_lane(
 impl ClaimFrontiersPrevalidated {
     /// Returns the conversation whose raw closure edge must be restored.
     #[must_use]
-    #[cfg(test)]
     pub(super) const fn conversation_id(&self) -> ConversationId {
         self.conversation_id
     }
@@ -3260,7 +3241,6 @@ impl ClaimFrontiersPrevalidated {
     /// A second request is refused even for the same sequence. The returned
     /// token is non-cloneable and binds conversation, record key, target
     /// participant, and exact current/last binding epoch.
-    #[cfg(test)]
     pub(super) fn take_marker_record(
         &mut self,
         request: MarkerRecordRequest,

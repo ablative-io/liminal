@@ -855,6 +855,11 @@ fn ordinary_binding_fate_requires_attach_and_exact_terminal_provenance() {
     let fate = authority
         .binding_fate(terminal, 9)
         .expect("exact ordinary terminal derives no-marker fate");
+    assert_eq!(
+        fate.conversation_id(),
+        29,
+        "ordinary fate must carry the committed terminal's conversation"
+    );
     assert_eq!(fate.through_seq(), 12);
     assert_eq!(fate.resulting_floor(), 9);
     assert_eq!(
@@ -920,6 +925,11 @@ fn fenced_recovery_fate_preserves_op_authority_until_exact_completion() {
     let authority = commit
         .recovered_binding_fate(Event::binding_fate_observed(4, recovered_epoch, 15))
         .expect("exact recovered-epoch fate derives suffix authority");
+    assert_eq!(
+        authority.conversation_id(),
+        1,
+        "recovered fate must carry the fenced-attach provenance conversation"
+    );
     assert_eq!(authority.participant_id(), 4);
     assert_eq!(authority.last_dead_binding_epoch(), recovered_epoch);
     assert_eq!(authority.predecessor_state(), commit.next_state());

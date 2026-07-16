@@ -14,6 +14,7 @@ mod binding;
 mod claim_frontier;
 mod closure_accounting;
 mod conversation;
+mod conversation_codec;
 mod cursor_facts;
 mod detach;
 mod edge;
@@ -23,6 +24,7 @@ mod incarnation;
 mod lookup;
 mod membership;
 mod observer_recovery;
+mod operation_event;
 mod operations;
 mod storage;
 
@@ -54,6 +56,8 @@ mod lookup_tests;
 mod membership_tests;
 #[cfg(test)]
 mod observer_recovery_tests;
+#[cfg(test)]
+mod operation_event_tests;
 #[cfg(test)]
 mod storage_tests;
 #[cfg(test)]
@@ -173,6 +177,10 @@ pub use membership::{
 pub use observer_recovery::{
     ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
 };
+pub use operation_event::{
+    AttachedOperation, BindingFateOperation, ConversationOperation, DetachedOperation,
+    EnrolledOperation, LeftOperation, NonzeroDebtAckOperation,
+};
 pub use operations::{
     CommittedOrdinaryRecord, InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
     InitialEnrollmentOperationDecision, InitialEnrollmentOperationFault,
@@ -197,8 +205,8 @@ pub use storage::{
     DetachedCursorReleaseProvenanceRestore, DetachedMarkerReleaseRestore,
     FencedAttachCommitRestore, LeaveCommittedRestore, LiveIdentityRestore,
     MarkerCursorProgressRestore, MarkerDeliveryRestore, OrdinaryBindingAuthorityRestore,
-    OrdinaryBindingFateRestore, ParticipantLifecycleRestore, PendingFinalizationRestore,
-    PendingRecoveredCursorReleaseRestore, RecoveredBindingFateRestore,
-    RecoveredStorageCompletionRestore, RestoredBindingFateTerminal, RestoredParticipantLifecycle,
-    RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
+    OrdinaryBindingFateRestore, ParticipantConversationRestore, ParticipantConversationState,
+    ParticipantLifecycleRestore, PendingFinalizationRestore, PendingRecoveredCursorReleaseRestore,
+    RecoveredBindingFateRestore, RecoveredStorageCompletionRestore, RestoredBindingFateTerminal,
+    RestoredParticipantLifecycle, RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
 };

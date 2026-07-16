@@ -9,11 +9,8 @@ use alloc::vec::Vec;
 
 use crate::wire::ConversationId;
 
-const EVENT_MAGIC: [u8; 4] = *b"LPCE";
-const EVENT_CODEC_MAJOR: u16 = 1;
-const EVENT_CODEC_MINOR: u16 = 0;
-const GENESIS_VALIDATED_TAG: u16 = 1;
-const EVENT_HEADER_LEN: usize = 30;
+use super::conversation_codec as codec;
+use super::operation_event::ConversationOperation;
 
 /// Immutable genesis configuration for one participant conversation.
 ///
@@ -120,6 +117,60 @@ impl ParticipantConversation {
         })
     }
 
+    /// Consumes the aggregate into a durability decision for one lifecycle
+    /// operation.
+    ///
+    /// Every operation payload's public producer consumes one of the crate's
+    /// own sealed commit values (each payload type documents its exact sealed
+    /// input), so the shell records only operations that actually committed;
+    /// validated cold restore is the one raw promotion path into those
+    /// inputs. Every arm carries the
+    /// conversation named by its producing commit, and a mismatch against
+    /// this shell's conversation is refused before any event is selected. A
+    /// successful decision owns the pre-state inside [`ConversationCommit`]
+    /// exactly as genesis validation does: no state advances until the
+    /// durable append is confirmed by consuming
+    /// [`ConversationCommit::commit`].
+    #[must_use]
+    pub const fn decide_operation(self, operation: ConversationOperation) -> ConversationDecision {
+        if !self.genesis_validated {
+            return ConversationDecision::Refused(ConversationRefusal {
+                conversation: self,
+                reason: ConversationRefusalReason::GenesisNotValidated,
+            });
+        }
+        let actual = operation.conversation_id();
+        if actual != self.genesis.conversation_id {
+            let expected = self.genesis.conversation_id;
+            return ConversationDecision::Refused(ConversationRefusal {
+                conversation: self,
+                reason: ConversationRefusalReason::OperationConversationMismatch {
+                    expected,
+                    actual,
+                },
+            });
+        }
+        let Some(resulting_event_ordinal) = self.next_event_ordinal.checked_add(1) else {
+            let ordinal = self.next_event_ordinal;
+            return ConversationDecision::Refused(ConversationRefusal {
+                conversation: self,
+                reason: ConversationRefusalReason::EventOrdinalExhausted { ordinal },
+            });
+        };
+        let event = ConversationEvent {
+            header: ConversationEventHeader {
+                conversation_id: self.genesis.conversation_id,
+                ordinal: self.next_event_ordinal,
+            },
+            body: ConversationEventBody::Operation(operation),
+        };
+        ConversationDecision::Commit(ConversationCommit {
+            conversation: self,
+            event,
+            resulting_event_ordinal,
+        })
+    }
+
     /// Consumes one decoded durable event into the next replay state.
     ///
     /// # Errors
@@ -162,11 +213,16 @@ impl ParticipantConversation {
             ConversationEventBody::GenesisValidated if self.genesis_validated => {
                 Err(ConversationReplayError::GenesisAlreadyValidated)
             }
-            ConversationEventBody::GenesisValidated => event.header.ordinal.checked_add(1).ok_or(
-                ConversationReplayError::EventOrdinalExhausted {
-                    ordinal: event.header.ordinal,
-                },
-            ),
+            ConversationEventBody::Operation(_) if !self.genesis_validated => {
+                Err(ConversationReplayError::GenesisNotValidated)
+            }
+            ConversationEventBody::GenesisValidated | ConversationEventBody::Operation(_) => {
+                event.header.ordinal.checked_add(1).ok_or(
+                    ConversationReplayError::EventOrdinalExhausted {
+                        ordinal: event.header.ordinal,
+                    },
+                )
+            }
         }
     }
 
@@ -178,6 +234,9 @@ impl ParticipantConversation {
         match &event.body {
             ConversationEventBody::GenesisValidated => {
                 self.genesis_validated = true;
+                self.next_event_ordinal = resulting_event_ordinal;
+            }
+            ConversationEventBody::Operation(_) => {
                 self.next_event_ordinal = resulting_event_ordinal;
             }
         }
@@ -205,9 +264,13 @@ struct ConversationEventHeader {
 }
 
 /// Private typed body of a durable participant-conversation event.
+///
+/// `pub(super)` only so the sibling canonical codec can encode and rebuild
+/// bodies; no path outside the lifecycle module can name this type.
 #[derive(Debug, PartialEq, Eq)]
-enum ConversationEventBody {
+pub(super) enum ConversationEventBody {
     GenesisValidated,
+    Operation(ConversationOperation),
 }
 
 /// Opaque durable event emitted only by a protocol decision or canonical decode.
@@ -247,21 +310,13 @@ impl ConversationEvent {
     /// Returns the exact canonical byte length of this event.
     #[must_use]
     pub const fn encoded_len(&self) -> usize {
-        EVENT_HEADER_LEN + self.body.encoded_len()
+        codec::EVENT_HEADER_LEN + codec::encoded_body_len(&self.body) as usize
     }
 
     /// Encodes the stable v1 event envelope in network byte order.
     #[must_use]
     pub fn encode_canonical(&self) -> Vec<u8> {
-        let mut encoded = Vec::with_capacity(EVENT_HEADER_LEN);
-        encoded.extend_from_slice(&EVENT_MAGIC);
-        encoded.extend_from_slice(&EVENT_CODEC_MAJOR.to_be_bytes());
-        encoded.extend_from_slice(&EVENT_CODEC_MINOR.to_be_bytes());
-        encoded.extend_from_slice(&self.header.conversation_id.to_be_bytes());
-        encoded.extend_from_slice(&self.header.ordinal.to_be_bytes());
-        encoded.extend_from_slice(&GENESIS_VALIDATED_TAG.to_be_bytes());
-        encoded.extend_from_slice(&0_u32.to_be_bytes());
-        encoded
+        codec::encode_event(self.header.conversation_id, self.header.ordinal, &self.body)
     }
 
     /// Decodes one exact canonical v1 event envelope.
@@ -272,50 +327,7 @@ impl ConversationEvent {
     /// magic prefix, an unsupported codec version or body tag, or any declared
     /// body length that differs from the complete supplied frame.
     pub fn decode_canonical(input: &[u8]) -> Result<Self, ConversationEventDecodeError> {
-        if input.len() < EVENT_HEADER_LEN {
-            return Err(ConversationEventDecodeError::Truncated {
-                required: EVENT_HEADER_LEN,
-                available: input.len(),
-            });
-        }
-        if input.get(0..4) != Some(EVENT_MAGIC.as_slice()) {
-            return Err(ConversationEventDecodeError::InvalidMagic);
-        }
-        let codec_major = take_u16(input, 4)?;
-        let codec_minor = take_u16(input, 6)?;
-        if (codec_major, codec_minor) != (EVENT_CODEC_MAJOR, EVENT_CODEC_MINOR) {
-            return Err(ConversationEventDecodeError::UnsupportedCodec {
-                major: codec_major,
-                minor: codec_minor,
-            });
-        }
-        let conversation_id = take_u64(input, 8)?;
-        let ordinal = take_u64(input, 16)?;
-        let event_tag = take_u16(input, 24)?;
-        let declared_body_len = take_u32(input, 26)?;
-        let declared_body_len_usize = usize::try_from(declared_body_len)
-            .map_err(|_| ConversationEventDecodeError::LengthOverflow)?;
-        let actual_body_len = input.len() - EVENT_HEADER_LEN;
-        if declared_body_len_usize != actual_body_len {
-            return Err(ConversationEventDecodeError::NonCanonicalLength {
-                declared_body_len,
-                actual_body_len,
-            });
-        }
-        let body = match event_tag {
-            GENESIS_VALIDATED_TAG if declared_body_len == 0 => {
-                ConversationEventBody::GenesisValidated
-            }
-            GENESIS_VALIDATED_TAG => {
-                return Err(ConversationEventDecodeError::NonCanonicalLength {
-                    declared_body_len,
-                    actual_body_len,
-                });
-            }
-            unknown => {
-                return Err(ConversationEventDecodeError::UnknownEventKind { tag: unknown });
-            }
-        };
+        let (conversation_id, ordinal, body) = codec::decode_event(input)?;
         Ok(Self {
             header: ConversationEventHeader {
                 conversation_id,
@@ -324,59 +336,6 @@ impl ConversationEvent {
             body,
         })
     }
-}
-
-impl ConversationEventBody {
-    const fn encoded_len(&self) -> usize {
-        match self {
-            Self::GenesisValidated => 0,
-        }
-    }
-}
-
-fn take_u16(input: &[u8], start: usize) -> Result<u16, ConversationEventDecodeError> {
-    let end = start
-        .checked_add(2)
-        .ok_or(ConversationEventDecodeError::LengthOverflow)?;
-    let bytes: [u8; 2] = input
-        .get(start..end)
-        .ok_or(ConversationEventDecodeError::Truncated {
-            required: end,
-            available: input.len(),
-        })?
-        .try_into()
-        .map_err(|_| ConversationEventDecodeError::LengthOverflow)?;
-    Ok(u16::from_be_bytes(bytes))
-}
-
-fn take_u32(input: &[u8], start: usize) -> Result<u32, ConversationEventDecodeError> {
-    let end = start
-        .checked_add(4)
-        .ok_or(ConversationEventDecodeError::LengthOverflow)?;
-    let bytes: [u8; 4] = input
-        .get(start..end)
-        .ok_or(ConversationEventDecodeError::Truncated {
-            required: end,
-            available: input.len(),
-        })?
-        .try_into()
-        .map_err(|_| ConversationEventDecodeError::LengthOverflow)?;
-    Ok(u32::from_be_bytes(bytes))
-}
-
-fn take_u64(input: &[u8], start: usize) -> Result<u64, ConversationEventDecodeError> {
-    let end = start
-        .checked_add(8)
-        .ok_or(ConversationEventDecodeError::LengthOverflow)?;
-    let bytes: [u8; 8] = input
-        .get(start..end)
-        .ok_or(ConversationEventDecodeError::Truncated {
-            required: end,
-            available: input.len(),
-        })?
-        .try_into()
-        .map_err(|_| ConversationEventDecodeError::LengthOverflow)?;
-    Ok(u64::from_be_bytes(bytes))
 }
 
 /// Stable canonical event-decode failure.
@@ -403,12 +362,20 @@ pub enum ConversationEventDecodeError {
         /// Unrecognized body tag.
         tag: u16,
     },
-    /// Declared and supplied body lengths differ or the selected body is nonempty.
+    /// Declared and supplied body lengths differ, or the declared length is
+    /// not the canonical length for the selected body kind.
     NonCanonicalLength {
         /// Length declared in the stable envelope.
         declared_body_len: u32,
         /// Complete bytes supplied after the fixed header.
         actual_body_len: usize,
+    },
+    /// A structurally complete body violates a canonical field invariant, such
+    /// as a zero generation, a non-generation-one enrollment epoch, an
+    /// unassigned Leave flag bit, or an invalid permanent Leave result.
+    NonCanonicalBody {
+        /// Body tag whose field invariants failed.
+        tag: u16,
     },
     /// A platform length conversion or offset addition overflowed.
     LengthOverflow,
@@ -433,6 +400,8 @@ pub enum ConversationReplayError {
     },
     /// The one-shot genesis validation already committed.
     GenesisAlreadyValidated,
+    /// A lifecycle operation event preceded the genesis-validation event.
+    GenesisNotValidated,
     /// No later event ordinal is representable.
     EventOrdinalExhausted {
         /// Last representable event ordinal.
@@ -466,6 +435,15 @@ impl ConversationReplayFailure {
 pub enum ConversationRefusalReason {
     /// The one-shot genesis validation already committed.
     GenesisAlreadyValidated,
+    /// A lifecycle operation was decided before genesis validation committed.
+    GenesisNotValidated,
+    /// The operation's provenance names another conversation.
+    OperationConversationMismatch {
+        /// Conversation required by the aggregate.
+        expected: ConversationId,
+        /// Conversation named by the operation's provenance.
+        actual: ConversationId,
+    },
     /// No later event ordinal is representable.
     EventOrdinalExhausted {
         /// Last representable event ordinal.
