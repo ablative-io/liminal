@@ -1,15 +1,22 @@
 //! Server-owned participant transport, durability, and transaction bindings.
 
 mod cursor_repository;
+mod detach_repository;
 mod transport;
 
 #[cfg(test)]
 mod cursor_repository_tests;
 #[cfg(test)]
+mod detach_repository_tests;
+#[cfg(test)]
 mod transport_tests;
 
 pub use cursor_repository::{
     CursorAckCommand, CursorEpisodeRepository, CursorEpisodeStart, CursorRepositoryError,
+};
+pub use detach_repository::{
+    DetachAllocation, EnrollmentAllocation, OrdinaryAttachAllocation, ParticipantDetachRepository,
+    ParticipantDetachRepositoryError, ParticipantRequestDigest,
 };
 
 pub use transport::{
