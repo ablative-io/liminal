@@ -29,262 +29,6 @@ mod operations;
 mod storage;
 
 #[cfg(test)]
-mod attach_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;
-#[cfg(test)]
-mod enrollment_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;
-#[cfg(test)]
-mod enrollment_tests;
-#[cfg(test)]
-mod incarnation_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;
-#[cfg(test)]
-mod enrollment_tests;
-#[cfg(test)]
-mod incarnation_tests;
-#[cfg(test)]
-mod lookup_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;
-#[cfg(test)]
-mod enrollment_tests;
-#[cfg(test)]
-mod incarnation_tests;
-#[cfg(test)]
-mod lookup_tests;
-#[cfg(test)]
-mod membership_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;
-#[cfg(test)]
-mod enrollment_tests;
-#[cfg(test)]
-mod incarnation_tests;
-#[cfg(test)]
-mod lookup_tests;
-#[cfg(test)]
-mod membership_tests;
-#[cfg(test)]
-mod observer_recovery_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;
-#[cfg(test)]
-mod enrollment_tests;
-#[cfg(test)]
-mod incarnation_tests;
-#[cfg(test)]
-mod lookup_tests;
-#[cfg(test)]
-mod membership_tests;
-#[cfg(test)]
-mod observer_recovery_tests;
-#[cfg(test)]
-mod operation_event_tests;#[cfg(test)]
-mod attach_tests;
-#[cfg(test)]
-mod binding_tests;
-#[cfg(test)]
-mod claim_frontier_tests;
-#[cfg(test)]
-mod closure_accounting_tests;
-#[cfg(test)]
-mod conversation_tests;
-#[cfg(test)]
-mod cursor_facts_tests;
-#[cfg(test)]
-mod detach_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod enrollment_closure_tests;
-#[cfg(test)]
-mod enrollment_tests;
-#[cfg(test)]
-mod incarnation_tests;
-#[cfg(test)]
-mod lookup_tests;
-#[cfg(test)]
-mod membership_tests;
-#[cfg(test)]
-mod observer_recovery_tests;
-#[cfg(test)]
-mod operation_event_tests;
-#[cfg(test)]
-mod storage_tests;#[cfg(test)]
 mod attach_tests;
 #[cfg(test)]
 mod binding_tests;
@@ -336,12 +80,10 @@ pub use admission::{
     select_semantic_connection_capacity,
 };
 use admission::{admit_sequence, allocate_order};
-
 pub use attach::{
     AttachCommit, AttachCommitError, AttachCommitParameters, AttachTransition,
     AttachVerificationError, VerifiedAttachCommit, commit_attach,
 };
-
 pub use binding::{
     ActiveBinding, AdmissionOrder, BindingState, BindingTerminalDisposition, BindingTerminalKind,
     CommittedBindingTerminal, CommittedBindingTerminalPosition, CommittedDetachedTerminal,
@@ -349,7 +91,6 @@ pub use binding::{
     PendingBindingTerminalPosition, PendingDetachedFinalization, PendingDiedFinalization,
     PendingFinalization,
 };
-
 pub use claim_frontier::{
     ActiveIdentityRanks, BindingTerminalOwner, ClaimFrontierCounter, ClaimFrontierError,
     ClaimFrontierInvalidReason, ClaimFrontiers, ClaimFrontiersRestore, ExitProductRange,
@@ -368,25 +109,21 @@ pub use claim_frontier::{
     SequenceProductRanges, SequenceProductRangesRestore, TerminalProductRange,
     TerminalProductRangeRestore, TerminalProductSource,
 };
-
 pub use closure_accounting::{
     ClosureAccounting, ClosureAccountingError, RecoveryFenceDecision, RecoveryFencePermit,
     RemainingClosureDecision, RemainingClosurePermit, RequiredCapacityPlan,
     RequiredCapacityPlanError, check_recovery_fence, check_remaining_closure,
 };
-
 pub use conversation::{
     ConversationCommit, ConversationDecision, ConversationEvent, ConversationEventDecodeError,
     ConversationGenesis, ConversationRefusal, ConversationRefusalReason, ConversationReplayError,
     ConversationReplayFailure, ParticipantConversation,
 };
-
 pub use cursor_facts::{
     BoundParticipantCursor, CumulativeAckAuthorizationError, CumulativeAckOutcome,
     CursorEpisodeBuildError, CursorFactEncodeError, CursorProgressFact, CursorProgressFacts,
     CursorProgressKey, NonzeroDebtCursorEpisode,
 };
-
 pub use detach::{
     CommittedDetach, CommittedDetachTransition, DetachCell, DetachCommitError, DetachReplayError,
     DetachVerificationError, EmptyDetach, PendingDetach, PendingDetachTransition,
@@ -394,7 +131,6 @@ pub use detach::{
     TerminalizedDetach, VerifiedCommittedDetach, VerifiedDetachRequest, VerifiedPendingDetach,
     VerifiedTerminalizedDetach, commit_detach, complete_pending_detach, start_blocked_detach,
 };
-
 pub use edge::{
     ClosureDebt, ClosureState, CursorFateSuccessor, CursorProgressContinuous, CursorProgressMarker,
     DebtCompletion, DetachedAttachRefusal, DetachedCredentialRecovery, DetachedCursorRelease,
@@ -404,19 +140,16 @@ pub use edge::{
     PhysicalCompaction, ProjectionCompactionSuccessor, RecoveredBindingFate,
     RecoveredBindingFateTransition, RecoveredCursorRelease, StoredEdge,
 };
-
 pub use enrollment::{
     AllocatedParticipantSlot, AttachedLifecycleRecord, AttachedRecordPosition, BindingOrigin,
     EnrollmentCommit, EnrollmentCommitError, EnrollmentCommitParameters,
     ParticipantSlotAllocationError, ParticipantSlotAllocatorProof, commit_enrollment,
 };
-
 pub use enrollment_closure::{
     InitialEnrollmentClosureError, InitialEnrollmentClosureInput,
     InitialEnrollmentClosureProjection, PlannedEnrollmentMarker, RecoveryQuartetStatus,
     project_initial_enrollment_closure,
 };
-
 pub use incarnation::{
     ConnectionIncarnationAllocation, ConnectionIncarnationAllocationDecision,
     ConnectionIncarnationAllocator, ConnectionIncarnationAllocatorRestore,
@@ -426,7 +159,6 @@ pub use incarnation::{
     ServerIncarnationFsyncIntent, ServerIncarnationStartupDecision,
     allocate_connection_incarnation, prepare_server_incarnation_startup,
 };
-
 pub use lookup::{
     AttachSecretProof, BindingRequiredLookupResult, CredentialAttachLiveReceipt,
     CredentialAttachLookupResult, CredentialAttachProvenance, CredentialAttachTokenPhase,
@@ -436,23 +168,19 @@ pub use lookup::{
     lookup_binding_required, lookup_credential_attach, lookup_detach, lookup_enrollment,
     lookup_leave,
 };
-
 pub use membership::{
     EnrollmentFingerprint, IdentityState, LeaveCommit, LeaveCommitError, LeaveCommitParameters,
     LeaveFingerprint, LeaveVerificationError, LiveMember, LiveMemberRestore,
     MembershipInvariantError, PendingLeaveCommitParameters, PreparedLeaveAuthority,
     RetiredIdentity, RetirementError, VerifiedLeaveRequest, commit_leave, commit_pending_leave,
 };
-
 pub use observer_recovery::{
     ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
 };
-
 pub use operation_event::{
     AttachedOperation, BindingFateOperation, ConversationOperation, DetachedOperation,
     EnrolledOperation, LeftOperation, NonzeroDebtAckOperation,
 };
-
 pub use operations::{
     CommittedOrdinaryRecord, InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
     InitialEnrollmentOperationDecision, InitialEnrollmentOperationFault,
@@ -471,7 +199,6 @@ pub use operations::{
     apply_nonzero_participant_ack, apply_participant_ack, apply_record_admission,
     drain_next_marker, select_marker_proof,
 };
-
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,
     CommittedBindingTerminalRestore, ConversationStateRestoreError, CursorEpisodeRestore,
