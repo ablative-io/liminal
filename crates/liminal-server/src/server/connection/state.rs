@@ -10,6 +10,7 @@ use liminal::protocol::Frame;
 
 use super::conversation::ConnectionConversation;
 use super::services::ConnectionSubscription;
+use crate::server::participant::ParticipantSession;
 
 /// State a connection process carries across scheduler slices: the resources it
 /// owns (subscriptions, conversations) plus the per-subscription delivery
@@ -27,6 +28,9 @@ pub(super) struct ConnectionProcessState {
     /// `Publish`/`Subscribe`/`WorkerRegister` would never reach `connect_response`
     /// — the only place the token is read — and would bypass the gate entirely.
     pub(super) authenticated: bool,
+    /// Shared participant capability state stored by a successful connection
+    /// handshake and consumed by the `liminal-protocol` inbound gate.
+    pub(super) participant_session: ParticipantSession,
     /// Library subscriptions owned by this connection, keyed by subscription id.
     pub(super) subscriptions: HashMap<u64, ConnectionSubscription>,
     /// Supervised conversations owned by this connection, keyed by conversation id.

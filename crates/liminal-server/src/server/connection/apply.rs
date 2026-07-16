@@ -16,6 +16,9 @@ use super::state::{ConnectionProcessState, FrameAction};
 use super::supervisor::ConnectionRuntime;
 use crate::ServerError;
 use crate::config::types::ServiceProfile;
+use crate::server::participant::{
+    PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, encode_server_value, gate_generic_frame,
+};
 
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -125,6 +128,7 @@ pub(super) fn apply_frame(
         Frame::WorkerRegister { registration, .. } => {
             worker_register_response(pid, runtime, registration)
         }
+        frame @ Frame::Unknown { type_id: 0x1A, .. } => participant_frame_response(state, &frame),
         // Client backpressure signals ride the subscription delivery machinery, so
         // they are application frames: gated by auth (they are NOT on the pre-auth
         // allowlist) and refused by a services profile that serves no
@@ -148,6 +152,24 @@ pub(super) fn apply_frame(
         | Frame::PublishError { .. }
         | Frame::ConversationError { .. }
         | Frame::Pong { .. } => FrameAction::NoResponse,
+    }
+}
+
+/// Applies the shared participant transport gate before semantic dispatch.
+///
+/// Semantic request handling is installed by the participant lifecycle service;
+/// this boundary already guarantees that malformed, unauthenticated, and
+/// capability-missing frames receive the crate's exact typed rejection.
+fn participant_frame_response(state: &ConnectionProcessState, frame: &Frame) -> FrameAction {
+    match gate_generic_frame(frame, state.authenticated, state.participant_session) {
+        ParticipantIngress::NotParticipant | ParticipantIngress::Request(_) => {
+            FrameAction::NoResponse
+        }
+        ParticipantIngress::Rejected(rejection) => encode_server_value(
+            liminal_protocol::wire::ServerValue::ParticipantTransportRejected(rejection),
+        )
+        .map_or(FrameAction::Close, FrameAction::Respond),
+        ParticipantIngress::InvalidGenericFrame => FrameAction::Close,
     }
 }
 
@@ -282,11 +304,20 @@ fn connect_response(
     // so the `apply_frame` gate admits subsequent application frames on it.
     state.authenticated = true;
     match negotiate_version(min_version, max_version, &[SUPPORTED_PROTOCOL]) {
-        Ok(selected_version) => FrameAction::Respond(Frame::ConnectAck {
-            flags: 0,
-            selected_version,
-            capabilities: 0,
-        }),
+        Ok(selected_version) => {
+            if state.participant_session.negotiate_v1().is_err() {
+                return FrameAction::RespondThenClose(Frame::ConnectError {
+                    flags: 0,
+                    reason_code: SERVER_ERROR_CODE,
+                    message: Some("participant capability configuration is invalid".to_owned()),
+                });
+            }
+            FrameAction::Respond(Frame::ConnectAck {
+                flags: 0,
+                selected_version,
+                capabilities: PARTICIPANT_CAPABILITY_BIT,
+            })
+        }
         Err(error) => FrameAction::Respond(Frame::ConnectError {
             flags: 0,
             reason_code: error.reason_code(),

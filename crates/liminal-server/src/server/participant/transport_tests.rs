@@ -1,0 +1,105 @@
+use liminal::protocol::{Frame, decode as decode_generic, encode as encode_generic, encoded_len};
+use liminal_protocol::wire::{
+    ClientRequest, EnrollmentRequest, EnrollmentToken, ParticipantFrame, ReceiverDirection,
+    ServerValue, TransportRejectionReason, decode, encode, encoded_len as participant_encoded_len,
+};
+
+use super::transport::{
+    ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
+};
+
+fn encoded_enrollment() -> Result<Vec<u8>, String> {
+    let frame = ParticipantFrame::ClientRequest(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: 41,
+        enrollment_token: EnrollmentToken::new([7; 16]),
+    }));
+    let needed = participant_encoded_len(&frame).map_err(|error| format!("{error:?}"))?;
+    let mut bytes = vec![0; needed];
+    let written = encode(&frame, &mut bytes).map_err(|error| format!("{error:?}"))?;
+    bytes.truncate(written);
+    Ok(bytes)
+}
+
+fn generic_round_trip(bytes: &[u8]) -> Result<Frame, String> {
+    let (frame, consumed) = decode_generic(bytes).map_err(|error| error.to_string())?;
+    assert_eq!(consumed, bytes.len());
+    Ok(frame)
+}
+
+#[test]
+fn negotiated_unknown_outer_frame_uses_shared_request_decoder() -> Result<(), String> {
+    let generic = generic_round_trip(&encoded_enrollment()?)?;
+    let mut session = ParticipantSession::default();
+    session
+        .negotiate_v1()
+        .map_err(|error| format!("{error:?}"))?;
+
+    let ingress = gate_generic_frame(&generic, true, session);
+
+    assert_eq!(
+        ingress,
+        ParticipantIngress::Request(ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: 41,
+            enrollment_token: EnrollmentToken::new([7; 16]),
+        }))
+    );
+    Ok(())
+}
+
+#[test]
+fn unauthenticated_participant_request_returns_shared_rejection() -> Result<(), String> {
+    let generic = generic_round_trip(&encoded_enrollment()?)?;
+    let mut session = ParticipantSession::default();
+    session
+        .negotiate_v1()
+        .map_err(|error| format!("{error:?}"))?;
+
+    let ParticipantIngress::Rejected(rejection) = gate_generic_frame(&generic, false, session)
+    else {
+        return Err("expected authentication rejection".to_owned());
+    };
+    assert_eq!(
+        rejection.reason,
+        TransportRejectionReason::AuthenticationFailed
+    );
+    Ok(())
+}
+
+#[test]
+fn crate_server_value_survives_generic_transport_round_trip() -> Result<(), String> {
+    let generic = generic_round_trip(&encoded_enrollment()?)?;
+    let ParticipantIngress::Rejected(rejection) =
+        gate_generic_frame(&generic, false, ParticipantSession::default())
+    else {
+        return Err("expected shared gate rejection".to_owned());
+    };
+    let outbound = encode_server_value(ServerValue::ParticipantTransportRejected(rejection))
+        .map_err(|error| format!("{error:?}"))?;
+    let generic_len = encoded_len(&outbound).map_err(|error| error.to_string())?;
+    let mut generic_bytes = vec![0; generic_len];
+    let written =
+        encode_generic(&outbound, &mut generic_bytes).map_err(|error| error.to_string())?;
+    generic_bytes.truncate(written);
+
+    let decoded =
+        decode(&generic_bytes, ReceiverDirection::Client).map_err(|error| format!("{error:?}"))?;
+    assert!(matches!(
+        decoded,
+        ParticipantFrame::ServerValue(ServerValue::ParticipantTransportRejected(_))
+    ));
+    Ok(())
+}
+
+#[test]
+fn unrelated_unknown_frame_remains_outside_participant_protocol() {
+    let frame = Frame::Unknown {
+        type_id: 0xFE,
+        flags: 0,
+        stream_id: 9,
+        payload: vec![1, 2, 3],
+    };
+    assert_eq!(
+        gate_generic_frame(&frame, true, ParticipantSession::default()),
+        ParticipantIngress::NotParticipant
+    );
+}

@@ -959,8 +959,8 @@ fn connect_frame(auth_token: &[u8]) -> Frame {
 }
 
 /// With no `[auth]` token configured the handshake is open: any token (including an
-/// empty one) is accepted and answered with `ConnectAck`, byte-identical to the
-/// pre-auth behaviour.
+/// empty one) is accepted and answered with `ConnectAck` advertising the shared
+/// participant capability.
 #[test]
 fn connect_without_configured_token_accepts_any_token() {
     let (runtime, _services) = runtime_with(RecordingServices::default());
@@ -969,14 +969,16 @@ fn connect_without_configured_token_accepts_any_token() {
     let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[]));
     assert!(matches!(
         action,
-        FrameAction::Respond(Frame::ConnectAck { .. })
+        FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
+            if capabilities == crate::server::participant::PARTICIPANT_CAPABILITY_BIT
     ));
 
     // A non-empty token is likewise ignored when no gate is configured.
     let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"anything"));
     assert!(matches!(
         action,
-        FrameAction::Respond(Frame::ConnectAck { .. })
+        FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
+            if capabilities == crate::server::participant::PARTICIPANT_CAPABILITY_BIT
     ));
 }
 
@@ -994,7 +996,8 @@ fn connect_with_matching_token_is_accepted() {
 
     assert!(matches!(
         action,
-        FrameAction::Respond(Frame::ConnectAck { .. })
+        FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
+            if capabilities == crate::server::participant::PARTICIPANT_CAPABILITY_BIT
     ));
 }
 
