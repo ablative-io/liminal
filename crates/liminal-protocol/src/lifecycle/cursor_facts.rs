@@ -380,6 +380,43 @@ impl NonzeroDebtCursorEpisode {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn restore(
+        conversation_id: ConversationId,
+        debt: ClosureDebt,
+        observer_progress: DeliverySeq,
+        candidate_high_watermark: DeliverySeq,
+        current_floor: u128,
+        cap_floor: u128,
+        participants: Vec<BoundParticipantCursor>,
+        facts: Vec<(CursorProgressKey, CursorProgressFact)>,
+    ) -> Option<Self> {
+        let mut episode = Self::new(
+            conversation_id,
+            debt,
+            observer_progress,
+            candidate_high_watermark,
+            current_floor,
+            cap_floor,
+            participants,
+        )
+        .ok()?;
+        if episode.floor.resulting_floor != current_floor {
+            return None;
+        }
+        for (key, fact) in facts {
+            let participant = episode.participants.get(&key.participant_index)?;
+            if key.boundary > candidate_high_watermark
+                || (fact == CursorProgressFact::Consumed && key.boundary > participant.cursor)
+                || (fact == CursorProgressFact::Pending && key.boundary <= participant.cursor)
+                || episode.facts.facts.insert(key, fact).is_some()
+            {
+                return None;
+            }
+        }
+        Some(episode)
+    }
+
     /// Returns the exact nonzero debt proving this episode is active.
     #[must_use]
     pub const fn debt(&self) -> ClosureDebt {

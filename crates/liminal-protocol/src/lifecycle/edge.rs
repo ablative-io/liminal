@@ -261,6 +261,25 @@ impl ParticipantCursorProgress {
         ))
     }
 
+    pub(super) fn restore_continuous(
+        authority: OrdinaryBindingAuthority,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        through_seq: DeliverySeq,
+    ) -> Option<Self> {
+        if authority.binding.participant_id != participant_id
+            || authority.binding.binding_epoch != binding_epoch
+            || authority.through_seq != through_seq
+        {
+            return None;
+        }
+        Some(Self::Continuous(CursorProgressContinuous {
+            participant_id,
+            binding_epoch,
+            through_seq,
+        }))
+    }
+
     /// Returns the participant whose cursor is required.
     #[must_use]
     pub const fn participant_id(self) -> ParticipantId {

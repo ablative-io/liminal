@@ -8,6 +8,7 @@
 //! suffix, so completion ordering is instead enforced by typed transitions and
 //! tests.
 
+mod admission;
 mod attach;
 mod binding;
 mod cursor_facts;
@@ -16,6 +17,8 @@ mod edge;
 mod enrollment;
 mod lookup;
 mod membership;
+mod observer_recovery;
+mod storage;
 
 #[cfg(test)]
 mod attach_tests;
@@ -33,7 +36,27 @@ mod enrollment_tests;
 mod lookup_tests;
 #[cfg(test)]
 mod membership_tests;
+#[cfg(test)]
+mod observer_recovery_tests;
+#[cfg(test)]
+mod storage_tests;
 
+pub use admission::{
+    BindingSlotDecision, BindingSlotOccupancy, CapacityCounter, CapacityCounterInvariantError,
+    ConnectionConversationCapacityCommit, ConnectionConversationTracking,
+    CredentialAttachCapacityCommit, CredentialAttachCapacityCounters,
+    CredentialAttachCapacityDecision, EnrollmentCapacityCommit, EnrollmentCapacityCounters,
+    EnrollmentCapacityDecision, FreshParticipantCapacityCounter,
+    FreshParticipantCapacityCounterInvariantError, ObserverCheckedOperation, ObserverFloorDecision,
+    ObserverFloorPermit, OrderAdmissionError, OrderAllocation, OrderClaims, OrderHigh, OrderLedger,
+    OrderLedgerInvariantError, RecordSizeDecision, RecordSizePermit, RecoverySequenceReserve,
+    ResultingEnrollmentCapacityCounters, ResultingOrderClaims, ResultingSequenceState,
+    SemanticConnectionCapacityDecision, SequenceAdmission, SequenceAdmissionError, SequenceClaims,
+    SequenceLedger, SequenceLedgerInvariantError, admit_sequence, allocate_order,
+    check_observer_floor, check_record_size, select_credential_attach_binding_slot,
+    select_credential_attach_capacity, select_enrollment_binding_slot, select_enrollment_capacity,
+    select_semantic_connection_capacity,
+};
 pub use attach::{
     AttachCommit, AttachCommitError, AttachCommitParameters, AttachTransition,
     AttachVerificationError, VerifiedAttachCommit, commit_attach,
@@ -86,4 +109,18 @@ pub use membership::{
     MembershipInvariantError, NoInterveningTuplePlannerProof, NoInterveningTupleProof,
     NoInterveningTupleProofError, PendingLeaveCommitParameters, RetiredIdentity, RetirementError,
     VerifiedLeaveRequest, commit_leave, commit_pending_leave,
+};
+pub use observer_recovery::{
+    ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
+};
+pub use storage::{
+    BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,
+    CommittedBindingTerminalRestore, CursorEpisodeRestore, DebtCompletionRestore,
+    DetachCellRestore, DetachedCredentialRecoveryRestore, DetachedCursorReleaseProvenanceRestore,
+    DetachedMarkerReleaseRestore, FencedAttachCommitRestore, LeaveCommittedRestore,
+    LiveIdentityRestore, MarkerCursorProgressRestore, MarkerDeliveryRestore,
+    OrdinaryBindingAuthorityRestore, OrdinaryBindingFateRestore, ParticipantLifecycleRestore,
+    PendingFinalizationRestore, PendingRecoveredCursorReleaseRestore, RecoveredBindingFateRestore,
+    RecoveredStorageCompletionRestore, RestoredBindingFateTerminal, RestoredParticipantLifecycle,
+    RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
 };

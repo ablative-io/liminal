@@ -308,6 +308,44 @@ impl<EF, V, LF> RetiredIdentity<EF, V, LF> {
     pub const fn leave_fingerprint(&self) -> &LeaveFingerprint<LF> {
         &self.leave_fingerprint
     }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn restore(
+        participant_id: ParticipantId,
+        conversation_id: ConversationId,
+        retired_generation: Generation,
+        enrollment_fingerprint: EnrollmentFingerprint<EF>,
+        leave_attempt_token: LeaveAttemptToken,
+        leave_request_verifier: V,
+        leave_fingerprint: LeaveFingerprint<LF>,
+        committed_result: LeaveCommitted,
+    ) -> Result<Self, RetirementError> {
+        if committed_result.conversation_id() != conversation_id {
+            return Err(RetirementError::Conversation);
+        }
+        if committed_result.participant_id() != participant_id {
+            return Err(RetirementError::Participant);
+        }
+        if committed_result.presented_generation() != retired_generation {
+            return Err(RetirementError::Generation);
+        }
+        if committed_result.retired_generation() != retired_generation {
+            return Err(RetirementError::RetiredGeneration);
+        }
+        if committed_result.leave_attempt_token() != leave_attempt_token {
+            return Err(RetirementError::Token);
+        }
+        Ok(Self {
+            participant_id,
+            conversation_id,
+            retired_generation,
+            enrollment_fingerprint,
+            leave_attempt_token,
+            leave_request_verifier,
+            leave_fingerprint,
+            committed_result,
+        })
+    }
 }
 
 /// Present participant identity state; absence is represented outside this enum.
