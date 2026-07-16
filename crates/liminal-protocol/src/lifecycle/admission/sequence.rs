@@ -132,6 +132,18 @@ pub enum SequenceLedgerInvariantError {
 }
 
 /// Validated delivery-sequence watermark and all unmaterialized claims.
+///
+/// Storage bindings may restore and inspect this factual snapshot, but cannot
+/// invoke the lower-level planner directly. Executable admission is owned by
+/// the protocol's total lifecycle operations.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::SequenceLedger;
+///
+/// fn bypass_total_operation(ledger: SequenceLedger) {
+///     let _ = ledger.plan_ordinary_record(0);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SequenceLedger {
     high_watermark: u64,
@@ -205,7 +217,8 @@ impl SequenceLedger {
     ///
     /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
     /// checked addition cannot be represented.
-    pub fn plan_enrollment(
+    #[cfg(test)]
+    pub(crate) fn plan_enrollment(
         self,
         new_markers: u64,
     ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
@@ -258,7 +271,8 @@ impl SequenceLedger {
     ///
     /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
     /// checked addition cannot be represented.
-    pub fn plan_detached_attach(
+    #[cfg(test)]
+    pub(crate) fn plan_detached_attach(
         self,
         new_markers: u64,
     ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
@@ -288,7 +302,8 @@ impl SequenceLedger {
     ///
     /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
     /// checked addition cannot be represented.
-    pub fn plan_supersession(
+    #[cfg(test)]
+    pub(crate) fn plan_supersession(
         self,
         new_markers: u64,
     ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
@@ -311,7 +326,8 @@ impl SequenceLedger {
     ///
     /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
     /// checked addition cannot be represented.
-    pub fn plan_ordinary_record(
+    #[cfg(test)]
+    pub(crate) fn plan_ordinary_record(
         self,
         new_markers: u64,
     ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
@@ -354,7 +370,8 @@ impl SequenceLedger {
     /// DCR pair exists, an arithmetic error if a checked addition fails, or
     /// [`SequenceAdmissionError::RecoverySequenceInvariantViolation`] if the
     /// exact reserved transfer did not preserve the ledger invariant.
-    pub fn apply_fenced_recovery(self) -> Result<Self, SequenceAdmissionError> {
+    #[cfg(test)]
+    pub(crate) fn apply_fenced_recovery(self) -> Result<Self, SequenceAdmissionError> {
         if self.claims.recovery != RecoverySequenceReserve::DetachedCredentialRecovery {
             return Err(SequenceAdmissionError::RecoverySequenceReserveMissing);
         }

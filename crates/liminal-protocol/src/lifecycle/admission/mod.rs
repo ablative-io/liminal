@@ -31,10 +31,12 @@ pub use observer::{
 };
 pub use order::{
     OrderAdmissionError, OrderAllocation, OrderClaims, OrderClaimsInvariantError, OrderHigh,
-    OrderLedger, OrderLedgerInvariantError, ResultingOrderClaims, allocate_order,
+    OrderLedger, OrderLedgerInvariantError,
 };
+pub(super) use order::{ResultingOrderClaims, allocate_order};
 pub use record::{RecordSizeDecision, RecordSizePermit, check_record_size};
 pub use sequence::{
-    RecoverySequenceReserve, ResultingSequenceState, SequenceAdmission, SequenceAdmissionError,
-    SequenceClaims, SequenceLedger, SequenceLedgerInvariantError, admit_sequence,
+    RecoverySequenceReserve, SequenceAdmission, SequenceAdmissionError, SequenceClaims,
+    SequenceLedger, SequenceLedgerInvariantError,
 };
+pub(super) use sequence::{ResultingSequenceState, admit_sequence};

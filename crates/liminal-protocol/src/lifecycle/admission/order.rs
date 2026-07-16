@@ -108,6 +108,18 @@ pub enum OrderLedgerInvariantError {
 }
 
 /// Validated transaction-order high watermark and reserved claims.
+///
+/// Storage bindings may restore and inspect this factual snapshot, but cannot
+/// invoke the lower-level planner directly. Executable allocation is owned by
+/// the protocol's total lifecycle operations.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::OrderLedger;
+///
+/// fn bypass_total_operation(ledger: OrderLedger) {
+///     let _ = ledger.plan_ordinary_record();
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrderLedger {
     high: OrderHigh,
@@ -163,7 +175,8 @@ impl OrderLedger {
     /// Returns [`OrderAdmissionError::ActiveBindingClaimOverflow`] or
     /// [`OrderAdmissionError::MembershipExitClaimOverflow`] for the first
     /// checked addition that cannot be represented.
-    pub fn plan_enrollment(self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
+    #[cfg(test)]
+    pub(crate) fn plan_enrollment(self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
         self.plan_enrollment_with_recovery_quartet(false)
     }
 
@@ -205,7 +218,8 @@ impl OrderLedger {
     ///
     /// Returns [`OrderAdmissionError::ActiveBindingClaimOverflow`] if the new
     /// terminal claim cannot be represented.
-    pub fn plan_detached_attach(self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
+    #[cfg(test)]
+    pub(crate) fn plan_detached_attach(self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
         let active_binding_terminals = self
             .claims
             .active_binding_terminals
@@ -221,14 +235,16 @@ impl OrderLedger {
     ///
     /// The aggregate `A`, `X`, `RO`, and `RA` counts are unchanged: the old
     /// binding's terminal claim moves to the replacement binding.
+    #[cfg(test)]
     #[must_use]
-    pub const fn plan_supersession(self) -> ResultingOrderClaims {
+    pub(crate) const fn plan_supersession(self) -> ResultingOrderClaims {
         ResultingOrderClaims(self.claims)
     }
 
     /// Plans ordinary record admission, which creates no order claim.
+    #[cfg(test)]
     #[must_use]
-    pub const fn plan_ordinary_record(self) -> ResultingOrderClaims {
+    pub(crate) const fn plan_ordinary_record(self) -> ResultingOrderClaims {
         ResultingOrderClaims(self.claims)
     }
 
@@ -256,7 +272,8 @@ impl OrderLedger {
     /// coupled recovery claims exist, or
     /// [`OrderAdmissionError::ActiveBindingClaimOverflow`] if `RA` cannot be
     /// transferred into `A`.
-    pub fn apply_fenced_recovery(self) -> Result<Self, OrderAdmissionError> {
+    #[cfg(test)]
+    pub(crate) fn apply_fenced_recovery(self) -> Result<Self, OrderAdmissionError> {
         if !self.claims.recovery_operation || !self.claims.recovery_replacement_terminal {
             return Err(OrderAdmissionError::RecoveryOrderReserveMissing {
                 recovery_operation: self.claims.recovery_operation,

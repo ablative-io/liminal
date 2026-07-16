@@ -12,7 +12,7 @@ use crate::wire::{
 use super::super::{
     ActiveBinding, AttachSecretProof, BindingState, DetachCell, EnrollmentFingerprint,
     IdentityState, LeaveCommitParameters, LeaveFingerprint, LiveMember, LiveMemberRestore,
-    PresentedIdentity, commit_leave,
+    PresentedIdentity, commit_leave, test_support::settled_leave_authority,
 };
 use super::participant_ack::{
     ParticipantAckCommit, ParticipantAckCommitError, ParticipantAckDecision, apply_participant_ack,
@@ -85,6 +85,7 @@ fn envelope(generation_value: u64, through_seq: u64) -> ParticipantAckEnvelope {
 
 fn retired_identity() -> TestIdentity {
     let member = member(CURRENT_CURSOR);
+    let authority = settled_leave_authority(&member, BindingState::Detached, 8);
     let leave_request = LeaveRequest {
         conversation_id: CONVERSATION_ID,
         participant_id: PARTICIPANT_ID,
@@ -105,6 +106,7 @@ fn retired_identity() -> TestIdentity {
         BindingState::Detached,
         DetachCell::<[u8; 1]>::default(),
         verified,
+        authority,
         LeaveCommitParameters {
             left_delivery_seq: 8,
         },

@@ -4,6 +4,7 @@
 
 use alloc::{string::String, vec, vec::Vec};
 
+use crate::outcome::CandidatePhase;
 use crate::wire::{
     AttachSecret, BindingEpoch, ConnectionIncarnation, DetachAttemptToken, DetachRequest,
     Generation, LeaveAttemptToken, LeaveRequest,
@@ -13,30 +14,14 @@ use super::{
     ActiveBinding, AttachSecretProof, BindingState, BindingTerminalDisposition,
     CommittedBindingTerminal, CommittedBindingTerminalPosition, DetachCell, DiedBindingTransition,
     EnrollmentFingerprint, IdentityState, LeaveCommitError, LeaveCommitParameters,
-    LeaveFingerprint, LiveMember, LiveMemberRestore, NoInterveningTuplePlannerProof,
-    NoInterveningTupleProof, PendingBindingTerminalPosition, PendingFinalization,
-    PendingLeaveCommitParameters, RetiredIdentity, commit_detach, commit_leave,
-    commit_pending_leave,
+    LeaveFingerprint, LiveMember, LiveMemberRestore, PendingBindingTerminalPosition,
+    PendingFinalization, PendingLeaveCommitParameters, RetiredIdentity, commit_detach,
+    commit_leave, commit_pending_leave,
+    test_support::{pending_leave_authority, settled_leave_authority},
 };
 
 #[derive(Debug, PartialEq, Eq)]
 struct NonCopyVerifier(Vec<u8>);
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PlannerProof {
-    pending_order: super::AdmissionOrder,
-    left_transaction_order: u64,
-}
-
-impl NoInterveningTuplePlannerProof for PlannerProof {
-    fn pending_admission_order(&self) -> super::AdmissionOrder {
-        self.pending_order
-    }
-
-    fn left_transaction_order(&self) -> u64 {
-        self.left_transaction_order
-    }
-}
 
 fn generation(value: u64) -> Generation {
     Generation::new(value).expect("test generations are nonzero")
@@ -104,13 +89,16 @@ fn assert_retired<EF, V, LF>(state: IdentityState<EF, V, LF>) -> RetiredIdentity
 fn bound_leave_derives_active_epoch_and_moves_generic_fingerprints() {
     let member = member(None);
     let binding = active(1);
+    let binding_state = BindingState::Bound(binding);
+    let authority = settled_leave_authority(&member, binding_state, 10);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
             member,
-            BindingState::Bound(binding),
+            binding_state,
             DetachCell::<[u8; 4]>::default(),
             verified,
+            authority,
             LeaveCommitParameters {
                 left_delivery_seq: 10,
             },
@@ -131,6 +119,11 @@ fn bound_leave_derives_active_epoch_and_moves_generic_fingerprints() {
         &vec![0xE1, 0xE2, 0xE3]
     );
     assert_eq!(retired.leave_fingerprint().value(), "canonical-leave");
+    assert_eq!(retired.left_admission_order().transaction_order(), 10);
+    assert_eq!(
+        retired.left_admission_order().candidate_phase(),
+        CandidatePhase::MembershipExit
+    );
     assert_eq!(
         retired.leave_request_verifier(),
         &NonCopyVerifier(vec![0xC1, 0xC2])
@@ -157,6 +150,7 @@ fn committed_detach_cell_must_match_retained_terminal_and_derives_sequence() {
     )
     .expect("detach commits")
     .into_parts();
+    let authority = settled_leave_authority(&member, binding_state, 9);
     let verified_leave = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -164,6 +158,7 @@ fn committed_detach_cell_must_match_retained_terminal_and_derives_sequence() {
             binding_state,
             DetachCell::Committed(committed_cell),
             verified_leave,
+            authority,
             LeaveCommitParameters {
                 left_delivery_seq: 9,
             },
@@ -187,6 +182,7 @@ fn separately_committed_death_is_history_even_with_empty_detach_cell() {
         panic!("committed disposition must append the Died terminal");
     };
     let member = member(Some(terminal.into()));
+    let authority = settled_leave_authority(&member, BindingState::Detached, 13);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -194,6 +190,7 @@ fn separately_committed_death_is_history_even_with_empty_detach_cell() {
             BindingState::Detached,
             DetachCell::<[u8; 1]>::default(),
             verified,
+            authority,
             LeaveCommitParameters {
                 left_delivery_seq: 13,
             },
@@ -228,6 +225,7 @@ fn terminalized_cell_uses_retained_history_because_fix_one_drops_sequence() {
     .expect("detach commits")
     .into_parts();
     let terminalized = committed.terminalize_after_attach();
+    let authority = settled_leave_authority(&member, binding_state, 15);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -235,6 +233,7 @@ fn terminalized_cell_uses_retained_history_because_fix_one_drops_sequence() {
             binding_state,
             DetachCell::Terminalized(terminalized),
             verified,
+            authority,
             LeaveCommitParameters {
                 left_delivery_seq: 15,
             },
@@ -258,6 +257,7 @@ fn pending_terminal_requires_typed_no_intervening_composition() {
     };
     let pending = PendingFinalization::from(pending);
     let member = member(None);
+    let rejected_authority = pending_leave_authority(&member, pending, 20, 8);
     let settled_verified = verify_leave(&member);
     assert!(matches!(
         commit_leave(
@@ -265,6 +265,7 @@ fn pending_terminal_requires_typed_no_intervening_composition() {
             BindingState::PendingFinalization(pending),
             DetachCell::<[u8; 1]>::default(),
             settled_verified,
+            rejected_authority,
             LeaveCommitParameters {
                 left_delivery_seq: 21,
             },
@@ -272,12 +273,7 @@ fn pending_terminal_requires_typed_no_intervening_composition() {
         Err(LeaveCommitError::PendingTerminalRequiresComposition)
     ));
 
-    let planner = PlannerProof {
-        pending_order: pending.admission_order(),
-        left_transaction_order: 8,
-    };
-    let proof = NoInterveningTupleProof::from_planner(pending, planner)
-        .expect("planner proof covers the exact pending order");
+    let authority = pending_leave_authority(&member, pending, 20, 8);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_pending_leave(
@@ -285,8 +281,8 @@ fn pending_terminal_requires_typed_no_intervening_composition() {
             pending,
             DetachCell::<[u8; 1]>::default(),
             verified,
+            authority,
             PendingLeaveCommitParameters {
-                no_intervening: proof,
                 terminal_delivery_seq: 20,
                 left_delivery_seq: 21,
             },
@@ -305,6 +301,7 @@ fn pending_terminal_requires_typed_no_intervening_composition() {
 #[test]
 fn empty_cell_and_no_history_derives_none_without_caller_option() {
     let member = member(None);
+    let authority = settled_leave_authority(&member, BindingState::Detached, 3);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -312,6 +309,7 @@ fn empty_cell_and_no_history_derives_none_without_caller_option() {
             BindingState::Detached,
             DetachCell::<[u8; 1]>::default(),
             verified,
+            authority,
             LeaveCommitParameters {
                 left_delivery_seq: 3,
             },

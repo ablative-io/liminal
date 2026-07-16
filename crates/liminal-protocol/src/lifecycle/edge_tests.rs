@@ -3,13 +3,13 @@
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{BindingEpoch, ConnectionIncarnation, Generation};
 
-use super::edge::RecoveredBindingFateTransition;
+use super::edge::{RecoveredBindingFateTransition, marker_delivery_for_test};
 use super::{
     ActiveBinding, BindingTerminalDisposition, ClosureDebt, ClosureState,
     CommittedBindingTerminalPosition, CursorFateSuccessor, DebtCompletion, DetachedAttachRefusal,
     DetachedCredentialRecovery, DetachedCursorRelease, DetachedMarkerRelease, Event, LeaveOnlyEdge,
-    MarkerDelivery, ObserverProjection, OrdinaryBindingAuthority, ParticipantCursorProgress,
-    PhysicalCompaction, StoredEdge,
+    ObserverProjection, OrdinaryBindingAuthority, ParticipantCursorProgress, PhysicalCompaction,
+    RecoveryClaimProvenance, StoredEdge,
 };
 
 fn epoch(generation: u64) -> BindingEpoch {
@@ -54,7 +54,8 @@ fn marker_progress(
     marker_delivery_seq: u64,
     closure_debt: ClosureDebt,
 ) -> ParticipantCursorProgress {
-    let delivery = MarkerDelivery::new(participant_id, binding_epoch, marker_delivery_seq);
+    let delivery = marker_delivery_for_test(participant_id, binding_epoch, marker_delivery_seq)
+        .expect("validated marker fixture restores");
     let event = Event::marker_delivered(participant_id, binding_epoch, marker_delivery_seq);
     match delivery
         .delivered(closure_debt, event)
@@ -98,7 +99,8 @@ fn marker_release(
     marker_delivery_seq: u64,
     closure_debt: ClosureDebt,
 ) -> DetachedMarkerRelease {
-    let delivery = MarkerDelivery::new(participant_id, binding_epoch, marker_delivery_seq);
+    let delivery = marker_delivery_for_test(participant_id, binding_epoch, marker_delivery_seq)
+        .expect("validated marker fixture restores");
     let fate = Event::binding_fate_observed(participant_id, binding_epoch, marker_delivery_seq);
     match delivery
         .binding_fate(closure_debt, fate)
@@ -239,7 +241,9 @@ fn strict_successor_set_contains_six_kinds_and_excludes_direct_recovery() {
     let allowed = [
         StoredEdge::ObserverProjection(ObserverProjection::new(11)),
         StoredEdge::PhysicalCompaction(compaction(11, 11)),
-        StoredEdge::MarkerDelivery(MarkerDelivery::new(4, binding, 11)),
+        StoredEdge::MarkerDelivery(
+            marker_delivery_for_test(4, binding, 11).expect("validated marker fixture restores"),
+        ),
         StoredEdge::ParticipantCursorProgress(ParticipantCursorProgress::continuous(
             4, binding, 11,
         )),
@@ -476,7 +480,8 @@ fn marker_delivery_derives_progress_and_covers_every_invalidator() {
     let original_debt = debt(2, 20);
     let next_debt = debt(1, 10);
     let binding = epoch(3);
-    let delivery = MarkerDelivery::new(4, binding, 14);
+    let delivery =
+        marker_delivery_for_test(4, binding, 14).expect("validated marker fixture restores");
     let delivered = Event::marker_delivered(4, binding, 14);
     let state = delivery
         .delivered(original_debt, delivered)
@@ -565,6 +570,51 @@ fn marker_delivery_derives_progress_and_covers_every_invalidator() {
             )
             .is_err()
     );
+}
+
+#[test]
+fn recovery_claim_provenance_covers_marker_delivery_progress_and_post_fate_dcr() {
+    let closure_debt = debt(2, 20);
+    let binding = epoch(3);
+    let delivery =
+        marker_delivery_for_test(4, binding, 14).expect("validated marker fixture restores");
+
+    let delivery_provenance =
+        RecoveryClaimProvenance::from_stored_edge(StoredEdge::MarkerDelivery(delivery))
+            .expect("validated live marker delivery owns pre-fate recovery claims");
+    assert_eq!(delivery_provenance.participant_index(), 4);
+    assert_eq!(delivery_provenance.marker_delivery_seq(), 14);
+    assert_eq!(delivery_provenance.prior_binding_epoch(), binding);
+
+    let delivered = delivery
+        .delivered(closure_debt, Event::marker_delivered(4, binding, 14))
+        .expect("exact marker delivery derives cursor progress");
+    let ClosureState::Owed {
+        edge: StoredEdge::ParticipantCursorProgress(progress),
+        ..
+    } = delivered
+    else {
+        panic!("marker delivery must derive marker-backed cursor progress")
+    };
+    let progress_provenance =
+        RecoveryClaimProvenance::from_stored_edge(StoredEdge::ParticipantCursorProgress(progress))
+            .expect("marker-backed cursor progress preserves pre-fate recovery claims");
+    assert_eq!(progress_provenance.participant_index(), 4);
+    assert_eq!(progress_provenance.marker_delivery_seq(), 14);
+    assert_eq!(progress_provenance.prior_binding_epoch(), binding);
+
+    let CursorFateSuccessor::DetachedCredentialRecovery(recovery) = progress
+        .binding_fate(closure_debt, Event::binding_fate_observed(4, binding, 1))
+        .expect("exact marker-backed fate derives DCR")
+    else {
+        panic!("marker-backed fate must not derive cursor-only release")
+    };
+    let post_fate =
+        RecoveryClaimProvenance::from_stored_edge(StoredEdge::DetachedCredentialRecovery(recovery))
+            .expect("DCR preserves post-fate recovery claims");
+    assert_eq!(post_fate.participant_index(), 4);
+    assert_eq!(post_fate.marker_delivery_seq(), 14);
+    assert_eq!(post_fate.prior_binding_epoch(), binding);
 }
 
 #[test]

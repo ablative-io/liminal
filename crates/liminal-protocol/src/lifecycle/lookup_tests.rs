@@ -21,7 +21,7 @@ use super::{
     CommittedBindingTerminalPosition, DetachCell, EnrollmentFingerprint, IdentityState,
     LeaveCommitParameters, LeaveFingerprint, LiveMember, LiveMemberRestore,
     PendingBindingTerminalPosition, commit_attach, commit_detach, commit_leave,
-    start_blocked_detach,
+    start_blocked_detach, test_support::settled_leave_authority,
 };
 
 type TestFingerprint = [u8; 32];
@@ -152,6 +152,7 @@ fn tombstone() -> TestIdentity {
 }
 
 fn retire(live: TestMember, leave_token: LeaveAttemptToken) -> TestIdentity {
+    let authority = settled_leave_authority(&live, BindingState::Detached, 22);
     let request = LeaveRequest {
         conversation_id: 11,
         participant_id: live.participant_id(),
@@ -172,6 +173,7 @@ fn retire(live: TestMember, leave_token: LeaveAttemptToken) -> TestIdentity {
         BindingState::Detached,
         DetachCell::<TestVerifier>::default(),
         verified,
+        authority,
         LeaveCommitParameters {
             left_delivery_seq: 22,
         },

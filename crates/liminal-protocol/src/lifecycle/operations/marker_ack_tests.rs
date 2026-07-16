@@ -16,7 +16,8 @@ use super::{
         ActiveBinding, AttachSecretProof, BindingState, DetachCell, EnrollmentFingerprint,
         IdentityState, LeaveCommitParameters, LeaveFingerprint, LiveMember, LiveMemberRestore,
         PresentedIdentity, commit_leave,
-        edge::{ClosureDebt, ClosureState, Event, MarkerDelivery, StoredEdge},
+        edge::{ClosureDebt, ClosureState, Event, StoredEdge, marker_delivery_for_test},
+        test_support::settled_leave_authority,
     },
     marker_ack::{MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, apply_marker_ack},
     marker_proof::{MarkerProofInput, MarkerProofState},
@@ -104,7 +105,8 @@ fn marker_progress(
 ) -> super::super::ParticipantCursorProgress {
     let debt = ClosureDebt::new(WideResourceVector::new(1, 1))
         .expect("marker fixture has nonzero closure debt");
-    let delivery = MarkerDelivery::new(participant_id, binding_epoch, marker_delivery_seq);
+    let delivery = marker_delivery_for_test(participant_id, binding_epoch, marker_delivery_seq)
+        .expect("validated marker fixture restores");
     let state = delivery
         .delivered(
             debt,
@@ -149,6 +151,7 @@ fn exact_state() -> MarkerProofState {
 
 fn retired_identity() -> TestIdentity {
     let member = member(CURRENT_CURSOR);
+    let authority = settled_leave_authority(&member, BindingState::Detached, 30);
     let leave_request = LeaveRequest {
         conversation_id: CONVERSATION_ID,
         participant_id: PARTICIPANT_ID,
@@ -169,6 +172,7 @@ fn retired_identity() -> TestIdentity {
         BindingState::Detached,
         DetachCell::<[u8; 1]>::default(),
         verified,
+        authority,
         LeaveCommitParameters {
             left_delivery_seq: 30,
         },

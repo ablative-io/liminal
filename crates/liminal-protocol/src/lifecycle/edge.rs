@@ -1,7 +1,10 @@
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{BindingEpoch, DeliverySeq, ParticipantId, ParticipantIndex};
 
-use super::{ActiveBinding, CommittedDiedTerminal};
+use super::{
+    ActiveBinding, CommittedDiedTerminal,
+    claim_frontier::{ValidatedMarkerCandidate, ValidatedMarkerRecord},
+};
 
 /// Nonzero componentwise closure debt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +83,24 @@ impl PhysicalCompaction {
 }
 
 /// Exact marker-delivery witness.
+///
+/// This witness has no public constructor. Fresh delivery is produced only by
+/// the claim frontier's consuming marker-drain transition; cold restoration
+/// requires its sealed retained-marker-record authority. Raw participant,
+/// binding, and sequence values therefore cannot create recovery authority.
+///
+/// ```compile_fail
+/// use liminal_protocol::{
+///     lifecycle::MarkerDelivery,
+///     wire::{BindingEpoch, ConnectionIncarnation, Generation},
+/// };
+///
+/// let epoch = BindingEpoch::new(
+///     ConnectionIncarnation::new(1, 1),
+///     Generation::ONE,
+/// );
+/// let _ = MarkerDelivery::new(7, epoch, 11);
+/// ```
 // The frozen tag spells this required field `marker_delivery_seq`.
 #[allow(clippy::struct_field_names)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,17 +111,44 @@ pub struct MarkerDelivery {
 }
 
 impl MarkerDelivery {
-    /// Creates a planned exact marker-delivery witness.
+    /// Creates the exact post-append marker successor only from one
+    /// frontier-consumed marker candidate.
+    ///
+    /// A candidate whose target epoch is still bound selects live delivery. A
+    /// candidate whose target epoch has already died selects the undelivered
+    /// detached release directly, so no transient live-delivery authority is
+    /// fabricated for a detached participant.
     #[must_use]
-    pub const fn new(
-        participant_id: ParticipantId,
-        binding_epoch: BindingEpoch,
-        marker_delivery_seq: DeliverySeq,
-    ) -> Self {
+    pub(super) const fn successor_from_validated_candidate(
+        candidate: ValidatedMarkerCandidate,
+    ) -> StoredEdge {
+        let participant_id = candidate.participant_id();
+        let marker_delivery_seq = candidate.delivery_seq();
+        let successor = match candidate.target_binding() {
+            super::FrontierBinding::Bound(binding_epoch) => StoredEdge::MarkerDelivery(Self {
+                participant_id,
+                binding_epoch,
+                marker_delivery_seq,
+            }),
+            super::FrontierBinding::Detached(last_dead_binding_epoch) => {
+                StoredEdge::DetachedMarkerRelease(DetachedMarkerRelease {
+                    participant_id,
+                    marker_delivery_seq,
+                    last_dead_binding_epoch,
+                })
+            }
+        };
+        candidate.consume();
+        successor
+    }
+
+    /// Rebuilds delivery only from one frontier-validated retained marker.
+    #[must_use]
+    pub(super) const fn from_validated_record(record: &ValidatedMarkerRecord) -> Self {
         Self {
-            participant_id,
-            binding_epoch,
-            marker_delivery_seq,
+            participant_id: record.participant_id(),
+            binding_epoch: record.binding_epoch(),
+            marker_delivery_seq: record.delivery_seq(),
         }
     }
 
@@ -121,6 +169,190 @@ impl MarkerDelivery {
     pub const fn marker_delivery_seq(self) -> DeliverySeq {
         self.marker_delivery_seq
     }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::too_many_lines)]
+pub fn validated_marker_record_for_test(
+    conversation_id: crate::wire::ConversationId,
+    participant_id: ParticipantId,
+    target_binding: super::claim_frontier::FrontierBinding,
+    marker_delivery_seq: DeliverySeq,
+    cursor: DeliverySeq,
+) -> ValidatedMarkerRecord {
+    use alloc::{vec, vec::Vec};
+
+    use crate::outcome::CandidatePhase;
+
+    use super::{
+        AdmissionOrder, OrderClaims, OrderHigh, OrderLedger, RecoverySequenceReserve,
+        SequenceClaims, SequenceLedger,
+        claim_frontier::{
+            BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore, FrontierBinding,
+            FrontierParticipant, ImmutableSequenceCandidate, MarkerProvenance, MarkerRecordRequest,
+            MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore, OrderDirectOwner,
+            RetainedCausalRecord, RetainedCausalRecordKind, SequenceClaimFrontierRestore,
+            SequenceDirectOwner, SequenceProductRangesRestore, TerminalProductRangeRestore,
+        },
+    };
+
+    let identity_slot_limit = participant_id
+        .checked_add(1)
+        .expect("test participant must fit a half-open identity domain");
+    let exit_seq = marker_delivery_seq
+        .checked_add(1)
+        .expect("test marker must leave an exit-claim suffix");
+    let binding_epoch = match target_binding {
+        FrontierBinding::Bound(epoch) | FrontierBinding::Detached(epoch) => epoch,
+    };
+    let terminal_owner = BindingTerminalOwner {
+        participant_index: participant_id,
+        binding_epoch,
+    };
+    let (sequence_claims, sequence_movable, products, order_claims, order_movable) =
+        match target_binding {
+            FrontierBinding::Bound(_) => {
+                let terminal_seq = exit_seq
+                    .checked_add(1)
+                    .expect("test marker must leave a terminal-claim suffix");
+                let product_seq = terminal_seq
+                    .checked_add(1)
+                    .expect("test marker must leave a terminal-product suffix");
+                (
+                    SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::None),
+                    vec![
+                        MovableSequenceClaim {
+                            delivery_seq: exit_seq,
+                            owner: SequenceDirectOwner::MembershipExit {
+                                participant_index: participant_id,
+                            },
+                        },
+                        MovableSequenceClaim {
+                            delivery_seq: terminal_seq,
+                            owner: SequenceDirectOwner::BindingTerminal(terminal_owner),
+                        },
+                    ],
+                    SequenceProductRangesRestore {
+                        live_times_terminal: vec![TerminalProductRangeRestore {
+                            start: product_seq,
+                            length: 1,
+                            terminal: terminal_owner,
+                        }],
+                        live_times_replacement_terminal: None,
+                        other_live_times_exit: vec![],
+                    },
+                    OrderClaims::new(1, 1, false, false)
+                        .expect("bound test claims have no torn recovery pair"),
+                    vec![
+                        MovableOrderClaim {
+                            transaction_order: 1,
+                            owner: OrderDirectOwner::ActiveBindingTerminal(terminal_owner),
+                        },
+                        MovableOrderClaim {
+                            transaction_order: 2,
+                            owner: OrderDirectOwner::MembershipExit {
+                                participant_index: participant_id,
+                            },
+                        },
+                    ],
+                )
+            }
+            FrontierBinding::Detached(_) => (
+                SequenceClaims::new(1, 0, 0, RecoverySequenceReserve::None),
+                vec![MovableSequenceClaim {
+                    delivery_seq: exit_seq,
+                    owner: SequenceDirectOwner::MembershipExit {
+                        participant_index: participant_id,
+                    },
+                }],
+                SequenceProductRangesRestore::default(),
+                OrderClaims::new(0, 1, false, false)
+                    .expect("detached test claims have no torn recovery pair"),
+                vec![MovableOrderClaim {
+                    transaction_order: 1,
+                    owner: OrderDirectOwner::MembershipExit {
+                        participant_index: participant_id,
+                    },
+                }],
+            ),
+        };
+    let sequence_ledger = SequenceLedger::try_new(marker_delivery_seq, sequence_claims)
+        .expect("test sequence frontier is within the numeric suffix");
+    let order_ledger = OrderLedger::try_new(OrderHigh::Allocated(0), order_claims)
+        .expect("test order frontier is within the numeric suffix");
+    let admission_order = AdmissionOrder::new(0, CandidatePhase::CompactionMarker, participant_id);
+    let mut prevalidated = ClaimFrontiers::prevalidate(
+        ClaimFrontiersRestore {
+            conversation_id,
+            active_identities: vec![FrontierParticipant::new(
+                participant_id,
+                cursor,
+                target_binding,
+            )],
+            identity_slot_limit,
+            retained_floor: u128::from(marker_delivery_seq),
+            retained_record_limit: 1,
+            retained_records: vec![RetainedCausalRecord {
+                delivery_seq: marker_delivery_seq,
+                admission_order,
+                kind: RetainedCausalRecordKind::CompactionMarker {
+                    participant_index: participant_id,
+                    provenance: MarkerProvenance::NonProductM,
+                },
+            }],
+            active_marker_anchors: vec![marker_delivery_seq],
+            historical_marker_deliveries: vec![],
+            historical_causal_facts: vec![],
+            sequence: SequenceClaimFrontierRestore {
+                movable_claims: sequence_movable,
+                immutable_candidates: Vec::<ImmutableSequenceCandidate>::new(),
+                products,
+                recovery: None,
+            },
+            order: OrderClaimFrontierRestore {
+                movable_claims: order_movable,
+                immutable_candidates: vec![],
+                recovery: None,
+            },
+            recovery_marker_delivery_seq: None,
+        },
+        sequence_ledger,
+        order_ledger,
+    )
+    .expect("complete test claim frontier must prevalidate");
+    let record = prevalidated
+        .take_marker_record(MarkerRecordRequest::planned(
+            participant_id,
+            marker_delivery_seq,
+            target_binding,
+        ))
+        .expect("prevalidated test frontier retains its exact marker");
+    if cursor >= marker_delivery_seq {
+        record.delivered_for_test()
+    } else {
+        record
+    }
+}
+
+#[cfg(test)]
+pub fn marker_delivery_for_test(
+    participant_id: ParticipantId,
+    binding_epoch: BindingEpoch,
+    marker_delivery_seq: DeliverySeq,
+) -> Result<MarkerDelivery, super::storage::StorageRestoreError> {
+    let record = validated_marker_record_for_test(
+        1,
+        participant_id,
+        super::claim_frontier::FrontierBinding::Bound(binding_epoch),
+        marker_delivery_seq,
+        marker_delivery_seq.saturating_sub(1),
+    );
+    super::storage::MarkerDeliveryRestore {
+        participant_id,
+        binding_epoch,
+        marker_delivery_seq,
+    }
+    .restore_bound(1, record)
 }
 
 /// Continuous cursor-progress witness with no delivered marker.
@@ -516,6 +748,35 @@ impl DebtCompletion {
 ///     let _ = OrdinaryBindingAuthority::new(binding, 11);
 /// }
 /// ```
+///
+/// An ordinary-attach fork also cannot extract authority through the public
+/// surface. Only the protocol-owned aggregate/replay path may consume it:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::AttachCommit;
+///
+/// fn splice<F, V>(commit: &AttachCommit<F, V>) {
+///     let _ = commit.ordinary_binding_authority();
+/// }
+/// ```
+///
+/// Even code handed the opaque type cannot execute its fate transition:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::{CommittedDiedTerminal, OrdinaryBindingAuthority};
+///
+/// fn execute(authority: OrdinaryBindingAuthority, terminal: CommittedDiedTerminal) {
+///     let _ = authority.binding_fate(terminal, 11);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::{Event, OrdinaryBindingAuthority};
+///
+/// fn advance(authority: OrdinaryBindingAuthority, event: Event) {
+///     let _ = authority.cursor_progressed(event);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingAuthority {
     binding: ActiveBinding,
@@ -551,7 +812,11 @@ impl OrdinaryBindingAuthority {
     ///
     /// Returns this authority unchanged for another event class, participant,
     /// epoch, or previous cursor.
-    pub fn cursor_progressed(self, event: Event) -> Result<Self, Self> {
+    #[allow(
+        dead_code,
+        reason = "the crate-owned participant-ack operation advances this sealed authority"
+    )]
+    pub(crate) fn cursor_progressed(self, event: Event) -> Result<Self, Self> {
         let EventKind::CursorProgressed {
             participant_id,
             binding_epoch,
@@ -583,7 +848,7 @@ impl OrdinaryBindingAuthority {
     ///
     /// Returns this authority unchanged unless the terminal names the same
     /// participant, conversation, and binding epoch.
-    pub fn binding_fate(
+    pub(crate) fn binding_fate(
         self,
         terminal: CommittedDiedTerminal,
         resulting_floor: DeliverySeq,
@@ -608,7 +873,39 @@ impl OrdinaryBindingAuthority {
 /// Exact no-marker fate derived from an ordinary attach and its durable death.
 ///
 /// Fields are private, so raw participant/epoch values cannot create cursor-
-/// release authority.
+/// release authority. Its executable transitions are also crate-sealed:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::{ClosureDebt, OrdinaryBindingFate};
+///
+/// fn direct(fate: OrdinaryBindingFate, debt: ClosureDebt) {
+///     let _ = fate.into_direct_state(debt);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::{ClosureDebt, ObserverProjection, OrdinaryBindingFate};
+///
+/// fn behind_projection(
+///     projection: ObserverProjection,
+///     fate: OrdinaryBindingFate,
+///     debt: ClosureDebt,
+/// ) {
+///     let _ = projection.apply_ordinary_binding_fate(debt, fate);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::{ClosureDebt, OrdinaryBindingFate, PhysicalCompaction};
+///
+/// fn behind_compaction(
+///     compaction: PhysicalCompaction,
+///     fate: OrdinaryBindingFate,
+///     debt: ClosureDebt,
+/// ) {
+///     let _ = compaction.apply_ordinary_binding_fate(debt, fate);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingFate {
     through_seq: DeliverySeq,
@@ -631,7 +928,7 @@ impl OrdinaryBindingFate {
 
     /// Selects direct `DetachedCursorRelease` when no storage edge precedes it.
     #[must_use]
-    pub const fn into_direct_state(self, debt: ClosureDebt) -> ClosureState {
+    pub(crate) const fn into_direct_state(self, debt: ClosureDebt) -> ClosureState {
         owed(debt, StoredEdge::DetachedCursorRelease(self.release))
     }
 }
@@ -1199,7 +1496,11 @@ impl ObserverProjection {
     /// projection completion must retain its cursor-release suffix while debt
     /// remains.
     #[must_use]
-    pub const fn apply_ordinary_binding_fate(
+    #[allow(
+        dead_code,
+        reason = "the crate-owned binding-fate operation invokes this sealed OP transition"
+    )]
+    pub(crate) const fn apply_ordinary_binding_fate(
         self,
         resulting_debt: ClosureDebt,
         authority: OrdinaryBindingFate,
@@ -1262,7 +1563,7 @@ impl ObserverProjection {
     ///
     /// Returns the pending authority intact unless it belongs to this exact OP
     /// and the completion event reaches its exact boundary.
-    pub fn complete_after_binding_fate(
+    pub(crate) fn complete_after_binding_fate(
         self,
         event: Event,
         resulting_debt: Option<ClosureDebt>,
@@ -1502,7 +1803,11 @@ impl ObserverProjection {
 impl PhysicalCompaction {
     /// Applies ordinary no-marker binding fate by preserving or covering PC.
     #[must_use]
-    pub const fn apply_ordinary_binding_fate(
+    #[allow(
+        dead_code,
+        reason = "the crate-owned binding-fate replay boundary invokes this sealed PC transition"
+    )]
+    pub(crate) const fn apply_ordinary_binding_fate(
         self,
         resulting_debt: ClosureDebt,
         authority: OrdinaryBindingFate,
@@ -1581,7 +1886,7 @@ impl PhysicalCompaction {
     ///
     /// Returns the pending authority intact unless it belongs to this exact PC
     /// and the completion event covers its exact stored range.
-    pub fn complete_after_binding_fate(
+    pub(crate) fn complete_after_binding_fate(
         self,
         event: Event,
         resulting_debt: Option<ClosureDebt>,
@@ -1663,6 +1968,34 @@ impl PhysicalCompaction {
         } else {
             Err(original)
         }
+    }
+
+    /// Records a later marker append while preserving this exact active range.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless the appended marker lies
+    /// strictly after the physical-compaction range and its projection target
+    /// covers that marker.
+    pub const fn marker_appended(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::PhysicalCompaction(self));
+        let EventKind::MarkerAppended {
+            marker_delivery_seq,
+            resulting_projection_through,
+        } = event.0
+        else {
+            return Err(original);
+        };
+        if marker_delivery_seq <= self.through_seq
+            || resulting_projection_through < marker_delivery_seq
+        {
+            return Err(original);
+        }
+        Ok(original)
     }
 
     /// Applies an advancing ack, fate, or Leave whose resulting floor does not

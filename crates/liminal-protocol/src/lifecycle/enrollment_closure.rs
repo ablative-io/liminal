@@ -250,7 +250,7 @@ impl InitialEnrollmentClosureProjection {
     ///
     /// Returns [`OrderAdmissionError`] for claim overflow or an attempted
     /// second recovery quartet.
-    pub fn plan_order(&self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
+    pub(crate) fn plan_order(&self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
         self.order.plan_enrollment_with_recovery_quartet(matches!(
             self.recovery_quartet,
             RecoveryQuartetStatus::Endowed
@@ -263,7 +263,7 @@ impl InitialEnrollmentClosureProjection {
     ///
     /// Returns [`SequenceAdmissionError`] for counter/claim overflow or an
     /// attempted second recovery quartet.
-    pub fn plan_sequence(&self) -> Result<ResultingSequenceState, SequenceAdmissionError> {
+    pub(crate) fn plan_sequence(&self) -> Result<ResultingSequenceState, SequenceAdmissionError> {
         let marker_count = u64::try_from(self.new_markers.len()).map_err(|_| {
             SequenceAdmissionError::MarkerClaimOverflow {
                 markers: self.sequence.claims().markers(),

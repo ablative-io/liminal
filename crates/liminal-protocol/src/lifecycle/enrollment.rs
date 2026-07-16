@@ -166,6 +166,108 @@ impl AttachedLifecycleRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BindingOriginKind {
+    Unfenced,
+    Recovered {
+        marker_delivery_seq: DeliverySeq,
+        prior_binding_epoch: BindingEpoch,
+    },
+}
+
+/// Opaque durable origin of one current or last authoritative binding.
+///
+/// Enrollment and verified ordinary/superseding attach emit the unfenced form;
+/// verified marker-fenced attach emits the recovered form. The discriminator
+/// and every field are private so stored raw values cannot relabel a recovered
+/// binding as ordinary authority. Cold restoration replays the protocol commit
+/// that originally emitted this capsule, then passes it to total conversation
+/// restore.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::BindingOrigin;
+///
+/// fn relabel_recovered_as_unfenced(origin: BindingOrigin) -> BindingOrigin {
+///     BindingOrigin::unfenced(origin.attached())
+/// }
+/// ```
+///
+/// Producer commits also keep the capsule behind the protocol replay boundary:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::AttachCommit;
+///
+/// fn extract_attach<F, V>(commit: &AttachCommit<F, V>) {
+///     let _ = commit.binding_origin();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::EnrollmentCommit;
+///
+/// fn extract_enrollment<F>(commit: &EnrollmentCommit<F>) {
+///     let _ = commit.binding_origin();
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BindingOrigin {
+    attached: AttachedLifecycleRecord,
+    kind: BindingOriginKind,
+}
+
+impl BindingOrigin {
+    pub(crate) const fn unfenced(attached: AttachedLifecycleRecord) -> Self {
+        Self {
+            attached,
+            kind: BindingOriginKind::Unfenced,
+        }
+    }
+
+    pub(crate) const fn recovered(
+        attached: AttachedLifecycleRecord,
+        marker_delivery_seq: DeliverySeq,
+        prior_binding_epoch: BindingEpoch,
+    ) -> Self {
+        Self {
+            attached,
+            kind: BindingOriginKind::Recovered {
+                marker_delivery_seq,
+                prior_binding_epoch,
+            },
+        }
+    }
+
+    pub(crate) const fn attached(self) -> AttachedLifecycleRecord {
+        self.attached
+    }
+
+    pub(crate) const fn conversation_id(self) -> ConversationId {
+        self.attached.conversation_id()
+    }
+
+    pub(crate) const fn participant_id(self) -> ParticipantId {
+        self.attached.participant_id()
+    }
+
+    pub(crate) const fn binding_epoch(self) -> BindingEpoch {
+        self.attached.binding_epoch()
+    }
+
+    pub(crate) const fn is_unfenced(self) -> bool {
+        matches!(self.kind, BindingOriginKind::Unfenced)
+    }
+
+    pub(crate) const fn recovered_marker(self) -> Option<(DeliverySeq, BindingEpoch)> {
+        match self.kind {
+            BindingOriginKind::Unfenced => None,
+            BindingOriginKind::Recovered {
+                marker_delivery_seq,
+                prior_binding_epoch,
+            } => Some((marker_delivery_seq, prior_binding_epoch)),
+        }
+    }
+}
+
 /// Values allocated by one successful enrollment transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EnrollmentCommitParameters<F, P> {
@@ -196,6 +298,19 @@ pub struct EnrollmentCommit<F> {
     pub attached: AttachedLifecycleRecord,
     /// Exact canonical enrollment receipt.
     pub outcome: EnrollBound,
+    binding_origin: BindingOrigin,
+}
+
+impl<F> EnrollmentCommit<F> {
+    /// Returns the opaque unfenced binding origin emitted by enrollment.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the crate-owned event replay boundary persists this producer-emitted origin"
+    )]
+    pub(crate) const fn binding_origin(&self) -> BindingOrigin {
+        self.binding_origin
+    }
 }
 
 /// Failure while committing a previously allocated enrollment.
@@ -255,5 +370,6 @@ pub fn commit_enrollment<F, P>(
         binding_state: BindingState::Bound(binding),
         attached,
         outcome,
+        binding_origin: BindingOrigin::unfenced(attached),
     })
 }

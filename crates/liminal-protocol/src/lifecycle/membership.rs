@@ -5,8 +5,8 @@ use crate::wire::{
 };
 
 use super::{
-    AdmissionOrder, BindingState, CommittedBindingTerminal, DetachCell, PendingFinalization,
-    detach::validate_pending_pair, lookup::AttachSecretProof,
+    AdmissionOrder, BindingState, ClaimFrontiers, CommittedBindingTerminal, DetachCell,
+    PendingFinalization, detach::validate_pending_pair, lookup::AttachSecretProof,
 };
 
 /// Consuming-layer enrollment-token fingerprint with no protocol-invented width.
@@ -363,6 +363,7 @@ pub struct RetiredIdentity<EF, V, LF> {
     leave_attempt_token: LeaveAttemptToken,
     leave_request_verifier: V,
     leave_fingerprint: LeaveFingerprint<LF>,
+    left_admission_order: AdmissionOrder,
     committed_result: LeaveCommitted,
 }
 
@@ -397,6 +398,12 @@ impl<EF, V, LF> RetiredIdentity<EF, V, LF> {
         &self.committed_result
     }
 
+    /// Returns the immutable causal key of the permanent `Left` record.
+    #[must_use]
+    pub const fn left_admission_order(&self) -> AdmissionOrder {
+        self.left_admission_order
+    }
+
     /// Stored non-reversible secret-proof verifier.
     #[must_use]
     pub const fn leave_request_verifier(&self) -> &V {
@@ -416,6 +423,7 @@ impl<EF, V, LF> RetiredIdentity<EF, V, LF> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(test)]
     pub(super) fn restore(
         participant_id: ParticipantId,
         conversation_id: ConversationId,
@@ -424,6 +432,7 @@ impl<EF, V, LF> RetiredIdentity<EF, V, LF> {
         leave_attempt_token: LeaveAttemptToken,
         leave_request_verifier: V,
         leave_fingerprint: LeaveFingerprint<LF>,
+        left_transaction_order: TransactionOrder,
         committed_result: LeaveCommitted,
     ) -> Result<Self, RetirementError> {
         if committed_result.conversation_id() != conversation_id {
@@ -441,6 +450,11 @@ impl<EF, V, LF> RetiredIdentity<EF, V, LF> {
         if committed_result.leave_attempt_token() != leave_attempt_token {
             return Err(RetirementError::Token);
         }
+        let left_admission_order = AdmissionOrder::new(
+            left_transaction_order,
+            CandidatePhase::MembershipExit,
+            participant_id,
+        );
         Ok(Self {
             participant_id,
             conversation_id,
@@ -449,6 +463,7 @@ impl<EF, V, LF> RetiredIdentity<EF, V, LF> {
             leave_attempt_token,
             leave_request_verifier,
             leave_fingerprint,
+            left_admission_order,
             committed_result,
         })
     }
@@ -476,6 +491,8 @@ pub enum RetirementError {
     RetiredGeneration,
     /// Result's Leave token differs from the committing token.
     Token,
+    /// Stored `Left` order is not phase 1 for the retired participant.
+    LeftAdmissionOrder,
 }
 
 /// Failure while proving a live member's exact Leave request authority.
@@ -508,81 +525,162 @@ pub struct LeaveCommitParameters {
     pub left_delivery_seq: DeliverySeq,
 }
 
-/// Consuming planner proof that no unrelated tuple lies between a pending
-/// binding terminal and the positional `Left` commit.
-pub trait NoInterveningTuplePlannerProof {
-    /// Exact pending binding-terminal order covered by the proof.
-    fn pending_admission_order(&self) -> AdmissionOrder;
-
-    /// Transaction-order major assigned to the later `Left` record.
-    fn left_transaction_order(&self) -> TransactionOrder;
-}
-
 /// Proof bound to one exact pending finalization and later `Left` major.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NoInterveningTupleProof<P> {
-    planner_proof: P,
+#[derive(Debug, PartialEq, Eq)]
+struct NoInterveningTupleProof {
     pending_order: AdmissionOrder,
     left_transaction_order: TransactionOrder,
 }
 
-/// Invalid positional-composition planner proof.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NoInterveningTupleProofError {
-    /// Proof names another pending candidate.
-    PendingOrder,
-    /// Pending order is not the canonical binding-terminal phase/participant.
-    PendingShape,
-    /// `Left` major is not strictly later than the preserved pending major.
-    LeftOrder,
-}
-
-impl<P: NoInterveningTuplePlannerProof> NoInterveningTupleProof<P> {
-    /// Binds a consuming planner proof to one exact pending finalization.
-    ///
-    /// The proof type itself attests that no unrelated tuple intervenes; this
-    /// constructor additionally checks the exact immutable order coordinates.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`NoInterveningTupleProofError`] for mismatched or non-positional order.
-    pub fn from_planner(
-        pending: PendingFinalization,
-        planner_proof: P,
-    ) -> Result<Self, NoInterveningTupleProofError> {
-        let pending_order = pending.admission_order();
-        if planner_proof.pending_admission_order() != pending_order {
-            return Err(NoInterveningTupleProofError::PendingOrder);
-        }
-        if pending_order.candidate_phase() != CandidatePhase::BindingTerminal
-            || pending_order.participant_index() != pending.participant_id()
-        {
-            return Err(NoInterveningTupleProofError::PendingShape);
-        }
-        let left_transaction_order = planner_proof.left_transaction_order();
-        if left_transaction_order <= pending_order.transaction_order() {
-            return Err(NoInterveningTupleProofError::LeftOrder);
-        }
-        Ok(Self {
-            planner_proof,
-            pending_order,
-            left_transaction_order,
-        })
-    }
-
+impl NoInterveningTupleProof {
     fn matches(&self, pending: PendingFinalization) -> bool {
         self.pending_order == pending.admission_order()
             && self.left_transaction_order > self.pending_order.transaction_order()
-            && self.planner_proof.pending_admission_order() == self.pending_order
-            && self.planner_proof.left_transaction_order() == self.left_transaction_order
+    }
+}
+
+/// Linear order-lane authority for one exact settled or positional Leave.
+///
+/// Construction consumes a completely validated [`ClaimFrontiers`] snapshot,
+/// removes and relays the exact `X` order handle, and seals the resulting lane
+/// inside this value. The frontier cannot be recovered by a caller or reused
+/// after a successful commit. A later total Leave fixed-point operation may
+/// consume the held lane together with sequence, floor, product, and closure
+/// projection; this lower layer deliberately exposes no purported post-Leave
+/// [`ClaimFrontiers`].
+///
+/// External code cannot implement a planner proof or initialize this authority
+/// from raw majors:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::NoInterveningTuplePlannerProof;
+/// ```
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::PreparedLeaveAuthority;
+///
+/// let _ = PreparedLeaveAuthority { left_transaction_order: 7 };
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct PreparedLeaveAuthority {
+    frontiers: ClaimFrontiers,
+    conversation_id: ConversationId,
+    participant_id: ParticipantId,
+    kind: PreparedLeaveKind,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PreparedLeaveKind {
+    Settled {
+        ended_binding_epoch: Option<BindingEpoch>,
+        left_transaction_order: TransactionOrder,
+    },
+    Pending {
+        binding_epoch: BindingEpoch,
+        no_intervening: NoInterveningTupleProof,
+    },
+}
+
+impl PreparedLeaveAuthority {
+    pub(super) const fn settled(
+        frontiers: ClaimFrontiers,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        ended_binding_epoch: Option<BindingEpoch>,
+        left_transaction_order: TransactionOrder,
+    ) -> Self {
+        Self {
+            frontiers,
+            conversation_id,
+            participant_id,
+            kind: PreparedLeaveKind::Settled {
+                ended_binding_epoch,
+                left_transaction_order,
+            },
+        }
+    }
+
+    pub(super) const fn pending(
+        frontiers: ClaimFrontiers,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        pending_order: AdmissionOrder,
+        left_transaction_order: TransactionOrder,
+    ) -> Self {
+        Self {
+            frontiers,
+            conversation_id,
+            participant_id,
+            kind: PreparedLeaveKind::Pending {
+                binding_epoch,
+                no_intervening: NoInterveningTupleProof {
+                    pending_order,
+                    left_transaction_order,
+                },
+            },
+        }
+    }
+
+    fn consume_settled(
+        self,
+        member_conversation_id: ConversationId,
+        member_participant_id: ParticipantId,
+        ended_binding_epoch: Option<BindingEpoch>,
+    ) -> Result<TransactionOrder, LeaveCommitError> {
+        let Self {
+            frontiers: _,
+            conversation_id,
+            participant_id,
+            kind,
+        } = self;
+        let PreparedLeaveKind::Settled {
+            ended_binding_epoch: authorized_epoch,
+            left_transaction_order,
+        } = kind
+        else {
+            return Err(LeaveCommitError::PreparedAuthority);
+        };
+        if conversation_id != member_conversation_id
+            || participant_id != member_participant_id
+            || authorized_epoch != ended_binding_epoch
+        {
+            return Err(LeaveCommitError::PreparedAuthority);
+        }
+        Ok(left_transaction_order)
+    }
+
+    fn consume_pending(
+        self,
+        pending: PendingFinalization,
+    ) -> Result<TransactionOrder, LeaveCommitError> {
+        let Self {
+            frontiers: _,
+            conversation_id,
+            participant_id,
+            kind,
+        } = self;
+        let PreparedLeaveKind::Pending {
+            binding_epoch,
+            no_intervening,
+        } = kind
+        else {
+            return Err(LeaveCommitError::PreparedAuthority);
+        };
+        if conversation_id != pending.conversation_id()
+            || participant_id != pending.participant_id()
+            || binding_epoch != pending.binding_epoch()
+            || !no_intervening.matches(pending)
+        {
+            return Err(LeaveCommitError::PreparedAuthority);
+        }
+        Ok(no_intervening.left_transaction_order)
     }
 }
 
 /// Allocation and ordering proof for positional pending-terminal Leave.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingLeaveCommitParameters<P> {
-    /// Typed no-intervening planner proof.
-    pub no_intervening: NoInterveningTupleProof<P>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingLeaveCommitParameters {
     /// Real sequence allocated to the pending binding terminal.
     pub terminal_delivery_seq: DeliverySeq,
     /// Real sequence allocated to the following `Left` record.
@@ -592,6 +690,8 @@ pub struct PendingLeaveCommitParameters<P> {
 /// Failure while applying an already-authorized Leave transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeaveCommitError {
+    /// Prepared order authority belongs to another state or Leave mode.
+    PreparedAuthority,
     /// Verified request authority was minted for another live member.
     VerifiedAuthority,
     /// Bound or pending-finalization state belongs to another member/generation.
@@ -650,6 +750,7 @@ impl<F> LiveMember<F> {
         leave_attempt_token: LeaveAttemptToken,
         leave_request_verifier: V,
         leave_fingerprint: LeaveFingerprint<LF>,
+        left_admission_order: AdmissionOrder,
         committed_result: LeaveCommitted,
     ) -> Result<RetiredIdentity<F, V, LF>, RetirementError> {
         if committed_result.conversation_id() != self.conversation_id {
@@ -667,6 +768,11 @@ impl<F> LiveMember<F> {
         if committed_result.leave_attempt_token() != leave_attempt_token {
             return Err(RetirementError::Token);
         }
+        if left_admission_order.candidate_phase() != CandidatePhase::MembershipExit
+            || left_admission_order.participant_index() != self.participant_id
+        {
+            return Err(RetirementError::LeftAdmissionOrder);
+        }
         Ok(RetiredIdentity {
             participant_id: self.participant_id,
             conversation_id: self.conversation_id,
@@ -675,6 +781,7 @@ impl<F> LiveMember<F> {
             leave_attempt_token,
             leave_request_verifier,
             leave_fingerprint,
+            left_admission_order,
             committed_result,
         })
     }
@@ -691,6 +798,7 @@ pub fn commit_leave<EF, V, LF, D>(
     binding_state: BindingState,
     detach_cell: DetachCell<D>,
     verified: VerifiedLeaveRequest<V, LF>,
+    authority: PreparedLeaveAuthority,
     parameters: LeaveCommitParameters,
 ) -> Result<IdentityState<EF, V, LF>, LeaveCommitError> {
     validate_verified(&member, &verified)?;
@@ -710,6 +818,11 @@ pub fn commit_leave<EF, V, LF, D>(
         }
     };
     validate_settled_cell(&member, binding_state, &detach_cell)?;
+    let left_transaction_order = authority.consume_settled(
+        member.conversation_id,
+        member.participant_id,
+        ended_binding_epoch,
+    )?;
     let prior_terminal_delivery_seq = member
         .latest_terminal
         .map(CommittedBindingTerminal::delivery_seq);
@@ -719,6 +832,7 @@ pub fn commit_leave<EF, V, LF, D>(
         verified,
         ended_binding_epoch,
         prior_terminal_delivery_seq,
+        left_transaction_order,
         parameters.left_delivery_seq,
         detach_cell,
     )
@@ -733,26 +847,21 @@ pub fn commit_leave<EF, V, LF, D>(
 ///
 /// Returns [`LeaveCommitError`] when the planner proof, pending state/cell,
 /// authority, or allocated sequence order is inconsistent.
-pub fn commit_pending_leave<EF, V, LF, D, P>(
+pub fn commit_pending_leave<EF, V, LF, D>(
     member: LiveMember<EF>,
     pending: PendingFinalization,
     detach_cell: DetachCell<D>,
     verified: VerifiedLeaveRequest<V, LF>,
-    parameters: PendingLeaveCommitParameters<P>,
-) -> Result<IdentityState<EF, V, LF>, LeaveCommitError>
-where
-    P: NoInterveningTuplePlannerProof,
-{
+    authority: PreparedLeaveAuthority,
+    parameters: PendingLeaveCommitParameters,
+) -> Result<IdentityState<EF, V, LF>, LeaveCommitError> {
     let PendingLeaveCommitParameters {
-        no_intervening,
         terminal_delivery_seq,
         left_delivery_seq,
     } = parameters;
     validate_verified(&member, &verified)?;
     validate_pending(&member, pending)?;
-    if !no_intervening.matches(pending) {
-        return Err(LeaveCommitError::NoInterveningTuple);
-    }
+    let left_transaction_order = authority.consume_pending(pending)?;
     validate_pending_cell(member.conversation_id, pending, &detach_cell)?;
     if terminal_delivery_seq >= left_delivery_seq {
         return Err(LeaveCommitError::TerminalSequenceOrder);
@@ -770,6 +879,7 @@ where
         verified,
         None,
         Some(committed_terminal.delivery_seq()),
+        left_transaction_order,
         left_delivery_seq,
         detach_cell,
     )
@@ -886,6 +996,7 @@ fn finish_leave<EF, V, LF, D>(
     verified: VerifiedLeaveRequest<V, LF>,
     ended_binding_epoch: Option<BindingEpoch>,
     prior_terminal_delivery_seq: Option<DeliverySeq>,
+    left_transaction_order: TransactionOrder,
     left_delivery_seq: DeliverySeq,
     detach_cell: DetachCell<D>,
 ) -> Result<IdentityState<EF, V, LF>, LeaveCommitError> {
@@ -916,6 +1027,11 @@ fn finish_leave<EF, V, LF, D>(
             leave_attempt_token,
             leave_request_verifier,
             leave_fingerprint,
+            AdmissionOrder::new(
+                left_transaction_order,
+                CandidatePhase::MembershipExit,
+                participant_id,
+            ),
             committed_result,
         )
         .map_err(LeaveCommitError::RetirementInvariant)?;

@@ -9,7 +9,8 @@ use crate::wire::{
 };
 
 use super::super::edge::{
-    ClosureDebt, ClosureState, Event, MarkerDelivery, ParticipantCursorProgress, StoredEdge,
+    ClosureDebt, ClosureState, Event, ParticipantCursorProgress, StoredEdge,
+    marker_delivery_for_test,
 };
 use super::marker_proof::{
     MarkerProofDecision, MarkerProofInput, MarkerProofState, select_marker_proof,
@@ -80,7 +81,8 @@ fn marker_progress(
 ) -> ParticipantCursorProgress {
     let debt = ClosureDebt::new(WideResourceVector::new(1, 1))
         .expect("marker delivery fixture has nonzero closure debt");
-    let delivery = MarkerDelivery::new(participant_id, binding_epoch, marker_delivery_seq);
+    let delivery = marker_delivery_for_test(participant_id, binding_epoch, marker_delivery_seq)
+        .expect("validated marker fixture restores");
     let state = delivery
         .delivered(
             debt,

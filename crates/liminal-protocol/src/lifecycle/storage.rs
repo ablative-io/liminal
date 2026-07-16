@@ -8,22 +8,33 @@
 use alloc::vec::Vec;
 
 use crate::algebra::WideResourceVector;
+use crate::outcome::ParticipantStateCorruptReason;
 use crate::wire::{
     AttachSecret, BindingEpoch, CloseCause, ConversationId, DeliverySeq, DetachAttemptToken,
     Generation, LeaveAttemptToken, LeaveCommitted, ObserverEpoch, ParticipantId, TransactionOrder,
 };
 
 use super::{
-    ActiveBinding, AdmissionOrder, BindingState, BoundParticipantCursor, ClosureDebt, ClosureState,
-    CommittedBindingTerminal, DebtCompletion, DetachCell, DetachedCredentialRecovery,
-    DetachedMarkerRelease, EmptyDetach, EnrollmentFingerprint, Event, FencedAttachCommit,
-    IdentityState, LeaveFingerprint, LiveMember, LiveMemberRestore, MarkerDelivery,
-    NonzeroDebtCursorEpisode, ObserverProjection, OrdinaryBindingAuthority, OrdinaryBindingFate,
-    ParticipantCursorProgress, PendingFinalization, PendingRecoveredCursorRelease,
-    PhysicalCompaction, RecoveredBindingFate, RecoveredBindingFateTransition, RetiredIdentity,
-    StoredEdge,
+    ActiveBinding, AdmissionOrder, BindingOrigin, BindingState, BoundParticipantCursor,
+    ClaimFrontiers, ClaimFrontiersRestore, ClosureDebt, ClosureState, CommittedBindingTerminal,
+    DebtCompletion, DetachCell, DetachedCredentialRecovery, DetachedMarkerRelease,
+    EnrollmentFingerprint, Event, FencedAttachCommit, IdentityState, LeaveFingerprint, LiveMember,
+    MarkerDelivery, NonzeroDebtCursorEpisode, ObserverProjection, OrderLedger,
+    OrdinaryBindingAuthority, OrdinaryBindingFate, ParticipantCursorProgress, PendingFinalization,
+    PendingRecoveredCursorRelease, PhysicalCompaction, RecoveredBindingFate,
+    RecoveredBindingFateTransition, RetiredIdentity, SequenceLedger, StoredEdge,
     binding::{restore_committed_terminal, restore_pending_finalization},
+    claim_frontier::{
+        MarkerRecordOccurrence, MarkerRecordRequest, ValidatedConversationHistory,
+        ValidatedMarkerRecord,
+    },
     cursor_facts::{CursorProgressFact, CursorProgressKey},
+};
+
+#[cfg(test)]
+use super::{
+    EmptyDetach, FrontierBinding, LiveMemberRestore,
+    claim_frontier::HistoricalCausalAuthority,
     detach::{
         restore_committed_detach, restore_pending_detach, restore_terminalized_detach,
         validate_pending_pair,
@@ -55,6 +66,187 @@ pub enum StorageRestoreError {
     ClosureDebt,
     /// A stored edge disagrees with the predecessor provenance in its capsule.
     StoredEdgeProvenance,
+}
+
+/// Failure while jointly restoring claim frontiers and their current closure edge.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConversationStateRestoreError {
+    /// Numeric, causal, or cross-counter claim-frontier validation failed.
+    ClaimFrontier(ParticipantStateCorruptReason),
+    /// Raw lifecycle storage disagreed with its typed predecessor authority.
+    Storage(StorageRestoreError),
+}
+
+/// Jointly restored claim frontiers and exact current closure state.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RestoredConversationState {
+    frontiers: ClaimFrontiers,
+    closure: ClosureState,
+}
+
+/// Complete crate-internal participant-conversation snapshot.
+///
+/// This component form is intentionally not public API. Allowing a caller to
+/// combine a member restored from one history with a binding-origin capsule
+/// emitted by another would turn a valid producer proof into spliceable
+/// executable authority. Public cold restoration must instead replay one
+/// consuming protocol event history, which owns every predecessor and
+/// successor together.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ParticipantConversationRestore<EF, V, LF, D> {
+    /// Complete live and retired participant states.
+    pub participants: Vec<ParticipantLifecycleRestore<EF, V, LF, D>>,
+    /// Coupled raw claim frontiers.
+    pub frontiers: ClaimFrontiersRestore,
+    /// Aggregate delivery-sequence ledger.
+    pub sequence_ledger: SequenceLedger,
+    /// Aggregate transaction-order ledger.
+    pub order_ledger: OrderLedger,
+    /// Current closure state.
+    pub closure: ClosureStateRestore,
+}
+
+/// Fully validated crate-internal participant-conversation state.
+///
+/// This state can execute restored edge authority, so only the protocol-owned
+/// replay layer may produce or consume it.
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct ParticipantConversationState<EF, V, LF, D> {
+    participants: Vec<RestoredParticipantLifecycle<EF, V, LF, D>>,
+    frontiers: ClaimFrontiers,
+    closure: ClosureState,
+}
+
+#[cfg(test)]
+impl<EF, V, LF, D> ParticipantConversationState<EF, V, LF, D> {
+    /// Borrows every restored participant and tombstone.
+    #[must_use]
+    pub(super) fn participants(&self) -> &[RestoredParticipantLifecycle<EF, V, LF, D>] {
+        &self.participants
+    }
+
+    /// Borrows the finalized claim frontiers.
+    #[must_use]
+    pub(super) const fn frontiers(&self) -> &ClaimFrontiers {
+        &self.frontiers
+    }
+
+    /// Returns the exact closure state.
+    #[must_use]
+    pub(super) const fn closure(&self) -> ClosureState {
+        self.closure
+    }
+}
+
+impl RestoredConversationState {
+    /// Borrows the fully finalized coupled claim frontiers.
+    #[must_use]
+    pub const fn frontiers(&self) -> &ClaimFrontiers {
+        &self.frontiers
+    }
+
+    /// Returns the exact restored closure debt and stored edge.
+    #[must_use]
+    pub const fn closure(&self) -> ClosureState {
+        self.closure
+    }
+
+    /// Consumes the aggregate into the two values persisted by a server binding.
+    #[must_use]
+    pub fn into_parts(self) -> (ClaimFrontiers, ClosureState) {
+        (self.frontiers, self.closure)
+    }
+}
+
+/// Restores claim ownership and its marker-derived edge as one provenance unit.
+///
+/// Numeric/candidate validation runs first. At most one non-cloneable retained
+/// marker token is then consumed to restore the raw closure edge, after which
+/// frontier recovery claims are finalized against that exact typed edge.
+/// This standalone form intentionally rejects raw compacted causal history and
+/// ordinary-binding cursor authority; those require protocol-owned event replay
+/// to establish owned lifecycle provenance first.
+///
+/// # Errors
+///
+/// Returns [`ConversationStateRestoreError::ClaimFrontier`] for malformed
+/// numeric/candidate ownership or [`ConversationStateRestoreError::Storage`]
+/// for a missing, ambiguous, cross-conversation, or context-mismatched marker
+/// record and every other stored-edge provenance failure.
+pub fn restore_conversation_state(
+    frontier_restore: ClaimFrontiersRestore,
+    sequence_ledger: SequenceLedger,
+    order_ledger: OrderLedger,
+    closure_restore: ClosureStateRestore,
+) -> Result<RestoredConversationState, ConversationStateRestoreError> {
+    let history = ValidatedConversationHistory::empty();
+    restore_conversation_with_history(
+        frontier_restore,
+        sequence_ledger,
+        order_ledger,
+        &closure_restore,
+        &history,
+    )
+}
+
+fn restore_conversation_with_history(
+    frontier_restore: ClaimFrontiersRestore,
+    sequence_ledger: SequenceLedger,
+    order_ledger: OrderLedger,
+    closure_restore: &ClosureStateRestore,
+    history: &ValidatedConversationHistory,
+) -> Result<RestoredConversationState, ConversationStateRestoreError> {
+    let mut prevalidated = ClaimFrontiers::prevalidate_with_history(
+        frontier_restore,
+        sequence_ledger,
+        order_ledger,
+        history,
+    )
+    .map_err(ConversationStateRestoreError::ClaimFrontier)?;
+    let marker_request = closure_restore.marker_record_request();
+    let ordinary_request = closure_restore.ordinary_binding_request();
+    let closure = match (marker_request, ordinary_request) {
+        (Some(marker_request), None) => {
+            let record = prevalidated.take_marker_record(marker_request).ok_or(
+                ConversationStateRestoreError::Storage(StorageRestoreError::StoredEdgeProvenance),
+            )?;
+            (*closure_restore)
+                .restore_with_marker_record(prevalidated.conversation_id(), record)
+                .map_err(ConversationStateRestoreError::Storage)?
+        }
+        (None, Some(binding)) => {
+            let origin = history
+                .ordinary_origin(
+                    binding.conversation_id,
+                    binding.participant_id,
+                    binding.binding_epoch,
+                )
+                .ok_or(ConversationStateRestoreError::Storage(
+                    StorageRestoreError::StoredEdgeProvenance,
+                ))?;
+            (*closure_restore)
+                .restore_with_binding_origin(origin)
+                .map_err(ConversationStateRestoreError::Storage)?
+        }
+        (None, None) => (*closure_restore)
+            .restore()
+            .map_err(ConversationStateRestoreError::Storage)?,
+        (Some(_), Some(_)) => {
+            return Err(ConversationStateRestoreError::Storage(
+                StorageRestoreError::StoredEdgeProvenance,
+            ));
+        }
+    };
+    let current_edge = match closure {
+        ClosureState::Clear => None,
+        ClosureState::Owed { edge, .. } => Some(edge),
+    };
+    let frontiers = prevalidated
+        .finish(current_edge)
+        .map_err(ConversationStateRestoreError::ClaimFrontier)?;
+    Ok(RestoredConversationState { frontiers, closure })
 }
 
 /// Raw durable fields for one committed binding terminal.
@@ -179,6 +371,7 @@ pub enum BindingStateRestore {
 }
 
 impl BindingStateRestore {
+    #[cfg(test)]
     fn restore_for<EF>(self, member: &LiveMember<EF>) -> Result<BindingState, StorageRestoreError> {
         let state = match self {
             Self::Detached => BindingState::Detached,
@@ -226,6 +419,7 @@ pub struct LiveIdentityRestore<EF> {
 }
 
 impl<EF> LiveIdentityRestore<EF> {
+    #[cfg(test)]
     fn restore(self) -> Result<LiveMember<EF>, StorageRestoreError> {
         let latest_terminal = self
             .latest_terminal
@@ -301,11 +495,14 @@ pub struct RetiredIdentityRestore<EF, V, LF> {
     pub leave_request_verifier: V,
     /// Stored canonical Leave fingerprint.
     pub leave_fingerprint: LeaveFingerprint<LF>,
+    /// Immutable transaction-order major of the permanent `Left` record.
+    pub left_transaction_order: TransactionOrder,
     /// Complete canonical committed result.
     pub committed_result: LeaveCommittedRestore,
 }
 
 impl<EF, V, LF> RetiredIdentityRestore<EF, V, LF> {
+    #[cfg(test)]
     fn restore(self) -> Result<RetiredIdentity<EF, V, LF>, StorageRestoreError> {
         let result = self.committed_result.restore()?;
         RetiredIdentity::restore(
@@ -316,6 +513,7 @@ impl<EF, V, LF> RetiredIdentityRestore<EF, V, LF> {
             self.leave_attempt_token,
             self.leave_request_verifier,
             self.leave_fingerprint,
+            self.left_transaction_order,
             result,
         )
         .map_err(|_| StorageRestoreError::RetiredIdentity)
@@ -375,6 +573,7 @@ pub enum DetachCellRestore<V> {
 }
 
 impl<V> DetachCellRestore<V> {
+    #[cfg(test)]
     fn restore(self) -> Result<DetachCell<V>, StorageRestoreError> {
         match self {
             Self::Empty => Ok(DetachCell::Empty(EmptyDetach)),
@@ -433,7 +632,11 @@ impl<V> DetachCellRestore<V> {
     }
 }
 
-/// Complete participant durable state, with tombstone precedence in the type.
+/// Complete event-replayed participant state, with tombstone precedence in the type.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the live storage capsule remains inline so its atomic slots cannot be restored separately"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParticipantLifecycleRestore<EF, V, LF, D> {
     /// Live identity and its atomically paired binding and detach slots.
@@ -442,6 +645,8 @@ pub enum ParticipantLifecycleRestore<EF, V, LF, D> {
         identity: LiveIdentityRestore<EF>,
         /// Binding slot.
         binding: BindingStateRestore,
+        /// Current or last binding's producer-emitted origin capsule.
+        binding_origin: Option<BindingOrigin>,
         /// Four-state detach replay cell.
         detach_cell: DetachCellRestore<D>,
     },
@@ -450,6 +655,10 @@ pub enum ParticipantLifecycleRestore<EF, V, LF, D> {
 }
 
 /// Validated runtime participant state restored from durable data.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "the validated live capsule remains inline as one atomic lifecycle result"
+)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RestoredParticipantLifecycle<EF, V, LF, D> {
     /// Valid live membership and its paired slots.
@@ -458,6 +667,8 @@ pub enum RestoredParticipantLifecycle<EF, V, LF, D> {
         member: LiveMember<EF>,
         /// Validated binding state.
         binding: BindingState,
+        /// Validated current or last binding origin, when a binding has existed.
+        binding_origin: Option<BindingOrigin>,
         /// Validated detach cell.
         detach_cell: DetachCell<D>,
     },
@@ -472,7 +683,8 @@ impl<EF, V, LF, D> ParticipantLifecycleRestore<EF, V, LF, D> {
     ///
     /// Returns [`StorageRestoreError`] when any raw state is invalid or the
     /// membership, binding, terminal history, and detach-cell variants disagree.
-    pub fn restore(
+    #[cfg(test)]
+    pub(super) fn restore(
         self,
     ) -> Result<RestoredParticipantLifecycle<EF, V, LF, D>, StorageRestoreError> {
         match self {
@@ -482,19 +694,55 @@ impl<EF, V, LF, D> ParticipantLifecycleRestore<EF, V, LF, D> {
             Self::Live {
                 identity,
                 binding,
+                binding_origin,
                 detach_cell,
             } => {
                 let member = identity.restore()?;
                 let binding = binding.restore_for(&member)?;
+                let binding_origin = binding_origin
+                    .map(|origin| validate_binding_origin(origin, &member, binding))
+                    .transpose()?;
+                let origin_required = !matches!(binding, BindingState::Detached)
+                    || member.latest_terminal().is_some();
+                if origin_required != binding_origin.is_some() {
+                    return Err(StorageRestoreError::BindingAuthority);
+                }
                 let detach_cell = detach_cell.restore()?;
                 validate_live_pair(&member, binding, &detach_cell)?;
                 Ok(RestoredParticipantLifecycle::Live {
                     member,
                     binding,
+                    binding_origin,
                     detach_cell,
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+fn validate_binding_origin<EF>(
+    origin: BindingOrigin,
+    member: &LiveMember<EF>,
+    binding_state: BindingState,
+) -> Result<BindingOrigin, StorageRestoreError> {
+    let expected_epoch = match binding_state {
+        BindingState::Bound(current) => Some(current.binding_epoch),
+        BindingState::PendingFinalization(pending) => Some(pending.binding_epoch()),
+        BindingState::Detached => member
+            .latest_terminal()
+            .map(CommittedBindingTerminal::binding_epoch),
+    };
+    let attached = origin.attached();
+    if origin.participant_id() != member.participant_id()
+        || origin.conversation_id() != member.conversation_id()
+        || expected_epoch != Some(origin.binding_epoch())
+        || attached.participant_id() != member.participant_id()
+        || attached.conversation_id() != member.conversation_id()
+    {
+        Err(StorageRestoreError::BindingAuthority)
+    } else {
+        Ok(origin)
     }
 }
 
@@ -513,6 +761,7 @@ impl<EF, V, LF, D> RestoredParticipantLifecycle<EF, V, LF, D> {
             Self::Live {
                 member,
                 binding,
+                binding_origin: _,
                 detach_cell,
             } => (
                 IdentityState::Live(member),
@@ -524,7 +773,146 @@ impl<EF, V, LF, D> RestoredParticipantLifecycle<EF, V, LF, D> {
     }
 }
 
+#[cfg(test)]
+impl<EF, V, LF, D> ParticipantConversationRestore<EF, V, LF, D> {
+    /// Restores participant lifecycle, sealed history/origins, frontiers, and
+    /// closure as one total conversation snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error when participant snapshots or binding origins
+    /// disagree, and a claim-frontier error when the exact participant-derived
+    /// history does not back raw causal rows and marker ownership.
+    pub fn restore(
+        self,
+    ) -> Result<ParticipantConversationState<EF, V, LF, D>, ConversationStateRestoreError> {
+        let participants = self
+            .participants
+            .into_iter()
+            .map(ParticipantLifecycleRestore::restore)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(ConversationStateRestoreError::Storage)?;
+        validate_participant_frontier_projection(
+            &participants,
+            self.frontiers.conversation_id,
+            &self.frontiers.active_identities,
+        )?;
+        let history = validated_conversation_history(&participants)?;
+        let restored = restore_conversation_with_history(
+            self.frontiers,
+            self.sequence_ledger,
+            self.order_ledger,
+            &self.closure,
+            &history,
+        )?;
+        let (frontiers, closure) = restored.into_parts();
+        Ok(ParticipantConversationState {
+            participants,
+            frontiers,
+            closure,
+        })
+    }
+}
+
+#[cfg(test)]
+fn validated_conversation_history<EF, V, LF, D>(
+    participants: &[RestoredParticipantLifecycle<EF, V, LF, D>],
+) -> Result<ValidatedConversationHistory, ConversationStateRestoreError> {
+    let mut causal_authorities = Vec::new();
+    let mut binding_origins = Vec::new();
+    let mut seen = Vec::new();
+    for participant in participants {
+        let participant_id = match participant {
+            RestoredParticipantLifecycle::Live {
+                member,
+                binding_origin,
+                ..
+            } => {
+                if let Some(terminal) = member.latest_terminal() {
+                    causal_authorities
+                        .push(HistoricalCausalAuthority::from_committed_terminal(terminal));
+                }
+                if let Some(origin) = binding_origin {
+                    binding_origins.push(*origin);
+                }
+                member.participant_id()
+            }
+            RestoredParticipantLifecycle::Retired(retired) => {
+                causal_authorities.push(HistoricalCausalAuthority::from_retired(retired));
+                retired.participant_id()
+            }
+        };
+        if seen.contains(&participant_id) {
+            return Err(ConversationStateRestoreError::Storage(
+                StorageRestoreError::MembershipInvariant,
+            ));
+        }
+        seen.push(participant_id);
+    }
+    Ok(ValidatedConversationHistory::new(
+        causal_authorities,
+        binding_origins,
+    ))
+}
+
+#[cfg(test)]
+fn validate_participant_frontier_projection<EF, V, LF, D>(
+    participants: &[RestoredParticipantLifecycle<EF, V, LF, D>],
+    conversation_id: ConversationId,
+    frontier: &[super::FrontierParticipant],
+) -> Result<(), ConversationStateRestoreError> {
+    let mut projected = Vec::new();
+    for participant in participants {
+        match participant {
+            RestoredParticipantLifecycle::Live {
+                member, binding, ..
+            } => {
+                if member.conversation_id() != conversation_id {
+                    return Err(ConversationStateRestoreError::Storage(
+                        StorageRestoreError::MembershipInvariant,
+                    ));
+                }
+                let binding = match binding {
+                    BindingState::Bound(binding) => FrontierBinding::Bound(binding.binding_epoch),
+                    BindingState::PendingFinalization(pending) => {
+                        FrontierBinding::Detached(pending.binding_epoch())
+                    }
+                    BindingState::Detached => {
+                        let Some(terminal) = member.latest_terminal() else {
+                            return Err(ConversationStateRestoreError::Storage(
+                                StorageRestoreError::BindingAuthority,
+                            ));
+                        };
+                        FrontierBinding::Detached(terminal.binding_epoch())
+                    }
+                };
+                projected.push(super::FrontierParticipant::new(
+                    member.participant_id(),
+                    member.cursor(),
+                    binding,
+                ));
+            }
+            RestoredParticipantLifecycle::Retired(retired) => {
+                if retired.conversation_id() != conversation_id {
+                    return Err(ConversationStateRestoreError::Storage(
+                        StorageRestoreError::MembershipInvariant,
+                    ));
+                }
+            }
+        }
+    }
+    projected.sort_by_key(|participant| participant.participant_index());
+    if projected == frontier {
+        Ok(())
+    } else {
+        Err(ConversationStateRestoreError::Storage(
+            StorageRestoreError::MembershipInvariant,
+        ))
+    }
+}
+
 #[allow(clippy::suspicious_operation_groupings)]
+#[cfg(test)]
 fn validate_live_pair<EF, D>(
     member: &LiveMember<EF>,
     binding: BindingState,
@@ -619,6 +1007,18 @@ impl CursorEpisodeRestore {
 }
 
 /// Raw predecessor fields for an ordinary-attach binding authority.
+///
+/// Raw fields are not executable provenance. Standalone restoration is absent:
+/// total participant-conversation restore must first prove an exact unfenced
+/// binding-origin capsule.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::OrdinaryBindingAuthorityRestore;
+///
+/// fn bypass(raw: OrdinaryBindingAuthorityRestore) {
+///     let _ = raw.restore();
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingAuthorityRestore {
     /// Exact binding installed by ordinary attach.
@@ -628,14 +1028,44 @@ pub struct OrdinaryBindingAuthorityRestore {
 }
 
 impl OrdinaryBindingAuthorityRestore {
-    /// Rebuilds the opaque ordinary-attach authority from its complete fields.
-    #[must_use]
-    pub const fn restore(self) -> OrdinaryBindingAuthority {
-        OrdinaryBindingAuthority::new(self.binding, self.through_seq)
+    fn restore_with_origin(
+        self,
+        origin: &BindingOrigin,
+    ) -> Result<OrdinaryBindingAuthority, StorageRestoreError> {
+        if !origin.is_unfenced()
+            || origin.conversation_id() != self.binding.conversation_id
+            || origin.participant_id() != self.binding.participant_id
+            || origin.binding_epoch() != self.binding.binding_epoch
+        {
+            return Err(StorageRestoreError::StoredEdgeProvenance);
+        }
+        Ok(OrdinaryBindingAuthority::new(
+            self.binding,
+            self.through_seq,
+        ))
     }
 }
 
 /// Raw predecessor fields proving exact marker delivery.
+///
+/// A retained-record authority is mandatory and cannot be constructed by a
+/// storage binding. Raw edge fields alone therefore fail at compile time.
+///
+/// ```compile_fail
+/// use liminal_protocol::{
+///     lifecycle::MarkerDeliveryRestore,
+///     wire::BindingEpoch,
+/// };
+///
+/// fn raw_restore(epoch: BindingEpoch) {
+///     let raw = MarkerDeliveryRestore {
+///         participant_id: 7,
+///         binding_epoch: epoch,
+///         marker_delivery_seq: 11,
+///     };
+///     let _ = raw.restore_bound(1);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerDeliveryRestore {
     /// Participant that received the marker.
@@ -647,14 +1077,139 @@ pub struct MarkerDeliveryRestore {
 }
 
 impl MarkerDeliveryRestore {
-    /// Rebuilds the marker-delivery witness.
-    #[must_use]
-    pub const fn restore(self) -> MarkerDelivery {
-        MarkerDelivery::new(
-            self.participant_id,
-            self.binding_epoch,
-            self.marker_delivery_seq,
+    /// Rebuilds a live marker-delivery witness after exact record-field matching.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageRestoreError::StoredEdgeProvenance`] when the authority
+    /// belongs to another conversation, names a detached target, or disagrees
+    /// with any raw edge field.
+    #[cfg(test)]
+    pub(super) fn restore_bound(
+        self,
+        conversation_id: ConversationId,
+        record_authority: ValidatedMarkerRecord,
+    ) -> Result<MarkerDelivery, StorageRestoreError> {
+        let restored = self.restore_with_target(
+            conversation_id,
+            &record_authority,
+            MarkerRecordTarget::Bound,
+            MarkerRecordOccurrence::Undelivered,
+        );
+        record_authority.consume();
+        restored
+    }
+
+    /// Exercises the delivered detached-record gate for adversarial tests.
+    #[cfg(test)]
+    pub(super) fn restore_detached_delivered_for_test(
+        self,
+        conversation_id: ConversationId,
+        record_authority: ValidatedMarkerRecord,
+    ) -> Result<MarkerDelivery, StorageRestoreError> {
+        let restored = self.restore_with_target(
+            conversation_id,
+            &record_authority,
+            MarkerRecordTarget::Detached,
+            MarkerRecordOccurrence::Delivered,
+        );
+        record_authority.consume();
+        restored
+    }
+
+    fn restore_detached(
+        self,
+        conversation_id: ConversationId,
+        record_authority: &ValidatedMarkerRecord,
+    ) -> Result<MarkerDelivery, StorageRestoreError> {
+        self.restore_with_target(
+            conversation_id,
+            record_authority,
+            MarkerRecordTarget::Detached,
+            MarkerRecordOccurrence::Undelivered,
         )
+    }
+
+    fn restore_with_target(
+        self,
+        conversation_id: ConversationId,
+        record_authority: &ValidatedMarkerRecord,
+        target: MarkerRecordTarget,
+        occurrence: MarkerRecordOccurrence,
+    ) -> Result<MarkerDelivery, StorageRestoreError> {
+        if record_authority.conversation_id() != conversation_id
+            || !target.matches(record_authority.target_binding(), self.binding_epoch)
+            || record_authority.occurrence() != occurrence
+        {
+            return Err(StorageRestoreError::StoredEdgeProvenance);
+        }
+        let delivery = MarkerDelivery::from_validated_record(record_authority);
+        if delivery.participant_id() != self.participant_id
+            || delivery.binding_epoch() != self.binding_epoch
+            || delivery.marker_delivery_seq() != self.marker_delivery_seq
+        {
+            return Err(StorageRestoreError::StoredEdgeProvenance);
+        }
+        Ok(delivery)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MarkerRecordTarget {
+    Bound,
+    Detached,
+}
+
+impl MarkerRecordTarget {
+    fn matches(self, target: super::FrontierBinding, epoch: BindingEpoch) -> bool {
+        matches!(
+            (self, target),
+            (Self::Bound, super::FrontierBinding::Bound(actual))
+                | (Self::Detached, super::FrontierBinding::Detached(actual))
+                if actual == epoch
+        )
+    }
+}
+
+#[derive(Debug)]
+enum MarkerRestoreAuthority<'a> {
+    Absent,
+    Record {
+        conversation_id: ConversationId,
+        record: &'a ValidatedMarkerRecord,
+    },
+}
+
+impl MarkerRestoreAuthority<'_> {
+    const fn require_absent(&self) -> Result<(), StorageRestoreError> {
+        match self {
+            Self::Absent => Ok(()),
+            Self::Record { .. } => Err(StorageRestoreError::StoredEdgeProvenance),
+        }
+    }
+
+    const fn require_record(
+        &self,
+    ) -> Result<(ConversationId, &ValidatedMarkerRecord), StorageRestoreError> {
+        match self {
+            Self::Record {
+                conversation_id,
+                record,
+            } if record.conversation_id() == *conversation_id => Ok((*conversation_id, record)),
+            Self::Absent | Self::Record { .. } => Err(StorageRestoreError::StoredEdgeProvenance),
+        }
+    }
+
+    fn record_for(
+        &self,
+        expected_conversation_id: ConversationId,
+    ) -> Result<&ValidatedMarkerRecord, StorageRestoreError> {
+        let (conversation_id, record) = self.require_record()?;
+        if conversation_id == expected_conversation_id {
+            Ok(record)
+        } else {
+            Err(StorageRestoreError::StoredEdgeProvenance)
+        }
     }
 }
 
@@ -679,6 +1234,8 @@ impl MarkerCursorProgressRestore {
     fn restore_with_debt(
         self,
         debt: ClosureDebt,
+        record_authority: &ValidatedMarkerRecord,
+        target: MarkerRecordTarget,
     ) -> Result<ParticipantCursorProgress, StorageRestoreError> {
         if self.participant_id != self.delivery.participant_id
             || self.binding_epoch != self.delivery.binding_epoch
@@ -687,7 +1244,12 @@ impl MarkerCursorProgressRestore {
         {
             return Err(StorageRestoreError::StoredEdgeProvenance);
         }
-        let marker = self.delivery.restore();
+        let marker = self.delivery.restore_with_target(
+            self.conversation_id,
+            record_authority,
+            target,
+            MarkerRecordOccurrence::Delivered,
+        )?;
         let state = marker
             .delivered(
                 debt,
@@ -731,6 +1293,7 @@ impl DetachedCredentialRecoveryRestore {
     fn restore_with_debt(
         self,
         debt: ClosureDebt,
+        record_authority: &ValidatedMarkerRecord,
     ) -> Result<DetachedCredentialRecovery, StorageRestoreError> {
         if self.participant_id != self.progress.participant_id
             || self.marker_delivery_seq != self.progress.marker_delivery_seq
@@ -745,7 +1308,11 @@ impl DetachedCredentialRecoveryRestore {
         {
             return Err(StorageRestoreError::StoredEdgeProvenance);
         }
-        let progress = self.progress.restore_with_debt(debt)?;
+        let progress = self.progress.restore_with_debt(
+            debt,
+            record_authority,
+            MarkerRecordTarget::Detached,
+        )?;
         let successor = progress
             .binding_fate(
                 debt,
@@ -786,6 +1353,7 @@ impl DetachedMarkerReleaseRestore {
     fn restore_with_debt(
         self,
         debt: ClosureDebt,
+        record_authority: &ValidatedMarkerRecord,
     ) -> Result<DetachedMarkerRelease, StorageRestoreError> {
         if self.participant_id != self.delivery.participant_id
             || self.marker_delivery_seq != self.delivery.marker_delivery_seq
@@ -800,7 +1368,9 @@ impl DetachedMarkerReleaseRestore {
         {
             return Err(StorageRestoreError::StoredEdgeProvenance);
         }
-        let marker = self.delivery.restore();
+        let marker = self
+            .delivery
+            .restore_detached(self.conversation_id, record_authority)?;
         let state = marker
             .binding_fate(
                 debt,
@@ -824,6 +1394,17 @@ impl DetachedMarkerReleaseRestore {
 }
 
 /// Exact ordinary-binding fate provenance for cursor release.
+///
+/// Raw fields are deliberately not independently restorable. The participant's
+/// total snapshot must first prove its unfenced binding origin.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::OrdinaryBindingFateRestore;
+///
+/// fn bypass(raw: OrdinaryBindingFateRestore) {
+///     let _ = raw.restore();
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingFateRestore {
     /// Ordinary-attach authority that owned the no-marker cursor.
@@ -841,8 +1422,11 @@ impl OrdinaryBindingFateRestore {
     ///
     /// Returns [`StorageRestoreError::StoredEdgeProvenance`] unless the terminal
     /// is a `Died` terminal for the exact participant, conversation, and epoch.
-    pub fn restore(self) -> Result<OrdinaryBindingFate, StorageRestoreError> {
-        let authority = self.authority.restore();
+    fn restore_with_origin(
+        self,
+        origin: &BindingOrigin,
+    ) -> Result<OrdinaryBindingFate, StorageRestoreError> {
+        let authority = self.authority.restore_with_origin(origin)?;
         let terminal = self.terminal.restore()?;
         let CommittedBindingTerminal::Died(terminal) = terminal else {
             return Err(StorageRestoreError::StoredEdgeProvenance);
@@ -907,6 +1491,18 @@ impl DebtCompletionRestore {
 }
 
 /// Complete predecessor and event fields for a committed fenced attach.
+///
+/// Raw fields remain serializable, but their executable restoration entry point
+/// is crate-private. Public callers cannot combine them with an occurrence token
+/// obtained from another transition.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::FencedAttachCommitRestore;
+///
+/// fn bypass() {
+///     let _ = FencedAttachCommitRestore::restore;
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FencedAttachCommitRestore {
     /// Exact DCR predecessor.
@@ -934,10 +1530,23 @@ impl FencedAttachCommitRestore {
     ///
     /// Returns [`StorageRestoreError`] for any participant, marker, epoch,
     /// generation, debt, or successor mismatch.
-    pub fn restore(self) -> Result<FencedAttachCommit, StorageRestoreError> {
+    #[cfg(test)]
+    pub(super) fn restore(
+        self,
+        record_authority: ValidatedMarkerRecord,
+    ) -> Result<FencedAttachCommit, StorageRestoreError> {
+        let restored = self.restore_with_record(&record_authority);
+        record_authority.consume();
+        restored
+    }
+
+    fn restore_with_record(
+        self,
+        record_authority: &ValidatedMarkerRecord,
+    ) -> Result<FencedAttachCommit, StorageRestoreError> {
         let debt =
             ClosureDebt::new(self.predecessor_debt).ok_or(StorageRestoreError::ClosureDebt)?;
-        let predecessor = self.predecessor.restore_with_debt(debt)?;
+        let predecessor = self.predecessor.restore_with_debt(debt, record_authority)?;
         predecessor
             .fenced_attach(
                 debt,
@@ -955,6 +1564,14 @@ impl FencedAttachCommitRestore {
 }
 
 /// Complete fenced-attach predecessor for a recovered binding-fate authority.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::RecoveredBindingFateRestore;
+///
+/// fn bypass() {
+///     let _ = RecoveredBindingFateRestore::restore;
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RecoveredBindingFateRestore {
     /// Exact fenced-attach commit that installed the recovered epoch.
@@ -974,8 +1591,21 @@ impl RecoveredBindingFateRestore {
     ///
     /// Returns [`StorageRestoreError::StoredEdgeProvenance`] for a wrong
     /// participant/epoch or a fenced attach whose successor was already clear.
-    pub fn restore(self) -> Result<RecoveredBindingFate, StorageRestoreError> {
-        let commit = self.fenced_attach.restore()?;
+    #[cfg(test)]
+    pub(super) fn restore(
+        self,
+        record_authority: ValidatedMarkerRecord,
+    ) -> Result<RecoveredBindingFate, StorageRestoreError> {
+        let restored = self.restore_with_record(&record_authority);
+        record_authority.consume();
+        restored
+    }
+
+    fn restore_with_record(
+        self,
+        record_authority: &ValidatedMarkerRecord,
+    ) -> Result<RecoveredBindingFate, StorageRestoreError> {
+        let commit = self.fenced_attach.restore_with_record(record_authority)?;
         commit
             .recovered_binding_fate(Event::binding_fate_observed(
                 self.participant_id,
@@ -1002,8 +1632,21 @@ impl PendingRecoveredCursorReleaseRestore {
     ///
     /// Returns [`StorageRestoreError`] if provenance mismatches or the fate
     /// covers physical compaction immediately instead of leaving it pending.
-    pub fn restore(self) -> Result<PendingRecoveredCursorRelease, StorageRestoreError> {
-        let authority = self.fate.restore()?;
+    #[cfg(test)]
+    pub(super) fn restore(
+        self,
+        record_authority: ValidatedMarkerRecord,
+    ) -> Result<PendingRecoveredCursorRelease, StorageRestoreError> {
+        let restored = self.restore_with_record(&record_authority);
+        record_authority.consume();
+        restored
+    }
+
+    fn restore_with_record(
+        self,
+        record_authority: &ValidatedMarkerRecord,
+    ) -> Result<PendingRecoveredCursorRelease, StorageRestoreError> {
+        let authority = self.fate.restore_with_record(record_authority)?;
         let predecessor_state = authority.predecessor_state();
         let resulting_debt =
             ClosureDebt::new(self.resulting_debt).ok_or(StorageRestoreError::ClosureDebt)?;
@@ -1124,14 +1767,51 @@ pub enum DetachedCursorReleaseProvenanceRestore {
 }
 
 impl DetachedCursorReleaseProvenanceRestore {
-    fn restore_state(self, debt: ClosureDebt) -> Result<ClosureState, StorageRestoreError> {
+    const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
-            Self::Ordinary(provenance) => Ok(provenance.restore()?.into_direct_state(debt)),
+            Self::Ordinary(fate) => Some(fate.authority.binding),
+            Self::RecoveredDirect { .. } | Self::RecoveredAfterStorage { .. } => None,
+        }
+    }
+
+    const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
+        match self {
+            Self::Ordinary(_) => None,
+            Self::RecoveredDirect { fate, .. } => Some(MarkerRecordRequest::recovered(
+                fate.participant_id,
+                fate.fenced_attach.marker_delivery_seq,
+                fate.fenced_attach.prior_binding_epoch,
+                fate.fenced_attach.new_binding_epoch,
+            )),
+            Self::RecoveredAfterStorage { pending, .. } => Some(MarkerRecordRequest::recovered(
+                pending.fate.participant_id,
+                pending.fate.fenced_attach.marker_delivery_seq,
+                pending.fate.fenced_attach.prior_binding_epoch,
+                pending.fate.fenced_attach.new_binding_epoch,
+            )),
+        }
+    }
+
+    fn restore_state(
+        self,
+        debt: ClosureDebt,
+        marker_authority: &MarkerRestoreAuthority<'_>,
+        ordinary_origin: Option<&BindingOrigin>,
+    ) -> Result<ClosureState, StorageRestoreError> {
+        match self {
+            Self::Ordinary(provenance) => {
+                marker_authority.require_absent()?;
+                let origin = ordinary_origin.ok_or(StorageRestoreError::StoredEdgeProvenance)?;
+                Ok(provenance
+                    .restore_with_origin(origin)?
+                    .into_direct_state(debt))
+            }
             Self::RecoveredDirect {
                 fate,
                 resulting_debt,
             } => {
-                let authority = fate.restore()?;
+                let (_, record_authority) = marker_authority.require_record()?;
+                let authority = fate.restore_with_record(record_authority)?;
                 let predecessor = authority.predecessor_state();
                 let resulting_debt =
                     ClosureDebt::new(resulting_debt).ok_or(StorageRestoreError::ClosureDebt)?;
@@ -1165,7 +1845,8 @@ impl DetachedCursorReleaseProvenanceRestore {
                 pending,
                 completion,
             } => {
-                let state = completion.restore(pending.restore()?)?;
+                let (_, record_authority) = marker_authority.require_record()?;
+                let state = completion.restore(pending.restore_with_record(record_authority)?)?;
                 match state {
                     ClosureState::Owed {
                         debt: restored_debt,
@@ -1227,46 +1908,123 @@ pub enum StoredEdgeRestore {
 }
 
 impl StoredEdgeRestore {
-    fn restore_with_debt(self, debt: ClosureDebt) -> Result<StoredEdge, StorageRestoreError> {
+    const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
-            Self::ObserverProjection { through_seq } => Ok(StoredEdge::ObserverProjection(
-                ObserverProjection::new(through_seq),
+            Self::ParticipantCursorProgressContinuous { authority, .. } => Some(authority.binding),
+            Self::DetachedCursorRelease { provenance, .. } => provenance.ordinary_binding_request(),
+            Self::ObserverProjection { .. }
+            | Self::PhysicalCompaction { .. }
+            | Self::MarkerDelivery(_)
+            | Self::ParticipantCursorProgressMarker(_)
+            | Self::DetachedCredentialRecovery(_)
+            | Self::DetachedMarkerRelease(_) => None,
+        }
+    }
+
+    const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
+        match self {
+            Self::MarkerDelivery(value) => Some(MarkerRecordRequest::planned(
+                value.participant_id,
+                value.marker_delivery_seq,
+                super::FrontierBinding::Bound(value.binding_epoch),
             )),
+            Self::ParticipantCursorProgressMarker(value) => Some(MarkerRecordRequest::delivered(
+                value.participant_id,
+                value.marker_delivery_seq,
+                super::FrontierBinding::Bound(value.binding_epoch),
+            )),
+            Self::DetachedCredentialRecovery(value) => Some(MarkerRecordRequest::delivered(
+                value.participant_id,
+                value.marker_delivery_seq,
+                super::FrontierBinding::Detached(value.prior_binding_epoch),
+            )),
+            Self::DetachedMarkerRelease(value) => Some(MarkerRecordRequest::planned(
+                value.participant_id,
+                value.marker_delivery_seq,
+                super::FrontierBinding::Detached(value.last_dead_binding_epoch),
+            )),
+            Self::DetachedCursorRelease { provenance, .. } => provenance.marker_record_request(),
+            Self::ObserverProjection { .. }
+            | Self::PhysicalCompaction { .. }
+            | Self::ParticipantCursorProgressContinuous { .. } => None,
+        }
+    }
+
+    fn restore_with_debt(
+        self,
+        debt: ClosureDebt,
+        marker_authority: &MarkerRestoreAuthority<'_>,
+        ordinary_origin: Option<&BindingOrigin>,
+    ) -> Result<StoredEdge, StorageRestoreError> {
+        match self {
+            Self::ObserverProjection { through_seq } => {
+                marker_authority.require_absent()?;
+                Ok(StoredEdge::ObserverProjection(ObserverProjection::new(
+                    through_seq,
+                )))
+            }
             Self::PhysicalCompaction {
                 from_floor,
                 through_seq,
-            } => PhysicalCompaction::new(from_floor, through_seq)
-                .map(StoredEdge::PhysicalCompaction)
-                .ok_or(StorageRestoreError::StoredEdgeProvenance),
-            Self::MarkerDelivery(value) => Ok(StoredEdge::MarkerDelivery(value.restore())),
+            } => {
+                marker_authority.require_absent()?;
+                PhysicalCompaction::new(from_floor, through_seq)
+                    .map(StoredEdge::PhysicalCompaction)
+                    .ok_or(StorageRestoreError::StoredEdgeProvenance)
+            }
+            Self::MarkerDelivery(value) => {
+                let (conversation_id, record_authority) = marker_authority.require_record()?;
+                value
+                    .restore_with_target(
+                        conversation_id,
+                        record_authority,
+                        MarkerRecordTarget::Bound,
+                        MarkerRecordOccurrence::Undelivered,
+                    )
+                    .map(StoredEdge::MarkerDelivery)
+            }
             Self::ParticipantCursorProgressContinuous {
                 participant_id,
                 binding_epoch,
                 through_seq,
                 authority,
-            } => ParticipantCursorProgress::restore_continuous(
-                authority.restore(),
-                participant_id,
-                binding_epoch,
-                through_seq,
-            )
-            .map(StoredEdge::ParticipantCursorProgress)
-            .ok_or(StorageRestoreError::StoredEdgeProvenance),
-            Self::ParticipantCursorProgressMarker(value) => value
-                .restore_with_debt(debt)
-                .map(StoredEdge::ParticipantCursorProgress),
-            Self::DetachedCredentialRecovery(value) => value
-                .restore_with_debt(debt)
-                .map(StoredEdge::DetachedCredentialRecovery),
-            Self::DetachedMarkerRelease(value) => value
-                .restore_with_debt(debt)
-                .map(StoredEdge::DetachedMarkerRelease),
+            } => {
+                marker_authority.require_absent()?;
+                let origin = ordinary_origin.ok_or(StorageRestoreError::StoredEdgeProvenance)?;
+                ParticipantCursorProgress::restore_continuous(
+                    authority.restore_with_origin(origin)?,
+                    participant_id,
+                    binding_epoch,
+                    through_seq,
+                )
+                .map(StoredEdge::ParticipantCursorProgress)
+                .ok_or(StorageRestoreError::StoredEdgeProvenance)
+            }
+            Self::ParticipantCursorProgressMarker(value) => {
+                let record_authority = marker_authority.record_for(value.conversation_id)?;
+                value
+                    .restore_with_debt(debt, record_authority, MarkerRecordTarget::Bound)
+                    .map(StoredEdge::ParticipantCursorProgress)
+            }
+            Self::DetachedCredentialRecovery(value) => {
+                let record_authority =
+                    marker_authority.record_for(value.progress.conversation_id)?;
+                value
+                    .restore_with_debt(debt, record_authority)
+                    .map(StoredEdge::DetachedCredentialRecovery)
+            }
+            Self::DetachedMarkerRelease(value) => {
+                let record_authority = marker_authority.record_for(value.conversation_id)?;
+                value
+                    .restore_with_debt(debt, record_authority)
+                    .map(StoredEdge::DetachedMarkerRelease)
+            }
             Self::DetachedCursorRelease {
                 participant_id,
                 last_dead_binding_epoch,
                 provenance,
             } => {
-                let state = provenance.restore_state(debt)?;
+                let state = provenance.restore_state(debt, marker_authority, ordinary_origin)?;
                 match state {
                     ClosureState::Owed {
                         edge: StoredEdge::DetachedCursorRelease(edge),
@@ -1301,6 +2059,20 @@ pub enum ClosureStateRestore {
 }
 
 impl ClosureStateRestore {
+    const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
+        match self {
+            Self::Clear => None,
+            Self::Owed { edge, .. } => edge.ordinary_binding_request(),
+        }
+    }
+
+    const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
+        match self {
+            Self::Clear => None,
+            Self::Owed { edge, .. } => edge.marker_record_request(),
+        }
+    }
+
     /// Validates and rebuilds one closure state.
     ///
     /// # Errors
@@ -1308,13 +2080,59 @@ impl ClosureStateRestore {
     /// Returns [`StorageRestoreError`] for zero owed debt, an invalid range, or
     /// any opaque edge whose supplied predecessor provenance does not match.
     pub fn restore(self) -> Result<ClosureState, StorageRestoreError> {
+        self.restore_with_authority(&MarkerRestoreAuthority::Absent, None)
+    }
+
+    /// Restores exactly one marker-derived edge after claim/log prevalidation.
+    ///
+    /// The marker token is conversation-bound and fixes whether its current
+    /// target is live (`MarkerDelivery`/marker PCP) or detached (DMR/DCR and
+    /// recovered cursor-release history).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageRestoreError::StoredEdgeProvenance`] when the raw edge
+    /// is not marker-derived, the token belongs to another conversation, or
+    /// the retained record has the wrong target state, epoch, participant, or
+    /// delivery sequence.
+    pub(super) fn restore_with_marker_record(
+        self,
+        conversation_id: ConversationId,
+        record: ValidatedMarkerRecord,
+    ) -> Result<ClosureState, StorageRestoreError> {
+        let restored = self.restore_with_authority(
+            &MarkerRestoreAuthority::Record {
+                conversation_id,
+                record: &record,
+            },
+            None,
+        );
+        record.consume();
+        restored
+    }
+
+    fn restore_with_binding_origin(
+        self,
+        origin: &BindingOrigin,
+    ) -> Result<ClosureState, StorageRestoreError> {
+        self.restore_with_authority(&MarkerRestoreAuthority::Absent, Some(origin))
+    }
+
+    fn restore_with_authority(
+        self,
+        marker_authority: &MarkerRestoreAuthority<'_>,
+        ordinary_origin: Option<&BindingOrigin>,
+    ) -> Result<ClosureState, StorageRestoreError> {
         match self {
-            Self::Clear => Ok(ClosureState::Clear),
+            Self::Clear => {
+                marker_authority.require_absent()?;
+                Ok(ClosureState::Clear)
+            }
             Self::Owed { debt, edge } => {
                 let debt = ClosureDebt::new(debt).ok_or(StorageRestoreError::ClosureDebt)?;
                 Ok(ClosureState::Owed {
                     debt,
-                    edge: edge.restore_with_debt(debt)?,
+                    edge: edge.restore_with_debt(debt, marker_authority, ordinary_origin)?,
                 })
             }
         }

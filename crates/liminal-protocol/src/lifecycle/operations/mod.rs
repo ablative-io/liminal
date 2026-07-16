@@ -1,5 +1,6 @@
 mod enrollment_operation;
 mod marker_ack;
+mod marker_drain;
 mod marker_proof;
 mod nonzero_participant_ack;
 mod participant_ack;
@@ -8,6 +9,8 @@ mod participant_ack;
 mod enrollment_operation_tests;
 #[cfg(test)]
 mod marker_ack_tests;
+#[cfg(test)]
+mod marker_drain_tests;
 #[cfg(test)]
 mod marker_proof_tests;
 #[cfg(test)]
@@ -22,6 +25,7 @@ pub use enrollment_operation::{
     apply_initial_enrollment,
 };
 pub use marker_ack::{MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, apply_marker_ack};
+pub use marker_drain::{MarkerDrainCommit, MarkerDrainError, drain_next_marker};
 pub use marker_proof::{
     MarkerProofDecision, MarkerProofInput, MarkerProofPermit, MarkerProofState, select_marker_proof,
 };
