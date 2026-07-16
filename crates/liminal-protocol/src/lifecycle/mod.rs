@@ -16,6 +16,7 @@ mod cursor_facts;
 mod detach;
 mod edge;
 mod enrollment;
+mod enrollment_closure;
 mod lookup;
 mod membership;
 mod observer_recovery;
@@ -37,6 +38,8 @@ mod edge_tests;
 #[cfg(test)]
 mod enrollment_tests;
 #[cfg(test)]
+mod enrollment_closure_tests;
+#[cfg(test)]
 mod lookup_tests;
 #[cfg(test)]
 mod membership_tests;
@@ -52,8 +55,9 @@ pub use admission::{
     CredentialAttachCapacityDecision, EnrollmentCapacityCommit, EnrollmentCapacityCounters,
     EnrollmentCapacityDecision, FreshParticipantCapacityCounter,
     FreshParticipantCapacityCounterInvariantError, ObserverCheckedOperation, ObserverFloorDecision,
-    ObserverFloorPermit, OrderAdmissionError, OrderAllocation, OrderClaims, OrderHigh, OrderLedger,
-    OrderLedgerInvariantError, RecordSizeDecision, RecordSizePermit, RecoverySequenceReserve,
+    ObserverFloorPermit, OrderAdmissionError, OrderAllocation, OrderClaims,
+    OrderClaimsInvariantError, OrderHigh, OrderLedger, OrderLedgerInvariantError,
+    RecordSizeDecision, RecordSizePermit, RecoverySequenceReserve,
     ResultingEnrollmentCapacityCounters, ResultingOrderClaims, ResultingSequenceState,
     SemanticConnectionCapacityDecision, SequenceAdmission, SequenceAdmissionError, SequenceClaims,
     SequenceLedger, SequenceLedgerInvariantError, admit_sequence, allocate_order,
@@ -102,6 +106,11 @@ pub use enrollment::{
     AllocatedParticipantSlot, AttachedLifecycleRecord, AttachedRecordPosition, EnrollmentCommit,
     EnrollmentCommitError, EnrollmentCommitParameters, ParticipantSlotAllocationError,
     ParticipantSlotAllocatorProof, commit_enrollment,
+};
+pub use enrollment_closure::{
+    InitialEnrollmentClosureError, InitialEnrollmentClosureInput,
+    InitialEnrollmentClosureProjection, PlannedEnrollmentMarker, RecoveryQuartetStatus,
+    project_initial_enrollment_closure,
 };
 pub use lookup::{
     AttachSecretProof, BindingRequiredLookupResult, CredentialAttachLiveReceipt,

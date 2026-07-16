@@ -153,6 +153,36 @@ impl ClosureAccounting {
         self.state
     }
 
+    /// Returns identity slots currently owning marker-capacity credits.
+    #[must_use]
+    pub const fn marker_capacity_credits(self) -> u64 {
+        self.marker_capacity_credits
+    }
+
+    /// Returns current planned, undelivered, or delivered marker anchors.
+    #[must_use]
+    pub const fn marker_anchors(self) -> u64 {
+        self.marker_anchors
+    }
+
+    /// Returns sequence claims owned by the current edge.
+    #[must_use]
+    pub const fn edge_sequence_claims(self) -> u64 {
+        self.edge_sequence_claims
+    }
+
+    /// Returns transaction-order positions owned by the current edge.
+    #[must_use]
+    pub const fn edge_order_position_claims(self) -> u64 {
+        self.edge_order_position_claims
+    }
+
+    /// Returns the exact current recovery-capacity occupancy.
+    #[must_use]
+    pub const fn edge_k_remaining(self) -> ResourceVector {
+        self.edge_k_remaining
+    }
+
     /// Returns the current retained baseline `B`.
     #[must_use]
     pub const fn baseline(self) -> WideResourceVector {
