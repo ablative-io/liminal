@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use liminal::durability::{DurableStore, open_ephemeral};
+use liminal::durability::{DurabilityError, DurableStore, StoredEntry, open_ephemeral};
 use liminal_protocol::{
     lifecycle::{
         ConnectionIncarnationAllocationDecision, ConnectionIncarnationAllocator,
@@ -15,6 +15,60 @@ use super::incarnation_stream::{
     IncarnationAllocation, IncarnationStartup, IncarnationStream, IncarnationStreamError,
     StartedIncarnationStream, encode_allocate_event_fixture, encode_startup_event_fixture,
 };
+
+#[derive(Debug)]
+struct ShortPageStore {
+    inner: Arc<dyn DurableStore>,
+    maximum_page: usize,
+}
+
+impl ShortPageStore {
+    fn new(inner: Arc<dyn DurableStore>, maximum_page: usize) -> Self {
+        Self {
+            inner,
+            maximum_page,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableStore for ShortPageStore {
+    async fn append(
+        &self,
+        stream_key: &str,
+        payload: Vec<u8>,
+        expected_seq: u64,
+    ) -> Result<u64, DurabilityError> {
+        self.inner.append(stream_key, payload, expected_seq).await
+    }
+
+    async fn read_from(
+        &self,
+        stream_key: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner
+            .read_from(stream_key, offset, limit.min(self.maximum_page))
+            .await
+    }
+
+    async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {
+        self.inner.cas(key, old_value, new_value).await
+    }
+
+    async fn read_value(&self, key: &str) -> Result<Option<u64>, DurabilityError> {
+        self.inner.read_value(key).await
+    }
+
+    async fn scan(&self, prefix: &str) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner.scan(prefix).await
+    }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        self.inner.flush().await
+    }
+}
 
 fn store() -> Result<Arc<dyn DurableStore>, Box<dyn std::error::Error>> {
     Ok(Arc::new(open_ephemeral(1)?))
@@ -248,6 +302,39 @@ fn cold_replay_crosses_bounded_pages_without_polling() -> Result<(), Box<dyn std
     assert_eq!(
         replayed.header().last_examined_connection_ordinal,
         Some(259)
+    );
+    Ok(())
+}
+
+#[test]
+fn cold_replay_treats_only_an_empty_short_page_as_end_of_stream()
+-> Result<(), Box<dyn std::error::Error>> {
+    let inner = store()?;
+    let mut first_server = started(Arc::clone(&inner))?;
+    for ordinal in 0..3_u64 {
+        assert_eq!(
+            liminal::durability::bridge::block_on(first_server.allocate(&[]))??,
+            IncarnationAllocation::Allocated {
+                connection_incarnation: ConnectionIncarnation::new(1, ordinal),
+                skipped_collisions: 0,
+            }
+        );
+    }
+    drop(first_server);
+
+    let short_pages: Arc<dyn DurableStore> = Arc::new(ShortPageStore::new(inner, 1));
+    let mut replayed = liminal::durability::bridge::block_on(
+        IncarnationStream::new(short_pages, 4).resume_started_for_test(),
+    )??;
+    assert_eq!(replayed.header().server_incarnation, 1);
+    assert_eq!(replayed.header().last_examined_connection_ordinal, Some(2));
+    assert_eq!(
+        liminal::durability::bridge::block_on(replayed.allocate(&[]))??,
+        IncarnationAllocation::Allocated {
+            connection_incarnation: ConnectionIncarnation::new(1, 3),
+            skipped_collisions: 0,
+        },
+        "cold replay must not reuse an ordinal hidden behind a short non-final page"
     );
     Ok(())
 }

@@ -311,7 +311,6 @@ impl IncarnationStream {
             if entries.is_empty() {
                 break;
             }
-            let entry_count = entries.len();
             for entry in entries {
                 if entry.sequence != next_sequence {
                     return Err(IncarnationStreamError::EventSequence {
@@ -370,9 +369,6 @@ impl IncarnationStream {
                 next_sequence = next_sequence
                     .checked_add(1)
                     .ok_or(IncarnationStreamError::StreamSequenceExhausted)?;
-            }
-            if entry_count < REPLAY_PAGE_SIZE {
-                break;
             }
         }
         Ok(ReplayedIncarnationState {
