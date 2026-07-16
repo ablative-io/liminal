@@ -17,7 +17,7 @@ use super::lookup::{
     lookup_leave,
 };
 use super::{
-    ActiveBinding, AttachCommitParameters, AttachedRecordPosition, BindingState,
+    ActiveBinding, AttachCommitParameters, AttachedRecordPosition, BindingState, ClosureState,
     CommittedBindingTerminalPosition, DetachCell, EnrollmentFingerprint, IdentityState,
     LeaveCommitParameters, LeaveFingerprint, LiveMember, LiveMemberRestore,
     PendingBindingTerminalPosition, commit_attach, commit_detach, commit_leave,
@@ -118,6 +118,9 @@ fn terminalized_detach() -> (
     let verified_attach = old_member
         .verify_detached_attach(
             BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits ordinary attach"),
             attach_request,
             AttachSecretProof::Verified,
             AttachCommitParameters {

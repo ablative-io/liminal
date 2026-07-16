@@ -74,12 +74,38 @@ fn ordinary_attach_cannot_claim_marker_acceptance() {
     assert!(matches!(
         member().verify_detached_attach(
             BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits ordinary attach"),
             request(Some(14)),
             AttachSecretProof::Verified,
             parameters(),
         ),
         Err(AttachVerificationError::MarkerProof)
     ));
+}
+
+#[test]
+fn clear_closure_admission_reaches_ordinary_binding_authority() {
+    let verified = member()
+        .verify_detached_attach(
+            BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits ordinary attach"),
+            request(None),
+            AttachSecretProof::Verified,
+            parameters(),
+        )
+        .expect("clear ordinary detached attach verifies");
+    let committed = commit_attach(verified, DetachCell::<[u8; 32]>::default())
+        .expect("verified ordinary detached attach commits");
+
+    let authority = committed
+        .ordinary_binding_authority()
+        .expect("ordinary attach carries its admitted binding authority");
+    assert_eq!(authority.binding(), parameters().binding);
+    assert_eq!(authority.through_seq(), member().cursor());
 }
 
 #[test]
@@ -104,6 +130,11 @@ fn active_same_participant_attach_records_supersession() {
     assert_eq!(committed.member.cursor(), 5);
     assert_eq!(committed.outcome.persisted_cursor(), 5);
     assert_eq!(committed.outcome.accepted_marker_delivery_seq(), None);
+    let ordinary_authority = committed
+        .ordinary_binding_authority()
+        .expect("ordinary supersession mints no-marker fate authority");
+    assert_eq!(ordinary_authority.binding(), parameters().binding);
+    assert_eq!(ordinary_authority.through_seq(), 5);
     let AttachTransition::Superseded { terminal } = committed.transition else {
         panic!("supersession must carry its real old terminal");
     };
@@ -193,6 +224,7 @@ fn fenced_recovery_composes_pending_detach_and_sets_both_marker_fields() {
     assert_eq!(committed.member.cursor(), 14);
     assert_eq!(committed.outcome.persisted_cursor(), 14);
     assert_eq!(committed.outcome.accepted_marker_delivery_seq(), Some(14));
+    assert_eq!(committed.ordinary_binding_authority(), None);
     assert!(matches!(committed.detach_cell, DetachCell::Terminalized(_)));
     assert_eq!(
         committed.transition,

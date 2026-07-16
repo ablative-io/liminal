@@ -246,64 +246,6 @@ fn extract_credential_recovery(
     edge
 }
 
-#[allow(clippy::too_many_arguments)]
-fn recovered_cursor_release(
-    participant_id: u64,
-    prior_epoch: BindingEpoch,
-    recovered_epoch: BindingEpoch,
-    marker_delivery_seq: u64,
-    compaction_through: u64,
-    fate_floor: u64,
-    debt: ClosureDebt,
-) -> liminal_protocol::lifecycle::DetachedCursorRelease {
-    let marker = MarkerDelivery::new(participant_id, prior_epoch, marker_delivery_seq);
-    let progress = extract_marker_progress(
-        marker
-            .delivered(
-                debt,
-                Event::marker_delivered(participant_id, prior_epoch, marker_delivery_seq),
-            )
-            .expect("exact marker delivery creates fenced-recovery provenance"),
-    );
-    let recovery = extract_credential_recovery(
-        progress
-            .binding_fate(
-                debt,
-                Event::binding_fate_observed(participant_id, prior_epoch, fate_floor),
-            )
-            .expect("exact marker-backed fate creates DCR"),
-    );
-    let compaction = PhysicalCompaction::new(compaction_through, compaction_through)
-        .expect("single-record compaction is ordered");
-    let fenced = recovery
-        .fenced_attach(
-            debt,
-            Event::fenced_recovery_committed(
-                participant_id,
-                marker_delivery_seq,
-                prior_epoch,
-                recovered_epoch,
-                compaction_through,
-            ),
-            DebtCompletion::physical_compaction(debt, compaction),
-        )
-        .expect("exact fenced attach creates recovered-binding authority");
-    let authority = fenced
-        .recovered_binding_fate(Event::binding_fate_observed(
-            participant_id,
-            recovered_epoch,
-            fate_floor,
-        ))
-        .expect("exact recovered epoch fate creates cursor-release authority");
-    let transition = compaction
-        .apply_recovered_binding_fate(debt, debt, authority)
-        .expect("covering fate consumes the exact fenced-attach authority");
-    let RecoveredBindingFateTransition::DetachedCursorRelease(released) = transition else {
-        panic!("fate floor must cover the exact compaction predecessor")
-    };
-    released.edge()
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SlotProof {
     conversation_id: u64,
@@ -944,6 +886,9 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
     let verified_attach = member_one
         .verify_detached_attach(
             binding_state,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits an ordinary detached attach"),
             attach_two_request,
             AttachSecretProof::Verified,
             AttachCommitParameters {
@@ -989,6 +934,9 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
     let verified_attach = member_two
         .verify_detached_attach(
             detached_state,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits an ordinary detached attach"),
             CredentialAttachRequest {
                 conversation_id: CONVERSATION,
                 participant_id: P0,
@@ -1203,25 +1151,74 @@ fn acceptance_case_47_canonical_sequence_budgets_and_gap_free_boundary_histories
     let capacity_a = mandatory_capacity(baseline_a, q, k, uniform(10));
     assert_eq!(capacity_a.debt, wide_uniform(1));
     assert!(capacity_a.is_legal());
-    // The frozen ordinary no-marker history ends in this exact public edge
-    // snapshot. LP final-review Fix 1 deliberately makes the corresponding
-    // executable continuous witness crate-private: external callers may
-    // restore/serialize the snapshot, but cannot fabricate fate authority from
-    // these raw participant/epoch values. The trusted ordinary producer and
-    // DCursor's sole Leave transition remain covered in lifecycle edge tests.
-    let arm_a_edge = RepaymentEdge::DetachedCursorRelease {
+    // Reach e47A through a real ordinary attach. Its opaque commit authority,
+    // combined with the exact durable Died terminal, is the only ordinary
+    // no-marker route to executable DCursor state.
+    let arm_a_attach_request = CredentialAttachRequest {
+        conversation_id: C47_A,
         participant_id: P0,
-        last_dead_binding_epoch: e47_a,
+        capability_generation: generation(2),
+        attach_secret: secret(2),
+        attach_attempt_token: attach_token(0xA6),
+        accept_marker_delivery_seq: None,
     };
-    let RepaymentEdge::DetachedCursorRelease {
-        participant_id,
-        last_dead_binding_epoch,
-    } = arm_a_edge
+    let arm_a_verified = restored_member(C47_A, 2, 0, None)
+        .verify_detached_attach(
+            BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits an ordinary detached attach"),
+            arm_a_attach_request,
+            AttachSecretProof::Verified,
+            AttachCommitParameters {
+                binding: ActiveBinding {
+                    participant_id: P0,
+                    conversation_id: C47_A,
+                    binding_epoch: e47_a,
+                },
+                attach_secret: secret(3),
+                attached_position: AttachedRecordPosition::new(1, 1),
+                receipt_expires_at: 1_000,
+                provenance_expires_at: 2_000,
+            },
+        )
+        .expect("the public Arm A prefix ordinarily binds generation 3");
+    let arm_a_attach = commit_attach(arm_a_verified, DetachCell::<[u8; 32]>::default())
+        .expect("ordinary Arm A attach commits");
+    assert_eq!(arm_a_attach.outcome.persisted_cursor(), 0);
+    assert_eq!(arm_a_attach.outcome.accepted_marker_delivery_seq(), None);
+    let ordinary_authority = arm_a_attach
+        .ordinary_binding_authority()
+        .expect("ordinary attach mints no-marker fate authority");
+    let BindingState::Bound(active_e47_a) = arm_a_attach.binding_state else {
+        panic!("ordinary attach must bind e47A")
+    };
+    let cursor_progress = Event::cursor_progressed(P0, e47_a, 0, MAX - 8, floor_a)
+        .expect("Arm A's public prefix advances the e47A cursor to MAX-8");
+    let ordinary_authority = ordinary_authority
+        .cursor_progressed(cursor_progress)
+        .expect("exact e47A normal ack preserves ordinary attach provenance");
+    assert_eq!(ordinary_authority.through_seq(), MAX - 8);
+    let died_e47_a = match active_e47_a.connection_lost(BindingTerminalDisposition::Committed(
+        CommittedBindingTerminalPosition::new(MAX - 5, MAX - 2),
+    )) {
+        liminal_protocol::lifecycle::DiedBindingTransition::Committed(terminal) => terminal,
+        liminal_protocol::lifecycle::DiedBindingTransition::Pending(_) => {
+            panic!("Arm A terminal is durable")
+        }
+    };
+    let ordinary_fate = ordinary_authority
+        .binding_fate(died_e47_a, floor_a)
+        .expect("exact e47A death consumes ordinary attach authority");
+    assert_eq!(ordinary_fate.through_seq(), MAX - 8);
+    let ClosureState::Owed {
+        edge: StoredEdge::DetachedCursorRelease(dcursor_a),
+        ..
+    } = ordinary_fate.into_direct_state(closure_debt(1))
     else {
-        panic!("Arm A must retain the frozen DCursor snapshot")
+        panic!("ordinary no-marker fate must select Arm A DCursor")
     };
-    assert_eq!(participant_id, P0);
-    assert_eq!(last_dead_binding_epoch, e47_a);
+    assert_eq!(dcursor_a.last_dead_binding_epoch(), e47_a);
     let l47_a = LeaveRequest {
         conversation_id: C47_A,
         participant_id: P0,
@@ -1230,6 +1227,21 @@ fn acceptance_case_47_canonical_sequence_budgets_and_gap_free_boundary_histories
         leave_attempt_token: leave_token(0xA7),
     };
     assert_client_round_trip(ClientRequest::Leave(l47_a));
+    let claim_a = dcursor_a
+        .validate_leave_claim(P0, uniform(1), k, 1)
+        .expect("MAX-1 Left consumes one K record");
+    assert_eq!(claim_a.actual_charge(), uniform(1));
+    assert_eq!(
+        dcursor_a
+            .leave(
+                closure_debt(1),
+                Event::detached_leave_committed(P0, MAX - 1),
+                claim_a,
+                DebtCompletion::clear(),
+            )
+            .expect("DCursor's sole successor is exact detached Leave"),
+        ClosureState::Clear
+    );
     let transfer_a = recovery_transfer(wide_uniform(1), k, uniform(1))
         .expect("Left transfers one recovery charge");
     assert_eq!(transfer_a.baseline, wide_uniform(2));
@@ -1626,37 +1638,18 @@ fn acceptance_case_48_marker_ack_and_fenced_recovery_converge_for_both_observer_
             u128::from(H + 7),
         );
 
-        // Live e7 Leave is the complementary recovered-binding ordering after
-        // the recovery OP advances to its strict h+5 suffix. Exercise that
-        // public predecessor-bound transition instead of fabricating a raw
-        // continuous cursor witness from participant/epoch values.
-        let projection_completion = Event::projection_completed(H + 4);
+        // Live e7 Leave is the complementary ordering before recovery OP
+        // completion. Its own h+5 append atomically replaces OP h+4 with the
+        // exact later projection; it does not reorder projection ahead of Leave.
+        let live_leave = Event::live_leave_committed(P0, e7, recovery_floor);
         let live_leave_projection = ObserverProjection::new(H + 5);
-        let strict_projection = recovered_op
-            .strict_after_completion(
-                &projection_completion,
-                debt_one,
-                StoredEdge::ObserverProjection(live_leave_projection),
-                H + 5,
-            )
-            .expect("exact recovery OP completion selects strict h+5 OP");
+        let leave_successor = recovered_op
+            .later_projection_after_leave(&live_leave, debt_q, live_leave_projection)
+            .expect("live e7 Leave binds exact OP h+4 to later OP h+5");
         assert_eq!(
             recovered_op
-                .complete(debt_one, projection_completion, strict_projection)
-                .expect("exact recovery OP completion commits its typed suffix"),
-            ClosureState::Owed {
-                debt: debt_one,
-                edge: StoredEdge::ObserverProjection(live_leave_projection),
-            }
-        );
-        assert_eq!(
-            live_leave_projection
-                .independent_event(
-                    debt_one,
-                    Event::live_leave_committed(P0, e7, recovery_floor),
-                    Some(debt_q),
-                )
-                .expect("live e7 Leave preserves the exact recovered OP"),
+                .leave_with_later_projection(debt_one, live_leave, leave_successor)
+                .expect("live e7 Leave atomically installs its exact later OP"),
             ClosureState::Owed {
                 debt: debt_q,
                 edge: StoredEdge::ObserverProjection(live_leave_projection),
@@ -2315,6 +2308,9 @@ fn acceptance_case_51_detached_attach_exhaustion_and_cursor_only_recovery_fence(
     let verified = member
         .verify_detached_attach(
             BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits an ordinary detached attach"),
             u51.clone(),
             AttachSecretProof::Verified,
             AttachCommitParameters {
@@ -2361,7 +2357,6 @@ fn acceptance_case_51_detached_attach_exhaustion_and_cursor_only_recovery_fence(
     let post_capacity = mandatory_capacity(post_baseline, q, k, uniform(7));
     assert_eq!(post_capacity.debt, wide_uniform(1));
     assert!(post_capacity.is_legal());
-    let debt_one = closure_debt(1);
     let op = ObserverProjection::new(h + 1);
 
     // Equality exhaustion at h=MAX-6 returns the exact ten-field budget and
@@ -2411,22 +2406,39 @@ fn acceptance_case_51_detached_attach_exhaustion_and_cursor_only_recovery_fence(
     let fate_budget = sequence_budget(h + 2, 1, 0, 0, 0, 0, 0, 0, 0);
     assert_eq!(fate_budget.remaining, 5);
 
-    // Fate before OP preserves OP. LP final-review Fix 1 requires the executable
-    // DCursor authority used below to traverse the fenced-attach proof chain;
-    // raw continuous participant/epoch values are no longer public authority.
+    // Fate before OP consumes the real ordinary-attach authority and exact
+    // durable e6 terminal. OP remains current with the latent DCursor suffix;
+    // exact completion then installs that suffix without any marker provenance.
+    let ordinary_authority = attached
+        .ordinary_binding_authority()
+        .expect("U51 ordinary attach mints no-marker fate authority");
+    let ordinary_fate = ordinary_authority
+        .binding_fate(died_e6, h - 1)
+        .expect("exact e6 terminal consumes U51 authority");
+    assert_eq!(ordinary_fate.through_seq(), h - 2);
+    assert_eq!(ordinary_fate.resulting_floor(), h - 1);
+    let pending_cursor_release = op.apply_ordinary_binding_fate(closure_debt(2), ordinary_fate);
     assert_eq!(
-        op.independent_event(
-            debt_one,
-            Event::binding_fate_observed(P0, e6, h - 1),
-            Some(closure_debt(2)),
-        )
-        .expect("fate before OP preserves OP"),
+        pending_cursor_release.current_state(),
         ClosureState::Owed {
             debt: closure_debt(2),
             edge: StoredEdge::ObserverProjection(op),
         }
     );
-    let dcursor = recovered_cursor_release(P0, e5, e6, h - 2, h - 2, h - 1, closure_debt(2));
+    let dcursor_state = op
+        .complete_after_binding_fate(
+            Event::projection_completed(h + 1),
+            Some(closure_debt(2)),
+            pending_cursor_release,
+        )
+        .expect("exact U51 OP completion installs the ordinary cursor suffix");
+    let ClosureState::Owed {
+        edge: StoredEdge::DetachedCursorRelease(dcursor),
+        ..
+    } = dcursor_state
+    else {
+        panic!("ordinary e6 fate must select DCursor after OP")
+    };
     assert_eq!(dcursor.last_dead_binding_epoch(), e6);
     assert_eq!(
         dcursor.ordinary_attach_refusal(),

@@ -5,9 +5,11 @@ use crate::wire::{BindingEpoch, ConnectionIncarnation, Generation};
 
 use super::edge::RecoveredBindingFateTransition;
 use super::{
-    ClosureDebt, ClosureState, CursorFateSuccessor, DebtCompletion, DetachedAttachRefusal,
+    ActiveBinding, BindingTerminalDisposition, ClosureDebt, ClosureState,
+    CommittedBindingTerminalPosition, CursorFateSuccessor, DebtCompletion, DetachedAttachRefusal,
     DetachedCredentialRecovery, DetachedCursorRelease, DetachedMarkerRelease, Event, LeaveOnlyEdge,
-    MarkerDelivery, ObserverProjection, ParticipantCursorProgress, PhysicalCompaction, StoredEdge,
+    MarkerDelivery, ObserverProjection, OrdinaryBindingAuthority, ParticipantCursorProgress,
+    PhysicalCompaction, StoredEdge,
 };
 
 fn epoch(generation: u64) -> BindingEpoch {
@@ -116,17 +118,59 @@ fn cursor_release(
     through_seq: u64,
     closure_debt: ClosureDebt,
 ) -> DetachedCursorRelease {
-    let progress =
-        ParticipantCursorProgress::continuous(participant_id, binding_epoch, through_seq);
-    let fate = Event::binding_fate_observed(participant_id, binding_epoch, through_seq);
-    match progress
-        .binding_fate(closure_debt, fate)
-        .expect("exact continuous-cursor fate commits")
-    {
-        CursorFateSuccessor::DetachedCursorRelease(edge) => edge,
-        other @ CursorFateSuccessor::DetachedCredentialRecovery(_) => {
-            panic!("continuous fate selected an unexpected edge: {other:?}")
-        }
+    let binding = ActiveBinding {
+        participant_id,
+        conversation_id: 1,
+        binding_epoch,
+    };
+    let terminal = match binding.connection_lost(BindingTerminalDisposition::Committed(
+        CommittedBindingTerminalPosition::new(1, through_seq),
+    )) {
+        super::DiedBindingTransition::Committed(terminal) => terminal,
+        super::DiedBindingTransition::Pending(_) => panic!("test terminal is committed"),
+    };
+    let fate = OrdinaryBindingAuthority::new(binding, through_seq)
+        .binding_fate(terminal, through_seq)
+        .expect("exact ordinary binding terminal derives cursor fate");
+    let ClosureState::Owed {
+        edge: StoredEdge::DetachedCursorRelease(edge),
+        ..
+    } = fate.into_direct_state(closure_debt)
+    else {
+        panic!("ordinary cursor fate did not select DCursor")
+    };
+    edge
+}
+
+#[test]
+fn only_clear_closure_state_admits_an_ordinary_detached_attach() {
+    let closure_debt = debt(1, 8);
+    let binding_epoch = epoch(2);
+    assert!(
+        ClosureState::Clear
+            .ordinary_detached_attach_admission()
+            .is_ok(),
+        "clear closure state must admit the ordinary detached-attach path"
+    );
+
+    let recovery_edges = [
+        StoredEdge::DetachedCredentialRecovery(credential_recovery(
+            4,
+            binding_epoch,
+            11,
+            closure_debt,
+        )),
+        StoredEdge::DetachedMarkerRelease(marker_release(4, binding_epoch, 11, closure_debt)),
+        StoredEdge::DetachedCursorRelease(cursor_release(4, binding_epoch, 11, closure_debt)),
+    ];
+
+    for edge in recovery_edges {
+        let state = owed(closure_debt, edge);
+        assert_eq!(
+            state.ordinary_detached_attach_admission(),
+            Err(state),
+            "DCR, DMR, and DCursor must not mint ordinary attach admission: {edge:?}"
+        );
     }
 }
 
@@ -244,6 +288,29 @@ fn observer_marker_independent_and_binding_orderings_are_closed() {
         projection
             .later_projection_after_marker(&Event::marker_appended(10, 14), next_debt, later,)
             .is_none()
+    );
+
+    let leave = Event::live_leave_committed(2, epoch(2), 11);
+    let leave_projection = ObserverProjection::new(15);
+    let leave_successor = projection
+        .later_projection_after_leave(&leave, next_debt, leave_projection)
+        .expect("Leave appends a strict later projection boundary");
+    assert_eq!(
+        projection.leave_with_later_projection(original_debt, leave, leave_successor),
+        Ok(owed(
+            next_debt,
+            StoredEdge::ObserverProjection(leave_projection)
+        ))
+    );
+    assert!(
+        projection
+            .later_projection_after_leave(
+                &Event::binding_fate_observed(2, epoch(2), 11),
+                next_debt,
+                leave_projection,
+            )
+            .is_none(),
+        "binding fate cannot use the Leave-only successor path"
     );
 
     let binding = epoch(2);
@@ -610,14 +677,13 @@ fn cursor_storage_fate_supersession_and_leave_preserve_typestate() {
         Ok(CursorFateSuccessor::DetachedCredentialRecovery(_))
     ));
     let continuous_fate = Event::binding_fate_observed(4, binding, 6);
-    assert!(matches!(
+    assert_eq!(
         continuous.binding_fate(original_debt, continuous_fate),
-        Ok(CursorFateSuccessor::DetachedCursorRelease(_))
-    ));
-    assert!(
-        continuous
-            .binding_fate(original_debt, Event::binding_fate_observed(4, epoch(3), 6))
-            .is_err()
+        Err(owed(
+            original_debt,
+            StoredEdge::ParticipantCursorProgress(continuous)
+        )),
+        "raw continuous PCP cannot derive DCursor without attach provenance"
     );
 
     let retargeted = continuous
@@ -698,6 +764,78 @@ fn detached_recovery_fence_proof_binds_every_authority_field() {
         recovery.authority_superseded(),
         (recovery, DetachedAttachRefusal::StaleAuthority)
     );
+}
+
+#[test]
+fn ordinary_binding_fate_requires_attach_and_exact_terminal_provenance() {
+    let original_debt = debt(2, 20);
+    let next_debt = debt(1, 10);
+    let binding = ActiveBinding {
+        participant_id: 4,
+        conversation_id: 29,
+        binding_epoch: epoch(2),
+    };
+    let authority = OrdinaryBindingAuthority::new(binding, 10);
+    assert_eq!(
+        authority.cursor_progressed(cursor_event(4, binding.binding_epoch, 9, 11, 9)),
+        Err(authority),
+        "cursor authority requires its exact previous boundary"
+    );
+    let authority = authority
+        .cursor_progressed(cursor_event(4, binding.binding_epoch, 10, 12, 9))
+        .expect("exact ordinary cursor progress preserves attach provenance");
+    let wrong_binding = ActiveBinding {
+        participant_id: 5,
+        ..binding
+    };
+    let wrong_terminal = match wrong_binding.connection_lost(BindingTerminalDisposition::Committed(
+        CommittedBindingTerminalPosition::new(4, 13),
+    )) {
+        super::DiedBindingTransition::Committed(terminal) => terminal,
+        super::DiedBindingTransition::Pending(_) => panic!("test terminal is committed"),
+    };
+    assert_eq!(authority.binding_fate(wrong_terminal, 9), Err(authority));
+
+    let terminal = match binding.connection_lost(BindingTerminalDisposition::Committed(
+        CommittedBindingTerminalPosition::new(4, 13),
+    )) {
+        super::DiedBindingTransition::Committed(terminal) => terminal,
+        super::DiedBindingTransition::Pending(_) => panic!("test terminal is committed"),
+    };
+    let fate = authority
+        .binding_fate(terminal, 9)
+        .expect("exact ordinary terminal derives no-marker fate");
+    assert_eq!(fate.through_seq(), 12);
+    assert_eq!(fate.resulting_floor(), 9);
+    assert_eq!(
+        fate.into_direct_state(original_debt),
+        owed(
+            original_debt,
+            StoredEdge::DetachedCursorRelease(cursor_release(4, epoch(2), 10, original_debt))
+        )
+    );
+
+    let projection = ObserverProjection::new(15);
+    let pending = projection.apply_ordinary_binding_fate(next_debt, fate);
+    assert_eq!(
+        pending.current_state(),
+        owed(next_debt, StoredEdge::ObserverProjection(projection))
+    );
+    let pending = projection
+        .complete_after_binding_fate(Event::projection_completed(14), Some(next_debt), pending)
+        .expect_err("another projection boundary preserves authority");
+    let state = projection
+        .complete_after_binding_fate(Event::projection_completed(15), Some(next_debt), pending)
+        .expect("exact completion installs ordinary DCursor");
+    let ClosureState::Owed {
+        edge: StoredEdge::DetachedCursorRelease(release),
+        ..
+    } = state
+    else {
+        panic!("ordinary cursor fate did not survive projection")
+    };
+    assert_eq!(release.participant_id(), 4);
+    assert_eq!(release.last_dead_binding_epoch(), epoch(2));
 }
 
 #[test]

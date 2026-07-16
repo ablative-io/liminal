@@ -812,6 +812,9 @@ fn acceptance_case_53_verifier_precedence_receipt_provenance_and_terminalized_de
     let verified_attach = detached_member
         .verify_detached_attach(
             detached_binding,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("committed detach leaves clear ordinary-attach closure"),
             attach,
             AttachSecretProof::Verified,
             AttachCommitParameters {

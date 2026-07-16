@@ -321,6 +321,9 @@ fn case_28_detach_replay_terminalization_and_leave_precedence() -> TestResult {
     let verified_attach = detached_member
         .verify_detached_attach(
             BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .map_err(|state| format!("clear attach admission failed: {state:?}"))?,
             attach_request,
             AttachSecretProof::Verified,
             AttachCommitParameters {
@@ -963,6 +966,9 @@ fn case_35_atomic_detach_and_terminalized_replay_without_fabricated_epoch() -> T
     let attach = detached_member
         .verify_detached_attach(
             BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .map_err(|state| format!("clear attach admission failed: {state:?}"))?,
             attach_request,
             AttachSecretProof::Verified,
             AttachCommitParameters {

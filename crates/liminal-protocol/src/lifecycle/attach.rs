@@ -5,8 +5,9 @@ use crate::wire::{
 use super::{
     ActiveBinding, AttachedLifecycleRecord, AttachedRecordPosition, BindingState, ClosureState,
     CommittedBindingTerminal, CommittedBindingTerminalPosition, CommittedDetachedTerminal,
-    DetachCell, FencedAttachCommit, LiveMember, MembershipInvariantError, PendingFinalization,
-    detach::validate_pending_pair, lookup::AttachSecretProof,
+    DetachCell, FencedAttachCommit, LiveMember, MembershipInvariantError, OrdinaryBindingAuthority,
+    OrdinaryDetachedAttachAdmission, PendingFinalization, detach::validate_pending_pair,
+    lookup::AttachSecretProof,
 };
 
 /// Result allocation owned by one successful credential-attach transaction.
@@ -106,11 +107,23 @@ pub struct AttachCommit<F, V> {
     pub outcome: AttachBound,
     /// Typed old-binding or fenced-recovery terminal effect.
     pub transition: AttachTransition,
+    ordinary_binding_authority: Option<OrdinaryBindingAuthority>,
+}
+
+impl<F, V> AttachCommit<F, V> {
+    /// Returns no-marker fate authority only for a committed ordinary attach.
+    ///
+    /// Fenced recovery returns `None`; its recovered epoch must instead use the
+    /// [`FencedAttachCommit`] proof that authorized that commit.
+    #[must_use]
+    pub const fn ordinary_binding_authority(&self) -> Option<OrdinaryBindingAuthority> {
+        self.ordinary_binding_authority
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 enum AttachMode<'a> {
-    Detached,
+    Detached(OrdinaryDetachedAttachAdmission),
     Superseded(CommittedDetachedTerminal),
     Fenced {
         proof: &'a FencedAttachCommit,
@@ -136,6 +149,7 @@ impl<F> LiveMember<F> {
     pub fn verify_detached_attach(
         self,
         binding_state: BindingState,
+        closure_admission: OrdinaryDetachedAttachAdmission,
         request: CredentialAttachRequest,
         secret_proof: AttachSecretProof,
         parameters: AttachCommitParameters,
@@ -151,7 +165,7 @@ impl<F> LiveMember<F> {
             member: self,
             request,
             parameters,
-            mode: AttachMode::Detached,
+            mode: AttachMode::Detached(closure_admission),
         })
     }
 
@@ -310,7 +324,7 @@ where
     let attached =
         AttachedLifecycleRecord::from_binding(parameters.binding, parameters.attached_position);
     let (persisted_cursor, terminal, transition) = match mode {
-        AttachMode::Detached => (previous_member.cursor(), None, AttachTransition::Detached),
+        AttachMode::Detached(_) => (previous_member.cursor(), None, AttachTransition::Detached),
         AttachMode::Superseded(committed) => (
             previous_member.cursor(),
             Some(CommittedBindingTerminal::from(committed)),
@@ -366,6 +380,12 @@ where
         ),
     }
     .ok_or(AttachCommitError::ReceiptInvariant)?;
+    let ordinary_binding_authority = match transition {
+        AttachTransition::Detached | AttachTransition::Superseded { .. } => Some(
+            OrdinaryBindingAuthority::new(parameters.binding, persisted_cursor),
+        ),
+        AttachTransition::FencedRecovery { .. } => None,
+    };
     Ok(AttachCommit {
         member,
         binding_state: BindingState::Bound(parameters.binding),
@@ -373,6 +393,7 @@ where
         attached,
         outcome,
         transition,
+        ordinary_binding_authority,
     })
 }
 

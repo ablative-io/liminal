@@ -15,11 +15,11 @@ use crate::wire::{
 
 use super::{
     ActiveBinding, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition, BindingState,
-    BindingTerminalDisposition, CommittedBindingTerminalPosition, CommittedDetach, DetachCell,
-    DetachCommitError, DetachReplayError, EnrollmentFingerprint, LiveMember, LiveMemberRestore,
-    PendingBindingTerminalPosition, PendingDetach, PendingDrainDecision, PendingFinalization,
-    PendingReplay, PendingReplayError, TerminalizedDetach, commit_attach, commit_detach,
-    complete_pending_detach, start_blocked_detach,
+    BindingTerminalDisposition, ClosureState, CommittedBindingTerminalPosition, CommittedDetach,
+    DetachCell, DetachCommitError, DetachReplayError, EnrollmentFingerprint, LiveMember,
+    LiveMemberRestore, PendingBindingTerminalPosition, PendingDetach, PendingDrainDecision,
+    PendingFinalization, PendingReplay, PendingReplayError, TerminalizedDetach, commit_attach,
+    commit_detach, complete_pending_detach, start_blocked_detach,
 };
 
 type TestMember = LiveMember<[u8; 32]>;
@@ -57,6 +57,9 @@ fn successful_attach(
     let verified = member
         .verify_detached_attach(
             BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear state admits ordinary attach"),
             request,
             AttachSecretProof::Verified,
             AttachCommitParameters {

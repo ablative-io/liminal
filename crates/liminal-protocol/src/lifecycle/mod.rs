@@ -61,7 +61,8 @@ pub use edge::{
     ClosureDebt, ClosureState, CursorFateSuccessor, CursorProgressContinuous, CursorProgressMarker,
     DebtCompletion, DetachedAttachRefusal, DetachedCredentialRecovery, DetachedCursorRelease,
     DetachedMarkerRelease, Event, FencedAttachCommit, KClaimBackedDetachedLeave, LeaveOnlyEdge,
-    MarkerDelivery, ObserverProjection, ParticipantCursorProgress, PendingRecoveredCursorRelease,
+    MarkerDelivery, ObserverProjection, OrdinaryBindingAuthority, OrdinaryBindingFate,
+    OrdinaryDetachedAttachAdmission, ParticipantCursorProgress, PendingRecoveredCursorRelease,
     PhysicalCompaction, ProjectionCompactionSuccessor, RecoveredBindingFate,
     RecoveredBindingFateTransition, RecoveredCursorRelease, StoredEdge,
 };

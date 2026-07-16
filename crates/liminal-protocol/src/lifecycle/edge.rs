@@ -1,6 +1,8 @@
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{BindingEpoch, DeliverySeq, ParticipantId, ParticipantIndex};
 
+use super::{ActiveBinding, CommittedDiedTerminal};
+
 /// Nonzero componentwise closure debt.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClosureDebt(WideResourceVector);
@@ -415,6 +417,33 @@ pub enum ClosureState {
     },
 }
 
+/// Opaque proof that ordinary detached attach entered from a legal closure state.
+///
+/// Only [`ClosureState::ordinary_detached_attach_admission`] constructs this
+/// value. Recovery-fenced DCR, DMR, and `DCursor` states therefore cannot enter
+/// the ordinary detached-attach path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OrdinaryDetachedAttachAdmission {
+    _private: (),
+}
+
+impl ClosureState {
+    /// Admits ordinary detached attach only from clear closure state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state for every stored edge, including DCR,
+    /// DMR, and `DCursor`.
+    pub const fn ordinary_detached_attach_admission(
+        self,
+    ) -> Result<OrdinaryDetachedAttachAdmission, Self> {
+        match self {
+            Self::Clear => Ok(OrdinaryDetachedAttachAdmission { _private: () }),
+            Self::Owed { .. } => Err(self),
+        }
+    }
+}
+
 /// Validated completion restricted to clear, observer projection, or physical
 /// compaction.
 ///
@@ -452,6 +481,139 @@ impl DebtCompletion {
     #[must_use]
     pub const fn into_state(self) -> ClosureState {
         self.0
+    }
+}
+
+/// Opaque authority for the current epoch produced by an ordinary attach.
+///
+/// Only a successful non-fenced attach commit can construct this value. It is
+/// therefore disjoint from [`FencedAttachCommit`]: a recovered binding cannot
+/// use the ordinary no-marker fate path.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::{ActiveBinding, OrdinaryBindingAuthority};
+///
+/// fn fabricate(binding: ActiveBinding) {
+///     let _ = OrdinaryBindingAuthority::new(binding, 11);
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OrdinaryBindingAuthority {
+    binding: ActiveBinding,
+    through_seq: DeliverySeq,
+}
+
+impl OrdinaryBindingAuthority {
+    pub(crate) const fn new(binding: ActiveBinding, through_seq: DeliverySeq) -> Self {
+        Self {
+            binding,
+            through_seq,
+        }
+    }
+
+    /// Returns the exact authoritative binding committed by ordinary attach.
+    #[must_use]
+    pub const fn binding(self) -> ActiveBinding {
+        self.binding
+    }
+
+    /// Returns the durable no-marker cursor carried through ordinary attach.
+    #[must_use]
+    pub const fn through_seq(self) -> DeliverySeq {
+        self.through_seq
+    }
+
+    /// Advances this ordinary binding's cursor through one exact normal ack.
+    ///
+    /// The returned authority preserves its attach provenance while replacing
+    /// the cursor only when participant, epoch, and previous boundary all match.
+    ///
+    /// # Errors
+    ///
+    /// Returns this authority unchanged for another event class, participant,
+    /// epoch, or previous cursor.
+    pub fn cursor_progressed(self, event: Event) -> Result<Self, Self> {
+        let EventKind::CursorProgressed {
+            participant_id,
+            binding_epoch,
+            progress:
+                CursorProgressEvent::Normal {
+                    previous_cursor,
+                    through_seq,
+                },
+            ..
+        } = event.0
+        else {
+            return Err(self);
+        };
+        if participant_id != self.binding.participant_id
+            || binding_epoch != self.binding.binding_epoch
+            || previous_cursor != self.through_seq
+        {
+            return Err(self);
+        }
+        Ok(Self {
+            through_seq,
+            ..self
+        })
+    }
+
+    /// Consumes the exact durable death of this ordinary binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns this authority unchanged unless the terminal names the same
+    /// participant, conversation, and binding epoch.
+    pub fn binding_fate(
+        self,
+        terminal: CommittedDiedTerminal,
+        resulting_floor: DeliverySeq,
+    ) -> Result<OrdinaryBindingFate, Self> {
+        if terminal.participant_id() != self.binding.participant_id
+            || terminal.conversation_id() != self.binding.conversation_id
+            || terminal.binding_epoch() != self.binding.binding_epoch
+        {
+            return Err(self);
+        }
+        Ok(OrdinaryBindingFate {
+            through_seq: self.through_seq,
+            resulting_floor,
+            release: DetachedCursorRelease {
+                participant_id: self.binding.participant_id,
+                last_dead_binding_epoch: self.binding.binding_epoch,
+            },
+        })
+    }
+}
+
+/// Exact no-marker fate derived from an ordinary attach and its durable death.
+///
+/// Fields are private, so raw participant/epoch values cannot create cursor-
+/// release authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OrdinaryBindingFate {
+    through_seq: DeliverySeq,
+    resulting_floor: DeliverySeq,
+    release: DetachedCursorRelease,
+}
+
+impl OrdinaryBindingFate {
+    /// Returns the durable cursor preceding the ordinary binding's death.
+    #[must_use]
+    pub const fn through_seq(self) -> DeliverySeq {
+        self.through_seq
+    }
+
+    /// Returns the measured floor from the binding-fate transaction.
+    #[must_use]
+    pub const fn resulting_floor(self) -> DeliverySeq {
+        self.resulting_floor
+    }
+
+    /// Selects direct `DetachedCursorRelease` when no storage edge precedes it.
+    #[must_use]
+    pub const fn into_direct_state(self, debt: ClosureDebt) -> ClosureState {
+        owed(debt, StoredEdge::DetachedCursorRelease(self.release))
     }
 }
 
@@ -603,7 +765,8 @@ impl RecoveredBindingFate {
 ///
 /// This opaque value must survive alongside the preserved storage edge. Exact
 /// completion of that edge consumes it and installs `DetachedCursorRelease`, or
-/// clears it only when closure debt reaches zero.
+/// clears it only when closure debt reaches zero. Both ordinary binding fate
+/// and fenced recovered fate produce this common post-provenance state.
 #[derive(Debug, PartialEq, Eq)]
 pub struct PendingRecoveredCursorRelease {
     debt: ClosureDebt,
@@ -631,7 +794,7 @@ impl PendingRecoveredCursorRelease {
     }
 }
 
-/// Exact released state when recovered fate covers storage immediately.
+/// Exact released state when binding fate covers storage immediately.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RecoveredCursorRelease {
     debt: ClosureDebt,
@@ -658,7 +821,7 @@ impl RecoveredCursorRelease {
     }
 }
 
-/// Preserve-or-cover result for recovered binding fate against OP/PC.
+/// Preserve-or-cover result for cursor-releasing binding fate against OP/PC.
 #[derive(Debug, PartialEq, Eq)]
 pub enum RecoveredBindingFateTransition {
     /// Storage remains current and carries a latent cursor-release suffix.
@@ -671,6 +834,7 @@ pub enum RecoveredBindingFateTransition {
 enum SuccessorUse {
     ObserverCompletion,
     ObserverMarkerAppend,
+    ObserverLeave,
     PhysicalCompletion,
     PhysicalCover,
     CursorGreaterAck,
@@ -689,12 +853,17 @@ pub struct ProjectionCompactionSuccessor {
     state: ClosureState,
 }
 
-/// Fate successor selected solely from cursor-progress typestate.
+/// Closed cursor-fate result taxonomy retained for API compatibility.
+///
+/// [`ParticipantCursorProgress::binding_fate`] produces only the marker-backed
+/// recovery arm. Executable cursor release is instead installed through
+/// [`OrdinaryBindingFate`] or [`RecoveredBindingFate`], both of which carry the
+/// required predecessor authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorFateSuccessor {
     /// Marker-backed state becomes fenced detached recovery.
     DetachedCredentialRecovery(DetachedCredentialRecovery),
-    /// Continuous state becomes Leave-only cursor release.
+    /// Reserved cursor-release taxonomy arm; raw continuous fate cannot produce it.
     DetachedCursorRelease(DetachedCursorRelease),
 }
 
@@ -1005,6 +1174,24 @@ impl Event {
 }
 
 impl ObserverProjection {
+    /// Applies ordinary no-marker binding fate while this OP remains current.
+    ///
+    /// The opaque fate carries ordinary-attach and exact-terminal provenance;
+    /// projection completion must retain its cursor-release suffix while debt
+    /// remains.
+    #[must_use]
+    pub const fn apply_ordinary_binding_fate(
+        self,
+        resulting_debt: ClosureDebt,
+        authority: OrdinaryBindingFate,
+    ) -> PendingRecoveredCursorRelease {
+        PendingRecoveredCursorRelease {
+            debt: resulting_debt,
+            predecessor: RecoveredStorageEdge::ObserverProjection(self),
+            release: authority.release,
+        }
+    }
+
     /// Applies recovered binding fate while this exact OP remains incomplete.
     ///
     /// OP is independent of binding fate, so nonzero debt preserves it and the
@@ -1042,6 +1229,21 @@ impl ObserverProjection {
     /// Returns the pending authority intact unless it belongs to this exact OP
     /// and the completion event reaches its exact boundary.
     pub fn complete_after_recovered_binding_fate(
+        self,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+        pending: PendingRecoveredCursorRelease,
+    ) -> Result<ClosureState, PendingRecoveredCursorRelease> {
+        self.complete_after_binding_fate(event, resulting_debt, pending)
+    }
+
+    /// Consumes a latent cursor-release suffix on exact OP completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pending authority intact unless it belongs to this exact OP
+    /// and the completion event reaches its exact boundary.
+    pub fn complete_after_binding_fate(
         self,
         event: Event,
         resulting_debt: Option<ClosureDebt>,
@@ -1177,6 +1379,54 @@ impl ObserverProjection {
         }
     }
 
+    /// Validates the exact later OP selected atomically by a live or detached Leave.
+    #[must_use]
+    pub const fn later_projection_after_leave(
+        &self,
+        event: &Event,
+        debt: ClosureDebt,
+        successor: Self,
+    ) -> Option<ProjectionCompactionSuccessor> {
+        let EventKind::LeaveCommitted {
+            resulting_floor, ..
+        } = event.0
+        else {
+            return None;
+        };
+        if successor.through_seq <= self.through_seq || successor.through_seq < resulting_floor {
+            return None;
+        }
+        Some(ProjectionCompactionSuccessor {
+            predecessor: StoredEdge::ObserverProjection(*self),
+            event: *event,
+            use_kind: SuccessorUse::ObserverLeave,
+            state: owed(debt, StoredEdge::ObserverProjection(successor)),
+        })
+    }
+
+    /// Consumes exact Leave and atomically installs its predecessor-bound later OP.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owed state unless the successor was built for
+    /// this exact OP and Leave occurrence.
+    pub fn leave_with_later_projection(
+        self,
+        debt: ClosureDebt,
+        event: Event,
+        successor: ProjectionCompactionSuccessor,
+    ) -> Result<ClosureState, ClosureState> {
+        let original = owed(debt, StoredEdge::ObserverProjection(self));
+        if successor.predecessor == StoredEdge::ObserverProjection(self)
+            && successor.event == event
+            && successor.use_kind == SuccessorUse::ObserverLeave
+        {
+            Ok(successor.state)
+        } else {
+            Err(original)
+        }
+    }
+
     /// Consumes an independently valid cursor, marker, fate, or Leave event and
     /// preserves this exact OP while debt remains, or clears it with debt.
     ///
@@ -1231,6 +1481,27 @@ impl ObserverProjection {
 }
 
 impl PhysicalCompaction {
+    /// Applies ordinary no-marker binding fate by preserving or covering PC.
+    #[must_use]
+    pub const fn apply_ordinary_binding_fate(
+        self,
+        resulting_debt: ClosureDebt,
+        authority: OrdinaryBindingFate,
+    ) -> RecoveredBindingFateTransition {
+        if authority.resulting_floor > self.through_seq {
+            RecoveredBindingFateTransition::DetachedCursorRelease(RecoveredCursorRelease {
+                debt: resulting_debt,
+                release: authority.release,
+            })
+        } else {
+            RecoveredBindingFateTransition::PendingStorage(PendingRecoveredCursorRelease {
+                debt: resulting_debt,
+                predecessor: RecoveredStorageEdge::PhysicalCompaction(self),
+                release: authority.release,
+            })
+        }
+    }
+
     /// Applies recovered binding fate by preserving or covering this exact PC.
     ///
     /// A fate floor at or below `through_seq` preserves PC and returns a latent
@@ -1277,6 +1548,21 @@ impl PhysicalCompaction {
     /// Returns the pending authority intact unless it belongs to this exact PC
     /// and the completion event covers its exact stored range.
     pub fn complete_after_recovered_binding_fate(
+        self,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+        pending: PendingRecoveredCursorRelease,
+    ) -> Result<ClosureState, PendingRecoveredCursorRelease> {
+        self.complete_after_binding_fate(event, resulting_debt, pending)
+    }
+
+    /// Consumes a latent cursor-release suffix on exact PC completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pending authority intact unless it belongs to this exact PC
+    /// and the completion event covers its exact stored range.
+    pub fn complete_after_binding_fate(
         self,
         event: Event,
         resulting_debt: Option<ClosureDebt>,
@@ -1884,13 +2170,12 @@ impl ParticipantCursorProgress {
         ))
     }
 
-    /// Consumes exact binding fate and derives DCR only from marker-backed PCP,
-    /// or `DCursor` only from a crate-derived continuous PCP.
+    /// Consumes exact binding fate and derives DCR only from marker-backed PCP.
     ///
-    /// Continuous construction is not part of the public API. In particular,
-    /// the fate of an epoch committed by fenced attach must use
-    /// [`FencedAttachCommit::recovered_binding_fate`] instead of this raw-event
-    /// transition.
+    /// Continuous PCP never accepts this raw-event transition. Ordinary
+    /// no-marker fate requires [`OrdinaryBindingAuthority`], while the fate of
+    /// an epoch committed by fenced attach requires
+    /// [`FencedAttachCommit::recovered_binding_fate`].
     ///
     /// # Errors
     ///
@@ -1902,6 +2187,9 @@ impl ParticipantCursorProgress {
         event: Event,
     ) -> Result<CursorFateSuccessor, ClosureState> {
         let original = owed(debt, StoredEdge::ParticipantCursorProgress(self));
+        let Self::Marker(value) = self else {
+            return Err(original);
+        };
         let EventKind::BindingFateObserved {
             participant_id,
             binding_epoch,
@@ -1910,24 +2198,16 @@ impl ParticipantCursorProgress {
         else {
             return Err(original);
         };
-        if participant_id != self.participant_id() || binding_epoch != self.binding_epoch() {
+        if participant_id != value.participant_id || binding_epoch != value.binding_epoch {
             return Err(original);
         }
-        Ok(match self {
-            Self::Continuous(value) => {
-                CursorFateSuccessor::DetachedCursorRelease(DetachedCursorRelease {
-                    participant_id: value.participant_id,
-                    last_dead_binding_epoch: value.binding_epoch,
-                })
-            }
-            Self::Marker(value) => {
-                CursorFateSuccessor::DetachedCredentialRecovery(DetachedCredentialRecovery {
-                    participant_id: value.participant_id,
-                    marker_delivery_seq: value.marker_delivery_seq,
-                    prior_binding_epoch: value.binding_epoch,
-                })
-            }
-        })
+        Ok(CursorFateSuccessor::DetachedCredentialRecovery(
+            DetachedCredentialRecovery {
+                participant_id: value.participant_id,
+                marker_delivery_seq: value.marker_delivery_seq,
+                prior_binding_epoch: value.binding_epoch,
+            },
+        ))
     }
 
     /// Retargets only continuous PCP after exact charged supersession.
