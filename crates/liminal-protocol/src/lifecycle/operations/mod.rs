@@ -51,6 +51,6 @@ pub use participant_ack::{
 pub use record_admission::{
     CommittedOrdinaryRecord, RecordAdmissionCommit, RecordAdmissionDecision,
     RecordAdmissionDrainFirst, RecordAdmissionFailure, RecordAdmissionFault,
-    RecordAdmissionPrestate, RecordAdmissionRefusal, UnchangedRecordAdmission,
-    apply_record_admission,
+    RecordAdmissionPersistenceParts, RecordAdmissionPrestate, RecordAdmissionRefusal,
+    UnchangedRecordAdmission, apply_record_admission,
 };

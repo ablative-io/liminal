@@ -3,10 +3,10 @@
 use alloc::{vec, vec::Vec};
 
 use crate::wire::{
-    AckCommitted, AckGap, AckNoOp, AckRegression, AttachSecret, BindingEpoch,
-    BindingRequiredEnvelope, CommonStaleAuthorityEnvelope, ConnectionIncarnation, Generation,
-    LeaveAttemptToken, LeaveRequest, NoBinding, ParticipantAck, ParticipantAckEnvelope,
-    ParticipantReferenceEnvelope, ParticipantUnknown, Retired, ServerValue, StaleAuthority,
+    AckCommitted, AckGap, AckRegression, AttachSecret, BindingEpoch, BindingRequiredEnvelope,
+    CommonStaleAuthorityEnvelope, ConnectionIncarnation, Generation, LeaveAttemptToken,
+    LeaveRequest, NoBinding, ParticipantAck, ParticipantAckEnvelope, ParticipantAckResponse,
+    ParticipantReferenceEnvelope, ParticipantUnknown, Retired, StaleAuthority,
 };
 
 use super::super::{
@@ -144,10 +144,12 @@ fn shared_lookup_precedence_is_preserved_before_ack_relations() {
             &stale_request,
             0,
         ),
-        ParticipantAckDecision::Respond(ServerValue::Retired(Retired::Participant {
-            request: ParticipantReferenceEnvelope::ParticipantAck(stale_envelope.clone()),
-            retired_generation: generation(3),
-        })),
+        ParticipantAckDecision::Respond(ParticipantAckResponse::from_retired(
+            Retired::Participant {
+                request: ParticipantReferenceEnvelope::ParticipantAck(stale_envelope.clone()),
+                retired_generation: generation(3),
+            }
+        )),
     );
 
     assert_eq!(
@@ -158,9 +160,11 @@ fn shared_lookup_precedence_is_preserved_before_ack_relations() {
             &stale_request,
             0,
         ),
-        ParticipantAckDecision::Respond(ServerValue::ParticipantUnknown(ParticipantUnknown {
-            request: ParticipantReferenceEnvelope::ParticipantAck(stale_envelope.clone()),
-        })),
+        ParticipantAckDecision::Respond(ParticipantAckResponse::from_participant_unknown(
+            ParticipantUnknown {
+                request: ParticipantReferenceEnvelope::ParticipantAck(stale_envelope.clone()),
+            }
+        )),
     );
 
     let live: TestIdentity = IdentityState::Live(member(CURRENT_CURSOR));
@@ -172,17 +176,20 @@ fn shared_lookup_precedence_is_preserved_before_ack_relations() {
             &stale_request,
             0,
         ),
-        ParticipantAckDecision::Respond(ServerValue::StaleAuthority(StaleAuthority::Live {
-            request: CommonStaleAuthorityEnvelope::ParticipantAck(stale_envelope),
-            current_generation: generation(3),
-        })),
+        ParticipantAckDecision::Respond(ParticipantAckResponse::from_stale_authority(
+            StaleAuthority::Live {
+                request: CommonStaleAuthorityEnvelope::ParticipantAck(stale_envelope),
+                current_generation: generation(3),
+            }
+        )),
     );
 
     let current_request = request(3, 4);
     let current_envelope = envelope(3, 4);
-    let expected_no_binding = ParticipantAckDecision::Respond(ServerValue::NoBinding(NoBinding {
-        request: BindingRequiredEnvelope::ParticipantAck(current_envelope),
-    }));
+    let expected_no_binding =
+        ParticipantAckDecision::Respond(ParticipantAckResponse::from_no_binding(NoBinding {
+            request: BindingRequiredEnvelope::ParticipantAck(current_envelope),
+        }));
     assert_eq!(
         apply_participant_ack(
             PresentedIdentity::from(Some(&live)),
@@ -207,7 +214,7 @@ fn wrong_receiving_epoch_is_no_binding_before_ack_relations() {
             &ack,
             0,
         ),
-        ParticipantAckDecision::Respond(ServerValue::NoBinding(NoBinding {
+        ParticipantAckDecision::Respond(ParticipantAckResponse::from_no_binding(NoBinding {
             request: BindingRequiredEnvelope::ParticipantAck(envelope(3, 4)),
         })),
     );
@@ -221,7 +228,7 @@ fn all_four_ack_relations_select_exact_wire_outcomes() {
     let regression = request(3, 4);
     assert_eq!(
         apply_participant_ack(presented, &binding(), epoch(3, 9), &regression, 9),
-        ParticipantAckDecision::Respond(ServerValue::AckRegression(
+        ParticipantAckDecision::Respond(ParticipantAckResponse::ack_regression(
             AckRegression::new(envelope(3, 4), CURRENT_CURSOR)
                 .expect("four is below the current cursor"),
         )),
@@ -230,16 +237,16 @@ fn all_four_ack_relations_select_exact_wire_outcomes() {
     let no_op = request(3, CURRENT_CURSOR);
     assert_eq!(
         apply_participant_ack(presented, &binding(), epoch(3, 9), &no_op, 0),
-        ParticipantAckDecision::Respond(ServerValue::AckNoOp(AckNoOp::participant_ack(envelope(
+        ParticipantAckDecision::Respond(ParticipantAckResponse::ack_no_op(envelope(
             3,
-            CURRENT_CURSOR
-        ),))),
+            CURRENT_CURSOR,
+        ))),
     );
 
     let gap = request(3, 7);
     assert_eq!(
         apply_participant_ack(presented, &binding(), epoch(3, 9), &gap, 6),
-        ParticipantAckDecision::Respond(ServerValue::AckGap(
+        ParticipantAckDecision::Respond(ParticipantAckResponse::ack_gap(
             AckGap::new(envelope(3, 7), CURRENT_CURSOR).expect("seven is above the current cursor"),
         )),
     );

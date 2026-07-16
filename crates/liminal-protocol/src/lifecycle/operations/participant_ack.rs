@@ -1,6 +1,6 @@
 use crate::wire::{
-    AckCommitted, AckGap, AckNoOp, AckRegression, BindingEpoch, ConversationId, DeliverySeq,
-    Generation, ParticipantAck, ParticipantAckEnvelope, ParticipantId, ServerValue,
+    AckCommitted, AckGap, AckRegression, BindingEpoch, ConversationId, DeliverySeq, Generation,
+    ParticipantAck, ParticipantAckEnvelope, ParticipantAckResponse, ParticipantId,
 };
 
 use super::super::{
@@ -127,7 +127,7 @@ impl ParticipantAckCommitError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParticipantAckDecision {
     /// Exact lookup, regression, no-op, or gap response; membership is unchanged.
-    Respond(ServerValue),
+    Respond(ParticipantAckResponse),
     /// Exact committed response paired with its sole cursor update authority.
     Commit(ParticipantAckCommit),
 }
@@ -155,16 +155,22 @@ pub fn apply_participant_ack<EF, V, LF>(
         &lookup_request,
     ) {
         BindingRequiredLookupResult::Retired(outcome) => {
-            return ParticipantAckDecision::Respond(ServerValue::Retired(outcome));
+            return ParticipantAckDecision::Respond(ParticipantAckResponse::from_retired(outcome));
         }
         BindingRequiredLookupResult::ParticipantUnknown(outcome) => {
-            return ParticipantAckDecision::Respond(ServerValue::ParticipantUnknown(outcome));
+            return ParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_participant_unknown(outcome),
+            );
         }
         BindingRequiredLookupResult::StaleAuthority(outcome) => {
-            return ParticipantAckDecision::Respond(ServerValue::StaleAuthority(outcome));
+            return ParticipantAckDecision::Respond(ParticipantAckResponse::from_stale_authority(
+                outcome,
+            ));
         }
         BindingRequiredLookupResult::NoBinding(outcome) => {
-            return ParticipantAckDecision::Respond(ServerValue::NoBinding(outcome));
+            return ParticipantAckDecision::Respond(ParticipantAckResponse::from_no_binding(
+                outcome,
+            ));
         }
         BindingRequiredLookupResult::Authorized { member, .. } => member,
     };
@@ -173,17 +179,17 @@ pub fn apply_participant_ack<EF, V, LF>(
     if request.through_seq < current_cursor
         && let Some(outcome) = AckRegression::new(ack_envelope(request), current_cursor)
     {
-        return ParticipantAckDecision::Respond(ServerValue::AckRegression(outcome));
+        return ParticipantAckDecision::Respond(ParticipantAckResponse::ack_regression(outcome));
     }
     if request.through_seq == current_cursor {
-        return ParticipantAckDecision::Respond(ServerValue::AckNoOp(AckNoOp::participant_ack(
-            ack_envelope(request),
+        return ParticipantAckDecision::Respond(ParticipantAckResponse::ack_no_op(ack_envelope(
+            request,
         )));
     }
     if request.through_seq > contiguously_available_through
         && let Some(outcome) = AckGap::new(ack_envelope(request), current_cursor)
     {
-        return ParticipantAckDecision::Respond(ServerValue::AckGap(outcome));
+        return ParticipantAckDecision::Respond(ParticipantAckResponse::ack_gap(outcome));
     }
 
     let outcome = AckCommitted::new(ack_envelope(request));

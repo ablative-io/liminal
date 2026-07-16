@@ -2,9 +2,9 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use crate::wire::{
-    ConnectionConversationCapacityExceeded, ConversationId, DeliverySeq, InvalidObserverEpoch,
-    InvalidObserverEpochList, ObserverEpoch, ObserverProgressStatus, ObserverRecoveryAccepted,
-    ObserverRecoveryHandshake, ServerValue,
+    ConversationId, DeliverySeq, InvalidObserverEpoch, InvalidObserverEpochList, ObserverEpoch,
+    ObserverProgressStatus, ObserverRecoveryAccepted, ObserverRecoveryHandshake,
+    ObserverRecoveryResponse,
 };
 
 /// One equal observer epoch that must be armed by an accepted recovery batch.
@@ -63,7 +63,7 @@ impl ObserverRecoveryCommit {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ObserverRecoveryDecision {
     /// Validation or connection-capacity preflight refused the whole batch.
-    Respond(ServerValue),
+    Respond(ObserverRecoveryResponse),
     /// Every entry validated and the complete arm plan may commit atomically.
     Commit(ObserverRecoveryCommit),
 }
@@ -95,25 +95,29 @@ where
 {
     let presented_entries = wire_count(request.observer_refusals.len());
     if presented_entries > max_entries {
-        return ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpochList(
-            InvalidObserverEpochList::TooManyEntries {
-                presented_entries,
-                max_entries,
-            },
-        ));
+        return ObserverRecoveryDecision::Respond(
+            ObserverRecoveryResponse::invalid_observer_epoch_list(
+                InvalidObserverEpochList::TooManyEntries {
+                    presented_entries,
+                    max_entries,
+                },
+            ),
+        );
     }
 
     let mut first_indices = BTreeMap::new();
     for (index, refusal) in request.observer_refusals.iter().enumerate() {
         let request_index = wire_count(index);
         if let Some(first_index) = first_indices.insert(refusal.conversation_id, request_index) {
-            return ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpochList(
-                InvalidObserverEpochList::DuplicateConversation {
-                    conversation_id: refusal.conversation_id,
-                    first_index,
-                    duplicate_index: request_index,
-                },
-            ));
+            return ObserverRecoveryDecision::Respond(
+                ObserverRecoveryResponse::invalid_observer_epoch_list(
+                    InvalidObserverEpochList::DuplicateConversation {
+                        conversation_id: refusal.conversation_id,
+                        first_index,
+                        duplicate_index: request_index,
+                    },
+                ),
+            );
         }
     }
 
@@ -125,11 +129,9 @@ where
         let occupied = wire_count(tracked.len());
         if occupied >= connection_conversation_limit {
             return ObserverRecoveryDecision::Respond(
-                ServerValue::ConnectionConversationCapacityExceeded(
-                    ConnectionConversationCapacityExceeded::ObserverRecovery {
-                        conversation_id: refusal.conversation_id,
-                        limit: connection_conversation_limit,
-                    },
+                ObserverRecoveryResponse::connection_capacity_exceeded(
+                    refusal.conversation_id,
+                    connection_conversation_limit,
                 ),
             );
         }
@@ -139,21 +141,25 @@ where
     let mut validated = Vec::with_capacity(request.observer_refusals.len());
     for refusal in &request.observer_refusals {
         let Some(current_observer_progress) = observer_progress(refusal.conversation_id) else {
-            return ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpoch(
-                InvalidObserverEpoch::ConversationUnknown {
-                    conversation_id: refusal.conversation_id,
-                    presented_epoch: refusal.refused_epoch,
-                },
-            ));
+            return ObserverRecoveryDecision::Respond(
+                ObserverRecoveryResponse::invalid_observer_epoch(
+                    InvalidObserverEpoch::ConversationUnknown {
+                        conversation_id: refusal.conversation_id,
+                        presented_epoch: refusal.refused_epoch,
+                    },
+                ),
+            );
         };
         if refusal.refused_epoch > current_observer_progress {
-            return ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpoch(
-                InvalidObserverEpoch::EpochAhead {
-                    conversation_id: refusal.conversation_id,
-                    presented_epoch: refusal.refused_epoch,
-                    current_observer_progress,
-                },
-            ));
+            return ObserverRecoveryDecision::Respond(
+                ObserverRecoveryResponse::invalid_observer_epoch(
+                    InvalidObserverEpoch::EpochAhead {
+                        conversation_id: refusal.conversation_id,
+                        presented_epoch: refusal.refused_epoch,
+                        current_observer_progress,
+                    },
+                ),
+            );
         }
         validated.push((refusal, current_observer_progress));
     }

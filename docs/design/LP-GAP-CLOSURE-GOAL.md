@@ -125,6 +125,23 @@ running server, wire-encoded end to end.
 touch; no rule duplication; no hand-built outcomes; fail-closed on every new
 arm. Your declaration states each explicitly.
 
+## Amendments
+
+**2026-07-17 (A5 lane, review fix round) — A5 decision-arm migration file
+scope.** The A5 lane mandate as dispatched scoped file changes to
+`lifecycle/record_admission.rs` and `wire/` only. Migrating the operation
+decision arms onto the request-bound response authorities is
+compile-required across the selectors and operations that mint responses,
+so the A5 diff also touches `lifecycle/admission/capacity.rs`,
+`lifecycle/observer_recovery.rs`, `lifecycle/operations/enrollment_operation.rs`,
+`lifecycle/operations/marker_ack.rs`, `lifecycle/operations/participant_ack.rs`,
+`lifecycle/operations/nonzero_participant_ack.rs`, their test files, and the
+`lifecycle` mod re-exports. The review round examined these edits and found
+them correct and a necessary consequence of A5; this amendment records that
+the decision-arm migration across those lifecycle files is IN-MANDATE for
+the A5 lane. The explicit DO-NOT files (`lifecycle/conversation.rs`,
+`lifecycle/storage.rs`, `liminal-server`) remain untouched and out of scope.
+
 ## Declaration
 
 Commit hash; per-gap closure evidence (file:line of the new public

@@ -1,10 +1,9 @@
 use core::num::NonZeroU64;
 
 use crate::wire::{
-    AttachEnvelope, ConnectionConversationBindingOccupied, ConnectionConversationCapacityExceeded,
-    CredentialAttachRequest, EnrollmentEnvelope, EnrollmentReceiptCapacityScope, EnrollmentRequest,
-    IdentityCapacityExceeded, IdentityCapacityScope, ParticipantId, ReceiptCapacityExceeded,
-    ReceiptCapacityScope, ResponseEnvelope, ServerValue,
+    AttachEnvelope, CredentialAttachRequest, CredentialAttachResponse, EnrollmentEnvelope,
+    EnrollmentReceiptCapacityScope, EnrollmentRequest, EnrollmentResponse,
+    IdentityCapacityExceeded, IdentityCapacityScope, ParticipantId, ReceiptCapacityScope,
 };
 
 /// Invalid persisted occupancy for one signed nonzero capacity.
@@ -177,22 +176,30 @@ impl ConnectionConversationCapacityCommit {
 }
 
 /// Stage-6 semantic connection-capacity result.
+///
+/// The refusal arm carries only the request-independent capacity fact; the
+/// invoking operation mints its request-bound `0x0102` wire outcome from its
+/// own exact envelope plus this signed limit, so the triggering envelope is
+/// never duplicated through this shared selector.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SemanticConnectionCapacityDecision {
     /// Existing or newly reserved conversation capacity may commit.
     Commit(ConnectionConversationCapacityCommit),
-    /// Exact semantic-request capacity refusal.
-    Respond(ServerValue),
+    /// The untracked conversation would exceed the signed limit.
+    Respond {
+        /// Signed connection-conversation limit that is full.
+        limit: u64,
+    },
 }
 
 /// Applies semantic connection-conversation capacity before participant mutation.
 ///
 /// An already tracked conversation succeeds without incrementing the counter,
 /// even when capacity is full. An untracked conversation either returns the
-/// complete incremented counter or the exact `0x0102` wire outcome.
+/// complete incremented counter or the signed limit for the caller's exact
+/// request-bound `0x0102` wire outcome.
 #[must_use]
 pub const fn select_semantic_connection_capacity(
-    request: ResponseEnvelope,
     tracking: ConnectionConversationTracking,
     current: CapacityCounter,
 ) -> SemanticConnectionCapacityDecision {
@@ -205,14 +212,9 @@ pub const fn select_semantic_connection_capacity(
         }
         ConnectionConversationTracking::Untracked => {
             let Some(resulting) = current.incremented() else {
-                return SemanticConnectionCapacityDecision::Respond(
-                    ServerValue::ConnectionConversationCapacityExceeded(
-                        ConnectionConversationCapacityExceeded::SemanticRequest {
-                            request,
-                            limit: current.limit(),
-                        },
-                    ),
-                );
+                return SemanticConnectionCapacityDecision::Respond {
+                    limit: current.limit(),
+                };
             };
             SemanticConnectionCapacityDecision::Commit(ConnectionConversationCapacityCommit {
                 resulting,
@@ -234,13 +236,14 @@ pub enum BindingSlotOccupancy {
     },
 }
 
-/// Stage-6 participant binding-slot result.
+/// Stage-6 participant binding-slot result, bound to the requesting
+/// operation's response authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum BindingSlotDecision {
+pub enum BindingSlotDecision<R> {
     /// The binding operation may continue.
     Available,
-    /// Exact operation-specific binding-slot refusal.
-    Respond(ServerValue),
+    /// Exact request-bound binding-slot refusal.
+    Respond(R),
 }
 
 /// Selects enrollment binding-slot occupancy without revealing its occupant.
@@ -248,17 +251,14 @@ pub enum BindingSlotDecision {
 pub const fn select_enrollment_binding_slot(
     request: &EnrollmentRequest,
     occupancy: BindingSlotOccupancy,
-) -> BindingSlotDecision {
+) -> BindingSlotDecision<EnrollmentResponse> {
     match occupancy {
         BindingSlotOccupancy::Empty => BindingSlotDecision::Available,
-        BindingSlotOccupancy::Occupied { .. } => {
-            BindingSlotDecision::Respond(ServerValue::ConnectionConversationBindingOccupied(
-                ConnectionConversationBindingOccupied::Enrollment {
-                    conversation_id: request.conversation_id,
-                    enrollment_token: request.enrollment_token,
-                },
-            ))
-        }
+        BindingSlotOccupancy::Occupied { .. } => BindingSlotDecision::Respond(
+            EnrollmentResponse::connection_conversation_binding_occupied(&enrollment_envelope(
+                request,
+            )),
+        ),
     }
 }
 
@@ -268,7 +268,7 @@ pub const fn select_enrollment_binding_slot(
 pub const fn select_credential_attach_binding_slot(
     request: &CredentialAttachRequest,
     occupancy: BindingSlotOccupancy,
-) -> BindingSlotDecision {
+) -> BindingSlotDecision<CredentialAttachResponse> {
     match occupancy {
         BindingSlotOccupancy::Empty => BindingSlotDecision::Available,
         BindingSlotOccupancy::Occupied { participant_id }
@@ -276,17 +276,11 @@ pub const fn select_credential_attach_binding_slot(
         {
             BindingSlotDecision::Available
         }
-        BindingSlotOccupancy::Occupied { .. } => {
-            BindingSlotDecision::Respond(ServerValue::ConnectionConversationBindingOccupied(
-                ConnectionConversationBindingOccupied::CredentialAttach {
-                    conversation_id: request.conversation_id,
-                    participant_id: request.participant_id,
-                    capability_generation: request.capability_generation,
-                    attach_attempt_token: request.attach_attempt_token,
-                    accept_marker_delivery_seq: request.accept_marker_delivery_seq,
-                },
-            ))
-        }
+        BindingSlotOccupancy::Occupied { .. } => BindingSlotDecision::Respond(
+            CredentialAttachResponse::connection_conversation_binding_occupied(&attach_envelope(
+                request,
+            )),
+        ),
     }
 }
 
@@ -447,8 +441,8 @@ impl EnrollmentCapacityCommit {
 pub enum EnrollmentCapacityDecision {
     /// All seven reservations may commit together.
     Commit(EnrollmentCapacityCommit),
-    /// Exact first-full identity or receipt scope.
-    Respond(ServerValue),
+    /// Exact first-full identity or receipt scope, bound to enrollment.
+    Respond(EnrollmentResponse),
 }
 
 /// Applies the fixed enrollment runtime-capacity order atomically.
@@ -589,8 +583,8 @@ impl CredentialAttachCapacityCommit {
 pub enum CredentialAttachCapacityDecision {
     /// All five receipt/provenance reservations may commit together.
     Commit(CredentialAttachCapacityCommit),
-    /// Exact first-full receipt/provenance scope.
-    Respond(ServerValue),
+    /// Exact first-full receipt/provenance scope, bound to credential attach.
+    Respond(CredentialAttachResponse),
 }
 
 /// Applies credential attach's exact five-scope runtime-capacity order.
@@ -651,7 +645,7 @@ const fn enrollment_identity_refusal(
     scope: IdentityCapacityScope,
     counter: CapacityCounter,
 ) -> EnrollmentCapacityDecision {
-    EnrollmentCapacityDecision::Respond(ServerValue::IdentityCapacityExceeded(
+    EnrollmentCapacityDecision::Respond(EnrollmentResponse::identity_capacity_exceeded(
         IdentityCapacityExceeded {
             request: enrollment_envelope(request),
             scope,
@@ -666,13 +660,11 @@ const fn enrollment_receipt_refusal(
     scope: EnrollmentReceiptCapacityScope,
     counter: CapacityCounter,
 ) -> EnrollmentCapacityDecision {
-    EnrollmentCapacityDecision::Respond(ServerValue::ReceiptCapacityExceeded(
-        ReceiptCapacityExceeded::Enrollment {
-            request: enrollment_envelope(request),
-            scope,
-            limit: counter.limit(),
-            occupied: counter.occupied(),
-        },
+    EnrollmentCapacityDecision::Respond(EnrollmentResponse::receipt_capacity_exceeded(
+        enrollment_envelope(request),
+        scope,
+        counter.limit(),
+        counter.occupied(),
     ))
 }
 
@@ -681,13 +673,11 @@ const fn credential_attach_receipt_refusal(
     scope: ReceiptCapacityScope,
     counter: CapacityCounter,
 ) -> CredentialAttachCapacityDecision {
-    CredentialAttachCapacityDecision::Respond(ServerValue::ReceiptCapacityExceeded(
-        ReceiptCapacityExceeded::CredentialAttach {
-            request: attach_envelope(request),
-            scope,
-            limit: counter.limit(),
-            occupied: counter.occupied(),
-        },
+    CredentialAttachCapacityDecision::Respond(CredentialAttachResponse::receipt_capacity_exceeded(
+        attach_envelope(request),
+        scope,
+        counter.limit(),
+        counter.occupied(),
     ))
 }
 

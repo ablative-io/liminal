@@ -5,8 +5,8 @@ use core::cell::Cell;
 
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{
-    AttachSecret, BindingEpoch, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken,
-    Generation, ServerValue,
+    AttachSecret, BindingEpoch, ConnectionIncarnation, EnrollmentEnvelope, EnrollmentRequest,
+    EnrollmentResponse, EnrollmentToken, Generation, ServerValue,
 };
 
 use super::super::{
@@ -269,7 +269,8 @@ fn token_replay_precedes_every_capacity_and_never_allocates() {
 
     assert!(matches!(
         replay,
-        InitialEnrollmentOperationDecision::Respond(ServerValue::Bound(_))
+        InitialEnrollmentOperationDecision::Respond(ref response)
+            if matches!(response.server_value(), ServerValue::Bound(_))
     ));
     assert_eq!(calls.get(), 0);
     assert_eq!(value_calls.get(), 0);
@@ -300,12 +301,21 @@ fn stage_six_and_eight_refusals_are_ordered_and_nonmutating() {
             allocate()
         },
     );
-    assert!(matches!(
+    // Register row 5641: the refusal carries the triggering request's exact
+    // common envelope plus the signed connection-conversation limit, asserted
+    // as the complete wire value through the production flow.
+    assert_eq!(
         semantic,
         InitialEnrollmentOperationDecision::Respond(
-            ServerValue::ConnectionConversationCapacityExceeded(_)
-        )
-    ));
+            EnrollmentResponse::connection_conversation_capacity_exceeded(
+                EnrollmentEnvelope {
+                    conversation_id: request.conversation_id,
+                    enrollment_token: request.enrollment_token,
+                },
+                1,
+            )
+        ),
+    );
 
     let binding_occupied = apply_initial_enrollment(
         &input(
@@ -328,7 +338,8 @@ fn stage_six_and_eight_refusals_are_ordered_and_nonmutating() {
     );
     assert!(matches!(
         binding_occupied,
-        InitialEnrollmentOperationDecision::Respond(
+        InitialEnrollmentOperationDecision::Respond(ref response) if matches!(
+            response.server_value(),
             ServerValue::ConnectionConversationBindingOccupied(_)
         )
     ));
@@ -354,7 +365,10 @@ fn stage_six_and_eight_refusals_are_ordered_and_nonmutating() {
     );
     assert!(matches!(
         identity_capacity,
-        InitialEnrollmentOperationDecision::Respond(ServerValue::IdentityCapacityExceeded(_))
+        InitialEnrollmentOperationDecision::Respond(ref response) if matches!(
+            response.server_value(),
+            ServerValue::IdentityCapacityExceeded(_)
+        )
     ));
     assert_eq!(calls.get(), 0);
     assert_eq!(value_calls.get(), 0);

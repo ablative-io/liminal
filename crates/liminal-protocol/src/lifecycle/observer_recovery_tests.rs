@@ -4,9 +4,8 @@ use alloc::{vec, vec::Vec};
 use core::cell::Cell;
 
 use crate::wire::{
-    ConnectionConversationCapacityExceeded, InvalidObserverEpoch, InvalidObserverEpochList,
-    ObserverProgressStatus, ObserverRecoveryAccepted, ObserverRecoveryHandshake, ObserverRefusal,
-    ServerValue,
+    InvalidObserverEpoch, InvalidObserverEpochList, ObserverProgressStatus,
+    ObserverRecoveryAccepted, ObserverRecoveryHandshake, ObserverRecoveryResponse, ObserverRefusal,
 };
 
 use super::{ObserverRecoveryDecision, apply_observer_recovery};
@@ -32,7 +31,7 @@ fn over_limit_beats_duplicate_without_progress_lookup() {
     });
     assert_eq!(
         too_many,
-        ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpochList(
+        ObserverRecoveryDecision::Respond(ObserverRecoveryResponse::invalid_observer_epoch_list(
             InvalidObserverEpochList::TooManyEntries {
                 presented_entries: 2,
                 max_entries: 1,
@@ -57,7 +56,7 @@ fn first_request_order_duplicate_precedes_capacity_and_progress_lookup() {
     );
     assert_eq!(
         duplicate,
-        ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpochList(
+        ObserverRecoveryDecision::Respond(ObserverRecoveryResponse::invalid_observer_epoch_list(
             InvalidObserverEpochList::DuplicateConversation {
                 conversation_id: 7,
                 first_index: 0,
@@ -86,11 +85,8 @@ fn request_order_capacity_precedes_unknown_and_ahead() {
     );
     assert_eq!(
         capacity,
-        ObserverRecoveryDecision::Respond(ServerValue::ConnectionConversationCapacityExceeded(
-            ConnectionConversationCapacityExceeded::ObserverRecovery {
-                conversation_id: 12,
-                limit: 3,
-            }
+        ObserverRecoveryDecision::Respond(ObserverRecoveryResponse::connection_capacity_exceeded(
+            12, 3
         ))
     );
     assert_eq!(progress_lookups.get(), 0);
@@ -100,11 +96,8 @@ fn request_order_capacity_precedes_unknown_and_ahead() {
     });
     assert_eq!(
         reversed,
-        ObserverRecoveryDecision::Respond(ServerValue::ConnectionConversationCapacityExceeded(
-            ConnectionConversationCapacityExceeded::ObserverRecovery {
-                conversation_id: 11,
-                limit: 3,
-            }
+        ObserverRecoveryDecision::Respond(ObserverRecoveryResponse::connection_capacity_exceeded(
+            11, 3
         ))
     );
 }
@@ -132,7 +125,7 @@ fn unknown_and_ahead_are_selected_by_request_index() {
     );
     assert_eq!(
         ahead_first,
-        ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpoch(
+        ObserverRecoveryDecision::Respond(ObserverRecoveryResponse::invalid_observer_epoch(
             InvalidObserverEpoch::EpochAhead {
                 conversation_id: 31,
                 presented_epoch: 6,
@@ -150,7 +143,7 @@ fn unknown_and_ahead_are_selected_by_request_index() {
     );
     assert_eq!(
         unknown_first,
-        ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpoch(
+        ObserverRecoveryDecision::Respond(ObserverRecoveryResponse::invalid_observer_epoch(
             InvalidObserverEpoch::ConversationUnknown {
                 conversation_id: 32,
                 presented_epoch: 5,
@@ -216,7 +209,7 @@ fn later_epoch_failure_produces_no_partial_arm_plan() {
     );
     assert_eq!(
         decision,
-        ObserverRecoveryDecision::Respond(ServerValue::InvalidObserverEpoch(
+        ObserverRecoveryDecision::Respond(ObserverRecoveryResponse::invalid_observer_epoch(
             InvalidObserverEpoch::EpochAhead {
                 conversation_id: 22,
                 presented_epoch: 7,
