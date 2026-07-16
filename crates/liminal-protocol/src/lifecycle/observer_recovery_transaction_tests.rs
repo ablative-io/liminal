@@ -22,7 +22,8 @@ use crate::wire::{
 };
 
 use super::{
-    ObserverProgressAdvanceError, ObserverProgressTrackError, ObserverRecoveryAggregate,
+    ObserverProgressAdvanceDecision, ObserverProgressAdvanceError,
+    ObserverProgressAdvanceTransaction, ObserverProgressTrackError, ObserverRecoveryAggregate,
     ObserverRecoveryAggregateRestoreError, ObserverRecoveryTransaction,
     ObserverRecoveryTransactionDecision,
 };
@@ -64,6 +65,28 @@ fn commit_transaction(
     }
 }
 
+fn advance_transaction(
+    decision: ObserverProgressAdvanceDecision,
+) -> ObserverProgressAdvanceTransaction {
+    match decision {
+        ObserverProgressAdvanceDecision::Commit(transaction) => transaction,
+        ObserverProgressAdvanceDecision::Refuse { error, .. } => {
+            panic!("a valid advance must commit, refused with {error:?}")
+        }
+    }
+}
+
+fn refused_advance(
+    decision: ObserverProgressAdvanceDecision,
+) -> (ObserverRecoveryAggregate, ObserverProgressAdvanceError) {
+    match decision {
+        ObserverProgressAdvanceDecision::Refuse { aggregate, error } => (aggregate, error),
+        ObserverProgressAdvanceDecision::Commit(transaction) => {
+            panic!("an invalid advance must refuse, committed {transaction:?}")
+        }
+    }
+}
+
 #[test]
 fn track_registers_once_and_refuses_duplicates() {
     let mut aggregate = ObserverRecoveryAggregate::new();
@@ -85,36 +108,99 @@ fn track_registers_once_and_refuses_duplicates() {
 
 #[test]
 fn advance_requires_a_known_conversation_and_strict_progress() {
-    let mut aggregate = tracked_aggregate();
+    let aggregate = tracked_aggregate();
+    let (aggregate, error) = refused_advance(aggregate.decide_progress_advance(999, 11));
     assert_eq!(
-        aggregate.advance_progress(999, 11),
-        Err(ObserverProgressAdvanceError::ConversationUnknown {
+        error,
+        ObserverProgressAdvanceError::ConversationUnknown {
             conversation_id: 999
-        })
+        }
     );
+    let (aggregate, error) =
+        refused_advance(aggregate.decide_progress_advance(101, INITIAL_PROGRESS));
     assert_eq!(
-        aggregate.advance_progress(101, INITIAL_PROGRESS),
-        Err(ObserverProgressAdvanceError::NotAdvancing {
+        error,
+        ObserverProgressAdvanceError::NotAdvancing {
             conversation_id: 101,
             current_observer_progress: INITIAL_PROGRESS,
             presented_progress: INITIAL_PROGRESS,
-        })
+        }
     );
+    let (aggregate, error) =
+        refused_advance(aggregate.decide_progress_advance(101, INITIAL_PROGRESS - 1));
     assert_eq!(
-        aggregate.advance_progress(101, INITIAL_PROGRESS - 1),
-        Err(ObserverProgressAdvanceError::NotAdvancing {
+        error,
+        ObserverProgressAdvanceError::NotAdvancing {
             conversation_id: 101,
             current_observer_progress: INITIAL_PROGRESS,
             presented_progress: INITIAL_PROGRESS - 1,
-        })
+        }
     );
-    assert_eq!(aggregate.observer_progress(101), Some(INITIAL_PROGRESS));
     assert_eq!(
-        aggregate.advance_progress(101, INITIAL_PROGRESS + 1),
-        Ok(None),
+        aggregate.observer_progress(101),
+        Some(INITIAL_PROGRESS),
+        "a refused advance must return the aggregate unchanged"
+    );
+
+    let transaction =
+        advance_transaction(aggregate.decide_progress_advance(101, INITIAL_PROGRESS + 1));
+    assert_eq!(transaction.conversation_id(), 101);
+    assert_eq!(transaction.presented_progress(), INITIAL_PROGRESS + 1);
+    assert_eq!(
+        transaction.fired_arm(),
+        None,
+        "advancing an unarmed conversation plans no fire"
+    );
+    let (aggregate, fired) = transaction.commit();
+    assert_eq!(
+        fired, None,
         "advancing an unarmed conversation fires nothing"
     );
     assert_eq!(aggregate.observer_progress(101), Some(INITIAL_PROGRESS + 1));
+}
+
+#[test]
+fn aborted_advance_leaves_progress_and_arm_untouched() {
+    let (aggregate, _) = commit_transaction(tracked_aggregate().decide_recovery(
+        &request(&[(101, INITIAL_PROGRESS)]),
+        LIMIT,
+        LIMIT,
+        &CONVERSATIONS,
+    ))
+    .commit();
+    let before_progress = aggregate.progress_rows();
+    let before_armed = aggregate.armed_rows();
+
+    // Crash between the decision and the durable append: abort applies
+    // neither the progress write nor the arm fire.
+    let transaction =
+        advance_transaction(aggregate.decide_progress_advance(101, INITIAL_PROGRESS + 2));
+    let planned = transaction
+        .fired_arm()
+        .expect("the pending advance plans the installed arm's fire");
+    assert_eq!(planned.conversation_id(), 101);
+    assert_eq!(planned.refused_epoch(), INITIAL_PROGRESS);
+    let aggregate = transaction.abort();
+    assert_eq!(
+        aggregate.progress_rows(),
+        before_progress,
+        "an aborted advance must not leave live progress ahead of durable state"
+    );
+    assert_eq!(
+        aggregate.armed_rows(),
+        before_armed,
+        "an aborted advance must not surrender the installed arm"
+    );
+
+    // The untouched aggregate still answers a replayed advance identically.
+    let transaction =
+        advance_transaction(aggregate.decide_progress_advance(101, INITIAL_PROGRESS + 2));
+    let (aggregate, fired) = transaction.commit();
+    let arm = fired.expect("the replayed advance fires the still-installed arm");
+    assert_eq!(arm.conversation_id(), 101);
+    assert_eq!(arm.refused_epoch(), INITIAL_PROGRESS);
+    assert_eq!(aggregate.observer_progress(101), Some(INITIAL_PROGRESS + 2));
+    assert_eq!(aggregate.armed_epoch(101), None);
 }
 
 #[test]
@@ -230,7 +316,7 @@ fn replaying_a_committed_recovery_is_idempotent() {
 
 #[test]
 fn advancing_past_an_installed_arm_fires_it_exactly_once() {
-    let (mut aggregate, _) = commit_transaction(tracked_aggregate().decide_recovery(
+    let (aggregate, _) = commit_transaction(tracked_aggregate().decide_recovery(
         &request(&[(101, INITIAL_PROGRESS)]),
         LIMIT,
         LIMIT,
@@ -239,17 +325,15 @@ fn advancing_past_an_installed_arm_fires_it_exactly_once() {
     .commit();
     assert_eq!(aggregate.armed_epoch(101), Some(INITIAL_PROGRESS));
 
-    let fired = aggregate
-        .advance_progress(101, INITIAL_PROGRESS + 2)
-        .expect("strict progress advances");
+    let (aggregate, fired) =
+        advance_transaction(aggregate.decide_progress_advance(101, INITIAL_PROGRESS + 2)).commit();
     let arm = fired.expect("advancing past the armed epoch must fire the arm");
     assert_eq!(arm.conversation_id(), 101);
     assert_eq!(arm.refused_epoch(), INITIAL_PROGRESS);
     assert_eq!(aggregate.armed_epoch(101), None);
 
-    let fired_again = aggregate
-        .advance_progress(101, INITIAL_PROGRESS + 3)
-        .expect("strict progress advances");
+    let (_, fired_again) =
+        advance_transaction(aggregate.decide_progress_advance(101, INITIAL_PROGRESS + 3)).commit();
     assert_eq!(fired_again, None, "an arm fires exactly once");
 }
 
@@ -295,14 +379,15 @@ fn restore_round_trips_and_rejects_every_corruption_class() {
     );
 }
 
-/// One generated interleaving step: an acknowledgement/fate progress advance,
-/// or an observer-recovery batch that either commits or crashes (aborts)
-/// between the durable append decision and installation.
+/// One generated interleaving step: an acknowledgement/fate progress advance
+/// or an observer-recovery batch, each of which either commits or crashes
+/// (aborts) between the durable-append decision and its application.
 #[derive(Clone, Debug)]
 enum ModelOp {
     Advance {
         slot: usize,
         delta: u64,
+        crash: bool,
     },
     Recover {
         entries: Vec<(usize, u8)>,
@@ -312,8 +397,8 @@ enum ModelOp {
 
 fn op_strategy() -> impl Strategy<Value = ModelOp> {
     prop_oneof![
-        (0_usize..CONVERSATIONS.len(), 1_u64..4)
-            .prop_map(|(slot, delta)| ModelOp::Advance { slot, delta }),
+        (0_usize..CONVERSATIONS.len(), 1_u64..4, any::<bool>())
+            .prop_map(|(slot, delta, crash)| ModelOp::Advance { slot, delta, crash }),
         (
             proptest::collection::vec((0_usize..CONVERSATIONS.len(), 0_u8..3), 0..4),
             any::<bool>(),
@@ -349,33 +434,50 @@ proptest! {
 
         for op in ops {
             match op {
-                ModelOp::Advance { slot, delta } => {
+                ModelOp::Advance { slot, delta, crash } => {
                     let conversation_id = CONVERSATIONS[slot];
                     let current = live
                         .observer_progress(conversation_id)
                         .expect("model conversations stay tracked");
                     let presented = current + delta;
                     let had_arm = live.armed_epoch(conversation_id);
-                    let fired = live
-                        .advance_progress(conversation_id, presented)
-                        .expect("model advances are strictly increasing");
-                    // The arm fires exactly when one was installed, and the
-                    // fired arm names the exact installed epoch.
-                    match (had_arm, &fired) {
+                    let before_progress = live.progress_rows();
+                    let before_armed = live.armed_rows();
+
+                    let transaction = advance_transaction(
+                        live.decide_progress_advance(conversation_id, presented),
+                    );
+                    // The plan fires an arm exactly when one was installed,
+                    // and the planned arm names the exact installed epoch.
+                    match (had_arm, transaction.fired_arm()) {
                         (Some(epoch), Some(arm)) => {
                             prop_assert_eq!(arm.conversation_id(), conversation_id);
                             prop_assert_eq!(arm.refused_epoch(), epoch);
                         }
                         (None, None) => {}
-                        (had, fired) => {
-                            panic!("arm/fire disagreement: installed {had:?}, fired {fired:?}");
+                        (had, planned) => {
+                            panic!("arm/fire disagreement: installed {had:?}, planned {planned:?}");
                         }
                     }
-                    // One durable transaction: progress advance + arm removal.
-                    durable_progress.insert(conversation_id, presented);
-                    if fired.is_some() {
-                        durable_arms.remove(&conversation_id);
-                    }
+                    live = if crash {
+                        // Crash between the decision and the durable append:
+                        // neither progress nor arm changes, live or durable.
+                        let aggregate = transaction.abort();
+                        prop_assert_eq!(aggregate.progress_rows(), before_progress);
+                        prop_assert_eq!(aggregate.armed_rows(), before_armed);
+                        aggregate
+                    } else {
+                        let planned = transaction.fired_arm();
+                        let (aggregate, fired) = transaction.commit();
+                        prop_assert_eq!(&fired, &planned, "commit surrenders the exact plan");
+                        // One durable transaction: progress advance + arm
+                        // removal + wake.
+                        durable_progress.insert(conversation_id, presented);
+                        if fired.is_some() {
+                            durable_arms.remove(&conversation_id);
+                        }
+                        aggregate
+                    };
                 }
                 ModelOp::Recover { entries, crash } => {
                     let batch: Vec<(ConversationId, ObserverEpoch)> = entries

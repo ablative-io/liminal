@@ -81,6 +81,15 @@ pub enum ObserverProgressAdvanceError {
 /// binding fate can advance progress between the read and the installation,
 /// and a crash while the transaction is pending installs nothing.
 ///
+/// The acknowledgement/binding-fate feed carries the same barrier:
+/// [`Self::decide_progress_advance`] consumes the aggregate and only
+/// [`ObserverProgressAdvanceTransaction::commit`] applies the progress write
+/// and surrenders the fired arm — after the caller's durable append is
+/// confirmed — while [`ObserverProgressAdvanceTransaction::abort`] returns
+/// the aggregate byte-for-byte unchanged, arm still installed. No mutation in
+/// this module is exempt from the decide/commit/abort discipline, so live and
+/// durable state can never disagree about progress or an installed arm.
+///
 /// The aggregate is deliberately not `Clone`: at most one owner may read
 /// progress for arm selection.
 ///
@@ -199,43 +208,56 @@ impl ObserverRecoveryAggregate {
         Ok(())
     }
 
-    /// Advances one conversation's hard observer progress and fires its arm.
+    /// Consumes the aggregate into one progress-advance transaction.
     ///
-    /// This is the acknowledgement/binding-fate feed. When the conversation
-    /// carries an installed equal-epoch arm, strictly advancing past it fires
-    /// the arm: the arm is removed and returned so the caller wakes the
-    /// parked rows in the same durable transaction (LAW-1: wake on the event,
-    /// never poll).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ObserverProgressAdvanceError`] without any change for an
-    /// unknown conversation or a presented value that does not strictly
-    /// advance the current progress.
-    pub fn advance_progress(
-        &mut self,
+    /// This is the acknowledgement/binding-fate feed. Validation happens
+    /// here — unknown conversation and non-advancing progress refuse with
+    /// the aggregate unchanged — and a validated advance returns a pending
+    /// [`ObserverProgressAdvanceTransaction`] carrying the new progress row
+    /// and the fired-arm plan for the caller's durable append. Nothing
+    /// mutates until [`ObserverProgressAdvanceTransaction::commit`] confirms
+    /// the append; [`ObserverProgressAdvanceTransaction::abort`] returns the
+    /// aggregate byte-for-byte unchanged. Every installed arm is equal-epoch
+    /// with its conversation's progress, so a strictly advancing write always
+    /// fires the installed arm: the fired arm is surrendered by `commit` so
+    /// the caller wakes the parked rows in the same durable transaction
+    /// (LAW-1: wake on the event, never poll).
+    #[must_use]
+    pub fn decide_progress_advance(
+        self,
         conversation_id: ConversationId,
         presented_progress: DeliverySeq,
-    ) -> Result<Option<ObserverRecoveryArm>, ObserverProgressAdvanceError> {
-        let Some(current) = self.progress.get_mut(&conversation_id) else {
-            return Err(ObserverProgressAdvanceError::ConversationUnknown { conversation_id });
+    ) -> ObserverProgressAdvanceDecision {
+        let Some(current) = self.progress.get(&conversation_id).copied() else {
+            return ObserverProgressAdvanceDecision::Refuse {
+                aggregate: self,
+                error: ObserverProgressAdvanceError::ConversationUnknown { conversation_id },
+            };
         };
-        if presented_progress <= *current {
-            return Err(ObserverProgressAdvanceError::NotAdvancing {
-                conversation_id,
-                current_observer_progress: *current,
-                presented_progress,
-            });
+        if presented_progress <= current {
+            return ObserverProgressAdvanceDecision::Refuse {
+                aggregate: self,
+                error: ObserverProgressAdvanceError::NotAdvancing {
+                    conversation_id,
+                    current_observer_progress: current,
+                    presented_progress,
+                },
+            };
         }
-        *current = presented_progress;
         let fired = self
             .armed
-            .remove(&conversation_id)
+            .get(&conversation_id)
+            .copied()
             .map(|refused_epoch| ObserverRecoveryArm {
                 conversation_id,
                 refused_epoch,
             });
-        Ok(fired)
+        ObserverProgressAdvanceDecision::Commit(ObserverProgressAdvanceTransaction {
+            aggregate: self,
+            conversation_id,
+            presented_progress,
+            fired,
+        })
     }
 
     /// Consumes the aggregate into one observer-recovery transaction.
@@ -334,6 +356,87 @@ impl ObserverRecoveryTransaction {
     }
 
     /// Cancels a failed durable append; not one arm is installed.
+    #[must_use]
+    pub fn abort(self) -> ObserverRecoveryAggregate {
+        self.aggregate
+    }
+}
+
+/// Total transactional progress-advance decision against the owned aggregate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ObserverProgressAdvanceDecision {
+    /// The advance was refused; the aggregate is unchanged.
+    Refuse {
+        /// Unchanged aggregate returned to its owner.
+        aggregate: ObserverRecoveryAggregate,
+        /// Exact refusal.
+        error: ObserverProgressAdvanceError,
+    },
+    /// The advance validated; the progress write and arm fire may commit
+    /// atomically.
+    Commit(ObserverProgressAdvanceTransaction),
+}
+
+/// Ownership barrier between a validated progress advance and its durable
+/// append.
+///
+/// The aggregate is unreachable while the transaction is pending, so no
+/// recovery batch can read the not-yet-durable progress and no other advance
+/// can race the fired-arm plan. Consuming [`Self::commit`] applies the
+/// progress write and removes the fired arm as ONE mutation — after the
+/// caller has confirmed the durable append of the progress row, the arm-row
+/// deletion, and the wake — and consuming [`Self::abort`] returns the
+/// aggregate byte-for-byte unchanged, arm still installed, so a failed
+/// append never leaves live progress ahead of durable state or a
+/// phantom-fired arm.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ObserverProgressAdvanceTransaction {
+    aggregate: ObserverRecoveryAggregate,
+    conversation_id: ConversationId,
+    presented_progress: DeliverySeq,
+    fired: Option<ObserverRecoveryArm>,
+}
+
+impl ObserverProgressAdvanceTransaction {
+    /// Returns the conversation whose progress row the durable append writes.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    /// Returns the new hard observer progress for the durable append.
+    #[must_use]
+    pub const fn presented_progress(&self) -> DeliverySeq {
+        self.presented_progress
+    }
+
+    /// Returns the fired-arm plan for the durable append.
+    ///
+    /// `Some` names the installed arm whose durable row the same append must
+    /// delete and whose parked rows the same append must wake; `None` means
+    /// the conversation carried no arm.
+    #[must_use]
+    pub const fn fired_arm(&self) -> Option<ObserverRecoveryArm> {
+        self.fired
+    }
+
+    /// Applies the advance after a confirmed durable append.
+    ///
+    /// The progress write and the arm removal are one mutation: the returned
+    /// arm is exactly [`Self::fired_arm`], surrendered so the caller wakes
+    /// the parked rows it durably committed to waking.
+    #[must_use]
+    pub fn commit(mut self) -> (ObserverRecoveryAggregate, Option<ObserverRecoveryArm>) {
+        self.aggregate
+            .progress
+            .insert(self.conversation_id, self.presented_progress);
+        if self.fired.is_some() {
+            self.aggregate.armed.remove(&self.conversation_id);
+        }
+        (self.aggregate, self.fired)
+    }
+
+    /// Cancels a failed durable append; neither progress nor arm changes.
     #[must_use]
     pub fn abort(self) -> ObserverRecoveryAggregate {
         self.aggregate

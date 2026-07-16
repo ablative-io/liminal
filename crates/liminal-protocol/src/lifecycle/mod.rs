@@ -187,7 +187,8 @@ pub use membership::{
     RetiredIdentity, RetirementError, VerifiedLeaveRequest, commit_leave, commit_pending_leave,
 };
 pub use observer_recovery::{
-    ObserverProgressAdvanceError, ObserverProgressTrackError, ObserverRecoveryAggregate,
+    ObserverProgressAdvanceDecision, ObserverProgressAdvanceError,
+    ObserverProgressAdvanceTransaction, ObserverProgressTrackError, ObserverRecoveryAggregate,
     ObserverRecoveryAggregateRestoreError, ObserverRecoveryArm, ObserverRecoveryCommit,
     ObserverRecoveryDecision, ObserverRecoveryTransaction, ObserverRecoveryTransactionDecision,
     apply_observer_recovery,
