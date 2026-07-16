@@ -5,8 +5,8 @@ use core::cell::Cell;
 
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{
-    AttachSecret, BindingEpoch, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken,
-    Generation, ServerValue,
+    AttachSecret, BindingEpoch, ConnectionIncarnation, EnrollmentEnvelope, EnrollmentRequest,
+    EnrollmentResponse, EnrollmentToken, Generation, ServerValue,
 };
 
 use super::super::{
@@ -301,13 +301,21 @@ fn stage_six_and_eight_refusals_are_ordered_and_nonmutating() {
             allocate()
         },
     );
-    assert!(matches!(
+    // Register row 5641: the refusal carries the triggering request's exact
+    // common envelope plus the signed connection-conversation limit, asserted
+    // as the complete wire value through the production flow.
+    assert_eq!(
         semantic,
-        InitialEnrollmentOperationDecision::Respond(ref response) if matches!(
-            response.server_value(),
-            ServerValue::ConnectionConversationCapacityExceeded(_)
-        )
-    ));
+        InitialEnrollmentOperationDecision::Respond(
+            EnrollmentResponse::connection_conversation_capacity_exceeded(
+                EnrollmentEnvelope {
+                    conversation_id: request.conversation_id,
+                    enrollment_token: request.enrollment_token,
+                },
+                1,
+            )
+        ),
+    );
 
     let binding_occupied = apply_initial_enrollment(
         &input(

@@ -13,7 +13,8 @@ use crate::{
     wire::{
         AttachSecret, BindingEpoch, ConnectionIncarnation, ConversationSequenceExhausted,
         Generation, ObserverBackpressureState, RecordAdmission, RecordAdmissionEnvelope,
-        RecordCommitted, RecordTooLarge, SequenceAllocatingEnvelope, SequenceBudget, ServerValue,
+        RecordAdmissionResponse, RecordCommitted, RecordTooLarge, SequenceAllocatingEnvelope,
+        SequenceBudget, ServerValue,
     },
 };
 
@@ -780,6 +781,88 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
     ));
     assert_eq!(
         no_binding.unchanged().prestate().frontiers(),
+        &expected_frontiers
+    );
+}
+
+#[test]
+fn untracked_semantic_conversation_refusal_carries_exact_envelope_and_limit() {
+    let conversation_id = 33_002;
+    let generation = Generation::new(7).expect("seven is nonzero");
+    let binding_epoch = BindingEpoch::new(ConnectionIncarnation::new(33, 2), generation);
+    let retained = vec![ordinary_record(1, 1)];
+    let retained_charges = keyed_charges(&retained, ResourceVector::new(1, 100));
+    let frontiers =
+        || one_participant_frontiers(conversation_id, binding_epoch, 1, 1, 0, 1, retained.clone());
+    let member = test_member(conversation_id, generation, 0);
+    let binding = BindingState::Bound(ActiveBinding {
+        participant_id: 0,
+        conversation_id,
+        binding_epoch,
+    });
+    let envelope = RecordAdmissionEnvelope {
+        conversation_id,
+        participant_id: 0,
+        capability_generation: generation,
+    };
+    let accounting = clear_accounting(
+        WideResourceVector::new(2, 200),
+        ResourceVector::new(10, 1_000),
+    );
+    let limits = OrdinaryProjectionLimits::new(
+        ResourceVector::new(1, 100),
+        ResourceVector::new(2, 200),
+        ResourceVector::new(2, 200),
+    );
+    let encoded = ResourceVector::new(1, 100);
+    let expected_frontiers = frontiers();
+    let subject = RecordAdmissionPrestate::new(
+        request(&envelope, &[0; 9]),
+        PresentedIdentity::<TestFingerprint, TestFingerprint, TestFingerprint>::Live(&member),
+        &binding,
+        binding_epoch,
+        ConnectionConversationTracking::Untracked,
+        CapacityCounter::try_new(2, 2).expect("full test connection capacity is valid"),
+        accounting,
+        ResourceVector::new(2, 110),
+        frontiers(),
+        retained_charges,
+        1,
+        limits,
+    );
+    let RecordAdmissionDecision::Respond(refusal) = apply_record_admission(subject, encoded) else {
+        panic!("first untracked semantic conversation at the full limit must refuse")
+    };
+
+    // Register row 5641: the refusal carries the triggering request's exact
+    // common envelope plus the signed connection-conversation limit, asserted
+    // as the complete wire value through the production flow.
+    let expected = RecordAdmissionResponse::connection_conversation_capacity_exceeded(envelope, 2);
+    assert_eq!(refusal.response(), &expected);
+    assert_eq!(
+        refusal.unchanged().prestate().frontiers(),
+        &expected_frontiers
+    );
+    assert_eq!(
+        refusal
+            .unchanged()
+            .prestate()
+            .connection_capacity()
+            .occupied(),
+        2
+    );
+    assert_eq!(refusal.unchanged().encoded_record_charge(), encoded);
+
+    let (_, unchanged) = refusal.into_parts();
+    let (replay_prestate, replay_charge) = unchanged.into_parts();
+    let RecordAdmissionDecision::Respond(replayed) =
+        apply_record_admission(replay_prestate, replay_charge)
+    else {
+        panic!("capacity refusal must replay from the returned prestate")
+    };
+    assert_eq!(replayed.response(), &expected);
+    assert_eq!(
+        replayed.unchanged().prestate().frontiers(),
         &expected_frontiers
     );
 }

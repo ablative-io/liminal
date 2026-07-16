@@ -22,7 +22,8 @@ use crate::wire::{
     DetachRequest, EnrollBound, EnrollmentEnvelope, EnrollmentToken, Generation, LeaveAttemptToken,
     LeaveEnvelope, MarkerAckEnvelope, MarkerAckProof, MarkerClosureCapacityExceeded,
     OrderAllocatingEnvelope, ParticipantAckEnvelope, RecordAdmissionEnvelope, RepaymentEdge,
-    SequenceAllocatingEnvelope, SequenceBudget, ServerValue, TerminalizedDetachCell,
+    SequenceAllocatingEnvelope, SequenceBudget, ServerDiscriminant, ServerValue,
+    TerminalizedDetachCell,
 };
 
 pub(super) fn generation(value: u64) -> Generation {
@@ -292,11 +293,20 @@ pub(super) fn terminalized_detach_cell() -> TerminalizedDetachCell {
         )
 }
 
-pub(super) fn assert_bound(value: &ServerValue, expected: ClientDiscriminant) {
+pub(super) fn assert_bound(
+    value: &ServerValue,
+    expected_request: ClientDiscriminant,
+    expected_value: ServerDiscriminant,
+) {
     assert_eq!(
         value.originating_request(),
-        Some(expected),
+        Some(expected_request),
         "constructed {:?} must echo its bound originating request",
         value.discriminant(),
+    );
+    assert_eq!(
+        value.discriminant(),
+        expected_value,
+        "constructor must select its register-mandated wire variant",
     );
 }
