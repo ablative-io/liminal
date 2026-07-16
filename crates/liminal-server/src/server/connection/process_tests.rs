@@ -1209,7 +1209,8 @@ fn participant_request_without_capability_responds_with_exact_rejection_then_clo
 
 /// A complete installed participant service is advertised only on a process that
 /// carries the incarnation durably allocated before spawn. The same context then
-/// reaches the handler and its protocol-owned value round-trips on 0x1A.
+/// reaches the handler and its protocol-owned value round-trips on the
+/// `PARTICIPANT_FRAME_TYPE` frame.
 #[test]
 fn installed_participant_service_advertises_and_dispatches_with_exact_incarnation()
 -> Result<(), Box<dyn std::error::Error>> {
