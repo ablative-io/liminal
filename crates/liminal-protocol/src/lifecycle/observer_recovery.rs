@@ -7,6 +7,339 @@ use crate::wire::{
     ObserverRecoveryResponse,
 };
 
+/// Restore-time validation failure for the owned observer-recovery aggregate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObserverRecoveryAggregateRestoreError {
+    /// One conversation appears twice in the durable progress rows.
+    DuplicateProgress {
+        /// Duplicated conversation.
+        conversation_id: ConversationId,
+    },
+    /// One conversation appears twice in the durable arm rows.
+    DuplicateArm {
+        /// Duplicated conversation.
+        conversation_id: ConversationId,
+    },
+    /// A durable arm names a conversation with no durable progress row.
+    ArmWithoutProgress {
+        /// Conversation named by the orphaned arm.
+        conversation_id: ConversationId,
+    },
+    /// A durable arm's epoch differs from its conversation's progress.
+    ///
+    /// An installed arm is always equal-epoch: it is installed at the exact
+    /// read progress and fired (removed) by the same mutation that advances
+    /// progress past it, so any durable disagreement is corruption.
+    ArmEpochMismatch {
+        /// Conversation whose arm disagrees.
+        conversation_id: ConversationId,
+        /// Epoch stored with the arm.
+        armed_epoch: ObserverEpoch,
+        /// Durable hard observer progress.
+        current_observer_progress: DeliverySeq,
+    },
+}
+
+/// Failure while registering a newly tracked conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObserverProgressTrackError {
+    /// The conversation already has an authoritative progress row.
+    AlreadyTracked {
+        /// Conversation presented twice.
+        conversation_id: ConversationId,
+    },
+}
+
+/// Failure while advancing hard observer progress.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObserverProgressAdvanceError {
+    /// The conversation has no authoritative progress row.
+    ConversationUnknown {
+        /// Unknown conversation.
+        conversation_id: ConversationId,
+    },
+    /// The presented progress does not strictly advance the current value.
+    NotAdvancing {
+        /// Conversation whose progress was presented.
+        conversation_id: ConversationId,
+        /// Current hard observer progress.
+        current_observer_progress: DeliverySeq,
+        /// Non-advancing presented progress.
+        presented_progress: DeliverySeq,
+    },
+}
+
+/// Exclusively owned observer-recovery aggregate: per-conversation hard
+/// observer progress plus every installed equal-epoch arm, as ONE owned unit.
+///
+/// This is the A4 transactional surface
+/// (`docs/design/LP-GAP-CLOSURE-GOAL.md`): the equal-epoch progress read and
+/// the arm installation share one serialization boundary *by construction*,
+/// because [`Self::decide_recovery`] consumes the aggregate and only
+/// [`ObserverRecoveryTransaction::commit`] or
+/// [`ObserverRecoveryTransaction::abort`] returns it. No acknowledgement or
+/// binding fate can advance progress between the read and the installation,
+/// and a crash while the transaction is pending installs nothing.
+///
+/// The aggregate is deliberately not `Clone`: at most one owner may read
+/// progress for arm selection.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::ObserverRecoveryAggregate;
+///
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<ObserverRecoveryAggregate>();
+/// ```
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ObserverRecoveryAggregate {
+    progress: BTreeMap<ConversationId, DeliverySeq>,
+    armed: BTreeMap<ConversationId, ObserverEpoch>,
+}
+
+impl ObserverRecoveryAggregate {
+    /// Creates an empty aggregate tracking no conversations.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            progress: BTreeMap::new(),
+            armed: BTreeMap::new(),
+        }
+    }
+
+    /// Rebuilds the aggregate from durable progress and arm rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObserverRecoveryAggregateRestoreError`] for duplicate rows,
+    /// an arm without its progress row, or an arm whose epoch is not the
+    /// exact current progress of its conversation.
+    pub fn restore(
+        progress_rows: &[(ConversationId, DeliverySeq)],
+        armed_rows: &[(ConversationId, ObserverEpoch)],
+    ) -> Result<Self, ObserverRecoveryAggregateRestoreError> {
+        let mut progress = BTreeMap::new();
+        for (conversation_id, observer_progress) in progress_rows {
+            if progress
+                .insert(*conversation_id, *observer_progress)
+                .is_some()
+            {
+                return Err(ObserverRecoveryAggregateRestoreError::DuplicateProgress {
+                    conversation_id: *conversation_id,
+                });
+            }
+        }
+        let mut armed = BTreeMap::new();
+        for (conversation_id, armed_epoch) in armed_rows {
+            let Some(current_observer_progress) = progress.get(conversation_id).copied() else {
+                return Err(ObserverRecoveryAggregateRestoreError::ArmWithoutProgress {
+                    conversation_id: *conversation_id,
+                });
+            };
+            if current_observer_progress != *armed_epoch {
+                return Err(ObserverRecoveryAggregateRestoreError::ArmEpochMismatch {
+                    conversation_id: *conversation_id,
+                    armed_epoch: *armed_epoch,
+                    current_observer_progress,
+                });
+            }
+            if armed.insert(*conversation_id, *armed_epoch).is_some() {
+                return Err(ObserverRecoveryAggregateRestoreError::DuplicateArm {
+                    conversation_id: *conversation_id,
+                });
+            }
+        }
+        Ok(Self { progress, armed })
+    }
+
+    /// Returns the current hard observer progress for one conversation.
+    #[must_use]
+    pub fn observer_progress(&self, conversation_id: ConversationId) -> Option<DeliverySeq> {
+        self.progress.get(&conversation_id).copied()
+    }
+
+    /// Returns the installed equal-epoch arm for one conversation, if any.
+    #[must_use]
+    pub fn armed_epoch(&self, conversation_id: ConversationId) -> Option<ObserverEpoch> {
+        self.armed.get(&conversation_id).copied()
+    }
+
+    /// Returns every durable progress row in conversation order.
+    #[must_use]
+    pub fn progress_rows(&self) -> Vec<(ConversationId, DeliverySeq)> {
+        self.progress
+            .iter()
+            .map(|(conversation_id, observer_progress)| (*conversation_id, *observer_progress))
+            .collect()
+    }
+
+    /// Returns every installed arm row in conversation order.
+    #[must_use]
+    pub fn armed_rows(&self) -> Vec<(ConversationId, ObserverEpoch)> {
+        self.armed
+            .iter()
+            .map(|(conversation_id, armed_epoch)| (*conversation_id, *armed_epoch))
+            .collect()
+    }
+
+    /// Registers a newly tracked conversation at its current progress.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObserverProgressTrackError::AlreadyTracked`] without any
+    /// change when the conversation already has an authoritative row.
+    pub fn track(
+        &mut self,
+        conversation_id: ConversationId,
+        observer_progress: DeliverySeq,
+    ) -> Result<(), ObserverProgressTrackError> {
+        if self.progress.contains_key(&conversation_id) {
+            return Err(ObserverProgressTrackError::AlreadyTracked { conversation_id });
+        }
+        self.progress.insert(conversation_id, observer_progress);
+        Ok(())
+    }
+
+    /// Advances one conversation's hard observer progress and fires its arm.
+    ///
+    /// This is the acknowledgement/binding-fate feed. When the conversation
+    /// carries an installed equal-epoch arm, strictly advancing past it fires
+    /// the arm: the arm is removed and returned so the caller wakes the
+    /// parked rows in the same durable transaction (LAW-1: wake on the event,
+    /// never poll).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObserverProgressAdvanceError`] without any change for an
+    /// unknown conversation or a presented value that does not strictly
+    /// advance the current progress.
+    pub fn advance_progress(
+        &mut self,
+        conversation_id: ConversationId,
+        presented_progress: DeliverySeq,
+    ) -> Result<Option<ObserverRecoveryArm>, ObserverProgressAdvanceError> {
+        let Some(current) = self.progress.get_mut(&conversation_id) else {
+            return Err(ObserverProgressAdvanceError::ConversationUnknown { conversation_id });
+        };
+        if presented_progress <= *current {
+            return Err(ObserverProgressAdvanceError::NotAdvancing {
+                conversation_id,
+                current_observer_progress: *current,
+                presented_progress,
+            });
+        }
+        *current = presented_progress;
+        let fired = self
+            .armed
+            .remove(&conversation_id)
+            .map(|refused_epoch| ObserverRecoveryArm {
+                conversation_id,
+                refused_epoch,
+            });
+        Ok(fired)
+    }
+
+    /// Consumes the aggregate into one observer-recovery transaction.
+    ///
+    /// [`apply_observer_recovery`]'s selection is unchanged; this wrapper
+    /// binds its progress reads to the owned aggregate so the read and the
+    /// arm installation are one owned unit. A refused batch returns the
+    /// aggregate unchanged alongside the exact refusal response.
+    #[must_use]
+    pub fn decide_recovery(
+        self,
+        request: &ObserverRecoveryHandshake,
+        max_entries: u64,
+        connection_conversation_limit: u64,
+        tracked_conversations: &[ConversationId],
+    ) -> ObserverRecoveryTransactionDecision {
+        let decision = apply_observer_recovery(
+            request,
+            max_entries,
+            connection_conversation_limit,
+            tracked_conversations,
+            |conversation_id| self.progress.get(&conversation_id).copied(),
+        );
+        match decision {
+            ObserverRecoveryDecision::Respond(response) => {
+                ObserverRecoveryTransactionDecision::Respond {
+                    aggregate: self,
+                    response,
+                }
+            }
+            ObserverRecoveryDecision::Commit(commit) => {
+                ObserverRecoveryTransactionDecision::Commit(ObserverRecoveryTransaction {
+                    aggregate: self,
+                    commit,
+                })
+            }
+        }
+    }
+}
+
+/// Total transactional observer-recovery decision against the owned aggregate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ObserverRecoveryTransactionDecision {
+    /// The whole batch was refused; the aggregate is unchanged.
+    Respond {
+        /// Unchanged aggregate returned to its owner.
+        aggregate: ObserverRecoveryAggregate,
+        /// Exact refusal response.
+        response: ObserverRecoveryResponse,
+    },
+    /// Every entry validated; the arm plan may commit atomically.
+    Commit(ObserverRecoveryTransaction),
+}
+
+/// Ownership barrier between arm selection and atomic arm installation.
+///
+/// The aggregate is unreachable while the transaction is pending, so no
+/// progress can advance between the equal-epoch read and the installation.
+/// Consuming [`Self::commit`] installs every arm of the plan at once — a
+/// subset is unrepresentable — and consuming [`Self::abort`] installs none,
+/// so a crash at any point leaves either the complete arm plan or no arm at
+/// all, never a partially-armed request.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ObserverRecoveryTransaction {
+    aggregate: ObserverRecoveryAggregate,
+    commit: ObserverRecoveryCommit,
+}
+
+impl ObserverRecoveryTransaction {
+    /// Borrows the complete equal-epoch arm plan for the durable append.
+    #[must_use]
+    pub fn arms(&self) -> &[ObserverRecoveryArm] {
+        self.commit.arms()
+    }
+
+    /// Borrows the exact request-ordered success response.
+    #[must_use]
+    pub const fn outcome(&self) -> &ObserverRecoveryAccepted {
+        self.commit.outcome()
+    }
+
+    /// Installs the whole arm plan after a confirmed durable append.
+    ///
+    /// Installation is idempotent: replaying a durable recovery against the
+    /// post-state reinstalls the identical equal-epoch arms, so at most one
+    /// arm per conversation ever exists and crash replay converges.
+    #[must_use]
+    pub fn commit(mut self) -> (ObserverRecoveryAggregate, ObserverRecoveryAccepted) {
+        let (arms, outcome) = self.commit.into_parts();
+        for arm in arms {
+            self.aggregate
+                .armed
+                .insert(arm.conversation_id(), arm.refused_epoch());
+        }
+        (self.aggregate, outcome)
+    }
+
+    /// Cancels a failed durable append; not one arm is installed.
+    #[must_use]
+    pub fn abort(self) -> ObserverRecoveryAggregate {
+        self.aggregate
+    }
+}
+
 /// One equal observer epoch that must be armed by an accepted recovery batch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ObserverRecoveryArm {

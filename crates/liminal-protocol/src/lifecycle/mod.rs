@@ -60,6 +60,8 @@ mod membership_tests;
 #[cfg(test)]
 mod observer_recovery_tests;
 #[cfg(test)]
+mod observer_recovery_transaction_tests;
+#[cfg(test)]
 mod operation_event_tests;
 #[cfg(test)]
 mod storage_tests;
@@ -185,7 +187,10 @@ pub use membership::{
     RetiredIdentity, RetirementError, VerifiedLeaveRequest, commit_leave, commit_pending_leave,
 };
 pub use observer_recovery::{
-    ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
+    ObserverProgressAdvanceError, ObserverProgressTrackError, ObserverRecoveryAggregate,
+    ObserverRecoveryAggregateRestoreError, ObserverRecoveryArm, ObserverRecoveryCommit,
+    ObserverRecoveryDecision, ObserverRecoveryTransaction, ObserverRecoveryTransactionDecision,
+    apply_observer_recovery,
 };
 pub use operation_event::{
     AttachedOperation, BindingFateOperation, ConversationOperation, DetachedOperation,
