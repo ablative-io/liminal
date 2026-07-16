@@ -283,10 +283,11 @@ impl ObserverRecoveryAggregate {
 
     /// Consumes the aggregate into one observer-recovery transaction.
     ///
-    /// [`apply_observer_recovery`]'s selection is unchanged; this wrapper
-    /// binds its progress reads to the owned aggregate so the read and the
-    /// arm installation are one owned unit. A refused batch returns the
-    /// aggregate unchanged alongside the exact refusal response.
+    /// This is the only public door to arm selection: it binds the
+    /// crate-internal selection's progress reads to the owned aggregate so
+    /// the read and the arm installation are one owned unit by construction.
+    /// A refused batch returns the aggregate unchanged alongside the exact
+    /// refusal response.
     #[must_use]
     pub fn decide_recovery(
         self,
@@ -594,12 +595,19 @@ fn wire_count(value: usize) -> u64 {
 /// conversation, request-index connection capacity, then request-index unknown
 /// or ahead epoch. Only after every entry passes is an arm plan produced.
 /// `observer_progress` must return the current hard observer progress for a
-/// known conversation and `None` for an unknown conversation. The progress
-/// reads and installation of every returned arm must share one serialization
-/// boundary: releasing it between evaluation and installation would violate
-/// the equal-epoch subscribe-then-snapshot rule.
+/// known conversation and `None` for an unknown conversation.
+///
+/// This raw selection is deliberately crate-internal: its progress reads and
+/// the installation of every returned arm must share one serialization
+/// boundary (releasing it between evaluation and installation would violate
+/// the equal-epoch subscribe-then-snapshot rule), and that requirement is
+/// enforceable only by ownership.
+/// [`ObserverRecoveryAggregate::decide_recovery`] is the one public door to
+/// arm selection: it binds these progress reads to the owned aggregate, so
+/// no caller can interleave an acknowledgement or fate advance between
+/// evaluation and installation.
 #[must_use]
-pub fn apply_observer_recovery<F>(
+pub(super) fn apply_observer_recovery<F>(
     request: &ObserverRecoveryHandshake,
     max_entries: u64,
     connection_conversation_limit: u64,

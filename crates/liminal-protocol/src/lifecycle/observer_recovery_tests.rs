@@ -8,7 +8,8 @@ use crate::wire::{
     ObserverRecoveryAccepted, ObserverRecoveryHandshake, ObserverRecoveryResponse, ObserverRefusal,
 };
 
-use super::{ObserverRecoveryDecision, apply_observer_recovery};
+use super::ObserverRecoveryDecision;
+use super::observer_recovery::apply_observer_recovery;
 
 fn request(entries: &[(u64, u64)]) -> ObserverRecoveryHandshake {
     ObserverRecoveryHandshake {

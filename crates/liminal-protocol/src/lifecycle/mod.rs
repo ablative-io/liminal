@@ -192,7 +192,6 @@ pub use observer_recovery::{
     ObserverProgressTrackTransaction, ObserverRecoveryAggregate,
     ObserverRecoveryAggregateRestoreError, ObserverRecoveryArm, ObserverRecoveryCommit,
     ObserverRecoveryDecision, ObserverRecoveryTransaction, ObserverRecoveryTransactionDecision,
-    apply_observer_recovery,
 };
 pub use operation_event::{
     AttachedOperation, BindingFateOperation, ConversationOperation, DetachedOperation,
