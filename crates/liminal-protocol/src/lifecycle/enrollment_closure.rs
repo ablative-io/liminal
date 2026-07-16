@@ -146,6 +146,7 @@ pub struct InitialEnrollmentClosureProjection {
     order: OrderLedger,
     sequence: SequenceLedger,
     participant_index: ParticipantIndex,
+    identity_slots: u64,
     binding_epoch: BindingEpoch,
 }
 
@@ -218,10 +219,28 @@ impl InitialEnrollmentClosureProjection {
         self.participant_index
     }
 
+    /// Returns the validated half-open identity domain used by the projection.
+    #[must_use]
+    pub const fn identity_slots(&self) -> u64 {
+        self.identity_slots
+    }
+
     /// Returns the generation-one binding epoch used by the successor proof.
     #[must_use]
     pub const fn binding_epoch(&self) -> BindingEpoch {
         self.binding_epoch
+    }
+
+    /// Returns the unchanged current order ledger consumed by stage 9.
+    #[must_use]
+    pub const fn current_order(&self) -> OrderLedger {
+        self.order
+    }
+
+    /// Returns the hard observer progress checked by stage 11.
+    #[must_use]
+    pub const fn observer_progress(&self) -> u64 {
+        0
     }
 
     /// Produces the sealed enrollment order claims, including a quartet only
@@ -475,6 +494,7 @@ pub fn project_initial_enrollment_closure(
         order: input.order,
         sequence: input.sequence,
         participant_index: input.participant_index,
+        identity_slots: input.identity_slots,
         binding_epoch: input.binding_epoch,
     })
 }

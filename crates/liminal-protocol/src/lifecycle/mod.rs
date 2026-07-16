@@ -36,9 +36,9 @@ mod detach_tests;
 #[cfg(test)]
 mod edge_tests;
 #[cfg(test)]
-mod enrollment_tests;
-#[cfg(test)]
 mod enrollment_closure_tests;
+#[cfg(test)]
+mod enrollment_tests;
 #[cfg(test)]
 mod lookup_tests;
 #[cfg(test)]
@@ -132,12 +132,15 @@ pub use observer_recovery::{
     ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
 };
 pub use operations::{
-    MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, MarkerProofDecision,
-    MarkerProofInput, MarkerProofPermit, MarkerProofState, NonzeroAckEpisodePosition,
-    NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError, NonzeroParticipantAckDecision,
-    NonzeroParticipantAckInvariantError, ParticipantAckCommit, ParticipantAckCommitError,
-    ParticipantAckDecision, apply_marker_ack, apply_nonzero_participant_ack, apply_participant_ack,
-    select_marker_proof,
+    InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
+    InitialEnrollmentOperationDecision, InitialEnrollmentOperationFault,
+    InitialEnrollmentOperationInput, MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision,
+    MarkerProofDecision, MarkerProofInput, MarkerProofPermit, MarkerProofState,
+    NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
+    NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError, ParticipantAckCommit,
+    ParticipantAckCommitError, ParticipantAckDecision, ReceiptDeadlineError, ReceiptDeadlines,
+    apply_initial_enrollment, apply_marker_ack, apply_nonzero_participant_ack,
+    apply_participant_ack, select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,

@@ -27,6 +27,7 @@ pub struct AllocatedParticipantSlot<P> {
     allocator_proof: P,
     conversation_id: ConversationId,
     participant_id: ParticipantId,
+    identity_limit: u64,
 }
 
 /// Invalid participant-slot allocation proof.
@@ -45,12 +46,14 @@ impl<P: ParticipantSlotAllocatorProof> AllocatedParticipantSlot<P> {
     /// allocator reports the exhausted sentinel or an out-of-range index.
     pub fn from_allocator(allocator_proof: P) -> Result<Self, ParticipantSlotAllocationError> {
         let participant_id = allocator_proof.participant_index();
-        if participant_id >= allocator_proof.identity_limit() {
+        let identity_limit = allocator_proof.identity_limit();
+        if participant_id >= identity_limit {
             return Err(ParticipantSlotAllocationError::IdentityLimit);
         }
         Ok(Self {
             conversation_id: allocator_proof.conversation_id(),
             participant_id,
+            identity_limit,
             allocator_proof,
         })
     }
@@ -65,6 +68,12 @@ impl<P: ParticipantSlotAllocatorProof> AllocatedParticipantSlot<P> {
     #[must_use]
     pub const fn participant_id(&self) -> ParticipantId {
         self.participant_id
+    }
+
+    /// Returns the checked half-open identity domain used by the allocator.
+    #[must_use]
+    pub const fn identity_limit(&self) -> u64 {
+        self.identity_limit
     }
 }
 
