@@ -167,8 +167,9 @@ pub enum ParticipantDetachRepositoryError {
 ///
 /// This first binding intentionally covers the mandatory enrollment, immediate
 /// committed detach, ordinary attach, and exact old-token lookup path. Each
-/// mutating method appends exactly one event with an optimistic stream-head
-/// precondition. No protocol state is cached or serialized.
+/// mutating method appends and flushes exactly one event with an optimistic
+/// stream-head precondition before publishing its outcome. No protocol state
+/// is cached or serialized.
 #[derive(Debug)]
 pub struct ParticipantDetachRepository {
     store: Arc<dyn DurableStore>,
@@ -354,6 +355,7 @@ impl ParticipantDetachRepository {
                 actual: assigned,
             });
         }
+        self.store.flush().await?;
         Ok(())
     }
 

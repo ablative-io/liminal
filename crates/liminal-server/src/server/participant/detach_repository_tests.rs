@@ -3,9 +3,10 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use haematite::{Database, DatabaseConfig, EventStore};
-use liminal::durability::{DurableStore, HaematiteStore};
+use liminal::durability::{DurabilityError, DurableStore, HaematiteStore, StoredEntry};
 use liminal_protocol::lifecycle::{AttachSecretProof, ParticipantSlotAllocatorProof};
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, BindingEpoch, BindingStateView, ConnectionIncarnation,
@@ -15,7 +16,65 @@ use liminal_protocol::wire::{
 
 use super::detach_repository::{
     DetachAllocation, EnrollmentAllocation, OrdinaryAttachAllocation, ParticipantDetachRepository,
+    ParticipantDetachRepositoryError,
 };
+
+#[derive(Debug)]
+struct FailFirstFlush {
+    inner: Arc<dyn DurableStore>,
+    fail_flush: AtomicBool,
+}
+
+impl FailFirstFlush {
+    fn new(inner: Arc<dyn DurableStore>) -> Self {
+        Self {
+            inner,
+            fail_flush: AtomicBool::new(true),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableStore for FailFirstFlush {
+    async fn append(
+        &self,
+        stream_key: &str,
+        payload: Vec<u8>,
+        expected_seq: u64,
+    ) -> Result<u64, DurabilityError> {
+        self.inner.append(stream_key, payload, expected_seq).await
+    }
+
+    async fn read_from(
+        &self,
+        stream_key: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner.read_from(stream_key, offset, limit).await
+    }
+
+    async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {
+        self.inner.cas(key, old_value, new_value).await
+    }
+
+    async fn read_value(&self, key: &str) -> Result<Option<u64>, DurabilityError> {
+        self.inner.read_value(key).await
+    }
+
+    async fn scan(&self, prefix: &str) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner.scan(prefix).await
+    }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        if self.fail_flush.swap(false, Ordering::SeqCst) {
+            return Err(DurabilityError::ConfigError(
+                "injected participant detach flush failure".into(),
+            ));
+        }
+        self.inner.flush().await
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct TestParticipantSlot {
@@ -169,11 +228,61 @@ fn write_history(
             .collect::<Vec<_>>(),
         vec![0, 1, 2]
     );
-    runtime.block_on(store.flush())?;
     drop(repository);
     drop(store);
     drop(runtime);
     Ok(stream_key)
+}
+
+#[test]
+fn failed_first_flush_never_publishes_enrollment_outcome() -> Result<(), Box<dyn std::error::Error>>
+{
+    let directory = tempfile::tempdir()?;
+    let data_dir = directory.path().join("participant-db");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let inner = create_store(&data_dir)?;
+    let failing: Arc<dyn DurableStore> = Arc::new(FailFirstFlush::new(Arc::clone(&inner)));
+    let repository = ParticipantDetachRepository::new(failing, 29);
+
+    let result = runtime.block_on(repository.commit_enrollment(
+        EnrollmentRequest {
+            conversation_id: 29,
+            enrollment_token: EnrollmentToken::new([0xE1; 16]),
+        },
+        TestParticipantSlot {
+            conversation_id: 29,
+            participant_id: 3,
+            identity_limit: 8,
+        },
+        EnrollmentAllocation {
+            attach_secret: AttachSecret::new([0x44; 32]),
+            origin_binding_epoch: BindingEpoch::new(
+                ConnectionIncarnation::new(7, 11),
+                Generation::ONE,
+            ),
+            attached_transaction_order: 1,
+            attached_delivery_seq: 40,
+            receipt_expires_at: 1_000,
+            provenance_expires_at: 2_000,
+            enrollment_fingerprint: [0x91; 32],
+        },
+    ));
+    assert!(matches!(
+        result,
+        Err(ParticipantDetachRepositoryError::DurableStore(
+            DurabilityError::ConfigError(message)
+        )) if message == "injected participant detach flush failure"
+    ));
+
+    let entries = runtime.block_on(inner.read_from(repository.stream_key(), 0, 8))?;
+    assert_eq!(
+        entries.len(),
+        1,
+        "the failed durability barrier must not cause an internal append retry"
+    );
+    Ok(())
 }
 
 fn assert_reopened_history(
