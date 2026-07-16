@@ -124,8 +124,10 @@ pub use observer_recovery::{
 };
 pub use operations::{
     MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, MarkerProofDecision,
-    MarkerProofInput, MarkerProofPermit, MarkerProofState, ParticipantAckCommit,
-    ParticipantAckCommitError, ParticipantAckDecision, apply_marker_ack, apply_participant_ack,
+    MarkerProofInput, MarkerProofPermit, MarkerProofState, NonzeroAckEpisodePosition,
+    NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError, NonzeroParticipantAckDecision,
+    NonzeroParticipantAckInvariantError, ParticipantAckCommit, ParticipantAckCommitError,
+    ParticipantAckDecision, apply_marker_ack, apply_nonzero_participant_ack, apply_participant_ack,
     select_marker_proof,
 };
 pub use storage::{

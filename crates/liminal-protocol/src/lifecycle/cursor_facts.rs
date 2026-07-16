@@ -417,6 +417,12 @@ impl NonzeroDebtCursorEpisode {
         Some(episode)
     }
 
+    /// Returns the conversation owning this aggregate for internal operation
+    /// prestate validation.
+    pub(super) const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
     /// Returns the exact nonzero debt proving this episode is active.
     #[must_use]
     pub const fn debt(&self) -> ClosureDebt {
