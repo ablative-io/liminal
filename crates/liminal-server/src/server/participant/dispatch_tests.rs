@@ -20,7 +20,7 @@ use super::{
         ParticipantConnectionContext, ParticipantDispatch, ParticipantDispatchError,
         ParticipantSemanticError, ParticipantSemanticHandler, dispatch_generic_frame,
     },
-    transport::ParticipantSession,
+    transport::{ParticipantSession, normalize_configured_frame_limit},
 };
 
 #[derive(Debug)]
@@ -100,10 +100,9 @@ fn participant_generic(request: ClientRequest) -> Result<Frame, String> {
 }
 
 fn negotiated_session() -> Result<ParticipantSession, String> {
+    let limit = normalize_configured_frame_limit(u64::MAX).map_err(|error| format!("{error:?}"))?;
     let mut session = ParticipantSession::default();
-    session
-        .negotiate_v1()
-        .map_err(|error| format!("{error:?}"))?;
+    session.negotiate_v1(limit);
     Ok(session)
 }
 

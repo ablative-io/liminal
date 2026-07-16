@@ -190,7 +190,11 @@ fn supervisor_allocation_reaches_real_process_handler_as_exact_context()
     let participant_service = InstalledParticipantService::new(
         Arc::new(RecordingParticipantHandler { observations }),
         Arc::clone(&store),
-    );
+        u64::MAX,
+    )
+    .map_err(|error| ServerError::ConfigValidation {
+        message: format!("invalid participant test wire-frame limit: {error:?}"),
+    })?;
     let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
         participant_service,
     });

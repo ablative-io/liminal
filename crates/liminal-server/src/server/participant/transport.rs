@@ -1,9 +1,9 @@
 use liminal::protocol::Frame;
 use liminal_protocol::wire::{
-    AuthenticationState, ClientRequest, CodecError, InboundGateContext, InboundGateError,
-    NegotiatedParticipantCapability, PARTICIPANT_FRAME_TYPE, ParticipantCapabilityState,
-    ParticipantFrame, ParticipantTransportRejected, ReceiverDirection, ServerValue,
-    TransportRejectionReason, ValidatedFrameLimit, encode, encoded_len, gate_inbound,
+    AuthenticationState, ClientRequest, CodecError, FRAME_MAX, InboundGateContext,
+    InboundGateError, NegotiatedParticipantCapability, PARTICIPANT_FRAME_TYPE,
+    ParticipantCapabilityState, ParticipantFrame, ParticipantTransportRejected, ReceiverDirection,
+    ServerValue, TransportRejectionReason, ValidatedFrameLimit, encode, encoded_len, gate_inbound,
 };
 
 /// Reserved connection-capability bit for `participant-v1`.
@@ -12,9 +12,6 @@ use liminal_protocol::wire::{
 /// participant service is installed. The transport gate can still decode and
 /// reject participant frames while the bit remains unadvertised.
 pub const PARTICIPANT_CAPABILITY_BIT: u32 = 1;
-
-/// Complete participant-frame limit selected for one server connection.
-const PARTICIPANT_MAX_FRAME_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Participant capability negotiated on one authenticated connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,6 +50,20 @@ pub fn preflight_generic_bytes(
     }
 }
 
+/// Normalizes the operator's raw configured `WF` to the generic frame ceiling.
+///
+/// # Errors
+///
+/// Returns [`CodecError::InvalidFrameLimit`] when the configured value is below
+/// the shared protocol's minimum complete-frame size. Values above the generic
+/// `u32` payload ceiling are clamped to [`FRAME_MAX`] exactly as the participant
+/// contract defines.
+pub fn normalize_configured_frame_limit(
+    configured_wf: u64,
+) -> Result<ValidatedFrameLimit, CodecError> {
+    ValidatedFrameLimit::new(configured_wf.min(FRAME_MAX))
+}
+
 impl Default for ParticipantSession {
     fn default() -> Self {
         Self {
@@ -62,17 +73,11 @@ impl Default for ParticipantSession {
 }
 
 impl ParticipantSession {
-    /// Stores the server's supported v1 capability after a successful handshake.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`CodecError::InvalidFrameLimit`] if the server limit ever drifts
-    /// outside the shared protocol's accepted range.
-    pub fn negotiate_v1(&mut self) -> Result<(), CodecError> {
-        let limit = ValidatedFrameLimit::new(PARTICIPANT_MAX_FRAME_BYTES)?;
+    /// Stores the server's supported v1 capability and normalized configured
+    /// complete-frame limit after a successful handshake.
+    pub const fn negotiate_v1(&mut self, limit: ValidatedFrameLimit) {
         self.capability =
             ParticipantCapabilityState::Negotiated(NegotiatedParticipantCapability::v1(limit));
-        Ok(())
     }
 
     const fn gate_context(self, authenticated: bool) -> InboundGateContext {

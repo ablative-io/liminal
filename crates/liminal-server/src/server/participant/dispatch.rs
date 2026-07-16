@@ -8,8 +8,12 @@ use std::sync::Arc;
 
 use liminal::durability::DurableStore;
 use liminal::protocol::Frame;
-use liminal_protocol::wire::{ClientRequest, CodecError, ConnectionIncarnation, ServerValue};
+use liminal_protocol::wire::{
+    ClientRequest, CodecError, ConnectionIncarnation, ServerValue, ValidatedFrameLimit,
+};
 
+#[cfg(test)]
+use super::transport::normalize_configured_frame_limit;
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
 };
@@ -88,20 +92,28 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
 pub struct InstalledParticipantService {
     handler: Arc<dyn ParticipantSemanticHandler>,
     durable_store: Arc<dyn DurableStore>,
+    frame_limit: ValidatedFrameLimit,
 }
 
 impl InstalledParticipantService {
-    /// Pairs a semantic test handler with its declared durable store.
+    /// Pairs a semantic test handler, its declared durable store, and the raw
+    /// configured participant wire-frame limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the shared codec error when the configured limit is smaller than
+    /// the protocol's minimum complete frame.
     #[cfg(test)]
-    #[must_use]
     pub(crate) fn new(
         handler: Arc<dyn ParticipantSemanticHandler>,
         durable_store: Arc<dyn DurableStore>,
-    ) -> Self {
-        Self {
+        configured_wf: u64,
+    ) -> Result<Self, CodecError> {
+        Ok(Self {
             handler,
             durable_store,
-        }
+            frame_limit: normalize_configured_frame_limit(configured_wf)?,
+        })
     }
 
     /// Returns the installed semantic handler.
@@ -114,6 +126,13 @@ impl InstalledParticipantService {
     #[must_use]
     pub(crate) fn durable_store(&self) -> Arc<dyn DurableStore> {
         Arc::clone(&self.durable_store)
+    }
+
+    /// Returns the normalized configured complete-frame limit advertised by
+    /// this installed participant service.
+    #[must_use]
+    pub(crate) const fn frame_limit(&self) -> ValidatedFrameLimit {
+        self.frame_limit
     }
 }
 

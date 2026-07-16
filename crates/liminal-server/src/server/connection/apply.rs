@@ -373,12 +373,10 @@ fn connect_response(
     };
     let (participant_session, capabilities) =
         match (runtime.participant_service(), state.connection_incarnation) {
-            (Some(_), Some(_)) => {
+            (Some(service), Some(_)) => {
                 let mut participant_session =
                     crate::server::participant::ParticipantSession::default();
-                if participant_session.negotiate_v1().is_err() {
-                    return FrameAction::Close;
-                }
+                participant_session.negotiate_v1(service.frame_limit());
                 (participant_session, PARTICIPANT_CAPABILITY_BIT)
             }
             // A generic durable channel store alone does not activate the participant

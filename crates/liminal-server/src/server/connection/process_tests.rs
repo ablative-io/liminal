@@ -10,9 +10,9 @@ use liminal_protocol::{
         lookup_binding_required,
     },
     wire::{
-        ClientRequest, ConnectionIncarnation, Generation, ParticipantFrame, ParticipantUnknown,
-        ReceiverDirection, RecordAdmission, ServerValue, TransportRejectionReason,
-        decode as decode_participant, encode as encode_participant,
+        ClientRequest, ConnectionIncarnation, Generation, PARTICIPANT_FRAME_TYPE, ParticipantFrame,
+        ParticipantUnknown, ReceiverDirection, RecordAdmission, ServerValue,
+        TransportRejectionReason, decode as decode_participant, encode as encode_participant,
         encoded_len as participant_encoded_len,
     },
 };
@@ -28,6 +28,7 @@ use crate::server::connection::worker_front_door::WorkerFrontDoorServices;
 use crate::server::participant::{
     InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext,
     ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSession,
+    preflight_generic_bytes,
 };
 
 /// Fixed connection pid used by the scheduler-free `apply_frame` unit tests.
@@ -237,9 +238,20 @@ impl ParticipantSemanticHandler for ProcessParticipantHandler {
 fn participant_runtime(
     handler: Arc<ProcessParticipantHandler>,
 ) -> Result<ConnectionRuntime, Box<dyn std::error::Error>> {
+    participant_runtime_with_configured_wf(handler, u64::MAX)
+}
+
+fn participant_runtime_with_configured_wf(
+    handler: Arc<ProcessParticipantHandler>,
+    configured_wf: u64,
+) -> Result<ConnectionRuntime, Box<dyn std::error::Error>> {
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let participant_service = InstalledParticipantService::new(handler, store, configured_wf)
+        .map_err(|error| ServerError::ConfigValidation {
+            message: format!("invalid participant test wire-frame limit: {error:?}"),
+        })?;
     let services = RecordingServices {
-        participant_service: Some(InstalledParticipantService::new(handler, store)),
+        participant_service: Some(participant_service),
         ..RecordingServices::default()
     };
     Ok(ConnectionRuntime::for_tests(Arc::new(services)))
@@ -1242,6 +1254,43 @@ fn installed_participant_service_advertises_and_dispatches_with_exact_incarnatio
     Ok(())
 }
 
+#[test]
+fn installed_participant_wire_limit_reaches_negotiated_session()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = participant_runtime_with_configured_wf(
+        Arc::new(ProcessParticipantHandler::default()),
+        128,
+    )?;
+    let mut state = ConnectionProcessState {
+        connection_incarnation: Some(ConnectionIncarnation::new(4, 10)),
+        ..ConnectionProcessState::default()
+    };
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[])),
+        FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
+            if capabilities == PARTICIPANT_CAPABILITY_BIT
+    ));
+
+    let mut oversized_header = vec![PARTICIPANT_FRAME_TYPE, 0, 0, 0, 0, 0];
+    oversized_header.extend_from_slice(&119_u32.to_be_bytes());
+    let Some(rejection) = preflight_generic_bytes(
+        &oversized_header,
+        state.authenticated,
+        state.participant_session,
+    ) else {
+        return Err("installed participant wire-frame limit was not negotiated".into());
+    };
+    assert_eq!(
+        rejection.reason,
+        TransportRejectionReason::FrameTooLarge {
+            complete_frame_bytes: 129,
+            max_frame_bytes: 128,
+        }
+    );
+    Ok(())
+}
+
 /// Semantic failure has no server-authored lifecycle fallback: the connection
 /// closes after the injected handler returns a non-wire error.
 #[test]
@@ -1254,10 +1303,12 @@ fn installed_participant_semantic_failure_closes_without_response()
         connection_incarnation: Some(ConnectionIncarnation::new(4, 10)),
         ..ConnectionProcessState::default()
     };
+    let Some(service) = runtime.participant_service() else {
+        return Err("participant semantic-failure fixture had no installed service".into());
+    };
     state
         .participant_session
-        .negotiate_v1()
-        .map_err(|error| format!("{error:?}"))?;
+        .negotiate_v1(service.frame_limit());
     let (_, frame) = participant_record_admission()?;
 
     assert!(matches!(

@@ -47,11 +47,13 @@ fn services(
     store: Arc<dyn DurableStore>,
 ) -> Result<Arc<dyn ConnectionServices>, ServerError> {
     let connection_services =
-        LiminalConnectionServices::from_config_with_store(config, Arc::clone(&store))?
-            .with_participant_service(InstalledParticipantService::new(
-                Arc::new(UnavailableParticipantHandler),
-                store,
-            ));
+        LiminalConnectionServices::from_config_with_store(config, Arc::clone(&store))?;
+    let participant_service =
+        InstalledParticipantService::new(Arc::new(UnavailableParticipantHandler), store, u64::MAX)
+            .map_err(|error| ServerError::ConfigValidation {
+                message: format!("invalid participant test wire-frame limit: {error:?}"),
+            })?;
+    let connection_services = connection_services.with_participant_service(participant_service);
     Ok(Arc::new(connection_services))
 }
 

@@ -52,5 +52,5 @@ pub use dispatch::{
 };
 pub use transport::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_value,
-    gate_generic_frame, preflight_generic_bytes,
+    gate_generic_frame, normalize_configured_frame_limit, preflight_generic_bytes,
 };

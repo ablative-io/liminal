@@ -1,12 +1,13 @@
 use liminal::protocol::{Frame, decode as decode_generic, encode as encode_generic, encoded_len};
 use liminal_protocol::wire::{
-    ClientRequest, EnrollmentRequest, EnrollmentToken, ParticipantFrame, ReceiverDirection,
-    ServerValue, TransportRejectionReason, decode, encode, encoded_len as participant_encoded_len,
+    ClientRequest, EnrollmentRequest, EnrollmentToken, FRAME_MAX, ParticipantFrame,
+    ReceiverDirection, ServerValue, TransportRejectionReason, decode, encode,
+    encoded_len as participant_encoded_len,
 };
 
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
-    preflight_generic_bytes,
+    normalize_configured_frame_limit, preflight_generic_bytes,
 };
 
 fn encoded_enrollment() -> Result<Vec<u8>, String> {
@@ -27,13 +28,30 @@ fn generic_round_trip(bytes: &[u8]) -> Result<Frame, String> {
     Ok(frame)
 }
 
+fn negotiated_session(configured_wf: u64) -> Result<ParticipantSession, String> {
+    let limit =
+        normalize_configured_frame_limit(configured_wf).map_err(|error| format!("{error:?}"))?;
+    let mut session = ParticipantSession::default();
+    session.negotiate_v1(limit);
+    Ok(session)
+}
+
+#[test]
+fn configured_wire_frame_limit_normalizes_to_generic_ceiling() -> Result<(), String> {
+    assert_eq!(
+        normalize_configured_frame_limit(u64::MAX)
+            .map_err(|error| format!("{error:?}"))?
+            .get(),
+        FRAME_MAX
+    );
+    assert!(normalize_configured_frame_limit(15).is_err());
+    Ok(())
+}
+
 #[test]
 fn negotiated_unknown_outer_frame_uses_shared_request_decoder() -> Result<(), String> {
     let generic = generic_round_trip(&encoded_enrollment()?)?;
-    let mut session = ParticipantSession::default();
-    session
-        .negotiate_v1()
-        .map_err(|error| format!("{error:?}"))?;
+    let session = negotiated_session(u64::MAX)?;
 
     let ingress = gate_generic_frame(&generic, true, session);
 
@@ -50,10 +68,7 @@ fn negotiated_unknown_outer_frame_uses_shared_request_decoder() -> Result<(), St
 #[test]
 fn unauthenticated_participant_request_returns_shared_rejection() -> Result<(), String> {
     let generic = generic_round_trip(&encoded_enrollment()?)?;
-    let mut session = ParticipantSession::default();
-    session
-        .negotiate_v1()
-        .map_err(|error| format!("{error:?}"))?;
+    let session = negotiated_session(u64::MAX)?;
 
     let ParticipantIngress::Rejected(rejection) = gate_generic_frame(&generic, false, session)
     else {
@@ -122,11 +137,8 @@ fn unrelated_unknown_frame_remains_outside_participant_protocol() {
 
 #[test]
 fn negotiated_limit_rejects_from_header_before_body_arrives() -> Result<(), String> {
-    let mut session = ParticipantSession::default();
-    session
-        .negotiate_v1()
-        .map_err(|error| format!("{error:?}"))?;
-    let declared_payload = 4_194_295_u32;
+    let session = negotiated_session(128)?;
+    let declared_payload = 119_u32;
     let mut header = vec![0x1A, 0, 0, 0, 0, 0];
     header.extend_from_slice(&declared_payload.to_be_bytes());
 
@@ -136,8 +148,8 @@ fn negotiated_limit_rejects_from_header_before_body_arrives() -> Result<(), Stri
     assert_eq!(
         rejection.reason,
         TransportRejectionReason::FrameTooLarge {
-            complete_frame_bytes: 4_194_305,
-            max_frame_bytes: 4_194_304,
+            complete_frame_bytes: 129,
+            max_frame_bytes: 128,
         }
     );
     Ok(())
@@ -145,10 +157,7 @@ fn negotiated_limit_rejects_from_header_before_body_arrives() -> Result<(), Stri
 
 #[test]
 fn incomplete_frame_within_limit_remains_in_incremental_decoder() -> Result<(), String> {
-    let mut session = ParticipantSession::default();
-    session
-        .negotiate_v1()
-        .map_err(|error| format!("{error:?}"))?;
+    let session = negotiated_session(256)?;
     let mut header = vec![0x1A, 0, 0, 0, 0, 0];
     header.extend_from_slice(&128_u32.to_be_bytes());
 
