@@ -216,6 +216,14 @@ impl ProductionParticipantHandler {
         context: ParticipantConnectionContext,
         request: &ObserverRecoveryHandshake,
     ) -> Result<ServerValue, ParticipantSemanticError> {
+        // Crash-window repair pre-pass: every named conversation's observer
+        // registration is made derivable from its own durable conversation
+        // log before the batch classifies, so an enrollment whose Track row
+        // was lost between the two appends is re-registered idempotently
+        // instead of being refused forever.
+        for refusal in &request.observer_refusals {
+            self.ensure_tracking_from_log(refusal.conversation_id)?;
+        }
         // Connection-conversation tracking derived from binding authority:
         // the conversations whose live binding epoch names this connection.
         let tracked = self.bound_conversations(context)?;
@@ -329,37 +337,93 @@ impl ProductionParticipantHandler {
         result
     }
 
+    /// Ensures a conversation's observer registration is derivable from its
+    /// own durable log (idempotent crash-window repair).
+    ///
+    /// A never-committed conversation id leaves no residue: its probe cell is
+    /// evicted. An already-live enrolled owner re-registers idempotently,
+    /// covering an earlier failed Track append inside this process lifetime.
+    fn ensure_tracking_from_log(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ParticipantSemanticError> {
+        let cell = self.cell(conversation_id)?;
+        let mut owner = cell
+            .lock()
+            .map_err(|_| ParticipantSemanticError::Internal {
+                message: format!(
+                    "participant conversation {conversation_id} owner lock is poisoned"
+                ),
+            })?;
+        if owner.is_none() {
+            let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
+            let replayed = self.replay_and_repair(conversation_id, &log)?;
+            if replayed.next_log_sequence == 0 {
+                drop(owner);
+                return self.evict_uncommitted(conversation_id, &cell);
+            }
+            *owner = Some(replayed);
+            drop(owner);
+            return Ok(());
+        }
+        let enrolled = owner
+            .as_ref()
+            .is_some_and(|authority| !authority.tokens.is_empty());
+        drop(owner);
+        if enrolled {
+            self.ensure_observer_tracked(conversation_id)?;
+        }
+        Ok(())
+    }
+
     /// Conversations whose current live binding names this connection.
+    ///
+    /// Binding occupancy is derived from DURABLE reality: a registry cell
+    /// whose in-memory owner was discarded by a failed operation is replayed
+    /// from its log before counting, so the observer-recovery capacity check
+    /// never under-reports a durably bound conversation.
     fn bound_conversations(
         &self,
         context: ParticipantConnectionContext,
     ) -> Result<Vec<ConversationId>, ParticipantSemanticError> {
-        let conversations =
-            self.conversations
-                .lock()
-                .map_err(|_| ParticipantSemanticError::Internal {
-                    message: "participant conversation registry lock is poisoned".to_owned(),
-                })?;
+        let cells: Vec<(ConversationId, Arc<Mutex<Option<ConversationAuthority>>>)> = {
+            let conversations =
+                self.conversations
+                    .lock()
+                    .map_err(|_| ParticipantSemanticError::Internal {
+                        message: "participant conversation registry lock is poisoned".to_owned(),
+                    })?;
+            conversations
+                .iter()
+                .map(|(conversation_id, cell)| (*conversation_id, Arc::clone(cell)))
+                .collect()
+        };
         let mut bound = Vec::new();
-        for (conversation_id, cell) in conversations.iter() {
-            let owner = cell
+        for (conversation_id, cell) in cells {
+            let mut owner = cell
                 .lock()
                 .map_err(|_| ParticipantSemanticError::Internal {
                     message: format!(
                         "participant conversation {conversation_id} owner lock is poisoned"
                     ),
                 })?;
-            if let Some(authority) = owner.as_ref() {
-                if !matches!(
-                    authority.binding_slot_occupancy(context.connection_incarnation()),
-                    liminal_protocol::lifecycle::BindingSlotOccupancy::Empty
-                ) {
-                    bound.push(*conversation_id);
-                }
+            if owner.is_none() {
+                let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
+                *owner = Some(self.replay_and_repair(conversation_id, &log)?);
+            }
+            let Some(authority) = owner.as_ref() else {
+                return Err(ParticipantSemanticError::Internal {
+                    message: format!("participant conversation {conversation_id} owner is absent"),
+                });
+            };
+            if !matches!(
+                authority.binding_slot_occupancy(context.connection_incarnation()),
+                liminal_protocol::lifecycle::BindingSlotOccupancy::Empty
+            ) {
+                bound.push(conversation_id);
             }
             drop(owner);
         }
-        drop(conversations);
         bound.sort_unstable();
         Ok(bound)
     }

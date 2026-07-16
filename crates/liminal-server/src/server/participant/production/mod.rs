@@ -33,6 +33,9 @@ mod tests;
 mod tests_binding;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_observer;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_receipts;
 
 pub use handler::ProductionParticipantHandler;
