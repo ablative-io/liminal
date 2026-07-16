@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use crate::wire::{
     AttachBound, AttachSecret, BindingEpoch, CredentialAttachRequest, DeliverySeq, Generation,
 };
@@ -5,9 +7,10 @@ use crate::wire::{
 use super::{
     ActiveBinding, AttachedLifecycleRecord, AttachedRecordPosition, BindingOrigin, BindingState,
     ClosureState, CommittedBindingTerminal, CommittedBindingTerminalPosition,
-    CommittedDetachedTerminal, DetachCell, FencedAttachCommit, LiveMember,
-    MembershipInvariantError, OrdinaryBindingAuthority, OrdinaryDetachedAttachAdmission,
-    PendingFinalization, detach::validate_pending_pair, lookup::AttachSecretProof,
+    CommittedDetachedTerminal, CommittedDiedTerminal, DetachCell, Event, FencedAttachCommit,
+    LiveMember, MembershipInvariantError, OrdinaryBindingAuthority, OrdinaryBindingFate,
+    OrdinaryDetachedAttachAdmission, PendingFinalization, detach::validate_pending_pair,
+    lookup::AttachSecretProof,
 };
 
 /// Result allocation owned by one successful credential-attach transaction.
@@ -112,6 +115,58 @@ pub struct AttachCommit<F, V> {
 }
 
 impl<F, V> AttachCommit<F, V> {
+    /// Consumes one exact normal-ack event into this ordinary attach's cursor authority.
+    ///
+    /// Fenced recovery has no ordinary authority and therefore returns the
+    /// unchanged commit. The raw authority never crosses the public boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged commit for fenced recovery or when the event names
+    /// another participant, epoch, previous cursor, or event class.
+    pub fn ordinary_cursor_progressed(mut self, event: Event) -> Result<Self, Box<Self>> {
+        let Some(authority) = self.ordinary_binding_authority.take() else {
+            return Err(Box::new(self));
+        };
+        match authority.cursor_progressed(event) {
+            Ok(authority) => {
+                self.ordinary_binding_authority = Some(authority);
+                Ok(self)
+            }
+            Err(authority) => {
+                self.ordinary_binding_authority = Some(authority);
+                Err(Box::new(self))
+            }
+        }
+    }
+
+    /// Consumes this ordinary attach and its exact durable death into cursor-release fate.
+    ///
+    /// A fenced attach cannot enter this path because it carries no ordinary
+    /// binding authority; recovered epochs still require the distinct
+    /// [`FencedAttachCommit`] provenance transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged commit for fenced recovery or unless the terminal
+    /// names this exact ordinary participant, conversation, and binding epoch.
+    pub fn ordinary_binding_fate(
+        mut self,
+        terminal: CommittedDiedTerminal,
+        resulting_floor: DeliverySeq,
+    ) -> Result<OrdinaryBindingFate, Box<Self>> {
+        let Some(authority) = self.ordinary_binding_authority.take() else {
+            return Err(Box::new(self));
+        };
+        match authority.binding_fate(terminal, resulting_floor) {
+            Ok(fate) => Ok(fate),
+            Err(authority) => {
+                self.ordinary_binding_authority = Some(authority);
+                Err(Box::new(self))
+            }
+        }
+    }
+
     /// Returns no-marker fate authority only for a committed ordinary attach.
     ///
     /// Fenced recovery returns `None`; its recovered epoch must instead use the

@@ -872,40 +872,9 @@ impl OrdinaryBindingAuthority {
 
 /// Exact no-marker fate derived from an ordinary attach and its durable death.
 ///
-/// Fields are private, so raw participant/epoch values cannot create cursor-
-/// release authority. Its executable transitions are also crate-sealed:
-///
-/// ```compile_fail
-/// use liminal_protocol::lifecycle::{ClosureDebt, OrdinaryBindingFate};
-///
-/// fn direct(fate: OrdinaryBindingFate, debt: ClosureDebt) {
-///     let _ = fate.into_direct_state(debt);
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use liminal_protocol::lifecycle::{ClosureDebt, ObserverProjection, OrdinaryBindingFate};
-///
-/// fn behind_projection(
-///     projection: ObserverProjection,
-///     fate: OrdinaryBindingFate,
-///     debt: ClosureDebt,
-/// ) {
-///     let _ = projection.apply_ordinary_binding_fate(debt, fate);
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use liminal_protocol::lifecycle::{ClosureDebt, OrdinaryBindingFate, PhysicalCompaction};
-///
-/// fn behind_compaction(
-///     compaction: PhysicalCompaction,
-///     fate: OrdinaryBindingFate,
-///     debt: ClosureDebt,
-/// ) {
-///     let _ = compaction.apply_ordinary_binding_fate(debt, fate);
-/// }
-/// ```
+/// Fields are private and the only public producer consumes an [`AttachCommit`]
+/// carrying ordinary provenance. A fenced attach cannot produce this type, so
+/// executing it cannot bypass [`FencedAttachCommit::recovered_binding_fate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingFate {
     through_seq: DeliverySeq,
@@ -928,7 +897,7 @@ impl OrdinaryBindingFate {
 
     /// Selects direct `DetachedCursorRelease` when no storage edge precedes it.
     #[must_use]
-    pub(crate) const fn into_direct_state(self, debt: ClosureDebt) -> ClosureState {
+    pub const fn into_direct_state(self, debt: ClosureDebt) -> ClosureState {
         owed(debt, StoredEdge::DetachedCursorRelease(self.release))
     }
 }
@@ -1500,7 +1469,7 @@ impl ObserverProjection {
         dead_code,
         reason = "the crate-owned binding-fate operation invokes this sealed OP transition"
     )]
-    pub(crate) const fn apply_ordinary_binding_fate(
+    pub const fn apply_ordinary_binding_fate(
         self,
         resulting_debt: ClosureDebt,
         authority: OrdinaryBindingFate,
@@ -1549,6 +1518,21 @@ impl ObserverProjection {
     /// Returns the pending authority intact unless it belongs to this exact OP
     /// and the completion event reaches its exact boundary.
     pub fn complete_after_recovered_binding_fate(
+        self,
+        event: Event,
+        resulting_debt: Option<ClosureDebt>,
+        pending: PendingRecoveredCursorRelease,
+    ) -> Result<ClosureState, PendingRecoveredCursorRelease> {
+        self.complete_after_binding_fate(event, resulting_debt, pending)
+    }
+
+    /// Consumes a latent ordinary cursor suffix on exact OP completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns the pending authority intact unless it belongs to this exact OP
+    /// and the completion event reaches the stored projection boundary.
+    pub fn complete_after_ordinary_binding_fate(
         self,
         event: Event,
         resulting_debt: Option<ClosureDebt>,
