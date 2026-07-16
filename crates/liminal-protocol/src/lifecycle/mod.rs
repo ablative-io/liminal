@@ -9,6 +9,7 @@
 //! tests.
 
 mod admission;
+mod aggregate_commit;
 mod attach;
 mod binding;
 mod claim_frontier;
@@ -28,6 +29,8 @@ mod operation_event;
 mod operations;
 mod storage;
 
+#[cfg(test)]
+mod aggregate_commit_tests;
 #[cfg(test)]
 mod attach_tests;
 #[cfg(test)]
@@ -80,6 +83,13 @@ pub use admission::{
     select_semantic_connection_capacity,
 };
 use admission::{admit_sequence, allocate_order};
+pub use aggregate_commit::{
+    AggregateOperationCommit, AggregateOperationDecision, AggregateOperationFault,
+    AggregateOperationFaultReason, AggregateOperationRefusal, AggregateOperationResult,
+    decide_attached_operation, decide_detached_operation, decide_enrolled_operation,
+    decide_left_operation, decide_nonzero_debt_ack_operation,
+    decide_ordinary_binding_fate_operation, decide_recovered_binding_fate_operation,
+};
 pub use attach::{
     AttachCommit, AttachCommitError, AttachCommitParameters, AttachTransition,
     AttachVerificationError, VerifiedAttachCommit, commit_attach,

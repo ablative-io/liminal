@@ -24,9 +24,10 @@ use super::{
     ActiveBinding, AllocatedParticipantSlot, AttachCommit, AttachCommitParameters,
     AttachSecretProof, AttachTransition, AttachedRecordPosition, BindingState,
     CommittedBindingTerminalPosition, CommittedDetachTransition, DetachCell, EnrollmentCommit,
-    EnrollmentCommitParameters, EnrollmentFingerprint, IdentityState, LeaveCommitParameters,
-    LeaveFingerprint, LiveMember, LiveMemberRestore, ParticipantSlotAllocatorProof,
-    RetiredIdentity, commit_attach, commit_detach, commit_enrollment, commit_leave,
+    EnrollmentCommitParameters, EnrollmentFingerprint, IdentityState, LeaveCommit,
+    LeaveCommitParameters, LeaveFingerprint, LiveMember, LiveMemberRestore,
+    ParticipantSlotAllocatorProof, RetiredIdentity, commit_attach, commit_detach,
+    commit_enrollment, commit_leave,
 };
 
 fn generation(value: u64) -> Generation {
@@ -61,7 +62,7 @@ impl ParticipantSlotAllocatorProof for AllocationProof {
     }
 }
 
-fn enrollment_commit() -> EnrollmentCommit<Vec<u8>> {
+pub(super) fn enrollment_commit() -> EnrollmentCommit<Vec<u8>> {
     commit_enrollment(
         &EnrollmentRequest {
             conversation_id: 17,
@@ -101,7 +102,7 @@ fn attach_member() -> LiveMember<Vec<u8>> {
     .expect("fixture membership is internally consistent")
 }
 
-fn superseding_attach_commit() -> AttachCommit<Vec<u8>, [u8; 32]> {
+pub(super) fn superseding_attach_commit() -> AttachCommit<Vec<u8>, [u8; 32]> {
     let old_binding = ActiveBinding {
         participant_id: 3,
         conversation_id: 29,
@@ -137,7 +138,7 @@ fn superseding_attach_commit() -> AttachCommit<Vec<u8>, [u8; 32]> {
         .expect("verified supersession commits")
 }
 
-fn detach_transition(
+pub(super) fn detach_transition(
     participant_id: u64,
     token_byte: u8,
     delivery_seq: u64,
@@ -191,7 +192,7 @@ fn leave_member() -> LiveMember<Vec<u8>> {
     .expect("fixture history belongs to the member")
 }
 
-fn retired_identity() -> RetiredIdentity<Vec<u8>, Vec<u8>, String> {
+pub(super) fn bound_leave_commit() -> LeaveCommit<Vec<u8>, Vec<u8>, String> {
     let member = leave_member();
     let binding = ActiveBinding {
         participant_id: 7,
@@ -214,7 +215,7 @@ fn retired_identity() -> RetiredIdentity<Vec<u8>, Vec<u8>, String> {
             LeaveFingerprint::new(String::from("canonical-leave")),
         )
         .expect("fixture request has current authority");
-    let commit = commit_leave(
+    commit_leave(
         member,
         binding_state,
         DetachCell::<[u8; 32]>::default(),
@@ -224,8 +225,11 @@ fn retired_identity() -> RetiredIdentity<Vec<u8>, Vec<u8>, String> {
             left_delivery_seq: 6,
         },
     )
-    .expect("bound Leave commits");
-    let (state, _) = commit.into_parts();
+    .expect("bound Leave commits")
+}
+
+fn retired_identity() -> RetiredIdentity<Vec<u8>, Vec<u8>, String> {
+    let (state, _) = bound_leave_commit().into_parts();
     match state {
         IdentityState::Retired(retired) => retired,
         IdentityState::Live(_) => panic!("Leave must return only a tombstone"),
