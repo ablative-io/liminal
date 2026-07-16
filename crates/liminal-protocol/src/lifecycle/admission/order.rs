@@ -129,6 +129,104 @@ impl OrderLedger {
     pub fn remaining(self) -> u128 {
         remaining_after(self.high)
     }
+
+    /// Plans optional enrollment's `A+1, X+1` claim transition.
+    ///
+    /// Existing `RO` and `RA` claims are preserved. The returned claim state is
+    /// sealed and can only be consumed by [`allocate_order`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrderAdmissionError::ActiveBindingClaimOverflow`] or
+    /// [`OrderAdmissionError::MembershipExitClaimOverflow`] for the first
+    /// checked addition that cannot be represented.
+    pub fn plan_enrollment(self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
+        let active_binding_terminals = self
+            .claims
+            .active_binding_terminals
+            .checked_add(1)
+            .ok_or(OrderAdmissionError::ActiveBindingClaimOverflow)?;
+        let membership_exits = self
+            .claims
+            .membership_exits
+            .checked_add(1)
+            .ok_or(OrderAdmissionError::MembershipExitClaimOverflow)?;
+        Ok(ResultingOrderClaims(OrderClaims {
+            active_binding_terminals,
+            membership_exits,
+            ..self.claims
+        }))
+    }
+
+    /// Plans optional detached attach's `A+1` claim transition.
+    ///
+    /// Membership and both recovery order claims are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrderAdmissionError::ActiveBindingClaimOverflow`] if the new
+    /// terminal claim cannot be represented.
+    pub fn plan_detached_attach(self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
+        let active_binding_terminals = self
+            .claims
+            .active_binding_terminals
+            .checked_add(1)
+            .ok_or(OrderAdmissionError::ActiveBindingClaimOverflow)?;
+        Ok(ResultingOrderClaims(OrderClaims {
+            active_binding_terminals,
+            ..self.claims
+        }))
+    }
+
+    /// Plans supersession's transfer of the existing `A` claim.
+    ///
+    /// The aggregate `A`, `X`, `RO`, and `RA` counts are unchanged: the old
+    /// binding's terminal claim moves to the replacement binding.
+    #[must_use]
+    pub const fn plan_supersession(self) -> ResultingOrderClaims {
+        ResultingOrderClaims(self.claims)
+    }
+
+    /// Plans ordinary record admission, which creates no order claim.
+    #[must_use]
+    pub const fn plan_ordinary_record(self) -> ResultingOrderClaims {
+        ResultingOrderClaims(self.claims)
+    }
+
+    /// Applies fenced recovery using only its pre-owned `RO` and `RA` claims.
+    ///
+    /// `RO` is consumed by the recovery operation and `RA` transfers into one
+    /// new active binding-terminal `A` claim. No caller major is allocated, so
+    /// the order high watermark is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrderAdmissionError::RecoveryOrderReserveMissing`] unless both
+    /// coupled recovery claims exist, or
+    /// [`OrderAdmissionError::ActiveBindingClaimOverflow`] if `RA` cannot be
+    /// transferred into `A`.
+    pub fn apply_fenced_recovery(self) -> Result<Self, OrderAdmissionError> {
+        if !self.claims.recovery_operation || !self.claims.recovery_replacement_terminal {
+            return Err(OrderAdmissionError::RecoveryOrderReserveMissing {
+                recovery_operation: self.claims.recovery_operation,
+                recovery_replacement_terminal: self.claims.recovery_replacement_terminal,
+            });
+        }
+        let active_binding_terminals = self
+            .claims
+            .active_binding_terminals
+            .checked_add(1)
+            .ok_or(OrderAdmissionError::ActiveBindingClaimOverflow)?;
+        Ok(Self {
+            high: self.high,
+            claims: OrderClaims {
+                active_binding_terminals,
+                membership_exits: self.claims.membership_exits,
+                recovery_operation: false,
+                recovery_replacement_terminal: false,
+            },
+        })
+    }
 }
 
 /// Protocol-produced post-operation order claims.
@@ -139,13 +237,6 @@ impl OrderLedger {
 pub struct ResultingOrderClaims(OrderClaims);
 
 impl ResultingOrderClaims {
-    // This sealed producer is consumed by the protocol operation layer. Keep it
-    // crate-private so a storage binding cannot forge simulated claims.
-    #[allow(dead_code)]
-    pub(crate) const fn from_claims(claims: OrderClaims) -> Self {
-        Self(claims)
-    }
-
     const fn claims(self) -> OrderClaims {
         self.0
     }
@@ -183,6 +274,17 @@ pub enum OrderAdmissionError {
         remaining: u128,
         /// Simulated resulting claim count.
         resulting_claims: u128,
+    },
+    /// Adding an active binding-terminal claim would exceed u64.
+    ActiveBindingClaimOverflow,
+    /// Adding a membership-exit claim would exceed u64.
+    MembershipExitClaimOverflow,
+    /// Fenced recovery lacks one or both coupled reserved order claims.
+    RecoveryOrderReserveMissing {
+        /// Whether the current edge owns recovery-operation claim `RO`.
+        recovery_operation: bool,
+        /// Whether the current edge owns replacement-terminal claim `RA`.
+        recovery_replacement_terminal: bool,
     },
 }
 

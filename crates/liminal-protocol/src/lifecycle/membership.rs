@@ -100,6 +100,69 @@ pub struct LiveMember<F> {
     latest_terminal: Option<CommittedBindingTerminal>,
 }
 
+/// Crate-owned proof of one exact cumulative cursor transition.
+///
+/// Fields and construction remain crate-private so consuming servers can apply
+/// only an update emitted by a typed protocol operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct LiveMemberCursorUpdate {
+    conversation_id: ConversationId,
+    participant_id: ParticipantId,
+    generation: Generation,
+    from_cursor: DeliverySeq,
+    resulting_cursor: DeliverySeq,
+}
+
+impl LiveMemberCursorUpdate {
+    /// Captures the complete identity and old/new cursor prestate.
+    pub(super) const fn new(
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        generation: Generation,
+        from_cursor: DeliverySeq,
+        resulting_cursor: DeliverySeq,
+    ) -> Self {
+        Self {
+            conversation_id,
+            participant_id,
+            generation,
+            from_cursor,
+            resulting_cursor,
+        }
+    }
+}
+
+/// Rejection while applying an opaque cursor update to durable membership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum LiveMemberCursorUpdateError {
+    /// Conversation differs from the commit proof.
+    Conversation {
+        expected: ConversationId,
+        actual: ConversationId,
+    },
+    /// Participant differs from the commit proof.
+    Participant {
+        expected: ParticipantId,
+        actual: ParticipantId,
+    },
+    /// Credential generation differs from the commit proof.
+    Generation {
+        expected: Generation,
+        actual: Generation,
+    },
+    /// Proposed update is not a strict cumulative advance.
+    NonAdvancing {
+        from_cursor: DeliverySeq,
+        resulting_cursor: DeliverySeq,
+    },
+    /// Member cursor is neither the old nor already-committed new prestate.
+    CursorPrestate {
+        expected_from_cursor: DeliverySeq,
+        resulting_cursor: DeliverySeq,
+        actual_cursor: DeliverySeq,
+    },
+}
+
 impl<F> LiveMember<F> {
     /// Restores a durable member after checking retained terminal identity and generation.
     ///
@@ -182,6 +245,49 @@ impl<F> LiveMember<F> {
     #[must_use]
     pub const fn latest_terminal(&self) -> Option<CommittedBindingTerminal> {
         self.latest_terminal
+    }
+
+    /// Applies an exact old/new-prestate cursor proof without permitting regression.
+    pub(super) fn apply_cursor_update(
+        &mut self,
+        update: LiveMemberCursorUpdate,
+    ) -> Result<(), LiveMemberCursorUpdateError> {
+        if self.conversation_id != update.conversation_id {
+            return Err(LiveMemberCursorUpdateError::Conversation {
+                expected: update.conversation_id,
+                actual: self.conversation_id,
+            });
+        }
+        if self.participant_id != update.participant_id {
+            return Err(LiveMemberCursorUpdateError::Participant {
+                expected: update.participant_id,
+                actual: self.participant_id,
+            });
+        }
+        if self.generation != update.generation {
+            return Err(LiveMemberCursorUpdateError::Generation {
+                expected: update.generation,
+                actual: self.generation,
+            });
+        }
+        if update.resulting_cursor <= update.from_cursor {
+            return Err(LiveMemberCursorUpdateError::NonAdvancing {
+                from_cursor: update.from_cursor,
+                resulting_cursor: update.resulting_cursor,
+            });
+        }
+        if self.cursor == update.resulting_cursor {
+            return Ok(());
+        }
+        if self.cursor != update.from_cursor {
+            return Err(LiveMemberCursorUpdateError::CursorPrestate {
+                expected_from_cursor: update.from_cursor,
+                resulting_cursor: update.resulting_cursor,
+                actual_cursor: self.cursor,
+            });
+        }
+        self.cursor = update.resulting_cursor;
+        Ok(())
     }
 
     /// Replaces the latest binding terminal after checking its identity domain.

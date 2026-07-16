@@ -11,6 +11,7 @@
 mod admission;
 mod attach;
 mod binding;
+mod closure_accounting;
 mod cursor_facts;
 mod detach;
 mod edge;
@@ -18,12 +19,15 @@ mod enrollment;
 mod lookup;
 mod membership;
 mod observer_recovery;
+mod operations;
 mod storage;
 
 #[cfg(test)]
 mod attach_tests;
 #[cfg(test)]
 mod binding_tests;
+#[cfg(test)]
+mod closure_accounting_tests;
 #[cfg(test)]
 mod cursor_facts_tests;
 #[cfg(test)]
@@ -67,6 +71,11 @@ pub use binding::{
     CommittedDiedTerminal, DetachedBindingTransition, DiedBindingTransition,
     PendingBindingTerminalPosition, PendingDetachedFinalization, PendingDiedFinalization,
     PendingFinalization,
+};
+pub use closure_accounting::{
+    ClosureAccounting, ClosureAccountingError, RecoveryFenceDecision, RecoveryFencePermit,
+    RemainingClosureDecision, RemainingClosurePermit, RequiredCapacityPlan,
+    RequiredCapacityPlanError, check_recovery_fence, check_remaining_closure,
 };
 pub use cursor_facts::{
     BoundParticipantCursor, CumulativeAckAuthorizationError, CumulativeAckOutcome,
@@ -112,6 +121,12 @@ pub use membership::{
 };
 pub use observer_recovery::{
     ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
+};
+pub use operations::{
+    MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, MarkerProofDecision,
+    MarkerProofInput, MarkerProofPermit, MarkerProofState, ParticipantAckCommit,
+    ParticipantAckCommitError, ParticipantAckDecision, apply_marker_ack, apply_participant_ack,
+    select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,

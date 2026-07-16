@@ -1,4 +1,4 @@
-#![allow(clippy::expect_used)]
+#![allow(clippy::expect_used, clippy::panic)]
 
 use crate::wire::{
     AttachAttemptToken, AttachEnvelope, EnrollmentEnvelope, EnrollmentToken, Generation,
@@ -39,37 +39,190 @@ fn record(conversation_id: u64) -> SequenceAllocatingEnvelope {
     })
 }
 
+fn restored(high_watermark: u64, claims: SequenceClaims) -> SequenceLedger {
+    SequenceLedger::try_new(high_watermark, claims).expect("fixture ledger is valid")
+}
+
 fn admitted(
     request: SequenceAllocatingEnvelope,
-    high_watermark: u64,
-    claims: SequenceClaims,
+    resulting: ResultingSequenceState,
 ) -> SequenceLedger {
-    admit_sequence(
-        request,
-        ResultingSequenceState::from_parts(high_watermark, claims),
-    )
-    .expect("fixture reserve fits")
-    .resulting()
+    admit_sequence(request, resulting)
+        .expect("fixture reserve fits")
+        .resulting()
 }
 
 fn exhausted_budget(
     request: SequenceAllocatingEnvelope,
-    high_watermark: u64,
-    claims: SequenceClaims,
+    resulting: ResultingSequenceState,
 ) -> SequenceBudget {
-    let error = admit_sequence(
-        request,
-        ResultingSequenceState::from_parts(high_watermark, claims),
-    )
-    .expect_err("fixture exhausts the sequence suffix");
-    let SequenceAdmissionError::Exhausted(exhausted) = error;
-    exhausted.sequence_budget
+    match admit_sequence(request, resulting).expect_err("fixture exhausts the sequence suffix") {
+        SequenceAdmissionError::Exhausted(exhausted) => exhausted.sequence_budget,
+        error => panic!("expected wire exhaustion, got {error:?}"),
+    }
+}
+
+#[test]
+fn optional_planners_apply_exact_primitive_claim_deltas() {
+    let current = restored(
+        100,
+        SequenceClaims::new(2, 2, 3, RecoverySequenceReserve::None),
+    );
+
+    let enrollment_result = admitted(
+        enrollment(70_001),
+        current
+            .plan_enrollment(2)
+            .expect("enrollment additions fit"),
+    );
+    assert_ledger(
+        enrollment_result,
+        101,
+        3,
+        3,
+        5,
+        RecoverySequenceReserve::None,
+    );
+
+    let detached_result = admitted(
+        attach(70_002),
+        current
+            .plan_detached_attach(2)
+            .expect("detached attach additions fit"),
+    );
+    assert_ledger(detached_result, 101, 2, 3, 5, RecoverySequenceReserve::None);
+
+    let supersession_result = admitted(
+        attach(70_003),
+        current
+            .plan_supersession(2)
+            .expect("supersession additions fit"),
+    );
+    assert_ledger(
+        supersession_result,
+        102,
+        2,
+        2,
+        5,
+        RecoverySequenceReserve::None,
+    );
+
+    let ordinary_result = admitted(
+        record(70_004),
+        current
+            .plan_ordinary_record(2)
+            .expect("ordinary additions fit"),
+    );
+    assert_ledger(ordinary_result, 101, 2, 2, 5, RecoverySequenceReserve::None);
+}
+
+#[test]
+fn optional_planners_preserve_an_existing_recovery_pair() {
+    let current = restored(
+        10,
+        SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::DetachedCredentialRecovery),
+    );
+    let result = admitted(
+        record(71),
+        current
+            .plan_ordinary_record(1)
+            .expect("ordinary marker addition fits"),
+    );
+    assert_ledger(
+        result,
+        11,
+        1,
+        1,
+        1,
+        RecoverySequenceReserve::DetachedCredentialRecovery,
+    );
+}
+
+#[test]
+fn checked_planners_report_counter_overflow_before_admission() {
+    let high_max = restored(u64::MAX, SequenceClaims::default());
+    assert_eq!(
+        high_max.plan_ordinary_record(0),
+        Err(SequenceAdmissionError::HighWatermarkOverflow {
+            high_watermark: u64::MAX,
+            required_values: 1,
+        })
+    );
+
+    let one_value_left = restored(u64::MAX - 1, SequenceClaims::default());
+    assert_eq!(
+        one_value_left.plan_supersession(0),
+        Err(SequenceAdmissionError::HighWatermarkOverflow {
+            high_watermark: u64::MAX - 1,
+            required_values: 2,
+        })
+    );
+
+    let terminal_max = restored(
+        0,
+        SequenceClaims::new(0, u64::MAX, 0, RecoverySequenceReserve::None),
+    );
+    assert_eq!(
+        terminal_max.plan_detached_attach(0),
+        Err(SequenceAdmissionError::BindingTerminalClaimOverflow {
+            binding_terminals: u64::MAX,
+        })
+    );
+
+    let marker_max = restored(
+        0,
+        SequenceClaims::new(0, 0, u64::MAX, RecoverySequenceReserve::None),
+    );
+    assert_eq!(
+        marker_max.plan_ordinary_record(1),
+        Err(SequenceAdmissionError::MarkerClaimOverflow {
+            markers: u64::MAX,
+            new_markers: 1,
+        })
+    );
+}
+
+#[test]
+fn fenced_recovery_consumes_rs_and_transfers_rt_into_t() {
+    let current = restored(
+        10,
+        SequenceClaims::new(1, 0, 2, RecoverySequenceReserve::DetachedCredentialRecovery),
+    );
+    let resulting = current
+        .apply_fenced_recovery()
+        .expect("coupled sequence reserve transfers exactly");
+
+    assert_ledger(resulting, 11, 1, 1, 2, RecoverySequenceReserve::None);
+    assert_eq!(current.required_reserve(), 6);
+    assert_eq!(resulting.required_reserve(), 5);
+    assert_eq!(resulting.budget().rs, 0);
+    assert_eq!(resulting.budget().rt, 0);
+    assert_eq!(resulting.budget().l_times_rt, 0);
+    assert_eq!(resulting.budget().l_times_t, 1);
+}
+
+#[test]
+fn fenced_recovery_requires_the_coupled_sequence_pair() {
+    let current = restored(
+        10,
+        SequenceClaims::new(1, 0, 0, RecoverySequenceReserve::None),
+    );
+    assert_eq!(
+        current.apply_fenced_recovery(),
+        Err(SequenceAdmissionError::RecoverySequenceReserveMissing)
+    );
 }
 
 #[test]
 fn case_21_supersession_projects_the_exact_exhausted_budget() {
-    let claims = SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::None);
-    let budget = exhausted_budget(attach(21), u64::MAX - 2, claims);
+    let current = restored(
+        u64::MAX - 4,
+        SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::None),
+    );
+    let resulting = current
+        .plan_supersession(0)
+        .expect("two resulting record values are representable");
+    let budget = exhausted_budget(attach(21), resulting);
 
     assert_eq!(
         budget,
@@ -86,22 +239,14 @@ fn case_21_supersession_projects_the_exact_exhausted_budget() {
             l_other_times_e: 0,
         }
     );
-    assert_eq!(claims.checked_required_reserve(), Some(3));
 }
 
 #[test]
 fn case_26_exact_seventeen_value_suffix_is_admissible() {
     let high_watermark = u64::MAX - 17;
     let claims = SequenceClaims::new(3, 2, 0, RecoverySequenceReserve::None);
-    let ledger = SequenceLedger::try_new(high_watermark, claims)
-        .expect("all seventeen remaining values are owned exactly once");
+    let ledger = restored(high_watermark, claims);
 
-    assert_eq!(claims.live_members(), 3);
-    assert_eq!(claims.binding_terminals(), 2);
-    assert_eq!(claims.markers(), 0);
-    assert_eq!(claims.recovery(), RecoverySequenceReserve::None);
-    assert_eq!(ledger.high_watermark(), high_watermark);
-    assert_eq!(ledger.claims(), claims);
     assert_eq!(ledger.required_reserve(), 17);
     assert_eq!(
         ledger.budget(),
@@ -122,43 +267,51 @@ fn case_26_exact_seventeen_value_suffix_is_admissible() {
 
 #[test]
 fn case_31_enrollment_and_record_fixed_points_both_exhaust() {
-    let claims = SequenceClaims::new(1, 1, 1, RecoverySequenceReserve::None);
-    let enrollment_budget = exhausted_budget(enrollment(31_001), u64::MAX - 1, claims);
-    let record_budget = exhausted_budget(record(31_002), u64::MAX - 3, claims);
+    let enrollment_current = restored(u64::MAX - 2, SequenceClaims::default());
+    let enrollment_budget = exhausted_budget(
+        enrollment(31_001),
+        enrollment_current
+            .plan_enrollment(1)
+            .expect("enrollment counters fit before reserve admission"),
+    );
+
+    let ordinary_current = restored(
+        u64::MAX - 4,
+        SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::None),
+    );
+    let ordinary_budget = exhausted_budget(
+        record(31_002),
+        ordinary_current
+            .plan_ordinary_record(1)
+            .expect("ordinary counters fit before reserve admission"),
+    );
 
     assert_eq!(enrollment_budget.remaining, 1);
-    assert_eq!(record_budget.remaining, 3);
-    assert_eq!(enrollment_budget.e, 1);
-    assert_eq!(enrollment_budget.t, 1);
-    assert_eq!(enrollment_budget.m, 1);
-    assert_eq!(enrollment_budget.l_times_t, 1);
-    assert_eq!(record_budget.e, 1);
-    assert_eq!(record_budget.t, 1);
-    assert_eq!(record_budget.m, 1);
-    assert_eq!(record_budget.l_times_t, 1);
-    assert_eq!(claims.checked_required_reserve(), Some(4));
+    assert_eq!(ordinary_budget.remaining, 3);
+    for budget in [enrollment_budget, ordinary_budget] {
+        assert_eq!(budget.e, 1);
+        assert_eq!(budget.t, 1);
+        assert_eq!(budget.m, 1);
+        assert_eq!(budget.l_times_t, 1);
+    }
 }
 
 #[test]
 fn case_47_derives_all_four_canonical_budgets() {
-    let arm_a = admitted(
-        record(47_001),
+    let arm_a = restored(
         u64::MAX - 2,
         SequenceClaims::new(1, 0, 0, RecoverySequenceReserve::None),
     );
     let h = u64::MAX - 6;
-    let arm_b = admitted(
-        attach(47_002),
+    let arm_b = restored(
         h,
         SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::DetachedCredentialRecovery),
     );
-    let arm_c = admitted(
-        attach(47_003),
+    let arm_c = restored(
         h + 1,
         SequenceClaims::new(1, 0, 1, RecoverySequenceReserve::None),
     );
-    let arm_d = admitted(
-        record(47_004),
+    let arm_d = restored(
         u64::MAX - 3,
         SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::None),
     );
@@ -228,8 +381,7 @@ fn case_47_derives_all_four_canonical_budgets() {
 
 #[test]
 fn case_54_shutdown_reserve_is_derived_as_six() {
-    let ledger = admitted(
-        enrollment(54),
+    let ledger = restored(
         4,
         SequenceClaims::new(2, 0, 2, RecoverySequenceReserve::None),
     );
@@ -253,17 +405,35 @@ fn case_54_shutdown_reserve_is_derived_as_six() {
 }
 
 #[test]
-fn maximum_boundary_allows_only_a_zero_reserve() {
-    let empty = admitted(record(60), u64::MAX, SequenceClaims::default());
-    assert_eq!(empty.required_reserve(), 0);
-    assert_eq!(empty.budget().remaining, 0);
+fn maximum_boundary_allows_only_a_zero_resulting_reserve() {
+    let clear_current = restored(u64::MAX - 1, SequenceClaims::default());
+    let clear = admitted(
+        record(60),
+        clear_current
+            .plan_ordinary_record(0)
+            .expect("final value is representable"),
+    );
+    assert_eq!(clear.high_watermark(), u64::MAX);
+    assert_eq!(clear.required_reserve(), 0);
 
     let one_exit = SequenceClaims::new(1, 0, 0, RecoverySequenceReserve::None);
-    let budget = exhausted_budget(record(61), u64::MAX, one_exit);
+    let claimed_current = restored(u64::MAX - 1, one_exit);
+    let budget = exhausted_budget(
+        record(61),
+        claimed_current
+            .plan_ordinary_record(0)
+            .expect("final value is representable"),
+    );
     assert_eq!(budget.remaining, 0);
     assert_eq!(budget.e, 1);
 
-    let equality = admitted(record(62), u64::MAX - 1, one_exit);
+    let equality_current = restored(u64::MAX - 2, one_exit);
+    let equality = admitted(
+        record(62),
+        equality_current
+            .plan_ordinary_record(0)
+            .expect("penultimate value is representable"),
+    );
     assert_eq!(equality.required_reserve(), 1);
     assert_eq!(equality.budget().remaining, 1);
 }
@@ -286,7 +456,7 @@ fn restore_rejects_an_unowned_suffix_and_reports_derived_budget() {
 }
 
 #[test]
-fn checked_wide_sum_overflow_is_an_exhaustion_not_a_wrap() {
+fn checked_wide_derived_sum_never_wraps() {
     let claims = SequenceClaims::new(
         u64::MAX,
         u64::MAX,
@@ -294,15 +464,28 @@ fn checked_wide_sum_overflow_is_an_exhaustion_not_a_wrap() {
         RecoverySequenceReserve::DetachedCredentialRecovery,
     );
     assert_eq!(claims.checked_required_reserve(), None);
-
-    let budget = exhausted_budget(record(63), 0, claims);
+    let budget = claims.budget(0);
     assert_eq!(budget.e, u64::MAX);
-    assert_eq!(budget.t, u64::MAX);
-    assert_eq!(budget.m, u64::MAX);
     assert_eq!(budget.rs, 1);
     assert_eq!(budget.rt, 1);
     assert_eq!(
         budget.l_times_t,
         u128::from(u64::MAX) * u128::from(u64::MAX)
     );
+}
+
+fn assert_ledger(
+    ledger: SequenceLedger,
+    high_watermark: u64,
+    live_members: u64,
+    binding_terminals: u64,
+    markers: u64,
+    recovery: RecoverySequenceReserve,
+) {
+    let claims = ledger.claims();
+    assert_eq!(ledger.high_watermark(), high_watermark);
+    assert_eq!(claims.live_members(), live_members);
+    assert_eq!(claims.binding_terminals(), binding_terminals);
+    assert_eq!(claims.markers(), markers);
+    assert_eq!(claims.recovery(), recovery);
 }

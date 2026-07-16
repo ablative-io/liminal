@@ -194,6 +194,178 @@ impl SequenceLedger {
     pub const fn required_reserve(self) -> u128 {
         self.required_reserve
     }
+
+    /// Plans optional enrollment: one record, one member, one terminal claim,
+    /// and the protocol-computed new marker claims.
+    ///
+    /// Existing recovery claims are preserved. `E`, `L_other`, and all product
+    /// terms remain derived from the resulting primitive state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
+    /// checked addition cannot be represented.
+    pub fn plan_enrollment(
+        self,
+        new_markers: u64,
+    ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
+        let high_watermark = self.checked_high_watermark(1)?;
+        let live_members = self.claims.live_members.checked_add(1).ok_or(
+            SequenceAdmissionError::LiveMemberClaimOverflow {
+                live_members: self.claims.live_members,
+            },
+        )?;
+        let binding_terminals = self.claims.binding_terminals.checked_add(1).ok_or(
+            SequenceAdmissionError::BindingTerminalClaimOverflow {
+                binding_terminals: self.claims.binding_terminals,
+            },
+        )?;
+        let markers = self.checked_markers(new_markers)?;
+        Ok(ResultingSequenceState {
+            high_watermark,
+            claims: SequenceClaims {
+                live_members,
+                binding_terminals,
+                markers,
+                recovery: self.claims.recovery,
+            },
+        })
+    }
+
+    /// Plans optional detached attach: one record, one terminal claim, and new markers.
+    ///
+    /// Membership and existing recovery claims are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
+    /// checked addition cannot be represented.
+    pub fn plan_detached_attach(
+        self,
+        new_markers: u64,
+    ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
+        let high_watermark = self.checked_high_watermark(1)?;
+        let binding_terminals = self.claims.binding_terminals.checked_add(1).ok_or(
+            SequenceAdmissionError::BindingTerminalClaimOverflow {
+                binding_terminals: self.claims.binding_terminals,
+            },
+        )?;
+        let markers = self.checked_markers(new_markers)?;
+        Ok(ResultingSequenceState {
+            high_watermark,
+            claims: SequenceClaims {
+                binding_terminals,
+                markers,
+                ..self.claims
+            },
+        })
+    }
+
+    /// Plans optional supersession: two records and the new marker claims.
+    ///
+    /// The old terminal claim is consumed while the replacement binding creates
+    /// one, so `T` is unchanged. Membership and recovery claims are preserved.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
+    /// checked addition cannot be represented.
+    pub fn plan_supersession(
+        self,
+        new_markers: u64,
+    ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
+        let high_watermark = self.checked_high_watermark(2)?;
+        let markers = self.checked_markers(new_markers)?;
+        Ok(ResultingSequenceState {
+            high_watermark,
+            claims: SequenceClaims {
+                markers,
+                ..self.claims
+            },
+        })
+    }
+
+    /// Plans ordinary admission: one record and the new marker claims.
+    ///
+    /// Membership, terminal, and recovery claims are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
+    /// checked addition cannot be represented.
+    pub fn plan_ordinary_record(
+        self,
+        new_markers: u64,
+    ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
+        let high_watermark = self.checked_high_watermark(1)?;
+        let markers = self.checked_markers(new_markers)?;
+        Ok(ResultingSequenceState {
+            high_watermark,
+            claims: SequenceClaims {
+                markers,
+                ..self.claims
+            },
+        })
+    }
+
+    /// Applies fenced recovery from its coupled `RS=1, RT=1` reserve.
+    ///
+    /// The recovery Attached record consumes `RS`, while `RT` transfers into a
+    /// normal `T` claim for the recovered binding. The high watermark advances
+    /// once, recovery claims become empty, and no optional sequence allocation
+    /// is performed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SequenceAdmissionError::RecoverySequenceReserveMissing`] if no
+    /// DCR pair exists, an arithmetic error if a checked addition fails, or
+    /// [`SequenceAdmissionError::RecoverySequenceInvariantViolation`] if the
+    /// exact reserved transfer did not preserve the ledger invariant.
+    pub fn apply_fenced_recovery(self) -> Result<Self, SequenceAdmissionError> {
+        if self.claims.recovery != RecoverySequenceReserve::DetachedCredentialRecovery {
+            return Err(SequenceAdmissionError::RecoverySequenceReserveMissing);
+        }
+        let high_watermark = self.checked_high_watermark(1)?;
+        let binding_terminals = self.claims.binding_terminals.checked_add(1).ok_or(
+            SequenceAdmissionError::BindingTerminalClaimOverflow {
+                binding_terminals: self.claims.binding_terminals,
+            },
+        )?;
+        let claims = SequenceClaims {
+            binding_terminals,
+            recovery: RecoverySequenceReserve::None,
+            ..self.claims
+        };
+        let budget = claims.budget(high_watermark);
+        let required_reserve = checked_required_reserve(&budget)
+            .ok_or(SequenceAdmissionError::RecoverySequenceInvariantViolation)?;
+        if required_reserve > u128::from(budget.remaining) {
+            return Err(SequenceAdmissionError::RecoverySequenceInvariantViolation);
+        }
+        Ok(Self {
+            high_watermark,
+            claims,
+            required_reserve,
+        })
+    }
+
+    fn checked_high_watermark(self, required_values: u64) -> Result<u64, SequenceAdmissionError> {
+        self.high_watermark.checked_add(required_values).ok_or(
+            SequenceAdmissionError::HighWatermarkOverflow {
+                high_watermark: self.high_watermark,
+                required_values,
+            },
+        )
+    }
+
+    fn checked_markers(self, new_markers: u64) -> Result<u64, SequenceAdmissionError> {
+        self.claims.markers.checked_add(new_markers).ok_or(
+            SequenceAdmissionError::MarkerClaimOverflow {
+                markers: self.claims.markers,
+                new_markers,
+            },
+        )
+    }
 }
 
 /// Protocol-produced proposed sequence state.
@@ -204,18 +376,6 @@ impl SequenceLedger {
 pub struct ResultingSequenceState {
     high_watermark: u64,
     claims: SequenceClaims,
-}
-
-impl ResultingSequenceState {
-    // This sealed producer is consumed by the protocol operation layer. Keep it
-    // crate-private so a storage binding cannot forge simulated claims.
-    #[allow(dead_code)]
-    pub(crate) const fn from_parts(high_watermark: u64, claims: SequenceClaims) -> Self {
-        Self {
-            high_watermark,
-            claims,
-        }
-    }
 }
 
 /// Successful sequence-reserve admission.
@@ -237,6 +397,34 @@ impl SequenceAdmission {
 pub enum SequenceAdmissionError {
     /// The proposed canonical reserve exceeds the resulting sequence suffix.
     Exhausted(Box<ConversationSequenceExhausted>),
+    /// Appending the operation's record count would exceed the sequence domain.
+    HighWatermarkOverflow {
+        /// Current high watermark.
+        high_watermark: u64,
+        /// Number of consecutive values the transition requires.
+        required_values: u64,
+    },
+    /// Enrollment cannot add another live member claim.
+    LiveMemberClaimOverflow {
+        /// Current live member count.
+        live_members: u64,
+    },
+    /// Enrollment, detached attach, or fenced recovery cannot add a terminal claim.
+    BindingTerminalClaimOverflow {
+        /// Current binding-terminal claim count.
+        binding_terminals: u64,
+    },
+    /// The protocol-computed marker increment cannot be represented.
+    MarkerClaimOverflow {
+        /// Current marker claim count.
+        markers: u64,
+        /// New marker claims proposed by the fixed-point simulation.
+        new_markers: u64,
+    },
+    /// Fenced recovery was attempted without the coupled `RS=1, RT=1` reserve.
+    RecoverySequenceReserveMissing,
+    /// A reserved fenced-recovery transfer failed to preserve the sequence invariant.
+    RecoverySequenceInvariantViolation,
 }
 
 /// Applies the sealed resulting claim state to the sequence-reserve gate.
