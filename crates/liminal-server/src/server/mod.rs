@@ -1,6 +1,6 @@
 pub mod connection;
 pub mod listener;
-mod participant;
+pub mod participant;
 pub mod runtime;
 pub mod shutdown;
 
