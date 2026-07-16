@@ -7,5 +7,5 @@ mod transport_tests;
 
 pub use transport::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_value,
-    gate_generic_frame,
+    gate_generic_frame, preflight_generic_bytes,
 };

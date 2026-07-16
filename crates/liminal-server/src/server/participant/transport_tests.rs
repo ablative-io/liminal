@@ -6,6 +6,7 @@ use liminal_protocol::wire::{
 
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
+    preflight_generic_bytes,
 };
 
 fn encoded_enrollment() -> Result<Vec<u8>, String> {
@@ -102,4 +103,40 @@ fn unrelated_unknown_frame_remains_outside_participant_protocol() {
         gate_generic_frame(&frame, true, ParticipantSession::default()),
         ParticipantIngress::NotParticipant
     );
+}
+
+#[test]
+fn negotiated_limit_rejects_from_header_before_body_arrives() -> Result<(), String> {
+    let mut session = ParticipantSession::default();
+    session
+        .negotiate_v1()
+        .map_err(|error| format!("{error:?}"))?;
+    let declared_payload = 4_194_295_u32;
+    let mut header = vec![0x1A, 0, 0, 0, 0, 0];
+    header.extend_from_slice(&declared_payload.to_be_bytes());
+
+    let Some(rejection) = preflight_generic_bytes(&header, true, session) else {
+        return Err("oversized participant header was not rejected".to_owned());
+    };
+    assert_eq!(
+        rejection.reason,
+        TransportRejectionReason::FrameTooLarge {
+            complete_frame_bytes: 4_194_305,
+            max_frame_bytes: 4_194_304,
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn incomplete_frame_within_limit_remains_in_incremental_decoder() -> Result<(), String> {
+    let mut session = ParticipantSession::default();
+    session
+        .negotiate_v1()
+        .map_err(|error| format!("{error:?}"))?;
+    let mut header = vec![0x1A, 0, 0, 0, 0, 0];
+    header.extend_from_slice(&128_u32.to_be_bytes());
+
+    assert_eq!(preflight_generic_bytes(&header, true, session), None);
+    Ok(())
 }

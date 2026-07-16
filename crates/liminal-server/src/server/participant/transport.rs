@@ -3,7 +3,7 @@ use liminal_protocol::wire::{
     AuthenticationState, ClientRequest, CodecError, InboundGateContext, InboundGateError,
     NegotiatedParticipantCapability, PARTICIPANT_FRAME_TYPE, ParticipantCapabilityState,
     ParticipantFrame, ParticipantTransportRejected, ReceiverDirection, ServerValue,
-    ValidatedFrameLimit, encode, encoded_len, gate_inbound,
+    TransportRejectionReason, ValidatedFrameLimit, encode, encoded_len, gate_inbound,
 };
 
 /// Bit advertised in the existing connection acknowledgement for `participant-v1`.
@@ -20,6 +20,37 @@ const PARTICIPANT_MAX_FRAME_BYTES: u64 = 4 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParticipantSession {
     capability: ParticipantCapabilityState,
+}
+
+/// Rejects an oversized participant frame from its generic header before the
+/// connection buffers the declared body.
+///
+/// The shared gate owns both the negotiated/pre-capability limit and the exact
+/// rejection payload. An incomplete frame within the limit returns `None` and
+/// remains in the ordinary incremental decoder.
+#[must_use]
+pub fn preflight_generic_bytes(
+    input: &[u8],
+    authenticated: bool,
+    session: ParticipantSession,
+) -> Option<ParticipantTransportRejected> {
+    if input.first().copied() != Some(PARTICIPANT_FRAME_TYPE) || input.len() < 10 {
+        return None;
+    }
+    match gate_inbound(input, session.gate_context(authenticated)) {
+        Err(InboundGateError::ParticipantRejected(rejection))
+            if matches!(
+                rejection.reason,
+                TransportRejectionReason::FrameTooLarge { .. }
+            ) =>
+        {
+            Some(rejection)
+        }
+        Ok(_)
+        | Err(
+            InboundGateError::NotParticipantFrame { .. } | InboundGateError::ParticipantRejected(_),
+        ) => None,
+    }
 }
 
 impl Default for ParticipantSession {

@@ -710,6 +710,27 @@ fn process_buffer(
     outbound: &mut OutboundWriter,
 ) -> Result<ProcessStatus, ServerError> {
     loop {
+        if let Some(rejection) = crate::server::participant::preflight_generic_bytes(
+            buffer,
+            state.authenticated,
+            state.participant_session,
+        ) {
+            let response = crate::server::participant::encode_server_value(
+                liminal_protocol::wire::ServerValue::ParticipantTransportRejected(rejection),
+            )
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("failed to encode participant frame-limit rejection: {error:?}"),
+            })?;
+            outbound
+                .enqueue_frame(&response)
+                .map_err(|error| ServerError::ListenerAccept {
+                    message: format!(
+                        "failed to enqueue participant frame-limit rejection: {error}"
+                    ),
+                })?;
+            buffer.clear();
+            return Ok(ProcessStatus::Close);
+        }
         let (frame, consumed) = match decode(buffer) {
             Ok(decoded) => decoded,
             Err(
