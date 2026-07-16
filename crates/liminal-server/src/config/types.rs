@@ -361,6 +361,15 @@ const fn default_max_subscription_inbox_depth() -> usize {
 /// [`ParticipantConfig::collect_errors`] rejects semantically impossible
 /// values during the same accumulated validation pass as the rest of the
 /// config. All values are deployment-owner decisions (no assumed defaults).
+///
+/// Every field here is consumed by the live production handler. The
+/// record-admission and leave-closure parameters (record/marker/mandatory/
+/// recovery charges) are deliberately absent until the claim-frontier
+/// acquisition lands: required-but-inert config would force deployment owners
+/// to author numbers that gate nothing today and silently become live limits
+/// later. They are reintroduced together with their real consumers and
+/// complete validation in the same commit (`deny_unknown_fields` makes a
+/// premature key a typed startup error, never a silent no-op).
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParticipantConfig {
@@ -383,22 +392,6 @@ pub struct ParticipantConfig {
     /// Semantic conversations one connection may track (the protocol's
     /// connection-conversation limit used by observer recovery).
     pub max_semantic_conversations_per_connection: u64,
-    /// Maximum encoded ordinary-record charge: retained entries component.
-    pub max_ordinary_record_entries: u64,
-    /// Maximum encoded ordinary-record charge: retained bytes component.
-    pub max_ordinary_record_bytes: u64,
-    /// Generated maximum marker charge: entries component.
-    pub marker_max_entries: u64,
-    /// Generated maximum marker charge: bytes component.
-    pub marker_max_bytes: u64,
-    /// Generated mandatory transaction envelope `Q`: entries component.
-    pub mandatory_bound_entries: u64,
-    /// Generated mandatory transaction envelope `Q`: bytes component.
-    pub mandatory_bound_bytes: u64,
-    /// Full transferable recovery occupancy `K`: entries component.
-    pub recovery_claim_entries: u64,
-    /// Full transferable recovery occupancy `K`: bytes component.
-    pub recovery_claim_bytes: u64,
 }
 
 impl ParticipantConfig {
@@ -408,7 +401,7 @@ impl ParticipantConfig {
     /// nothing, or violate a protocol precondition; the TTL ordering mirrors
     /// the protocol's own frozen configuration precedence.
     pub(crate) fn collect_errors(&self, errors: &mut Vec<String>) {
-        let nonzero: [(&str, u64); 7] = [
+        let nonzero: [(&str, u64); 6] = [
             ("wire_frame_limit", self.wire_frame_limit),
             ("attach_receipt_ttl_ms", self.attach_receipt_ttl_ms),
             ("receipt_provenance_ttl_ms", self.receipt_provenance_ttl_ms),
@@ -420,10 +413,6 @@ impl ParticipantConfig {
             (
                 "max_semantic_conversations_per_connection",
                 self.max_semantic_conversations_per_connection,
-            ),
-            (
-                "max_ordinary_record_entries",
-                self.max_ordinary_record_entries,
             ),
         ];
         for (field, value) in nonzero {

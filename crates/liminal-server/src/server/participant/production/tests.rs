@@ -37,14 +37,6 @@ pub(super) const fn test_participant_config() -> ParticipantConfig {
         identity_slots: 4,
         observer_recovery_max_entries: 64,
         max_semantic_conversations_per_connection: 32,
-        max_ordinary_record_entries: 1,
-        max_ordinary_record_bytes: 1_048_576,
-        marker_max_entries: 1,
-        marker_max_bytes: 4_096,
-        mandatory_bound_entries: 8,
-        mandatory_bound_bytes: 1_048_576,
-        recovery_claim_entries: 8,
-        recovery_claim_bytes: 1_048_576,
     }
 }
 

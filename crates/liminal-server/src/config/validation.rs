@@ -904,14 +904,6 @@ mod tests {
             identity_slots: 4,
             observer_recovery_max_entries: 64,
             max_semantic_conversations_per_connection: 32,
-            max_ordinary_record_entries: 1,
-            max_ordinary_record_bytes: 1_048_576,
-            marker_max_entries: 1,
-            marker_max_bytes: 4_096,
-            mandatory_bound_entries: 8,
-            mandatory_bound_bytes: 1_048_576,
-            recovery_claim_entries: 8,
-            recovery_claim_bytes: 1_048_576,
         }
     }
 
@@ -935,7 +927,7 @@ mod tests {
     #[test]
     fn zero_participant_values_are_typed_config_errors() -> Result<(), Box<dyn std::error::Error>> {
         type ParticipantMutator = (&'static str, fn(&mut ParticipantConfig));
-        let mutators: [ParticipantMutator; 7] = [
+        let mutators: [ParticipantMutator; 6] = [
             ("wire_frame_limit", |p| p.wire_frame_limit = 0),
             ("attach_receipt_ttl_ms", |p| p.attach_receipt_ttl_ms = 0),
             ("receipt_provenance_ttl_ms", |p| {
@@ -947,9 +939,6 @@ mod tests {
             }),
             ("max_semantic_conversations_per_connection", |p| {
                 p.max_semantic_conversations_per_connection = 0;
-            }),
-            ("max_ordinary_record_entries", |p| {
-                p.max_ordinary_record_entries = 0;
             }),
         ];
         for (field, mutate) in mutators {

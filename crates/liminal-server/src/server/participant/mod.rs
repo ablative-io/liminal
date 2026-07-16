@@ -51,7 +51,7 @@ pub use dispatch::{
     ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
     dispatch_generic_frame,
 };
-pub use production::ProductionParticipantHandler;
+pub(crate) use production::ProductionParticipantHandler;
 pub use transport::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_value,
     gate_generic_frame, normalize_configured_frame_limit, preflight_generic_bytes,
