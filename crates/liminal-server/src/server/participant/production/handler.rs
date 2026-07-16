@@ -6,7 +6,10 @@
 //! next touch cold-replays durable reality). A short registry lock selects
 //! the conversation cell; a per-conversation lock covers replay and each
 //! operation. Everything is event-driven: cells are created on request
-//! arrival and discarded on error — no timer, sweep, or polling loop exists.
+//! arrival, discarded on error, and evicted entirely when the touched
+//! conversation has no durable log — no timer, sweep, or polling loop
+//! exists, and refused probes of unknown conversation ids leave neither
+//! durable nor in-memory residue.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -80,7 +83,10 @@ impl ProductionParticipantHandler {
     ///
     /// On any [`StateError`] the in-memory owner is discarded — durable state
     /// is untouched by failed operations, so the next touch cold-replays
-    /// exact durable reality.
+    /// exact durable reality. A conversation whose durable log is still empty
+    /// after the operation (a refused or failed probe of a never-committed
+    /// conversation id) leaves no residue: its registry cell is evicted, so
+    /// wire probes grow neither durable nor in-memory state.
     fn with_conversation(
         &self,
         conversation_id: ConversationId,
@@ -99,9 +105,7 @@ impl ProductionParticipantHandler {
                 })?;
         let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
         if owner.is_none() {
-            let replayed = block_on(ConversationAuthority::replay(conversation_id, &log))
-                .map_err(|error| bridge_error(&error))?
-                .map_err(|error| state_error(&error))?;
+            let replayed = self.replay_and_repair(conversation_id, &log)?;
             *owner = Some(replayed);
         }
         let Some(authority) = owner.as_mut() else {
@@ -110,17 +114,79 @@ impl ProductionParticipantHandler {
             });
         };
         let appender = LogAppender { log: &log };
-        let result = match operation(authority, &appender) {
-            Ok(value) => Ok(value),
+        let (result, durably_empty) = match operation(authority, &appender) {
+            Ok(value) => {
+                let durably_empty = authority.next_log_sequence == 0;
+                (Ok(value), durably_empty)
+            }
             Err(error) => {
                 // Discard the possibly part-consumed in-memory owner; durable
                 // reality is authoritative and will be replayed next touch.
+                let durably_empty = authority.next_log_sequence == 0;
                 *owner = None;
-                Err(state_error(&error))
+                (Err(state_error(&error)), durably_empty)
             }
         };
         drop(owner);
+        if durably_empty {
+            self.evict_uncommitted(conversation_id, &cell)?;
+        }
         result
+    }
+
+    /// Cold-replays one conversation's durable log and repairs its observer
+    /// registration.
+    ///
+    /// An enrolled conversation whose durable observer `Track` row was lost
+    /// to a crash between the enrollment append and the tracking append is
+    /// re-registered idempotently here, so observer recovery is derivable
+    /// from the conversation log itself on any first touch.
+    fn replay_and_repair(
+        &self,
+        conversation_id: ConversationId,
+        log: &OperationLog,
+    ) -> Result<ConversationAuthority, ParticipantSemanticError> {
+        let replayed = block_on(ConversationAuthority::replay(conversation_id, log))
+            .map_err(|error| bridge_error(&error))?
+            .map_err(|error| state_error(&error))?;
+        if !replayed.tokens.is_empty() {
+            self.ensure_observer_tracked(conversation_id)?;
+        }
+        Ok(replayed)
+    }
+
+    /// Removes a conversation's registry cell after a durably empty touch.
+    ///
+    /// Only the exact cell this operation used is removed (a racing request
+    /// may have installed a fresh cell already); a concurrent holder of the
+    /// evicted cell stays correct because every durable append is optimistic
+    /// on its exact sequence and cold replay is the source of truth.
+    fn evict_uncommitted(
+        &self,
+        conversation_id: ConversationId,
+        cell: &Arc<Mutex<Option<ConversationAuthority>>>,
+    ) -> Result<(), ParticipantSemanticError> {
+        let mut conversations =
+            self.conversations
+                .lock()
+                .map_err(|_| ParticipantSemanticError::Internal {
+                    message: "participant conversation registry lock is poisoned".to_owned(),
+                })?;
+        if let Some(existing) = conversations.get(&conversation_id) {
+            if Arc::ptr_eq(existing, cell) {
+                conversations.remove(&conversation_id);
+            }
+        }
+        drop(conversations);
+        Ok(())
+    }
+
+    /// Number of live conversation registry cells (test observability).
+    #[cfg(test)]
+    pub(super) fn registry_len(&self) -> usize {
+        self.conversations
+            .lock()
+            .map_or(usize::MAX, |conversations| conversations.len())
     }
 
     fn operation_facts(
@@ -312,7 +378,13 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                     self.with_conversation(request.conversation_id, |authority, appender| {
                         authority.apply_enrollment(&request, &operation_facts, appender)
                     })?;
-                self.ensure_observer_tracked(request.conversation_id)?;
+                // Only a fresh commit registers observer tracking; refusals
+                // and replays leave the observer log untouched (an already
+                // enrolled conversation was registered at its own commit or
+                // by the replay-time repair).
+                if matches!(value, ServerValue::EnrollBound(_)) {
+                    self.ensure_observer_tracked(request.conversation_id)?;
+                }
                 Ok(value)
             }
             ClientRequest::CredentialAttach(request) => {
@@ -333,19 +405,19 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                 })
             }
             ClientRequest::MarkerAck(request) => {
-                self.with_conversation(request.conversation_id, |authority, appender| {
-                    authority.apply_marker_ack(&request, context.connection_incarnation(), appender)
+                self.with_conversation(request.conversation_id, |authority, _appender| {
+                    authority.apply_marker_ack(&request, context.connection_incarnation())
                 })
             }
             ClientRequest::Leave(request) => {
-                self.with_conversation(request.conversation_id, |authority, appender| {
-                    authority.apply_leave(&request, context.connection_incarnation(), appender)
+                self.with_conversation(request.conversation_id, |authority, _appender| {
+                    authority.apply_leave(&request, context.connection_incarnation())
                 })
             }
             ClientRequest::RecordAdmission(request) => {
                 let operation_facts = self.operation_facts(context)?;
-                self.with_conversation(request.conversation_id, |authority, appender| {
-                    authority.apply_record_admission(&request, &operation_facts, appender)
+                self.with_conversation(request.conversation_id, |authority, _appender| {
+                    authority.apply_record_admission(&request, &operation_facts)
                 })
             }
             ClientRequest::ObserverRecovery(request) => {

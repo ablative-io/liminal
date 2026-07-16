@@ -32,7 +32,6 @@ impl ConversationAuthority {
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
     ) -> Result<ServerValue, StateError> {
-        self.ensure_genesis(appender)?;
         let envelope = detach_envelope(request);
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
@@ -220,7 +219,6 @@ impl ConversationAuthority {
         receiving_incarnation: ConnectionIncarnation,
         appender: &dyn DurableAppend,
     ) -> Result<ServerValue, StateError> {
-        self.ensure_genesis(appender)?;
         let receiving_epoch =
             BindingEpoch::new(receiving_incarnation, request.capability_generation);
         let contiguous = self.contiguously_available_through();
@@ -314,12 +312,10 @@ impl ConversationAuthority {
     /// empty: no expected marker, no delivery witness. The crate selects the
     /// refusal; a committed marker ack is unreachable until delivery exists.
     pub(super) fn apply_marker_ack(
-        &mut self,
+        &self,
         request: &MarkerAck,
         receiving_incarnation: ConnectionIncarnation,
-        appender: &dyn DurableAppend,
     ) -> Result<ServerValue, StateError> {
-        self.ensure_genesis(appender)?;
         let receiving_epoch =
             BindingEpoch::new(receiving_incarnation, request.capability_generation);
         let identity = self

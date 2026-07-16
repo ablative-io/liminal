@@ -106,13 +106,18 @@ impl ConversationAuthority {
     }
 
     /// Applies one enrollment request end to end.
+    ///
+    /// Every refusal (token replay, binding-slot occupancy) classifies over
+    /// the replayed authority WITHOUT touching durable state; the durable
+    /// shell genesis is minted only on the authorized-new arm, immediately
+    /// before the enrollment's own committing append — a refused request on a
+    /// never-seen conversation id leaves the durable store byte-identical.
     pub(super) fn apply_enrollment(
         &mut self,
         request: &EnrollmentRequest,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
     ) -> Result<ServerValue, StateError> {
-        self.ensure_genesis(appender)?;
         let token_bytes = request.enrollment_token.into_bytes();
         if let Some(participant_id) = self.tokens.get(&token_bytes).copied() {
             let slot = self.slots.get(&participant_id).ok_or_else(|| {
@@ -128,6 +133,9 @@ impl ConversationAuthority {
         }
 
         let deadlines = operation_facts.deadlines()?;
+        // The one conversation-creating arm: genesis is durable exactly when
+        // an authorized enrollment is about to append its own entry.
+        self.ensure_genesis(appender)?;
         let (attached_order, attached_seq) = self.allocate_position()?;
         let allocation = StoredEnrollmentAllocation {
             participant_id: self.next_participant,
@@ -252,13 +260,16 @@ impl ConversationAuthority {
     }
 
     /// Applies one credential-attach request end to end.
+    ///
+    /// Attach never creates a conversation: a fresh conversation id has no
+    /// slots and classifies as `ParticipantUnknown` without any durable
+    /// append.
     pub(super) fn apply_credential_attach(
         &mut self,
         request: &CredentialAttachRequest,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
     ) -> Result<ServerValue, StateError> {
-        self.ensure_genesis(appender)?;
         let envelope = attach_envelope(request);
         let Some(slot) = self.slots.get(&request.participant_id) else {
             return Ok(CredentialAttachResponse::participant_unknown(envelope).into_server_value());

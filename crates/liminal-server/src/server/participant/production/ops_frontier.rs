@@ -19,7 +19,7 @@ use liminal_protocol::wire::{
 
 use super::facts::{self, Digest};
 use super::ops_bind::OperationFacts;
-use super::state::{ConversationAuthority, DurableAppend, StateError};
+use super::state::{ConversationAuthority, StateError};
 
 impl ConversationAuthority {
     /// Applies one terminal Leave request.
@@ -27,12 +27,10 @@ impl ConversationAuthority {
     /// Refusal arms are total through the shared lookup; an authorized Leave
     /// fails closed until the claim-frontier acquisition lands.
     pub(super) fn apply_leave(
-        &mut self,
+        &self,
         request: &LeaveRequest,
         receiving_incarnation: ConnectionIncarnation,
-        appender: &dyn DurableAppend,
     ) -> Result<ServerValue, StateError> {
-        self.ensure_genesis(appender)?;
         let envelope = leave_envelope(request);
         let receiving_epoch =
             BindingEpoch::new(receiving_incarnation, request.capability_generation);
@@ -79,18 +77,20 @@ impl ConversationAuthority {
     }
 
     /// Applies one ordinary record admission.
+    ///
+    /// Fails closed before any durable touch: no genesis, no append, no
+    /// registry residue survives this arm.
     pub(super) fn apply_record_admission(
-        &mut self,
+        &self,
         request: &RecordAdmission,
         operation_facts: &OperationFacts,
-        appender: &dyn DurableAppend,
     ) -> Result<ServerValue, StateError> {
-        self.ensure_genesis(appender)?;
         let _ = (request, operation_facts);
-        Err(StateError::invariant(
-            "record admission requires the claim-frontier authority; the A1 frontier \
-             acquisition is not wired for records in this binding yet",
-        ))
+        Err(StateError::invariant(format!(
+            "record admission for conversation {} requires the claim-frontier authority; the A1 \
+             frontier acquisition is not wired for records in this binding yet",
+            self.conversation_id
+        )))
     }
 }
 
