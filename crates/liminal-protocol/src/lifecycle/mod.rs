@@ -185,8 +185,9 @@ pub use operations::{
     OrdinaryRecordProjectionInput, ParticipantAckCommit, ParticipantAckCommitError,
     ParticipantAckDecision, ProjectedOrdinaryRecord, ReceiptDeadlineError, ReceiptDeadlines,
     RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionDrainFirst,
-    RecordAdmissionFailure, RecordAdmissionFault, RecordAdmissionPrestate, RecordAdmissionRefusal,
-    RetainedRecordCharge, UnchangedRecordAdmission, apply_initial_enrollment, apply_marker_ack,
+    RecordAdmissionFailure, RecordAdmissionFault, RecordAdmissionPersistenceParts,
+    RecordAdmissionPrestate, RecordAdmissionRefusal, RetainedRecordCharge,
+    UnchangedRecordAdmission, apply_initial_enrollment, apply_marker_ack,
     apply_nonzero_participant_ack, apply_participant_ack, apply_record_admission,
     drain_next_marker, select_marker_proof,
 };

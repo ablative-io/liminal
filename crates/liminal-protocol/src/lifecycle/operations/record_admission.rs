@@ -299,45 +299,49 @@ pub struct RecordAdmissionCommit {
 }
 
 /// Exact successful record-admission parts for one atomic persistence commit.
-#[allow(
-    dead_code,
-    reason = "the future durable conversation writer consumes these exact commit parts"
-)]
-pub(in crate::lifecycle) struct RecordAdmissionPersistenceParts {
+///
+/// The durable conversation writer consumes every field of this value in one
+/// atomic transaction. Each field is an owned authority moved out of the
+/// selected [`RecordAdmissionCommit`]: nothing here is cloned from, or leaves
+/// a second reachable copy inside, the consumed commit. [`ClaimFrontiers`]
+/// deliberately implements neither `Clone` nor `Copy`, so the complete
+/// resulting frontier authority exists exactly once.
+#[derive(Debug)]
+pub struct RecordAdmissionPersistenceParts {
     /// Exact payload-bearing response.
-    pub(in crate::lifecycle) outcome: RecordCommitted,
+    pub outcome: RecordCommitted,
     /// Exact payload-bearing durable caller record.
-    pub(in crate::lifecycle) record: CommittedOrdinaryRecord,
+    pub record: CommittedOrdinaryRecord,
     /// Resulting semantic connection-capacity state.
-    pub(in crate::lifecycle) connection_capacity: ConnectionConversationCapacityCommit,
+    pub connection_capacity: ConnectionConversationCapacityCommit,
     /// Admitted caller-major allocation.
-    pub(in crate::lifecycle) order: OrderAllocation,
+    pub order: OrderAllocation,
     /// Admitted caller/marker sequence allocation.
-    pub(in crate::lifecycle) sequence: SequenceAdmission,
+    pub sequence: SequenceAdmission,
     /// Shared observer-floor permit.
-    pub(in crate::lifecycle) observer_floor: ObserverFloorPermit,
+    pub observer_floor: ObserverFloorPermit,
     /// Shared remaining-closure permit.
-    pub(in crate::lifecycle) closure: RemainingClosurePermit,
+    pub closure: RemainingClosurePermit,
     /// Complete resulting coupled claim frontiers.
-    pub(in crate::lifecycle) frontiers: ClaimFrontiers,
+    pub frontiers: ClaimFrontiers,
     /// Complete preferred/cap/resulting floor transition.
-    pub(in crate::lifecycle) floor: crate::algebra::FloorComputation,
+    pub floor: crate::algebra::FloorComputation,
     /// Exact physical retained occupancy.
-    pub(in crate::lifecycle) retained_charge: crate::algebra::WideResourceVector,
+    pub retained_charge: crate::algebra::WideResourceVector,
     /// Exact resulting closure baseline.
-    pub(in crate::lifecycle) baseline: crate::algebra::WideResourceVector,
+    pub baseline: crate::algebra::WideResourceVector,
     /// Exact resulting closure accounting.
-    pub(in crate::lifecycle) accounting: ClosureAccounting,
+    pub accounting: ClosureAccounting,
     /// Exact ordinary required-capacity envelope.
-    pub(in crate::lifecycle) required_capacity: RequiredCapacityPlan,
+    pub required_capacity: RequiredCapacityPlan,
     /// Exact causal caller-row key and kind.
-    pub(in crate::lifecycle) caller_record: super::super::RetainedCausalRecord,
+    pub caller_record: super::super::RetainedCausalRecord,
     /// Exact keyed caller-row charge.
-    pub(in crate::lifecycle) caller_charge: RetainedRecordCharge,
+    pub caller_charge: RetainedRecordCharge,
     /// One exact keyed charge per retained poststate row.
-    pub(in crate::lifecycle) retained_charges: Vec<RetainedRecordCharge>,
+    pub retained_charges: Vec<RetainedRecordCharge>,
     /// Canonically ordered newly owed markers.
-    pub(in crate::lifecycle) marker_candidates: Vec<super::super::MarkerCandidateAuthority>,
+    pub marker_candidates: Vec<super::super::MarkerCandidateAuthority>,
 }
 
 impl RecordAdmissionCommit {
@@ -391,11 +395,8 @@ impl RecordAdmissionCommit {
 
     /// Transfers the exact successful persistence parts without cloning or
     /// dropping any frontier, accounting, row, or marker authority.
-    #[allow(
-        dead_code,
-        reason = "the future durable conversation writer consumes these exact commit parts"
-    )]
-    pub(in crate::lifecycle) fn into_persistence_parts(self) -> RecordAdmissionPersistenceParts {
+    #[must_use]
+    pub fn into_persistence_parts(self) -> RecordAdmissionPersistenceParts {
         let ProjectedOrdinaryRecord {
             frontiers,
             floor,

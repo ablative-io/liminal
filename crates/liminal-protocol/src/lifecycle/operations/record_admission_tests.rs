@@ -33,8 +33,8 @@ use super::{
         UNIT, ordinary_capacity_walk_fixture, ordinary_capacity_walk_frontiers,
     },
     record_admission::{
-        RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionPrestate,
-        apply_record_admission,
+        RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionPersistenceParts,
+        RecordAdmissionPrestate, apply_record_admission,
     },
 };
 
@@ -381,6 +381,145 @@ fn capacity_walk_total_operation_commits_full_payload_and_replays_identically() 
     assert_eq!(persisted.caller_record.delivery_seq, 95);
     assert_eq!(persisted.caller_charge.delivery_seq(), 95);
     assert_eq!(persisted.marker_candidates[0].delivery_seq, 96);
+}
+
+#[test]
+fn into_persistence_parts_moves_the_complete_atomic_set_exactly_once() {
+    let fixture = ordinary_capacity_walk_fixture();
+    let member = test_member(
+        fixture.request.conversation_id,
+        fixture.request.capability_generation,
+        fixture.active_identities[0].cursor(),
+    );
+    let active = ActiveBinding {
+        participant_id: 0,
+        conversation_id: fixture.request.conversation_id,
+        binding_epoch: fixture.receiving_binding_epoch,
+    };
+    let binding = BindingState::Bound(active);
+    let payload = vec![0; 3 * usize::try_from(UNIT).expect("unit fits usize")];
+    let commit = committed(apply_record_admission(
+        prestate(
+            request(&fixture.request, &payload),
+            &member,
+            &binding,
+            fixture.receiving_binding_epoch,
+            ordinary_capacity_walk_frontiers(&fixture),
+            fixture.retained_charges.clone(),
+            fixture.closure_accounting,
+            fixture.encoded_record_charge,
+            fixture.observer_progress,
+            fixture.limits,
+        ),
+        fixture.encoded_record_charge,
+    ));
+
+    // Pre-move witnesses captured through the borrowing accessors only.
+    let expected_outcome = commit.outcome().clone();
+    let expected_record = commit.record().clone();
+    let expected_connection = commit.connection_capacity();
+    let expected_order = commit.order();
+    let expected_sequence = commit.sequence();
+    let expected_observer = commit.observer_floor();
+    let expected_closure = *commit.closure();
+    let expected_floor = commit.projection().floor();
+    let expected_retained_charge = commit.projection().retained_charge();
+    let expected_baseline = commit.projection().baseline();
+    let expected_accounting = commit.projection().accounting();
+    let expected_required = commit.projection().required_capacity();
+    let expected_caller_record = commit.projection().caller_record();
+    let expected_caller_charge = commit.projection().caller_charge();
+    let expected_row_charges = commit.projection().retained_charges().to_vec();
+    let expected_markers = commit.projection().new_marker_candidates().to_vec();
+    let expected_high = commit
+        .projection()
+        .frontiers()
+        .sequence()
+        .ledger()
+        .high_watermark();
+    let expected_retained_floor = commit.projection().frontiers().retained_floor();
+    let expected_rows: Vec<_> = commit
+        .projection()
+        .frontiers()
+        .retained_records()
+        .iter()
+        .map(|record| (record.delivery_seq, record.admission_order))
+        .collect();
+    let expected_cursor = commit
+        .projection()
+        .frontiers()
+        .active_identities()
+        .participants()[0]
+        .cursor();
+
+    // Consuming the commit moves the parts out. `RecordAdmissionCommit` is
+    // gone after this statement and `ClaimFrontiers` is neither `Clone` nor
+    // `Copy`, so no frontier, accounting, row, or marker authority stays
+    // reachable through a second owner; the borrow checker rejects any later
+    // use of `commit`. The exhaustive destructuring below (no `..` rest
+    // pattern) proves the complete atomic set is transferred.
+    let RecordAdmissionPersistenceParts {
+        outcome,
+        record,
+        connection_capacity,
+        order,
+        sequence,
+        observer_floor,
+        closure,
+        frontiers,
+        floor,
+        retained_charge,
+        baseline,
+        accounting,
+        required_capacity,
+        caller_record,
+        caller_charge,
+        retained_charges,
+        marker_candidates,
+    } = commit.into_persistence_parts();
+
+    assert_eq!(outcome, expected_outcome);
+    assert_eq!(record, expected_record);
+    assert_eq!(connection_capacity, expected_connection);
+    assert_eq!(order, expected_order);
+    assert_eq!(sequence, expected_sequence);
+    assert_eq!(observer_floor, expected_observer);
+    assert_eq!(closure, expected_closure);
+    assert_eq!(floor, expected_floor);
+    assert_eq!(retained_charge, expected_retained_charge);
+    assert_eq!(baseline, expected_baseline);
+    assert_eq!(accounting, expected_accounting);
+    assert_eq!(required_capacity, expected_required);
+    assert_eq!(caller_record, expected_caller_record);
+    assert_eq!(caller_charge, expected_caller_charge);
+    assert_eq!(retained_charges, expected_row_charges);
+    assert_eq!(marker_candidates, expected_markers);
+
+    // The moved frontier authority is the exact projected poststate.
+    assert_eq!(
+        frontiers.sequence().ledger().high_watermark(),
+        expected_high
+    );
+    assert_eq!(frontiers.retained_floor(), expected_retained_floor);
+    assert_eq!(
+        frontiers
+            .retained_records()
+            .iter()
+            .map(|record| (record.delivery_seq, record.admission_order))
+            .collect::<Vec<_>>(),
+        expected_rows
+    );
+    assert_eq!(
+        frontiers.active_identities().participants()[0].cursor(),
+        expected_cursor
+    );
+
+    // Cross-field authority coupling: the moved caller row is the committed
+    // record's exact key, and the moved outcome matches the moved record.
+    assert_eq!(caller_record.delivery_seq, record.delivery_seq());
+    assert_eq!(caller_record.admission_order, record.admission_order());
+    assert_eq!(outcome.delivery_seq(), record.delivery_seq());
+    assert_eq!(caller_charge.delivery_seq(), record.delivery_seq());
 }
 
 #[test]
