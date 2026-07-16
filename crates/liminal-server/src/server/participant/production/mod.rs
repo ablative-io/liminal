@@ -22,4 +22,11 @@ mod ops_frontier;
 mod ops_session;
 mod state;
 
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod e2e_tests;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests;
+
 pub use handler::ProductionParticipantHandler;

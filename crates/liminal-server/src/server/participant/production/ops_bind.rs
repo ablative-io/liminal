@@ -313,11 +313,21 @@ impl ConversationAuthority {
         }
 
         let deadlines = operation_facts.deadlines()?;
+        // The rotation result: the new binding epoch carries the successor of
+        // the verified current generation (the crate's ResultGeneration law).
+        let next_generation = request
+            .capability_generation
+            .get()
+            .checked_add(1)
+            .and_then(Generation::new)
+            .ok_or(StateError::AllocationExhausted {
+                domain: "capability generation",
+            })?;
         let (attached_order, attached_seq) = self.allocate_position()?;
         let allocation = StoredAttachAllocation {
             binding_epoch: BindingEpoch::new(
                 operation_facts.receiving_incarnation,
-                request.capability_generation,
+                next_generation,
             )
             .into(),
             attach_secret: facts::mint_secret_bytes()?,
