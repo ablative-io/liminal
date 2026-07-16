@@ -16,9 +16,7 @@ use super::state::{ConnectionProcessState, FrameAction};
 use super::supervisor::ConnectionRuntime;
 use crate::ServerError;
 use crate::config::types::ServiceProfile;
-use crate::server::participant::{
-    PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, encode_server_value, gate_generic_frame,
-};
+use crate::server::participant::{ParticipantIngress, encode_server_value, gate_generic_frame};
 
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -162,14 +160,19 @@ pub(super) fn apply_frame(
 /// capability-missing frames receive the crate's exact typed rejection.
 fn participant_frame_response(state: &ConnectionProcessState, frame: &Frame) -> FrameAction {
     match gate_generic_frame(frame, state.authenticated, state.participant_session) {
-        ParticipantIngress::NotParticipant | ParticipantIngress::Request(_) => {
-            FrameAction::NoResponse
+        ParticipantIngress::NotParticipant => FrameAction::NoResponse,
+        // A decoded request is unreachable while the capability is deliberately
+        // not advertised. Close if configuration drift ever makes it reachable;
+        // silently consuming an authorized lifecycle operation would make a
+        // retry indistinguishable from a lost commit. A locally unrepresentable
+        // generic frame is likewise terminal.
+        ParticipantIngress::Request(_) | ParticipantIngress::InvalidGenericFrame => {
+            FrameAction::Close
         }
         ParticipantIngress::Rejected(rejection) => encode_server_value(
             liminal_protocol::wire::ServerValue::ParticipantTransportRejected(rejection),
         )
         .map_or(FrameAction::Close, FrameAction::Respond),
-        ParticipantIngress::InvalidGenericFrame => FrameAction::Close,
     }
 }
 
@@ -304,20 +307,14 @@ fn connect_response(
     // so the `apply_frame` gate admits subsequent application frames on it.
     state.authenticated = true;
     match negotiate_version(min_version, max_version, &[SUPPORTED_PROTOCOL]) {
-        Ok(selected_version) => {
-            if state.participant_session.negotiate_v1().is_err() {
-                return FrameAction::RespondThenClose(Frame::ConnectError {
-                    flags: 0,
-                    reason_code: SERVER_ERROR_CODE,
-                    message: Some("participant capability configuration is invalid".to_owned()),
-                });
-            }
-            FrameAction::Respond(Frame::ConnectAck {
-                flags: 0,
-                selected_version,
-                capabilities: PARTICIPANT_CAPABILITY_BIT,
-            })
-        }
+        // Keep participant-v1 unadvertised until a complete semantic service is
+        // installed. The shared 0x1A gate remains active and returns the exact
+        // ParticipantCapabilityRequired value to a client that sends one anyway.
+        Ok(selected_version) => FrameAction::Respond(Frame::ConnectAck {
+            flags: 0,
+            selected_version,
+            capabilities: 0,
+        }),
         Err(error) => FrameAction::Respond(Frame::ConnectError {
             flags: 0,
             reason_code: error.reason_code(),

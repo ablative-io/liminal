@@ -67,6 +67,21 @@ fn unauthenticated_participant_request_returns_shared_rejection() -> Result<(), 
 }
 
 #[test]
+fn authenticated_request_without_advertised_capability_is_rejected() -> Result<(), String> {
+    let generic = generic_round_trip(&encoded_enrollment()?)?;
+    let ParticipantIngress::Rejected(rejection) =
+        gate_generic_frame(&generic, true, ParticipantSession::default())
+    else {
+        return Err("expected participant capability rejection".to_owned());
+    };
+    assert_eq!(
+        rejection.reason,
+        TransportRejectionReason::ParticipantCapabilityRequired
+    );
+    Ok(())
+}
+
+#[test]
 fn crate_server_value_survives_generic_transport_round_trip() -> Result<(), String> {
     let generic = generic_round_trip(&encoded_enrollment()?)?;
     let ParticipantIngress::Rejected(rejection) =

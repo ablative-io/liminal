@@ -6,11 +6,11 @@ use liminal_protocol::wire::{
     TransportRejectionReason, ValidatedFrameLimit, encode, encoded_len, gate_inbound,
 };
 
-/// Bit advertised in the existing connection acknowledgement for `participant-v1`.
+/// Reserved connection-capability bit for `participant-v1`.
 ///
-/// The legacy conversation frames remain available only for the Phase C SDK
-/// migration window. Participant lifecycle traffic itself uses the shared
-/// protocol's assigned outer frame exclusively.
+/// Production advertises this bit only after a complete semantic and durable
+/// participant service is installed. The transport gate can still decode and
+/// reject participant frames while the bit remains unadvertised.
 pub const PARTICIPANT_CAPABILITY_BIT: u32 = 1;
 
 /// Complete participant-frame limit selected for one server connection.

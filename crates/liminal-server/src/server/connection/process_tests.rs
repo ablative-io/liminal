@@ -959,8 +959,8 @@ fn connect_frame(auth_token: &[u8]) -> Frame {
 }
 
 /// With no `[auth]` token configured the handshake is open: any token (including an
-/// empty one) is accepted and answered with `ConnectAck` advertising the shared
-/// participant capability.
+/// empty one) is accepted. Participant-v1 stays unadvertised until its complete
+/// semantic service is installed.
 #[test]
 fn connect_without_configured_token_accepts_any_token() {
     let (runtime, _services) = runtime_with(RecordingServices::default());
@@ -970,7 +970,7 @@ fn connect_without_configured_token_accepts_any_token() {
     assert!(matches!(
         action,
         FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
-            if capabilities == crate::server::participant::PARTICIPANT_CAPABILITY_BIT
+            if capabilities == 0
     ));
 
     // A non-empty token is likewise ignored when no gate is configured.
@@ -978,12 +978,13 @@ fn connect_without_configured_token_accepts_any_token() {
     assert!(matches!(
         action,
         FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
-            if capabilities == crate::server::participant::PARTICIPANT_CAPABILITY_BIT
+            if capabilities == 0
     ));
 }
 
 /// With a token configured, a matching handshake token is accepted with a
-/// `ConnectAck` (and the connection stays open for subsequent frames).
+/// `ConnectAck` (and the connection stays open for subsequent frames), without
+/// prematurely advertising participant-v1.
 #[test]
 fn connect_with_matching_token_is_accepted() {
     let runtime = ConnectionRuntime::for_tests_with_auth_token(
@@ -997,7 +998,7 @@ fn connect_with_matching_token_is_accepted() {
     assert!(matches!(
         action,
         FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
-            if capabilities == crate::server::participant::PARTICIPANT_CAPABILITY_BIT
+            if capabilities == 0
     ));
 }
 
