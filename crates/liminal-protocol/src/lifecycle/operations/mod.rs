@@ -3,6 +3,7 @@ mod marker_ack;
 mod marker_drain;
 mod marker_proof;
 mod nonzero_participant_ack;
+pub(in crate::lifecycle) mod ordinary_record_projection;
 mod participant_ack;
 
 #[cfg(test)]
@@ -15,6 +16,8 @@ mod marker_drain_tests;
 mod marker_proof_tests;
 #[cfg(test)]
 mod nonzero_participant_ack_tests;
+#[cfg(test)]
+mod ordinary_record_projection_tests;
 #[cfg(test)]
 mod participant_ack_tests;
 
@@ -33,6 +36,11 @@ pub use nonzero_participant_ack::{
     NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
     NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError,
     apply_nonzero_participant_ack,
+};
+pub use ordinary_record_projection::{
+    OrdinaryProjectionError, OrdinaryProjectionLimits, OrdinaryRecordDrainFirst,
+    OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionInput, ProjectedOrdinaryRecord,
+    RetainedRecordCharge,
 };
 pub use participant_ack::{
     ParticipantAckCommit, ParticipantAckCommitError, ParticipantAckDecision, apply_participant_ack,

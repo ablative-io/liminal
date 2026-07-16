@@ -13,6 +13,7 @@ mod attach;
 mod binding;
 mod claim_frontier;
 mod closure_accounting;
+mod conversation;
 mod cursor_facts;
 mod detach;
 mod edge;
@@ -33,6 +34,8 @@ mod binding_tests;
 mod claim_frontier_tests;
 #[cfg(test)]
 mod closure_accounting_tests;
+#[cfg(test)]
+mod conversation_tests;
 #[cfg(test)]
 mod cursor_facts_tests;
 #[cfg(test)]
@@ -105,6 +108,11 @@ pub use closure_accounting::{
     RemainingClosureDecision, RemainingClosurePermit, RequiredCapacityPlan,
     RequiredCapacityPlanError, check_recovery_fence, check_remaining_closure,
 };
+pub use conversation::{
+    ConversationCommit, ConversationDecision, ConversationEvent, ConversationEventDecodeError,
+    ConversationGenesis, ConversationRefusal, ConversationRefusalReason, ConversationReplayError,
+    ConversationReplayFailure, ParticipantConversation,
+};
 pub use cursor_facts::{
     BoundParticipantCursor, CumulativeAckAuthorizationError, CumulativeAckOutcome,
     CursorEpisodeBuildError, CursorFactEncodeError, CursorProgressFact, CursorProgressFacts,
@@ -170,10 +178,12 @@ pub use operations::{
     MarkerDrainCommit, MarkerDrainError, MarkerProofDecision, MarkerProofInput, MarkerProofPermit,
     MarkerProofState, NonzeroAckEpisodePosition, NonzeroParticipantAckCommit,
     NonzeroParticipantAckCommitError, NonzeroParticipantAckDecision,
-    NonzeroParticipantAckInvariantError, ParticipantAckCommit, ParticipantAckCommitError,
-    ParticipantAckDecision, ReceiptDeadlineError, ReceiptDeadlines, apply_initial_enrollment,
-    apply_marker_ack, apply_nonzero_participant_ack, apply_participant_ack, drain_next_marker,
-    select_marker_proof,
+    NonzeroParticipantAckInvariantError, OrdinaryProjectionError, OrdinaryProjectionLimits,
+    OrdinaryRecordDrainFirst, OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionInput,
+    ParticipantAckCommit, ParticipantAckCommitError, ParticipantAckDecision,
+    ProjectedOrdinaryRecord, ReceiptDeadlineError, ReceiptDeadlines, RetainedRecordCharge,
+    apply_initial_enrollment, apply_marker_ack, apply_nonzero_participant_ack,
+    apply_participant_ack, drain_next_marker, select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,
