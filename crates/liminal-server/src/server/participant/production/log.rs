@@ -275,7 +275,7 @@ impl StoredAttachRequest {
     }
 }
 
-/// Server allocations committed with one ordinary detached attach.
+/// Server allocations committed with one credential attach.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub(super) struct StoredAttachAllocation {
     pub(super) binding_epoch: StoredBindingEpoch,
@@ -284,6 +284,10 @@ pub(super) struct StoredAttachAllocation {
     pub(super) attached_seq: DeliverySeq,
     pub(super) receipt_expires_at: StoredU128,
     pub(super) provenance_expires_at: StoredU128,
+    /// Admitted wall-clock read of the committing operation. Replay derives
+    /// the replaced receipt's exact terminal reason (`Superseded` vs
+    /// `Deadline`) from this stored fact, never from replay-time clocks.
+    pub(super) admitted_now_ms: u64,
 }
 
 /// Stored detach request fields.

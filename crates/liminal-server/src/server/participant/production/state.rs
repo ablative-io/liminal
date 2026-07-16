@@ -17,11 +17,55 @@ use liminal_protocol::lifecycle::{
 };
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachBound, AttachSecret, DeliverySeq, DetachAttemptToken, EnrollBound,
-    Generation, ParticipantId, TransactionOrder,
+    Generation, ParticipantId, ReceiptExpiryReason, TransactionOrder,
 };
 
 use super::facts::{Digest, FactsError};
 use super::log::{OperationLogError, StoredOperation};
+
+/// Exact committed credential-attach receipt with its own deadline pair.
+///
+/// The deadlines belong to THIS receipt alone: a later attach mints a fresh
+/// state and retires this one into an [`AttachProvenanceRecord`] — it never
+/// rewrites or re-opens these windows (bounded-provenance law: secret-bearing
+/// receipts never outlive their signed TTL).
+#[derive(Debug)]
+pub(super) struct AttachReceiptState {
+    /// Attempt token keying the exact receipt.
+    pub(super) token: AttachAttemptToken,
+    /// Live receipt for lookup-phase resolution.
+    pub(super) receipt: CredentialAttachLiveReceipt,
+    /// Exact committed payload held for byte-identical replay.
+    pub(super) outcome: AttachBound,
+    /// Secret presented by the committed request — the live receipt's
+    /// constant-time verifier (contract row 4: lost-rotation recovery
+    /// presents the invalidated OLD secret), never the minted result secret.
+    pub(super) verifier: [u8; 32],
+    /// Result generation minted by this receipt (presented + 1), as stored in
+    /// the contract's provenance record.
+    pub(super) result_generation: Generation,
+    /// Secret-bearing receipt deadline (epoch milliseconds).
+    pub(super) receipt_expires_at: u128,
+    /// Non-secret provenance deadline (epoch milliseconds).
+    pub(super) provenance_expires_at: u128,
+}
+
+/// Non-secret provenance fingerprint retained for an ended attach receipt.
+///
+/// Minted when a newer attach replaces the receipt (terminal reason
+/// `Superseded` if the receipt was still live, `Deadline` if its own deadline
+/// had already ended it). Inside its window an exact old token answers the
+/// contract's `ReceiptExpired` row; after the window the retained fingerprint
+/// keeps exact-old classification on the `StaleOrUnknownReceipt` arm.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct AttachProvenanceRecord {
+    /// Result generation the ended receipt had minted.
+    pub(super) result_generation: Generation,
+    /// Exact terminal reason set when the receipt ended.
+    pub(super) reason: ReceiptExpiryReason,
+    /// Non-secret provenance deadline (epoch milliseconds).
+    pub(super) provenance_expires_at: u128,
+}
 
 /// One enrolled participant's live authority and replay facts.
 #[derive(Debug)]
@@ -36,20 +80,20 @@ pub(super) struct Slot {
     pub(super) enrollment_receipt: EnrollmentLiveReceipt,
     /// Exact committed enrollment payload held for byte-identical replay.
     pub(super) enrollment_outcome: EnrollBound,
-    /// Exact committed attach receipt keyed by its attempt token.
-    pub(super) attach_receipt: Option<(AttachAttemptToken, CredentialAttachLiveReceipt)>,
-    /// Exact committed attach payload held for byte-identical replay.
-    pub(super) attach_outcome: Option<AttachBound>,
+    /// Enrollment receipt deadline, fixed at enroll commit and never
+    /// rewritten by later attaches (epoch milliseconds).
+    pub(super) enrollment_receipt_expires_at: u128,
+    /// Current attach receipt with its own independent deadline pair.
+    pub(super) attach: Option<AttachReceiptState>,
+    /// Bounded provenance fingerprints of ended attach receipts, keyed by
+    /// their exact attempt tokens. One record exists per committed rotation
+    /// (each rotation requires the then-current secret), so growth is bound
+    /// to the participant's own committed history.
+    pub(super) attach_provenance: BTreeMap<[u8; 16], AttachProvenanceRecord>,
     /// Currently valid attach secret for this slot.
     pub(super) attach_secret: AttachSecret,
-    /// Generation minted by the receipt currently held for replay.
-    pub(super) receipt_generation: Generation,
     /// Exact token of the slot's committed/terminalized detach, if any.
     pub(super) exact_detach_token: Option<DetachAttemptToken>,
-    /// Secret-bearing receipt deadline (epoch milliseconds).
-    pub(super) receipt_expires_at: u128,
-    /// Non-secret provenance deadline (epoch milliseconds).
-    pub(super) provenance_expires_at: u128,
 }
 
 /// Sole live owner of one conversation's protocol state.

@@ -23,9 +23,11 @@ use liminal_protocol::lifecycle::{
     select_enrollment_binding_slot,
 };
 use liminal_protocol::wire::{
-    AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, ConnectionIncarnation,
+    AttachBound, AttachEnvelope, AttachSecret,
+    AttemptTokenBodyConflict as WireAttemptTokenBodyConflict, BindingEpoch, ConnectionIncarnation,
     CredentialAttachRequest, CredentialAttachResponse, EnrollBound, EnrollmentRequest,
-    EnrollmentResponse, Generation, ReceiptExpiryReason, ServerValue,
+    EnrollmentResponse, Generation, ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason,
+    ServerValue,
 };
 
 use super::facts::{self, Digest};
@@ -235,13 +237,11 @@ impl ConversationAuthority {
                 cell: DetachCell::default(),
                 enrollment_receipt: EnrollmentLiveReceipt::from_commit(outcome.clone()),
                 enrollment_outcome: committed.outcome,
-                attach_receipt: None,
-                attach_outcome: None,
+                enrollment_receipt_expires_at: allocation.receipt_expires_at.get(),
+                attach: None,
+                attach_provenance: std::collections::BTreeMap::new(),
                 attach_secret: AttachSecret::new(allocation.attach_secret),
-                receipt_generation: Generation::ONE,
                 exact_detach_token: None,
-                receipt_expires_at: allocation.receipt_expires_at.get(),
-                provenance_expires_at: allocation.provenance_expires_at.get(),
             },
         );
         self.tokens.insert(
@@ -274,38 +274,8 @@ impl ConversationAuthority {
         let Some(slot) = self.slots.get(&request.participant_id) else {
             return Ok(CredentialAttachResponse::participant_unknown(envelope).into_server_value());
         };
-        let secret_proof = if facts::constant_time_eq(
-            &slot.attach_secret.into_bytes(),
-            &request.attach_secret.into_bytes(),
-        ) {
-            AttachSecretProof::Verified
-        } else {
-            AttachSecretProof::Mismatch
-        };
         let now = u128::from(operation_facts.now_ms);
-        let provenance;
-        let token_phase = match slot.attach_receipt.as_ref() {
-            Some((token, receipt)) if *token == request.attach_attempt_token => {
-                if now < slot.receipt_expires_at {
-                    CredentialAttachTokenPhase::LiveReceipt {
-                        identity: ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
-                        receipt,
-                    }
-                } else if now < slot.provenance_expires_at {
-                    provenance = CredentialAttachProvenance::new(
-                        slot.receipt_generation,
-                        ReceiptExpiryReason::Deadline,
-                    );
-                    CredentialAttachTokenPhase::Provenance {
-                        identity: ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
-                        provenance,
-                    }
-                } else {
-                    CredentialAttachTokenPhase::AfterProvenance
-                }
-            }
-            _ => CredentialAttachTokenPhase::NoMatch,
-        };
+        let (token_phase, secret_proof) = slot.attach_token_phase(request, now);
         let lookup = lookup_credential_attach(
             token_phase,
             PresentedIdentity::Live(&slot.member),
@@ -346,6 +316,7 @@ impl ConversationAuthority {
             attached_seq,
             receipt_expires_at: deadlines.receipt_expires_at().into(),
             provenance_expires_at: deadlines.provenance_expires_at().into(),
+            admitted_now_ms: operation_facts.now_ms,
         };
         let outcome = self.attach_commit(request, &allocation, CommitMode::Live(appender))?;
         Ok(CredentialAttachResponse::attach_bound(outcome).into_server_value())
@@ -384,6 +355,8 @@ impl ConversationAuthority {
             .ok_or_else(|| {
                 StateError::invariant("attach commit requires an enrolled participant slot")
             })?;
+        let binding_epoch = allocation.binding_epoch.to_epoch()?;
+        let result_generation = binding_epoch.capability_generation;
         let closure_admission = ClosureState::Clear
             .ordinary_detached_attach_admission()
             .map_err(|error| {
@@ -402,7 +375,7 @@ impl ConversationAuthority {
                     binding: liminal_protocol::lifecycle::ActiveBinding {
                         participant_id: request.participant_id,
                         conversation_id: request.conversation_id,
-                        binding_epoch: allocation.binding_epoch.to_epoch()?,
+                        binding_epoch,
                     },
                     attach_secret: AttachSecret::new(allocation.attach_secret),
                     attached_position: AttachedRecordPosition::new(
@@ -443,14 +416,35 @@ impl ConversationAuthority {
         slot.binding = committed.binding_state;
         slot.cell = committed.detach_cell;
         slot.attach_secret = AttachSecret::new(allocation.attach_secret);
-        slot.attach_receipt = Some((
-            request.attach_attempt_token,
-            CredentialAttachLiveReceipt::from_commit(outcome.clone()),
-        ));
-        slot.attach_outcome = Some(committed.outcome);
-        slot.receipt_generation = request.capability_generation;
-        slot.receipt_expires_at = allocation.receipt_expires_at.get();
-        slot.provenance_expires_at = allocation.provenance_expires_at.get();
+        // Retire the previous receipt into its bounded provenance record with
+        // the exact terminal reason: `Superseded` when the newer generation
+        // ended a still-live receipt, `Deadline` when its own deadline had
+        // already ended it. Derived from the committing operation's ADMITTED
+        // clock read, so replay reproduces the identical record.
+        if let Some(previous) = slot.attach.take() {
+            let reason = if u128::from(allocation.admitted_now_ms) < previous.receipt_expires_at {
+                ReceiptExpiryReason::Superseded
+            } else {
+                ReceiptExpiryReason::Deadline
+            };
+            slot.attach_provenance.insert(
+                previous.token.into_bytes(),
+                super::state::AttachProvenanceRecord {
+                    result_generation: previous.result_generation,
+                    reason,
+                    provenance_expires_at: previous.provenance_expires_at,
+                },
+            );
+        }
+        slot.attach = Some(super::state::AttachReceiptState {
+            token: request.attach_attempt_token,
+            receipt: CredentialAttachLiveReceipt::from_commit(outcome.clone()),
+            outcome: committed.outcome,
+            verifier: request.attach_secret.into_bytes(),
+            result_generation,
+            receipt_expires_at: allocation.receipt_expires_at.get(),
+            provenance_expires_at: allocation.provenance_expires_at.get(),
+        });
         self.slots.insert(participant_id, slot);
         self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
         Ok(outcome)
@@ -513,7 +507,82 @@ const fn attach_envelope(request: &CredentialAttachRequest) -> AttachEnvelope {
     }
 }
 
+impl Slot {
+    /// Resolves the credential-attach token phase and its phase-scoped
+    /// constant-time secret proof.
+    ///
+    /// The token phase resolves against the CURRENT receipt's own deadline
+    /// pair first, then against the retained provenance fingerprints of ended
+    /// receipts. Each receipt's windows are fixed at its own commit; a later
+    /// attach never re-opens them. The verifier is phase-scoped (contract
+    /// R-C0): a live receipt replay verifies against the receipt's own
+    /// committed presented secret (contract row 4 recovers a lost rotation
+    /// with the invalidated OLD secret); every other phase verifies against
+    /// the slot's current secret. Provenance phases ignore the proof by
+    /// construction of their result path.
+    fn attach_token_phase(
+        &self,
+        request: &CredentialAttachRequest,
+        now: u128,
+    ) -> (
+        CredentialAttachTokenPhase<'_, Digest, Digest, Digest>,
+        AttachSecretProof,
+    ) {
+        let identity = ResolvedIdentity::<Digest, Digest, Digest>::Live(&self.member);
+        let mut verifier_bytes = self.attach_secret.into_bytes();
+        let token_phase = match self.attach.as_ref() {
+            Some(attach) if attach.token == request.attach_attempt_token => {
+                if now < attach.receipt_expires_at {
+                    verifier_bytes = attach.verifier;
+                    CredentialAttachTokenPhase::LiveReceipt {
+                        identity,
+                        receipt: &attach.receipt,
+                    }
+                } else if now < attach.provenance_expires_at {
+                    CredentialAttachTokenPhase::Provenance {
+                        identity,
+                        provenance: CredentialAttachProvenance::new(
+                            attach.result_generation,
+                            ReceiptExpiryReason::Deadline,
+                        ),
+                    }
+                } else {
+                    CredentialAttachTokenPhase::AfterProvenance
+                }
+            }
+            _ => match self
+                .attach_provenance
+                .get(&request.attach_attempt_token.into_bytes())
+            {
+                Some(record) if now < record.provenance_expires_at => {
+                    CredentialAttachTokenPhase::Provenance {
+                        identity,
+                        provenance: CredentialAttachProvenance::new(
+                            record.result_generation,
+                            record.reason,
+                        ),
+                    }
+                }
+                Some(_) => CredentialAttachTokenPhase::AfterProvenance,
+                None => CredentialAttachTokenPhase::NoMatch,
+            },
+        };
+        let secret_proof =
+            if facts::constant_time_eq(&verifier_bytes, &request.attach_secret.into_bytes()) {
+                AttachSecretProof::Verified
+            } else {
+                AttachSecretProof::Mismatch
+            };
+        (token_phase, secret_proof)
+    }
+}
+
 /// Maps a non-authorized credential-attach lookup onto its bound response.
+///
+/// Every classified fact travels FROM the crate's lookup value into the
+/// response authority — the conflict kind, the provenance row's generations
+/// and terminal reason — with no server-side re-derivation of any lifecycle
+/// rule.
 fn credential_attach_refusal(
     lookup: &CredentialAttachLookupResult<'_, Digest>,
     envelope: AttachEnvelope,
@@ -526,34 +595,51 @@ fn credential_attach_refusal(
         CredentialAttachLookupResult::StaleAuthority(_) => {
             CredentialAttachResponse::stale_authority(envelope, slot.member.generation())
         }
-        CredentialAttachLookupResult::AttemptTokenBodyConflict(_) => {
-            // The conflict kind is re-derived from the same facts the lookup
-            // compared: generation first, then the marker sequence.
-            let conflict = if envelope.capability_generation == slot.receipt_generation {
-                liminal_protocol::wire::AttemptConflict::MarkerDeliverySequence
-            } else {
-                liminal_protocol::wire::AttemptConflict::Generation
+        CredentialAttachLookupResult::AttemptTokenBodyConflict(value) => {
+            let WireAttemptTokenBodyConflict::CredentialAttach { conflict, .. } = value else {
+                return Err(StateError::invariant(
+                    "leave conflict row observed in the credential-attach lookup",
+                ));
             };
-            CredentialAttachResponse::attempt_token_body_conflict(&envelope, conflict)
+            CredentialAttachResponse::attempt_token_body_conflict(&envelope, *conflict)
         }
         CredentialAttachLookupResult::Bound(_) => {
-            let outcome = slot.attach_outcome.clone().ok_or_else(|| {
-                StateError::invariant("attach receipt replay without a stored receipt")
-            })?;
+            let outcome = slot
+                .attach
+                .as_ref()
+                .map(|attach| attach.outcome.clone())
+                .ok_or_else(|| {
+                    StateError::invariant("attach receipt replay without a stored receipt")
+                })?;
             CredentialAttachResponse::bound(outcome)
         }
         CredentialAttachLookupResult::UnboundReceipt(_) => {
-            let outcome = slot.attach_outcome.clone().ok_or_else(|| {
-                StateError::invariant("attach receipt replay without a stored receipt")
-            })?;
+            let outcome = slot
+                .attach
+                .as_ref()
+                .map(|attach| attach.outcome.clone())
+                .ok_or_else(|| {
+                    StateError::invariant("attach receipt replay without a stored receipt")
+                })?;
             CredentialAttachResponse::unbound_receipt(outcome)
         }
-        CredentialAttachLookupResult::ReceiptExpired(_) => {
+        CredentialAttachLookupResult::ReceiptExpired(value) => {
+            let WireReceiptExpired::CredentialAttach {
+                result_generation,
+                current_generation,
+                reason,
+                ..
+            } = value
+            else {
+                return Err(StateError::invariant(
+                    "enrollment provenance row observed in the credential-attach lookup",
+                ));
+            };
             CredentialAttachResponse::receipt_expired(
                 &envelope,
-                slot.receipt_generation,
-                slot.member.generation(),
-                ReceiptExpiryReason::Deadline,
+                *result_generation,
+                *current_generation,
+                *reason,
             )
         }
         CredentialAttachLookupResult::StaleOrUnknownReceipt(value) => {
@@ -586,7 +672,11 @@ fn enrollment_replay_response(
     // mapping: expired-receipt token replays answer `EnrollmentKnown`. This
     // is the closest crate-expressible row and is recorded as a residual gap
     // in the activation declaration.
-    let phase = if now < slot.receipt_expires_at {
+    //
+    // The gate reads the enrollment receipt's OWN deadline, fixed at enroll
+    // commit: later attaches never re-open the generation-1 secret-bearing
+    // receipt (secret receipts never outlive their signed TTL).
+    let phase = if now < slot.enrollment_receipt_expires_at {
         EnrollmentTokenPhase::LiveReceipt {
             identity: ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
             receipt: &slot.enrollment_receipt,

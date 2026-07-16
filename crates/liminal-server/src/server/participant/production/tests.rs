@@ -81,7 +81,7 @@ fn participant_generic(request: ClientRequest) -> Result<Frame, Box<dyn Error>> 
 
 /// Dispatches one request through the live production seam and decodes the
 /// wire response back into a semantic value.
-fn dispatch(
+pub(super) fn dispatch(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
     request: ClientRequest,
