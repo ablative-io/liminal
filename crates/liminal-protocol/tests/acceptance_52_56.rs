@@ -912,9 +912,9 @@ fn acceptance_case_53_verifier_precedence_receipt_provenance_and_terminalized_de
             LeaveFingerprint::new([0x54; 32]),
         )
         .expect("L53 canonical authority is valid");
-    let prepared_leave = settled_leave_authority(&live8, BindingState::Detached, 42)
+    let prepared_leave = settled_leave_authority(&live8, BindingState::Detached, 42, 42)
         .expect("L53 consumes its exact X frontier handle");
-    let IdentityState::Retired(tombstone) = commit_leave(
+    let (identity, _frontiers) = commit_leave(
         live8,
         BindingState::Detached,
         DetachCell::<[u8; 32]>::default(),
@@ -924,7 +924,9 @@ fn acceptance_case_53_verifier_precedence_receipt_provenance_and_terminalized_de
             left_delivery_seq: 42,
         },
     )
-    .expect("L53 commits its permanent tombstone") else {
+    .expect("L53 commits its permanent tombstone")
+    .into_parts();
+    let IdentityState::Retired(tombstone) = identity else {
         panic!("Leave must retire P53")
     };
     let tombstone_before = tombstone.clone();
@@ -1677,6 +1679,7 @@ fn acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay() {
     let after_a = commit_adjacent(crash_before_a.0.clone());
     let replay_after_a = commit_adjacent(crash_before_a.0);
     assert_eq!(after_a, replay_after_a);
+    let (after_a, _after_a_frontiers) = after_a.into_parts();
     let IdentityState::Retired(tombstone_a) = after_a else {
         panic!("adjacent Leave must retire P")
     };
@@ -1727,7 +1730,7 @@ fn acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay() {
         .with_committed_terminal(p_terminal)
         .expect("separately drained P terminal belongs to P");
     let commit_intervening = |member: LiveMember<Fingerprint>| {
-        let authority = settled_leave_authority(&member, BindingState::Detached, 14)
+        let authority = settled_leave_authority(&member, BindingState::Detached, 14, 14)
             .expect("separate drains leave an exact settled X-major14 authority");
         let verified = member
             .verify_leave_request(
@@ -1752,6 +1755,7 @@ fn acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay() {
     let after_i = commit_intervening(p_with_terminal.clone());
     let replay_after_i = commit_intervening(p_with_terminal);
     assert_eq!(after_i, replay_after_i);
+    let (after_i, _after_i_frontiers) = after_i.into_parts();
     let IdentityState::Retired(tombstone_i) = after_i else {
         panic!("intervening Leave must retire P")
     };

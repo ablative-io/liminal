@@ -152,7 +152,7 @@ fn tombstone() -> TestIdentity {
 }
 
 fn retire(live: TestMember, leave_token: LeaveAttemptToken) -> TestIdentity {
-    let authority = settled_leave_authority(&live, BindingState::Detached, 22);
+    let authority = settled_leave_authority(&live, BindingState::Detached, 22, 1);
     let request = LeaveRequest {
         conversation_id: 11,
         participant_id: live.participant_id(),
@@ -175,10 +175,12 @@ fn retire(live: TestMember, leave_token: LeaveAttemptToken) -> TestIdentity {
         verified,
         authority,
         LeaveCommitParameters {
-            left_delivery_seq: 22,
+            left_delivery_seq: 1,
         },
     )
     .expect("typed Leave commit produces tombstone")
+    .into_parts()
+    .0
 }
 
 #[test]

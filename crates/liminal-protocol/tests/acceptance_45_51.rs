@@ -982,7 +982,7 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
         )
         .expect("bound Leave authority is exact");
     let prepared_leave =
-        settled_leave_authority(&race_start.member, BindingState::Bound(binding_three), 6)
+        settled_leave_authority(&race_start.member, BindingState::Bound(binding_three), 6, 6)
             .expect("bound Leave consumes the exact X/A frontier handles");
     let leave_first = commit_leave(
         race_start.member.clone(),
@@ -995,7 +995,7 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
         },
     )
     .expect("bound Leave commits one Left");
-    let IdentityState::Retired(leave_first_tombstone) = &leave_first else {
+    let IdentityState::Retired(leave_first_tombstone) = leave_first.identity() else {
         panic!("Leave-first history must be a tombstone")
     };
     assert_eq!(
@@ -1031,9 +1031,9 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
             LeaveFingerprint::new([0x46; 32]),
         )
         .expect("detached Leave retains credential authority");
-    let prepared_death_leave = settled_leave_authority(&death_member, BindingState::Detached, 7)
+    let prepared_death_leave = settled_leave_authority(&death_member, BindingState::Detached, 7, 7)
         .expect("detached Leave consumes the exact X frontier handle");
-    let death_first = commit_leave(
+    let (death_first, _death_first_frontiers) = commit_leave(
         death_member,
         BindingState::Detached,
         race_start.detach_cell,
@@ -1043,7 +1043,8 @@ fn acceptance_case_46_flat_exit_claim_survives_detach_reattach_and_leave_fate_ra
             left_delivery_seq: 7,
         },
     )
-    .expect("death-first detached Leave writes Left second");
+    .expect("death-first detached Leave writes Left second")
+    .into_parts();
     let IdentityState::Retired(death_first_tombstone) = death_first else {
         panic!("death-first history must finish retired")
     };
@@ -1388,9 +1389,9 @@ fn acceptance_case_47_canonical_sequence_budgets_and_gap_free_boundary_histories
         conversation_id: C47_D,
         binding_epoch: e47_d,
     });
-    let prepared_d = settled_leave_authority(&member_d, binding_d, MAX - 2)
+    let prepared_d = settled_leave_authority(&member_d, binding_d, MAX - 2, MAX - 2)
         .expect("Arm D consumes its pre-owned later X handle and relays A");
-    let left_d = commit_leave(
+    let (left_d, _left_d_frontiers) = commit_leave(
         member_d,
         binding_d,
         DetachCell::<[u8; 32]>::default(),
@@ -1400,7 +1401,8 @@ fn acceptance_case_47_canonical_sequence_budgets_and_gap_free_boundary_histories
             left_delivery_seq: MAX - 2,
         },
     )
-    .expect("pre-owned E/T lets bound Leave commit without wrap");
+    .expect("pre-owned E/T lets bound Leave commit without wrap")
+    .into_parts();
     let IdentityState::Retired(tombstone_d) = left_d else {
         panic!("Arm D Leave must retire P0")
     };

@@ -478,6 +478,38 @@ pub enum IdentityState<EF, V, LF> {
     Retired(RetiredIdentity<EF, V, LF>),
 }
 
+/// One indivisible committed Leave state update.
+///
+/// The identity tombstone and the claim frontiers resulting from the prepared
+/// Leave transition are deliberately carried together and are not cloneable.
+/// A durable binding must persist both parts in the same transaction; exposing
+/// only the tombstone would discard the consumed and relayed frontier authority.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LeaveCommit<EF, V, LF> {
+    identity: IdentityState<EF, V, LF>,
+    frontiers: ClaimFrontiers,
+}
+
+impl<EF, V, LF> LeaveCommit<EF, V, LF> {
+    /// Borrows the permanent identity result committed by Leave.
+    #[must_use]
+    pub const fn identity(&self) -> &IdentityState<EF, V, LF> {
+        &self.identity
+    }
+
+    /// Borrows the exact claim frontiers committed with the identity result.
+    #[must_use]
+    pub const fn frontiers(&self) -> &ClaimFrontiers {
+        &self.frontiers
+    }
+
+    /// Consumes the atomic commit for one durable transaction.
+    #[must_use]
+    pub fn into_parts(self) -> (IdentityState<EF, V, LF>, ClaimFrontiers) {
+        (self.identity, self.frontiers)
+    }
+}
+
 /// Mismatch between a live member and proposed stored Leave result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetirementError {
@@ -544,10 +576,8 @@ impl NoInterveningTupleProof {
 /// Construction consumes a completely validated [`ClaimFrontiers`] snapshot,
 /// removes and relays the exact `X` order handle, and seals the resulting lane
 /// inside this value. The frontier cannot be recovered by a caller or reused
-/// after a successful commit. A later total Leave fixed-point operation may
-/// consume the held lane together with sequence, floor, product, and closure
-/// projection; this lower layer deliberately exposes no purported post-Leave
-/// [`ClaimFrontiers`].
+/// after a successful commit. Leave returns that authority only inside the
+/// indivisible [`LeaveCommit`] beside the resulting tombstone.
 ///
 /// External code cannot implement a planner proof or initialize this authority
 /// from raw majors:
@@ -627,9 +657,9 @@ impl PreparedLeaveAuthority {
         member_conversation_id: ConversationId,
         member_participant_id: ParticipantId,
         ended_binding_epoch: Option<BindingEpoch>,
-    ) -> Result<TransactionOrder, LeaveCommitError> {
+    ) -> Result<(ClaimFrontiers, TransactionOrder), LeaveCommitError> {
         let Self {
-            frontiers: _,
+            frontiers,
             conversation_id,
             participant_id,
             kind,
@@ -647,15 +677,15 @@ impl PreparedLeaveAuthority {
         {
             return Err(LeaveCommitError::PreparedAuthority);
         }
-        Ok(left_transaction_order)
+        Ok((frontiers, left_transaction_order))
     }
 
     fn consume_pending(
         self,
         pending: PendingFinalization,
-    ) -> Result<TransactionOrder, LeaveCommitError> {
+    ) -> Result<(ClaimFrontiers, TransactionOrder), LeaveCommitError> {
         let Self {
-            frontiers: _,
+            frontiers,
             conversation_id,
             participant_id,
             kind,
@@ -674,7 +704,7 @@ impl PreparedLeaveAuthority {
         {
             return Err(LeaveCommitError::PreparedAuthority);
         }
-        Ok(no_intervening.left_transaction_order)
+        Ok((frontiers, no_intervening.left_transaction_order))
     }
 }
 
@@ -706,6 +736,10 @@ pub enum LeaveCommitError {
     TerminalHistory,
     /// Prior terminal sequence is not strictly before the new `Left` sequence.
     TerminalSequenceOrder,
+    /// The supplied record positions do not consume the next gap-free sequence values.
+    SequenceAuthority,
+    /// Consuming and relaying Leave claims could not produce a valid frontier.
+    ResultingFrontier,
     /// Internal tombstone construction rejected an inconsistent result.
     RetirementInvariant(RetirementError),
 }
@@ -800,7 +834,7 @@ pub fn commit_leave<EF, V, LF, D>(
     verified: VerifiedLeaveRequest<V, LF>,
     authority: PreparedLeaveAuthority,
     parameters: LeaveCommitParameters,
-) -> Result<IdentityState<EF, V, LF>, LeaveCommitError> {
+) -> Result<LeaveCommit<EF, V, LF>, LeaveCommitError> {
     validate_verified(&member, &verified)?;
     let ended_binding_epoch = match binding_state {
         BindingState::Detached => None,
@@ -818,7 +852,7 @@ pub fn commit_leave<EF, V, LF, D>(
         }
     };
     validate_settled_cell(&member, binding_state, &detach_cell)?;
-    let left_transaction_order = authority.consume_settled(
+    let (frontiers, left_transaction_order) = authority.consume_settled(
         member.conversation_id,
         member.participant_id,
         ended_binding_epoch,
@@ -832,9 +866,11 @@ pub fn commit_leave<EF, V, LF, D>(
         verified,
         ended_binding_epoch,
         prior_terminal_delivery_seq,
+        None,
         left_transaction_order,
         parameters.left_delivery_seq,
         detach_cell,
+        frontiers,
     )
 }
 
@@ -854,14 +890,14 @@ pub fn commit_pending_leave<EF, V, LF, D>(
     verified: VerifiedLeaveRequest<V, LF>,
     authority: PreparedLeaveAuthority,
     parameters: PendingLeaveCommitParameters,
-) -> Result<IdentityState<EF, V, LF>, LeaveCommitError> {
+) -> Result<LeaveCommit<EF, V, LF>, LeaveCommitError> {
     let PendingLeaveCommitParameters {
         terminal_delivery_seq,
         left_delivery_seq,
     } = parameters;
     validate_verified(&member, &verified)?;
     validate_pending(&member, pending)?;
-    let left_transaction_order = authority.consume_pending(pending)?;
+    let (frontiers, left_transaction_order) = authority.consume_pending(pending)?;
     validate_pending_cell(member.conversation_id, pending, &detach_cell)?;
     if terminal_delivery_seq >= left_delivery_seq {
         return Err(LeaveCommitError::TerminalSequenceOrder);
@@ -879,9 +915,11 @@ pub fn commit_pending_leave<EF, V, LF, D>(
         verified,
         None,
         Some(committed_terminal.delivery_seq()),
+        Some(committed_terminal),
         left_transaction_order,
         left_delivery_seq,
         detach_cell,
+        frontiers,
     )
 }
 
@@ -991,15 +1029,21 @@ fn validate_pending_cell<D>(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the final Leave constructor keeps every verified authority and both atomic result halves explicit"
+)]
 fn finish_leave<EF, V, LF, D>(
     member: LiveMember<EF>,
     verified: VerifiedLeaveRequest<V, LF>,
     ended_binding_epoch: Option<BindingEpoch>,
     prior_terminal_delivery_seq: Option<DeliverySeq>,
+    committed_terminal: Option<CommittedBindingTerminal>,
     left_transaction_order: TransactionOrder,
     left_delivery_seq: DeliverySeq,
     detach_cell: DetachCell<D>,
-) -> Result<IdentityState<EF, V, LF>, LeaveCommitError> {
+    frontiers: ClaimFrontiers,
+) -> Result<LeaveCommit<EF, V, LF>, LeaveCommitError> {
     let VerifiedLeaveRequest {
         conversation_id,
         participant_id,
@@ -1022,6 +1066,13 @@ fn finish_leave<EF, V, LF, D>(
     ) else {
         return Err(LeaveCommitError::TerminalSequenceOrder);
     };
+    let frontiers = frontiers.finish_leave_claims(
+        participant_id,
+        ended_binding_epoch,
+        committed_terminal,
+        left_delivery_seq,
+        left_transaction_order,
+    )?;
     let retired = member
         .retire(
             leave_attempt_token,
@@ -1036,5 +1087,8 @@ fn finish_leave<EF, V, LF, D>(
         )
         .map_err(LeaveCommitError::RetirementInvariant)?;
     let _detach_cell_replaced_by_tombstone = detach_cell;
-    Ok(IdentityState::Retired(retired))
+    Ok(LeaveCommit {
+        identity: IdentityState::Retired(retired),
+        frontiers,
+    })
 }

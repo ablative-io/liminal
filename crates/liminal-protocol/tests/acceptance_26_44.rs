@@ -117,7 +117,12 @@ fn retire_detached_member(
     token_byte: u8,
     left_delivery_seq: u64,
 ) -> Result<TestIdentity, String> {
-    let authority = settled_leave_authority(&live, BindingState::Detached, left_delivery_seq)?;
+    let authority = settled_leave_authority(
+        &live,
+        BindingState::Detached,
+        left_delivery_seq,
+        left_delivery_seq,
+    )?;
     let request = LeaveRequest {
         conversation_id: live.conversation_id(),
         participant_id: live.participant_id(),
@@ -141,6 +146,7 @@ fn retire_detached_member(
         authority,
         LeaveCommitParameters { left_delivery_seq },
     )
+    .map(|commit| commit.into_parts().0)
     .map_err(|error| format!("leave commit failed: {error:?}"))
 }
 
@@ -385,8 +391,8 @@ fn case_28_detach_replay_terminalization_and_leave_precedence() -> TestResult {
             LeaveFingerprint::new([0xC8; 32]),
         )
         .map_err(|error| format!("leave verify failed: {error:?}"))?;
-    let authority = settled_leave_authority(&attached.member, attached.binding_state, 32)?;
-    let retired = commit_leave(
+    let authority = settled_leave_authority(&attached.member, attached.binding_state, 32, 32)?;
+    let (retired, _frontiers) = commit_leave(
         attached.member,
         attached.binding_state,
         DetachCell::Terminalized(terminalized),
@@ -396,7 +402,8 @@ fn case_28_detach_replay_terminalization_and_leave_precedence() -> TestResult {
             left_delivery_seq: 32,
         },
     )
-    .map_err(|error| format!("leave commit failed: {error:?}"))?;
+    .map_err(|error| format!("leave commit failed: {error:?}"))?
+    .into_parts();
     let empty_cell = DetachCell::<[u8; 32]>::default();
     let result = lookup_detach(&DetachLookupContext {
         token_resolution: DetachTokenResolution::Exact(ResolvedIdentity::from(&retired)),
@@ -443,8 +450,8 @@ fn case_29_post_leave_enrollment_and_credential_token_replay() -> TestResult {
             LeaveFingerprint::new([0x92; 32]),
         )
         .map_err(|error| format!("leave verify failed: {error:?}"))?;
-    let authority = settled_leave_authority(&live, BindingState::Detached, 8)?;
-    let retired = commit_leave(
+    let authority = settled_leave_authority(&live, BindingState::Detached, 8, 8)?;
+    let (retired, _frontiers) = commit_leave(
         live,
         BindingState::Detached,
         DetachCell::<[u8; 32]>::default(),
@@ -454,7 +461,8 @@ fn case_29_post_leave_enrollment_and_credential_token_replay() -> TestResult {
             left_delivery_seq: 8,
         },
     )
-    .map_err(|error| format!("leave failed: {error:?}"))?;
+    .map_err(|error| format!("leave failed: {error:?}"))?
+    .into_parts();
 
     let enrollment_request = EnrollmentRequest {
         conversation_id: 29,

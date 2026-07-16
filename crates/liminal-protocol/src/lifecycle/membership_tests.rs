@@ -13,10 +13,10 @@ use crate::wire::{
 use super::{
     ActiveBinding, AttachSecretProof, BindingState, BindingTerminalDisposition,
     CommittedBindingTerminal, CommittedBindingTerminalPosition, DetachCell, DiedBindingTransition,
-    EnrollmentFingerprint, IdentityState, LeaveCommitError, LeaveCommitParameters,
-    LeaveFingerprint, LiveMember, LiveMemberRestore, PendingBindingTerminalPosition,
-    PendingFinalization, PendingLeaveCommitParameters, RetiredIdentity, commit_detach,
-    commit_leave, commit_pending_leave,
+    EnrollmentFingerprint, IdentityState, LeaveCommit, LeaveCommitError, LeaveCommitParameters,
+    LeaveFingerprint, LiveMember, LiveMemberRestore, OrderClaims, PendingBindingTerminalPosition,
+    PendingFinalization, PendingLeaveCommitParameters, RetainedCausalRecordKind, RetiredIdentity,
+    SequenceClaims, commit_detach, commit_leave, commit_pending_leave,
     test_support::{pending_leave_authority, settled_leave_authority},
 };
 
@@ -78,7 +78,46 @@ fn verify_leave(
         .expect("fixture request has current authority")
 }
 
-fn assert_retired<EF, V, LF>(state: IdentityState<EF, V, LF>) -> RetiredIdentity<EF, V, LF> {
+fn assert_retired<EF, V, LF>(commit: LeaveCommit<EF, V, LF>) -> RetiredIdentity<EF, V, LF> {
+    let (state, frontiers) = commit.into_parts();
+    let IdentityState::Retired(retired) = &state else {
+        panic!("Leave must return only a tombstone")
+    };
+    assert!(
+        frontiers
+            .active_identities()
+            .participants()
+            .iter()
+            .all(|participant| participant.participant_index() != 7),
+        "the atomic post-Leave frontier cannot retain the retired identity"
+    );
+    assert_eq!(
+        frontiers.sequence().ledger().claims().live_members(),
+        frontiers.active_identities().len()
+    );
+    assert_eq!(
+        frontiers.order().ledger().claims().membership_exits(),
+        frontiers.active_identities().len()
+    );
+    assert!(frontiers.cross_counter_valid_for_test());
+    assert_eq!(
+        frontiers.sequence().ledger().claims(),
+        SequenceClaims::default()
+    );
+    assert_eq!(frontiers.order().ledger().claims(), OrderClaims::default());
+    assert_eq!(
+        frontiers.sequence().ledger().high_watermark(),
+        retired.committed_result().left_delivery_seq()
+    );
+    assert!(matches!(
+        frontiers
+            .retained_records()
+            .last()
+            .map(|record| record.kind),
+        Some(RetainedCausalRecordKind::MembershipExit {
+            participant_index: 7
+        })
+    ));
     match state {
         IdentityState::Retired(retired) => retired,
         IdentityState::Live(_) => panic!("Leave must return only a tombstone"),
@@ -90,7 +129,7 @@ fn bound_leave_derives_active_epoch_and_moves_generic_fingerprints() {
     let member = member(None);
     let binding = active(1);
     let binding_state = BindingState::Bound(binding);
-    let authority = settled_leave_authority(&member, binding_state, 10);
+    let authority = settled_leave_authority(&member, binding_state, 10, 6);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -100,7 +139,7 @@ fn bound_leave_derives_active_epoch_and_moves_generic_fingerprints() {
             verified,
             authority,
             LeaveCommitParameters {
-                left_delivery_seq: 10,
+                left_delivery_seq: 6,
             },
         )
         .expect("bound Leave derives its ended epoch"),
@@ -150,7 +189,7 @@ fn committed_detach_cell_must_match_retained_terminal_and_derives_sequence() {
     )
     .expect("detach commits")
     .into_parts();
-    let authority = settled_leave_authority(&member, binding_state, 9);
+    let authority = settled_leave_authority(&member, binding_state, 9, 9);
     let verified_leave = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -182,7 +221,7 @@ fn separately_committed_death_is_history_even_with_empty_detach_cell() {
         panic!("committed disposition must append the Died terminal");
     };
     let member = member(Some(terminal.into()));
-    let authority = settled_leave_authority(&member, BindingState::Detached, 13);
+    let authority = settled_leave_authority(&member, BindingState::Detached, 13, 13);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -225,7 +264,7 @@ fn terminalized_cell_uses_retained_history_because_fix_one_drops_sequence() {
     .expect("detach commits")
     .into_parts();
     let terminalized = committed.terminalize_after_attach();
-    let authority = settled_leave_authority(&member, binding_state, 15);
+    let authority = settled_leave_authority(&member, binding_state, 15, 15);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -301,7 +340,7 @@ fn pending_terminal_requires_typed_no_intervening_composition() {
 #[test]
 fn empty_cell_and_no_history_derives_none_without_caller_option() {
     let member = member(None);
-    let authority = settled_leave_authority(&member, BindingState::Detached, 3);
+    let authority = settled_leave_authority(&member, BindingState::Detached, 3, 6);
     let verified = verify_leave(&member);
     let retired = assert_retired(
         commit_leave(
@@ -311,7 +350,7 @@ fn empty_cell_and_no_history_derives_none_without_caller_option() {
             verified,
             authority,
             LeaveCommitParameters {
-                left_delivery_seq: 3,
+                left_delivery_seq: 6,
             },
         )
         .expect("empty detached history has no prior terminal"),

@@ -118,17 +118,14 @@ pub(super) fn settled_leave_authority<F>(
     member: &LiveMember<F>,
     binding_state: BindingState,
     left_transaction_order: u64,
+    left_delivery_seq: u64,
 ) -> PreparedLeaveAuthority {
     let participant_id = member.participant_id();
     let fixture = settled_binding_fixture(member, binding_state, left_transaction_order)
         .expect("settled fixture has exact binding state and a usable A/X order");
-    let high_watermark = member
-        .latest_terminal()
-        .map_or_else(
-            || member.cursor(),
-            super::CommittedBindingTerminal::delivery_seq,
-        )
-        .max(member.cursor());
+    let high_watermark = left_delivery_seq
+        .checked_sub(1)
+        .expect("settled Leave appends after an allocated high watermark");
     let exit_seq = high_watermark
         .checked_add(1)
         .expect("settled fixture has one E position");

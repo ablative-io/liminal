@@ -145,16 +145,13 @@ pub fn settled_leave_authority<F>(
     member: &LiveMember<F>,
     binding_state: BindingState,
     left_transaction_order: u64,
+    left_delivery_seq: u64,
 ) -> Result<PreparedLeaveAuthority, String> {
     let participant_id = member.participant_id();
     let fixture = settled_binding_fixture(member, binding_state, left_transaction_order)?;
-    let high_watermark = member
-        .latest_terminal()
-        .map_or_else(
-            || member.cursor(),
-            liminal_protocol::lifecycle::CommittedBindingTerminal::delivery_seq,
-        )
-        .max(member.cursor());
+    let high_watermark = left_delivery_seq
+        .checked_sub(1)
+        .ok_or_else(|| "settled Leave requires a positive delivery sequence".to_owned())?;
     let exit_seq = high_watermark
         .checked_add(1)
         .ok_or_else(|| "settled fixture has no E suffix".to_owned())?;

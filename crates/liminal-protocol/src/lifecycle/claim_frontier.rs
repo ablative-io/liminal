@@ -19,11 +19,12 @@ use crate::{
 
 use super::{
     AttachedLifecycleRecord, BindingOrigin, BindingState, ClosureAccounting, ClosureState,
-    InitialEnrollmentClosureProjection, InitialEnrollmentOperationCommit, LiveMember,
-    ObserverCheckedOperation, ObserverFloorDecision, ObserverProjection, OrderClaims, OrderHigh,
-    OrderLedger, PendingFinalization, PreparedLeaveAuthority, RecoveryQuartetStatus,
-    RecoverySequenceReserve, RemainingClosureDecision, SequenceLedger, StoredEdge,
-    check_observer_floor, check_remaining_closure,
+    CommittedBindingTerminal, InitialEnrollmentClosureProjection, InitialEnrollmentOperationCommit,
+    LeaveCommitError, LiveMember, ObserverCheckedOperation, ObserverFloorDecision,
+    ObserverProjection, OrderClaims, OrderHigh, OrderLedger, PendingFinalization,
+    PreparedLeaveAuthority, RecoveryQuartetStatus, RecoverySequenceReserve,
+    RemainingClosureDecision, SequenceClaims, SequenceLedger, StoredEdge, check_observer_floor,
+    check_remaining_closure,
     operations::ordinary_record_projection::{
         OrdinaryFixedPointPlan, OrdinaryProjectionError, OrdinaryProjectionFacts,
         OrdinaryProjectionKernelDecision, OrdinaryRecordDrainFirst,
@@ -1852,6 +1853,45 @@ fn build_initial_enrollment_frontiers(
     })
 }
 
+#[derive(Clone, Copy)]
+enum LeaveSequenceUnit {
+    Direct(MovableSequenceClaim),
+    TerminalProduct(TerminalProductRange),
+    ReplacementProduct(ReplacementTerminalProductRange),
+    ExitProduct(ExitProductRange),
+    Recovery(RecoverySequenceBlock),
+}
+
+impl LeaveSequenceUnit {
+    fn original_start(self) -> DeliverySeq {
+        match self {
+            Self::Direct(claim) => claim.delivery_seq,
+            Self::TerminalProduct(range) => range.start,
+            Self::ReplacementProduct(range) => range.start,
+            Self::ExitProduct(range) => range.start,
+            Self::Recovery(block) => block_start_validated_sequence(block),
+        }
+    }
+}
+
+fn allocate_leave_sequence_range(
+    cursor: &mut Option<DeliverySeq>,
+    length: u64,
+) -> Result<DeliverySeq, LeaveCommitError> {
+    let Some(start) = *cursor else {
+        return Err(LeaveCommitError::ResultingFrontier);
+    };
+    let end = u128::from(start)
+        .checked_add(u128::from(length))
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(LeaveCommitError::ResultingFrontier)?;
+    if end > u128::from(u64::MAX) {
+        return Err(LeaveCommitError::ResultingFrontier);
+    }
+    *cursor = u64::try_from(end + 1).ok();
+    Ok(start)
+}
+
 impl ClaimFrontiers {
     /// Constructs the complete initial frontier directly from one admitted
     /// enrollment operation and its exact encoded `Attached` charge.
@@ -2427,6 +2467,261 @@ impl ClaimFrontiers {
         ))
     }
 
+    /// Completes the claim-frontier portion of one already-authorized Leave.
+    ///
+    /// The transition consumes the retiring identity's `E`, its still-live `T`
+    /// when applicable, and every product dimension removed with membership.
+    /// Surviving direct, product, and recovery claims are relayed gap-free after
+    /// the appended `Left` (or pending terminal plus `Left`) records. The
+    /// retained suffix is extended at the unchanged floor so no caller-authored
+    /// floor or snapshot can be substituted for the protocol result.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the atomic Leave relay keeps membership, both ledgers, products, recovery, and retained rows visibly in one checked transition"
+    )]
+    pub(super) fn finish_leave_claims(
+        mut self,
+        participant_id: ParticipantId,
+        ended_binding_epoch: Option<BindingEpoch>,
+        committed_terminal: Option<CommittedBindingTerminal>,
+        left_delivery_seq: DeliverySeq,
+        left_transaction_order: TransactionOrder,
+    ) -> Result<Self, LeaveCommitError> {
+        let prior_high = self.sequence.ledger.high_watermark();
+        let first_appended = prior_high
+            .checked_add(1)
+            .ok_or(LeaveCommitError::SequenceAuthority)?;
+        let expected_left = if committed_terminal.is_some() {
+            first_appended
+                .checked_add(1)
+                .ok_or(LeaveCommitError::SequenceAuthority)?
+        } else {
+            first_appended
+        };
+        if left_delivery_seq != expected_left {
+            return Err(LeaveCommitError::SequenceAuthority);
+        }
+
+        match (
+            committed_terminal,
+            self.sequence.immutable_candidates.as_slice(),
+        ) {
+            (
+                Some(terminal),
+                [
+                    ImmutableSequenceCandidate::BindingTerminal {
+                        delivery_seq,
+                        admission_order,
+                        owner,
+                    },
+                ],
+            ) if *delivery_seq == first_appended
+                && terminal.delivery_seq() == first_appended
+                && *admission_order == terminal.admission_order()
+                && owner.participant_index == participant_id
+                && owner.binding_epoch == terminal.binding_epoch() => {}
+            (None, []) => {}
+            (Some(_) | None, _) => return Err(LeaveCommitError::SequenceAuthority),
+        }
+
+        let Some(active_index) = self
+            .active_identities
+            .participants
+            .iter()
+            .position(|participant| participant.participant_index == participant_id)
+        else {
+            return Err(LeaveCommitError::ResultingFrontier);
+        };
+        self.active_identities.participants.remove(active_index);
+        let resulting_live = usize_to_u64(self.active_identities.participants.len());
+
+        let mut exit_consumed = false;
+        let mut terminal_consumed = ended_binding_epoch.is_none();
+        let mut units = Vec::new();
+        for claim in self.sequence.movable_claims.iter().copied() {
+            match claim.owner {
+                SequenceDirectOwner::MembershipExit {
+                    participant_index: owner,
+                } if owner == participant_id => {
+                    if exit_consumed {
+                        return Err(LeaveCommitError::ResultingFrontier);
+                    }
+                    exit_consumed = true;
+                }
+                SequenceDirectOwner::BindingTerminal(owner)
+                    if owner.participant_index == participant_id
+                        && Some(owner.binding_epoch) == ended_binding_epoch =>
+                {
+                    if terminal_consumed {
+                        return Err(LeaveCommitError::ResultingFrontier);
+                    }
+                    terminal_consumed = true;
+                }
+                SequenceDirectOwner::MembershipExit { .. }
+                | SequenceDirectOwner::BindingTerminal(_) => {
+                    units.push(LeaveSequenceUnit::Direct(claim));
+                }
+            }
+        }
+        if !exit_consumed || !terminal_consumed {
+            return Err(LeaveCommitError::ResultingFrontier);
+        }
+
+        let recovery_owned = self
+            .sequence
+            .recovery
+            .is_some_and(|block| block.participant_index == participant_id);
+        for range in self.sequence.products.live_times_terminal.iter().copied() {
+            if range.terminal.participant_index != participant_id && resulting_live != 0 {
+                units.push(LeaveSequenceUnit::TerminalProduct(TerminalProductRange {
+                    start: range.start,
+                    length: resulting_live,
+                    terminal: range.terminal,
+                }));
+            }
+        }
+        if let Some(range) = self.sequence.products.live_times_replacement_terminal
+            && !recovery_owned
+            && resulting_live != 0
+        {
+            units.push(LeaveSequenceUnit::ReplacementProduct(
+                ReplacementTerminalProductRange {
+                    start: range.start,
+                    length: resulting_live,
+                    participant_index: range.participant_index,
+                    marker_delivery_seq: range.marker_delivery_seq,
+                    prior_binding_epoch: range.prior_binding_epoch,
+                },
+            ));
+        }
+        let resulting_other = resulting_live.saturating_sub(1);
+        if resulting_other != 0 {
+            for range in self.sequence.products.other_live_times_exit.iter().copied() {
+                if range.exit_participant != participant_id {
+                    units.push(LeaveSequenceUnit::ExitProduct(ExitProductRange {
+                        start: range.start,
+                        length: resulting_other,
+                        exit_participant: range.exit_participant,
+                    }));
+                }
+            }
+        }
+        if let Some(recovery) = self.sequence.recovery
+            && !recovery_owned
+        {
+            units.push(LeaveSequenceUnit::Recovery(recovery));
+        }
+        units.sort_by_key(|unit| unit.original_start());
+
+        let mut cursor = left_delivery_seq.checked_add(1);
+        let mut movable_claims = Vec::new();
+        let mut terminal_products = Vec::new();
+        let mut replacement_product = None;
+        let mut exit_products = Vec::new();
+        let mut recovery = None;
+        for unit in units {
+            match unit {
+                LeaveSequenceUnit::Direct(mut claim) => {
+                    claim.delivery_seq = allocate_leave_sequence_range(&mut cursor, 1)?;
+                    movable_claims.push(claim);
+                }
+                LeaveSequenceUnit::TerminalProduct(mut range) => {
+                    range.start = allocate_leave_sequence_range(&mut cursor, range.length)?;
+                    terminal_products.push(range);
+                }
+                LeaveSequenceUnit::ReplacementProduct(mut range) => {
+                    range.start = allocate_leave_sequence_range(&mut cursor, range.length)?;
+                    replacement_product = Some(range);
+                }
+                LeaveSequenceUnit::ExitProduct(mut range) => {
+                    range.start = allocate_leave_sequence_range(&mut cursor, range.length)?;
+                    exit_products.push(range);
+                }
+                LeaveSequenceUnit::Recovery(mut block) => {
+                    let length = 2 + u64::from(block.terminal.is_some());
+                    let start = allocate_leave_sequence_range(&mut cursor, length)?;
+                    if let Some(mut terminal) = block.terminal {
+                        terminal.delivery_seq = start;
+                        block.terminal = Some(terminal);
+                        block.recovery_attach_seq = start
+                            .checked_add(1)
+                            .ok_or(LeaveCommitError::ResultingFrontier)?;
+                    } else {
+                        block.recovery_attach_seq = start;
+                    }
+                    block.replacement_terminal_seq = block
+                        .recovery_attach_seq
+                        .checked_add(1)
+                        .ok_or(LeaveCommitError::ResultingFrontier)?;
+                    recovery = Some(block);
+                }
+            }
+        }
+        movable_claims.sort_by_key(|claim| claim.delivery_seq);
+        terminal_products.sort_by_key(|range| range.start);
+        exit_products.sort_by_key(|range| range.start);
+        let terminal_count = usize_to_u64(
+            movable_claims
+                .iter()
+                .filter(|claim| matches!(claim.owner, SequenceDirectOwner::BindingTerminal(_)))
+                .count(),
+        ) + u64::from(recovery.is_some_and(|block| block.terminal.is_some()));
+        let recovery_reserve = if recovery.is_some() {
+            RecoverySequenceReserve::DetachedCredentialRecovery
+        } else {
+            RecoverySequenceReserve::None
+        };
+        let ledger = SequenceLedger::try_new(
+            left_delivery_seq,
+            SequenceClaims::new(resulting_live, terminal_count, 0, recovery_reserve),
+        )
+        .map_err(|_| LeaveCommitError::ResultingFrontier)?;
+        self.sequence = SequenceClaimFrontier {
+            ledger,
+            movable_claims,
+            immutable_candidates: Vec::new(),
+            products: SequenceProductRanges {
+                live_times_terminal: terminal_products,
+                live_times_replacement_terminal: replacement_product,
+                other_live_times_exit: exit_products,
+            },
+            recovery,
+        };
+
+        if let Some(terminal) = committed_terminal {
+            self.retained_records.push(RetainedCausalRecord {
+                delivery_seq: terminal.delivery_seq(),
+                admission_order: terminal.admission_order(),
+                kind: RetainedCausalRecordKind::BindingTerminal(BindingTerminalOwner {
+                    participant_index: participant_id,
+                    binding_epoch: terminal.binding_epoch(),
+                }),
+            });
+        }
+        self.retained_records.push(RetainedCausalRecord {
+            delivery_seq: left_delivery_seq,
+            admission_order: super::AdmissionOrder::new(
+                left_transaction_order,
+                CandidatePhase::MembershipExit,
+                participant_id,
+            ),
+            kind: RetainedCausalRecordKind::MembershipExit {
+                participant_index: participant_id,
+            },
+        });
+        self.retained_records
+            .sort_by_key(|record| record.delivery_seq);
+
+        let order_claims = self.order.ledger.claims();
+        if order_claims.membership_exits() != resulting_live
+            || self.order.recovery.is_some() != self.sequence.recovery.is_some()
+            || validate_cross_counter(&self.sequence, &self.order).is_err()
+        {
+            return Err(LeaveCommitError::ResultingFrontier);
+        }
+        Ok(self)
+    }
+
     fn marker_candidate(&self, delivery_seq: DeliverySeq) -> Option<ValidatedMarkerCandidate> {
         self.sequence
             .immutable_candidates
@@ -2797,7 +3092,10 @@ fn select_leave_order(
             units.push(LeaveRelayUnit::Direct(claim));
         }
     }
-    if let Some(recovery) = order.recovery {
+    if let Some(recovery) = order
+        .recovery
+        .filter(|recovery| recovery.participant_index != participant_id)
+    {
         units.push(LeaveRelayUnit::Recovery(recovery));
     }
     units.sort_by_key(|unit| unit.start());
@@ -2901,24 +3199,29 @@ const fn relay_recovery_block(
 }
 
 fn leave_resulting_order_ledger(
-    order: &OrderClaimFrontier,
     selected_major: TransactionOrder,
-    ended_binding_epoch: Option<BindingEpoch>,
+    movable_claims: &[MovableOrderClaim],
+    recovery: Option<RecoveryOrderBlock>,
 ) -> Result<OrderLedger, PrepareLeaveAuthorityError> {
-    let old_claims = order.ledger.claims();
-    let active_binding_terminals = old_claims
-        .active_binding_terminals()
-        .checked_sub(u64::from(ended_binding_epoch.is_some()))
-        .ok_or(PrepareLeaveAuthorityError::ResultingOrderLedger)?;
-    let membership_exits = old_claims
-        .membership_exits()
-        .checked_sub(1)
-        .ok_or(PrepareLeaveAuthorityError::ResultingOrderLedger)?;
+    let active_binding_terminals =
+        usize_to_u64(
+            movable_claims
+                .iter()
+                .filter(|claim| matches!(claim.owner, OrderDirectOwner::ActiveBindingTerminal(_)))
+                .count(),
+        ) + u64::from(recovery.is_some_and(|block| block.active_binding.is_some()));
+    let membership_exits = usize_to_u64(
+        movable_claims
+            .iter()
+            .filter(|claim| matches!(claim.owner, OrderDirectOwner::MembershipExit { .. }))
+            .count(),
+    );
+    let has_recovery = recovery.is_some();
     let resulting_claims = OrderClaims::new(
         active_binding_terminals,
         membership_exits,
-        old_claims.recovery_operation(),
-        old_claims.recovery_replacement_terminal(),
+        has_recovery,
+        has_recovery,
     )
     .map_err(|_| PrepareLeaveAuthorityError::ResultingOrderLedger)?;
     OrderLedger::try_new(OrderHigh::Allocated(selected_major), resulting_claims)
@@ -2934,8 +3237,7 @@ fn consume_leave_order_lane(
     let selection = select_leave_order(order, participant_id, ended_binding_epoch, pending_order)?;
     let (movable_claims, recovery) =
         relay_leave_order_units(selection.units, selection.selected_major)?;
-    let ledger =
-        leave_resulting_order_ledger(order, selection.selected_major, ended_binding_epoch)?;
+    let ledger = leave_resulting_order_ledger(selection.selected_major, &movable_claims, recovery)?;
     *order = OrderClaimFrontier {
         ledger,
         movable_claims,

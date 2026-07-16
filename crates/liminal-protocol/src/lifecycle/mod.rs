@@ -165,7 +165,7 @@ pub use lookup::{
     lookup_leave,
 };
 pub use membership::{
-    EnrollmentFingerprint, IdentityState, LeaveCommitError, LeaveCommitParameters,
+    EnrollmentFingerprint, IdentityState, LeaveCommit, LeaveCommitError, LeaveCommitParameters,
     LeaveFingerprint, LeaveVerificationError, LiveMember, LiveMemberRestore,
     MembershipInvariantError, PendingLeaveCommitParameters, PreparedLeaveAuthority,
     RetiredIdentity, RetirementError, VerifiedLeaveRequest, commit_leave, commit_pending_leave,

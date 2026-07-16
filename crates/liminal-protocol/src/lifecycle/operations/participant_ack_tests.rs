@@ -85,7 +85,7 @@ fn envelope(generation_value: u64, through_seq: u64) -> ParticipantAckEnvelope {
 
 fn retired_identity() -> TestIdentity {
     let member = member(CURRENT_CURSOR);
-    let authority = settled_leave_authority(&member, BindingState::Detached, 8);
+    let authority = settled_leave_authority(&member, BindingState::Detached, 8, CURRENT_CURSOR + 1);
     let leave_request = LeaveRequest {
         conversation_id: CONVERSATION_ID,
         participant_id: PARTICIPANT_ID,
@@ -108,10 +108,12 @@ fn retired_identity() -> TestIdentity {
         verified,
         authority,
         LeaveCommitParameters {
-            left_delivery_seq: 8,
+            left_delivery_seq: CURRENT_CURSOR + 1,
         },
     )
     .expect("test Leave creates a tombstone")
+    .into_parts()
+    .0
 }
 
 fn commit_for(member: &LiveMember<Vec<u8>>, through_seq: u64) -> ParticipantAckCommit {
