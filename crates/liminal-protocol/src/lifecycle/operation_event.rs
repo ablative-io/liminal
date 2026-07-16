@@ -6,8 +6,10 @@
 //! [`EnrollmentCommit`] and attach facts from [`AttachCommit`] (both carry
 //! private fields, so only [`super::commit_enrollment`] and
 //! [`super::commit_attach`] mint them, and the recorded fact kind is bound to
-//! the producing commit kind); detach facts pair the committed terminal with
-//! its committed replay cell, which supplies the recorded attempt token; leave
+//! the producing commit kind); detach facts consume the whole atomic
+//! [`CommittedDetachTransition`], whose committed replay cell — born in the
+//! same detach commit as its terminal — supplies the recorded attempt token;
+//! leave
 //! facts come from the permanent [`RetiredIdentity`] tombstone, which carries
 //! both the canonical [`LeaveCommitted`] result and the congruence-checked
 //! `Left` transaction order; fate facts come from the two private-field fate
@@ -28,8 +30,8 @@ use crate::wire::{
 };
 
 use super::{
-    AttachCommit, CommittedDetach, CommittedDetachedTerminal, EnrollmentCommit,
-    NonzeroParticipantAckCommit, OrdinaryBindingFate, RecoveredBindingFate, RetiredIdentity,
+    AttachCommit, CommittedDetachTransition, EnrollmentCommit, NonzeroParticipantAckCommit,
+    OrdinaryBindingFate, RecoveredBindingFate, RetiredIdentity,
 };
 
 /// Durable facts of one committed enrollment, as recorded by the shell.
@@ -229,20 +231,50 @@ pub struct DetachedOperation {
 }
 
 impl DetachedOperation {
-    /// Creates the detach event body from the exact committed terminal and its
-    /// committed replay cell.
+    /// Creates the detach event body from the whole atomic detach transition.
     ///
-    /// Both inputs are sealed: [`CommittedDetach`] has no public constructor,
-    /// so the recorded attempt token is the one the detach commit actually
-    /// retained rather than a caller-chosen value. The pairing checks mirror
-    /// the crate's cold-restore live-pair validation.
+    /// The producer consumes the crate's own sealed commit
+    /// ([`CommittedDetachTransition`] has no public constructor, so only
+    /// [`super::commit_detach`] and [`super::complete_pending_detach`] mint
+    /// it), exactly like the other five producers: the recorded terminal and
+    /// the replay cell supplying the recorded attempt token were born in one
+    /// detach commit with full conversation context, so pairing a terminal
+    /// with a cell from another detach — or another conversation whose
+    /// participant, epoch, and delivery-sequence fields collide — is
+    /// unrepresentable:
     ///
-    /// Returns `None` unless the terminal's cause is `CleanDeregister` and the
-    /// cell names that terminal's exact participant, ended binding epoch, and
-    /// committed delivery sequence: supersession terminals belong to the attach
-    /// event that committed them, never to a standalone detach event.
+    /// ```compile_fail
+    /// use liminal_protocol::lifecycle::{CommittedDetachTransition, DetachedOperation};
+    ///
+    /// fn mispair(
+    ///     conversation_a: &CommittedDetachTransition<(), [u8; 32]>,
+    ///     conversation_b: &CommittedDetachTransition<(), [u8; 32]>,
+    /// ) -> Option<DetachedOperation> {
+    ///     DetachedOperation::new(conversation_a.terminal(), conversation_b.cell())
+    /// }
+    /// ```
+    ///
+    /// A standalone terminal cannot be presented either, so a supersession
+    /// terminal still belongs only to the attach event that committed it:
+    ///
+    /// ```compile_fail
+    /// use liminal_protocol::lifecycle::{CommittedDetachedTerminal, DetachedOperation};
+    ///
+    /// fn relabel(terminal: &CommittedDetachedTerminal) -> Option<DetachedOperation> {
+    ///     DetachedOperation::new(terminal)
+    /// }
+    /// ```
+    ///
+    /// Returns `None` unless the transition's terminal cause is
+    /// `CleanDeregister` and its cell names that terminal's exact
+    /// participant, ended binding epoch, and committed delivery sequence —
+    /// re-validation of invariants the detach commit constructors already
+    /// guarantee, surfaced by the aggregate commit as a typed pairing fault
+    /// rather than a recorded lie.
     #[must_use]
-    pub fn new<V>(terminal: CommittedDetachedTerminal, cell: &CommittedDetach<V>) -> Option<Self> {
+    pub fn new<EF, V>(transition: &CommittedDetachTransition<EF, V>) -> Option<Self> {
+        let terminal = transition.terminal();
+        let cell = transition.cell();
         if terminal.cause() != DetachedCause::CleanDeregister {
             return None;
         }

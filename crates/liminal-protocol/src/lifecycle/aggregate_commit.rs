@@ -236,7 +236,7 @@ pub fn decide_detached_operation<EF, V>(
     conversation: ParticipantConversation,
     transition: CommittedDetachTransition<EF, V>,
 ) -> AggregateOperationResult<CommittedDetachTransition<EF, V>> {
-    let Some(body) = DetachedOperation::new(transition.terminal(), transition.cell()) else {
+    let Some(body) = DetachedOperation::new(&transition) else {
         return Err(Box::new(AggregateOperationFault {
             shell: conversation,
             operation: transition,

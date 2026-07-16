@@ -24,12 +24,11 @@ use super::operation_event::{
 use super::test_support::settled_leave_authority;
 use super::{
     ActiveBinding, AllocatedParticipantSlot, AttachCommit, AttachCommitParameters,
-    AttachSecretProof, AttachTransition, AttachedRecordPosition, BindingState,
-    CommittedBindingTerminalPosition, CommittedDetachTransition, DetachCell, EnrollmentCommit,
-    EnrollmentCommitParameters, EnrollmentFingerprint, IdentityState, LeaveCommit,
-    LeaveCommitParameters, LeaveFingerprint, LiveMember, LiveMemberRestore,
-    ParticipantSlotAllocatorProof, RetiredIdentity, commit_attach, commit_detach,
-    commit_enrollment, commit_leave,
+    AttachSecretProof, AttachedRecordPosition, BindingState, CommittedBindingTerminalPosition,
+    CommittedDetachTransition, DetachCell, EnrollmentCommit, EnrollmentCommitParameters,
+    EnrollmentFingerprint, IdentityState, LeaveCommit, LeaveCommitParameters, LeaveFingerprint,
+    LiveMember, LiveMemberRestore, ParticipantSlotAllocatorProof, RetiredIdentity, commit_attach,
+    commit_detach, commit_enrollment, commit_leave,
 };
 
 fn generation(value: u64) -> Generation {
@@ -274,7 +273,7 @@ fn attached_operation_repeats_the_attach_commits_attached_record() {
 #[test]
 fn detached_operation_records_the_committed_cells_own_attempt_token() {
     let transition = detach_transition(3, 0xD3, 44);
-    let operation = DetachedOperation::new(transition.terminal(), transition.cell())
+    let operation = DetachedOperation::new(&transition)
         .expect("a commit's own terminal/cell pair is congruent");
     assert_eq!(
         operation.detach_attempt_token(),
@@ -290,36 +289,14 @@ fn detached_operation_records_the_committed_cells_own_attempt_token() {
     );
 }
 
-#[test]
-fn detached_operation_refuses_a_cell_from_another_detach() {
-    let recorded = detach_transition(3, 0xD3, 44);
-    let foreign_participant = detach_transition(4, 0xD4, 44);
-    let foreign_delivery = detach_transition(3, 0xD5, 45);
-    assert_eq!(
-        DetachedOperation::new(recorded.terminal(), foreign_participant.cell()),
-        None,
-        "a cell for another participant must not supply the recorded token"
-    );
-    assert_eq!(
-        DetachedOperation::new(recorded.terminal(), foreign_delivery.cell()),
-        None,
-        "a cell committed at another delivery sequence must not supply the recorded token"
-    );
-}
-
-#[test]
-fn detached_operation_refuses_a_supersession_terminal() {
-    let attach = superseding_attach_commit();
-    let AttachTransition::Superseded { terminal } = attach.transition else {
-        panic!("the supersession fixture commits an old-binding terminal");
-    };
-    let detach = detach_transition(3, 0xD3, 44);
-    assert_eq!(
-        DetachedOperation::new(terminal, detach.cell()),
-        None,
-        "supersession terminals belong to the attach event that committed them"
-    );
-}
+// The mispairing refusals that lived here (a cell from another detach, a
+// supersession terminal from an attach commit, a colliding terminal/cell
+// pair from two different conversations) are now unrepresentable: the only
+// producer consumes the whole sealed `CommittedDetachTransition`, so no
+// caller can present a terminal and a cell that were not born in one detach
+// commit. The `compile_fail` doctests on `DetachedOperation::new` prove both
+// the split-pair and the standalone-terminal presentations no longer
+// compile.
 
 #[test]
 fn binding_fate_operation_repeats_the_ordinary_fates_committed_facts() {
