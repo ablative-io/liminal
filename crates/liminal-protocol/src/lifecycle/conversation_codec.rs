@@ -396,14 +396,18 @@ fn decode_attached(
     let binding_epoch = take_epoch(input, EVENT_HEADER_LEN + 8, PARTICIPANT_ATTACHED_TAG)?;
     let attached_transaction_order = take_u64(input, EVENT_HEADER_LEN + 32)?;
     let attached_delivery_seq = take_u64(input, EVENT_HEADER_LEN + 40)?;
+    let operation = AttachedOperation::from_decoded(
+        conversation_id,
+        participant_id,
+        binding_epoch,
+        attached_transaction_order,
+        attached_delivery_seq,
+    )
+    .ok_or(ConversationEventDecodeError::NonCanonicalBody {
+        tag: PARTICIPANT_ATTACHED_TAG,
+    })?;
     Ok(ConversationEventBody::Operation(
-        ConversationOperation::Attached(AttachedOperation::from_decoded(
-            conversation_id,
-            participant_id,
-            binding_epoch,
-            attached_transaction_order,
-            attached_delivery_seq,
-        )),
+        ConversationOperation::Attached(operation),
     ))
 }
 

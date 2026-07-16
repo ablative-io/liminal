@@ -158,20 +158,27 @@ impl AttachedOperation {
         }
     }
 
-    pub(super) const fn from_decoded(
+    pub(super) fn from_decoded(
         conversation_id: ConversationId,
         participant_id: ParticipantId,
         binding_epoch: BindingEpoch,
         attached_transaction_order: TransactionOrder,
         attached_delivery_seq: DeliverySeq,
-    ) -> Self {
-        Self {
+    ) -> Option<Self> {
+        // Every attach commit increments the member generation, so a
+        // committed attach epoch is generation two or later; a generation-one
+        // "attach" is an enrollment fact relabeled on the wire and is refused
+        // exactly as the enrolled decoder refuses non-generation-one bodies.
+        if binding_epoch.capability_generation == Generation::ONE {
+            return None;
+        }
+        Some(Self {
             conversation_id,
             participant_id,
             binding_epoch,
             attached_transaction_order,
             attached_delivery_seq,
-        }
+        })
     }
 
     /// Returns the conversation whose participant attached.

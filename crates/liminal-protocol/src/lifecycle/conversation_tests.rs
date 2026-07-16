@@ -236,13 +236,10 @@ fn enrolled_operation(conversation_id: u64) -> ConversationOperation {
 }
 
 fn attached_operation(conversation_id: u64) -> ConversationOperation {
-    ConversationOperation::Attached(AttachedOperation::from_decoded(
-        conversation_id,
-        7,
-        epoch(2, 5),
-        13,
-        14,
-    ))
+    ConversationOperation::Attached(
+        AttachedOperation::from_decoded(conversation_id, 7, epoch(2, 5), 13, 14)
+            .expect("post-genesis attach body is canonical"),
+    )
 }
 
 fn detached_operation(conversation_id: u64) -> ConversationOperation {
@@ -460,6 +457,21 @@ fn operation_decode_rejects_zero_generations_and_non_genesis_enrollment() {
 }
 
 #[test]
+fn operation_decode_rejects_a_generation_one_attach() {
+    // No attach commit can produce a generation-one epoch (attach success
+    // always increments the member generation past enrollment's generation
+    // one), so a decoded generation-one attach body is a relabeled enrollment
+    // fact and must be refused like the enrolled-side seal refuses
+    // non-generation-one bodies.
+    let mut generation_one_attach = encoded_operation(attached_operation(CONVERSATION_ID));
+    generation_one_attach[54..62].copy_from_slice(&1_u64.to_be_bytes());
+    assert_eq!(
+        ConversationEvent::decode_canonical(&generation_one_attach),
+        Err(ConversationEventDecodeError::NonCanonicalBody { tag: 3 })
+    );
+}
+
+#[test]
 fn operation_decode_rejects_non_canonical_lengths() {
     let mut truncated = encoded_operation(attached_operation(CONVERSATION_ID));
     truncated.pop();
@@ -560,13 +572,20 @@ fn build_operation(kind: u8, values: [u64; 5]) -> ConversationOperation {
             )
             .expect("generation-one enrollment bodies are canonical"),
         ),
-        1 => ConversationOperation::Attached(AttachedOperation::from_decoded(
-            CONVERSATION_ID,
-            values[3],
-            arbitrary_epoch,
-            values[4],
-            values[0],
-        )),
+        1 => ConversationOperation::Attached(
+            AttachedOperation::from_decoded(
+                CONVERSATION_ID,
+                values[3],
+                BindingEpoch::new(
+                    ConnectionIncarnation::new(values[1], values[2]),
+                    Generation::new((values[0] % 997) + 2)
+                        .expect("modular post-attach generations are at least two"),
+                ),
+                values[4],
+                values[0],
+            )
+            .expect("post-genesis attach bodies are canonical"),
+        ),
         2 => ConversationOperation::Detached(DetachedOperation::from_decoded(
             DetachAttemptToken::new(
                 values[3]
