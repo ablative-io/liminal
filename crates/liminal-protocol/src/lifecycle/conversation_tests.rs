@@ -228,16 +228,16 @@ fn epoch(generation: u64, connection_ordinal: u64) -> BindingEpoch {
     )
 }
 
-fn enrolled_operation() -> ConversationOperation {
+fn enrolled_operation(conversation_id: u64) -> ConversationOperation {
     ConversationOperation::Enrolled(
-        EnrolledOperation::from_decoded(CONVERSATION_ID, 7, epoch(1, 4), 11, 12)
+        EnrolledOperation::from_decoded(conversation_id, 7, epoch(1, 4), 11, 12)
             .expect("generation-one enrollment body is canonical"),
     )
 }
 
-fn attached_operation() -> ConversationOperation {
+fn attached_operation(conversation_id: u64) -> ConversationOperation {
     ConversationOperation::Attached(AttachedOperation::from_decoded(
-        CONVERSATION_ID,
+        conversation_id,
         7,
         epoch(2, 5),
         13,
@@ -245,10 +245,10 @@ fn attached_operation() -> ConversationOperation {
     ))
 }
 
-fn detached_operation() -> ConversationOperation {
+fn detached_operation(conversation_id: u64) -> ConversationOperation {
     ConversationOperation::Detached(DetachedOperation::from_decoded(
         DetachAttemptToken::new([0xD7; 16]),
-        CONVERSATION_ID,
+        conversation_id,
         7,
         epoch(2, 5),
         15,
@@ -257,11 +257,12 @@ fn detached_operation() -> ConversationOperation {
 }
 
 fn left_operation(
+    conversation_id: u64,
     ended_binding_epoch: Option<BindingEpoch>,
     prior_terminal_delivery_seq: Option<u64>,
 ) -> ConversationOperation {
     let committed = LeaveCommitted::new(
-        CONVERSATION_ID,
+        conversation_id,
         LeaveAttemptToken::new([0xB7; 16]),
         7,
         Generation::new(4).expect("retired generation is nonzero"),
@@ -270,30 +271,35 @@ fn left_operation(
         31,
     )
     .expect("leave fixture satisfies the canonical result invariants");
-    ConversationOperation::Left(LeftOperation::new(committed, 17))
+    ConversationOperation::Left(LeftOperation::from_decoded(committed, 17))
 }
 
-fn binding_fate_operation() -> ConversationOperation {
-    ConversationOperation::BindingFate(BindingFateOperation::from_decoded(7, epoch(3, 6), 21))
+fn binding_fate_operation(conversation_id: u64) -> ConversationOperation {
+    ConversationOperation::BindingFate(BindingFateOperation::from_decoded(
+        conversation_id,
+        7,
+        epoch(3, 6),
+        21,
+    ))
 }
 
-fn nonzero_debt_ack_operation() -> ConversationOperation {
+fn nonzero_debt_ack_operation(conversation_id: u64) -> ConversationOperation {
     ConversationOperation::NonzeroDebtAck(NonzeroDebtAckOperation::from_decoded(
-        CONVERSATION_ID,
+        conversation_id,
         7,
         Generation::new(3).expect("ack generation is nonzero"),
         22,
     ))
 }
 
-fn six_operations() -> Vec<ConversationOperation> {
+fn six_operations(conversation_id: u64) -> Vec<ConversationOperation> {
     vec![
-        enrolled_operation(),
-        attached_operation(),
-        detached_operation(),
-        left_operation(Some(epoch(4, 9)), Some(30)),
-        binding_fate_operation(),
-        nonzero_debt_ack_operation(),
+        enrolled_operation(conversation_id),
+        attached_operation(conversation_id),
+        detached_operation(conversation_id),
+        left_operation(conversation_id, Some(epoch(4, 9)), Some(30)),
+        binding_fate_operation(conversation_id),
+        nonzero_debt_ack_operation(conversation_id),
     ]
 }
 
@@ -320,23 +326,24 @@ fn assert_operation_round_trip(operation: ConversationOperation) {
 
 #[test]
 fn every_lifecycle_operation_round_trips_encode_decode_replay() {
-    for operation in six_operations() {
+    for operation in six_operations(CONVERSATION_ID) {
         assert_operation_round_trip(operation);
     }
 }
 
 #[test]
 fn left_bodies_round_trip_every_optional_field_combination() {
-    assert_operation_round_trip(left_operation(None, None));
-    assert_operation_round_trip(left_operation(Some(epoch(4, 9)), None));
-    assert_operation_round_trip(left_operation(None, Some(30)));
-    assert_operation_round_trip(left_operation(Some(epoch(4, 9)), Some(30)));
+    assert_operation_round_trip(left_operation(CONVERSATION_ID, None, None));
+    assert_operation_round_trip(left_operation(CONVERSATION_ID, Some(epoch(4, 9)), None));
+    assert_operation_round_trip(left_operation(CONVERSATION_ID, None, Some(30)));
+    assert_operation_round_trip(left_operation(CONVERSATION_ID, Some(epoch(4, 9)), Some(30)));
 }
 
 #[test]
 fn operation_decision_requires_genesis_validation_first() {
     let fresh = ParticipantConversation::from_genesis(ConversationGenesis::new(CONVERSATION_ID));
-    let ConversationDecision::Refused(refusal) = fresh.decide_operation(attached_operation())
+    let ConversationDecision::Refused(refusal) =
+        fresh.decide_operation(attached_operation(CONVERSATION_ID))
     else {
         unreachable!("an unvalidated shell must refuse lifecycle operations");
     };
@@ -352,7 +359,7 @@ fn operation_decision_requires_genesis_validation_first() {
 #[test]
 fn operation_replay_requires_genesis_validation_first() {
     let ConversationDecision::Commit(commit) =
-        validated_shell().decide_operation(attached_operation())
+        validated_shell().decide_operation(attached_operation(CONVERSATION_ID))
     else {
         unreachable!("a validated shell accepts the attach operation");
     };
@@ -374,34 +381,33 @@ fn operation_replay_requires_genesis_validation_first() {
 }
 
 #[test]
-fn operation_decision_refuses_foreign_conversation_provenance() {
-    let foreign = ConversationOperation::Attached(AttachedOperation::from_decoded(
-        CONVERSATION_ID + 1,
-        7,
-        epoch(2, 5),
-        13,
-        14,
-    ));
-    let ConversationDecision::Refused(refusal) = validated_shell().decide_operation(foreign) else {
-        unreachable!("provenance for another conversation must be refused");
-    };
-    assert_eq!(
-        refusal.reason(),
-        ConversationRefusalReason::OperationConversationMismatch {
-            expected: CONVERSATION_ID,
-            actual: CONVERSATION_ID + 1,
-        }
-    );
-    let shell = refusal.into_conversation();
-    assert_eq!(shell.next_event_ordinal(), 1);
-    assert!(shell.genesis_validated());
+fn operation_decision_refuses_foreign_conversation_provenance_for_every_kind() {
+    let foreign_operations = six_operations(CONVERSATION_ID + 1);
+    assert_eq!(foreign_operations.len(), 6);
+    for foreign in foreign_operations {
+        let ConversationDecision::Refused(refusal) = validated_shell().decide_operation(foreign)
+        else {
+            unreachable!("provenance for another conversation must be refused");
+        };
+        assert_eq!(
+            refusal.reason(),
+            ConversationRefusalReason::OperationConversationMismatch {
+                expected: CONVERSATION_ID,
+                actual: CONVERSATION_ID + 1,
+            }
+        );
+        let shell = refusal.into_conversation();
+        assert_eq!(shell.next_event_ordinal(), 1);
+        assert!(shell.genesis_validated());
+    }
 }
 
 #[test]
 fn operation_decision_refuses_ordinal_exhaustion() {
     let genesis = ConversationGenesis::new(CONVERSATION_ID);
     let exhausted = ParticipantConversation::from_test_state(genesis, u64::MAX, true);
-    let ConversationDecision::Refused(refusal) = exhausted.decide_operation(attached_operation())
+    let ConversationDecision::Refused(refusal) =
+        exhausted.decide_operation(attached_operation(CONVERSATION_ID))
     else {
         unreachable!("an unrepresentable successor cannot emit a commit");
     };
@@ -414,7 +420,7 @@ fn operation_decision_refuses_ordinal_exhaustion() {
 #[test]
 fn operation_abort_recovers_the_exact_unmodified_prestate() {
     let ConversationDecision::Commit(commit) =
-        validated_shell().decide_operation(detached_operation())
+        validated_shell().decide_operation(detached_operation(CONVERSATION_ID))
     else {
         unreachable!("a validated shell accepts the detach operation");
     };
@@ -431,21 +437,21 @@ fn encoded_operation(operation: ConversationOperation) -> Vec<u8> {
 
 #[test]
 fn operation_decode_rejects_zero_generations_and_non_genesis_enrollment() {
-    let mut zero_generation = encoded_operation(attached_operation());
+    let mut zero_generation = encoded_operation(attached_operation(CONVERSATION_ID));
     zero_generation[54..62].copy_from_slice(&0_u64.to_be_bytes());
     assert_eq!(
         ConversationEvent::decode_canonical(&zero_generation),
         Err(ConversationEventDecodeError::NonCanonicalBody { tag: 3 })
     );
 
-    let mut non_genesis_enrollment = encoded_operation(enrolled_operation());
+    let mut non_genesis_enrollment = encoded_operation(enrolled_operation(CONVERSATION_ID));
     non_genesis_enrollment[54..62].copy_from_slice(&2_u64.to_be_bytes());
     assert_eq!(
         ConversationEvent::decode_canonical(&non_genesis_enrollment),
         Err(ConversationEventDecodeError::NonCanonicalBody { tag: 2 })
     );
 
-    let mut zero_ack_generation = encoded_operation(nonzero_debt_ack_operation());
+    let mut zero_ack_generation = encoded_operation(nonzero_debt_ack_operation(CONVERSATION_ID));
     zero_ack_generation[38..46].copy_from_slice(&0_u64.to_be_bytes());
     assert_eq!(
         ConversationEvent::decode_canonical(&zero_ack_generation),
@@ -455,7 +461,7 @@ fn operation_decode_rejects_zero_generations_and_non_genesis_enrollment() {
 
 #[test]
 fn operation_decode_rejects_non_canonical_lengths() {
-    let mut truncated = encoded_operation(attached_operation());
+    let mut truncated = encoded_operation(attached_operation(CONVERSATION_ID));
     truncated.pop();
     let Err(ConversationEventDecodeError::NonCanonicalLength { .. }) =
         ConversationEvent::decode_canonical(&truncated)
@@ -463,7 +469,7 @@ fn operation_decode_rejects_non_canonical_lengths() {
         panic!("a truncated attach body must fail as non-canonical");
     };
 
-    let mut trailing = encoded_operation(binding_fate_operation());
+    let mut trailing = encoded_operation(binding_fate_operation(CONVERSATION_ID));
     trailing.push(0);
     let Err(ConversationEventDecodeError::NonCanonicalLength { .. }) =
         ConversationEvent::decode_canonical(&trailing)
@@ -476,7 +482,7 @@ fn operation_decode_rejects_non_canonical_lengths() {
 fn left_decode_rejects_unassigned_flags_and_invalid_results() {
     // Body layout after the 30-byte header: token(16) + participant(8) +
     // retired_generation(8) + flags(1) at absolute offset 62.
-    let mut junk_flags = encoded_operation(left_operation(None, None));
+    let mut junk_flags = encoded_operation(left_operation(CONVERSATION_ID, None, None));
     junk_flags[62] = 0b100;
     assert_eq!(
         ConversationEvent::decode_canonical(&junk_flags),
@@ -484,7 +490,7 @@ fn left_decode_rejects_unassigned_flags_and_invalid_results() {
     );
 
     // Claim the ended-epoch flag without supplying its bytes.
-    let mut missing_epoch = encoded_operation(left_operation(None, None));
+    let mut missing_epoch = encoded_operation(left_operation(CONVERSATION_ID, None, None));
     missing_epoch[62] = 0b01;
     let Err(ConversationEventDecodeError::NonCanonicalLength { .. }) =
         ConversationEvent::decode_canonical(&missing_epoch)
@@ -493,7 +499,7 @@ fn left_decode_rejects_unassigned_flags_and_invalid_results() {
     };
 
     // A prior terminal at or after Left violates the permanent result.
-    let mut inverted = encoded_operation(left_operation(None, Some(30)));
+    let mut inverted = encoded_operation(left_operation(CONVERSATION_ID, None, Some(30)));
     let prior_at = 63;
     inverted[prior_at..prior_at + 8].copy_from_slice(&31_u64.to_be_bytes());
     assert_eq!(
@@ -502,7 +508,8 @@ fn left_decode_rejects_unassigned_flags_and_invalid_results() {
     );
 
     // An ended epoch whose generation differs from the retired generation.
-    let mut foreign_epoch = encoded_operation(left_operation(Some(epoch(4, 9)), None));
+    let mut foreign_epoch =
+        encoded_operation(left_operation(CONVERSATION_ID, Some(epoch(4, 9)), None));
     let epoch_generation_at = 63 + 16;
     foreign_epoch[epoch_generation_at..epoch_generation_at + 8]
         .copy_from_slice(&5_u64.to_be_bytes());
@@ -516,7 +523,7 @@ fn left_decode_rejects_unassigned_flags_and_invalid_results() {
 fn operation_events_replay_in_committed_order_after_genesis() {
     let mut live = validated_shell();
     let mut log = Vec::new();
-    for operation in six_operations() {
+    for operation in six_operations(CONVERSATION_ID) {
         let ConversationDecision::Commit(commit) = live.decide_operation(operation) else {
             unreachable!("a validated shell accepts every same-conversation operation");
         };
@@ -595,9 +602,10 @@ fn build_operation(kind: u8, values: [u64; 5]) -> ConversationOperation {
                 left_delivery_seq,
             )
             .expect("constructed leave results satisfy the canonical invariants");
-            ConversationOperation::Left(LeftOperation::new(committed, values[3]))
+            ConversationOperation::Left(LeftOperation::from_decoded(committed, values[3]))
         }
         4 => ConversationOperation::BindingFate(BindingFateOperation::from_decoded(
+            CONVERSATION_ID,
             values[3],
             arbitrary_epoch,
             values[4],

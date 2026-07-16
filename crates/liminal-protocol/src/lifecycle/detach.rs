@@ -171,6 +171,10 @@ impl<V> PendingDetach<V> {
 }
 
 impl<V> CommittedDetach<V> {
+    pub(crate) const fn token(&self) -> DetachAttemptToken {
+        self.token
+    }
+
     pub(crate) const fn participant_id(&self) -> ParticipantId {
         self.participant_id
     }

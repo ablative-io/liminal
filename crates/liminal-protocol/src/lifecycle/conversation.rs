@@ -145,11 +145,16 @@ impl ParticipantConversation {
     /// Consumes the aggregate into a durability decision for one lifecycle
     /// operation.
     ///
-    /// Operation payloads are constructible only from the crate's own typed
-    /// commit values, so the shell records only operations that actually
-    /// committed. A successful decision owns the pre-state inside
-    /// [`ConversationCommit`] exactly as genesis validation does: no state
-    /// advances until the durable append is confirmed by consuming
+    /// Every operation payload's public producer consumes one of the crate's
+    /// own sealed commit values (each payload type documents its exact sealed
+    /// input), so the shell records only operations that actually committed;
+    /// validated cold restore is the one raw promotion path into those
+    /// inputs. Every arm carries the
+    /// conversation named by its producing commit, and a mismatch against
+    /// this shell's conversation is refused before any event is selected. A
+    /// successful decision owns the pre-state inside [`ConversationCommit`]
+    /// exactly as genesis validation does: no state advances until the
+    /// durable append is confirmed by consuming
     /// [`ConversationCommit::commit`].
     #[must_use]
     pub const fn decide_operation(self, operation: ConversationOperation) -> ConversationDecision {
@@ -159,9 +164,8 @@ impl ParticipantConversation {
                 reason: ConversationRefusalReason::GenesisNotValidated,
             });
         }
-        if let Some(actual) = operation.conversation_id()
-            && actual != self.genesis.conversation_id
-        {
+        let actual = operation.conversation_id();
+        if actual != self.genesis.conversation_id {
             let expected = self.genesis.conversation_id;
             return ConversationDecision::Refused(ConversationRefusal {
                 conversation: self,
@@ -412,7 +416,7 @@ impl ConversationEvent {
             }
             BINDING_FATE_RECORDED_TAG => {
                 require_body_len(BINDING_FATE_BODY_LEN, declared_body_len, actual_body_len)?;
-                decode_binding_fate(input)?
+                decode_binding_fate(conversation_id, input)?
             }
             NONZERO_DEBT_ACK_RECORDED_TAG => {
                 require_body_len(
@@ -787,11 +791,15 @@ fn decode_left(
         tag: PARTICIPANT_LEFT_TAG,
     })?;
     Ok(ConversationEventBody::Operation(
-        ConversationOperation::Left(LeftOperation::new(committed, left_transaction_order)),
+        ConversationOperation::Left(LeftOperation::from_decoded(
+            committed,
+            left_transaction_order,
+        )),
     ))
 }
 
 fn decode_binding_fate(
+    conversation_id: ConversationId,
     input: &[u8],
 ) -> Result<ConversationEventBody, ConversationEventDecodeError> {
     let participant_id = take_u64(input, EVENT_HEADER_LEN)?;
@@ -800,6 +808,7 @@ fn decode_binding_fate(
     let resulting_floor = take_u64(input, EVENT_HEADER_LEN + 32)?;
     Ok(ConversationEventBody::Operation(
         ConversationOperation::BindingFate(BindingFateOperation::from_decoded(
+            conversation_id,
             participant_id,
             last_dead_binding_epoch,
             resulting_floor,

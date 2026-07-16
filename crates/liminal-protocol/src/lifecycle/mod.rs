@@ -56,6 +56,8 @@ mod membership_tests;
 #[cfg(test)]
 mod observer_recovery_tests;
 #[cfg(test)]
+mod operation_event_tests;
+#[cfg(test)]
 mod storage_tests;
 #[cfg(test)]
 mod test_support;

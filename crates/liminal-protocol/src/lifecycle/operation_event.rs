@@ -1,18 +1,26 @@
 //! Public durable-fact vocabulary for the six lifecycle operations recorded
 //! by the participant-conversation shell.
 //!
-//! Each operation payload is constructed from the crate's own typed commit
-//! and result values (`docs/design/LP-GAP-CLOSURE-GOAL.md` item A1): attach
-//! and enrollment facts come from [`AttachedLifecycleRecord`] (no public
-//! constructor), detach facts from the committed terminal, fate facts from
-//! the two private-field fate authorities, ack facts from the nonzero-debt
-//! ack commit, and leave facts from [`LeaveCommitted`] — the crate's own
-//! validating result type. These payloads describe committed operations for
-//! the ordering shell; they are not executable lifecycle authority, and no
-//! path exists from a decoded or constructed payload to a typed lifecycle
-//! state, stored edge, or binding origin. Decoded events rebuild payloads
-//! through crate-private constructors that re-validate every canonical field
-//! invariant.
+//! Every public producer consumes one of the crate's own sealed commit values
+//! (`docs/design/LP-GAP-CLOSURE-GOAL.md` item A1): enrollment facts come from
+//! [`EnrollmentCommit`] and attach facts from [`AttachCommit`] (both carry
+//! private fields, so only [`super::commit_enrollment`] and
+//! [`super::commit_attach`] mint them, and the recorded fact kind is bound to
+//! the producing commit kind); detach facts pair the committed terminal with
+//! its committed replay cell, which supplies the recorded attempt token; leave
+//! facts come from the permanent [`RetiredIdentity`] tombstone, which carries
+//! both the canonical [`LeaveCommitted`] result and the congruence-checked
+//! `Left` transaction order; fate facts come from the two private-field fate
+//! authorities, which carry the conversation validated at their minting
+//! transitions; and ack facts come from the nonzero-debt ack commit. The one
+//! raw promotion path into any of those inputs is validated whole-participant
+//! cold restore ([`super::ParticipantLifecycleRestore::restore`] and the
+//! sealed stored-edge restores), each of which re-validates provenance before
+//! minting. These payloads describe committed operations for the ordering
+//! shell; they are not executable lifecycle authority, and no path exists from
+//! a decoded or constructed payload to a typed lifecycle state, stored edge,
+//! or binding origin. Decoded events rebuild payloads through crate-private
+//! constructors that re-validate every canonical field invariant.
 
 use crate::wire::{
     BindingEpoch, ConversationId, DeliverySeq, DetachAttemptToken, DetachedCause, Generation,
@@ -20,15 +28,17 @@ use crate::wire::{
 };
 
 use super::{
-    AttachedLifecycleRecord, CommittedDetachedTerminal, NonzeroParticipantAckCommit,
-    OrdinaryBindingFate, RecoveredBindingFate,
+    AttachCommit, CommittedDetach, CommittedDetachedTerminal, EnrollmentCommit,
+    NonzeroParticipantAckCommit, OrdinaryBindingFate, RecoveredBindingFate, RetiredIdentity,
 };
 
 /// Durable facts of one committed enrollment, as recorded by the shell.
 ///
-/// The only public producer consumes the crate's own enrollment commit output
-/// ([`AttachedLifecycleRecord`] is not publicly constructible), so an event can
-/// exist only downstream of [`super::commit_enrollment`].
+/// The only public producer consumes the crate's own enrollment commit
+/// ([`EnrollmentCommit`] carries a private field, so only
+/// [`super::commit_enrollment`] mints it), so an event can exist only
+/// downstream of a real enrollment commit and can never be minted from an
+/// attach commit's record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EnrolledOperation {
     conversation_id: ConversationId,
@@ -39,19 +49,22 @@ pub struct EnrolledOperation {
 }
 
 impl EnrolledOperation {
-    /// Creates the enrollment event body from the commit's `Attached` record.
+    /// Creates the enrollment event body from the enrollment commit itself.
     ///
-    /// Returns `None` unless the record carries the mandatory generation-one
-    /// origin epoch (the invariant [`super::commit_enrollment`] enforces).
+    /// [`super::commit_enrollment`] refuses any non-generation-one origin
+    /// epoch before constructing [`EnrollmentCommit`], so the canonical
+    /// generation-one body invariant re-validated on decode holds for every
+    /// value this producer can observe.
     #[must_use]
-    pub fn new(attached: AttachedLifecycleRecord) -> Option<Self> {
-        Self::from_decoded(
-            attached.conversation_id(),
-            attached.participant_id(),
-            attached.binding_epoch(),
-            attached.admission_order().transaction_order(),
-            attached.delivery_seq(),
-        )
+    pub const fn new<F>(commit: &EnrollmentCommit<F>) -> Self {
+        let attached = commit.attached;
+        Self {
+            conversation_id: attached.conversation_id(),
+            participant_id: attached.participant_id(),
+            binding_epoch: attached.binding_epoch(),
+            attached_transaction_order: attached.admission_order().transaction_order(),
+            attached_delivery_seq: attached.delivery_seq(),
+        }
     }
 
     pub(super) fn from_decoded(
@@ -105,6 +118,11 @@ impl EnrolledOperation {
 }
 
 /// Durable facts of one committed credential attach, as recorded by the shell.
+///
+/// The only public producer consumes the crate's own attach commit
+/// ([`AttachCommit`] carries private fields, so only [`super::commit_attach`]
+/// mints it), so an enrollment's generation-one record cannot be relabeled as
+/// an attach fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AttachedOperation {
     conversation_id: ConversationId,
@@ -115,9 +133,22 @@ pub struct AttachedOperation {
 }
 
 impl AttachedOperation {
-    /// Creates the attach event body from the commit's `Attached` record.
+    /// Creates the attach event body from the attach commit itself.
+    ///
+    /// The producer consumes the whole sealed commit rather than the shared
+    /// `Attached` record, so an enrollment commit cannot be relabeled as a
+    /// credential-attach fact:
+    ///
+    /// ```compile_fail
+    /// use liminal_protocol::lifecycle::{AttachedOperation, EnrollmentCommit};
+    ///
+    /// fn relabel(commit: &EnrollmentCommit<[u8; 4]>) -> AttachedOperation {
+    ///     AttachedOperation::new(commit)
+    /// }
+    /// ```
     #[must_use]
-    pub const fn new(attached: AttachedLifecycleRecord) -> Self {
+    pub const fn new<F, V>(commit: &AttachCommit<F, V>) -> Self {
+        let attached = commit.attached;
         Self {
             conversation_id: attached.conversation_id(),
             participant_id: attached.participant_id(),
@@ -178,7 +209,8 @@ impl AttachedOperation {
 ///
 /// The atomic detach transaction (terminal append, floor transition, cell
 /// replacement, and binding release) is summarized by its committed
-/// `Detached(CleanDeregister)` terminal plus the replayable attempt token.
+/// `Detached(CleanDeregister)` terminal plus the replayable attempt token
+/// retained inside the committed replay cell.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DetachedOperation {
     detach_attempt_token: DetachAttemptToken,
@@ -190,21 +222,31 @@ pub struct DetachedOperation {
 }
 
 impl DetachedOperation {
-    /// Creates the detach event body from the exact committed terminal.
+    /// Creates the detach event body from the exact committed terminal and its
+    /// committed replay cell.
     ///
-    /// Returns `None` unless the terminal's cause is `CleanDeregister`:
-    /// supersession terminals belong to the attach event that committed them,
-    /// never to a standalone detach event.
+    /// Both inputs are sealed: [`CommittedDetach`] has no public constructor,
+    /// so the recorded attempt token is the one the detach commit actually
+    /// retained rather than a caller-chosen value. The pairing checks mirror
+    /// the crate's cold-restore live-pair validation.
+    ///
+    /// Returns `None` unless the terminal's cause is `CleanDeregister` and the
+    /// cell names that terminal's exact participant, ended binding epoch, and
+    /// committed delivery sequence: supersession terminals belong to the attach
+    /// event that committed them, never to a standalone detach event.
     #[must_use]
-    pub fn new(
-        terminal: CommittedDetachedTerminal,
-        detach_attempt_token: DetachAttemptToken,
-    ) -> Option<Self> {
+    pub fn new<V>(terminal: CommittedDetachedTerminal, cell: &CommittedDetach<V>) -> Option<Self> {
         if terminal.cause() != DetachedCause::CleanDeregister {
             return None;
         }
+        let participant_matches = cell.participant_id() == terminal.participant_id();
+        let epoch_matches = cell.committed_binding_epoch() == terminal.binding_epoch();
+        let delivery_matches = cell.detached_delivery_seq() == terminal.delivery_seq();
+        if !(participant_matches && epoch_matches && delivery_matches) {
+            return None;
+        }
         Some(Self {
-            detach_attempt_token,
+            detach_attempt_token: cell.token(),
             conversation_id: terminal.conversation_id(),
             participant_id: terminal.participant_id(),
             committed_binding_epoch: terminal.binding_epoch(),
@@ -276,12 +318,40 @@ pub struct LeftOperation {
 }
 
 impl LeftOperation {
-    /// Creates the leave event body from the canonical permanent result.
+    /// Creates the leave event body from the permanent retirement tombstone.
     ///
-    /// [`LeaveCommitted`] validates the epoch-generation pairing and terminal
-    /// ordering at its own construction, so no invariant is re-stated here.
+    /// [`RetiredIdentity`] carries both the canonical [`LeaveCommitted`]
+    /// result and the congruence-checked `Left` admission order, so the
+    /// recorded fact and its transaction order both come from a committed
+    /// leave ([`super::commit_leave`] or [`super::commit_pending_leave`])
+    /// rather than from caller-chosen raw values. The one raw promotion path
+    /// into [`RetiredIdentity`] is validated whole-participant cold restore
+    /// ([`super::ParticipantLifecycleRestore::restore`]), which re-validates
+    /// every stored field against the stored result before minting the
+    /// tombstone.
+    ///
+    /// A leave fact cannot be minted from wire-constructible raw values:
+    ///
+    /// ```compile_fail
+    /// use liminal_protocol::lifecycle::LeftOperation;
+    /// use liminal_protocol::wire::LeaveCommitted;
+    ///
+    /// fn fabricate(committed: LeaveCommitted) -> LeftOperation {
+    ///     LeftOperation::new(committed, 17)
+    /// }
+    /// ```
     #[must_use]
-    pub const fn new(committed: LeaveCommitted, left_transaction_order: TransactionOrder) -> Self {
+    pub fn new<EF, V, LF>(retired: &RetiredIdentity<EF, V, LF>) -> Self {
+        Self {
+            committed: retired.committed_result().clone(),
+            left_transaction_order: retired.left_admission_order().transaction_order(),
+        }
+    }
+
+    pub(super) const fn from_decoded(
+        committed: LeaveCommitted,
+        left_transaction_order: TransactionOrder,
+    ) -> Self {
         Self {
             committed,
             left_transaction_order,
@@ -306,10 +376,14 @@ impl LeftOperation {
 ///
 /// Both fate authorities are private-field types constructible only through
 /// the crate's own transitions, so this event cannot assert a fate that never
-/// committed. Fate authorities are conversation-scoped by the aggregate that
-/// owns them; the shell stamps its own conversation into the event header.
+/// committed. Each authority carries the conversation validated at its
+/// minting transition (the committed `Died` terminal for ordinary fate, the
+/// frontier-validated marker provenance for recovered fate), so the shell's
+/// conversation-congruence refusal applies to this arm exactly as it does to
+/// the other five.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BindingFateOperation {
+    conversation_id: ConversationId,
     participant_id: ParticipantId,
     last_dead_binding_epoch: BindingEpoch,
     resulting_floor: DeliverySeq,
@@ -320,6 +394,7 @@ impl BindingFateOperation {
     #[must_use]
     pub const fn from_ordinary(fate: &OrdinaryBindingFate) -> Self {
         Self {
+            conversation_id: fate.conversation_id(),
             participant_id: fate.participant_id(),
             last_dead_binding_epoch: fate.last_dead_binding_epoch(),
             resulting_floor: fate.resulting_floor(),
@@ -330,6 +405,7 @@ impl BindingFateOperation {
     #[must_use]
     pub const fn from_recovered(fate: &RecoveredBindingFate) -> Self {
         Self {
+            conversation_id: fate.conversation_id(),
             participant_id: fate.participant_id(),
             last_dead_binding_epoch: fate.last_dead_binding_epoch(),
             resulting_floor: fate.resulting_floor(),
@@ -337,15 +413,23 @@ impl BindingFateOperation {
     }
 
     pub(super) const fn from_decoded(
+        conversation_id: ConversationId,
         participant_id: ParticipantId,
         last_dead_binding_epoch: BindingEpoch,
         resulting_floor: DeliverySeq,
     ) -> Self {
         Self {
+            conversation_id,
             participant_id,
             last_dead_binding_epoch,
             resulting_floor,
         }
+    }
+
+    /// Returns the conversation whose binding fate was observed.
+    #[must_use]
+    pub const fn conversation_id(self) -> ConversationId {
+        self.conversation_id
     }
 
     /// Returns the participant whose binding died.
@@ -447,16 +531,15 @@ pub enum ConversationOperation {
 }
 
 impl ConversationOperation {
-    /// Returns the conversation named by the operation's provenance, when the
-    /// producing commit carries one.
-    pub(super) const fn conversation_id(&self) -> Option<ConversationId> {
+    /// Returns the conversation named by the operation's provenance.
+    pub(super) const fn conversation_id(&self) -> ConversationId {
         match self {
-            Self::Enrolled(operation) => Some(operation.conversation_id()),
-            Self::Attached(operation) => Some(operation.conversation_id()),
-            Self::Detached(operation) => Some(operation.conversation_id()),
-            Self::Left(operation) => Some(operation.committed().conversation_id()),
-            Self::BindingFate(_) => None,
-            Self::NonzeroDebtAck(operation) => Some(operation.conversation_id()),
+            Self::Enrolled(operation) => operation.conversation_id(),
+            Self::Attached(operation) => operation.conversation_id(),
+            Self::Detached(operation) => operation.conversation_id(),
+            Self::Left(operation) => operation.committed().conversation_id(),
+            Self::BindingFate(operation) => operation.conversation_id(),
+            Self::NonzeroDebtAck(operation) => operation.conversation_id(),
         }
     }
 }
