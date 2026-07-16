@@ -16,8 +16,10 @@ use crate::wire::{
     LeaveAttemptToken, LeaveRequest,
 };
 
+use super::aggregate_commit_tests::{nonzero_ack_commit, ordinary_fate, recovered_fate};
 use super::operation_event::{
-    AttachedOperation, DetachedOperation, EnrolledOperation, LeftOperation,
+    AttachedOperation, BindingFateOperation, DetachedOperation, EnrolledOperation, LeftOperation,
+    NonzeroDebtAckOperation,
 };
 use super::test_support::settled_leave_authority;
 use super::{
@@ -317,6 +319,55 @@ fn detached_operation_refuses_a_supersession_terminal() {
         None,
         "supersession terminals belong to the attach event that committed them"
     );
+}
+
+#[test]
+fn binding_fate_operation_repeats_the_ordinary_fates_committed_facts() {
+    let fate = ordinary_fate();
+    let operation = BindingFateOperation::from_ordinary(&fate);
+    assert_eq!(operation.conversation_id(), 29);
+    assert_eq!(operation.participant_id(), 3);
+    assert_eq!(operation.last_dead_binding_epoch(), epoch(5, 12));
+    assert_eq!(
+        operation.last_dead_binding_epoch(),
+        fate.last_dead_binding_epoch()
+    );
+    assert_eq!(operation.resulting_floor(), 9);
+}
+
+#[test]
+fn binding_fate_operation_repeats_the_recovered_fates_committed_facts() {
+    let fate = recovered_fate();
+    let operation = BindingFateOperation::from_recovered(&fate);
+    assert_eq!(operation.conversation_id(), 1);
+    assert_eq!(operation.participant_id(), 4);
+    assert_eq!(
+        operation.last_dead_binding_epoch(),
+        BindingEpoch::new(ConnectionIncarnation::new(1, 3), generation(3))
+    );
+    assert_eq!(
+        operation.last_dead_binding_epoch(),
+        fate.last_dead_binding_epoch()
+    );
+    assert_eq!(operation.resulting_floor(), 15);
+}
+
+#[test]
+fn nonzero_debt_ack_operation_repeats_the_ack_commits_request() {
+    let commit = nonzero_ack_commit();
+    let request = commit.outcome().request();
+    let operation = NonzeroDebtAckOperation::new(&commit);
+    assert_eq!(operation.conversation_id(), 54);
+    assert_eq!(operation.participant_id(), 0);
+    assert_eq!(operation.capability_generation(), Generation::ONE);
+    assert_eq!(operation.through_seq(), 1);
+    assert_eq!(operation.conversation_id(), request.conversation_id);
+    assert_eq!(operation.participant_id(), request.participant_id);
+    assert_eq!(
+        operation.capability_generation(),
+        request.capability_generation
+    );
+    assert_eq!(operation.through_seq(), request.through_seq);
 }
 
 #[test]

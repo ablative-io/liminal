@@ -15,6 +15,7 @@ use crate::wire::{
     AttachSecret, BindingEpoch, ConnectionIncarnation, ConversationId, Generation, ParticipantAck,
 };
 
+use super::conversation::ConversationEventBody;
 use super::edge::marker_delivery_for_test;
 use super::operation_event_tests::{
     bound_leave_commit, detach_transition, enrollment_commit, superseding_attach_commit,
@@ -23,8 +24,8 @@ use super::{
     ActiveBinding, AggregateOperationCommit, AggregateOperationDecision, BindingState,
     BindingTerminalDisposition, BoundParticipantCursor, ClosureDebt, ClosureState,
     CommittedBindingTerminalPosition, ConversationDecision, ConversationEvent, ConversationGenesis,
-    ConversationRefusalReason, CursorFateSuccessor, CursorProgressKey, DebtCompletion,
-    DiedBindingTransition, EnrollmentFingerprint, Event, IdentityState, LiveMember,
+    ConversationOperation, ConversationRefusalReason, CursorFateSuccessor, CursorProgressKey,
+    DebtCompletion, DiedBindingTransition, EnrollmentFingerprint, Event, IdentityState, LiveMember,
     LiveMemberRestore, NonzeroDebtCursorEpisode, NonzeroParticipantAckCommit,
     NonzeroParticipantAckDecision, ObserverProjection, OrdinaryBindingFate,
     ParticipantConversation, PresentedIdentity, RecoveredBindingFate, StoredEdge,
@@ -69,7 +70,7 @@ fn committed_died_terminal(
     }
 }
 
-fn ordinary_fate() -> OrdinaryBindingFate {
+pub(super) fn ordinary_fate() -> OrdinaryBindingFate {
     let commit = superseding_attach_commit();
     let BindingState::Bound(binding) = commit.binding_state else {
         panic!("the superseding attach fixture installs a bound binding");
@@ -80,7 +81,7 @@ fn ordinary_fate() -> OrdinaryBindingFate {
         .expect("the exact new-binding terminal derives ordinary fate")
 }
 
-fn recovered_fate() -> RecoveredBindingFate {
+pub(super) fn recovered_fate() -> RecoveredBindingFate {
     let recovery_debt = debt(2, 20);
     let attached_debt = debt(2, 18);
     let prior_epoch = BindingEpoch::new(ConnectionIncarnation::new(1, 2), generation(2));
@@ -137,7 +138,7 @@ fn ack_member() -> LiveMember<Vec<u8>> {
     .expect("ack fixture membership is internally consistent")
 }
 
-fn nonzero_ack_commit() -> Box<NonzeroParticipantAckCommit> {
+pub(super) fn nonzero_ack_commit() -> Box<NonzeroParticipantAckCommit> {
     let member = ack_member();
     let episode = NonzeroDebtCursorEpisode::new(
         ACK_CONVERSATION,
@@ -298,11 +299,29 @@ fn nonzero_debt_ack_event_records_the_committed_cursor_fact_key() {
         validated_shell(ACK_CONVERSATION),
         payload,
     ));
+
+    // Fix 2, event side: the durable event body itself records the consumed
+    // commit's request fields — decoded back from the canonical bytes, not
+    // inferred from a shared derivation.
+    let (_, _, body) = super::conversation_codec::decode_event(&pending.event().encode_canonical())
+        .expect("the selected durable ack event decodes canonically");
+    let ConversationEventBody::Operation(ConversationOperation::NonzeroDebtAck(recorded)) = body
+    else {
+        panic!("the nonzero-debt ack commit must select a NonzeroDebtAck event body");
+    };
+    assert_eq!(recorded.conversation_id(), request.conversation_id);
+    assert_eq!(recorded.participant_id(), request.participant_id);
+    assert_eq!(
+        recorded.capability_generation(),
+        request.capability_generation
+    );
+    assert_eq!(recorded.through_seq(), request.through_seq);
+
     let (_live, payload) = pending.commit();
 
-    // Fix 2: the recorded (participant, through_seq) pair is the exact
-    // per-participant (participant_index, boundary) cursor-fact key that the
-    // consumed commit's resulting episode accounts for.
+    // Fix 2, episode side: the recorded (participant, through_seq) pair is
+    // the exact per-participant (participant_index, boundary) cursor-fact key
+    // that the consumed commit's resulting episode accounts for.
     let key = CursorProgressKey {
         participant_index: request.participant_id,
         boundary: request.through_seq,
