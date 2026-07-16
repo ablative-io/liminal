@@ -464,21 +464,41 @@ fn marker_ack_refuses_through_crate_selector() -> Result<(), Box<dyn Error>> {
             marker_delivery_seq: 9,
         }),
     )?;
+    // The frozen selector precedence yields exactly ONE row for these facts
+    // (cursor 0, requested 9, no expected marker): NoMarkerExpected.
+    let ServerValue::MarkerMismatch(mismatch) = refused else {
+        return Err(format!(
+            "undelivered marker ack must refuse through the marker-proof selector: {refused:?}"
+        )
+        .into());
+    };
     assert!(
         matches!(
-            refused,
-            ServerValue::MarkerMismatch(_) | ServerValue::MarkerNotDelivered(_)
+            mismatch.mismatch,
+            liminal_protocol::wire::MarkerMismatchBody::NoMarkerExpected
         ),
-        "undelivered marker ack must refuse through the marker-proof selector: {refused:?}"
+        "no marker was ever expected: {mismatch:?}"
     );
+    let liminal_protocol::wire::MarkerProofRequest::MarkerAck(proof) = &mismatch.request else {
+        return Err(format!("refusal must echo the marker-ack envelope: {mismatch:?}").into());
+    };
+    assert_eq!(proof.conversation_id, CONVERSATION);
+    assert_eq!(proof.participant_id, receipt.participant_id());
+    assert_eq!(proof.capability_generation, Generation::ONE);
+    assert_eq!(proof.requested_marker_delivery_seq, 9);
     Ok(())
 }
 
-/// Observer recovery for an untracked conversation refuses through the A4
-/// transaction; the durable observer rows survive a cold reopen.
+/// Observer recovery classifies each contract-derived row exactly, over
+/// durably restored rows only: a tracked conversation at progress 0 with
+/// refused epoch 1 is `EpochAhead` (pinning the Track row's survival across
+/// the cold reopen), an armable refusal at the exact progress is accepted
+/// and armed, and an untracked conversation id is `ConversationUnknown`.
 #[test]
-fn observer_recovery_refuses_unknown_epoch_and_tracks_durably() -> Result<(), Box<dyn Error>> {
-    use liminal_protocol::wire::{ObserverRecoveryHandshake, ObserverRefusal};
+fn observer_recovery_classifies_exact_rows_over_durable_tracking() -> Result<(), Box<dyn Error>> {
+    use liminal_protocol::wire::{
+        InvalidObserverEpoch, ObserverRecoveryHandshake, ObserverRefusal,
+    };
 
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
@@ -499,10 +519,12 @@ fn observer_recovery_refuses_unknown_epoch_and_tracks_durably() -> Result<(), Bo
         assert!(matches!(enrolled, ServerValue::EnrollBound(_)));
     }
 
-    // Cold reopen: the recovery batch runs over durably restored rows only.
+    // Cold reopen: the recovery batches run over durably restored rows only.
     let store = open_disk_store_for_tests(&data_dir)?;
     let handler = ProductionParticipantHandler::new(store, test_participant_config());
-    let value = dispatch(
+    // Tracked conversation, durable progress 0, refused epoch 1: the ONE
+    // contract row for these facts is EpochAhead with exact fields.
+    let ahead = dispatch(
         &handler,
         ConnectionIncarnation::new(42, 1),
         ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
@@ -512,12 +534,69 @@ fn observer_recovery_refuses_unknown_epoch_and_tracks_durably() -> Result<(), Bo
             }],
         }),
     )?;
-    assert!(
-        matches!(
-            value,
-            ServerValue::ObserverRecoveryAccepted(_) | ServerValue::InvalidObserverEpoch(_)
-        ),
-        "observer recovery must classify through the A4 transaction: {value:?}"
-    );
+    let ServerValue::InvalidObserverEpoch(InvalidObserverEpoch::EpochAhead {
+        conversation_id,
+        presented_epoch,
+        current_observer_progress,
+    }) = ahead
+    else {
+        return Err(
+            format!("refused epoch 1 over progress 0 must be EpochAhead: {ahead:?}").into(),
+        );
+    };
+    assert_eq!(conversation_id, CONVERSATION);
+    assert_eq!(presented_epoch, 1);
+    assert_eq!(current_observer_progress, 0);
+
+    // The exact durable progress arms: accepted with one armed status row.
+    let accepted = dispatch(
+        &handler,
+        ConnectionIncarnation::new(42, 2),
+        ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+            observer_refusals: vec![ObserverRefusal {
+                conversation_id: CONVERSATION,
+                refused_epoch: 0,
+            }],
+        }),
+    )?;
+    let ServerValue::ObserverRecoveryAccepted(outcome) = accepted else {
+        return Err(
+            format!("refused epoch at the exact durable progress must arm: {accepted:?}").into(),
+        );
+    };
+    assert_eq!(outcome.statuses.len(), 1);
+    let status = outcome
+        .statuses
+        .first()
+        .ok_or("accepted outcome carries one status row")?;
+    assert_eq!(status.conversation_id, CONVERSATION);
+    assert_eq!(status.refused_epoch, 0);
+    assert_eq!(status.current_observer_progress, 0);
+    assert!(status.armed, "the equal-epoch refusal must arm");
+    assert!(!status.progressed);
+
+    // An untracked conversation id classifies as ConversationUnknown.
+    let unknown_id = 9099_u64;
+    let unknown = dispatch(
+        &handler,
+        ConnectionIncarnation::new(42, 3),
+        ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+            observer_refusals: vec![ObserverRefusal {
+                conversation_id: unknown_id,
+                refused_epoch: 1,
+            }],
+        }),
+    )?;
+    let ServerValue::InvalidObserverEpoch(InvalidObserverEpoch::ConversationUnknown {
+        conversation_id,
+        presented_epoch,
+    }) = unknown
+    else {
+        return Err(
+            format!("an untracked conversation must be ConversationUnknown: {unknown:?}").into(),
+        );
+    };
+    assert_eq!(conversation_id, unknown_id);
+    assert_eq!(presented_epoch, 1);
     Ok(())
 }

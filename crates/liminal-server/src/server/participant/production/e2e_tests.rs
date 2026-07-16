@@ -290,10 +290,30 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
             accept_marker_delivery_seq: None,
         }),
     )?;
-    assert!(
-        matches!(attached, ServerValue::AttachBound(_)),
-        "attach did not bind: {attached:?}"
+    let ServerValue::AttachBound(bound) = attached else {
+        return Err(format!("attach did not bind: {attached:?}").into());
+    };
+    // The rotation's checked-increment law, wire-encoded end to end: the new
+    // epoch carries generation 2 on the SAME connection incarnation, echoes
+    // the presented generation separately, and rotates the secret.
+    assert_eq!(
+        bound.origin_binding_epoch().capability_generation,
+        Generation::new(2).ok_or("generation two is nonzero")?,
+        "the new binding epoch must carry the minted successor generation"
     );
+    assert_eq!(
+        bound.origin_binding_epoch().connection_incarnation,
+        old_epoch.connection_incarnation,
+        "the new epoch names the same live connection incarnation"
+    );
+    assert_eq!(bound.request_generation(), Generation::ONE);
+    assert_ne!(
+        bound.attach_secret(),
+        secret,
+        "the rotation must invalidate the enrollment secret"
+    );
+    assert_eq!(bound.participant_id(), participant);
+    assert_eq!(bound.conversation_id(), CONVERSATION);
 
     // Replay the OLD detach token: the terminalized cell must answer with
     // the OLD committed epoch, wire-encoded end to end.
