@@ -5,6 +5,7 @@ mod marker_proof;
 mod nonzero_participant_ack;
 pub(in crate::lifecycle) mod ordinary_record_projection;
 mod participant_ack;
+mod record_admission;
 
 #[cfg(test)]
 mod enrollment_operation_tests;
@@ -20,6 +21,8 @@ mod nonzero_participant_ack_tests;
 mod ordinary_record_projection_tests;
 #[cfg(test)]
 mod participant_ack_tests;
+#[cfg(test)]
+mod record_admission_tests;
 
 pub use enrollment_operation::{
     InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
@@ -39,9 +42,15 @@ pub use nonzero_participant_ack::{
 };
 pub use ordinary_record_projection::{
     OrdinaryProjectionError, OrdinaryProjectionLimits, OrdinaryRecordDrainFirst,
-    OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionInput, ProjectedOrdinaryRecord,
-    RetainedRecordCharge,
+    OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionFailure,
+    OrdinaryRecordProjectionInput, ProjectedOrdinaryRecord, RetainedRecordCharge,
 };
 pub use participant_ack::{
     ParticipantAckCommit, ParticipantAckCommitError, ParticipantAckDecision, apply_participant_ack,
+};
+pub use record_admission::{
+    CommittedOrdinaryRecord, RecordAdmissionCommit, RecordAdmissionDecision,
+    RecordAdmissionDrainFirst, RecordAdmissionFailure, RecordAdmissionFault,
+    RecordAdmissionPrestate, RecordAdmissionRefusal, UnchangedRecordAdmission,
+    apply_record_admission,
 };

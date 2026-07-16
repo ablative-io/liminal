@@ -23,27 +23,27 @@ use super::ordinary_record_projection::{
     RetainedRecordCharge, project_ordinary_fixed_point,
 };
 
-const CONVERSATION: u64 = 54;
-const UNIT: u64 = 10;
+pub(super) const CONVERSATION: u64 = 54;
+pub(super) const UNIT: u64 = 10;
 
 #[derive(Clone)]
-struct Fixture {
-    request: RecordAdmissionEnvelope,
-    receiving_binding_epoch: BindingEpoch,
-    encoded_record_charge: ResourceVector,
-    retained_records: Vec<RetainedCausalRecord>,
-    retained_charges: Vec<RetainedRecordCharge>,
-    active_marker_credit_records: Vec<RetainedCausalRecord>,
-    unaccepted_marker_anchors: Vec<u64>,
-    active_identities: Vec<FrontierParticipant>,
-    identity_slot_limit: u64,
-    current_floor: u128,
-    observer_progress: u64,
-    order_ledger: OrderLedger,
-    sequence_ledger: SequenceLedger,
-    immutable_candidates: Vec<ImmutableSequenceCandidate>,
-    closure_accounting: ClosureAccounting,
-    limits: OrdinaryProjectionLimits,
+pub(super) struct Fixture {
+    pub(super) request: RecordAdmissionEnvelope,
+    pub(super) receiving_binding_epoch: BindingEpoch,
+    pub(super) encoded_record_charge: ResourceVector,
+    pub(super) retained_records: Vec<RetainedCausalRecord>,
+    pub(super) retained_charges: Vec<RetainedRecordCharge>,
+    pub(super) active_marker_credit_records: Vec<RetainedCausalRecord>,
+    pub(super) unaccepted_marker_anchors: Vec<u64>,
+    pub(super) active_identities: Vec<FrontierParticipant>,
+    pub(super) identity_slot_limit: u64,
+    pub(super) current_floor: u128,
+    pub(super) observer_progress: u64,
+    pub(super) order_ledger: OrderLedger,
+    pub(super) sequence_ledger: SequenceLedger,
+    pub(super) immutable_candidates: Vec<ImmutableSequenceCandidate>,
+    pub(super) closure_accounting: ClosureAccounting,
+    pub(super) limits: OrdinaryProjectionLimits,
 }
 
 impl Fixture {
@@ -70,7 +70,7 @@ impl Fixture {
     }
 }
 
-fn epoch(ordinal: u64) -> BindingEpoch {
+pub(super) fn epoch(ordinal: u64) -> BindingEpoch {
     BindingEpoch::new(ConnectionIncarnation::new(1, ordinal), Generation::ONE)
 }
 
@@ -154,7 +154,7 @@ fn accounting(
     .expect("valid clear accounting")
 }
 
-fn case_54_fixture() -> Fixture {
+pub(super) fn ordinary_capacity_walk_fixture() -> Fixture {
     let h = 100;
     let records: Vec<_> = (h - 11..=h - 6)
         .enumerate()
@@ -204,7 +204,7 @@ fn case_54_fixture() -> Fixture {
     }
 }
 
-fn case_54_frontiers(fixture: &Fixture) -> ClaimFrontiers {
+pub(super) fn ordinary_capacity_walk_frontiers(fixture: &Fixture) -> ClaimFrontiers {
     let terminal = BindingTerminalOwner {
         participant_index: 0,
         binding_epoch: fixture.receiving_binding_epoch,
@@ -270,7 +270,7 @@ fn case_54_frontiers(fixture: &Fixture) -> ClaimFrontiers {
         fixture.sequence_ledger,
         fixture.order_ledger,
     )
-    .expect("case 54 exact frontiers restore")
+    .expect("ordinary capacity-walk frontiers restore")
 }
 
 fn credited_marker_frontiers(
@@ -346,9 +346,9 @@ fn credited_marker_frontiers(
 }
 
 #[test]
-fn consuming_case_54_wrapper_relays_exact_owners_and_seals_marker_prefix() {
-    let fixture = case_54_fixture();
-    let frontiers = case_54_frontiers(&fixture);
+fn consuming_capacity_walk_wrapper_relays_exact_owners_and_seals_marker_prefix() {
+    let fixture = ordinary_capacity_walk_fixture();
+    let frontiers = ordinary_capacity_walk_frontiers(&fixture);
     let decision = frontiers
         .project_ordinary_record(OrdinaryRecordProjectionInput::new(
             fixture.request.clone(),
@@ -359,9 +359,9 @@ fn consuming_case_54_wrapper_relays_exact_owners_and_seals_marker_prefix() {
             fixture.closure_accounting,
             fixture.limits,
         ))
-        .expect("case 54 consuming projection is legal");
+        .expect("ordinary capacity-walk projection is legal");
     let OrdinaryRecordProjectionDecision::Projected(projected) = decision else {
-        panic!("case 54 has no pre-owned prefix")
+        panic!("ordinary capacity walk has no pre-owned prefix")
     };
 
     assert_eq!(projected.floor().resulting_floor, 91);
@@ -449,25 +449,34 @@ fn consuming_case_54_wrapper_relays_exact_owners_and_seals_marker_prefix() {
 
 #[test]
 fn consuming_wrapper_rejects_a_disconnected_keyed_charge() {
-    let fixture = case_54_fixture();
+    let fixture = ordinary_capacity_walk_fixture();
     let mut charges = fixture.retained_charges.clone();
     charges[2] = RetainedRecordCharge::new(
         92,
         fixture.retained_records[2].admission_order,
         ResourceVector::new(1, 4 * UNIT),
     );
-    assert_eq!(
-        case_54_frontiers(&fixture).project_ordinary_record(OrdinaryRecordProjectionInput::new(
-            fixture.request.clone(),
-            fixture.receiving_binding_epoch,
-            fixture.encoded_record_charge,
-            charges,
-            fixture.observer_progress,
-            fixture.closure_accounting,
-            fixture.limits,
-        )),
-        Err(OrdinaryProjectionError::RetainedChargeKey { index: 2 })
+    let expected_frontiers = ordinary_capacity_walk_frontiers(&fixture);
+    let input = OrdinaryRecordProjectionInput::new(
+        fixture.request.clone(),
+        fixture.receiving_binding_epoch,
+        fixture.encoded_record_charge,
+        charges,
+        fixture.observer_progress,
+        fixture.closure_accounting,
+        fixture.limits,
     );
+    let expected_input = input.clone();
+    let Err(failure) = ordinary_capacity_walk_frontiers(&fixture).project_ordinary_record(input)
+    else {
+        panic!("disconnected charge must fail");
+    };
+    assert_eq!(
+        failure.error(),
+        &OrdinaryProjectionError::RetainedChargeKey { index: 2 }
+    );
+    assert_eq!(failure.frontiers(), &expected_frontiers);
+    assert_eq!(failure.projection_input(), &expected_input);
 }
 
 #[test]
@@ -544,12 +553,12 @@ fn consuming_wrapper_releases_compacted_credit_then_reovertakes_same_participant
 }
 
 #[test]
-fn frozen_case_54_walk_derives_floor_marker_and_both_ledgers() {
-    let OrdinaryProjectionKernelDecision::Projected(projected) = case_54_fixture()
+fn ordinary_capacity_walk_derives_floor_marker_and_both_ledgers() {
+    let OrdinaryProjectionKernelDecision::Projected(projected) = ordinary_capacity_walk_fixture()
         .project()
-        .expect("case 54 fixed point is legal")
+        .expect("ordinary capacity-walk fixed point is legal")
     else {
-        panic!("case 54 has no earlier mandatory prefix")
+        panic!("ordinary capacity walk has no earlier mandatory prefix")
     };
 
     assert_eq!(projected.floor().preferred_floor, 89);
@@ -859,8 +868,8 @@ fn compacted_credit_owner_can_receive_one_new_marker_in_the_same_fixed_point() {
 }
 
 #[test]
-fn hard_observer_blocks_the_exact_case_54_capacity_floor() {
-    let mut fixture = case_54_fixture();
+fn hard_observer_blocks_the_exact_capacity_walk_floor() {
+    let mut fixture = ordinary_capacity_walk_fixture();
     fixture.observer_progress = 89;
     assert_eq!(
         fixture.project(),
@@ -922,7 +931,7 @@ fn unaccepted_marker_prevents_capacity_search_crossing_its_sequence() {
 
 #[test]
 fn mandatory_candidate_wins_before_optional_projection_or_counter_planning() {
-    let mut fixture = case_54_fixture();
+    let mut fixture = ordinary_capacity_walk_fixture();
     let candidate = MarkerCandidateAuthority {
         delivery_seq: 95,
         admission_order: AdmissionOrder::new(80, CandidatePhase::CompactionMarker, 0),
@@ -946,7 +955,7 @@ fn mandatory_candidate_wins_before_optional_projection_or_counter_planning() {
 
 #[test]
 fn keyed_charge_mismatch_is_rejected_before_any_derived_total_is_used() {
-    let mut fixture = case_54_fixture();
+    let mut fixture = ordinary_capacity_walk_fixture();
     fixture.retained_charges[2] = RetainedRecordCharge::new(
         92,
         fixture.retained_records[2].admission_order,
