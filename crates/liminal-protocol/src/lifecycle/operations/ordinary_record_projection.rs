@@ -23,10 +23,10 @@ use crate::{
 use super::super::{
     AdmissionOrder, ClaimFrontiers, ClosureAccounting, ClosureAccountingError, ClosureState,
     FrontierBinding, FrontierParticipant, ImmutableSequenceCandidate, MarkerCandidateAuthority,
-    MarkerProvenance, MarkerSequenceOwner, OrderAdmissionError, OrderAllocation, OrderLedger,
-    RequiredCapacityPlan, RequiredCapacityPlanError, RetainedCausalRecord,
-    RetainedCausalRecordKind, SequenceAdmission, SequenceAdmissionError, SequenceLedger,
-    admit_sequence, allocate_order,
+    MarkerProvenance, MarkerSequenceOwner, ObserverFloorPermit, OrderAdmissionError,
+    OrderAllocation, OrderLedger, RemainingClosurePermit, RequiredCapacityPlan,
+    RequiredCapacityPlanError, RetainedCausalRecord, RetainedCausalRecordKind, SequenceAdmission,
+    SequenceAdmissionError, SequenceLedger, admit_sequence, allocate_order,
 };
 
 /// Exact durable charge keyed to one validated retained causal row.
@@ -160,6 +160,29 @@ impl OrdinaryRecordProjectionInput {
     }
 
     #[allow(clippy::type_complexity)]
+    pub(in crate::lifecycle) fn as_parts(
+        &self,
+    ) -> (
+        &RecordAdmissionEnvelope,
+        BindingEpoch,
+        ResourceVector,
+        &[RetainedRecordCharge],
+        DeliverySeq,
+        ClosureAccounting,
+        OrdinaryProjectionLimits,
+    ) {
+        (
+            &self.request,
+            self.receiving_binding_epoch,
+            self.encoded_record_charge,
+            &self.retained_charges,
+            self.observer_progress,
+            self.closure_accounting,
+            self.limits,
+        )
+    }
+
+    #[allow(clippy::type_complexity)]
     pub(in crate::lifecycle) fn into_parts(
         self,
     ) -> (
@@ -187,6 +210,7 @@ impl OrdinaryRecordProjectionInput {
 #[derive(Debug, PartialEq, Eq)]
 pub struct OrdinaryRecordDrainFirst {
     pub(in crate::lifecycle) frontiers: ClaimFrontiers,
+    pub(in crate::lifecycle) input: OrdinaryRecordProjectionInput,
     pub(in crate::lifecycle) candidate: ImmutableSequenceCandidate,
 }
 
@@ -203,11 +227,56 @@ impl OrdinaryRecordDrainFirst {
         &self.frontiers
     }
 
-    /// Recovers the unchanged frontier authority for the appropriate typed
-    /// mandatory-drain operation.
+    /// Borrows the unchanged exact storage facts and signed limits.
     #[must_use]
-    pub fn into_frontiers(self) -> ClaimFrontiers {
-        self.frontiers
+    pub const fn projection_input(&self) -> &OrdinaryRecordProjectionInput {
+        &self.input
+    }
+
+    /// Recovers the complete unchanged projection prestate.
+    #[must_use]
+    pub fn into_unchanged_parts(self) -> (ClaimFrontiers, OrdinaryRecordProjectionInput) {
+        (self.frontiers, self.input)
+    }
+}
+
+/// Recoverable noncommit from the consuming ordinary projection.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OrdinaryRecordProjectionFailure {
+    pub(in crate::lifecycle) frontiers: ClaimFrontiers,
+    pub(in crate::lifecycle) input: OrdinaryRecordProjectionInput,
+    pub(in crate::lifecycle) error: OrdinaryProjectionError,
+}
+
+impl OrdinaryRecordProjectionFailure {
+    /// Borrows the exact projection error.
+    #[must_use]
+    pub const fn error(&self) -> &OrdinaryProjectionError {
+        &self.error
+    }
+
+    /// Borrows the unchanged validated frontier aggregate.
+    #[must_use]
+    pub const fn frontiers(&self) -> &ClaimFrontiers {
+        &self.frontiers
+    }
+
+    /// Borrows the unchanged exact storage facts and signed limits.
+    #[must_use]
+    pub const fn projection_input(&self) -> &OrdinaryRecordProjectionInput {
+        &self.input
+    }
+
+    /// Recovers the unchanged projection prestate and selected error.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ClaimFrontiers,
+        OrdinaryRecordProjectionInput,
+        OrdinaryProjectionError,
+    ) {
+        (self.frontiers, self.input, self.error)
     }
 }
 
@@ -222,6 +291,8 @@ pub struct ProjectedOrdinaryRecord {
     pub(in crate::lifecycle) required_capacity: RequiredCapacityPlan,
     pub(in crate::lifecycle) order: OrderAllocation,
     pub(in crate::lifecycle) sequence: SequenceAdmission,
+    pub(in crate::lifecycle) observer_floor: ObserverFloorPermit,
+    pub(in crate::lifecycle) closure: RemainingClosurePermit,
     pub(in crate::lifecycle) caller_record: RetainedCausalRecord,
     pub(in crate::lifecycle) caller_charge: RetainedRecordCharge,
     pub(in crate::lifecycle) retained_charges: Vec<RetainedRecordCharge>,
@@ -275,6 +346,18 @@ impl ProjectedOrdinaryRecord {
     #[must_use]
     pub const fn sequence(&self) -> SequenceAdmission {
         self.sequence
+    }
+
+    /// Returns the shared stage-11 permit selected before frontier mutation.
+    #[must_use]
+    pub const fn observer_floor(&self) -> ObserverFloorPermit {
+        self.observer_floor
+    }
+
+    /// Returns the shared stage-12 permit selected before frontier mutation.
+    #[must_use]
+    pub const fn closure(&self) -> RemainingClosurePermit {
+        self.closure
     }
 
     /// Returns the exact retained caller record.
@@ -393,7 +476,6 @@ pub(in crate::lifecycle) struct OrdinaryFixedPointPlan {
 }
 
 impl OrdinaryFixedPointPlan {
-    #[cfg(test)]
     pub(in crate::lifecycle) const fn floor(&self) -> FloorComputation {
         self.floor
     }
@@ -413,7 +495,6 @@ impl OrdinaryFixedPointPlan {
         self.resulting_accounting
     }
 
-    #[cfg(test)]
     pub(in crate::lifecycle) const fn required_capacity(&self) -> RequiredCapacityPlan {
         self.required_capacity
     }
@@ -448,7 +529,6 @@ impl OrdinaryFixedPointPlan {
         &self.retained_charges
     }
 
-    #[cfg(test)]
     pub(in crate::lifecycle) fn marker_candidates(&self) -> &[MarkerCandidateAuthority] {
         &self.marker_candidates
     }
@@ -580,6 +660,10 @@ pub enum OrdinaryProjectionError {
     SequenceRelocation,
     /// Existing exact order owners could not be relayed behind the caller major.
     OrderRelocation,
+    /// The shared observer selector disagreed with the successful fixed point.
+    ObserverSelectorInvariant,
+    /// The shared closure selector disagreed with the successful fixed point.
+    ClosureSelectorInvariant,
 }
 
 /// Computes the ordinary record's zero-debt floor and marker fixed point.

@@ -11,20 +11,24 @@ use alloc::{boxed::Box, vec::Vec};
 use crate::{
     algebra::ResourceVector,
     outcome::{CandidatePhase, ClaimCounter, ParticipantStateCorruptReason},
-    wire::{BindingEpoch, ConversationId, DeliverySeq, ParticipantId, TransactionOrder},
+    wire::{
+        BindingEpoch, ClosureCheckedEnvelope, ConversationId, DeliverySeq, ParticipantId,
+        TransactionOrder,
+    },
 };
 
 use super::{
     AttachedLifecycleRecord, BindingOrigin, BindingState, ClosureAccounting, ClosureState,
     InitialEnrollmentClosureProjection, InitialEnrollmentOperationCommit, LiveMember,
-    ObserverProjection, OrderClaims, OrderHigh, OrderLedger, PendingFinalization,
-    PreparedLeaveAuthority, RecoveryQuartetStatus, RecoverySequenceReserve, SequenceLedger,
-    StoredEdge,
+    ObserverCheckedOperation, ObserverFloorDecision, ObserverProjection, OrderClaims, OrderHigh,
+    OrderLedger, PendingFinalization, PreparedLeaveAuthority, RecoveryQuartetStatus,
+    RecoverySequenceReserve, RemainingClosureDecision, SequenceLedger, StoredEdge,
+    check_observer_floor, check_remaining_closure,
     operations::ordinary_record_projection::{
         OrdinaryFixedPointPlan, OrdinaryProjectionError, OrdinaryProjectionFacts,
         OrdinaryProjectionKernelDecision, OrdinaryRecordDrainFirst,
-        OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionInput, ProjectedOrdinaryRecord,
-        project_ordinary_fixed_point,
+        OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionFailure,
+        OrdinaryRecordProjectionInput, ProjectedOrdinaryRecord, project_ordinary_fixed_point,
     },
 };
 
@@ -2085,13 +2089,14 @@ impl ClaimFrontiers {
     ///
     /// # Errors
     ///
-    /// Returns [`OrdinaryProjectionError`] for a conversation/binding mismatch,
-    /// malformed keyed charges/accounting, capacity or observer refusal, counter
-    /// exhaustion, or an impossible exact-owner relocation.
+    /// Returns [`OrdinaryRecordProjectionFailure`] for a conversation/binding
+    /// mismatch, malformed keyed charges/accounting, capacity or observer
+    /// refusal, counter exhaustion, or an impossible exact-owner relocation.
+    /// Every failure owns the unchanged frontier and original projection input.
     pub fn project_ordinary_record(
         self,
         input: OrdinaryRecordProjectionInput,
-    ) -> Result<OrdinaryRecordProjectionDecision, OrdinaryProjectionError> {
+    ) -> Result<OrdinaryRecordProjectionDecision, Box<OrdinaryRecordProjectionFailure>> {
         let (
             request,
             receiving_binding_epoch,
@@ -2100,17 +2105,21 @@ impl ClaimFrontiers {
             observer_progress,
             closure_accounting,
             limits,
-        ) = input.into_parts();
+        ) = input.as_parts();
         if request.conversation_id != self.conversation_id {
-            return Err(OrdinaryProjectionError::Conversation);
+            return Err(projection_failure(
+                self,
+                input,
+                OrdinaryProjectionError::Conversation,
+            ));
         }
         let unaccepted_marker_anchors = ordinary_unaccepted_marker_anchors(&self);
-        let kernel = project_ordinary_fixed_point(&OrdinaryProjectionFacts {
-            request,
+        let kernel = match project_ordinary_fixed_point(&OrdinaryProjectionFacts {
+            request: request.clone(),
             receiving_binding_epoch,
             encoded_record_charge,
             retained_records: &self.retained_records,
-            retained_charges: &retained_charges,
+            retained_charges,
             active_marker_credit_records: &self.marker_records,
             unaccepted_marker_anchors: &unaccepted_marker_anchors,
             active_identities: self.active_identities.participants(),
@@ -2123,24 +2132,86 @@ impl ClaimFrontiers {
             closure_accounting,
             remaining_recovery_claim: closure_accounting.edge_k_remaining(),
             limits,
-        })?;
+        }) {
+            Ok(value) => value,
+            Err(error) => return Err(projection_failure(self, input, error)),
+        };
         match kernel {
             OrdinaryProjectionKernelDecision::DrainFirst(prefix) => Ok(
                 OrdinaryRecordProjectionDecision::DrainFirst(Box::new(OrdinaryRecordDrainFirst {
                     frontiers: self,
+                    input,
                     candidate: prefix.candidate(),
                 })),
             ),
-            OrdinaryProjectionKernelDecision::Projected(projected) => self
-                .apply_ordinary_projection(*projected)
-                .map(|projected| OrdinaryRecordProjectionDecision::Projected(Box::new(projected))),
+            OrdinaryProjectionKernelDecision::Projected(projected) => {
+                let observer_floor = match check_observer_floor(
+                    ObserverCheckedOperation::RecordAdmission(request.clone()),
+                    observer_progress,
+                    projected.floor().resulting_floor,
+                ) {
+                    ObserverFloorDecision::Eligible(permit) => permit,
+                    ObserverFloorDecision::Respond(_) => {
+                        return Err(projection_failure(
+                            self,
+                            input,
+                            OrdinaryProjectionError::ObserverSelectorInvariant,
+                        ));
+                    }
+                };
+                let closure = match check_remaining_closure(
+                    &ClosureCheckedEnvelope::RecordAdmission(request.clone()),
+                    closure_accounting,
+                    false,
+                    0,
+                    projected.required_capacity(),
+                ) {
+                    RemainingClosureDecision::Eligible(permit) => *permit,
+                    RemainingClosureDecision::Respond(_) => {
+                        return Err(projection_failure(
+                            self,
+                            input,
+                            OrdinaryProjectionError::ClosureSelectorInvariant,
+                        ));
+                    }
+                };
+                match self.apply_ordinary_projection(*projected, observer_floor, closure) {
+                    Ok(projected) => Ok(OrdinaryRecordProjectionDecision::Projected(Box::new(
+                        projected,
+                    ))),
+                    Err(failure) => {
+                        let (frontiers, error) = *failure;
+                        Err(projection_failure(frontiers, input, error))
+                    }
+                }
+            }
         }
     }
 
     fn apply_ordinary_projection(
         mut self,
         projected: OrdinaryFixedPointPlan,
-    ) -> Result<ProjectedOrdinaryRecord, OrdinaryProjectionError> {
+        observer_floor: super::ObserverFloorPermit,
+        closure: super::RemainingClosurePermit,
+    ) -> Result<ProjectedOrdinaryRecord, Box<(Self, OrdinaryProjectionError)>> {
+        let Ok(marker_count) = u64::try_from(projected.marker_candidates().len()) else {
+            return Err(Box::new((
+                self,
+                OrdinaryProjectionError::SequenceRelocation,
+            )));
+        };
+        let Some(sequence_delta) = marker_count.checked_add(1) else {
+            return Err(Box::new((
+                self,
+                OrdinaryProjectionError::SequenceRelocation,
+            )));
+        };
+        if let Err(error) = preflight_ordinary_sequence_owners(&self.sequence, sequence_delta) {
+            return Err(Box::new((self, error)));
+        }
+        if let Err(error) = preflight_ordinary_order_owners(&self.order) {
+            return Err(Box::new((self, error)));
+        }
         let (
             floor,
             retained_charge,
@@ -2156,13 +2227,10 @@ impl ClaimFrontiers {
             new_marker_candidates,
         ) = projected.into_parts();
 
-        let marker_count = u64::try_from(new_marker_candidates.len())
-            .map_err(|_| OrdinaryProjectionError::SequenceRelocation)?;
-        let sequence_delta = marker_count
-            .checked_add(1)
-            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
-        relay_ordinary_sequence_owners(&mut self.sequence, sequence_delta)?;
-        relay_ordinary_order_owners(&mut self.order)?;
+        let prior_sequence_ledger = self.sequence.ledger;
+        let prior_order_ledger = self.order.ledger;
+        relay_ordinary_sequence_owners(&mut self.sequence, sequence_delta);
+        relay_ordinary_order_owners(&mut self.order);
 
         self.sequence.ledger = sequence.resulting();
         self.sequence.immutable_candidates.extend(
@@ -2183,12 +2251,22 @@ impl ClaimFrontiers {
                         .collect(),
                 });
         }
+        if validate_cross_counter(&self.sequence, &self.order).is_err() {
+            self.sequence.ledger = prior_sequence_ledger;
+            self.sequence.immutable_candidates.clear();
+            self.order.ledger = prior_order_ledger;
+            self.order.immutable_candidates.clear();
+            rollback_ordinary_sequence_owners(&mut self.sequence, sequence_delta);
+            rollback_ordinary_order_owners(&mut self.order);
+            return Err(Box::new((
+                self,
+                OrdinaryProjectionError::SequenceRelocation,
+            )));
+        }
         self.retained_floor = floor.resulting_floor;
         self.retained_records = retained_records;
         self.marker_records
             .retain(|record| u128::from(record.delivery_seq) >= floor.resulting_floor);
-        validate_cross_counter(&self.sequence, &self.order)
-            .map_err(|_| OrdinaryProjectionError::SequenceRelocation)?;
 
         Ok(ProjectedOrdinaryRecord {
             frontiers: self,
@@ -2199,6 +2277,8 @@ impl ClaimFrontiers {
             required_capacity,
             order,
             sequence,
+            observer_floor,
+            closure,
             caller_record,
             caller_charge,
             retained_charges,
@@ -2464,49 +2544,61 @@ fn ordinary_unaccepted_marker_anchors(frontiers: &ClaimFrontiers) -> Vec<Deliver
         .collect()
 }
 
-fn relay_ordinary_sequence_owners(
-    sequence: &mut SequenceClaimFrontier,
+fn projection_failure(
+    frontiers: ClaimFrontiers,
+    input: OrdinaryRecordProjectionInput,
+    error: OrdinaryProjectionError,
+) -> Box<OrdinaryRecordProjectionFailure> {
+    Box::new(OrdinaryRecordProjectionFailure {
+        frontiers,
+        input,
+        error,
+    })
+}
+
+fn preflight_ordinary_sequence_owners(
+    sequence: &SequenceClaimFrontier,
     delta: u64,
 ) -> Result<(), OrdinaryProjectionError> {
     if !sequence.immutable_candidates.is_empty() {
         return Err(OrdinaryProjectionError::SequenceRelocation);
     }
-    for claim in &mut sequence.movable_claims {
-        claim.delivery_seq = claim
+    for claim in &sequence.movable_claims {
+        claim
             .delivery_seq
             .checked_add(delta)
             .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
     }
-    for range in &mut sequence.products.live_times_terminal {
-        range.start = range
+    for range in &sequence.products.live_times_terminal {
+        range
             .start
             .checked_add(delta)
             .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
     }
-    if let Some(range) = &mut sequence.products.live_times_replacement_terminal {
-        range.start = range
+    if let Some(range) = &sequence.products.live_times_replacement_terminal {
+        range
             .start
             .checked_add(delta)
             .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
     }
-    for range in &mut sequence.products.other_live_times_exit {
-        range.start = range
+    for range in &sequence.products.other_live_times_exit {
+        range
             .start
             .checked_add(delta)
             .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
     }
-    if let Some(recovery) = &mut sequence.recovery {
-        if let Some(terminal) = &mut recovery.terminal {
-            terminal.delivery_seq = terminal
+    if let Some(recovery) = &sequence.recovery {
+        if let Some(terminal) = &recovery.terminal {
+            terminal
                 .delivery_seq
                 .checked_add(delta)
                 .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
         }
-        recovery.recovery_attach_seq = recovery
+        recovery
             .recovery_attach_seq
             .checked_add(delta)
             .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
-        recovery.replacement_terminal_seq = recovery
+        recovery
             .replacement_terminal_seq
             .checked_add(delta)
             .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
@@ -2514,35 +2606,105 @@ fn relay_ordinary_sequence_owners(
     Ok(())
 }
 
-fn relay_ordinary_order_owners(
-    order: &mut OrderClaimFrontier,
+fn relay_ordinary_sequence_owners(sequence: &mut SequenceClaimFrontier, delta: u64) {
+    for claim in &mut sequence.movable_claims {
+        claim.delivery_seq = claim.delivery_seq.wrapping_add(delta);
+    }
+    for range in &mut sequence.products.live_times_terminal {
+        range.start = range.start.wrapping_add(delta);
+    }
+    if let Some(range) = &mut sequence.products.live_times_replacement_terminal {
+        range.start = range.start.wrapping_add(delta);
+    }
+    for range in &mut sequence.products.other_live_times_exit {
+        range.start = range.start.wrapping_add(delta);
+    }
+    if let Some(recovery) = &mut sequence.recovery {
+        if let Some(terminal) = &mut recovery.terminal {
+            terminal.delivery_seq = terminal.delivery_seq.wrapping_add(delta);
+        }
+        recovery.recovery_attach_seq = recovery.recovery_attach_seq.wrapping_add(delta);
+        recovery.replacement_terminal_seq = recovery.replacement_terminal_seq.wrapping_add(delta);
+    }
+}
+
+fn rollback_ordinary_sequence_owners(sequence: &mut SequenceClaimFrontier, delta: u64) {
+    for claim in &mut sequence.movable_claims {
+        claim.delivery_seq = claim.delivery_seq.wrapping_sub(delta);
+    }
+    for range in &mut sequence.products.live_times_terminal {
+        range.start = range.start.wrapping_sub(delta);
+    }
+    if let Some(range) = &mut sequence.products.live_times_replacement_terminal {
+        range.start = range.start.wrapping_sub(delta);
+    }
+    for range in &mut sequence.products.other_live_times_exit {
+        range.start = range.start.wrapping_sub(delta);
+    }
+    if let Some(recovery) = &mut sequence.recovery {
+        if let Some(terminal) = &mut recovery.terminal {
+            terminal.delivery_seq = terminal.delivery_seq.wrapping_sub(delta);
+        }
+        recovery.recovery_attach_seq = recovery.recovery_attach_seq.wrapping_sub(delta);
+        recovery.replacement_terminal_seq = recovery.replacement_terminal_seq.wrapping_sub(delta);
+    }
+}
+
+fn preflight_ordinary_order_owners(
+    order: &OrderClaimFrontier,
 ) -> Result<(), OrdinaryProjectionError> {
     if !order.immutable_candidates.is_empty() {
         return Err(OrdinaryProjectionError::OrderRelocation);
     }
-    for claim in &mut order.movable_claims {
-        claim.transaction_order = claim
+    for claim in &order.movable_claims {
+        claim
             .transaction_order
             .checked_add(1)
             .ok_or(OrdinaryProjectionError::OrderRelocation)?;
     }
-    if let Some(recovery) = &mut order.recovery {
-        if let Some(active_binding) = &mut recovery.active_binding {
-            active_binding.transaction_order = active_binding
+    if let Some(recovery) = &order.recovery {
+        if let Some(active_binding) = &recovery.active_binding {
+            active_binding
                 .transaction_order
                 .checked_add(1)
                 .ok_or(OrdinaryProjectionError::OrderRelocation)?;
         }
-        recovery.recovery_operation_order = recovery
+        recovery
             .recovery_operation_order
             .checked_add(1)
             .ok_or(OrdinaryProjectionError::OrderRelocation)?;
-        recovery.replacement_terminal_order = recovery
+        recovery
             .replacement_terminal_order
             .checked_add(1)
             .ok_or(OrdinaryProjectionError::OrderRelocation)?;
     }
     Ok(())
+}
+
+fn relay_ordinary_order_owners(order: &mut OrderClaimFrontier) {
+    for claim in &mut order.movable_claims {
+        claim.transaction_order = claim.transaction_order.wrapping_add(1);
+    }
+    if let Some(recovery) = &mut order.recovery {
+        if let Some(active_binding) = &mut recovery.active_binding {
+            active_binding.transaction_order = active_binding.transaction_order.wrapping_add(1);
+        }
+        recovery.recovery_operation_order = recovery.recovery_operation_order.wrapping_add(1);
+        recovery.replacement_terminal_order = recovery.replacement_terminal_order.wrapping_add(1);
+    }
+}
+
+fn rollback_ordinary_order_owners(order: &mut OrderClaimFrontier) {
+    for claim in &mut order.movable_claims {
+        claim.transaction_order = claim.transaction_order.wrapping_sub(1);
+    }
+    if let Some(recovery) = &mut order.recovery {
+        if let Some(active_binding) = &mut recovery.active_binding {
+            active_binding.transaction_order = active_binding.transaction_order.wrapping_sub(1);
+        }
+        recovery.recovery_operation_order = recovery.recovery_operation_order.wrapping_sub(1);
+        recovery.replacement_terminal_order = recovery.replacement_terminal_order.wrapping_sub(1);
+    }
 }
 
 fn validate_leave_identity<F>(
