@@ -12,20 +12,31 @@ pub struct OrderClaims {
 }
 
 impl OrderClaims {
-    /// Creates the four exact `A`, `X`, `RO`, and `RA` claim classes.
-    #[must_use]
+    /// Creates the four exact `A`, `X`, `RO`, and `RA` claim classes only when
+    /// the recovery pair is coupled.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrderClaimsInvariantError::RecoveryPairMismatch`] when exactly
+    /// one of `RO` and `RA` is present.
     pub const fn new(
         active_binding_terminals: u64,
         membership_exits: u64,
         recovery_operation: bool,
         recovery_replacement_terminal: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, OrderClaimsInvariantError> {
+        if recovery_operation != recovery_replacement_terminal {
+            return Err(OrderClaimsInvariantError::RecoveryPairMismatch {
+                recovery_operation,
+                recovery_replacement_terminal,
+            });
+        }
+        Ok(Self {
             active_binding_terminals,
             membership_exits,
             recovery_operation,
             recovery_replacement_terminal,
-        }
+        })
     }
 
     /// Returns active binding-terminal claims `A`.
@@ -60,6 +71,18 @@ impl OrderClaims {
             + u128::from(self.recovery_operation)
             + u128::from(self.recovery_replacement_terminal)
     }
+}
+
+/// Invalid primitive order-claim state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrderClaimsInvariantError {
+    /// The sole recovery-operation and replacement-terminal claims are coupled.
+    RecoveryPairMismatch {
+        /// Whether `RO` was present.
+        recovery_operation: bool,
+        /// Whether `RA` was present.
+        recovery_replacement_terminal: bool,
+    },
 }
 
 /// Persisted transaction-order high-watermark state.
@@ -141,6 +164,20 @@ impl OrderLedger {
     /// [`OrderAdmissionError::MembershipExitClaimOverflow`] for the first
     /// checked addition that cannot be represented.
     pub fn plan_enrollment(self) -> Result<ResultingOrderClaims, OrderAdmissionError> {
+        self.plan_enrollment_with_recovery_quartet(false)
+    }
+
+    /// Plans enrollment while allowing the protocol-owned closure projection to
+    /// endow the episode's sole `RO`/`RA` pair.
+    ///
+    /// The boolean is crate-private deliberately: only the fixed-point planner
+    /// may derive it from durable marker/binding facts. A storage binding cannot
+    /// request a quartet directly.
+    pub(crate) fn plan_enrollment_with_recovery_quartet(
+        self,
+        endow_recovery_quartet: bool,
+    ) -> Result<ResultingOrderClaims, OrderAdmissionError> {
+        self.ensure_quartet_can_be_endowed(endow_recovery_quartet)?;
         let active_binding_terminals = self
             .claims
             .active_binding_terminals
@@ -154,7 +191,9 @@ impl OrderLedger {
         Ok(ResultingOrderClaims(OrderClaims {
             active_binding_terminals,
             membership_exits,
-            ..self.claims
+            recovery_operation: self.claims.recovery_operation || endow_recovery_quartet,
+            recovery_replacement_terminal: self.claims.recovery_replacement_terminal
+                || endow_recovery_quartet,
         }))
     }
 
@@ -191,6 +230,18 @@ impl OrderLedger {
     #[must_use]
     pub const fn plan_ordinary_record(self) -> ResultingOrderClaims {
         ResultingOrderClaims(self.claims)
+    }
+
+    const fn ensure_quartet_can_be_endowed(
+        self,
+        endow_recovery_quartet: bool,
+    ) -> Result<(), OrderAdmissionError> {
+        if endow_recovery_quartet
+            && (self.claims.recovery_operation || self.claims.recovery_replacement_terminal)
+        {
+            return Err(OrderAdmissionError::RecoveryOrderReserveAlreadyPresent);
+        }
+        Ok(())
     }
 
     /// Applies fenced recovery using only its pre-owned `RO` and `RA` claims.
@@ -279,6 +330,8 @@ pub enum OrderAdmissionError {
     ActiveBindingClaimOverflow,
     /// Adding a membership-exit claim would exceed u64.
     MembershipExitClaimOverflow,
+    /// A fixed-point projection attempted to mint a second `RO`/`RA` pair.
+    RecoveryOrderReserveAlreadyPresent,
     /// Fenced recovery lacks one or both coupled reserved order claims.
     RecoveryOrderReserveMissing {
         /// Whether the current edge owns recovery-operation claim `RO`.

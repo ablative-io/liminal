@@ -214,6 +214,42 @@ fn fenced_recovery_requires_the_coupled_sequence_pair() {
 }
 
 #[test]
+fn closure_projection_endows_one_sequence_pair_and_rejects_a_second() {
+    let clear = restored(0, SequenceClaims::default());
+    let endowed = clear
+        .plan_enrollment_with_recovery_quartet(0, true)
+        .expect("clear state may receive its sole sequence pair");
+    let resulting = admitted(enrollment(72), endowed);
+    assert_ledger(
+        resulting,
+        1,
+        1,
+        1,
+        0,
+        RecoverySequenceReserve::DetachedCredentialRecovery,
+    );
+
+    assert_eq!(
+        resulting.plan_enrollment_with_recovery_quartet(0, true),
+        Err(SequenceAdmissionError::RecoverySequenceReserveAlreadyPresent)
+    );
+    let ordinary = admitted(
+        record(73),
+        resulting
+            .plan_ordinary_record(0)
+            .expect("ordinary planning preserves and never endows recovery"),
+    );
+    assert_ledger(
+        ordinary,
+        2,
+        1,
+        1,
+        0,
+        RecoverySequenceReserve::DetachedCredentialRecovery,
+    );
+}
+
+#[test]
 fn case_21_supersession_projects_the_exact_exhausted_budget() {
     let current = restored(
         u64::MAX - 4,

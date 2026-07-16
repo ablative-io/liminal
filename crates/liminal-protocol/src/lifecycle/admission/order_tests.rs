@@ -59,7 +59,7 @@ fn empty_ledger_owns_all_values_and_enrollment_allocates_zero() {
 fn optional_planners_apply_exact_deltas_and_preserve_recovery_claims() {
     let current = OrderLedger::try_new(
         OrderHigh::Allocated(100),
-        OrderClaims::new(4, 5, true, true),
+        OrderClaims::new(4, 5, true, true).expect("coupled recovery claims are valid"),
     )
     .expect("fixture order claims fit");
 
@@ -102,7 +102,7 @@ fn optional_planners_apply_exact_deltas_and_preserve_recovery_claims() {
 fn checked_planners_reject_claim_counter_overflow() {
     let active_max = OrderLedger::try_new(
         OrderHigh::Empty,
-        OrderClaims::new(u64::MAX, 0, false, false),
+        OrderClaims::new(u64::MAX, 0, false, false).expect("empty recovery pair is valid"),
     )
     .expect("MAX active claims fit the empty counter suffix");
     assert_eq!(
@@ -116,7 +116,7 @@ fn checked_planners_reject_claim_counter_overflow() {
 
     let exits_max = OrderLedger::try_new(
         OrderHigh::Empty,
-        OrderClaims::new(0, u64::MAX, false, false),
+        OrderClaims::new(0, u64::MAX, false, false).expect("empty recovery pair is valid"),
     )
     .expect("MAX exit claims fit the empty counter suffix");
     assert_eq!(
@@ -127,9 +127,11 @@ fn checked_planners_reject_claim_counter_overflow() {
 
 #[test]
 fn fenced_recovery_consumes_ro_and_transfers_ra_without_allocating() {
-    let current =
-        OrderLedger::try_new(OrderHigh::Allocated(42), OrderClaims::new(2, 3, true, true))
-            .expect("fenced recovery fixture is valid");
+    let current = OrderLedger::try_new(
+        OrderHigh::Allocated(42),
+        OrderClaims::new(2, 3, true, true).expect("coupled recovery claims are valid"),
+    )
+    .expect("fenced recovery fixture is valid");
     let resulting = current
         .apply_fenced_recovery()
         .expect("coupled recovery reserve transfers exactly");
@@ -142,27 +144,16 @@ fn fenced_recovery_consumes_ro_and_transfers_ra_without_allocating() {
 
 #[test]
 fn fenced_recovery_requires_the_coupled_ro_ra_pair() {
-    let missing_replacement = OrderLedger::try_new(
-        OrderHigh::Allocated(10),
-        OrderClaims::new(0, 1, true, false),
-    )
-    .expect("partial recovery fixture is representable for corruption refusal");
     assert_eq!(
-        missing_replacement.apply_fenced_recovery(),
-        Err(OrderAdmissionError::RecoveryOrderReserveMissing {
+        OrderClaims::new(0, 1, true, false),
+        Err(super::OrderClaimsInvariantError::RecoveryPairMismatch {
             recovery_operation: true,
             recovery_replacement_terminal: false,
         })
     );
-
-    let missing_operation = OrderLedger::try_new(
-        OrderHigh::Allocated(10),
-        OrderClaims::new(0, 1, false, true),
-    )
-    .expect("partial recovery fixture is representable for corruption refusal");
     assert_eq!(
-        missing_operation.apply_fenced_recovery(),
-        Err(OrderAdmissionError::RecoveryOrderReserveMissing {
+        OrderClaims::new(0, 1, false, true),
+        Err(super::OrderClaimsInvariantError::RecoveryPairMismatch {
             recovery_operation: false,
             recovery_replacement_terminal: true,
         })
@@ -170,10 +161,42 @@ fn fenced_recovery_requires_the_coupled_ro_ra_pair() {
 }
 
 #[test]
+fn closure_projection_endows_one_order_pair_and_rejects_a_second() {
+    let clear = OrderLedger::try_new(OrderHigh::Empty, OrderClaims::default())
+        .expect("empty order ledger is valid");
+    let endowed = clear
+        .plan_enrollment_with_recovery_quartet(true)
+        .expect("clear state may receive its sole quartet");
+    let resulting = allocate_order(enrollment_request(), clear, endowed)
+        .expect("endowed enrollment order fits")
+        .resulting();
+    assert_claims(resulting.claims(), 1, 1, true, true);
+
+    assert_eq!(
+        resulting.plan_enrollment_with_recovery_quartet(true),
+        Err(OrderAdmissionError::RecoveryOrderReserveAlreadyPresent)
+    );
+    assert_claims(
+        allocate_order(
+            record_request(),
+            resulting,
+            resulting.plan_ordinary_record(),
+        )
+        .expect("ordinary planning preserves the pair")
+        .resulting()
+        .claims(),
+        1,
+        1,
+        true,
+        true,
+    );
+}
+
+#[test]
 fn case_43_exact_claim_shortfall_selects_order_exhaustion() {
     let ledger = OrderLedger::try_new(
         OrderHigh::Allocated(u64::MAX - 2),
-        OrderClaims::new(1, 1, false, false),
+        OrderClaims::new(1, 1, false, false).expect("empty recovery pair is valid"),
     )
     .expect("two claims own the final two values");
     let error = allocate_order(record_request(), ledger, ledger.plan_ordinary_record())
@@ -195,7 +218,7 @@ fn final_major_is_legal_only_when_no_claim_survives() {
 
     let claimed = OrderLedger::try_new(
         OrderHigh::Allocated(u64::MAX - 1),
-        OrderClaims::new(1, 0, false, false),
+        OrderClaims::new(1, 0, false, false).expect("empty recovery pair is valid"),
     )
     .expect("one final value owns one claim");
     let error = allocate_order(record_request(), claimed, claimed.plan_ordinary_record())
@@ -226,7 +249,7 @@ fn exhausted_maximum_has_no_next_value() {
 fn restore_rejects_claims_beyond_the_counter_suffix() {
     let error = OrderLedger::try_new(
         OrderHigh::Allocated(u64::MAX),
-        OrderClaims::new(1, 0, false, false),
+        OrderClaims::new(1, 0, false, false).expect("empty recovery pair is valid"),
     )
     .expect_err("no value remains to own the claim");
     assert_eq!(

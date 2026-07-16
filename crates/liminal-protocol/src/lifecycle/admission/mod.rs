@@ -30,8 +30,8 @@ pub use observer::{
     ObserverCheckedOperation, ObserverFloorDecision, ObserverFloorPermit, check_observer_floor,
 };
 pub use order::{
-    OrderAdmissionError, OrderAllocation, OrderClaims, OrderHigh, OrderLedger,
-    OrderLedgerInvariantError, ResultingOrderClaims, allocate_order,
+    OrderAdmissionError, OrderAllocation, OrderClaims, OrderClaimsInvariantError, OrderHigh,
+    OrderLedger, OrderLedgerInvariantError, ResultingOrderClaims, allocate_order,
 };
 pub use record::{RecordSizeDecision, RecordSizePermit, check_record_size};
 pub use sequence::{

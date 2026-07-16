@@ -209,6 +209,20 @@ impl SequenceLedger {
         self,
         new_markers: u64,
     ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
+        self.plan_enrollment_with_recovery_quartet(new_markers, false)
+    }
+
+    /// Plans enrollment while allowing the protocol-owned closure projection to
+    /// endow the episode's sole coupled `RS=1,RT=1` reserve.
+    ///
+    /// The endowment selector is crate-private so a storage binding cannot mint
+    /// recovery claims from raw values.
+    pub(crate) fn plan_enrollment_with_recovery_quartet(
+        self,
+        new_markers: u64,
+        endow_recovery_quartet: bool,
+    ) -> Result<ResultingSequenceState, SequenceAdmissionError> {
+        self.ensure_quartet_can_be_endowed(endow_recovery_quartet)?;
         let high_watermark = self.checked_high_watermark(1)?;
         let live_members = self.claims.live_members.checked_add(1).ok_or(
             SequenceAdmissionError::LiveMemberClaimOverflow {
@@ -227,7 +241,11 @@ impl SequenceLedger {
                 live_members,
                 binding_terminals,
                 markers,
-                recovery: self.claims.recovery,
+                recovery: if endow_recovery_quartet {
+                    RecoverySequenceReserve::DetachedCredentialRecovery
+                } else {
+                    self.claims.recovery
+                },
             },
         })
     }
@@ -306,6 +324,21 @@ impl SequenceLedger {
                 ..self.claims
             },
         })
+    }
+
+    const fn ensure_quartet_can_be_endowed(
+        self,
+        endow_recovery_quartet: bool,
+    ) -> Result<(), SequenceAdmissionError> {
+        if endow_recovery_quartet
+            && matches!(
+                self.claims.recovery,
+                RecoverySequenceReserve::DetachedCredentialRecovery
+            )
+        {
+            return Err(SequenceAdmissionError::RecoverySequenceReserveAlreadyPresent);
+        }
+        Ok(())
     }
 
     /// Applies fenced recovery from its coupled `RS=1, RT=1` reserve.
@@ -423,6 +456,8 @@ pub enum SequenceAdmissionError {
     },
     /// Fenced recovery was attempted without the coupled `RS=1, RT=1` reserve.
     RecoverySequenceReserveMissing,
+    /// A fixed-point projection attempted to mint a second `RS`/`RT` pair.
+    RecoverySequenceReserveAlreadyPresent,
     /// A reserved fenced-recovery transfer failed to preserve the sequence invariant.
     RecoverySequenceInvariantViolation,
 }
