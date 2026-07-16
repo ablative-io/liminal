@@ -1,9 +1,10 @@
-//! Server-owned participant transport bindings.
+//! Server-owned participant storage and transport bindings.
 //!
 //! The repository modules are test-only executable regression fixtures. They
 //! must not become production bindings until one durable conversation
 //! aggregate can persist the protocol crate's complete typed transition.
 
+mod conversation_stream;
 #[cfg(test)]
 mod crash_repository;
 #[cfg(test)]
@@ -12,6 +13,8 @@ mod cursor_repository;
 mod detach_repository;
 mod transport;
 
+#[cfg(test)]
+mod conversation_stream_tests;
 #[cfg(test)]
 mod crash_repository_tests;
 #[cfg(test)]
