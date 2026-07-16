@@ -6,7 +6,7 @@
 //! positions use O(I) bounded storage, while product handles are derived lazily
 //! from active-identity ranks and are never expanded into an `I x I` array.
 
-use alloc::vec::Vec;
+use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
     outcome::{CandidatePhase, ClaimCounter, ParticipantStateCorruptReason},
@@ -16,6 +16,12 @@ use crate::{
 use super::{
     BindingOrigin, BindingState, LiveMember, OrderClaims, OrderHigh, OrderLedger,
     PendingFinalization, PreparedLeaveAuthority, RecoverySequenceReserve, SequenceLedger,
+    operations::ordinary_record_projection::{
+        OrdinaryFixedPointPlan, OrdinaryProjectionError, OrdinaryProjectionFacts,
+        OrdinaryProjectionKernelDecision, OrdinaryRecordDrainFirst,
+        OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionInput, ProjectedOrdinaryRecord,
+        project_ordinary_fixed_point,
+    },
 };
 
 /// Counter whose frontier failed restoration.
@@ -1170,6 +1176,7 @@ pub struct ClaimFrontiersRestore {
 pub(super) struct ClaimFrontiersPrevalidated {
     conversation_id: ConversationId,
     active_identities: ActiveIdentityRanks,
+    identity_slot_limit: u64,
     retained_floor: u128,
     retained_records: Vec<RetainedCausalRecord>,
     marker_records: Vec<RetainedCausalRecord>,
@@ -1291,6 +1298,7 @@ pub(super) enum MarkerDrainCoreError {
 pub struct ClaimFrontiers {
     conversation_id: ConversationId,
     active_identities: ActiveIdentityRanks,
+    identity_slot_limit: u64,
     retained_floor: u128,
     retained_records: Vec<RetainedCausalRecord>,
     marker_records: Vec<RetainedCausalRecord>,
@@ -1596,6 +1604,7 @@ impl ClaimFrontiers {
         Ok(ClaimFrontiersPrevalidated {
             conversation_id: restore.conversation_id,
             active_identities,
+            identity_slot_limit: restore.identity_slot_limit,
             retained_floor: restore.retained_floor,
             retained_records,
             marker_records,
@@ -1617,6 +1626,12 @@ impl ClaimFrontiers {
         &self.active_identities
     }
 
+    /// Returns the signed permanent identity-slot capacity validated at restore.
+    #[must_use]
+    pub const fn identity_slot_limit(&self) -> u64 {
+        self.identity_slot_limit
+    }
+
     /// Returns the owning conversation.
     #[must_use]
     pub const fn conversation_id(&self) -> ConversationId {
@@ -1627,6 +1642,12 @@ impl ClaimFrontiers {
     #[must_use]
     pub const fn retained_floor(&self) -> u128 {
         self.retained_floor
+    }
+
+    /// Borrows every validated physical row in the retained sequence suffix.
+    #[must_use]
+    pub fn retained_records(&self) -> &[RetainedCausalRecord] {
+        &self.retained_records
     }
 
     /// Borrows only the O(I) retained marker anchors needed by executable edges.
@@ -1645,6 +1666,143 @@ impl ClaimFrontiers {
     #[must_use]
     pub const fn order(&self) -> &OrderClaimFrontier {
         &self.order
+    }
+
+    #[cfg(test)]
+    pub(in crate::lifecycle) fn cross_counter_valid_for_test(&self) -> bool {
+        validate_cross_counter(&self.sequence, &self.order).is_ok()
+    }
+
+    /// Consumes one complete validated frontier into the ordinary record fixed
+    /// point, preventing storage callers from supplying disconnected retained
+    /// rows, participant cursors, immutable candidates, or aggregate ledgers.
+    ///
+    /// Exact keyed row charges remain durability facts. They are joined to the
+    /// owned rows here before any floor/capacity/counter transition executes.
+    /// The returned decision owns either the unchanged prestate and its exact
+    /// earlier candidate, or the complete projected poststate.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OrdinaryProjectionError`] for a conversation/binding mismatch,
+    /// malformed keyed charges/accounting, capacity or observer refusal, counter
+    /// exhaustion, or an impossible exact-owner relocation.
+    pub fn project_ordinary_record(
+        self,
+        input: OrdinaryRecordProjectionInput,
+    ) -> Result<OrdinaryRecordProjectionDecision, OrdinaryProjectionError> {
+        let (
+            request,
+            receiving_binding_epoch,
+            encoded_record_charge,
+            retained_charges,
+            observer_progress,
+            closure_accounting,
+            limits,
+        ) = input.into_parts();
+        if request.conversation_id != self.conversation_id {
+            return Err(OrdinaryProjectionError::Conversation);
+        }
+        let unaccepted_marker_anchors = ordinary_unaccepted_marker_anchors(&self);
+        let kernel = project_ordinary_fixed_point(&OrdinaryProjectionFacts {
+            request,
+            receiving_binding_epoch,
+            encoded_record_charge,
+            retained_records: &self.retained_records,
+            retained_charges: &retained_charges,
+            active_marker_credit_records: &self.marker_records,
+            unaccepted_marker_anchors: &unaccepted_marker_anchors,
+            active_identities: self.active_identities.participants(),
+            identity_slot_limit: self.identity_slot_limit,
+            current_floor: self.retained_floor,
+            observer_progress,
+            order_ledger: self.order.ledger,
+            sequence_ledger: self.sequence.ledger,
+            immutable_candidates: &self.sequence.immutable_candidates,
+            closure_accounting,
+            remaining_recovery_claim: closure_accounting.edge_k_remaining(),
+            limits,
+        })?;
+        match kernel {
+            OrdinaryProjectionKernelDecision::DrainFirst(prefix) => Ok(
+                OrdinaryRecordProjectionDecision::DrainFirst(Box::new(OrdinaryRecordDrainFirst {
+                    frontiers: self,
+                    candidate: prefix.candidate(),
+                })),
+            ),
+            OrdinaryProjectionKernelDecision::Projected(projected) => self
+                .apply_ordinary_projection(*projected)
+                .map(|projected| OrdinaryRecordProjectionDecision::Projected(Box::new(projected))),
+        }
+    }
+
+    fn apply_ordinary_projection(
+        mut self,
+        projected: OrdinaryFixedPointPlan,
+    ) -> Result<ProjectedOrdinaryRecord, OrdinaryProjectionError> {
+        let (
+            floor,
+            retained_charge,
+            baseline,
+            accounting,
+            required_capacity,
+            order,
+            sequence,
+            caller_record,
+            caller_charge,
+            retained_records,
+            retained_charges,
+            new_marker_candidates,
+        ) = projected.into_parts();
+
+        let marker_count = u64::try_from(new_marker_candidates.len())
+            .map_err(|_| OrdinaryProjectionError::SequenceRelocation)?;
+        let sequence_delta = marker_count
+            .checked_add(1)
+            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+        relay_ordinary_sequence_owners(&mut self.sequence, sequence_delta)?;
+        relay_ordinary_order_owners(&mut self.order)?;
+
+        self.sequence.ledger = sequence.resulting();
+        self.sequence.immutable_candidates.extend(
+            new_marker_candidates
+                .iter()
+                .copied()
+                .map(ImmutableSequenceCandidate::Marker),
+        );
+        self.order.ledger = order.resulting();
+        if !new_marker_candidates.is_empty() {
+            self.order
+                .immutable_candidates
+                .push(ImmutableOrderCandidateMajor {
+                    transaction_order: order.major(),
+                    candidate_keys: new_marker_candidates
+                        .iter()
+                        .map(|candidate| candidate.admission_order)
+                        .collect(),
+                });
+        }
+        self.retained_floor = floor.resulting_floor;
+        self.retained_records = retained_records;
+        self.marker_records
+            .retain(|record| u128::from(record.delivery_seq) >= floor.resulting_floor);
+        validate_cross_counter(&self.sequence, &self.order)
+            .map_err(|_| OrdinaryProjectionError::SequenceRelocation)?;
+
+        Ok(ProjectedOrdinaryRecord {
+            frontiers: self,
+            floor,
+            retained_charge,
+            baseline,
+            accounting,
+            required_capacity,
+            order,
+            sequence,
+            caller_record,
+            caller_charge,
+            retained_charges,
+            new_marker_candidates,
+        })
     }
 
     /// Consumes the exact settled bound/detached `X` authority and relays the
@@ -1885,6 +2043,105 @@ impl ClaimFrontiers {
             frontiers: self,
         })
     }
+}
+
+fn ordinary_unaccepted_marker_anchors(frontiers: &ClaimFrontiers) -> Vec<DeliverySeq> {
+    frontiers
+        .marker_records
+        .iter()
+        .filter_map(|record| {
+            let RetainedCausalRecordKind::CompactionMarker {
+                participant_index, ..
+            } = record.kind
+            else {
+                return None;
+            };
+            active_participant(&frontiers.active_identities, participant_index)
+                .is_some_and(|participant| participant.cursor < record.delivery_seq)
+                .then_some(record.delivery_seq)
+        })
+        .collect()
+}
+
+fn relay_ordinary_sequence_owners(
+    sequence: &mut SequenceClaimFrontier,
+    delta: u64,
+) -> Result<(), OrdinaryProjectionError> {
+    if !sequence.immutable_candidates.is_empty() {
+        return Err(OrdinaryProjectionError::SequenceRelocation);
+    }
+    for claim in &mut sequence.movable_claims {
+        claim.delivery_seq = claim
+            .delivery_seq
+            .checked_add(delta)
+            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+    }
+    for range in &mut sequence.products.live_times_terminal {
+        range.start = range
+            .start
+            .checked_add(delta)
+            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+    }
+    if let Some(range) = &mut sequence.products.live_times_replacement_terminal {
+        range.start = range
+            .start
+            .checked_add(delta)
+            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+    }
+    for range in &mut sequence.products.other_live_times_exit {
+        range.start = range
+            .start
+            .checked_add(delta)
+            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+    }
+    if let Some(recovery) = &mut sequence.recovery {
+        if let Some(terminal) = &mut recovery.terminal {
+            terminal.delivery_seq = terminal
+                .delivery_seq
+                .checked_add(delta)
+                .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+        }
+        recovery.recovery_attach_seq = recovery
+            .recovery_attach_seq
+            .checked_add(delta)
+            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+        recovery.replacement_terminal_seq = recovery
+            .replacement_terminal_seq
+            .checked_add(delta)
+            .ok_or(OrdinaryProjectionError::SequenceRelocation)?;
+    }
+    Ok(())
+}
+
+fn relay_ordinary_order_owners(
+    order: &mut OrderClaimFrontier,
+) -> Result<(), OrdinaryProjectionError> {
+    if !order.immutable_candidates.is_empty() {
+        return Err(OrdinaryProjectionError::OrderRelocation);
+    }
+    for claim in &mut order.movable_claims {
+        claim.transaction_order = claim
+            .transaction_order
+            .checked_add(1)
+            .ok_or(OrdinaryProjectionError::OrderRelocation)?;
+    }
+    if let Some(recovery) = &mut order.recovery {
+        if let Some(active_binding) = &mut recovery.active_binding {
+            active_binding.transaction_order = active_binding
+                .transaction_order
+                .checked_add(1)
+                .ok_or(OrdinaryProjectionError::OrderRelocation)?;
+        }
+        recovery.recovery_operation_order = recovery
+            .recovery_operation_order
+            .checked_add(1)
+            .ok_or(OrdinaryProjectionError::OrderRelocation)?;
+        recovery.replacement_terminal_order = recovery
+            .replacement_terminal_order
+            .checked_add(1)
+            .ok_or(OrdinaryProjectionError::OrderRelocation)?;
+    }
+    Ok(())
 }
 
 fn validate_leave_identity<F>(
@@ -2226,6 +2483,7 @@ impl ClaimFrontiersPrevalidated {
         Ok(ClaimFrontiers {
             conversation_id: self.conversation_id,
             active_identities: self.active_identities,
+            identity_slot_limit: self.identity_slot_limit,
             retained_floor: self.retained_floor,
             retained_records: self.retained_records,
             marker_records: self.marker_records,

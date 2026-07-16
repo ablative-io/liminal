@@ -326,7 +326,6 @@ impl SequenceLedger {
     ///
     /// Returns the first arithmetic variant of [`SequenceAdmissionError`] whose
     /// checked addition cannot be represented.
-    #[cfg(test)]
     pub(crate) fn plan_ordinary_record(
         self,
         new_markers: u64,

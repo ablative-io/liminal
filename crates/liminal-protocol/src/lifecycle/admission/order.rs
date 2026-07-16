@@ -242,7 +242,6 @@ impl OrderLedger {
     }
 
     /// Plans ordinary record admission, which creates no order claim.
-    #[cfg(test)]
     #[must_use]
     pub(crate) const fn plan_ordinary_record(self) -> ResultingOrderClaims {
         ResultingOrderClaims(self.claims)

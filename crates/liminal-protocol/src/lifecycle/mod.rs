@@ -178,10 +178,12 @@ pub use operations::{
     MarkerDrainCommit, MarkerDrainError, MarkerProofDecision, MarkerProofInput, MarkerProofPermit,
     MarkerProofState, NonzeroAckEpisodePosition, NonzeroParticipantAckCommit,
     NonzeroParticipantAckCommitError, NonzeroParticipantAckDecision,
-    NonzeroParticipantAckInvariantError, ParticipantAckCommit, ParticipantAckCommitError,
-    ParticipantAckDecision, ReceiptDeadlineError, ReceiptDeadlines, apply_initial_enrollment,
-    apply_marker_ack, apply_nonzero_participant_ack, apply_participant_ack, drain_next_marker,
-    select_marker_proof,
+    NonzeroParticipantAckInvariantError, OrdinaryProjectionError, OrdinaryProjectionLimits,
+    OrdinaryRecordDrainFirst, OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionInput,
+    ParticipantAckCommit, ParticipantAckCommitError, ParticipantAckDecision,
+    ProjectedOrdinaryRecord, ReceiptDeadlineError, ReceiptDeadlines, RetainedRecordCharge,
+    apply_initial_enrollment, apply_marker_ack, apply_nonzero_participant_ack,
+    apply_participant_ack, drain_next_marker, select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,
