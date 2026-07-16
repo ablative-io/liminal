@@ -857,7 +857,7 @@ fn validated_conversation_history<EF, V, LF, D>(
 ) -> Result<ValidatedConversationHistory, ConversationStateRestoreError> {
     let mut causal_authorities = Vec::new();
     let mut binding_origins = Vec::new();
-    let mut seen = Vec::new();
+    let mut seen = Vec::with_capacity(participants.len());
     for participant in participants {
         let participant_id = match participant {
             RestoredParticipantLifecycle::Live {
@@ -879,12 +879,20 @@ fn validated_conversation_history<EF, V, LF, D>(
                 retired.participant_id()
             }
         };
-        if seen.contains(&participant_id) {
-            return Err(ConversationStateRestoreError::Storage(
-                StorageRestoreError::MembershipInvariant,
-            ));
-        }
         seen.push(participant_id);
+    }
+    // Conversations carry no participant-count cap, so the duplicate check is
+    // sort-and-scan (O(n log n)) rather than a per-participant linear scan
+    // (O(n^2)) over the whole-conversation cold-restore path.
+    seen.sort_unstable();
+    let has_duplicate = seen
+        .iter()
+        .zip(seen.iter().skip(1))
+        .any(|(current, next)| current == next);
+    if has_duplicate {
+        return Err(ConversationStateRestoreError::Storage(
+            StorageRestoreError::MembershipInvariant,
+        ));
     }
     Ok(ValidatedConversationHistory::new(
         causal_authorities,

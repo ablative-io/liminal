@@ -2532,3 +2532,40 @@ fn total_restore_refuses_cross_conversation_component_splices() {
         "frontiers persisted for another conversation must not combine"
     );
 }
+
+#[test]
+fn total_restore_refuses_a_duplicated_participant_identity() {
+    let binding_epoch = epoch(2, 8);
+    let authority = OrdinaryBindingAuthorityRestore {
+        binding: binding(PARTICIPANT_ID, binding_epoch),
+        through_seq: 12,
+    };
+    let mut snapshot = ordinary_bound_conversation(owed(
+        StoredEdgeRestore::ParticipantCursorProgressContinuous {
+            participant_id: PARTICIPANT_ID,
+            binding_epoch,
+            through_seq: 12,
+            authority,
+        },
+    ));
+    // Duplicate the whole participant row AND its frontier projection so the
+    // frontier-congruence check passes and only the per-conversation identity
+    // uniqueness invariant can refuse the snapshot.
+    let duplicated = snapshot.participants[0].clone();
+    snapshot.participants.push(duplicated);
+    snapshot.frontiers.active_identities.push(
+        snapshot
+            .frontiers
+            .active_identities
+            .first()
+            .copied()
+            .expect("the fixture tracks one frontier participant"),
+    );
+    assert_eq!(
+        snapshot.restore(),
+        Err(ConversationStateRestoreError::Storage(
+            StorageRestoreError::MembershipInvariant
+        )),
+        "one participant identity persisted twice must not restore"
+    );
+}
