@@ -14,6 +14,7 @@ mod binding;
 mod claim_frontier;
 mod closure_accounting;
 mod conversation;
+mod conversation_codec;
 mod cursor_facts;
 mod detach;
 mod edge;
