@@ -1,11 +1,18 @@
 //! Public durable-fact vocabulary for the six lifecycle operations recorded
 //! by the participant-conversation shell.
 //!
-//! Each operation payload is constructible only from the typed commit values
-//! the crate itself produces (`docs/design/LP-GAP-CLOSURE-GOAL.md` item A1), so
-//! a storage binding cannot mint a lifecycle event from raw caller-authored
-//! values. Decoded events rebuild these payloads through crate-private
-//! constructors that re-validate every canonical field invariant.
+//! Each operation payload is constructed from the crate's own typed commit
+//! and result values (`docs/design/LP-GAP-CLOSURE-GOAL.md` item A1): attach
+//! and enrollment facts come from [`AttachedLifecycleRecord`] (no public
+//! constructor), detach facts from the committed terminal, fate facts from
+//! the two private-field fate authorities, ack facts from the nonzero-debt
+//! ack commit, and leave facts from [`LeaveCommitted`] — the crate's own
+//! validating result type. These payloads describe committed operations for
+//! the ordering shell; they are not executable lifecycle authority, and no
+//! path exists from a decoded or constructed payload to a typed lifecycle
+//! state, stored edge, or binding origin. Decoded events rebuild payloads
+//! through crate-private constructors that re-validate every canonical field
+//! invariant.
 
 use crate::wire::{
     BindingEpoch, ConversationId, DeliverySeq, DetachAttemptToken, DetachedCause, Generation,

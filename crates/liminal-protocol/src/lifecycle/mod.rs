@@ -202,8 +202,8 @@ pub use storage::{
     DetachedCursorReleaseProvenanceRestore, DetachedMarkerReleaseRestore,
     FencedAttachCommitRestore, LeaveCommittedRestore, LiveIdentityRestore,
     MarkerCursorProgressRestore, MarkerDeliveryRestore, OrdinaryBindingAuthorityRestore,
-    OrdinaryBindingFateRestore, ParticipantLifecycleRestore, PendingFinalizationRestore,
-    PendingRecoveredCursorReleaseRestore, RecoveredBindingFateRestore,
-    RecoveredStorageCompletionRestore, RestoredBindingFateTerminal, RestoredParticipantLifecycle,
-    RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
+    OrdinaryBindingFateRestore, ParticipantConversationRestore, ParticipantConversationState,
+    ParticipantLifecycleRestore, PendingFinalizationRestore, PendingRecoveredCursorReleaseRestore,
+    RecoveredBindingFateRestore, RecoveredStorageCompletionRestore, RestoredBindingFateTerminal,
+    RestoredParticipantLifecycle, RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
 };

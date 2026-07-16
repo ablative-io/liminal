@@ -68,7 +68,6 @@ impl<V> Default for DetachCell<V> {
     }
 }
 
-#[cfg(test)]
 pub(super) fn restore_pending_detach<V>(
     token: DetachAttemptToken,
     participant_id: ParticipantId,
@@ -98,7 +97,6 @@ pub(super) fn restore_pending_detach<V>(
     })
 }
 
-#[cfg(test)]
 pub(super) fn restore_committed_detach<V>(
     token: DetachAttemptToken,
     participant_id: ParticipantId,
@@ -120,7 +118,6 @@ pub(super) fn restore_committed_detach<V>(
     })
 }
 
-#[cfg(test)]
 pub(super) fn restore_terminalized_detach<V>(
     token: DetachAttemptToken,
     participant_id: ParticipantId,

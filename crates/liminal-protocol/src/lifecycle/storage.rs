@@ -16,25 +16,20 @@ use crate::wire::{
 
 use super::{
     ActiveBinding, AdmissionOrder, BindingOrigin, BindingState, BoundParticipantCursor,
-    ClosureDebt, ClosureState, CommittedBindingTerminal, DebtCompletion, DetachCell,
-    DetachedCredentialRecovery, DetachedMarkerRelease, EnrollmentFingerprint, Event,
-    FencedAttachCommit, IdentityState, LeaveFingerprint, LiveMember, MarkerDelivery,
-    NonzeroDebtCursorEpisode, ObserverProjection, OrdinaryBindingAuthority, OrdinaryBindingFate,
+    ClaimFrontiers, ClaimFrontiersRestore, ClosureDebt, ClosureState, CommittedBindingTerminal,
+    DebtCompletion, DetachCell, DetachedCredentialRecovery, DetachedMarkerRelease, EmptyDetach,
+    EnrollmentFingerprint, Event, FencedAttachCommit, FrontierBinding, IdentityState,
+    LeaveFingerprint, LiveMember, LiveMemberRestore, MarkerDelivery, NonzeroDebtCursorEpisode,
+    ObserverProjection, OrderLedger, OrdinaryBindingAuthority, OrdinaryBindingFate,
     ParticipantCursorProgress, PendingFinalization, PendingRecoveredCursorRelease,
     PhysicalCompaction, RecoveredBindingFate, RecoveredBindingFateTransition, RetiredIdentity,
-    StoredEdge,
+    SequenceLedger, StoredEdge,
     binding::{restore_committed_terminal, restore_pending_finalization},
-    claim_frontier::{MarkerRecordOccurrence, ValidatedMarkerRecord},
-    cursor_facts::{CursorProgressFact, CursorProgressKey},
-};
-
-#[cfg(test)]
-use super::{
-    ClaimFrontiers, ClaimFrontiersRestore, EmptyDetach, FrontierBinding, LiveMemberRestore,
-    OrderLedger, SequenceLedger,
     claim_frontier::{
-        HistoricalCausalAuthority, MarkerRecordRequest, ValidatedConversationHistory,
+        HistoricalCausalAuthority, MarkerRecordOccurrence, MarkerRecordRequest,
+        ValidatedConversationHistory, ValidatedMarkerRecord,
     },
+    cursor_facts::{CursorProgressFact, CursorProgressKey},
     detach::{
         restore_committed_detach, restore_pending_detach, restore_terminalized_detach,
         validate_pending_pair,
@@ -84,23 +79,26 @@ pub enum ConversationStateRestoreError {
 /// restore data, but only protocol-owned replay may promote it to executable
 /// state.
 #[derive(Debug, PartialEq, Eq)]
-#[cfg(test)]
 pub(super) struct RestoredConversationState {
     frontiers: ClaimFrontiers,
     closure: ClosureState,
 }
 
-/// Complete crate-internal participant-conversation snapshot.
+/// Complete raw participant-conversation snapshot for public cold restore.
 ///
-/// This component form is intentionally not public API. Allowing a caller to
-/// combine a member restored from one history with a binding-origin capsule
-/// emitted by another would turn a valid producer proof into spliceable
-/// executable authority. Public cold restoration must instead replay one
-/// consuming protocol event history, which owns every predecessor and
-/// successor together.
-#[cfg(test)]
+/// Every field is inert storage data. The only consumer is [`Self::restore`],
+/// which validates the whole snapshot as one unit: participant capsules first,
+/// then the conversation history derived from those exact restored
+/// participants (never an empty history), then frontiers and the closure edge
+/// against that owned history. Components restored from different snapshots
+/// are not independently combinable — [`ParticipantConversationState`] has no
+/// public constructor, restored binding origins and marker-record authorities
+/// are minted only inside this joint validation, and mixing capsules from
+/// different histories fails the frontier-projection and provenance checks.
+/// A valid producer proof therefore cannot be spliced into executable
+/// authority it never had.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ParticipantConversationRestore<EF, V, LF, D> {
+pub struct ParticipantConversationRestore<EF, V, LF, D> {
     /// Complete live and retired participant states.
     pub participants: Vec<ParticipantLifecycleRestore<EF, V, LF, D>>,
     /// Coupled raw claim frontiers.
@@ -113,49 +111,80 @@ pub(super) struct ParticipantConversationRestore<EF, V, LF, D> {
     pub closure: ClosureStateRestore,
 }
 
-/// Fully validated crate-internal participant-conversation state.
+/// Fully validated whole-conversation participant state.
 ///
-/// This state can execute restored edge authority, so only the protocol-owned
-/// replay layer may produce or consume it.
-#[cfg(test)]
+/// This state can execute restored edge authority. It has no public
+/// constructor and its fields are private: the sole producer is
+/// [`ParticipantConversationRestore::restore`], so possession of this value
+/// proves the complete snapshot validated jointly.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::ParticipantConversationState;
+///
+/// fn fabricate() {
+///     let _ = ParticipantConversationState::<[u8; 4], [u8; 4], [u8; 4], [u8; 4]> {
+///         participants: unreachable!(),
+///         frontiers: unreachable!(),
+///         closure: unreachable!(),
+///     };
+/// }
+/// ```
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct ParticipantConversationState<EF, V, LF, D> {
+pub struct ParticipantConversationState<EF, V, LF, D> {
     participants: Vec<RestoredParticipantLifecycle<EF, V, LF, D>>,
     frontiers: ClaimFrontiers,
     closure: ClosureState,
 }
 
-#[cfg(test)]
 impl<EF, V, LF, D> ParticipantConversationState<EF, V, LF, D> {
     /// Borrows every restored participant and tombstone.
     #[must_use]
-    pub(super) fn participants(&self) -> &[RestoredParticipantLifecycle<EF, V, LF, D>] {
+    pub fn participants(&self) -> &[RestoredParticipantLifecycle<EF, V, LF, D>] {
         &self.participants
     }
 
     /// Borrows the finalized claim frontiers.
     #[must_use]
-    pub(super) const fn frontiers(&self) -> &ClaimFrontiers {
+    pub const fn frontiers(&self) -> &ClaimFrontiers {
         &self.frontiers
     }
 
     /// Returns the exact closure state.
     #[must_use]
-    pub(super) const fn closure(&self) -> ClosureState {
+    pub const fn closure(&self) -> ClosureState {
         self.closure
+    }
+
+    /// Consumes the validated state into its participant, frontier, and
+    /// closure components.
+    ///
+    /// Decomposition is one-way: no public path recombines components into
+    /// this validated form, so values split here cannot be spliced with
+    /// components restored from another snapshot.
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<RestoredParticipantLifecycle<EF, V, LF, D>>,
+        ClaimFrontiers,
+        ClosureState,
+    ) {
+        (self.participants, self.frontiers, self.closure)
     }
 }
 
-#[cfg(test)]
 impl RestoredConversationState {
     /// Borrows the fully finalized coupled claim frontiers.
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn frontiers(&self) -> &ClaimFrontiers {
         &self.frontiers
     }
 
     /// Returns the exact restored closure debt and stored edge.
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn closure(&self) -> ClosureState {
         self.closure
     }
@@ -201,7 +230,6 @@ pub(super) fn restore_conversation_state(
     )
 }
 
-#[cfg(test)]
 fn restore_conversation_with_history(
     frontier_restore: ClaimFrontiersRestore,
     sequence_ledger: SequenceLedger,
@@ -382,7 +410,6 @@ pub enum BindingStateRestore {
 }
 
 impl BindingStateRestore {
-    #[cfg(test)]
     fn restore_for<EF>(self, member: &LiveMember<EF>) -> Result<BindingState, StorageRestoreError> {
         let state = match self {
             Self::Detached => BindingState::Detached,
@@ -430,7 +457,6 @@ pub struct LiveIdentityRestore<EF> {
 }
 
 impl<EF> LiveIdentityRestore<EF> {
-    #[cfg(test)]
     fn restore(self) -> Result<LiveMember<EF>, StorageRestoreError> {
         let latest_terminal = self
             .latest_terminal
@@ -513,7 +539,6 @@ pub struct RetiredIdentityRestore<EF, V, LF> {
 }
 
 impl<EF, V, LF> RetiredIdentityRestore<EF, V, LF> {
-    #[cfg(test)]
     fn restore(self) -> Result<RetiredIdentity<EF, V, LF>, StorageRestoreError> {
         let result = self.committed_result.restore()?;
         RetiredIdentity::restore(
@@ -584,7 +609,6 @@ pub enum DetachCellRestore<V> {
 }
 
 impl<V> DetachCellRestore<V> {
-    #[cfg(test)]
     fn restore(self) -> Result<DetachCell<V>, StorageRestoreError> {
         match self {
             Self::Empty => Ok(DetachCell::Empty(EmptyDetach)),
@@ -694,8 +718,7 @@ impl<EF, V, LF, D> ParticipantLifecycleRestore<EF, V, LF, D> {
     ///
     /// Returns [`StorageRestoreError`] when any raw state is invalid or the
     /// membership, binding, terminal history, and detach-cell variants disagree.
-    #[cfg(test)]
-    pub(super) fn restore(
+    pub fn restore(
         self,
     ) -> Result<RestoredParticipantLifecycle<EF, V, LF, D>, StorageRestoreError> {
         match self {
@@ -731,7 +754,6 @@ impl<EF, V, LF, D> ParticipantLifecycleRestore<EF, V, LF, D> {
     }
 }
 
-#[cfg(test)]
 fn validate_binding_origin<EF>(
     origin: BindingOrigin,
     member: &LiveMember<EF>,
@@ -784,10 +806,15 @@ impl<EF, V, LF, D> RestoredParticipantLifecycle<EF, V, LF, D> {
     }
 }
 
-#[cfg(test)]
 impl<EF, V, LF, D> ParticipantConversationRestore<EF, V, LF, D> {
     /// Restores participant lifecycle, sealed history/origins, frontiers, and
     /// closure as one total conversation snapshot.
+    ///
+    /// The conversation history backing frontier and closure validation is
+    /// derived exclusively from the participants restored in this same call —
+    /// never from an empty placeholder — so raw causal rows, binding origins,
+    /// and marker ownership must be proven by the exact membership and
+    /// tombstone capsules supplied alongside them.
     ///
     /// # Errors
     ///
@@ -825,7 +852,6 @@ impl<EF, V, LF, D> ParticipantConversationRestore<EF, V, LF, D> {
     }
 }
 
-#[cfg(test)]
 fn validated_conversation_history<EF, V, LF, D>(
     participants: &[RestoredParticipantLifecycle<EF, V, LF, D>],
 ) -> Result<ValidatedConversationHistory, ConversationStateRestoreError> {
@@ -866,7 +892,6 @@ fn validated_conversation_history<EF, V, LF, D>(
     ))
 }
 
-#[cfg(test)]
 fn validate_participant_frontier_projection<EF, V, LF, D>(
     participants: &[RestoredParticipantLifecycle<EF, V, LF, D>],
     conversation_id: ConversationId,
@@ -923,7 +948,6 @@ fn validate_participant_frontier_projection<EF, V, LF, D>(
 }
 
 #[allow(clippy::suspicious_operation_groupings)]
-#[cfg(test)]
 fn validate_live_pair<EF, D>(
     member: &LiveMember<EF>,
     binding: BindingState,
@@ -1183,13 +1207,6 @@ impl MarkerRecordTarget {
 }
 
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "record authority is constructible only inside crate-owned restore tests"
-    )
-)]
 enum MarkerRestoreAuthority<'a> {
     Absent,
     Record {
@@ -1785,7 +1802,6 @@ pub enum DetachedCursorReleaseProvenanceRestore {
 }
 
 impl DetachedCursorReleaseProvenanceRestore {
-    #[cfg(test)]
     const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
             Self::Ordinary(fate) => Some(fate.authority.binding),
@@ -1793,7 +1809,6 @@ impl DetachedCursorReleaseProvenanceRestore {
         }
     }
 
-    #[cfg(test)]
     const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
         match self {
             Self::Ordinary(_) => None,
@@ -1928,7 +1943,6 @@ pub enum StoredEdgeRestore {
 }
 
 impl StoredEdgeRestore {
-    #[cfg(test)]
     const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
             Self::ParticipantCursorProgressContinuous { authority, .. } => Some(authority.binding),
@@ -1942,7 +1956,6 @@ impl StoredEdgeRestore {
         }
     }
 
-    #[cfg(test)]
     const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
         match self {
             Self::MarkerDelivery(value) => Some(MarkerRecordRequest::planned(
@@ -2081,7 +2094,6 @@ pub enum ClosureStateRestore {
 }
 
 impl ClosureStateRestore {
-    #[cfg(test)]
     const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
             Self::Clear => None,
@@ -2089,7 +2101,6 @@ impl ClosureStateRestore {
         }
     }
 
-    #[cfg(test)]
     const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
         match self {
             Self::Clear => None,
@@ -2119,7 +2130,6 @@ impl ClosureStateRestore {
     /// is not marker-derived, the token belongs to another conversation, or
     /// the retained record has the wrong target state, epoch, participant, or
     /// delivery sequence.
-    #[cfg(test)]
     pub(super) fn restore_with_marker_record(
         self,
         conversation_id: ConversationId,
@@ -2136,7 +2146,6 @@ impl ClosureStateRestore {
         restored
     }
 
-    #[cfg(test)]
     fn restore_with_binding_origin(
         self,
         origin: &BindingOrigin,

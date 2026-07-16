@@ -147,7 +147,9 @@ fn ordinary_origin(
         .binding_origin()
 }
 
-fn enrollment_origin(attached_position: AttachedRecordPosition) -> BindingOrigin {
+fn replayed_enrollment_commit(
+    attached_position: AttachedRecordPosition,
+) -> super::EnrollmentCommit<[u8; 4]> {
     commit_enrollment(
         &EnrollmentRequest {
             conversation_id: CONVERSATION_ID,
@@ -165,7 +167,10 @@ fn enrollment_origin(attached_position: AttachedRecordPosition) -> BindingOrigin
         },
     )
     .expect("enrollment event replay commits")
-    .binding_origin()
+}
+
+fn enrollment_origin(attached_position: AttachedRecordPosition) -> BindingOrigin {
+    replayed_enrollment_commit(attached_position).binding_origin()
 }
 
 fn superseding_origin(
@@ -2356,4 +2361,174 @@ fn case_56_joint_restore_keeps_prefate_candidate_quartet_while_pc_is_current() {
     assert_eq!(recovery.participant_index(), PARTICIPANT_ID);
     assert_eq!(recovery.marker_delivery_seq(), 1);
     assert_eq!(recovery.recovered_binding_epoch(), epoch(2, 8));
+}
+
+fn enrollment_bound_snapshot(
+    commit: &super::EnrollmentCommit<[u8; 4]>,
+) -> ParticipantConversationRestore<[u8; 4], [u8; 4], [u8; 4], [u8; 4]> {
+    let enrollment_epoch = epoch(1, 7);
+    let enrollment_terminal = BindingTerminalOwner {
+        participant_index: PARTICIPANT_ID,
+        binding_epoch: enrollment_epoch,
+    };
+    let enrollment_authority = OrdinaryBindingAuthorityRestore {
+        binding: binding(PARTICIPANT_ID, enrollment_epoch),
+        through_seq: 12,
+    };
+    let mut snapshot = ordinary_bound_conversation(owed(
+        StoredEdgeRestore::ParticipantCursorProgressContinuous {
+            participant_id: PARTICIPANT_ID,
+            binding_epoch: enrollment_epoch,
+            through_seq: 12,
+            authority: enrollment_authority,
+        },
+    ));
+    let mut enrollment_identity = live_identity(PARTICIPANT_ID, generation(1), None);
+    enrollment_identity.cursor = 12;
+    snapshot.participants = vec![TestSnapshot::Live {
+        identity: enrollment_identity,
+        binding: BindingStateRestore::Bound(binding(PARTICIPANT_ID, enrollment_epoch)),
+        binding_origin: Some(commit.binding_origin()),
+        detach_cell: DetachCellRestore::Empty,
+    }];
+    snapshot.frontiers.active_identities[0] =
+        FrontierParticipant::new(PARTICIPANT_ID, 12, FrontierBinding::Bound(enrollment_epoch));
+    for claim in &mut snapshot.frontiers.sequence.movable_claims {
+        if let SequenceDirectOwner::BindingTerminal(owner) = &mut claim.owner {
+            *owner = enrollment_terminal;
+        }
+    }
+    snapshot.frontiers.sequence.products.live_times_terminal[0].terminal = enrollment_terminal;
+    for claim in &mut snapshot.frontiers.order.movable_claims {
+        if let OrderDirectOwner::ActiveBindingTerminal(owner) = &mut claim.owner {
+            *owner = enrollment_terminal;
+        }
+    }
+    snapshot
+}
+
+#[test]
+fn total_restore_of_replayed_enrollment_equals_live_state() {
+    let commit = replayed_enrollment_commit(AttachedRecordPosition::new(0, 1));
+
+    // The live aggregate: enrollment commit plus twelve acknowledged records.
+    let mut live_member = commit.member.clone();
+    live_member
+        .apply_cursor_update(super::membership::LiveMemberCursorUpdate::new(
+            CONVERSATION_ID,
+            PARTICIPANT_ID,
+            generation(1),
+            0,
+            12,
+        ))
+        .expect("the live enrollment member acknowledges through twelve");
+
+    let restored = enrollment_bound_snapshot(&commit)
+        .restore()
+        .expect("the cold snapshot of the replayed enrollment restores");
+    assert_eq!(restored.participants().len(), 1);
+    let RestoredParticipantLifecycle::Live {
+        member,
+        binding,
+        detach_cell,
+        ..
+    } = &restored.participants()[0]
+    else {
+        panic!("the restored enrollment participant must be live");
+    };
+    assert_eq!(
+        member, &live_member,
+        "restored membership equals live state"
+    );
+    assert_eq!(
+        *binding, commit.binding_state,
+        "restored binding equals the live commit's binding"
+    );
+    assert_eq!(*detach_cell, DetachCell::default());
+    assert!(matches!(
+        restored.closure(),
+        ClosureState::Owed {
+            edge: StoredEdge::ParticipantCursorProgress(_),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn total_restore_refuses_binding_origins_from_another_history() {
+    let binding_epoch = epoch(2, 8);
+    let authority = OrdinaryBindingAuthorityRestore {
+        binding: binding(PARTICIPANT_ID, binding_epoch),
+        through_seq: 12,
+    };
+    let edge = StoredEdgeRestore::ParticipantCursorProgressContinuous {
+        participant_id: PARTICIPANT_ID,
+        binding_epoch,
+        through_seq: 12,
+        authority,
+    };
+
+    // An origin emitted by a different attach history (another epoch) cannot
+    // back this participant's binding.
+    let mut spliced = ordinary_bound_conversation(owed(edge));
+    let mut identity = live_identity(PARTICIPANT_ID, generation(2), None);
+    identity.cursor = 12;
+    spliced.participants = vec![TestSnapshot::Live {
+        identity,
+        binding: BindingStateRestore::Bound(binding(PARTICIPANT_ID, binding_epoch)),
+        binding_origin: Some(ordinary_origin(
+            epoch(3, 9),
+            AttachedRecordPosition::new(0, 1),
+        )),
+        detach_cell: DetachCellRestore::Empty,
+    }];
+    assert_eq!(
+        spliced.restore(),
+        Err(ConversationStateRestoreError::Storage(
+            StorageRestoreError::BindingAuthority
+        )),
+        "a producer proof from another history must not become executable authority"
+    );
+
+    // An enrollment origin (generation one) cannot back a later-epoch binding.
+    let mut enrollment_spliced = ordinary_bound_conversation(owed(edge));
+    let mut identity = live_identity(PARTICIPANT_ID, generation(2), None);
+    identity.cursor = 12;
+    enrollment_spliced.participants = vec![TestSnapshot::Live {
+        identity,
+        binding: BindingStateRestore::Bound(binding(PARTICIPANT_ID, binding_epoch)),
+        binding_origin: Some(enrollment_origin(AttachedRecordPosition::new(0, 1))),
+        detach_cell: DetachCellRestore::Empty,
+    }];
+    assert_eq!(
+        enrollment_spliced.restore(),
+        Err(ConversationStateRestoreError::Storage(
+            StorageRestoreError::BindingAuthority
+        ))
+    );
+}
+
+#[test]
+fn total_restore_refuses_cross_conversation_component_splices() {
+    let binding_epoch = epoch(2, 8);
+    let authority = OrdinaryBindingAuthorityRestore {
+        binding: binding(PARTICIPANT_ID, binding_epoch),
+        through_seq: 12,
+    };
+    let mut snapshot = ordinary_bound_conversation(owed(
+        StoredEdgeRestore::ParticipantCursorProgressContinuous {
+            participant_id: PARTICIPANT_ID,
+            binding_epoch,
+            through_seq: 12,
+            authority,
+        },
+    ));
+    snapshot.frontiers.conversation_id = CONVERSATION_ID + 1;
+    assert_eq!(
+        snapshot.restore(),
+        Err(ConversationStateRestoreError::Storage(
+            StorageRestoreError::MembershipInvariant
+        )),
+        "frontiers persisted for another conversation must not combine"
+    );
 }
