@@ -24,6 +24,7 @@ mod cursor_repository;
 mod detach_repository;
 mod dispatch;
 pub(super) mod incarnation_stream;
+mod production;
 mod transport;
 
 #[cfg(test)]
@@ -50,6 +51,7 @@ pub use dispatch::{
     ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
     dispatch_generic_frame,
 };
+pub use production::ProductionParticipantHandler;
 pub use transport::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_value,
     gate_generic_frame, normalize_configured_frame_limit, preflight_generic_bytes,

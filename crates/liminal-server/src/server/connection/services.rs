@@ -22,7 +22,7 @@ use super::services_schema::resolve_channel_schema;
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{ClusterConfig, ServerConfig, ServiceProfile};
-use crate::server::participant::InstalledParticipantService;
+use crate::server::participant::{InstalledParticipantService, ProductionParticipantHandler};
 
 pub use super::services_cluster::ChannelCluster;
 
@@ -376,11 +376,38 @@ impl LiminalConnectionServices {
         }
         let conversation_supervisor = subsystems.conversation_supervisor()?;
         let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
+        // Production participant activation (LP gap closure, Part B): the
+        // deployment's [participant] section installs the ONE production
+        // semantic handler, sealed together with the same durable store the
+        // conversation logs live in, under the configured wire-frame limit.
+        // No section, no service — the capability bit stays off and the
+        // connection path is byte-identical to the pre-activation build.
+        let participant_service = config
+            .participant
+            .as_ref()
+            .map(|participant| {
+                InstalledParticipantService::new(
+                    Arc::new(ProductionParticipantHandler::new(
+                        Arc::clone(&durable_store),
+                        *participant,
+                    )),
+                    Arc::clone(&durable_store),
+                    participant.wire_frame_limit,
+                )
+                .map_err(|error| ServerError::ConfigValidation {
+                    message: format!(
+                        "participant.wire_frame_limit: {} is below the protocol's minimum \
+                         complete participant frame ({error:?})",
+                        participant.wire_frame_limit
+                    ),
+                })
+            })
+            .transpose()?;
         Ok(Self {
             channels,
             cluster,
             durable_store,
-            participant_service: None,
+            participant_service,
             dedup,
             conversation_supervisor,
             responders: Mutex::new(HashMap::new()),

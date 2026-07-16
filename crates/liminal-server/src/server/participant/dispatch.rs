@@ -12,10 +12,9 @@ use liminal_protocol::wire::{
     ClientRequest, CodecError, ConnectionIncarnation, ServerValue, ValidatedFrameLimit,
 };
 
-#[cfg(test)]
-use super::transport::normalize_configured_frame_limit;
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
+    normalize_configured_frame_limit,
 };
 
 /// Connection-scoped authority facts supplied to participant semantics.
@@ -96,14 +95,17 @@ pub struct InstalledParticipantService {
 }
 
 impl InstalledParticipantService {
-    /// Pairs a semantic test handler, its declared durable store, and the raw
+    /// Pairs a semantic handler, its declared durable store, and the raw
     /// configured participant wire-frame limit.
+    ///
+    /// Production construction happens exactly once, in the server's
+    /// connection-services layer, from the deployment's `[participant]`
+    /// configuration; tests construct it directly with fixture handlers.
     ///
     /// # Errors
     ///
     /// Returns the shared codec error when the configured limit is smaller than
     /// the protocol's minimum complete frame.
-    #[cfg(test)]
     pub(crate) fn new(
         handler: Arc<dyn ParticipantSemanticHandler>,
         durable_store: Arc<dyn DurableStore>,
