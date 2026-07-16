@@ -1,7 +1,8 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use liminal::durability::{DurableStore, open_ephemeral};
+use haematite::{Database, DatabaseConfig, EventStore};
+use liminal::durability::{DurableStore, HaematiteStore};
 use liminal_protocol::algebra::WideResourceVector;
 use liminal_protocol::lifecycle::{
     BoundParticipantCursor, ClosureDebt, CumulativeAckOutcome, CursorProgressFact,
@@ -16,12 +17,32 @@ const FIRST_PARTICIPANT: u64 = 11;
 const SECOND_PARTICIPANT: u64 = 22;
 const STREAM_KEY: &str = "participant/cursor-episode/700";
 
+fn create_store(data_dir: &std::path::Path) -> Result<Arc<dyn DurableStore>, Box<dyn Error>> {
+    let database = Database::create(DatabaseConfig {
+        data_dir: data_dir.to_path_buf(),
+        shard_count: 2,
+        sweep_interval: None,
+        distributed: None,
+    })?;
+    Ok(Arc::new(HaematiteStore::new(Arc::new(EventStore::new(
+        database,
+    )))))
+}
+
+fn reopen_store(data_dir: &std::path::Path) -> Result<Arc<dyn DurableStore>, Box<dyn Error>> {
+    let database = Database::open(data_dir)?;
+    Ok(Arc::new(HaematiteStore::new(Arc::new(EventStore::new(
+        database,
+    )))))
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn two_participants_ack_same_retained_suffix_and_survive_cold_reopen() -> Result<(), Box<dyn Error>>
 {
     let runtime = tokio::runtime::Builder::new_current_thread().build()?;
-    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(4)?);
+    let temp_dir = tempfile::tempdir()?;
+    let store = create_store(temp_dir.path())?;
     let first_epoch = binding_epoch(1);
     let second_epoch = binding_epoch(2);
     let debt =
@@ -96,12 +117,23 @@ fn two_participants_ack_same_retained_suffix_and_survive_cold_reopen() -> Result
         .encode()
         .map_err(|error| format!("pre-restart episode serialization failed: {error:?}"))?;
     runtime.block_on(repository.flush())?;
+    let written_entries = runtime.block_on(store.read_from(STREAM_KEY, 0, 8))?;
+    assert_eq!(written_entries.len(), 5);
+    assert_eq!(
+        written_entries
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3, 4]
+    );
     drop(repository);
+    drop(store);
 
+    let reopened_store = reopen_store(temp_dir.path())?;
     let reopened = runtime
         .block_on(CursorEpisodeRepository::recover(
             STREAM_KEY,
-            Arc::clone(&store),
+            Arc::clone(&reopened_store),
         ))?
         .ok_or("cursor episode must exist after cold reopen")?;
     assert_eq!(reopened.stream_key(), STREAM_KEY);
@@ -159,6 +191,8 @@ fn two_participants_ack_same_retained_suffix_and_survive_cold_reopen() -> Result
         .encode()
         .map_err(|error| format!("post-restart episode serialization failed: {error:?}"))?;
     assert_eq!(after_restart, before_restart);
+    let reopened_entries = runtime.block_on(reopened_store.read_from(STREAM_KEY, 0, 8))?;
+    assert_eq!(reopened_entries, written_entries);
 
     Ok(())
 }
