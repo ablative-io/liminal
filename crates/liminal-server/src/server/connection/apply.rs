@@ -10,6 +10,7 @@ use liminal::protocol::{
     ProtocolError, ProtocolVersion, SchemaId as ProtocolSchemaId, WorkerRegisterOutcome,
     WorkerRegistration, negotiate_version,
 };
+use liminal_protocol::wire::PARTICIPANT_FRAME_TYPE;
 
 use super::services::ConnectionServices;
 use super::state::{ConnectionProcessState, FrameAction};
@@ -129,9 +130,10 @@ pub(super) fn apply_frame(
         Frame::WorkerRegister { registration, .. } => {
             worker_register_response(pid, runtime, registration)
         }
-        frame @ Frame::Unknown { type_id: 0x1A, .. } => {
-            participant_frame_response(runtime, state, &frame)
-        }
+        frame @ Frame::Unknown {
+            type_id: PARTICIPANT_FRAME_TYPE,
+            ..
+        } => participant_frame_response(runtime, state, &frame),
         // Client backpressure signals ride the subscription delivery machinery, so
         // they are application frames: gated by auth (they are NOT on the pre-auth
         // allowlist) and refused by a services profile that serves no
