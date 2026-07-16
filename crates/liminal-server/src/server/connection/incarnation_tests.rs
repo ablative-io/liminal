@@ -39,6 +39,7 @@ fn config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         auth: None,
         services: ServicesConfig::default(),
         limits: LimitsConfig::default(),
+        participant: None,
     })
 }
 

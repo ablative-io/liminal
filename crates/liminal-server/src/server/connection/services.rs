@@ -1231,6 +1231,7 @@ mod durable_store_tests {
                 profile: profile.to_owned(),
             },
             limits: LimitsConfig::default(),
+            participant: None,
         }
     }
 

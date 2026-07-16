@@ -38,6 +38,7 @@ pub fn validate(config: &mut ServerConfig, base_dir: Option<&Path>) -> Result<()
     validate_auth(config, &mut errors);
     validate_services(config, &mut errors);
     config.limits.collect_errors(&mut errors);
+    validate_participant(config, &mut errors);
     load_channel_schemas(config, base_dir, &mut errors);
 
     if errors.is_empty() {
@@ -307,6 +308,28 @@ fn validate_services(config: &ServerConfig, errors: &mut Vec<String>) {
     }
 }
 
+/// Semantic checks for the optional `[participant]` section: the shared
+/// nonzero/ordering rules plus the protocol codec's own minimum-frame check on
+/// `wire_frame_limit`, so an impossible limit fails at validation rather than
+/// at service construction.
+fn validate_participant(config: &ServerConfig, errors: &mut Vec<String>) {
+    let Some(participant) = config.participant.as_ref() else {
+        return;
+    };
+    participant.collect_errors(errors);
+    if participant.wire_frame_limit != 0
+        && let Err(error) = crate::server::participant::normalize_configured_frame_limit(
+            participant.wire_frame_limit,
+        )
+    {
+        errors.push(format!(
+            "participant.wire_frame_limit: {} is below the protocol's minimum complete \
+             participant frame ({error:?})",
+            participant.wire_frame_limit
+        ));
+    }
+}
+
 /// Cross-field checks for the worker-front-door profile: config that asks for
 /// machinery the profile does not build — channels, routing rules, a persistence
 /// path, or a cluster — is rejected rather than silently ignored. The front door
@@ -349,6 +372,13 @@ pub(crate) fn worker_front_door_field_errors(config: &ServerConfig) -> Vec<Strin
                 .to_owned(),
         );
     }
+    if config.participant.is_some() {
+        errors.push(
+            "services.profile: \"worker-front-door\" installs no participant service; remove \
+             the [participant] section or use profile = \"full\""
+                .to_owned(),
+        );
+    }
     errors
 }
 
@@ -363,8 +393,8 @@ mod tests {
 
     use super::validate;
     use crate::config::types::{
-        AuthConfig, ChannelDef, ClusterConfig, LimitsConfig, RoutingRuleDef, ServerConfig,
-        ServicesConfig,
+        AuthConfig, ChannelDef, ClusterConfig, LimitsConfig, ParticipantConfig, RoutingRuleDef,
+        ServerConfig, ServicesConfig,
     };
 
     static NEXT_TEMP_DIR_ID: AtomicU64 = AtomicU64::new(0);
@@ -399,6 +429,7 @@ mod tests {
             auth: None,
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
+            participant: None,
         })
     }
 
@@ -861,6 +892,119 @@ mod tests {
                 "the {field} refusal must say why: {message}"
             );
         }
+        Ok(())
+    }
+
+    /// A complete participant section with deployment-plausible nonzero values.
+    const fn sample_participant() -> ParticipantConfig {
+        ParticipantConfig {
+            wire_frame_limit: 65_536,
+            attach_receipt_ttl_ms: 60_000,
+            receipt_provenance_ttl_ms: 600_000,
+            identity_slots: 4,
+            observer_recovery_max_entries: 64,
+            max_semantic_conversations_per_connection: 32,
+            max_ordinary_record_entries: 1,
+            max_ordinary_record_bytes: 1_048_576,
+            marker_max_entries: 1,
+            marker_max_bytes: 4_096,
+            mandatory_bound_entries: 8,
+            mandatory_bound_bytes: 1_048_576,
+            recovery_claim_entries: 8,
+            recovery_claim_bytes: 1_048_576,
+        }
+    }
+
+    #[test]
+    fn valid_participant_section_passes_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.participant = Some(sample_participant());
+        let temp_dir = std::env::temp_dir().join(format!(
+            "liminal-server-participant-validation-{}-{}",
+            std::process::id(),
+            NEXT_TEMP_DIR_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&temp_dir)?;
+        config.persistence_path = Some(temp_dir.clone());
+        let result = validate(&mut config, None);
+        fs::remove_dir_all(&temp_dir)?;
+        assert!(result.is_ok(), "expected valid config, got {result:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn zero_participant_values_are_typed_config_errors() -> Result<(), Box<dyn std::error::Error>> {
+        type ParticipantMutator = (&'static str, fn(&mut ParticipantConfig));
+        let mutators: [ParticipantMutator; 7] = [
+            ("wire_frame_limit", |p| p.wire_frame_limit = 0),
+            ("attach_receipt_ttl_ms", |p| p.attach_receipt_ttl_ms = 0),
+            ("receipt_provenance_ttl_ms", |p| {
+                p.receipt_provenance_ttl_ms = 0;
+            }),
+            ("identity_slots", |p| p.identity_slots = 0),
+            ("observer_recovery_max_entries", |p| {
+                p.observer_recovery_max_entries = 0;
+            }),
+            ("max_semantic_conversations_per_connection", |p| {
+                p.max_semantic_conversations_per_connection = 0;
+            }),
+            ("max_ordinary_record_entries", |p| {
+                p.max_ordinary_record_entries = 0;
+            }),
+        ];
+        for (field, mutate) in mutators {
+            let mut config = sample_config()?;
+            let mut participant = sample_participant();
+            mutate(&mut participant);
+            config.participant = Some(participant);
+            let message = config_validation_message(validate(&mut config, None));
+            assert!(
+                message.contains(&format!("participant.{field}")),
+                "expected typed error for participant.{field}, got: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provenance_ttl_shorter_than_receipt_is_a_typed_config_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        let mut participant = sample_participant();
+        participant.receipt_provenance_ttl_ms = participant.attach_receipt_ttl_ms - 1;
+        config.participant = Some(participant);
+        let message = config_validation_message(validate(&mut config, None));
+        assert!(
+            message.contains("participant.receipt_provenance_ttl_ms"),
+            "expected TTL-ordering error, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn undersized_wire_frame_limit_is_a_typed_config_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        let mut participant = sample_participant();
+        participant.wire_frame_limit = 1;
+        config.participant = Some(participant);
+        let message = config_validation_message(validate(&mut config, None));
+        assert!(
+            message.contains("participant.wire_frame_limit"),
+            "expected minimum-frame error, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn worker_front_door_rejects_participant_section() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = worker_front_door_config()?;
+        config.participant = Some(sample_participant());
+        let message = config_validation_message(validate(&mut config, None));
+        assert!(
+            message.contains("installs no participant service"),
+            "expected worker-front-door participant rejection, got: {message}"
+        );
         Ok(())
     }
 }

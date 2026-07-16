@@ -42,6 +42,17 @@ pub struct ServerConfig {
     /// silent "unlimited".
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Participant lifecycle activation (LP gap closure, Part B).
+    ///
+    /// When present the server installs the production participant semantic
+    /// handler and advertises the participant capability bit on every
+    /// connection. Every field inside is REQUIRED and carries NO default:
+    /// participant lifecycle values are deployment decisions, and an absent
+    /// field is a typed startup error rather than an assumed number. When the
+    /// section is absent the participant capability stays disabled and the
+    /// server behaves byte-identically to the pre-activation build.
+    #[serde(default)]
+    pub participant: Option<ParticipantConfig>,
 }
 
 impl ServerConfig {
@@ -340,6 +351,94 @@ const fn default_max_connection_inbox_bytes() -> usize {
 }
 const fn default_max_subscription_inbox_depth() -> usize {
     LimitsConfig::DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH
+}
+
+/// Participant lifecycle configuration (`[participant]`).
+///
+/// Present iff the deployment activates the participant protocol. Every field
+/// is required — serde carries no defaults here, so a missing field fails
+/// config loading with a typed error naming the field, and
+/// [`ParticipantConfig::collect_errors`] rejects semantically impossible
+/// values during the same accumulated validation pass as the rest of the
+/// config. All values are deployment-owner decisions (no assumed defaults).
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticipantConfig {
+    /// Complete participant wire-frame limit (`WF`) negotiated with every
+    /// participant-capable connection. Must be at least the protocol's
+    /// minimum complete frame; enforced by the shared codec at service
+    /// construction and pre-checked during config validation.
+    pub wire_frame_limit: u64,
+    /// Secret-bearing attach/enrollment receipt lifetime in milliseconds.
+    pub attach_receipt_ttl_ms: u64,
+    /// Non-secret receipt-provenance lifetime in milliseconds. Must be at
+    /// least `attach_receipt_ttl_ms` (provenance explains the receipt and
+    /// cannot expire first).
+    pub receipt_provenance_ttl_ms: u64,
+    /// Identity slots reserved per enrolled participant (the protocol's
+    /// half-open identity limit consumed by the slot allocator).
+    pub identity_slots: u64,
+    /// Maximum entries one observer-recovery handshake batch may name.
+    pub observer_recovery_max_entries: u64,
+    /// Semantic conversations one connection may track (the protocol's
+    /// connection-conversation limit used by observer recovery).
+    pub max_semantic_conversations_per_connection: u64,
+    /// Maximum encoded ordinary-record charge: retained entries component.
+    pub max_ordinary_record_entries: u64,
+    /// Maximum encoded ordinary-record charge: retained bytes component.
+    pub max_ordinary_record_bytes: u64,
+    /// Generated maximum marker charge: entries component.
+    pub marker_max_entries: u64,
+    /// Generated maximum marker charge: bytes component.
+    pub marker_max_bytes: u64,
+    /// Generated mandatory transaction envelope `Q`: entries component.
+    pub mandatory_bound_entries: u64,
+    /// Generated mandatory transaction envelope `Q`: bytes component.
+    pub mandatory_bound_bytes: u64,
+    /// Full transferable recovery occupancy `K`: entries component.
+    pub recovery_claim_entries: u64,
+    /// Full transferable recovery occupancy `K`: bytes component.
+    pub recovery_claim_bytes: u64,
+}
+
+impl ParticipantConfig {
+    /// Accumulates semantic validation errors for the participant section.
+    ///
+    /// Zero is rejected wherever it would be unlimited-by-silence, gate
+    /// nothing, or violate a protocol precondition; the TTL ordering mirrors
+    /// the protocol's own frozen configuration precedence.
+    pub(crate) fn collect_errors(&self, errors: &mut Vec<String>) {
+        let nonzero: [(&str, u64); 7] = [
+            ("wire_frame_limit", self.wire_frame_limit),
+            ("attach_receipt_ttl_ms", self.attach_receipt_ttl_ms),
+            ("receipt_provenance_ttl_ms", self.receipt_provenance_ttl_ms),
+            ("identity_slots", self.identity_slots),
+            (
+                "observer_recovery_max_entries",
+                self.observer_recovery_max_entries,
+            ),
+            (
+                "max_semantic_conversations_per_connection",
+                self.max_semantic_conversations_per_connection,
+            ),
+            (
+                "max_ordinary_record_entries",
+                self.max_ordinary_record_entries,
+            ),
+        ];
+        for (field, value) in nonzero {
+            if value == 0 {
+                errors.push(format!("participant.{field}: must be greater than zero"));
+            }
+        }
+        if self.receipt_provenance_ttl_ms < self.attach_receipt_ttl_ms {
+            errors.push(
+                "participant.receipt_provenance_ttl_ms: must be at least \
+                 attach_receipt_ttl_ms (provenance cannot expire before the receipt it explains)"
+                    .to_owned(),
+            );
+        }
+    }
 }
 
 /// Which connection-services adapter the server constructs (D2).

@@ -49,6 +49,7 @@ impl RunningServer {
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
+            participant: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
