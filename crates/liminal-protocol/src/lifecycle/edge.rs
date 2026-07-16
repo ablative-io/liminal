@@ -889,6 +889,18 @@ impl OrdinaryBindingFate {
         self.through_seq
     }
 
+    /// Returns the participant whose ordinary binding died.
+    #[must_use]
+    pub const fn participant_id(self) -> ParticipantId {
+        self.release.participant_id
+    }
+
+    /// Returns the exact dead binding epoch whose fate was observed.
+    #[must_use]
+    pub const fn last_dead_binding_epoch(self) -> BindingEpoch {
+        self.release.last_dead_binding_epoch
+    }
+
     /// Returns the measured floor from the binding-fate transaction.
     #[must_use]
     pub const fn resulting_floor(self) -> DeliverySeq {
@@ -1043,6 +1055,12 @@ impl RecoveredBindingFate {
     #[must_use]
     pub const fn last_dead_binding_epoch(&self) -> BindingEpoch {
         self.release.last_dead_binding_epoch
+    }
+
+    /// Returns the floor measured in the binding-fate transaction.
+    #[must_use]
+    pub const fn resulting_floor(&self) -> DeliverySeq {
+        self.resulting_floor
     }
 }
 

@@ -23,6 +23,7 @@ mod incarnation;
 mod lookup;
 mod membership;
 mod observer_recovery;
+mod operation_event;
 mod operations;
 mod storage;
 
@@ -172,6 +173,10 @@ pub use membership::{
 };
 pub use observer_recovery::{
     ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
+};
+pub use operation_event::{
+    AttachedOperation, BindingFateOperation, ConversationOperation, DetachedOperation,
+    EnrolledOperation, LeftOperation, NonzeroDebtAckOperation,
 };
 pub use operations::{
     CommittedOrdinaryRecord, InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
