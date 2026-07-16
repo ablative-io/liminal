@@ -1,18 +1,17 @@
 use std::vec;
 
 use liminal_protocol::{
-    algebra::WideResourceVector,
     lifecycle::{
         AdmissionOrder, BindingState, BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore,
-        ClosureState, ClosureStateRestore, ExitProductRangeRestore, FrontierBinding,
-        FrontierParticipant, ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate,
-        LiveMember, MarkerDelivery, MarkerDeliveryRestore, MarkerProvenance, MovableOrderClaim,
-        MovableSequenceClaim, OrderClaimFrontierRestore, OrderClaims, OrderDirectOwner, OrderHigh,
-        OrderLedger, PendingFinalization, PrepareLeaveAuthorityError, PreparedLeaveAuthority,
-        RecoverySequenceReserve, RetainedCausalRecord, RetainedCausalRecordKind,
-        SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner, SequenceLedger,
-        SequenceProductRangesRestore, StoredEdge, StoredEdgeRestore, TerminalProductRangeRestore,
-        restore_conversation_state,
+        ClosureState, ExitProductRangeRestore, FrontierBinding, FrontierParticipant,
+        ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate, LiveMember,
+        MarkerCandidateAuthority, MarkerDelivery, MarkerProvenance, MarkerSequenceOwner,
+        MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore, OrderClaims,
+        OrderDirectOwner, OrderHigh, OrderLedger, PendingFinalization, PrepareLeaveAuthorityError,
+        PreparedLeaveAuthority, RecoverySequenceReserve, RetainedCausalRecord,
+        RetainedCausalRecordKind, SequenceClaimFrontierRestore, SequenceClaims,
+        SequenceDirectOwner, SequenceLedger, SequenceProductRangesRestore, StoredEdge,
+        TerminalProductRangeRestore, drain_next_marker,
     },
     outcome::CandidatePhase,
     wire::{BindingEpoch, ConnectionIncarnation},
@@ -29,26 +28,14 @@ pub fn marker_delivery(
         marker_delivery_seq,
         marker_delivery_seq.saturating_sub(1),
     )?;
-    let restored = restore_conversation_state(
-        frontier_restore,
-        sequence_ledger,
-        order_ledger,
-        ClosureStateRestore::Owed {
-            debt: WideResourceVector::new(1, 1),
-            edge: StoredEdgeRestore::MarkerDelivery(MarkerDeliveryRestore {
-                participant_id,
-                binding_epoch,
-                marker_delivery_seq,
-            }),
-        },
-    )
-    .map_err(|error| format!("validated marker conversation failed to restore: {error:?}"))?;
-    let ClosureState::Owed {
-        edge: StoredEdge::MarkerDelivery(delivery),
-        ..
-    } = restored.closure()
-    else {
-        return Err("validated marker restore selected a different edge".to_owned());
+    let frontiers = ClaimFrontiers::restore(frontier_restore, sequence_ledger, order_ledger)
+        .map_err(|error| format!("planned marker frontier failed to restore: {error:?}"))?;
+    let commit = drain_next_marker(frontiers, ClosureState::Clear)
+        .map_err(|error| format!("planned marker failed to drain: {error:?}"))?;
+    let successor = commit.marker_successor();
+    let _persisted_parts = commit.into_parts();
+    let StoredEdge::MarkerDelivery(delivery) = successor else {
+        return Err("bound marker transition selected a different edge".to_owned());
     };
     Ok(delivery)
 }
@@ -539,7 +526,7 @@ fn marker_claims(
                 .checked_add(1)
                 .ok_or_else(|| "marker fixture has no terminal-product suffix".to_owned())?;
             Ok(MarkerClaims {
-                sequence: SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::None),
+                sequence: SequenceClaims::new(1, 1, 1, RecoverySequenceReserve::None),
                 movable_sequence: vec![
                     MovableSequenceClaim {
                         delivery_seq: exit_seq,
@@ -578,7 +565,7 @@ fn marker_claims(
             })
         }
         FrontierBinding::Detached(_) => Ok(MarkerClaims {
-            sequence: SequenceClaims::new(1, 0, 0, RecoverySequenceReserve::None),
+            sequence: SequenceClaims::new(1, 0, 1, RecoverySequenceReserve::None),
             movable_sequence: vec![MovableSequenceClaim {
                 delivery_seq: exit_seq,
                 owner: SequenceDirectOwner::MembershipExit {
@@ -604,6 +591,9 @@ fn marker_frontier(
     marker_delivery_seq: u64,
     cursor: u64,
 ) -> Result<(ClaimFrontiersRestore, SequenceLedger, OrderLedger), String> {
+    let high_watermark = marker_delivery_seq
+        .checked_sub(1)
+        .ok_or_else(|| "planned marker fixture requires a positive sequence".to_owned())?;
     let identity_slot_limit = participant_id
         .checked_add(1)
         .ok_or_else(|| "participant index has no half-open identity limit".to_owned())?;
@@ -615,11 +605,12 @@ fn marker_frontier(
         binding_epoch: binding_epoch(target_binding),
     };
     let claims = marker_claims(participant_id, target_binding, exit_seq, terminal_owner)?;
-    let sequence_ledger = SequenceLedger::try_new(marker_delivery_seq, claims.sequence)
+    let sequence_ledger = SequenceLedger::try_new(high_watermark, claims.sequence)
         .map_err(|error| format!("marker fixture sequence ledger is invalid: {error:?}"))?;
     let order_ledger = OrderLedger::try_new(OrderHigh::Allocated(0), claims.order)
         .map_err(|error| format!("marker fixture order ledger is invalid: {error:?}"))?;
-    let admission_order = AdmissionOrder::new(0, CandidatePhase::CompactionMarker, participant_id);
+    let ordinary_order = AdmissionOrder::new(0, CandidatePhase::OrdinaryRecord, participant_id);
+    let marker_order = AdmissionOrder::new(0, CandidatePhase::CompactionMarker, participant_id);
     Ok((
         ClaimFrontiersRestore {
             conversation_id: 1,
@@ -629,28 +620,38 @@ fn marker_frontier(
                 target_binding,
             )],
             identity_slot_limit,
-            retained_floor: u128::from(marker_delivery_seq),
+            retained_floor: u128::from(high_watermark),
             retained_record_limit: 1,
             retained_records: vec![RetainedCausalRecord {
-                delivery_seq: marker_delivery_seq,
-                admission_order,
-                kind: RetainedCausalRecordKind::CompactionMarker {
+                delivery_seq: high_watermark,
+                admission_order: ordinary_order,
+                kind: RetainedCausalRecordKind::OrdinaryRecord {
                     participant_index: participant_id,
-                    provenance: MarkerProvenance::NonProductM,
                 },
             }],
-            active_marker_anchors: vec![marker_delivery_seq],
+            active_marker_anchors: vec![],
             historical_marker_deliveries: vec![],
             historical_causal_facts: vec![],
             sequence: SequenceClaimFrontierRestore {
                 movable_claims: claims.movable_sequence,
-                immutable_candidates: Vec::<ImmutableSequenceCandidate>::new(),
+                immutable_candidates: vec![ImmutableSequenceCandidate::Marker(
+                    MarkerCandidateAuthority {
+                        delivery_seq: marker_delivery_seq,
+                        admission_order: marker_order,
+                        target_binding,
+                        provenance: MarkerProvenance::NonProductM,
+                        current_owner: MarkerSequenceOwner::Marker,
+                    },
+                )],
                 products: claims.products,
                 recovery: None,
             },
             order: OrderClaimFrontierRestore {
                 movable_claims: claims.movable_order,
-                immutable_candidates: vec![],
+                immutable_candidates: vec![ImmutableOrderCandidateMajorRestore {
+                    transaction_order: marker_order.transaction_order(),
+                    candidate_keys: vec![marker_order],
+                }],
                 recovery: None,
             },
             recovery_marker_delivery_seq: None,

@@ -16,25 +16,25 @@ use crate::wire::{
 
 use super::{
     ActiveBinding, AdmissionOrder, BindingOrigin, BindingState, BoundParticipantCursor,
-    ClaimFrontiers, ClaimFrontiersRestore, ClosureDebt, ClosureState, CommittedBindingTerminal,
-    DebtCompletion, DetachCell, DetachedCredentialRecovery, DetachedMarkerRelease,
-    EnrollmentFingerprint, Event, FencedAttachCommit, IdentityState, LeaveFingerprint, LiveMember,
-    MarkerDelivery, NonzeroDebtCursorEpisode, ObserverProjection, OrderLedger,
-    OrdinaryBindingAuthority, OrdinaryBindingFate, ParticipantCursorProgress, PendingFinalization,
-    PendingRecoveredCursorRelease, PhysicalCompaction, RecoveredBindingFate,
-    RecoveredBindingFateTransition, RetiredIdentity, SequenceLedger, StoredEdge,
+    ClosureDebt, ClosureState, CommittedBindingTerminal, DebtCompletion, DetachCell,
+    DetachedCredentialRecovery, DetachedMarkerRelease, EnrollmentFingerprint, Event,
+    FencedAttachCommit, IdentityState, LeaveFingerprint, LiveMember, MarkerDelivery,
+    NonzeroDebtCursorEpisode, ObserverProjection, OrdinaryBindingAuthority, OrdinaryBindingFate,
+    ParticipantCursorProgress, PendingFinalization, PendingRecoveredCursorRelease,
+    PhysicalCompaction, RecoveredBindingFate, RecoveredBindingFateTransition, RetiredIdentity,
+    StoredEdge,
     binding::{restore_committed_terminal, restore_pending_finalization},
-    claim_frontier::{
-        MarkerRecordOccurrence, MarkerRecordRequest, ValidatedConversationHistory,
-        ValidatedMarkerRecord,
-    },
+    claim_frontier::{MarkerRecordOccurrence, ValidatedMarkerRecord},
     cursor_facts::{CursorProgressFact, CursorProgressKey},
 };
 
 #[cfg(test)]
 use super::{
-    EmptyDetach, FrontierBinding, LiveMemberRestore,
-    claim_frontier::HistoricalCausalAuthority,
+    ClaimFrontiers, ClaimFrontiersRestore, EmptyDetach, FrontierBinding, LiveMemberRestore,
+    OrderLedger, SequenceLedger,
+    claim_frontier::{
+        HistoricalCausalAuthority, MarkerRecordRequest, ValidatedConversationHistory,
+    },
     detach::{
         restore_committed_detach, restore_pending_detach, restore_terminalized_detach,
         validate_pending_pair,
@@ -77,9 +77,15 @@ pub enum ConversationStateRestoreError {
     Storage(StorageRestoreError),
 }
 
-/// Jointly restored claim frontiers and exact current closure state.
+/// Crate-internal jointly restored claim frontiers and exact current closure state.
+///
+/// This value can execute restored edge authority. It is deliberately absent
+/// from the public storage surface: external callers may deserialize inert
+/// restore data, but only protocol-owned replay may promote it to executable
+/// state.
 #[derive(Debug, PartialEq, Eq)]
-pub struct RestoredConversationState {
+#[cfg(test)]
+pub(super) struct RestoredConversationState {
     frontiers: ClaimFrontiers,
     closure: ClosureState,
 }
@@ -140,22 +146,23 @@ impl<EF, V, LF, D> ParticipantConversationState<EF, V, LF, D> {
     }
 }
 
+#[cfg(test)]
 impl RestoredConversationState {
     /// Borrows the fully finalized coupled claim frontiers.
     #[must_use]
-    pub const fn frontiers(&self) -> &ClaimFrontiers {
+    pub(crate) const fn frontiers(&self) -> &ClaimFrontiers {
         &self.frontiers
     }
 
     /// Returns the exact restored closure debt and stored edge.
     #[must_use]
-    pub const fn closure(&self) -> ClosureState {
+    pub(crate) const fn closure(&self) -> ClosureState {
         self.closure
     }
 
     /// Consumes the aggregate into the two values persisted by a server binding.
     #[must_use]
-    pub fn into_parts(self) -> (ClaimFrontiers, ClosureState) {
+    pub(crate) fn into_parts(self) -> (ClaimFrontiers, ClosureState) {
         (self.frontiers, self.closure)
     }
 }
@@ -167,7 +174,9 @@ impl RestoredConversationState {
 /// frontier recovery claims are finalized against that exact typed edge.
 /// This standalone form intentionally rejects raw compacted causal history and
 /// ordinary-binding cursor authority; those require protocol-owned event replay
-/// to establish owned lifecycle provenance first.
+/// to establish owned lifecycle provenance first. It is crate-private because
+/// accepting caller-authored snapshots here would upgrade inert storage bytes
+/// into executable edge authority.
 ///
 /// # Errors
 ///
@@ -175,22 +184,24 @@ impl RestoredConversationState {
 /// numeric/candidate ownership or [`ConversationStateRestoreError::Storage`]
 /// for a missing, ambiguous, cross-conversation, or context-mismatched marker
 /// record and every other stored-edge provenance failure.
-pub fn restore_conversation_state(
+#[cfg(test)]
+pub(super) fn restore_conversation_state(
     frontier_restore: ClaimFrontiersRestore,
     sequence_ledger: SequenceLedger,
     order_ledger: OrderLedger,
-    closure_restore: ClosureStateRestore,
+    closure_restore: &ClosureStateRestore,
 ) -> Result<RestoredConversationState, ConversationStateRestoreError> {
     let history = ValidatedConversationHistory::empty();
     restore_conversation_with_history(
         frontier_restore,
         sequence_ledger,
         order_ledger,
-        &closure_restore,
+        closure_restore,
         &history,
     )
 }
 
+#[cfg(test)]
 fn restore_conversation_with_history(
     frontier_restore: ClaimFrontiersRestore,
     sequence_ledger: SequenceLedger,
@@ -1172,6 +1183,13 @@ impl MarkerRecordTarget {
 }
 
 #[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "record authority is constructible only inside crate-owned restore tests"
+    )
+)]
 enum MarkerRestoreAuthority<'a> {
     Absent,
     Record {
@@ -1767,6 +1785,7 @@ pub enum DetachedCursorReleaseProvenanceRestore {
 }
 
 impl DetachedCursorReleaseProvenanceRestore {
+    #[cfg(test)]
     const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
             Self::Ordinary(fate) => Some(fate.authority.binding),
@@ -1774,6 +1793,7 @@ impl DetachedCursorReleaseProvenanceRestore {
         }
     }
 
+    #[cfg(test)]
     const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
         match self {
             Self::Ordinary(_) => None,
@@ -1908,6 +1928,7 @@ pub enum StoredEdgeRestore {
 }
 
 impl StoredEdgeRestore {
+    #[cfg(test)]
     const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
             Self::ParticipantCursorProgressContinuous { authority, .. } => Some(authority.binding),
@@ -1921,6 +1942,7 @@ impl StoredEdgeRestore {
         }
     }
 
+    #[cfg(test)]
     const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
         match self {
             Self::MarkerDelivery(value) => Some(MarkerRecordRequest::planned(
@@ -2059,6 +2081,7 @@ pub enum ClosureStateRestore {
 }
 
 impl ClosureStateRestore {
+    #[cfg(test)]
     const fn ordinary_binding_request(self) -> Option<ActiveBinding> {
         match self {
             Self::Clear => None,
@@ -2066,6 +2089,7 @@ impl ClosureStateRestore {
         }
     }
 
+    #[cfg(test)]
     const fn marker_record_request(self) -> Option<MarkerRecordRequest> {
         match self {
             Self::Clear => None,
@@ -2095,6 +2119,7 @@ impl ClosureStateRestore {
     /// is not marker-derived, the token belongs to another conversation, or
     /// the retained record has the wrong target state, epoch, participant, or
     /// delivery sequence.
+    #[cfg(test)]
     pub(super) fn restore_with_marker_record(
         self,
         conversation_id: ConversationId,
@@ -2111,6 +2136,7 @@ impl ClosureStateRestore {
         restored
     }
 
+    #[cfg(test)]
     fn restore_with_binding_origin(
         self,
         origin: &BindingOrigin,

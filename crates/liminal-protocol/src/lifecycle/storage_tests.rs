@@ -1168,7 +1168,7 @@ fn historical_causal_rows_require_exact_owned_lifecycle_history() {
                 aggregate.frontiers.clone(),
                 aggregate.sequence_ledger,
                 aggregate.order_ledger,
-                ClosureStateRestore::Clear,
+                &ClosureStateRestore::Clear,
             ),
             Err(ConversationStateRestoreError::ClaimFrontier(_))
         ),
@@ -2331,19 +2331,15 @@ fn post_fenced_active_quartet_resolves_from_old_history_under_current_storage() 
 #[test]
 fn case_56_joint_restore_keeps_prefate_candidate_quartet_while_pc_is_current() {
     let (frontiers, sequence, order) = prefate_candidate_joint_frontiers();
-    let restored = restore_conversation_state(
-        frontiers,
-        sequence,
-        order,
-        ClosureStateRestore::Owed {
-            debt: WideResourceVector::new(1, 1),
-            edge: StoredEdgeRestore::PhysicalCompaction {
-                from_floor: 0,
-                through_seq: 0,
-            },
+    let closure = ClosureStateRestore::Owed {
+        debt: WideResourceVector::new(1, 1),
+        edge: StoredEdgeRestore::PhysicalCompaction {
+            from_floor: 0,
+            through_seq: 0,
         },
-    )
-    .expect("candidate recovery authority is independent of current PC");
+    };
+    let restored = restore_conversation_state(frontiers, sequence, order, &closure)
+        .expect("candidate recovery authority is independent of current PC");
 
     assert!(matches!(
         restored.closure(),
