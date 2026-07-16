@@ -10,6 +10,11 @@
     reason = "production aggregate boundary is wired before its participant runtime consumer"
 )]
 mod aggregate;
+#[allow(
+    dead_code,
+    reason = "production aggregate registry is wired before participant handlers consume it"
+)]
+mod aggregate_registry;
 mod conversation_stream;
 #[cfg(test)]
 mod crash_repository;
@@ -17,13 +22,12 @@ mod crash_repository;
 mod cursor_repository;
 #[cfg(test)]
 mod detach_repository;
-#[allow(
-    dead_code,
-    reason = "production incarnation boundary is wired before listener startup consumes it"
-)]
-mod incarnation_stream;
+mod dispatch;
+pub(super) mod incarnation_stream;
 mod transport;
 
+#[cfg(test)]
+mod aggregate_registry_tests;
 #[cfg(test)]
 mod aggregate_tests;
 #[cfg(test)]
@@ -35,10 +39,17 @@ mod cursor_repository_tests;
 #[cfg(test)]
 mod detach_repository_tests;
 #[cfg(test)]
+mod dispatch_tests;
+#[cfg(test)]
 mod incarnation_stream_tests;
 #[cfg(test)]
 mod transport_tests;
 
+pub use dispatch::{
+    InstalledParticipantService, ParticipantConnectionContext, ParticipantDispatch,
+    ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
+    dispatch_generic_frame,
+};
 pub use transport::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_value,
     gate_generic_frame, preflight_generic_bytes,

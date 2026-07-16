@@ -4,10 +4,18 @@ mod apply;
 mod conversation;
 #[path = "connection/delivery.rs"]
 mod delivery;
+#[path = "connection/incarnation.rs"]
+mod incarnation;
+#[cfg(test)]
+#[path = "connection/incarnation_tests.rs"]
+mod incarnation_tests;
 #[path = "connection/notifier.rs"]
 pub mod notifier;
 #[path = "connection/outbound.rs"]
 mod outbound;
+#[cfg(test)]
+#[path = "connection/participant_runtime_tests.rs"]
+mod participant_runtime_tests;
 #[path = "connection/pending_reply.rs"]
 mod pending_reply;
 #[path = "connection/process.rs"]

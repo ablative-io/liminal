@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use liminal::channel::ConnectionInboxBudget;
 use liminal::protocol::Frame;
+use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::conversation::ConnectionConversation;
 use super::services::ConnectionSubscription;
@@ -31,6 +32,9 @@ pub(super) struct ConnectionProcessState {
     /// Shared participant capability state stored by a successful connection
     /// handshake and consumed by the `liminal-protocol` inbound gate.
     pub(super) participant_session: ParticipantSession,
+    /// Durable incarnation allocated and flushed before this process was spawned.
+    /// `None` means the supervisor had no complete participant service installed.
+    pub(super) connection_incarnation: Option<ConnectionIncarnation>,
     /// Library subscriptions owned by this connection, keyed by subscription id.
     pub(super) subscriptions: HashMap<u64, ConnectionSubscription>,
     /// Supervised conversations owned by this connection, keyed by conversation id.

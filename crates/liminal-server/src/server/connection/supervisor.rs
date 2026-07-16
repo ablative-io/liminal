@@ -16,7 +16,9 @@ use beamr::scheduler::{ReadinessToken, Scheduler, SchedulerConfig, SchedulerServ
 use beamr::timer::TimerRef;
 
 use liminal::protocol::WorkerRegistration;
+use liminal_protocol::wire::ConnectionIncarnation;
 
+use super::incarnation::ConnectionIncarnationAuthority;
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
 use super::services::{
@@ -25,6 +27,7 @@ use super::services::{
 };
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig};
+use crate::server::participant::InstalledParticipantService;
 
 const CONNECTION_SCHEDULER_THREADS: usize = 4;
 const CONNECTION_SHUTDOWN_CONTROL_ATOM: &str = "liminal_server_connection_shutdown_control";
@@ -112,10 +115,25 @@ impl ConnectionSupervisor {
         services: Arc<dyn ConnectionServices>,
         auth_token: Option<Vec<u8>>,
     ) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, None, auth_token, LimitsConfig::default()).map(|inner| {
-            Self {
-                inner: Arc::new(inner),
-            }
+        Self::with_services_auth_and_limits(services, auth_token, LimitsConfig::default())
+    }
+
+    /// Creates a connection supervisor with explicit services, authentication,
+    /// and operational limits.
+    ///
+    /// Production runtime construction uses this form so the durable
+    /// incarnation stream's complete-reference bound is the same signed
+    /// `max_connections` bound enforced by connection admission.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when incarnation startup or scheduler startup fails.
+    pub fn with_services_auth_and_limits(
+        services: Arc<dyn ConnectionServices>,
+        auth_token: Option<Vec<u8>>,
+        limits: LimitsConfig,
+    ) -> Result<Self, ServerError> {
+        SupervisorInner::new(services, None, auth_token, limits).map(|inner| Self {
+            inner: Arc::new(inner),
         })
     }
 
@@ -462,6 +480,7 @@ impl ConnectionSupervisor {
 pub struct ConnectionHandle {
     pid: u64,
     peer_addr: Option<SocketAddr>,
+    connection_incarnation: Option<ConnectionIncarnation>,
     supervisor: Arc<SupervisorInner>,
 }
 
@@ -476,6 +495,16 @@ impl ConnectionHandle {
     #[must_use]
     pub const fn peer_addr(&self) -> Option<SocketAddr> {
         self.peer_addr
+    }
+
+    /// Returns the durable participant connection incarnation, when this
+    /// supervisor has a complete participant service installed.
+    ///
+    /// `None` identifies a services adapter that does not advertise participant
+    /// lifecycle semantics.
+    #[must_use]
+    pub const fn connection_incarnation(&self) -> Option<ConnectionIncarnation> {
+        self.connection_incarnation
     }
 
     /// Returns whether the beamr process is still live.
@@ -697,6 +726,7 @@ impl PushReplyAwaiter {
 pub(super) struct SupervisorInner {
     scheduler: Arc<Scheduler>,
     runtime: Arc<ConnectionRuntime>,
+    incarnations: Option<ConnectionIncarnationAuthority>,
 }
 
 impl std::fmt::Debug for SupervisorInner {
@@ -715,6 +745,17 @@ impl SupervisorInner {
         auth_token: Option<Vec<u8>>,
         limits: LimitsConfig,
     ) -> Result<Self, ServerError> {
+        let installed_services = ConnectionServiceInstallation::capture(services);
+        let incarnations = installed_services
+            .participant_service
+            .as_ref()
+            .map(|service| {
+                ConnectionIncarnationAuthority::startup(
+                    service.durable_store(),
+                    limits.max_connections,
+                )
+            })
+            .transpose()?;
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let registry = Arc::new(ModuleRegistry::new());
@@ -738,7 +779,7 @@ impl SupervisorInner {
         // whole connection scheduler.
         Ok(Self {
             runtime: Arc::new(ConnectionRuntime::new(
-                services,
+                installed_services,
                 control_atom,
                 ready_atom,
                 Arc::downgrade(&scheduler),
@@ -747,6 +788,7 @@ impl SupervisorInner {
                 limits,
             )),
             scheduler,
+            incarnations,
         })
     }
 
@@ -781,6 +823,7 @@ impl SupervisorInner {
             .map_err(|error| ServerError::ListenerAccept {
                 message: format!("failed to retain connection fd for teardown: {error}"),
             })?;
+        let connection_incarnation = self.allocate_connection_incarnation()?;
         let holder = Arc::new(Mutex::new(Some(stream)));
         let runtime = Arc::clone(&self.runtime);
         let process_holder = Arc::clone(&holder);
@@ -789,6 +832,7 @@ impl SupervisorInner {
                 Arc::clone(&runtime),
                 peer_addr,
                 &process_holder,
+                connection_incarnation,
             ))
         });
         let pid =
@@ -797,7 +841,10 @@ impl SupervisorInner {
                 .map_err(|error| ServerError::ListenerAccept {
                     message: format!("failed to spawn connection process: {error}"),
                 })?;
-        if let Err(error) = self.runtime.register_with_fd(pid, peer_addr, fd_guard) {
+        if let Err(error) =
+            self.runtime
+                .register_with_fd(pid, peer_addr, connection_incarnation, fd_guard)
+        {
             // Registration failure leaves no host record to reap. Terminate the
             // just-spawned process explicitly so neither its stream nor admission
             // reservation can escape this failed spawn.
@@ -811,8 +858,25 @@ impl SupervisorInner {
         Ok(ConnectionHandle {
             pid,
             peer_addr,
+            connection_incarnation,
             supervisor: Arc::clone(self),
         })
+    }
+
+    fn allocate_connection_incarnation(
+        &self,
+    ) -> Result<Option<ConnectionIncarnation>, ServerError> {
+        let Some(authority) = self.incarnations.as_ref() else {
+            return Ok(None);
+        };
+        // Activation is server-sealed and test-only today, so no durable
+        // binding-origin, receipt, work-item, or recovery references can yet
+        // coexist with this authority; active connections are the exact current
+        // test inventory. A production token constructor must first replace this
+        // with the complete durable reference inventory. It must never publish a
+        // raw caller-supplied matrix.
+        let references = self.runtime.complete_active_incarnation_references()?;
+        authority.allocate(&references).map(Some)
     }
 
     fn broadcast_control(&self, control: &ConnectionControl) {
@@ -927,8 +991,29 @@ struct PreWaitBarrier {
 }
 
 #[derive(Debug)]
+struct ConnectionServiceInstallation {
+    services: Arc<dyn ConnectionServices>,
+    participant_service: Option<InstalledParticipantService>,
+}
+
+impl ConnectionServiceInstallation {
+    /// Captures the service adapter's capability posture exactly once, before
+    /// participant incarnation startup or connection process construction.
+    fn capture(services: Arc<dyn ConnectionServices>) -> Self {
+        let participant_service = services.participant_service();
+        Self {
+            services,
+            participant_service,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub(super) struct ConnectionRuntime {
     services: Arc<dyn ConnectionServices>,
+    /// Complete participant handler/store bundle captured at supervisor startup.
+    /// `Some` is paired with an incarnation authority on `SupervisorInner`.
+    participant_service: Option<InstalledParticipantService>,
     records: Mutex<HashMap<u64, ConnectionRecord>>,
     controls: Mutex<Vec<QueuedConnectionControl>>,
     control_atom: Atom,
@@ -991,7 +1076,7 @@ pub(super) struct ConnectionRuntime {
 
 impl ConnectionRuntime {
     fn new(
-        services: Arc<dyn ConnectionServices>,
+        installed_services: ConnectionServiceInstallation,
         control_atom: Atom,
         ready_atom: Atom,
         scheduler: Weak<Scheduler>,
@@ -999,8 +1084,13 @@ impl ConnectionRuntime {
         auth_token: Option<Vec<u8>>,
         limits: LimitsConfig,
     ) -> Self {
+        let ConnectionServiceInstallation {
+            services,
+            participant_service,
+        } = installed_services;
         Self {
             services,
+            participant_service,
             records: Mutex::new(HashMap::new()),
             controls: Mutex::new(Vec::new()),
             control_atom,
@@ -1215,7 +1305,7 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            services,
+            ConnectionServiceInstallation::capture(services),
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1236,7 +1326,7 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            services,
+            ConnectionServiceInstallation::capture(services),
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1258,7 +1348,7 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            services,
+            ConnectionServiceInstallation::capture(services),
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1279,7 +1369,7 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            services,
+            ConnectionServiceInstallation::capture(services),
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1291,6 +1381,11 @@ impl ConnectionRuntime {
 
     pub(super) fn services(&self) -> &dyn ConnectionServices {
         self.services.as_ref()
+    }
+
+    /// Returns the complete participant service captured at supervisor startup.
+    pub(super) const fn participant_service(&self) -> Option<&InstalledParticipantService> {
+        self.participant_service.as_ref()
     }
 
     /// Returns the configured connection auth token as opaque bytes, or `None` when
@@ -1552,26 +1647,29 @@ impl ConnectionRuntime {
         &self,
         pid: u64,
         peer_addr: Option<SocketAddr>,
+        connection_incarnation: Option<ConnectionIncarnation>,
         fd_guard: TcpStream,
     ) -> Result<(), ServerError> {
-        self.register_record(pid, peer_addr, Some(fd_guard))
+        self.register_record(pid, peer_addr, connection_incarnation, Some(fd_guard))
     }
 
     #[cfg(test)]
     fn register(&self, pid: u64, peer_addr: Option<SocketAddr>) -> Result<(), ServerError> {
-        self.register_record(pid, peer_addr, None)
+        self.register_record(pid, peer_addr, None, None)
     }
 
     fn register_record(
         &self,
         pid: u64,
         peer_addr: Option<SocketAddr>,
+        connection_incarnation: Option<ConnectionIncarnation>,
         fd_guard: Option<TcpStream>,
     ) -> Result<(), ServerError> {
         lock(&self.records, "connection registry")?.insert(
             pid,
             ConnectionRecord {
                 peer_addr,
+                connection_incarnation,
                 registration: None,
                 readiness: None,
                 fd_guard,
@@ -1745,6 +1843,21 @@ impl ConnectionRuntime {
         )
     }
 
+    /// Reads the complete active-connection incarnation set under the registry
+    /// lock for the sealed activation tests. Poisoning fails admission closed:
+    /// treating an unreadable registry as empty could let a replay collision
+    /// through.
+    fn complete_active_incarnation_references(
+        &self,
+    ) -> Result<Vec<ConnectionIncarnation>, ServerError> {
+        Ok(
+            lock(&self.records, "connection incarnation reference registry")?
+                .values()
+                .filter_map(|record| record.connection_incarnation)
+                .collect(),
+        )
+    }
+
     fn push_control(&self, pid: u64, control: ConnectionControl) -> Result<(), ServerError> {
         lock(&self.controls, "connection control queue")?
             .push(QueuedConnectionControl { pid, control });
@@ -1877,6 +1990,8 @@ enum PushSlotDisposition {
 #[derive(Debug)]
 struct ConnectionRecord {
     peer_addr: Option<SocketAddr>,
+    /// Durable pair allocated and flushed before the process was spawned.
+    connection_incarnation: Option<ConnectionIncarnation>,
     /// Worker registration declared on this connection, set by `set_registration`
     /// when a `WorkerRegister` frame is accepted. `Some` marks a connection whose
     /// close must fire `on_worker_unregistered`.

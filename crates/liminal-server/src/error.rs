@@ -25,6 +25,30 @@ pub enum ServerError {
     #[error("listener accept failed: {message}")]
     ListenerAccept { message: String },
 
+    /// Durable participant-incarnation startup or allocation failed before its
+    /// result could be published.
+    #[error("participant incarnation {phase} failed: {message}")]
+    ParticipantIncarnation {
+        /// Exact server seam that failed.
+        phase: &'static str,
+        /// Underlying durable or bounded-bridge diagnostic.
+        message: String,
+    },
+
+    /// The durable server-incarnation namespace has no successor.
+    #[error("participant server-incarnation namespace is exhausted")]
+    ServerIncarnationExhausted,
+
+    /// The current durable server incarnation has no collision-free connection
+    /// ordinal left, so the accepted socket was not admitted.
+    #[error(
+        "connection incarnation exhausted for server incarnation {attempted_server_incarnation}"
+    )]
+    ConnectionIncarnationExhausted {
+        /// Server incarnation whose complete ordinal suffix was examined.
+        attempted_server_incarnation: u64,
+    },
+
     /// A frame requested an operation the configured services profile does not
     /// serve (e.g. ordinary publish/subscribe/conversation traffic against the
     /// capability-scoped worker front door). Server-internal taxonomy, not wire

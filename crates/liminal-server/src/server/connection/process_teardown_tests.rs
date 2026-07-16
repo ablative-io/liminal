@@ -125,7 +125,7 @@ fn teardown_releases_conversations_through_finalize_not_close() {
     // (the last-resort teardown route every other route funnels past) can
     // release the conversation.
     let holder = Arc::new(Mutex::new(None));
-    let mut process = ConnectionProcess::from_holder(runtime, None, &holder);
+    let mut process = ConnectionProcess::from_holder(runtime, None, &holder, None);
     process.state.conversations.insert(
         1,
         ConnectionConversation::new(Box::new(FinalizeProbe {

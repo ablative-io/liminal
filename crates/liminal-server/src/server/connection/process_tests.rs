@@ -1,7 +1,20 @@
 use std::sync::{Arc, Mutex};
 
+use liminal::durability::{DurableStore, open_ephemeral};
 use liminal::protocol::{
     CausalContext, MessageEnvelope, MessageId, SchemaId, WorkerRegisterOutcome, WorkerRegistration,
+};
+use liminal_protocol::{
+    lifecycle::{
+        BindingRequiredLookupResult, BindingState, ParticipantBindingRequest, PresentedIdentity,
+        lookup_binding_required,
+    },
+    wire::{
+        ClientRequest, ConnectionIncarnation, Generation, ParticipantFrame, ParticipantUnknown,
+        ReceiverDirection, RecordAdmission, ServerValue, TransportRejectionReason,
+        decode as decode_participant, encode as encode_participant,
+        encoded_len as participant_encoded_len,
+    },
 };
 
 use super::*;
@@ -12,6 +25,10 @@ use crate::server::connection::services::{
     ConnectionSubscription, PublishOutcome, SubscriptionResource,
 };
 use crate::server::connection::worker_front_door::WorkerFrontDoorServices;
+use crate::server::participant::{
+    InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext,
+    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSession,
+};
 
 /// Fixed connection pid used by the scheduler-free `apply_frame` unit tests.
 const TEST_PID: u64 = 1;
@@ -21,9 +38,14 @@ struct RecordingServices {
     publishes: Mutex<Vec<(String, Vec<u8>)>>,
     subscriptions: Mutex<Vec<(String, usize)>>,
     conversations: Mutex<Vec<(u64, String)>>,
+    participant_service: Option<InstalledParticipantService>,
 }
 
 impl ConnectionServices for RecordingServices {
+    fn participant_service(&self) -> Option<InstalledParticipantService> {
+        self.participant_service.clone()
+    }
+
     fn publish(
         &self,
         channel: &str,
@@ -160,6 +182,89 @@ fn runtime_with(services: RecordingServices) -> (ConnectionRuntime, Arc<Recordin
     let services = Arc::new(services);
     let runtime = ConnectionRuntime::for_tests(Arc::clone(&services) as Arc<_>);
     (runtime, services)
+}
+
+#[derive(Debug, Default)]
+struct ProcessParticipantHandler {
+    seen: Mutex<Vec<(ParticipantConnectionContext, ClientRequest)>>,
+    fail: bool,
+}
+
+impl ProcessParticipantHandler {
+    fn failing() -> Self {
+        Self {
+            seen: Mutex::new(Vec::new()),
+            fail: true,
+        }
+    }
+}
+
+impl ParticipantSemanticHandler for ProcessParticipantHandler {
+    fn handle(
+        &self,
+        context: ParticipantConnectionContext,
+        request: ClientRequest,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        self.seen
+            .lock()
+            .map_err(|_| ParticipantSemanticError::Internal {
+                message: "participant process test recorder poisoned".to_owned(),
+            })?
+            .push((context, request.clone()));
+        if self.fail {
+            return Err(ParticipantSemanticError::Unavailable);
+        }
+        let ClientRequest::RecordAdmission(record) = request else {
+            return Err(ParticipantSemanticError::Internal {
+                message: "participant process test expected record admission".to_owned(),
+            });
+        };
+        let lookup = lookup_binding_required::<[u8; 1], [u8; 1], [u8; 1]>(
+            PresentedIdentity::Absent,
+            &BindingState::Detached,
+            None,
+            &ParticipantBindingRequest::RecordAdmission(record),
+        );
+        let BindingRequiredLookupResult::ParticipantUnknown(value) = lookup else {
+            return Err(ParticipantSemanticError::Internal {
+                message: "protocol lookup did not select ParticipantUnknown".to_owned(),
+            });
+        };
+        Ok(ServerValue::ParticipantUnknown(value))
+    }
+}
+
+fn participant_runtime(
+    handler: Arc<ProcessParticipantHandler>,
+) -> Result<ConnectionRuntime, Box<dyn std::error::Error>> {
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let services = RecordingServices {
+        participant_service: Some(InstalledParticipantService::new(handler, store)),
+        ..RecordingServices::default()
+    };
+    Ok(ConnectionRuntime::for_tests(Arc::new(services)))
+}
+
+fn participant_record_admission() -> Result<(ClientRequest, Frame), String> {
+    let request = ClientRequest::RecordAdmission(RecordAdmission {
+        conversation_id: 70,
+        participant_id: 2,
+        capability_generation: Generation::new(3)
+            .ok_or_else(|| "participant process test generation was zero".to_owned())?,
+        payload: vec![1, 2, 3],
+    });
+    let participant = ParticipantFrame::ClientRequest(request.clone());
+    let mut bytes =
+        vec![0; participant_encoded_len(&participant).map_err(|error| format!("{error:?}"))?];
+    let written =
+        encode_participant(&participant, &mut bytes).map_err(|error| format!("{error:?}"))?;
+    bytes.truncate(written);
+    let (generic, consumed) =
+        liminal::protocol::decode(&bytes).map_err(|error| error.to_string())?;
+    if consumed != bytes.len() {
+        return Err("generic decoder left an unread participant suffix".to_owned());
+    }
+    Ok((request, generic))
 }
 
 #[test]
@@ -964,21 +1069,231 @@ fn connect_frame(auth_token: &[u8]) -> Frame {
 #[test]
 fn connect_without_configured_token_accepts_any_token() {
     let (runtime, _services) = runtime_with(RecordingServices::default());
-    let mut state = ConnectionProcessState::default();
+    let mut empty_token_state = ConnectionProcessState::default();
 
-    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[]));
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut empty_token_state,
+        connect_frame(&[]),
+    );
     assert!(matches!(
         action,
         FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
             if capabilities == 0
     ));
 
-    // A non-empty token is likewise ignored when no gate is configured.
-    let action = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(b"anything"));
+    // A separate connection carrying a non-empty token is likewise accepted when
+    // no gate is configured.
+    let mut nonempty_token_state = ConnectionProcessState::default();
+    let action = apply_frame(
+        TEST_PID,
+        &runtime,
+        &mut nonempty_token_state,
+        connect_frame(b"anything"),
+    );
     assert!(matches!(
         action,
         FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
             if capabilities == 0
+    ));
+}
+
+#[test]
+fn unsupported_version_closes_without_publishing_handshake_state_or_application_work()
+-> Result<(), ServerError> {
+    let services = Arc::new(RecordingServices::default());
+    let runtime = ConnectionRuntime::for_tests_with_auth_token(
+        Arc::clone(&services) as Arc<_>,
+        b"s3cr3t".to_vec(),
+    );
+    let mut state = ConnectionProcessState::default();
+    let unsupported = Frame::Connect {
+        flags: 0,
+        min_version: ProtocolVersion::new(2, 0),
+        max_version: ProtocolVersion::new(2, 0),
+        auth_token: b"s3cr3t".to_vec(),
+    };
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, unsupported),
+        FrameAction::RespondThenClose(Frame::ConnectError { .. })
+    ));
+    assert!(!state.authenticated);
+    assert_eq!(state.participant_session, ParticipantSession::default());
+
+    let application = Frame::Publish {
+        flags: 0,
+        stream_id: 3,
+        channel: "orders".to_owned(),
+        envelope: envelope(b"must-not-publish".to_vec()),
+        idempotency_key: None,
+    };
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, application),
+        FrameAction::Close
+    ));
+    let published = services
+        .publishes
+        .lock()
+        .map_err(|error| ServerError::ListenerAccept {
+            message: format!("test publish recorder unavailable: {error}"),
+        })?;
+    assert!(published.is_empty());
+    drop(published);
+    Ok(())
+}
+
+#[test]
+fn repeated_supported_connect_fails_closed_without_renegotiation() {
+    let (runtime, _services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState::default();
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[])),
+        FrameAction::Respond(Frame::ConnectAck { .. })
+    ));
+    let established_session = state.participant_session;
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[])),
+        FrameAction::Close
+    ));
+    assert!(state.authenticated);
+    assert_eq!(state.participant_session, established_session);
+}
+
+#[test]
+fn participant_request_without_capability_responds_with_exact_rejection_then_closes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (runtime, _services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState::default();
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[])),
+        FrameAction::Respond(Frame::ConnectAck {
+            capabilities: 0,
+            ..
+        })
+    ));
+    let (_, frame) = participant_record_admission()?;
+
+    let FrameAction::RespondThenClose(response) =
+        apply_frame(TEST_PID, &runtime, &mut state, frame)
+    else {
+        return Err("capability rejection did not require connection close".into());
+    };
+    let generic_len = liminal::protocol::encoded_len(&response)?;
+    let mut response_bytes = vec![0; generic_len];
+    let written = liminal::protocol::encode(&response, &mut response_bytes)?;
+    response_bytes.truncate(written);
+    let decoded = decode_participant(&response_bytes, ReceiverDirection::Client)
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(matches!(
+        decoded,
+        ParticipantFrame::ServerValue(ServerValue::ParticipantTransportRejected(rejection))
+            if rejection.reason == TransportRejectionReason::ParticipantCapabilityRequired
+    ));
+    Ok(())
+}
+
+/// A complete installed participant service is advertised only on a process that
+/// carries the incarnation durably allocated before spawn. The same context then
+/// reaches the handler and its protocol-owned value round-trips on 0x1A.
+#[test]
+fn installed_participant_service_advertises_and_dispatches_with_exact_incarnation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let handler = Arc::new(ProcessParticipantHandler::default());
+    let runtime = participant_runtime(Arc::clone(&handler))?;
+    let incarnation = ConnectionIncarnation::new(4, 9);
+    let mut state = ConnectionProcessState {
+        connection_incarnation: Some(incarnation),
+        ..ConnectionProcessState::default()
+    };
+
+    let connect = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[]));
+    assert!(matches!(
+        connect,
+        FrameAction::Respond(Frame::ConnectAck { capabilities, .. })
+            if capabilities == PARTICIPANT_CAPABILITY_BIT
+    ));
+
+    let (request, frame) = participant_record_admission()?;
+    let FrameAction::Respond(response) = apply_frame(TEST_PID, &runtime, &mut state, frame) else {
+        return Err("participant request did not produce a framed response".into());
+    };
+    let generic_len = liminal::protocol::encoded_len(&response)?;
+    let mut response_bytes = vec![0; generic_len];
+    let written = liminal::protocol::encode(&response, &mut response_bytes)?;
+    response_bytes.truncate(written);
+    let decoded = decode_participant(&response_bytes, ReceiverDirection::Client)
+        .map_err(|error| format!("{error:?}"))?;
+    assert!(matches!(
+        decoded,
+        ParticipantFrame::ServerValue(ServerValue::ParticipantUnknown(ParticipantUnknown { .. }))
+    ));
+    let seen = handler
+        .seen
+        .lock()
+        .map_err(|_| "participant process test recorder poisoned")?;
+    assert_eq!(
+        seen.as_slice(),
+        &[(ParticipantConnectionContext::new(incarnation), request)]
+    );
+    drop(seen);
+    Ok(())
+}
+
+/// Semantic failure has no server-authored lifecycle fallback: the connection
+/// closes after the injected handler returns a non-wire error.
+#[test]
+fn installed_participant_semantic_failure_closes_without_response()
+-> Result<(), Box<dyn std::error::Error>> {
+    let handler = Arc::new(ProcessParticipantHandler::failing());
+    let runtime = participant_runtime(handler)?;
+    let mut state = ConnectionProcessState {
+        authenticated: true,
+        connection_incarnation: Some(ConnectionIncarnation::new(4, 10)),
+        ..ConnectionProcessState::default()
+    };
+    state
+        .participant_session
+        .negotiate_v1()
+        .map_err(|error| format!("{error:?}"))?;
+    let (_, frame) = participant_record_admission()?;
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, frame),
+        FrameAction::Close
+    ));
+    Ok(())
+}
+
+/// The installed bundle always contains a durable store, but a process missing
+/// its pre-spawn incarnation is still an activation invariant violation and is
+/// refused before participant capability can be advertised.
+#[test]
+fn installed_participant_service_without_process_incarnation_fails_closed()
+-> Result<(), Box<dyn std::error::Error>> {
+    let runtime = participant_runtime(Arc::new(ProcessParticipantHandler::default()))?;
+    let mut state = ConnectionProcessState::default();
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[])),
+        FrameAction::Close
+    ));
+    Ok(())
+}
+
+#[test]
+fn worker_front_door_connect_keeps_participant_capability_disabled() {
+    let (runtime, _) = worker_front_door_runtime("aion.observability.v1");
+    let mut state = ConnectionProcessState::default();
+
+    assert!(matches!(
+        apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[])),
+        FrameAction::Respond(Frame::ConnectAck {
+            capabilities: 0,
+            ..
+        })
     ));
 }
 

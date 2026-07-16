@@ -99,14 +99,28 @@ impl ConversationAggregateAppendFailure {
 
     /// Borrows the aggregate reconstructed from durable storage after failure.
     #[must_use]
+    #[cfg(test)]
     pub(super) const fn reloaded(&self) -> &ParticipantConversationAggregate {
         &self.reloaded
     }
 
     /// Consumes the failure into the reconstructed durable aggregate.
     #[must_use]
+    #[cfg(test)]
     pub(super) fn into_reloaded(self) -> ParticipantConversationAggregate {
         self.reloaded
+    }
+
+    /// Returns the original append error while destroying the pre-barrier reload.
+    ///
+    /// A read after failed flush does not prove durability: it can expose buffered
+    /// bytes, or omit bytes which a later recovery flush persists. Production
+    /// therefore cannot extract that replay as executable aggregate authority.
+    #[must_use]
+    pub(super) fn into_error_discarding_reload(self) -> ConversationStreamError {
+        let Self { error, reloaded } = self;
+        drop(reloaded);
+        error
     }
 }
 
@@ -165,6 +179,18 @@ impl ParticipantConversationAggregate {
     #[must_use]
     pub(super) const fn genesis_validated(&self) -> bool {
         self.conversation.genesis_validated()
+    }
+
+    /// Resumes genesis initialization from an aggregate already reconstructed
+    /// after an ambiguous append.
+    ///
+    /// The registry invokes this only on a later explicit operation when the
+    /// reloaded stream was still empty. It is not an append retry inside the
+    /// failed operation and introduces no timer or polling loop.
+    pub(super) async fn resume_open(
+        self,
+    ) -> Result<ConversationAggregateOpen, ConversationAggregateError> {
+        self.initialize_genesis().await
     }
 
     async fn initialize_genesis(

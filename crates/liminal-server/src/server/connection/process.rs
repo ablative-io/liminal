@@ -10,6 +10,7 @@ use beamr::scheduler::{Interest, ReadinessToken};
 use beamr::term::Term;
 
 use liminal::protocol::{Frame, ProtocolError, decode};
+use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::apply::apply_frame;
 use super::delivery::{DELIVERY_SLICE_BUDGET, service_subscriptions};
@@ -22,6 +23,10 @@ use crate::ServerError;
 #[cfg(test)]
 #[path = "process_teardown_tests.rs"]
 mod teardown_tests;
+
+#[cfg(test)]
+#[path = "process_terminal_tests.rs"]
+mod terminal_tests;
 
 #[cfg(test)]
 #[path = "process_wake_tests.rs"]
@@ -62,6 +67,7 @@ impl ConnectionProcess {
         runtime: Arc<ConnectionRuntime>,
         peer_addr: Option<SocketAddr>,
         holder: &Arc<Mutex<Option<TcpStream>>>,
+        connection_incarnation: Option<ConnectionIncarnation>,
     ) -> Self {
         // The `NativeHandlerFactory` is `Fn + Send + Sync`, so the accepted
         // `TcpStream` cannot be moved into the closure (a `Fn` captures by shared
@@ -96,6 +102,7 @@ impl ConnectionProcess {
             super::pending_reply::DEFAULT_REPLY_TIMEOUT,
         );
         let state = ConnectionProcessState {
+            connection_incarnation,
             pending_replies,
             ..ConnectionProcessState::default()
         };
@@ -277,17 +284,7 @@ impl ConnectionProcess {
             &mut self.outbound,
         ) {
             Ok(ProcessStatus::Continue) => SliceStep::Continue,
-            Ok(ProcessStatus::Close) => {
-                // A client-initiated close (e.g. a pipelined [Ping, Disconnect] or
-                // [Publish, Disconnect] in one segment) may have enqueued a response
-                // — the Pong/PublishAck — into the outbound buffer just before the
-                // Disconnect returned Close. Drain it best-effort before finishing so
-                // that queued reply is not dropped, mirroring the ForceClose drain.
-                let _ = self.drain_outbound();
-                self.release_conversations();
-                self.runtime.finish(pid);
-                SliceStep::Stop(ExitReason::Normal)
-            }
+            Ok(ProcessStatus::Close) => self.finish_normal_close(pid),
             Err(error) => {
                 tracing::warn!(connection_pid = pid, %error, "connection process failed");
                 self.release_conversations();
@@ -321,6 +318,18 @@ impl ConnectionProcess {
         for (_conversation_id, conversation) in std::mem::take(&mut self.state.conversations) {
             conversation.finalize();
         }
+    }
+
+    /// Finishes a client-initiated or terminal-rejection close.
+    fn finish_normal_close(&mut self, pid: u64) -> SliceStep {
+        // Multiple responses may already precede the terminal frame. Make one
+        // unbudgeted, nonblocking drain so the ordinary 8 KiB slice budget cannot
+        // deterministically truncate it. `WouldBlock` remains best-effort: never
+        // sleep, poll, or retry.
+        let _ = self.drain_outbound_for_close();
+        self.release_conversations();
+        self.runtime.finish(pid);
+        SliceStep::Stop(ExitReason::Normal)
     }
 
     /// R1(vi) (§1.2(3b)): services the pending-reply table for this slice.
@@ -408,9 +417,9 @@ impl ConnectionProcess {
     /// `Ok(DrainOutcome::WouldBlockWithResidue)` the park-flip commit arms writable
     /// readiness interest for this connection's socket (and only then), so the
     /// connection re-wakes when the kernel send buffer drains instead of parking
-    /// with unflushed residue. `Drained`/`Progress` arm nothing. A `None` budget is
-    /// passed so live per-slice throughput is unchanged; the park-flip supplies a
-    /// byte budget here.
+    /// with unflushed residue. `Drained`/`Progress` arm nothing. The current live
+    /// slice uses the fixed read-buffer budget; terminal close uses
+    /// [`Self::drain_outbound_for_close`] instead.
     fn drain_outbound(
         &mut self,
     ) -> Result<super::outbound::DrainOutcome, super::outbound::OutboundError> {
@@ -418,6 +427,21 @@ impl ConnectionProcess {
             return Ok(super::outbound::DrainOutcome::Drained);
         };
         self.outbound.drain(stream, Some(READ_BUFFER_BYTES))
+    }
+
+    /// Makes one unbudgeted, nonblocking attempt to flush terminal output.
+    ///
+    /// The outbound queue is bounded, so removing the normal slice budget cannot
+    /// create unbounded work. A full socket can still return
+    /// [`DrainOutcome::WouldBlockWithResidue`]; terminal delivery is best-effort
+    /// at that transport boundary and this method never waits or retries.
+    fn drain_outbound_for_close(
+        &mut self,
+    ) -> Result<super::outbound::DrainOutcome, super::outbound::OutboundError> {
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(super::outbound::DrainOutcome::Drained);
+        };
+        self.outbound.drain(stream, None)
     }
 
     fn arm_readiness(

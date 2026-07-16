@@ -16,7 +16,10 @@ use super::state::{ConnectionProcessState, FrameAction};
 use super::supervisor::ConnectionRuntime;
 use crate::ServerError;
 use crate::config::types::ServiceProfile;
-use crate::server::participant::{ParticipantIngress, encode_server_value, gate_generic_frame};
+use crate::server::participant::{
+    PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext, ParticipantDispatch,
+    ParticipantIngress, dispatch_generic_frame, encode_server_value, gate_generic_frame,
+};
 
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 const SUPPORTED_PROTOCOL: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -49,7 +52,7 @@ pub(super) fn apply_frame(
             max_version,
             auth_token,
             ..
-        } => connect_response(runtime, state, min_version, max_version, &auth_token),
+        } => connect_once(runtime, state, min_version, max_version, &auth_token),
         Frame::Disconnect { .. } => FrameAction::Close,
         Frame::Ping { .. } => FrameAction::Respond(Frame::Pong { flags: 0 }),
         Frame::Publish {
@@ -126,7 +129,9 @@ pub(super) fn apply_frame(
         Frame::WorkerRegister { registration, .. } => {
             worker_register_response(pid, runtime, registration)
         }
-        frame @ Frame::Unknown { type_id: 0x1A, .. } => participant_frame_response(state, &frame),
+        frame @ Frame::Unknown { type_id: 0x1A, .. } => {
+            participant_frame_response(runtime, state, &frame)
+        }
         // Client backpressure signals ride the subscription delivery machinery, so
         // they are application frames: gated by auth (they are NOT on the pre-auth
         // allowlist) and refused by a services profile that serves no
@@ -153,12 +158,64 @@ pub(super) fn apply_frame(
     }
 }
 
+/// Applies the core protocol's single-use connection handshake.
+fn connect_once(
+    runtime: &ConnectionRuntime,
+    state: &mut ConnectionProcessState,
+    min_version: ProtocolVersion,
+    max_version: ProtocolVersion,
+    auth_token: &[u8],
+) -> FrameAction {
+    // The core lifecycle excludes `Connect` from its Active state; accepting a
+    // second one would silently renegotiate capability/session state in place.
+    if state.authenticated {
+        FrameAction::Close
+    } else {
+        connect_response(runtime, state, min_version, max_version, auth_token)
+    }
+}
+
 /// Applies the shared participant transport gate before semantic dispatch.
 ///
 /// Semantic request handling is installed by the participant lifecycle service;
 /// this boundary already guarantees that malformed, unauthenticated, and
 /// capability-missing frames receive the crate's exact typed rejection.
-fn participant_frame_response(state: &ConnectionProcessState, frame: &Frame) -> FrameAction {
+fn participant_frame_response(
+    runtime: &ConnectionRuntime,
+    state: &ConnectionProcessState,
+    frame: &Frame,
+) -> FrameAction {
+    match (runtime.participant_service(), state.connection_incarnation) {
+        (Some(service), Some(connection_incarnation)) => {
+            match dispatch_generic_frame(
+                frame,
+                state.authenticated,
+                state.participant_session,
+                ParticipantConnectionContext::new(connection_incarnation),
+                service.handler(),
+            ) {
+                ParticipantDispatch::NotParticipant => FrameAction::NoResponse,
+                ParticipantDispatch::Respond(response) => FrameAction::Respond(response),
+                ParticipantDispatch::RespondThenClose(response) => {
+                    FrameAction::RespondThenClose(response)
+                }
+                ParticipantDispatch::Fatal(error) => {
+                    tracing::warn!(%error, "participant request failed closed");
+                    FrameAction::Close
+                }
+            }
+        }
+        (None, None) => participant_frame_without_service(state, frame),
+        // A complete service and a durable connection incarnation are one
+        // activation invariant. Any mismatch is internal configuration drift;
+        // close without fabricating a lifecycle outcome.
+        (Some(_), None) | (None, Some(_)) => FrameAction::Close,
+    }
+}
+
+/// Applies only the crate-owned pre-semantic gate while participant capability
+/// is disabled. A decoded request cannot occur because the session is missing.
+fn participant_frame_without_service(state: &ConnectionProcessState, frame: &Frame) -> FrameAction {
     match gate_generic_frame(frame, state.authenticated, state.participant_session) {
         ParticipantIngress::NotParticipant => FrameAction::NoResponse,
         // A decoded request is unreachable while the capability is deliberately
@@ -172,7 +229,7 @@ fn participant_frame_response(state: &ConnectionProcessState, frame: &Frame) -> 
         ParticipantIngress::Rejected(rejection) => encode_server_value(
             liminal_protocol::wire::ServerValue::ParticipantTransportRejected(rejection),
         )
-        .map_or(FrameAction::Close, FrameAction::Respond),
+        .map_or(FrameAction::Close, FrameAction::RespondThenClose),
     }
 }
 
@@ -303,24 +360,45 @@ fn connect_response(
             });
         }
     }
-    // The token matched (or none is configured): mark the connection authenticated
-    // so the `apply_frame` gate admits subsequent application frames on it.
+    let selected_version = match negotiate_version(min_version, max_version, &[SUPPORTED_PROTOCOL])
+    {
+        Ok(selected_version) => selected_version,
+        Err(error) => {
+            return FrameAction::RespondThenClose(Frame::ConnectError {
+                flags: 0,
+                reason_code: error.reason_code(),
+                message: error.message().map(str::to_owned),
+            });
+        }
+    };
+    let (participant_session, capabilities) =
+        match (runtime.participant_service(), state.connection_incarnation) {
+            (Some(_), Some(_)) => {
+                let mut participant_session =
+                    crate::server::participant::ParticipantSession::default();
+                if participant_session.negotiate_v1().is_err() {
+                    return FrameAction::Close;
+                }
+                (participant_session, PARTICIPANT_CAPABILITY_BIT)
+            }
+            // A generic durable channel store alone does not activate the participant
+            // protocol. Both service and incarnation are absent.
+            (None, None) => (crate::server::participant::ParticipantSession::default(), 0),
+            // Fail closed on impossible partial activation without inventing a
+            // participant response.
+            (Some(_), None) | (None, Some(_)) => return FrameAction::Close,
+        };
+
+    // Publish handshake state only after authentication, version negotiation,
+    // and participant posture have all succeeded. Every rejection above leaves
+    // the pre-handshake state untouched.
     state.authenticated = true;
-    match negotiate_version(min_version, max_version, &[SUPPORTED_PROTOCOL]) {
-        // Keep participant-v1 unadvertised until a complete semantic service is
-        // installed. The shared 0x1A gate remains active and returns the exact
-        // ParticipantCapabilityRequired value to a client that sends one anyway.
-        Ok(selected_version) => FrameAction::Respond(Frame::ConnectAck {
-            flags: 0,
-            selected_version,
-            capabilities: 0,
-        }),
-        Err(error) => FrameAction::Respond(Frame::ConnectError {
-            flags: 0,
-            reason_code: error.reason_code(),
-            message: error.message().map(str::to_owned),
-        }),
-    }
+    state.participant_session = participant_session;
+    FrameAction::Respond(Frame::ConnectAck {
+        flags: 0,
+        selected_version,
+        capabilities,
+    })
 }
 
 /// Constant-time byte-slice equality for the connection auth token.

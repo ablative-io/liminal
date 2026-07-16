@@ -57,8 +57,11 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         ServiceProfile::Full => {
             let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
             let channel_cluster = services.channel_cluster().clone();
-            let connection_supervisor =
-                ConnectionSupervisor::with_services_and_auth(services, auth_token)?;
+            let connection_supervisor = ConnectionSupervisor::with_services_auth_and_limits(
+                services,
+                auth_token,
+                config.limits,
+            )?;
 
             // SRV-005: start clustering on the channel-supervisor scheduler when a
             // [cluster] section is configured. The returned handle owns the inbound
@@ -75,8 +78,11 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         }
         ServiceProfile::WorkerFrontDoor => {
             let services = build_connection_services(&config)?;
-            let connection_supervisor =
-                ConnectionSupervisor::with_services_and_auth(services, auth_token)?;
+            let connection_supervisor = ConnectionSupervisor::with_services_auth_and_limits(
+                services,
+                auth_token,
+                config.limits,
+            )?;
             readiness.set_cluster_configured(false);
             (connection_supervisor, None)
         }

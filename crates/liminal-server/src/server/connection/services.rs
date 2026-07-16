@@ -22,6 +22,7 @@ use super::services_schema::resolve_channel_schema;
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{ClusterConfig, ServerConfig, ServiceProfile};
+use crate::server::participant::InstalledParticipantService;
 
 pub use super::services_cluster::ChannelCluster;
 
@@ -147,6 +148,16 @@ pub struct PublishOutcome {
 
 /// Operations that adapt wire frames to liminal library calls.
 pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
+    /// Returns the complete participant service installed on this adapter.
+    ///
+    /// `None` keeps participant capability disabled even when the adapter owns a
+    /// durable store for unrelated channel traffic. The returned token is
+    /// server-sealed and atomically carries declared semantics plus durability,
+    /// making a handler-without-store activation impossible by construction.
+    fn participant_service(&self) -> Option<InstalledParticipantService> {
+        None
+    }
+
     /// Delegates a publish request to the liminal library.
     ///
     /// `idempotency_key`, when `Some`, drives dedup-on-delivery: a re-publish with
@@ -243,6 +254,9 @@ pub struct LiminalConnectionServices {
     channels: HashMap<String, ConfiguredChannel>,
     cluster: ChannelCluster,
     durable_store: Arc<dyn DurableStore>,
+    /// Complete participant service, installed only when semantic lifecycle
+    /// handling and its durable aggregate store are both ready.
+    participant_service: Option<InstalledParticipantService>,
     /// In-memory (haematite-backed) dedup cache for dedup-on-delivery. Keyed by
     /// the per-message idempotency key carried on the publish frame; a duplicate
     /// key is suppressed before fan-out so a subscriber receives it at most once.
@@ -366,6 +380,7 @@ impl LiminalConnectionServices {
             channels,
             cluster,
             durable_store,
+            participant_service: None,
             dedup,
             conversation_supervisor,
             responders: Mutex::new(HashMap::new()),
@@ -386,6 +401,7 @@ impl LiminalConnectionServices {
             channels: HashMap::new(),
             cluster: build_channel_cluster(None)?,
             durable_store,
+            participant_service: None,
             dedup,
             conversation_supervisor,
             responders: Mutex::new(HashMap::new()),
@@ -407,6 +423,22 @@ impl LiminalConnectionServices {
     #[must_use]
     pub fn durable_store(&self) -> Arc<dyn DurableStore> {
         Arc::clone(&self.durable_store)
+    }
+
+    /// Installs a complete participant bundle in full-service supervisor tests.
+    ///
+    /// Production full services intentionally stay disabled until a concrete
+    /// lifecycle handler exists. This consuming test builder exercises the real
+    /// supervisor activation path without allowing an already-shared adapter to
+    /// change capability posture.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn with_participant_service(
+        mut self,
+        participant_service: InstalledParticipantService,
+    ) -> Self {
+        self.participant_service = Some(participant_service);
+        self
     }
 
     /// Returns the conversation supervisor backing supervised conversations.
@@ -888,6 +920,10 @@ fn open_or_create_database(data_dir: &Path) -> Result<Database, ServerError> {
 }
 
 impl ConnectionServices for LiminalConnectionServices {
+    fn participant_service(&self) -> Option<InstalledParticipantService> {
+        self.participant_service.clone()
+    }
+
     fn publish(
         &self,
         channel: &str,
