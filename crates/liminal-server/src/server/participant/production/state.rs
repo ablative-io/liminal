@@ -231,6 +231,24 @@ impl ConversationAuthority {
         Ok((order, seq))
     }
 
+    /// Allocates one supersession handoff position: a single transaction
+    /// major shared by the `Detached(Superseded)` terminal and the `Attached`
+    /// record, with the terminal's delivery sequence immediately before the
+    /// record's (the crate's lifecycle-order law for the ordered handoff).
+    pub(super) fn allocate_supersession_position(
+        &mut self,
+    ) -> Result<(TransactionOrder, DeliverySeq, DeliverySeq), StateError> {
+        let (order, terminal_seq) = self.allocate_position()?;
+        let attached_seq = self.next_seq;
+        self.next_seq = self
+            .next_seq
+            .checked_add(1)
+            .ok_or(StateError::AllocationExhausted {
+                domain: "delivery sequence",
+            })?;
+        Ok((order, terminal_seq, attached_seq))
+    }
+
     /// Ensures durable shell genesis, appending event zero on first touch.
     ///
     /// Idempotent: an already genesis-validated shell returns immediately.

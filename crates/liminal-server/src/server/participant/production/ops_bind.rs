@@ -14,20 +14,21 @@
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AllocatedParticipantSlot, AttachCommitParameters,
     AttachSecretProof, AttachedRecordPosition, BindingSlotDecision, BindingSlotOccupancy,
-    BindingState, ClosureState, CredentialAttachLiveReceipt, CredentialAttachLookupResult,
-    CredentialAttachProvenance, CredentialAttachTokenPhase, DetachCell, EnrollmentCommitParameters,
-    EnrollmentFingerprint, EnrollmentLiveReceipt, EnrollmentLookupResult, EnrollmentTokenPhase,
-    ParticipantSlotAllocatorProof, PresentedIdentity, ReceiptDeadlines, ResolvedIdentity,
-    commit_attach, commit_enrollment, decide_attached_operation, decide_enrolled_operation,
-    lookup_credential_attach, lookup_enrollment, select_credential_attach_binding_slot,
-    select_enrollment_binding_slot,
+    BindingState, ClosureState, CommittedBindingTerminalPosition, CredentialAttachLiveReceipt,
+    CredentialAttachLookupResult, CredentialAttachProvenance, CredentialAttachTokenPhase,
+    DetachCell, EnrollmentCommitParameters, EnrollmentFingerprint, EnrollmentLiveReceipt,
+    EnrollmentLookupResult, EnrollmentTokenPhase, MarkerProofDecision, MarkerProofInput,
+    MarkerProofState, ParticipantSlotAllocatorProof, PresentedIdentity, ReceiptDeadlines,
+    ResolvedIdentity, commit_attach, commit_enrollment, decide_attached_operation,
+    decide_enrolled_operation, lookup_credential_attach, lookup_enrollment,
+    select_credential_attach_binding_slot, select_enrollment_binding_slot, select_marker_proof,
 };
 use liminal_protocol::wire::{
     AttachBound, AttachEnvelope, AttachSecret,
     AttemptTokenBodyConflict as WireAttemptTokenBodyConflict, BindingEpoch, ConnectionIncarnation,
     CredentialAttachRequest, CredentialAttachResponse, EnrollBound, EnrollmentRequest,
-    EnrollmentResponse, Generation, ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason,
-    ServerValue,
+    EnrollmentResponse, Generation, MarkerMismatch, MarkerNotDelivered, MarkerProofRequest,
+    ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason, ServerValue,
 };
 
 use super::facts::{self, Digest};
@@ -292,6 +293,26 @@ impl ConversationAuthority {
         ) {
             return Ok(response.into_server_value());
         }
+        // A marker-bearing attach is a fenced-recovery presentation: classify
+        // it through the crate's total marker-proof selector against the
+        // factual (empty) delivery state — a typed refusal, never a
+        // connection-fatal invariant.
+        if request.accept_marker_delivery_seq.is_some() {
+            return marker_bearing_attach_refusal(request, slot, operation_facts);
+        }
+        // Attach mode from binding authority (contract R-C1.3): a bound slot
+        // for the SAME participant supersedes — one ordered
+        // Detached(Superseded)/Attached handoff, even on this connection
+        // incarnation; a detached slot binds ordinarily.
+        let superseding = match &slot.binding {
+            BindingState::Detached => false,
+            BindingState::Bound(_) => true,
+            BindingState::PendingFinalization(_) => {
+                return Err(StateError::invariant(
+                    "pending finalization observed in a binding that commits detaches immediately",
+                ));
+            }
+        };
 
         let deadlines = operation_facts.deadlines()?;
         // The rotation result: the new binding epoch carries the successor of
@@ -304,7 +325,13 @@ impl ConversationAuthority {
             .ok_or(StateError::AllocationExhausted {
                 domain: "capability generation",
             })?;
-        let (attached_order, attached_seq) = self.allocate_position()?;
+        let (attached_order, superseded_terminal_seq, attached_seq) = if superseding {
+            let (order, terminal_seq, attached_seq) = self.allocate_supersession_position()?;
+            (order, Some(terminal_seq), attached_seq)
+        } else {
+            let (order, seq) = self.allocate_position()?;
+            (order, None, seq)
+        };
         let allocation = StoredAttachAllocation {
             binding_epoch: BindingEpoch::new(
                 operation_facts.receiving_incarnation,
@@ -317,6 +344,7 @@ impl ConversationAuthority {
             receipt_expires_at: deadlines.receipt_expires_at().into(),
             provenance_expires_at: deadlines.provenance_expires_at().into(),
             admitted_now_ms: operation_facts.now_ms,
+            superseded_terminal_seq,
         };
         let outcome = self.attach_commit(request, &allocation, CommitMode::Live(appender))?;
         Ok(CredentialAttachResponse::attach_bound(outcome).into_server_value())
@@ -342,7 +370,14 @@ impl ConversationAuthority {
         Ok(())
     }
 
-    /// Shared ordinary detached-attach commit core (live and replay paths).
+    /// Shared credential-attach commit core (live and replay paths).
+    ///
+    /// The mode is derived from the slot's binding authority paired with the
+    /// stored allocation: a detached slot with no terminal allocation binds
+    /// ordinarily; a bound slot with a terminal allocation supersedes its
+    /// active epoch atomically (one ordered `Detached(Superseded)`/`Attached`
+    /// handoff through the crate's verified transition). Any other pairing is
+    /// a drifted log and fails loudly.
     fn attach_commit(
         &mut self,
         request: &CredentialAttachRequest,
@@ -357,38 +392,22 @@ impl ConversationAuthority {
             })?;
         let binding_epoch = allocation.binding_epoch.to_epoch()?;
         let result_generation = binding_epoch.capability_generation;
-        let closure_admission = ClosureState::Clear
-            .ordinary_detached_attach_admission()
-            .map_err(|error| {
-                StateError::invariant(format!(
-                    "clear closure refused detached attach admission: {error:?}"
-                ))
-            })?;
-        let verified = slot
-            .member
-            .verify_detached_attach(
-                slot.binding,
-                closure_admission,
-                request.clone(),
-                AttachSecretProof::Verified,
-                AttachCommitParameters {
-                    binding: liminal_protocol::lifecycle::ActiveBinding {
-                        participant_id: request.participant_id,
-                        conversation_id: request.conversation_id,
-                        binding_epoch,
-                    },
-                    attach_secret: AttachSecret::new(allocation.attach_secret),
-                    attached_position: AttachedRecordPosition::new(
-                        allocation.attached_order,
-                        allocation.attached_seq,
-                    ),
-                    receipt_expires_at: allocation.receipt_expires_at.get(),
-                    provenance_expires_at: allocation.provenance_expires_at.get(),
-                },
-            )
-            .map_err(|error| {
-                StateError::invariant(format!("protocol attach verification failed: {error:?}"))
-            })?;
+        let parameters = AttachCommitParameters {
+            binding: liminal_protocol::lifecycle::ActiveBinding {
+                participant_id: request.participant_id,
+                conversation_id: request.conversation_id,
+                binding_epoch,
+            },
+            attach_secret: AttachSecret::new(allocation.attach_secret),
+            attached_position: AttachedRecordPosition::new(
+                allocation.attached_order,
+                allocation.attached_seq,
+            ),
+            receipt_expires_at: allocation.receipt_expires_at.get(),
+            provenance_expires_at: allocation.provenance_expires_at.get(),
+        };
+        let verified =
+            verify_attach_mode(slot.member, slot.binding, request, allocation, parameters)?;
         let committed = commit_attach(verified, slot.cell).map_err(|error| {
             StateError::invariant(format!("protocol attach transition failed: {error:?}"))
         })?;
@@ -575,6 +594,111 @@ impl Slot {
             };
         (token_phase, secret_proof)
     }
+}
+
+/// Verifies one attach transition in its allocation-derived mode.
+///
+/// A detached slot with no terminal allocation binds ordinarily; a bound
+/// slot with a terminal allocation supersedes its active epoch (contract
+/// R-C1.3's ordered handoff). Any other pairing is a drifted log and fails
+/// loudly.
+fn verify_attach_mode(
+    member: liminal_protocol::lifecycle::LiveMember<Digest>,
+    binding: BindingState,
+    request: &CredentialAttachRequest,
+    allocation: &StoredAttachAllocation,
+    parameters: AttachCommitParameters,
+) -> Result<liminal_protocol::lifecycle::VerifiedAttachCommit<'static, Digest>, StateError> {
+    match (binding, allocation.superseded_terminal_seq) {
+        (BindingState::Detached, None) => {
+            let closure_admission = ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .map_err(|error| {
+                    StateError::invariant(format!(
+                        "clear closure refused detached attach admission: {error:?}"
+                    ))
+                })?;
+            member.verify_detached_attach(
+                BindingState::Detached,
+                closure_admission,
+                request.clone(),
+                AttachSecretProof::Verified,
+                parameters,
+            )
+        }
+        (BindingState::Bound(active), Some(terminal_seq)) => member.verify_superseding_attach(
+            active,
+            request.clone(),
+            AttachSecretProof::Verified,
+            CommittedBindingTerminalPosition::new(allocation.attached_order, terminal_seq),
+            parameters,
+        ),
+        (_, _) => {
+            return Err(StateError::invariant(
+                "attach allocation mode does not match the slot's binding authority",
+            ));
+        }
+    }
+    .map_err(|error| {
+        StateError::invariant(format!("protocol attach verification failed: {error:?}"))
+    })
+}
+
+/// Classifies a marker-bearing (fenced-recovery) attach through the crate's
+/// total marker-proof selector against the factual delivery state.
+///
+/// This binding delivers no markers yet (no delivery pump exists for
+/// participant records), so the durable marker facts are empty: no expected
+/// marker, no delivery witness. The crate selects the exact typed refusal; a
+/// permitted fenced attach is unreachable until delivery exists, and
+/// observing one is a loud invariant failure — never a silently hand-built
+/// outcome.
+fn marker_bearing_attach_refusal(
+    request: &CredentialAttachRequest,
+    slot: &Slot,
+    operation_facts: &OperationFacts,
+) -> Result<ServerValue, StateError> {
+    let Some(input) = MarkerProofInput::credential_attach(request) else {
+        return Err(StateError::invariant(
+            "marker-bearing attach classification without a presented marker",
+        ));
+    };
+    let proof_epoch = BindingEpoch::new(
+        operation_facts.receiving_incarnation,
+        request.capability_generation,
+    );
+    let marker_state = MarkerProofState::new(slot.member.cursor(), false, None, proof_epoch, None);
+    let response = match select_marker_proof(&marker_state, input) {
+        MarkerProofDecision::MarkerMismatch(MarkerMismatch {
+            request: MarkerProofRequest::CredentialAttach(proof),
+            mismatch,
+        }) => CredentialAttachResponse::marker_mismatch(proof, mismatch),
+        MarkerProofDecision::MarkerNotDelivered(MarkerNotDelivered {
+            request: MarkerProofRequest::CredentialAttach(proof),
+            reason,
+            expected_marker_delivery_seq,
+        }) => CredentialAttachResponse::marker_not_delivered(
+            proof,
+            reason,
+            expected_marker_delivery_seq,
+        ),
+        MarkerProofDecision::MarkerMismatch(_) | MarkerProofDecision::MarkerNotDelivered(_) => {
+            return Err(StateError::invariant(
+                "attach marker proof classified under a foreign operation envelope",
+            ));
+        }
+        MarkerProofDecision::AckNoOp(_) => {
+            return Err(StateError::invariant(
+                "attach marker proof classified as a marker-ack no-op",
+            ));
+        }
+        MarkerProofDecision::Permit(_) => {
+            return Err(StateError::invariant(
+                "marker proof permitted although no marker was ever delivered",
+            ));
+        }
+    };
+    Ok(response.into_server_value())
 }
 
 /// Maps a non-authorized credential-attach lookup onto its bound response.

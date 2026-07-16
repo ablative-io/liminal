@@ -288,6 +288,11 @@ pub(super) struct StoredAttachAllocation {
     /// the replaced receipt's exact terminal reason (`Superseded` vs
     /// `Deadline`) from this stored fact, never from replay-time clocks.
     pub(super) admitted_now_ms: u64,
+    /// `Some` exactly when this attach superseded an active binding: the
+    /// delivery sequence assigned to the `Detached(Superseded)` terminal of
+    /// the ordered handoff (sharing `attached_order` as its transaction
+    /// major). `None` for an ordinary detached attach.
+    pub(super) superseded_terminal_seq: Option<DeliverySeq>,
 }
 
 /// Stored detach request fields.
