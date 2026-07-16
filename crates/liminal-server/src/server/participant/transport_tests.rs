@@ -1,7 +1,7 @@
 use liminal::protocol::{Frame, decode as decode_generic, encode as encode_generic, encoded_len};
 use liminal_protocol::wire::{
-    ClientRequest, EnrollmentRequest, EnrollmentToken, FRAME_MAX, ParticipantFrame,
-    ReceiverDirection, ServerValue, TransportRejectionReason, decode, encode,
+    ClientRequest, EnrollmentRequest, EnrollmentToken, FRAME_MAX, PARTICIPANT_FRAME_TYPE,
+    ParticipantFrame, ReceiverDirection, ServerValue, TransportRejectionReason, decode, encode,
     encoded_len as participant_encoded_len,
 };
 
@@ -139,7 +139,7 @@ fn unrelated_unknown_frame_remains_outside_participant_protocol() {
 fn negotiated_limit_rejects_from_header_before_body_arrives() -> Result<(), String> {
     let session = negotiated_session(128)?;
     let declared_payload = 119_u32;
-    let mut header = vec![0x1A, 0, 0, 0, 0, 0];
+    let mut header = vec![PARTICIPANT_FRAME_TYPE, 0, 0, 0, 0, 0];
     header.extend_from_slice(&declared_payload.to_be_bytes());
 
     let Some(rejection) = preflight_generic_bytes(&header, true, session) else {
@@ -158,7 +158,7 @@ fn negotiated_limit_rejects_from_header_before_body_arrives() -> Result<(), Stri
 #[test]
 fn incomplete_frame_within_limit_remains_in_incremental_decoder() -> Result<(), String> {
     let session = negotiated_session(256)?;
-    let mut header = vec![0x1A, 0, 0, 0, 0, 0];
+    let mut header = vec![PARTICIPANT_FRAME_TYPE, 0, 0, 0, 0, 0];
     header.extend_from_slice(&128_u32.to_be_bytes());
 
     assert_eq!(preflight_generic_bytes(&header, true, session), None);
