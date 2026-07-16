@@ -9,13 +9,17 @@
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
+    algebra::ResourceVector,
     outcome::{CandidatePhase, ClaimCounter, ParticipantStateCorruptReason},
     wire::{BindingEpoch, ConversationId, DeliverySeq, ParticipantId, TransactionOrder},
 };
 
 use super::{
-    BindingOrigin, BindingState, LiveMember, OrderClaims, OrderHigh, OrderLedger,
-    PendingFinalization, PreparedLeaveAuthority, RecoverySequenceReserve, SequenceLedger,
+    AttachedLifecycleRecord, BindingOrigin, BindingState, ClosureAccounting, ClosureState,
+    InitialEnrollmentClosureProjection, InitialEnrollmentOperationCommit, LiveMember,
+    ObserverProjection, OrderClaims, OrderHigh, OrderLedger, PendingFinalization,
+    PreparedLeaveAuthority, RecoveryQuartetStatus, RecoverySequenceReserve, SequenceLedger,
+    StoredEdge,
     operations::ordinary_record_projection::{
         OrdinaryFixedPointPlan, OrdinaryProjectionError, OrdinaryProjectionFacts,
         OrdinaryProjectionKernelDecision, OrdinaryRecordDrainFirst,
@@ -1306,6 +1310,112 @@ pub struct ClaimFrontiers {
     order: OrderClaimFrontier,
 }
 
+/// Atomic protocol-owned initial-enrollment frontier result.
+///
+/// The wrapper owns the typed operation commit together with the exact frontier,
+/// closure accounting, and retained `Attached` charge derived from it. It is not
+/// cloneable and exposes no raw restore components or caller-selected positions.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InitialEnrollmentFrontierCommit<F> {
+    operation: InitialEnrollmentOperationCommit<F>,
+    frontiers: ClaimFrontiers,
+    closure_accounting: ClosureAccounting,
+    attached_charge: ResourceVector,
+}
+
+impl<F> InitialEnrollmentFrontierCommit<F> {
+    /// Borrows the complete admitted enrollment operation.
+    #[must_use]
+    pub const fn operation(&self) -> &InitialEnrollmentOperationCommit<F> {
+        &self.operation
+    }
+
+    /// Borrows the directly constructed coupled claim frontiers.
+    #[must_use]
+    pub const fn frontiers(&self) -> &ClaimFrontiers {
+        &self.frontiers
+    }
+
+    /// Returns the exact closure accounting committed with the frontier.
+    #[must_use]
+    pub const fn closure_accounting(&self) -> ClosureAccounting {
+        self.closure_accounting
+    }
+
+    /// Returns the exact encoded charge of the retained `Attached` row.
+    #[must_use]
+    pub const fn attached_charge(&self) -> ResourceVector {
+        self.attached_charge
+    }
+
+    /// Consumes the atomic result for the crate-owned conversation event layer.
+    #[allow(
+        dead_code,
+        reason = "the next conversation event body consumes this sealed operation/frontier unit"
+    )]
+    pub(in crate::lifecycle) fn into_conversation_parts(
+        self,
+    ) -> (
+        InitialEnrollmentOperationCommit<F>,
+        ClaimFrontiers,
+        ClosureAccounting,
+        ResourceVector,
+    ) {
+        (
+            self.operation,
+            self.frontiers,
+            self.closure_accounting,
+            self.attached_charge,
+        )
+    }
+}
+
+/// An admitted initial enrollment disagreed with its typed frontier projection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitialEnrollmentFrontierError {
+    /// Supplied encoded `Attached` charge differs from the admitted projection.
+    AttachedChargeMismatch {
+        /// Charge fixed by the admitted closure projection.
+        expected: ResourceVector,
+        /// Charge supplied for the exact encoded `Attached` row.
+        actual: ResourceVector,
+    },
+    /// Membership, binding, and `Attached` facts do not describe participant zero.
+    EnrollmentShape,
+    /// Operation record positions and aggregate ledgers disagree.
+    LedgerShape,
+    /// Floor, observer, marker, recovery, or closure facts disagree.
+    ClosureProjection,
+    /// Deriving exact direct/product positions overflowed their fixed-width domain.
+    PositionOverflow,
+    /// The directly constructed sequence and order owners failed cross-validation.
+    FrontierInvariant,
+}
+
+/// Failed initial-frontier derivation retaining the speculative operation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InitialEnrollmentFrontierFailure<F> {
+    operation: InitialEnrollmentOperationCommit<F>,
+    error: InitialEnrollmentFrontierError,
+}
+
+impl<F> InitialEnrollmentFrontierFailure<F> {
+    /// Returns the exact derivation fault.
+    #[must_use]
+    pub const fn error(&self) -> InitialEnrollmentFrontierError {
+        self.error
+    }
+
+    /// Recovers the speculative operation for the crate-owned conversation layer.
+    #[allow(
+        dead_code,
+        reason = "the conversation decision layer recovers or terminalizes the speculative enrollment"
+    )]
+    pub(in crate::lifecycle) fn into_operation(self) -> InitialEnrollmentOperationCommit<F> {
+        self.operation
+    }
+}
+
 /// Failure to consume the exact order authority for a Leave transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrepareLeaveAuthorityError {
@@ -1477,7 +1587,298 @@ impl ValidatedMarkerCandidate {
     }
 }
 
+#[derive(Clone, Copy)]
+struct InitialEnrollmentFrontierShape {
+    conversation_id: ConversationId,
+    binding_epoch: BindingEpoch,
+    identity_slot_limit: u64,
+    retained_floor: u128,
+    attached: AttachedLifecycleRecord,
+    order_ledger: OrderLedger,
+    sequence_ledger: SequenceLedger,
+    closure_accounting: ClosureAccounting,
+}
+
+#[derive(Clone, Copy)]
+struct InitialFrontierPositions {
+    terminal_sequence: DeliverySeq,
+    exit_sequence: DeliverySeq,
+    product_sequence: DeliverySeq,
+    active_terminal_order: TransactionOrder,
+    exit_order: TransactionOrder,
+}
+
+fn initial_enrollment_frontier_shape<F>(
+    operation: &InitialEnrollmentOperationCommit<F>,
+    attached_charge: ResourceVector,
+) -> Result<InitialEnrollmentFrontierShape, InitialEnrollmentFrontierError> {
+    let projection = operation.closure_projection();
+    let expected_charge = projection.resulting_retained_charge();
+    if attached_charge != expected_charge {
+        return Err(InitialEnrollmentFrontierError::AttachedChargeMismatch {
+            expected: expected_charge,
+            actual: attached_charge,
+        });
+    }
+    let enrollment = operation.enrollment();
+    let attached = enrollment.attached;
+    let BindingState::Bound(binding) = enrollment.binding_state else {
+        return Err(InitialEnrollmentFrontierError::EnrollmentShape);
+    };
+    if enrollment.member.participant_id() != 0
+        || enrollment.member.cursor() != 0
+        || binding.participant_id != 0
+        || attached.participant_id() != 0
+        || binding.conversation_id != enrollment.member.conversation_id()
+        || attached.conversation_id() != binding.conversation_id
+        || attached.binding_epoch() != binding.binding_epoch
+        || projection.participant_index() != 0
+        || projection.binding_epoch() != binding.binding_epoch
+        || projection.identity_slots() == 0
+    {
+        return Err(InitialEnrollmentFrontierError::EnrollmentShape);
+    }
+    let admission_order = attached.admission_order();
+    let order_ledger = operation.order().resulting();
+    let sequence_ledger = operation.sequence().resulting();
+    let order_claims = order_ledger.claims();
+    let sequence_claims = sequence_ledger.claims();
+    if operation.order().major() != admission_order.transaction_order()
+        || !matches!(order_ledger.high(), OrderHigh::Allocated(value) if value == admission_order.transaction_order())
+        || order_claims.active_binding_terminals() != 1
+        || order_claims.membership_exits() != 1
+        || order_claims.recovery_operation()
+        || order_claims.recovery_replacement_terminal()
+        || sequence_ledger.high_watermark() != attached.delivery_seq()
+        || sequence_claims.live_members() != 1
+        || sequence_claims.binding_terminals() != 1
+        || sequence_claims.markers() != 0
+        || sequence_claims.recovery() != RecoverySequenceReserve::None
+        || admission_order.candidate_phase() != CandidatePhase::AttachLifecycle
+    {
+        return Err(InitialEnrollmentFrontierError::LedgerShape);
+    }
+    Ok(InitialEnrollmentFrontierShape {
+        conversation_id: binding.conversation_id,
+        binding_epoch: binding.binding_epoch,
+        identity_slot_limit: projection.identity_slots(),
+        retained_floor: projection.resulting_floor(),
+        attached,
+        order_ledger,
+        sequence_ledger,
+        closure_accounting: validate_initial_enrollment_closure(operation, projection, attached)?,
+    })
+}
+
+fn validate_initial_enrollment_closure<F>(
+    operation: &InitialEnrollmentOperationCommit<F>,
+    projection: &InitialEnrollmentClosureProjection,
+    attached: AttachedLifecycleRecord,
+) -> Result<ClosureAccounting, InitialEnrollmentFrontierError> {
+    let accounting = projection.resulting_closure_accounting();
+    let state_matches = match accounting.state() {
+        ClosureState::Clear => {
+            projection.debt().is_zero()
+                && projection.remaining_recovery_claim() == ResourceVector::default()
+        }
+        ClosureState::Owed {
+            debt,
+            edge: StoredEdge::ObserverProjection(observer),
+        } => {
+            debt.value() == projection.debt()
+                && observer == ObserverProjection::new(attached.delivery_seq())
+                && projection.remaining_recovery_claim() == accounting.edge_k_remaining()
+        }
+        ClosureState::Owed { .. } => false,
+    };
+    if projection.resulting_floor() != 1
+        || projection.resulting_floor() != operation.observer_floor().cap_floor()
+        || operation.observer_floor().observer_progress() != 0
+        || projection.recovery_quartet() != RecoveryQuartetStatus::None
+        || !projection.new_marker_candidates().is_empty()
+        || accounting.marker_capacity_credits() != 0
+        || accounting.marker_anchors() != 0
+        || accounting.edge_sequence_claims() != 0
+        || accounting.edge_order_position_claims() != 0
+        || accounting.baseline() != projection.resulting_baseline()
+        || !state_matches
+    {
+        Err(InitialEnrollmentFrontierError::ClosureProjection)
+    } else {
+        Ok(accounting)
+    }
+}
+
+fn initial_frontier_positions(
+    attached: AttachedLifecycleRecord,
+) -> Result<InitialFrontierPositions, InitialEnrollmentFrontierError> {
+    let terminal_sequence = attached
+        .delivery_seq()
+        .checked_add(1)
+        .ok_or(InitialEnrollmentFrontierError::PositionOverflow)?;
+    let exit_sequence = terminal_sequence
+        .checked_add(1)
+        .ok_or(InitialEnrollmentFrontierError::PositionOverflow)?;
+    let product_sequence = exit_sequence
+        .checked_add(1)
+        .ok_or(InitialEnrollmentFrontierError::PositionOverflow)?;
+    let active_terminal_order = attached
+        .admission_order()
+        .transaction_order()
+        .checked_add(1)
+        .ok_or(InitialEnrollmentFrontierError::PositionOverflow)?;
+    let exit_order = active_terminal_order
+        .checked_add(1)
+        .ok_or(InitialEnrollmentFrontierError::PositionOverflow)?;
+    Ok(InitialFrontierPositions {
+        terminal_sequence,
+        exit_sequence,
+        product_sequence,
+        active_terminal_order,
+        exit_order,
+    })
+}
+
+fn initial_sequence_frontier(
+    shape: &InitialEnrollmentFrontierShape,
+    positions: InitialFrontierPositions,
+    terminal: BindingTerminalOwner,
+) -> SequenceClaimFrontier {
+    SequenceClaimFrontier {
+        ledger: shape.sequence_ledger,
+        movable_claims: alloc::vec![
+            MovableSequenceClaim {
+                delivery_seq: positions.terminal_sequence,
+                owner: SequenceDirectOwner::BindingTerminal(terminal),
+            },
+            MovableSequenceClaim {
+                delivery_seq: positions.exit_sequence,
+                owner: SequenceDirectOwner::MembershipExit {
+                    participant_index: 0,
+                },
+            },
+        ],
+        immutable_candidates: Vec::new(),
+        products: SequenceProductRanges {
+            live_times_terminal: alloc::vec![TerminalProductRange {
+                start: positions.product_sequence,
+                length: 1,
+                terminal,
+            }],
+            live_times_replacement_terminal: None,
+            other_live_times_exit: Vec::new(),
+        },
+        recovery: None,
+    }
+}
+
+fn initial_order_frontier(
+    shape: &InitialEnrollmentFrontierShape,
+    positions: InitialFrontierPositions,
+    terminal: BindingTerminalOwner,
+) -> OrderClaimFrontier {
+    OrderClaimFrontier {
+        ledger: shape.order_ledger,
+        movable_claims: alloc::vec![
+            MovableOrderClaim {
+                transaction_order: positions.active_terminal_order,
+                owner: OrderDirectOwner::ActiveBindingTerminal(terminal),
+            },
+            MovableOrderClaim {
+                transaction_order: positions.exit_order,
+                owner: OrderDirectOwner::MembershipExit {
+                    participant_index: 0,
+                },
+            },
+        ],
+        immutable_candidates: Vec::new(),
+        recovery: None,
+    }
+}
+
+fn build_initial_enrollment_frontiers(
+    shape: &InitialEnrollmentFrontierShape,
+) -> Result<ClaimFrontiers, InitialEnrollmentFrontierError> {
+    let positions = initial_frontier_positions(shape.attached)?;
+    let terminal = BindingTerminalOwner {
+        participant_index: 0,
+        binding_epoch: shape.binding_epoch,
+    };
+    let sequence = initial_sequence_frontier(shape, positions, terminal);
+    let order = initial_order_frontier(shape, positions, terminal);
+    validate_cross_counter(&sequence, &order)
+        .map_err(|_| InitialEnrollmentFrontierError::FrontierInvariant)?;
+    Ok(ClaimFrontiers {
+        conversation_id: shape.conversation_id,
+        active_identities: ActiveIdentityRanks {
+            participants: alloc::vec![FrontierParticipant::new(
+                0,
+                0,
+                FrontierBinding::Bound(shape.binding_epoch),
+            )],
+        },
+        identity_slot_limit: shape.identity_slot_limit,
+        retained_floor: shape.retained_floor,
+        retained_records: alloc::vec![RetainedCausalRecord {
+            delivery_seq: shape.attached.delivery_seq(),
+            admission_order: shape.attached.admission_order(),
+            kind: RetainedCausalRecordKind::AttachLifecycle {
+                participant_index: 0,
+                binding_epoch: shape.binding_epoch,
+            },
+        }],
+        marker_records: Vec::new(),
+        sequence,
+        order,
+    })
+}
+
 impl ClaimFrontiers {
+    /// Constructs the complete initial frontier directly from one admitted
+    /// enrollment operation and its exact encoded `Attached` charge.
+    ///
+    /// No restore representation, row list, claim list, or numeric position is
+    /// accepted from the caller. Participant zero, the retained lifecycle row,
+    /// `A`/`X`, `T`/`E`, and `L x T` owners are derived solely from the opaque
+    /// operation commit after its closure projection and aggregate ledgers are
+    /// cross-checked.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InitialEnrollmentFrontierError`] when the supplied charge or
+    /// any typed operation/projection invariant disagrees with the canonical
+    /// initial frontier.
+    pub fn from_initial_enrollment<F>(
+        operation: InitialEnrollmentOperationCommit<F>,
+        attached_charge: ResourceVector,
+    ) -> Result<InitialEnrollmentFrontierCommit<F>, Box<InitialEnrollmentFrontierFailure<F>>> {
+        let shape = match initial_enrollment_frontier_shape(&operation, attached_charge) {
+            Ok(shape) => shape,
+            Err(error) => {
+                return Err(Box::new(InitialEnrollmentFrontierFailure {
+                    operation,
+                    error,
+                }));
+            }
+        };
+        let closure_accounting = shape.closure_accounting;
+        let frontiers = match build_initial_enrollment_frontiers(&shape) {
+            Ok(frontiers) => frontiers,
+            Err(error) => {
+                return Err(Box::new(InitialEnrollmentFrontierFailure {
+                    operation,
+                    error,
+                }));
+            }
+        };
+        Ok(InitialEnrollmentFrontierCommit {
+            operation,
+            frontiers,
+            closure_accounting,
+            attached_charge,
+        })
+    }
+
     /// Restores exact frontiers only when their numeric unions, logical owners,
     /// product descriptors, DCR intervals, candidate keys, and aggregate ledgers
     /// all agree.

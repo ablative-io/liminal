@@ -3,15 +3,25 @@
 use alloc::{vec, vec::Vec};
 
 use crate::{
-    algebra::WideResourceVector,
+    algebra::{ResourceVector, WideResourceVector},
     outcome::{CandidatePhase, ClaimCounter, ParticipantStateCorruptReason},
-    wire::{BindingEpoch, CloseCause, ConnectionIncarnation, Generation},
+    wire::{
+        AttachSecret, BindingEpoch, CloseCause, ConnectionIncarnation, EnrollmentRequest,
+        EnrollmentToken, Generation,
+    },
 };
 
 use super::{
-    ActiveBinding, AdmissionOrder, ClosureDebt, ClosureState, CursorFateSuccessor, Event,
-    OrderClaims, OrderHigh, OrderLedger, PhysicalCompaction, RecoverySequenceReserve,
-    SequenceClaims, SequenceLedger, StoredEdge,
+    ActiveBinding, AdmissionOrder, AllocatedParticipantSlot, BindingSlotOccupancy, BindingState,
+    CapacityCounter, ClosureAccounting, ClosureDebt, ClosureState, ConnectionConversationTracking,
+    CursorFateSuccessor, EnrollmentCapacityCounters, EnrollmentFingerprint, EnrollmentTokenPhase,
+    Event, FreshParticipantCapacityCounter, InitialEnrollmentClosureInput,
+    InitialEnrollmentCommitValues, InitialEnrollmentFrontierError,
+    InitialEnrollmentOperationCommit, InitialEnrollmentOperationDecision,
+    InitialEnrollmentOperationInput, OrderClaims, OrderHigh, OrderLedger,
+    ParticipantSlotAllocationError, ParticipantSlotAllocatorProof, PhysicalCompaction,
+    ReceiptDeadlines, RecoverySequenceReserve, SequenceClaims, SequenceLedger, StoredEdge,
+    apply_initial_enrollment,
     claim_frontier::{
         BindingTerminalOwner, ClaimFrontierCounter, ClaimFrontierInvalidReason, ClaimFrontiers,
         ClaimFrontiersRestore, ExitProductRangeRestore, FrontierBinding, FrontierParticipant,
@@ -1171,4 +1181,262 @@ fn marker_drain_core_consumes_m_and_tuple_without_advancing_allocated_high() {
     assert!(frontiers.order().immutable_candidates().is_empty());
     assert_eq!(frontiers.order().ledger().high(), OrderHigh::Allocated(0));
     assert_eq!(frontiers.retained_marker_records().len(), 1);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InitialFrontierAllocationProof;
+
+impl ParticipantSlotAllocatorProof for InitialFrontierAllocationProof {
+    fn conversation_id(&self) -> u64 {
+        25
+    }
+
+    fn participant_index(&self) -> u64 {
+        0
+    }
+
+    fn identity_limit(&self) -> u64 {
+        1
+    }
+}
+
+fn initial_frontier_counter(limit: u64, occupied: u64) -> CapacityCounter {
+    CapacityCounter::try_new(limit, occupied).expect("initial fixture counter is bounded")
+}
+
+fn initial_frontier_fresh_counter(limit: u64) -> FreshParticipantCapacityCounter {
+    FreshParticipantCapacityCounter::try_new(limit, 0)
+        .expect("initial fixture participant owns no rows")
+}
+
+fn initial_frontier_capacity() -> EnrollmentCapacityCounters {
+    EnrollmentCapacityCounters::new(
+        initial_frontier_counter(4, 0),
+        initial_frontier_counter(4, 0),
+        initial_frontier_counter(4, 0),
+        initial_frontier_fresh_counter(4),
+        initial_frontier_counter(4, 0),
+        initial_frontier_counter(4, 0),
+        initial_frontier_fresh_counter(4),
+    )
+}
+
+fn initial_frontier_closure(cap: ResourceVector) -> InitialEnrollmentClosureInput {
+    let accounting = ClosureAccounting::try_new(
+        ClosureState::Clear,
+        0,
+        0,
+        0,
+        0,
+        ResourceVector::default(),
+        WideResourceVector::new(1, 4),
+        cap,
+        0,
+        2,
+    )
+    .expect("initial closure accounting is canonical");
+    InitialEnrollmentClosureInput::new(
+        accounting,
+        1,
+        ResourceVector::new(2, 8),
+        ResourceVector::new(2, 8),
+        ResourceVector::new(1, 4),
+        ResourceVector::new(1, 4),
+        0,
+        epoch(1, 9),
+        OrderLedger::try_new(OrderHigh::Empty, OrderClaims::default())
+            .expect("initial order ledger is empty"),
+        SequenceLedger::try_new(0, SequenceClaims::default())
+            .expect("initial sequence ledger is empty"),
+        1,
+        0,
+    )
+}
+
+fn initial_enrollment_operation(cap: ResourceVector) -> InitialEnrollmentOperationCommit<Vec<u8>> {
+    let request = EnrollmentRequest {
+        conversation_id: 25,
+        enrollment_token: EnrollmentToken::new([0x25; 16]),
+    };
+    let binding = BindingState::Detached;
+    let input: InitialEnrollmentOperationInput<'_, Vec<u8>, u64, Vec<u8>> =
+        InitialEnrollmentOperationInput::new(
+            &request,
+            EnrollmentTokenPhase::Unmapped,
+            &binding,
+            ConnectionConversationTracking::Untracked,
+            initial_frontier_counter(4, 0),
+            BindingSlotOccupancy::Empty,
+            initial_frontier_capacity(),
+            initial_frontier_closure(cap),
+        );
+    let decision = apply_initial_enrollment(
+        &input,
+        || {
+            InitialEnrollmentCommitValues::new(
+                AttachSecret::new([0xA5; 32]),
+                ReceiptDeadlines::try_from_ttls(0, 1_000, 2_000)
+                    .expect("fixture deadlines are ordered"),
+                EnrollmentFingerprint::new(vec![2, 5, 2, 5]),
+            )
+        },
+        || -> Result<_, ParticipantSlotAllocationError> {
+            AllocatedParticipantSlot::from_allocator(InitialFrontierAllocationProof)
+        },
+    );
+    let InitialEnrollmentOperationDecision::Commit(commit) = decision else {
+        panic!("canonical initial enrollment must commit");
+    };
+    *commit
+}
+
+fn assert_exact_initial_frontier(commit: &super::InitialEnrollmentFrontierCommit<Vec<u8>>) {
+    let frontiers = commit.frontiers();
+    let binding_epoch = epoch(1, 9);
+    let terminal = BindingTerminalOwner {
+        participant_index: 0,
+        binding_epoch,
+    };
+    assert_eq!(frontiers.conversation_id(), 25);
+    assert_eq!(frontiers.identity_slot_limit(), 1);
+    assert_eq!(frontiers.retained_floor(), 1);
+    assert_eq!(
+        frontiers.active_identities().participants(),
+        &[FrontierParticipant::new(
+            0,
+            0,
+            FrontierBinding::Bound(binding_epoch),
+        )]
+    );
+    assert_eq!(frontiers.retained_records().len(), 1);
+    assert_eq!(
+        frontiers.retained_records()[0],
+        RetainedCausalRecord {
+            delivery_seq: 1,
+            admission_order: AdmissionOrder::new(0, CandidatePhase::AttachLifecycle, 0),
+            kind: RetainedCausalRecordKind::AttachLifecycle {
+                participant_index: 0,
+                binding_epoch,
+            },
+        }
+    );
+    assert!(frontiers.retained_marker_records().is_empty());
+    assert_eq!(
+        frontiers.sequence().movable_claims(),
+        &[
+            MovableSequenceClaim {
+                delivery_seq: 2,
+                owner: SequenceDirectOwner::BindingTerminal(terminal),
+            },
+            MovableSequenceClaim {
+                delivery_seq: 3,
+                owner: SequenceDirectOwner::MembershipExit {
+                    participant_index: 0,
+                },
+            },
+        ]
+    );
+    assert!(frontiers.sequence().immutable_candidates().is_empty());
+    let terminal_products = frontiers.sequence().products().live_times_terminal();
+    assert_eq!(terminal_products.len(), 1);
+    assert_eq!(terminal_products[0].start(), 4);
+    assert_eq!(terminal_products[0].length(), 1);
+    assert_eq!(terminal_products[0].terminal(), terminal);
+    assert!(
+        frontiers
+            .sequence()
+            .products()
+            .other_live_times_exit()
+            .is_empty()
+    );
+    assert_eq!(
+        frontiers.order().movable_claims(),
+        &[
+            MovableOrderClaim {
+                transaction_order: 1,
+                owner: OrderDirectOwner::ActiveBindingTerminal(terminal),
+            },
+            MovableOrderClaim {
+                transaction_order: 2,
+                owner: OrderDirectOwner::MembershipExit {
+                    participant_index: 0,
+                },
+            },
+        ]
+    );
+    assert!(frontiers.order().immutable_candidates().is_empty());
+    assert!(frontiers.cross_counter_valid_for_test());
+}
+
+#[test]
+fn case_25_equality_debt_constructs_exact_initial_frontier() {
+    let committed = ClaimFrontiers::from_initial_enrollment(
+        initial_enrollment_operation(ResourceVector::new(5, 20)),
+        ResourceVector::new(1, 4),
+    )
+    .expect("Case 25 equality-debt frontier is exact");
+    assert_exact_initial_frontier(&committed);
+    assert_eq!(committed.attached_charge(), ResourceVector::new(1, 4));
+    assert_eq!(
+        committed.closure_accounting(),
+        committed
+            .operation()
+            .closure_projection()
+            .resulting_closure_accounting()
+    );
+    assert!(matches!(
+        committed.closure_accounting().state(),
+        ClosureState::Owed {
+            debt,
+            edge: StoredEdge::ObserverProjection(edge),
+        } if debt.value() == WideResourceVector::new(1, 4)
+            && edge == super::ObserverProjection::new(1)
+    ));
+}
+
+#[test]
+fn case_25_clear_headroom_constructs_the_same_exact_claim_owners() {
+    let committed = ClaimFrontiers::from_initial_enrollment(
+        initial_enrollment_operation(ResourceVector::new(6, 24)),
+        ResourceVector::new(1, 4),
+    )
+    .expect("clear initial frontier is exact");
+    assert_exact_initial_frontier(&committed);
+    assert_eq!(committed.closure_accounting().state(), ClosureState::Clear);
+    assert_eq!(
+        committed.closure_accounting().edge_k_remaining(),
+        ResourceVector::default()
+    );
+}
+
+#[test]
+fn initial_frontier_rejects_each_attached_charge_dimension_mismatch() {
+    for actual in [ResourceVector::new(2, 4), ResourceVector::new(1, 5)] {
+        let failure = ClaimFrontiers::from_initial_enrollment(
+            initial_enrollment_operation(ResourceVector::new(5, 20)),
+            actual,
+        )
+        .expect_err("mismatched encoded Attached charge must be rejected");
+        assert_eq!(
+            failure.error(),
+            InitialEnrollmentFrontierError::AttachedChargeMismatch {
+                expected: ResourceVector::new(1, 4),
+                actual,
+            }
+        );
+        let recovered = failure.into_operation();
+        assert_eq!(recovered.enrollment().attached.conversation_id(), 25);
+        assert_eq!(recovered.enrollment().attached.delivery_seq(), 1);
+    }
+}
+
+#[test]
+fn initial_frontier_crash_replay_is_deterministic() {
+    let run = || {
+        ClaimFrontiers::from_initial_enrollment(
+            initial_enrollment_operation(ResourceVector::new(5, 20)),
+            ResourceVector::new(1, 4),
+        )
+    };
+    assert_eq!(run(), run());
 }
