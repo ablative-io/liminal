@@ -68,6 +68,78 @@ impl<V> Default for DetachCell<V> {
     }
 }
 
+#[cfg(test)]
+pub(super) fn restore_pending_detach<V>(
+    token: DetachAttemptToken,
+    participant_id: ParticipantId,
+    request_generation: Generation,
+    request_verifier: V,
+    committed_binding_epoch: BindingEpoch,
+    admission_order: AdmissionOrder,
+    refused_epoch: ObserverEpoch,
+) -> Option<PendingDetach<V>> {
+    if committed_binding_epoch.capability_generation != request_generation
+        || admission_order.participant_index() != participant_id
+        || !matches!(
+            admission_order.candidate_phase(),
+            crate::outcome::CandidatePhase::BindingTerminal
+        )
+    {
+        return None;
+    }
+    Some(PendingDetach {
+        token,
+        participant_id,
+        request_generation,
+        request_verifier,
+        committed_binding_epoch,
+        admission_order,
+        refused_epoch,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn restore_committed_detach<V>(
+    token: DetachAttemptToken,
+    participant_id: ParticipantId,
+    request_generation: Generation,
+    request_verifier: V,
+    committed_binding_epoch: BindingEpoch,
+    detached_delivery_seq: DeliverySeq,
+) -> Option<CommittedDetach<V>> {
+    if committed_binding_epoch.capability_generation != request_generation {
+        return None;
+    }
+    Some(CommittedDetach {
+        token,
+        participant_id,
+        request_generation,
+        request_verifier,
+        committed_binding_epoch,
+        detached_delivery_seq,
+    })
+}
+
+#[cfg(test)]
+pub(super) fn restore_terminalized_detach<V>(
+    token: DetachAttemptToken,
+    participant_id: ParticipantId,
+    request_generation: Generation,
+    request_verifier: V,
+    committed_binding_epoch: BindingEpoch,
+) -> Option<TerminalizedDetach<V>> {
+    if committed_binding_epoch.capability_generation != request_generation {
+        return None;
+    }
+    Some(TerminalizedDetach {
+        token,
+        participant_id,
+        request_generation,
+        request_verifier,
+        committed_binding_epoch,
+    })
+}
+
 impl<V> DetachCell<V> {
     /// Extracts the mandated fourth variant without exposing its fields.
     #[must_use]

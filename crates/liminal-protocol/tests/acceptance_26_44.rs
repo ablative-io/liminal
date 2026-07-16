@@ -1,3 +1,7 @@
+mod support;
+
+use support::settled_leave_authority;
+
 use std::boxed::Box;
 
 use liminal_protocol::algebra::{
@@ -12,12 +16,12 @@ use liminal_protocol::lifecycle::{
     CursorFateSuccessor, DebtCompletion, DetachCell, DetachLookupContext, DetachLookupResult,
     DetachTokenResolution, DetachedCredentialRecovery, EnrollmentFingerprint,
     EnrollmentLookupResult, EnrollmentTokenPhase, Event, IdentityState, LeaveCommitParameters,
-    LeaveFingerprint, LeaveSecretProof, LiveMember, LiveMemberRestore, MarkerDelivery,
-    NonzeroDebtCursorEpisode, ObserverProjection, ParticipantBindingRequest,
-    PendingBindingTerminalPosition, PendingDrainDecision, PendingReplay, PresentedIdentity,
-    RecoveredBindingFateTransition, ResolvedIdentity, StoredEdge, commit_attach, commit_detach,
-    commit_leave, lookup_binding_required, lookup_credential_attach, lookup_detach,
-    lookup_enrollment, lookup_leave, start_blocked_detach,
+    LeaveFingerprint, LeaveSecretProof, LiveMember, LiveMemberRestore, NonzeroDebtCursorEpisode,
+    ObserverProjection, ParticipantBindingRequest, PendingBindingTerminalPosition,
+    PendingDrainDecision, PendingReplay, PresentedIdentity, RecoveredBindingFateTransition,
+    ResolvedIdentity, StoredEdge, commit_attach, commit_detach, commit_leave,
+    lookup_binding_required, lookup_credential_attach, lookup_detach, lookup_enrollment,
+    lookup_leave, start_blocked_detach,
 };
 use liminal_protocol::outcome::{
     CheckedMultiplyOverflow, ConnectionIncarnationExhausted, HandshakeSizeOperands,
@@ -39,6 +43,7 @@ use liminal_protocol::wire::{
     SequenceAllocatingEnvelope, SequenceBudget, ServerDiscriminant, ServerValue, StaleAuthority,
     decode, decode_server_value_body, encode, encode_server_value_body, encoded_len,
 };
+use support::marker_delivery;
 
 type TestResult = Result<(), String>;
 type TestMember = LiveMember<[u8; 32]>;
@@ -112,6 +117,7 @@ fn retire_detached_member(
     token_byte: u8,
     left_delivery_seq: u64,
 ) -> Result<TestIdentity, String> {
+    let authority = settled_leave_authority(&live, BindingState::Detached, left_delivery_seq)?;
     let request = LeaveRequest {
         conversation_id: live.conversation_id(),
         participant_id: live.participant_id(),
@@ -132,6 +138,7 @@ fn retire_detached_member(
         BindingState::Detached,
         DetachCell::<[u8; 32]>::default(),
         verified,
+        authority,
         LeaveCommitParameters { left_delivery_seq },
     )
     .map_err(|error| format!("leave commit failed: {error:?}"))
@@ -143,7 +150,7 @@ fn credential_recovery(
     marker_delivery_seq: u64,
     closure_debt: ClosureDebt,
 ) -> Result<DetachedCredentialRecovery, String> {
-    let delivery = MarkerDelivery::new(participant_id, binding_epoch, marker_delivery_seq);
+    let delivery = marker_delivery(participant_id, binding_epoch, marker_delivery_seq)?;
     let delivered = delivery
         .delivered(
             closure_debt,
@@ -378,11 +385,13 @@ fn case_28_detach_replay_terminalization_and_leave_precedence() -> TestResult {
             LeaveFingerprint::new([0xC8; 32]),
         )
         .map_err(|error| format!("leave verify failed: {error:?}"))?;
+    let authority = settled_leave_authority(&attached.member, attached.binding_state, 32)?;
     let retired = commit_leave(
         attached.member,
         attached.binding_state,
         DetachCell::Terminalized(terminalized),
         verified_leave,
+        authority,
         LeaveCommitParameters {
             left_delivery_seq: 32,
         },
@@ -434,11 +443,13 @@ fn case_29_post_leave_enrollment_and_credential_token_replay() -> TestResult {
             LeaveFingerprint::new([0x92; 32]),
         )
         .map_err(|error| format!("leave verify failed: {error:?}"))?;
+    let authority = settled_leave_authority(&live, BindingState::Detached, 8)?;
     let retired = commit_leave(
         live,
         BindingState::Detached,
         DetachCell::<[u8; 32]>::default(),
         verified,
+        authority,
         LeaveCommitParameters {
             left_delivery_seq: 8,
         },

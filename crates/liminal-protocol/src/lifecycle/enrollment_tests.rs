@@ -86,6 +86,9 @@ fn enrollment_consumes_allocated_slot_and_derives_every_fixed_value() {
     assert_eq!(committed.outcome.capability_generation(), Generation::ONE);
     assert_eq!(committed.outcome.persisted_cursor(), 0);
     assert_eq!(committed.outcome.accepted_marker_delivery_seq(), None);
+    assert!(committed.binding_origin().is_unfenced());
+    assert_eq!(committed.binding_origin().attached(), committed.attached);
+    assert_eq!(committed.binding_origin().recovered_marker(), None);
 }
 
 #[test]

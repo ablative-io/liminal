@@ -10,6 +10,8 @@
     clippy::type_complexity
 )]
 
+mod support;
+
 use std::{boxed::Box, collections::BTreeMap, vec, vec::Vec};
 
 use liminal_protocol::{
@@ -26,11 +28,11 @@ use liminal_protocol::{
         DetachLookupContext, DetachLookupResult, DetachTokenResolution, DetachedAttachRefusal,
         Event, IdentityState, LeaveCommitParameters, LeaveFingerprint, LeaveLookupResult,
         LeaveOnlyEdge, LeaveSecretProof, LiveMember, LiveMemberRestore, MarkerDelivery,
-        NoInterveningTuplePlannerProof, NoInterveningTupleProof, NonzeroDebtCursorEpisode,
-        ObserverProjection, PendingBindingTerminalPosition, PendingFinalization,
-        PendingLeaveCommitParameters, PhysicalCompaction, PresentedIdentity, ResolvedIdentity,
-        StoredEdge, commit_attach, commit_detach, commit_leave, commit_pending_leave,
-        lookup_credential_attach, lookup_detach, lookup_leave,
+        NonzeroDebtCursorEpisode, ObserverProjection, PendingBindingTerminalPosition,
+        PendingFinalization, PendingLeaveCommitParameters, PhysicalCompaction,
+        PrepareLeaveAuthorityError, PresentedIdentity, ResolvedIdentity, StoredEdge, commit_attach,
+        commit_detach, commit_leave, commit_pending_leave, lookup_credential_attach, lookup_detach,
+        lookup_leave,
     },
     outcome::{
         HandshakeSizeOperands, ParticipantRecoveryHandshakeTooLarge, RecoveryHandshakeDimension,
@@ -48,6 +50,10 @@ use liminal_protocol::{
         Retired, SequenceAllocatingEnvelope, SequenceBudget, ServerValue, StaleAuthority,
         StaleOrUnknownReceipt, decode, encode, encoded_len,
     },
+};
+use support::{
+    intervening_pending_leave_refusal, marker_delivery, pending_leave_authority,
+    settled_leave_authority,
 };
 
 const BM: u64 = 16;
@@ -906,11 +912,14 @@ fn acceptance_case_53_verifier_precedence_receipt_provenance_and_terminalized_de
             LeaveFingerprint::new([0x54; 32]),
         )
         .expect("L53 canonical authority is valid");
+    let prepared_leave = settled_leave_authority(&live8, BindingState::Detached, 42)
+        .expect("L53 consumes its exact X frontier handle");
     let IdentityState::Retired(tombstone) = commit_leave(
         live8,
         BindingState::Detached,
         DetachCell::<[u8; 32]>::default(),
         verified_leave,
+        prepared_leave,
         LeaveCommitParameters {
             left_delivery_seq: 42,
         },
@@ -1504,7 +1513,7 @@ fn acceptance_case_54_multi_binding_shutdown_families_and_participant_scoped_pro
     let e54_1 = epoch(54, 11, 11);
     let e54_2 = epoch(54, 12, 12);
     let e54_3 = epoch(54, 13, 13);
-    let marker = MarkerDelivery::new(P0, e54_0, m54);
+    let marker = marker_delivery(P0, e54_0, m54).expect("validated case-54 marker record restores");
     let marker = marker
         .retarget(e54_1, 0, 1, 2)
         .expect("first retarget activates block0");
@@ -1601,22 +1610,6 @@ fn acceptance_case_54_multi_binding_shutdown_families_and_participant_scoped_pro
     );
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct PlannerProof55 {
-    pending_order: liminal_protocol::lifecycle::AdmissionOrder,
-    left_order: u64,
-}
-
-impl NoInterveningTuplePlannerProof for PlannerProof55 {
-    fn pending_admission_order(&self) -> liminal_protocol::lifecycle::AdmissionOrder {
-        self.pending_order
-    }
-
-    fn left_transaction_order(&self) -> u64 {
-        self.left_order
-    }
-}
-
 fn pending_fate(
     conversation_id: u64,
     participant_id: u64,
@@ -1664,22 +1657,16 @@ fn acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay() {
             )
             .expect("L55A has exact permanent verifier authority")
     };
-    let proof_a = NoInterveningTupleProof::from_planner(
-        pending_a,
-        PlannerProof55 {
-            pending_order: pending_a.admission_order(),
-            left_order: 11,
-        },
-    )
-    .expect("marker11 leaves terminal-major10 adjacent to X-major11");
     let commit_adjacent = |member: LiveMember<Fingerprint>| {
+        let authority = pending_leave_authority(&member, pending_a, 12, 11)
+            .expect("marker11 leaves terminal-major10 adjacent to exact X-major11");
         commit_pending_leave(
             member.clone(),
             pending_a,
             DetachCell::<Fingerprint>::default(),
             verify_a(&member),
+            authority,
             PendingLeaveCommitParameters {
-                no_intervening: proof_a.clone(),
                 terminal_delivery_seq: 12,
                 left_delivery_seq: 13,
             },
@@ -1717,6 +1704,12 @@ fn acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay() {
     let pending_u = pending_fate(C55I, P1, e_u_i, 11);
     assert_eq!(pending_p.admission_order().transaction_order(), 10);
     assert_eq!(pending_u.admission_order().transaction_order(), 11);
+    assert_eq!(
+        intervening_pending_leave_refusal(&p_intervening, pending_p, pending_u, 12, 12)
+            .expect("case-55 intervening snapshot restores before authorization"),
+        PrepareLeaveAuthorityError::PendingCandidate,
+        "U's immutable terminal makes P's positional authority unconstructible"
+    );
     let request_i = LeaveRequest {
         conversation_id: C55I,
         participant_id: P0,
@@ -1734,6 +1727,8 @@ fn acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay() {
         .with_committed_terminal(p_terminal)
         .expect("separately drained P terminal belongs to P");
     let commit_intervening = |member: LiveMember<Fingerprint>| {
+        let authority = settled_leave_authority(&member, BindingState::Detached, 14)
+            .expect("separate drains leave an exact settled X-major14 authority");
         let verified = member
             .verify_leave_request(
                 &request_i,
@@ -1747,6 +1742,7 @@ fn acceptance_case_55_adjacent_and_intervening_positional_leave_crash_replay() {
             BindingState::Detached,
             DetachCell::<Fingerprint>::default(),
             verified,
+            authority,
             LeaveCommitParameters {
                 left_delivery_seq: 14,
             },
@@ -2237,7 +2233,7 @@ fn acceptance_case_56_sequence_equality_and_pcp_ordering_without_occurrence_arra
     let e6 = epoch(56, 6, 6);
     let debt_two = closure_debt(2);
     let pc = PhysicalCompaction::new(h - 3, h - 3).expect("single-row P1 Left range is nonempty");
-    let marker = MarkerDelivery::new(P1, e5, h + 1);
+    let marker = marker_delivery(P1, e5, h + 1).expect("validated case-56 marker record restores");
     let fate_first_seed = PcpOrderingSnapshot56::seed(C56S, P1, e5, h, debt_two, pc, marker);
     let fate_pending = replay_transition56(
         &fate_first_seed,

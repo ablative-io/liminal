@@ -8,19 +8,31 @@
 //! suffix, so completion ordering is instead enforced by typed transitions and
 //! tests.
 
+mod admission;
 mod attach;
 mod binding;
+mod claim_frontier;
+mod closure_accounting;
 mod cursor_facts;
 mod detach;
 mod edge;
 mod enrollment;
+mod enrollment_closure;
+mod incarnation;
 mod lookup;
 mod membership;
+mod observer_recovery;
+mod operations;
+mod storage;
 
 #[cfg(test)]
 mod attach_tests;
 #[cfg(test)]
 mod binding_tests;
+#[cfg(test)]
+mod claim_frontier_tests;
+#[cfg(test)]
+mod closure_accounting_tests;
 #[cfg(test)]
 mod cursor_facts_tests;
 #[cfg(test)]
@@ -28,12 +40,39 @@ mod detach_tests;
 #[cfg(test)]
 mod edge_tests;
 #[cfg(test)]
+mod enrollment_closure_tests;
+#[cfg(test)]
 mod enrollment_tests;
+#[cfg(test)]
+mod incarnation_tests;
 #[cfg(test)]
 mod lookup_tests;
 #[cfg(test)]
 mod membership_tests;
+#[cfg(test)]
+mod observer_recovery_tests;
+#[cfg(test)]
+mod storage_tests;
+#[cfg(test)]
+mod test_support;
 
+pub use admission::{
+    BindingSlotDecision, BindingSlotOccupancy, CapacityCounter, CapacityCounterInvariantError,
+    ConnectionConversationCapacityCommit, ConnectionConversationTracking,
+    CredentialAttachCapacityCommit, CredentialAttachCapacityCounters,
+    CredentialAttachCapacityDecision, EnrollmentCapacityCommit, EnrollmentCapacityCounters,
+    EnrollmentCapacityDecision, FreshParticipantCapacityCounter,
+    FreshParticipantCapacityCounterInvariantError, ObserverCheckedOperation, ObserverFloorDecision,
+    ObserverFloorPermit, OrderAdmissionError, OrderAllocation, OrderClaims,
+    OrderClaimsInvariantError, OrderHigh, OrderLedger, OrderLedgerInvariantError,
+    RecordSizeDecision, RecordSizePermit, RecoverySequenceReserve,
+    ResultingEnrollmentCapacityCounters, SemanticConnectionCapacityDecision, SequenceAdmission,
+    SequenceAdmissionError, SequenceClaims, SequenceLedger, SequenceLedgerInvariantError,
+    check_observer_floor, check_record_size, select_credential_attach_binding_slot,
+    select_credential_attach_capacity, select_enrollment_binding_slot, select_enrollment_capacity,
+    select_semantic_connection_capacity,
+};
+use admission::{admit_sequence, allocate_order};
 pub use attach::{
     AttachCommit, AttachCommitError, AttachCommitParameters, AttachTransition,
     AttachVerificationError, VerifiedAttachCommit, commit_attach,
@@ -44,6 +83,27 @@ pub use binding::{
     CommittedDiedTerminal, DetachedBindingTransition, DiedBindingTransition,
     PendingBindingTerminalPosition, PendingDetachedFinalization, PendingDiedFinalization,
     PendingFinalization,
+};
+pub use claim_frontier::{
+    ActiveIdentityRanks, BindingTerminalOwner, ClaimFrontierCounter, ClaimFrontierError,
+    ClaimFrontierInvalidReason, ClaimFrontiers, ClaimFrontiersRestore, ExitProductRange,
+    ExitProductRangeRestore, FrontierBinding, FrontierParticipant, HistoricalCausalFactRestore,
+    HistoricalMarkerDeliveryFactRestore, ImmutableOrderCandidateMajor,
+    ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate, MarkerCandidateAuthority,
+    MarkerProvenance, MarkerSequenceOwner, MovableOrderClaim, MovableSequenceClaim,
+    OrderClaimFrontier, OrderClaimFrontierRestore, OrderDirectOwner, PrepareLeaveAuthorityError,
+    RecoveryClaimProvenance, RecoveryOrderActiveBindingRestore, RecoveryOrderBlock,
+    RecoveryOrderBlockRestore, RecoverySequenceBlock, RecoverySequenceBlockRestore,
+    RecoverySequenceTerminalRestore, ReplacementTerminalProductRange,
+    ReplacementTerminalProductRangeRestore, RetainedCausalRecord, RetainedCausalRecordKind,
+    SequenceClaimFrontier, SequenceClaimFrontierRestore, SequenceDirectOwner, SequenceProductClass,
+    SequenceProductRanges, SequenceProductRangesRestore, TerminalProductRange,
+    TerminalProductRangeRestore, TerminalProductSource,
+};
+pub use closure_accounting::{
+    ClosureAccounting, ClosureAccountingError, RecoveryFenceDecision, RecoveryFencePermit,
+    RemainingClosureDecision, RemainingClosurePermit, RequiredCapacityPlan,
+    RequiredCapacityPlanError, check_recovery_fence, check_remaining_closure,
 };
 pub use cursor_facts::{
     BoundParticipantCursor, CumulativeAckAuthorizationError, CumulativeAckOutcome,
@@ -67,9 +127,23 @@ pub use edge::{
     RecoveredBindingFateTransition, RecoveredCursorRelease, StoredEdge,
 };
 pub use enrollment::{
-    AllocatedParticipantSlot, AttachedLifecycleRecord, AttachedRecordPosition, EnrollmentCommit,
-    EnrollmentCommitError, EnrollmentCommitParameters, ParticipantSlotAllocationError,
-    ParticipantSlotAllocatorProof, commit_enrollment,
+    AllocatedParticipantSlot, AttachedLifecycleRecord, AttachedRecordPosition, BindingOrigin,
+    EnrollmentCommit, EnrollmentCommitError, EnrollmentCommitParameters,
+    ParticipantSlotAllocationError, ParticipantSlotAllocatorProof, commit_enrollment,
+};
+pub use enrollment_closure::{
+    InitialEnrollmentClosureError, InitialEnrollmentClosureInput,
+    InitialEnrollmentClosureProjection, PlannedEnrollmentMarker, RecoveryQuartetStatus,
+    project_initial_enrollment_closure,
+};
+pub use incarnation::{
+    ConnectionIncarnationAllocation, ConnectionIncarnationAllocationDecision,
+    ConnectionIncarnationAllocator, ConnectionIncarnationAllocatorRestore,
+    ConnectionIncarnationAllocatorRestoreError, ConnectionOrdinalExhaustion,
+    ConnectionOrdinalExhaustionCommit, ConnectionOrdinalExhaustionReplay,
+    DurableIncarnationReferences, DurableIncarnationReferencesError, ServerIncarnationExhaustion,
+    ServerIncarnationFsyncIntent, ServerIncarnationStartupDecision,
+    allocate_connection_incarnation, prepare_server_incarnation_startup,
 };
 pub use lookup::{
     AttachSecretProof, BindingRequiredLookupResult, CredentialAttachLiveReceipt,
@@ -83,7 +157,34 @@ pub use lookup::{
 pub use membership::{
     EnrollmentFingerprint, IdentityState, LeaveCommitError, LeaveCommitParameters,
     LeaveFingerprint, LeaveVerificationError, LiveMember, LiveMemberRestore,
-    MembershipInvariantError, NoInterveningTuplePlannerProof, NoInterveningTupleProof,
-    NoInterveningTupleProofError, PendingLeaveCommitParameters, RetiredIdentity, RetirementError,
-    VerifiedLeaveRequest, commit_leave, commit_pending_leave,
+    MembershipInvariantError, PendingLeaveCommitParameters, PreparedLeaveAuthority,
+    RetiredIdentity, RetirementError, VerifiedLeaveRequest, commit_leave, commit_pending_leave,
+};
+pub use observer_recovery::{
+    ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
+};
+pub use operations::{
+    InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
+    InitialEnrollmentOperationDecision, InitialEnrollmentOperationFault,
+    InitialEnrollmentOperationInput, MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision,
+    MarkerDrainCommit, MarkerDrainError, MarkerProofDecision, MarkerProofInput, MarkerProofPermit,
+    MarkerProofState, NonzeroAckEpisodePosition, NonzeroParticipantAckCommit,
+    NonzeroParticipantAckCommitError, NonzeroParticipantAckDecision,
+    NonzeroParticipantAckInvariantError, ParticipantAckCommit, ParticipantAckCommitError,
+    ParticipantAckDecision, ReceiptDeadlineError, ReceiptDeadlines, apply_initial_enrollment,
+    apply_marker_ack, apply_nonzero_participant_ack, apply_participant_ack, drain_next_marker,
+    select_marker_proof,
+};
+pub use storage::{
+    BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,
+    CommittedBindingTerminalRestore, ConversationStateRestoreError, CursorEpisodeRestore,
+    DebtCompletionRestore, DetachCellRestore, DetachedCredentialRecoveryRestore,
+    DetachedCursorReleaseProvenanceRestore, DetachedMarkerReleaseRestore,
+    FencedAttachCommitRestore, LeaveCommittedRestore, LiveIdentityRestore,
+    MarkerCursorProgressRestore, MarkerDeliveryRestore, OrdinaryBindingAuthorityRestore,
+    OrdinaryBindingFateRestore, ParticipantLifecycleRestore, PendingFinalizationRestore,
+    PendingRecoveredCursorReleaseRestore, RecoveredBindingFateRestore,
+    RecoveredStorageCompletionRestore, RestoredBindingFateTerminal, RestoredConversationState,
+    RestoredParticipantLifecycle, RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
+    restore_conversation_state,
 };

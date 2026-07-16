@@ -799,3 +799,111 @@ pub enum BindingState {
     /// Authority ended and a cause-partitioned terminal record is pending.
     PendingFinalization(PendingFinalization),
 }
+
+pub(super) const fn restore_pending_finalization(
+    binding: ActiveBinding,
+    cause: CloseCause,
+    transaction_order: TransactionOrder,
+) -> Option<PendingFinalization> {
+    let position =
+        BindingTerminalDisposition::Pending(PendingBindingTerminalPosition::new(transaction_order));
+    match cause {
+        CloseCause::CleanDeregister => match binding.clean_deregister(position) {
+            DetachedBindingTransition::Pending(value) => Some(PendingFinalization::Detached(value)),
+            DetachedBindingTransition::Committed(_) => None,
+        },
+        CloseCause::ServerShutdown => match binding.server_shutdown(position) {
+            DetachedBindingTransition::Pending(value) => Some(PendingFinalization::Detached(value)),
+            DetachedBindingTransition::Committed(_) => None,
+        },
+        // Supersession is an indivisible committed handoff and can never be pending.
+        CloseCause::Superseded => None,
+        CloseCause::ConnectionLost => match binding.connection_lost(position) {
+            DiedBindingTransition::Pending(value) => Some(PendingFinalization::Died(value)),
+            DiedBindingTransition::Committed(_) => None,
+        },
+        CloseCause::ProcessKilled => match binding.process_killed(position) {
+            DiedBindingTransition::Pending(value) => Some(PendingFinalization::Died(value)),
+            DiedBindingTransition::Committed(_) => None,
+        },
+        CloseCause::ProtocolError => match binding.protocol_error(position) {
+            DiedBindingTransition::Pending(value) => Some(PendingFinalization::Died(value)),
+            DiedBindingTransition::Committed(_) => None,
+        },
+        CloseCause::UncleanServerRestart {
+            prior_server_incarnation,
+        } => {
+            if binding
+                .binding_epoch
+                .connection_incarnation
+                .server_incarnation
+                != prior_server_incarnation
+            {
+                return None;
+            }
+            match binding.unclean_server_restart(position) {
+                DiedBindingTransition::Pending(value) => Some(PendingFinalization::Died(value)),
+                DiedBindingTransition::Committed(_) => None,
+            }
+        }
+    }
+}
+
+pub(super) const fn restore_committed_terminal(
+    binding: ActiveBinding,
+    cause: CloseCause,
+    transaction_order: TransactionOrder,
+    delivery_seq: DeliverySeq,
+) -> Option<CommittedBindingTerminal> {
+    let position = BindingTerminalDisposition::Committed(CommittedBindingTerminalPosition::new(
+        transaction_order,
+        delivery_seq,
+    ));
+    match cause {
+        CloseCause::CleanDeregister => match binding.clean_deregister(position) {
+            DetachedBindingTransition::Committed(value) => {
+                Some(CommittedBindingTerminal::Detached(value))
+            }
+            DetachedBindingTransition::Pending(_) => None,
+        },
+        CloseCause::Superseded => Some(CommittedBindingTerminal::Detached(binding.superseded(
+            CommittedBindingTerminalPosition::new(transaction_order, delivery_seq),
+        ))),
+        CloseCause::ServerShutdown => match binding.server_shutdown(position) {
+            DetachedBindingTransition::Committed(value) => {
+                Some(CommittedBindingTerminal::Detached(value))
+            }
+            DetachedBindingTransition::Pending(_) => None,
+        },
+        CloseCause::ConnectionLost => match binding.connection_lost(position) {
+            DiedBindingTransition::Committed(value) => Some(CommittedBindingTerminal::Died(value)),
+            DiedBindingTransition::Pending(_) => None,
+        },
+        CloseCause::ProcessKilled => match binding.process_killed(position) {
+            DiedBindingTransition::Committed(value) => Some(CommittedBindingTerminal::Died(value)),
+            DiedBindingTransition::Pending(_) => None,
+        },
+        CloseCause::ProtocolError => match binding.protocol_error(position) {
+            DiedBindingTransition::Committed(value) => Some(CommittedBindingTerminal::Died(value)),
+            DiedBindingTransition::Pending(_) => None,
+        },
+        CloseCause::UncleanServerRestart {
+            prior_server_incarnation,
+        } => {
+            if binding
+                .binding_epoch
+                .connection_incarnation
+                .server_incarnation
+                != prior_server_incarnation
+            {
+                return None;
+            }
+            match binding.unclean_server_restart(position) {
+                DiedBindingTransition::Committed(value) => {
+                    Some(CommittedBindingTerminal::Died(value))
+                }
+                DiedBindingTransition::Pending(_) => None,
+            }
+        }
+    }
+}

@@ -3,11 +3,11 @@ use crate::wire::{
 };
 
 use super::{
-    ActiveBinding, AttachedLifecycleRecord, AttachedRecordPosition, BindingState, ClosureState,
-    CommittedBindingTerminal, CommittedBindingTerminalPosition, CommittedDetachedTerminal,
-    DetachCell, FencedAttachCommit, LiveMember, MembershipInvariantError, OrdinaryBindingAuthority,
-    OrdinaryDetachedAttachAdmission, PendingFinalization, detach::validate_pending_pair,
-    lookup::AttachSecretProof,
+    ActiveBinding, AttachedLifecycleRecord, AttachedRecordPosition, BindingOrigin, BindingState,
+    ClosureState, CommittedBindingTerminal, CommittedBindingTerminalPosition,
+    CommittedDetachedTerminal, DetachCell, FencedAttachCommit, LiveMember,
+    MembershipInvariantError, OrdinaryBindingAuthority, OrdinaryDetachedAttachAdmission,
+    PendingFinalization, detach::validate_pending_pair, lookup::AttachSecretProof,
 };
 
 /// Result allocation owned by one successful credential-attach transaction.
@@ -107,6 +107,7 @@ pub struct AttachCommit<F, V> {
     pub outcome: AttachBound,
     /// Typed old-binding or fenced-recovery terminal effect.
     pub transition: AttachTransition,
+    binding_origin: BindingOrigin,
     ordinary_binding_authority: Option<OrdinaryBindingAuthority>,
 }
 
@@ -116,8 +117,22 @@ impl<F, V> AttachCommit<F, V> {
     /// Fenced recovery returns `None`; its recovered epoch must instead use the
     /// [`FencedAttachCommit`] proof that authorized that commit.
     #[must_use]
-    pub const fn ordinary_binding_authority(&self) -> Option<OrdinaryBindingAuthority> {
+    #[allow(
+        dead_code,
+        reason = "the crate-owned binding-fate operation consumes this sealed attach authority"
+    )]
+    pub(crate) const fn ordinary_binding_authority(&self) -> Option<OrdinaryBindingAuthority> {
         self.ordinary_binding_authority
+    }
+
+    /// Returns the opaque binding origin emitted from the verified attach mode.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "the crate-owned event replay boundary persists this producer-emitted origin"
+    )]
+    pub(crate) const fn binding_origin(&self) -> BindingOrigin {
+        self.binding_origin
     }
 }
 
@@ -323,14 +338,20 @@ where
     let next_cell = transition_detach_cell(&mode, &previous_member, detach_cell)?;
     let attached =
         AttachedLifecycleRecord::from_binding(parameters.binding, parameters.attached_position);
-    let (persisted_cursor, terminal, transition) = match mode {
-        AttachMode::Detached(_) => (previous_member.cursor(), None, AttachTransition::Detached),
+    let (persisted_cursor, terminal, transition, binding_origin) = match mode {
+        AttachMode::Detached(_) => (
+            previous_member.cursor(),
+            None,
+            AttachTransition::Detached,
+            BindingOrigin::unfenced(attached),
+        ),
         AttachMode::Superseded(committed) => (
             previous_member.cursor(),
             Some(CommittedBindingTerminal::from(committed)),
             AttachTransition::Superseded {
                 terminal: committed,
             },
+            BindingOrigin::unfenced(attached),
         ),
         AttachMode::Fenced { proof, pending } => {
             let composed_terminal =
@@ -343,6 +364,11 @@ where
                     composed_terminal,
                     next_closure_state: proof.next_state(),
                 },
+                BindingOrigin::recovered(
+                    attached,
+                    proof.marker_delivery_seq(),
+                    proof.prior_binding_epoch(),
+                ),
             )
         }
     };
@@ -393,6 +419,7 @@ where
         attached,
         outcome,
         transition,
+        binding_origin,
         ordinary_binding_authority,
     })
 }
