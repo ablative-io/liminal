@@ -3,157 +3,44 @@
 //! The matrix is transcribed from the R-D1 register of
 //! `docs/design/PARTICIPANT-CONTRACT.md` @
 //! `55856ae3c53206f9c662e6815650dfc67a89ce85`: the outcome table at lines
-//! 5624-5689, the exhaustive-pair routing rule at lines 5773-5784, and the
-//! ack-exclusion rule at lines 5699-5701. Each constructed response is
-//! checked against the wire's structural `originating_request` echo, proving
-//! every constructor stays inside its request's legal set.
+//! 5624-5689, the exhaustive-pair routing rule at lines 5773-5784, the
+//! ack-exclusion rule at lines 5699-5701, and the sequence-reachability rule
+//! at lines 5691-5696. Each per-request test constructs one value for every
+//! legal outcome class its register rows admit, and each constructed
+//! response is checked against the wire's structural `originating_request`
+//! echo, proving every constructor stays inside its request's legal set.
 
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
 
-use alloc::{vec, vec::Vec};
+mod support;
 
-use crate::algebra::{ResourceDimension, ResourceVector, WideResourceVector};
+use alloc::{boxed::Box, vec, vec::Vec};
 
-use super::{
-    AckCommitted, AckGap, AckRegression, AttachBound, AttachEnvelope, AttachMarkerProof,
-    AttachSecret, AttemptConflict, BindingEpoch, BindingRequiredEnvelope, ClientDiscriminant,
-    ClosureRefusalReason, ClosureSnapshot, ConnectionIncarnation, CredentialAttachResponse,
-    DetachCommitted, DetachEnvelope, DetachInProgress, DetachResponse, EnrollBound,
-    EnrollmentEnvelope, EnrollmentKnown, EnrollmentReceiptCapacityScope, EnrollmentResponse,
-    EnrollmentToken, Generation, IdentityCapacityExceeded, IdentityCapacityScope,
-    InvalidObserverEpoch, InvalidObserverEpochList, LeaveCommitted, LeaveEnvelope, LeaveResponse,
-    LeaveStaleAuthority, MarkerAckCommitted, MarkerAckEnvelope, MarkerAckResponse,
-    MarkerMismatchBody, MarkerNotDeliveredReason, ObserverBackpressureState,
-    ObserverRecoveryAccepted, ObserverRecoveryResponse, ParticipantAckEnvelope,
-    ParticipantAckResponse, RecordAdmissionEnvelope, RecordAdmissionResponse, RecordCommitted,
-    RecordTooLarge, ServerDiscriminant, ServerValue, StaleOrUnknownReceipt,
+use self::support::{
+    assert_bound, attach_bound, attach_envelope, attach_marker_proof, closure_capacity_exceeded,
+    closure_snapshot, detach_envelope, enroll_bound, enrollment_envelope, epoch, generation,
+    leave_envelope, marker_ack_envelope, marker_ack_proof, order_exhausted,
+    participant_ack_envelope, record_envelope, sequence_budget, sequence_exhausted,
+    terminalized_detach_cell,
 };
 
-fn generation(value: u64) -> Generation {
-    Generation::new(value).expect("test generation is nonzero")
-}
+use crate::algebra::{ResourceDimension, ResourceVector};
 
-fn epoch(generation_value: u64) -> BindingEpoch {
-    BindingEpoch::new(
-        ConnectionIncarnation::new(1, 1),
-        generation(generation_value),
-    )
-}
-
-fn enrollment_envelope() -> EnrollmentEnvelope {
-    EnrollmentEnvelope {
-        conversation_id: 7,
-        enrollment_token: EnrollmentToken::new([1; 16]),
-    }
-}
-
-fn attach_envelope() -> AttachEnvelope {
-    AttachEnvelope {
-        conversation_id: 7,
-        participant_id: 3,
-        capability_generation: generation(2),
-        attach_attempt_token: super::AttachAttemptToken::new([2; 16]),
-        accept_marker_delivery_seq: None,
-    }
-}
-
-fn detach_envelope() -> DetachEnvelope {
-    DetachEnvelope {
-        conversation_id: 7,
-        participant_id: 3,
-        capability_generation: generation(2),
-        detach_attempt_token: super::DetachAttemptToken::new([3; 16]),
-    }
-}
-
-fn participant_ack_envelope() -> ParticipantAckEnvelope {
-    ParticipantAckEnvelope {
-        conversation_id: 7,
-        participant_id: 3,
-        capability_generation: generation(2),
-        through_seq: 9,
-    }
-}
-
-fn leave_envelope() -> LeaveEnvelope {
-    LeaveEnvelope {
-        conversation_id: 7,
-        participant_id: 3,
-        capability_generation: generation(2),
-        leave_attempt_token: super::LeaveAttemptToken::new([4; 16]),
-    }
-}
-
-fn marker_ack_envelope() -> MarkerAckEnvelope {
-    MarkerAckEnvelope {
-        conversation_id: 7,
-        participant_id: 3,
-        capability_generation: generation(2),
-        marker_delivery_seq: 11,
-    }
-}
-
-fn record_envelope() -> RecordAdmissionEnvelope {
-    RecordAdmissionEnvelope {
-        conversation_id: 7,
-        participant_id: 3,
-        capability_generation: generation(2),
-    }
-}
-
-fn enroll_bound() -> EnrollBound {
-    EnrollBound::new(
-        7,
-        EnrollmentToken::new([1; 16]),
-        3,
-        AttachSecret::new([5; 32]),
-        epoch(1),
-        1_000,
-        2_000,
-    )
-    .expect("generation-1 epoch builds an enrollment receipt")
-}
-
-fn attach_bound() -> AttachBound {
-    AttachBound::ordinary(
-        7,
-        super::AttachAttemptToken::new([2; 16]),
-        3,
-        generation(1),
-        AttachSecret::new([6; 32]),
-        epoch(2),
-        0,
-        1_000,
-        2_000,
-    )
-    .expect("successor generation builds an attach receipt")
-}
-
-fn closure_snapshot() -> ClosureSnapshot {
-    ClosureSnapshot {
-        marker_capacity_credits: 0,
-        marker_anchors: 0,
-        entry_debt: 0,
-        byte_debt: 0,
-        repayment_edge: super::RepaymentEdge::None,
-        edge_sequence_claims: 0,
-        edge_order_position_claims: 0,
-        edge_k_remaining: ResourceVector::new(0, 0),
-        k_headroom: WideResourceVector::new(1, 1),
-        episode_churn_used: 0,
-        delta_cycles: 0,
-        episode_churn_limit: 2,
-    }
-}
-
-fn assert_bound(value: &ServerValue, expected: ClientDiscriminant) {
-    assert_eq!(
-        value.originating_request(),
-        Some(expected),
-        "constructed {:?} must echo its bound originating request",
-        value.discriminant(),
-    );
-}
+use super::{
+    AckCommitted, AckGap, AckNoOp, AckRegression, AttemptConflict, BindingRequiredEnvelope,
+    ClientDiscriminant, ClosureCheckedEnvelope, ClosureRefusalReason, CommonStaleAuthorityEnvelope,
+    CredentialAttachResponse, DetachCommitted, DetachInProgress, DetachResponse,
+    DetachStaleAuthority, EnrollmentKnown, EnrollmentReceiptCapacityScope, EnrollmentResponse,
+    EnrollmentToken, IdentityCapacityExceeded, IdentityCapacityScope, InvalidObserverEpoch,
+    InvalidObserverEpochList, LeaveCommitted, LeaveResponse, LeaveStaleAuthority,
+    MarkerAckCommitted, MarkerAckResponse, MarkerMismatch, MarkerMismatchBody, MarkerNotDelivered,
+    MarkerNotDeliveredReason, MarkerProofRequest, NoBinding, ObserverBackpressure,
+    ObserverBackpressureState, ObserverRecoveryAccepted, ObserverRecoveryResponse,
+    OrderAllocatingEnvelope, ParticipantAckResponse, ParticipantReferenceEnvelope,
+    ParticipantUnknown, ReceiptExpired, RecordAdmissionResponse, RecordCommitted, RecordTooLarge,
+    Retired, SequenceAllocatingEnvelope, ServerDiscriminant, ServerValue, StaleAuthority,
+    StaleOrUnknownReceipt,
+};
 
 /// Enrollment legal set: register rows 5641, 5643, 5644, 5649, 5650-5657,
 /// and 5663.
@@ -164,6 +51,16 @@ fn enrollment_constructors_stay_inside_the_register_rows() {
         EnrollmentResponse::connection_conversation_capacity_exceeded(enrollment_envelope(), 4),
         // Row 5643: enrollment binding attempt on an occupied slot.
         EnrollmentResponse::connection_conversation_binding_occupied(&enrollment_envelope()),
+        // Row 5644: conversation order exhausted, shared-allocator payload
+        // with the enrollment envelope arm.
+        EnrollmentResponse::from_conversation_order_exhausted(Box::new(order_exhausted(
+            OrderAllocatingEnvelope::Enrollment(enrollment_envelope()),
+        ))),
+        // Row 5649: marker-closure capacity, shared-selector payload with the
+        // enrollment envelope arm.
+        EnrollmentResponse::from_marker_closure_capacity_exceeded(Box::new(
+            closure_capacity_exceeded(ClosureCheckedEnvelope::Enrollment(enrollment_envelope())),
+        )),
         // Row 5650: EnrollBound success.
         EnrollmentResponse::enroll_bound(enroll_bound()),
         // Row 5651: EnrollmentKnown post-provenance replay.
@@ -172,6 +69,21 @@ fn enrollment_constructors_stay_inside_the_register_rows() {
             token: EnrollmentToken::new([1; 16]),
             participant_id: 3,
             current_generation: generation(2),
+        }),
+        // Row 5652: exact enrollment provenance-window expiry.
+        EnrollmentResponse::from_receipt_expired(ReceiptExpired::Enrollment {
+            conversation_id: 7,
+            token: EnrollmentToken::new([1; 16]),
+            participant_id: 3,
+            result_generation: generation(1),
+            current_generation: generation(2),
+            reason: super::ReceiptExpiryReason::Deadline,
+        }),
+        // Row 5653: enrollment token mapping resolved to a tombstone.
+        EnrollmentResponse::from_retired(Retired::Enrollment {
+            request: enrollment_envelope(),
+            participant_id: 3,
+            retired_generation: generation(2),
         }),
         // Row 5654: reachable receipt/provenance scope full.
         EnrollmentResponse::receipt_capacity_exceeded(
@@ -192,6 +104,11 @@ fn enrollment_constructors_stay_inside_the_register_rows() {
             enrollment_envelope(),
             ObserverBackpressureState::initial(5),
         ),
+        // Row 5657: canonical sequence-reserve check failed, shared-allocator
+        // payload with the enrollment envelope arm.
+        EnrollmentResponse::from_conversation_sequence_exhausted(Box::new(sequence_exhausted(
+            SequenceAllocatingEnvelope::Enrollment(enrollment_envelope()),
+        ))),
         // Row 5663: Bound / UnboundReceipt byte-identical replay.
         EnrollmentResponse::bound(enroll_bound()),
         EnrollmentResponse::unbound_receipt(enroll_bound()),
@@ -288,31 +205,6 @@ fn credential_attach_constructors_stay_inside_the_register_rows() {
     }
 }
 
-fn attach_marker_proof() -> AttachMarkerProof {
-    AttachMarkerProof {
-        conversation_id: 7,
-        token: super::AttachAttemptToken::new([2; 16]),
-        participant_id: 3,
-        capability_generation: generation(2),
-        requested_marker_delivery_seq: 11,
-    }
-}
-
-fn sequence_budget() -> super::SequenceBudget {
-    super::SequenceBudget {
-        high_watermark: 5,
-        remaining: 0,
-        e: 1,
-        t: 1,
-        m: 0,
-        rs: 0,
-        rt: 0,
-        l_times_t: 1,
-        l_times_rt: 0,
-        l_other_times_e: 0,
-    }
-}
-
 /// Detach legal set: register rows 5641, 5645, 5646, 5647, 5648, and
 /// 5668-5673.
 #[test]
@@ -324,6 +216,19 @@ fn detach_constructors_stay_inside_the_register_rows() {
         DetachResponse::participant_unknown(detach_envelope()),
         // Row 5646: no current binding and no Pending cell.
         DetachResponse::no_binding(detach_envelope()),
+        // Rows 5647/5671: live stale authority.
+        DetachResponse::stale_authority(DetachStaleAuthority::Live {
+            conversation_id: 7,
+            participant_id: 3,
+            capability_generation: generation(2),
+            detach_attempt_token: super::DetachAttemptToken::new([3; 16]),
+            current_generation: generation(3),
+        }),
+        // Row 5671: verified exact old token resolved to the terminalized
+        // detach cell retained by a later attach.
+        DetachResponse::stale_authority(DetachStaleAuthority::TerminalizedDetachCell(
+            terminalized_detach_cell(),
+        )),
         // Rows 5648/5672: tombstone after Leave.
         DetachResponse::retired(detach_envelope(), generation(3)),
         // Row 5668: committed detach.
@@ -355,8 +260,9 @@ fn detach_constructors_stay_inside_the_register_rows() {
 }
 
 /// Normal-ack legal set: register rows 5641, 5645, 5646, 5647, and
-/// 5674-5677. Rows 5699-5701 exclude backpressure, closure, order, and
-/// sequence outcomes: no such constructor exists.
+/// 5674-5677. Rows 5699-5701 exclude backpressure, closure, and order
+/// outcomes; the reachability rule at lines 5691-5696 separately excludes
+/// sequence exhaustion: no such constructor exists.
 #[test]
 fn participant_ack_constructors_stay_inside_the_register_rows() {
     let responses = vec![
@@ -365,6 +271,20 @@ fn participant_ack_constructors_stay_inside_the_register_rows() {
             participant_ack_envelope(),
             4,
         ),
+        // Row 5645: unknown participant, binding-lookup payload with this
+        // request's envelope arm.
+        ParticipantAckResponse::from_participant_unknown(ParticipantUnknown {
+            request: ParticipantReferenceEnvelope::ParticipantAck(participant_ack_envelope()),
+        }),
+        // Row 5646: exact-binding lookup missed.
+        ParticipantAckResponse::from_no_binding(NoBinding {
+            request: BindingRequiredEnvelope::ParticipantAck(participant_ack_envelope()),
+        }),
+        // Row 5647: live stale authority with the common envelope.
+        ParticipantAckResponse::from_stale_authority(StaleAuthority::Live {
+            request: CommonStaleAuthorityEnvelope::ParticipantAck(participant_ack_envelope()),
+            current_generation: generation(3),
+        }),
         // Row 5674: committed cumulative ack.
         ParticipantAckResponse::ack_committed(AckCommitted::new(participant_ack_envelope())),
         // Row 5675: idempotent no-op.
@@ -377,6 +297,11 @@ fn participant_ack_constructors_stay_inside_the_register_rows() {
             AckRegression::new(participant_ack_envelope(), 12)
                 .expect("through_seq 9 below cursor 12"),
         ),
+        // Row 5677: presented id has a tombstone.
+        ParticipantAckResponse::from_retired(Retired::Participant {
+            request: ParticipantReferenceEnvelope::ParticipantAck(participant_ack_envelope()),
+            retired_generation: generation(3),
+        }),
     ];
     for response in responses {
         assert_bound(response.server_value(), ClientDiscriminant::ParticipantAck);
@@ -443,15 +368,48 @@ fn leave_constructors_stay_inside_the_register_rows() {
 }
 
 /// Marker-ack legal set: register rows 5641, 5645, 5646, 5647, and
-/// 5682-5684. Rows 5699-5701 exclude backpressure, closure, order, and
-/// sequence outcomes: no such constructor exists.
+/// 5682-5684. Rows 5699-5701 exclude backpressure, closure, and order
+/// outcomes; the reachability rule at lines 5691-5696 separately excludes
+/// sequence exhaustion: no such constructor exists.
 #[test]
 fn marker_ack_constructors_stay_inside_the_register_rows() {
     let responses = vec![
         // Row 5641: connection-conversation capacity.
         MarkerAckResponse::connection_conversation_capacity_exceeded(marker_ack_envelope(), 4),
+        // Row 5645: unknown participant, binding-lookup payload with this
+        // request's envelope arm.
+        MarkerAckResponse::from_participant_unknown(ParticipantUnknown {
+            request: ParticipantReferenceEnvelope::MarkerAck(marker_ack_envelope()),
+        }),
+        // Row 5646: exact-binding lookup missed.
+        MarkerAckResponse::from_no_binding(NoBinding {
+            request: BindingRequiredEnvelope::MarkerAck(marker_ack_envelope()),
+        }),
+        // Row 5647: live stale authority with the common envelope.
+        MarkerAckResponse::from_stale_authority(StaleAuthority::Live {
+            request: CommonStaleAuthorityEnvelope::MarkerAck(marker_ack_envelope()),
+            current_generation: generation(3),
+        }),
         // Row 5682: committed marker ack.
         MarkerAckResponse::marker_ack_committed(MarkerAckCommitted::new(marker_ack_envelope())),
+        // Row 5682: idempotent no-op at the unchanged marker cursor.
+        MarkerAckResponse::from_ack_no_op(AckNoOp::marker_ack(marker_ack_envelope())),
+        // Row 5683: marker-proof refusals minted with this request's own
+        // proof fields.
+        MarkerAckResponse::from_marker_not_delivered(MarkerNotDelivered {
+            request: MarkerProofRequest::MarkerAck(marker_ack_proof()),
+            reason: MarkerNotDeliveredReason::NotDeliveredToProofEpoch,
+            expected_marker_delivery_seq: 12,
+        }),
+        MarkerAckResponse::from_marker_mismatch(MarkerMismatch {
+            request: MarkerProofRequest::MarkerAck(marker_ack_proof()),
+            mismatch: MarkerMismatchBody::NoMarkerExpected,
+        }),
+        // Row 5684: presented id has a tombstone.
+        MarkerAckResponse::from_retired(Retired::Participant {
+            request: ParticipantReferenceEnvelope::MarkerAck(marker_ack_envelope()),
+            retired_generation: generation(3),
+        }),
     ];
     for response in responses {
         assert_bound(response.server_value(), ClientDiscriminant::MarkerAck);
@@ -465,6 +423,35 @@ fn record_admission_constructors_stay_inside_the_register_rows() {
     let responses = vec![
         // Row 5641: connection-conversation capacity.
         RecordAdmissionResponse::connection_conversation_capacity_exceeded(record_envelope(), 4),
+        // Row 5644: conversation order exhausted, shared-allocator payload
+        // with the record-admission envelope arm.
+        RecordAdmissionResponse::from_conversation_order_exhausted(Box::new(order_exhausted(
+            OrderAllocatingEnvelope::RecordAdmission(record_envelope()),
+        ))),
+        // Row 5645: unknown participant, binding-lookup payload with this
+        // request's envelope arm.
+        RecordAdmissionResponse::from_participant_unknown(ParticipantUnknown {
+            request: ParticipantReferenceEnvelope::RecordAdmission(record_envelope()),
+        }),
+        // Row 5646: exact-binding lookup missed.
+        RecordAdmissionResponse::from_no_binding(NoBinding {
+            request: BindingRequiredEnvelope::RecordAdmission(record_envelope()),
+        }),
+        // Row 5647: live stale authority with the common envelope.
+        RecordAdmissionResponse::from_stale_authority(StaleAuthority::Live {
+            request: CommonStaleAuthorityEnvelope::RecordAdmission(record_envelope()),
+            current_generation: generation(3),
+        }),
+        // Row 5648: presented id has a tombstone.
+        RecordAdmissionResponse::from_retired(Retired::Participant {
+            request: ParticipantReferenceEnvelope::RecordAdmission(record_envelope()),
+            retired_generation: generation(3),
+        }),
+        // Rows 5649/5686: marker-closure capacity, shared-selector payload
+        // with the record-admission envelope arm.
+        RecordAdmissionResponse::from_marker_closure_capacity_exceeded(Box::new(
+            closure_capacity_exceeded(ClosureCheckedEnvelope::RecordAdmission(record_envelope())),
+        )),
         // Row 5685: committed ordinary record.
         RecordAdmissionResponse::record_committed(RecordCommitted::new(record_envelope(), 44)),
         // Row 5686: static size refusal, Entries before Bytes.
@@ -474,6 +461,20 @@ fn record_admission_constructors_stay_inside_the_register_rows() {
             encoded_record_charge: ResourceVector::new(2, 10),
             max_ordinary_record_charge: ResourceVector::new(1, 100),
         }),
+        // Row 5686: canonical sequence-reserve check failed, shared-allocator
+        // payload with the record-admission envelope arm.
+        RecordAdmissionResponse::from_conversation_sequence_exhausted(Box::new(
+            sequence_exhausted(SequenceAllocatingEnvelope::RecordAdmission(
+                record_envelope(),
+            )),
+        )),
+        // Row 5687: hard-observer retention refused the ordinary append.
+        RecordAdmissionResponse::from_observer_backpressure(
+            ObserverBackpressure::RecordAdmission {
+                request: record_envelope(),
+                state: ObserverBackpressureState::initial(5),
+            },
+        ),
     ];
     for response in responses {
         assert_bound(response.server_value(), ClientDiscriminant::RecordAdmission);

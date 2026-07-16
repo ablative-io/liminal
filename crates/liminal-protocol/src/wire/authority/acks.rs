@@ -3,9 +3,12 @@
 //!
 //! Per the register's closing rule (contract lines 5699-5701), normal and
 //! marker acks never return `ObserverBackpressure`,
-//! `MarkerClosureCapacityExceeded`, `ConversationOrderExhausted`, or
-//! `ConversationSequenceExhausted`: they append no record, allocate no major,
-//! and may relieve retention pressure. No constructor for those outcomes
+//! `MarkerClosureCapacityExceeded`, or `ConversationOrderExhausted`: they
+//! append no record, allocate no major, and may relieve retention pressure.
+//! `ConversationSequenceExhausted` is excluded separately by the register's
+//! reachability rule (contract lines 5691-5696): that outcome remains
+//! reachable only for optional enrollment, attach, supersession, ordinary,
+//! or floor-triggering candidates. No constructor for any of those outcomes
 //! exists here.
 
 use super::super::{
