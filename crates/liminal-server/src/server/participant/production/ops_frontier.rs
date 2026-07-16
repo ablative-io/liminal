@@ -17,8 +17,8 @@ use liminal_protocol::wire::{
     RecordAdmission, ServerValue,
 };
 
+use super::barrier::OperationFacts;
 use super::facts::{self, Digest};
-use super::ops_bind::OperationFacts;
 use super::state::{ConversationAuthority, StateError};
 
 impl ConversationAuthority {

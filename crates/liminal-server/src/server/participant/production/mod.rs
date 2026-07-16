@@ -13,11 +13,13 @@
 //! server never serializes protocol state and never grows a second
 //! implementation of lifecycle rules.
 
+mod barrier;
 mod facts;
 mod handler;
 mod log;
 mod observer;
-mod ops_bind;
+mod ops_attach;
+mod ops_enroll;
 mod ops_frontier;
 mod ops_session;
 mod state;
@@ -37,5 +39,8 @@ mod tests_observer;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_receipts;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_residue;
 
 pub use handler::ProductionParticipantHandler;

@@ -1,0 +1,82 @@
+//! Shared aggregate-barrier plumbing for the production operation arms.
+//!
+//! Every committing arm (enrollment, attach, detach) resolves its pending A3
+//! aggregate barrier through [`commit_through_barrier`]: the live mode
+//! appends the operation's stored inputs plus canonical event bytes at the
+//! optimistic head before the shell advances; the replay mode re-mints the
+//! canonical bytes and cross-checks them against the stored entry, so byte
+//! drift between live and replayed decisions fails loudly.
+
+use liminal_protocol::lifecycle::ReceiptDeadlines;
+use liminal_protocol::wire::ConnectionIncarnation;
+
+use super::log::StoredOperation;
+use super::state::{DurableAppend, StateError};
+
+/// Connection-scoped and configured facts supplied to each operation.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct OperationFacts {
+    /// Durable incarnation of the receiving connection.
+    pub(super) receiving_incarnation: ConnectionIncarnation,
+    /// Admitted wall-clock read for deadline derivation and receipt phases.
+    pub(super) now_ms: u64,
+    /// Configured identity slots per enrolled participant.
+    pub(super) identity_slots: u64,
+    /// Configured secret-bearing receipt TTL.
+    pub(super) attach_receipt_ttl_ms: u64,
+    /// Configured non-secret provenance TTL.
+    pub(super) receipt_provenance_ttl_ms: u64,
+}
+
+impl OperationFacts {
+    /// Derives the receipt/provenance deadline pair from the admitted clock.
+    pub(super) fn deadlines(&self) -> Result<ReceiptDeadlines, StateError> {
+        ReceiptDeadlines::try_from_ttls(
+            self.now_ms,
+            self.attach_receipt_ttl_ms,
+            self.receipt_provenance_ttl_ms,
+        )
+        .map_err(|error| {
+            StateError::invariant(format!("validated TTL configuration rejected: {error:?}"))
+        })
+    }
+}
+
+/// One barrier resolution mode: live durable append or replay byte-check.
+#[derive(Clone, Copy)]
+pub(super) enum CommitMode<'a> {
+    /// Append the operation at the optimistic head, then commit.
+    Live(&'a dyn DurableAppend),
+    /// Cross-check re-minted canonical bytes against the stored entry.
+    Replay {
+        /// Canonical event bytes read from the durable entry.
+        stored_event: &'a [u8],
+        /// Durable log sequence of the entry (for drift diagnostics).
+        sequence: u64,
+    },
+}
+
+/// Resolves one pending aggregate barrier through the selected mode.
+pub(super) fn commit_through_barrier<T>(
+    barrier: liminal_protocol::lifecycle::AggregateOperationCommit<T>,
+    mode: CommitMode<'_>,
+    next_log_sequence: u64,
+    make_operation: &dyn Fn(Vec<u8>) -> StoredOperation,
+) -> Result<(liminal_protocol::lifecycle::ParticipantConversation, T), StateError> {
+    let event = barrier.event().encode_canonical();
+    match mode {
+        CommitMode::Live(appender) => {
+            let operation = make_operation(event);
+            appender.append(&operation, next_log_sequence)?;
+        }
+        CommitMode::Replay {
+            stored_event,
+            sequence,
+        } => {
+            if event != stored_event {
+                return Err(StateError::ReplayedEventDrift { sequence });
+            }
+        }
+    }
+    Ok(barrier.commit())
+}

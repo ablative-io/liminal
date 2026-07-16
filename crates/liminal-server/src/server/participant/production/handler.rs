@@ -28,10 +28,10 @@ use crate::server::participant::{
     ParticipantConnectionContext, ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
+use super::barrier::OperationFacts;
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
 use super::observer::{ObserverLog, ObserverRow};
-use super::ops_bind::OperationFacts;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 /// Production semantic handler backed by the shared durable store.

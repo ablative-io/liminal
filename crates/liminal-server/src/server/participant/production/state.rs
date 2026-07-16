@@ -249,6 +249,31 @@ impl ConversationAuthority {
         Ok((order, terminal_seq, attached_seq))
     }
 
+    /// Reports whether the receiving connection already owns a bound slot in
+    /// this conversation, exposing only what the crate's stage-6 selector
+    /// needs. Derived from binding-epoch authority; no side table exists.
+    pub(super) fn binding_slot_occupancy(
+        &self,
+        receiving_incarnation: liminal_protocol::wire::ConnectionIncarnation,
+    ) -> liminal_protocol::lifecycle::BindingSlotOccupancy {
+        for (participant_id, slot) in &self.slots {
+            if let BindingState::Bound(active) = slot.binding {
+                if active.binding_epoch.connection_incarnation == receiving_incarnation {
+                    return liminal_protocol::lifecycle::BindingSlotOccupancy::Occupied {
+                        participant_id: *participant_id,
+                    };
+                }
+            }
+        }
+        liminal_protocol::lifecycle::BindingSlotOccupancy::Empty
+    }
+
+    /// Advances the position allocators past a replayed entry's positions.
+    pub(super) fn observe_replayed_position(&mut self, order: u64, seq: u64) {
+        self.next_order = self.next_order.max(order.saturating_add(1));
+        self.next_seq = self.next_seq.max(seq.saturating_add(1));
+    }
+
     /// Ensures durable shell genesis, appending event zero on first touch.
     ///
     /// Idempotent: an already genesis-validated shell returns immediately.

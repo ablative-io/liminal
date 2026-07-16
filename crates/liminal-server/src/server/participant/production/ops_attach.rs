@@ -1,9 +1,11 @@
-//! Enrollment and credential-attach arms of the production handler.
+//! Credential-attach arm of the production handler.
 //!
-//! Both arms classify through the shared lookup selectors, commit through
-//! the crate's typed transitions, mint their shell events through the A3
-//! aggregate commits, and answer through the request-bound response
-//! authorities. No lifecycle outcome is constructed here.
+//! Classification flows through the shared credential-attach lookup (token
+//! phase, tombstone precedence, verifier order, live-authority checks),
+//! commits through the crate's verified attach transitions — ordinary
+//! detached attach or the R-C1.3 superseding handoff — mints the shell event
+//! through the A3 aggregate commit, and answers through the request-bound
+//! response authority. No lifecycle outcome is constructed here.
 //!
 //! Error contract: any [`StateError`] leaves durable state untouched (nothing
 //! is published before the append succeeds) but may have consumed in-memory
@@ -12,254 +14,30 @@
 //! same crash-consistency model the aggregate barrier is built for.
 
 use liminal_protocol::lifecycle::{
-    AggregateOperationDecision, AllocatedParticipantSlot, AttachCommitParameters,
-    AttachSecretProof, AttachedRecordPosition, BindingSlotDecision, BindingSlotOccupancy,
-    BindingState, ClosureState, CommittedBindingTerminalPosition, CredentialAttachLiveReceipt,
-    CredentialAttachLookupResult, CredentialAttachProvenance, CredentialAttachTokenPhase,
-    DetachCell, EnrollmentCommitParameters, EnrollmentFingerprint, EnrollmentLiveReceipt,
-    EnrollmentLookupResult, EnrollmentTokenPhase, MarkerProofDecision, MarkerProofInput,
-    MarkerProofState, ParticipantSlotAllocatorProof, PresentedIdentity, ReceiptDeadlines,
-    ResolvedIdentity, commit_attach, commit_enrollment, decide_attached_operation,
-    decide_enrolled_operation, lookup_credential_attach, lookup_enrollment,
-    select_credential_attach_binding_slot, select_enrollment_binding_slot, select_marker_proof,
+    AggregateOperationDecision, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition,
+    BindingSlotDecision, BindingState, ClosureState, CommittedBindingTerminalPosition,
+    CredentialAttachLiveReceipt, CredentialAttachLookupResult, CredentialAttachProvenance,
+    CredentialAttachTokenPhase, MarkerProofDecision, MarkerProofInput, MarkerProofState,
+    PresentedIdentity, ResolvedIdentity, commit_attach, decide_attached_operation,
+    lookup_credential_attach, select_credential_attach_binding_slot, select_marker_proof,
 };
 use liminal_protocol::wire::{
     AttachBound, AttachEnvelope, AttachSecret,
-    AttemptTokenBodyConflict as WireAttemptTokenBodyConflict, BindingEpoch, ConnectionIncarnation,
-    CredentialAttachRequest, CredentialAttachResponse, EnrollBound, EnrollmentRequest,
-    EnrollmentResponse, Generation, MarkerMismatch, MarkerNotDelivered, MarkerProofRequest,
-    ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason, ServerValue,
+    AttemptTokenBodyConflict as WireAttemptTokenBodyConflict, BindingEpoch,
+    CredentialAttachRequest, CredentialAttachResponse, Generation, MarkerMismatch,
+    MarkerNotDelivered, MarkerProofRequest, ReceiptExpired as WireReceiptExpired,
+    ReceiptExpiryReason, ServerValue,
 };
 
+use super::barrier::{CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
-use super::log::{
-    StoredAttachAllocation, StoredAttachRequest, StoredEnrollmentAllocation,
-    StoredEnrollmentRequest, StoredOperation,
+use super::log::{StoredAttachAllocation, StoredAttachRequest, StoredOperation};
+use super::state::{
+    AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend, Slot,
+    StateError,
 };
-use super::state::{ConversationAuthority, DurableAppend, Slot, StateError};
-
-/// Connection-scoped and configured facts supplied to each operation.
-#[derive(Clone, Copy, Debug)]
-pub(super) struct OperationFacts {
-    /// Durable incarnation of the receiving connection.
-    pub(super) receiving_incarnation: ConnectionIncarnation,
-    /// Admitted wall-clock read for deadline derivation and receipt phases.
-    pub(super) now_ms: u64,
-    /// Configured identity slots per enrolled participant.
-    pub(super) identity_slots: u64,
-    /// Configured secret-bearing receipt TTL.
-    pub(super) attach_receipt_ttl_ms: u64,
-    /// Configured non-secret provenance TTL.
-    pub(super) receipt_provenance_ttl_ms: u64,
-}
-
-impl OperationFacts {
-    fn deadlines(&self) -> Result<ReceiptDeadlines, StateError> {
-        ReceiptDeadlines::try_from_ttls(
-            self.now_ms,
-            self.attach_receipt_ttl_ms,
-            self.receipt_provenance_ttl_ms,
-        )
-        .map_err(|error| {
-            StateError::invariant(format!("validated TTL configuration rejected: {error:?}"))
-        })
-    }
-}
-
-/// Server-owned participant-slot allocation proof for one enrollment.
-#[derive(Clone, Copy, Debug)]
-struct ServerSlotProof {
-    conversation_id: u64,
-    participant_id: u64,
-    identity_limit: u64,
-}
-
-impl ParticipantSlotAllocatorProof for ServerSlotProof {
-    fn conversation_id(&self) -> u64 {
-        self.conversation_id
-    }
-
-    fn participant_index(&self) -> u64 {
-        self.participant_id
-    }
-
-    fn identity_limit(&self) -> u64 {
-        self.identity_limit
-    }
-}
 
 impl ConversationAuthority {
-    /// Reports whether the receiving connection already owns a bound slot in
-    /// this conversation, exposing only what the crate's stage-6 selector
-    /// needs. Derived from binding-epoch authority; no side table exists.
-    pub(super) fn binding_slot_occupancy(
-        &self,
-        receiving_incarnation: ConnectionIncarnation,
-    ) -> BindingSlotOccupancy {
-        for (participant_id, slot) in &self.slots {
-            if let BindingState::Bound(active) = slot.binding {
-                if active.binding_epoch.connection_incarnation == receiving_incarnation {
-                    return BindingSlotOccupancy::Occupied {
-                        participant_id: *participant_id,
-                    };
-                }
-            }
-        }
-        BindingSlotOccupancy::Empty
-    }
-
-    /// Applies one enrollment request end to end.
-    ///
-    /// Every refusal (token replay, binding-slot occupancy) classifies over
-    /// the replayed authority WITHOUT touching durable state; the durable
-    /// shell genesis is minted only on the authorized-new arm, immediately
-    /// before the enrollment's own committing append — a refused request on a
-    /// never-seen conversation id leaves the durable store byte-identical.
-    pub(super) fn apply_enrollment(
-        &mut self,
-        request: &EnrollmentRequest,
-        operation_facts: &OperationFacts,
-        appender: &dyn DurableAppend,
-    ) -> Result<ServerValue, StateError> {
-        let token_bytes = request.enrollment_token.into_bytes();
-        if let Some(participant_id) = self.tokens.get(&token_bytes).copied() {
-            let slot = self.slots.get(&participant_id).ok_or_else(|| {
-                StateError::invariant("enrollment token maps to a missing participant slot")
-            })?;
-            return enrollment_replay_response(slot, request, operation_facts);
-        }
-        if let BindingSlotDecision::Respond(response) = select_enrollment_binding_slot(
-            request,
-            self.binding_slot_occupancy(operation_facts.receiving_incarnation),
-        ) {
-            return Ok(response.into_server_value());
-        }
-
-        let deadlines = operation_facts.deadlines()?;
-        // The one conversation-creating arm: genesis is durable exactly when
-        // an authorized enrollment is about to append its own entry.
-        self.ensure_genesis(appender)?;
-        let (attached_order, attached_seq) = self.allocate_position()?;
-        let allocation = StoredEnrollmentAllocation {
-            participant_id: self.next_participant,
-            identity_limit: operation_facts.identity_slots,
-            attach_secret: facts::mint_secret_bytes()?,
-            origin_epoch: BindingEpoch::new(operation_facts.receiving_incarnation, Generation::ONE)
-                .into(),
-            attached_order,
-            attached_seq,
-            receipt_expires_at: deadlines.receipt_expires_at().into(),
-            provenance_expires_at: deadlines.provenance_expires_at().into(),
-            enrollment_fingerprint: facts::enrollment_fingerprint(request.enrollment_token),
-        };
-        let outcome = self.enroll_commit(request, &allocation, CommitMode::Live(appender))?;
-        Ok(EnrollmentResponse::enroll_bound(outcome).into_server_value())
-    }
-
-    /// Replays one committed enrollment entry from its stored inputs.
-    pub(super) fn replay_enrolled(
-        &mut self,
-        request: StoredEnrollmentRequest,
-        allocation: &StoredEnrollmentAllocation,
-        stored_event: &[u8],
-        sequence: u64,
-    ) -> Result<(), StateError> {
-        let request = request.to_request();
-        self.enroll_commit(
-            &request,
-            allocation,
-            CommitMode::Replay {
-                stored_event,
-                sequence,
-            },
-        )?;
-        Ok(())
-    }
-
-    /// Shared enrollment commit core for the live and replay paths.
-    fn enroll_commit(
-        &mut self,
-        request: &EnrollmentRequest,
-        allocation: &StoredEnrollmentAllocation,
-        mode: CommitMode<'_>,
-    ) -> Result<EnrollBound, StateError> {
-        let allocated_slot = AllocatedParticipantSlot::from_allocator(ServerSlotProof {
-            conversation_id: request.conversation_id,
-            participant_id: allocation.participant_id,
-            identity_limit: allocation.identity_limit,
-        })
-        .map_err(|error| {
-            StateError::invariant(format!("participant slot allocation rejected: {error:?}"))
-        })?;
-        let committed = commit_enrollment(
-            request,
-            EnrollmentCommitParameters {
-                allocated_slot,
-                attach_secret: AttachSecret::new(allocation.attach_secret),
-                origin_binding_epoch: allocation.origin_epoch.to_epoch()?,
-                attached_position: AttachedRecordPosition::new(
-                    allocation.attached_order,
-                    allocation.attached_seq,
-                ),
-                receipt_expires_at: allocation.receipt_expires_at.get(),
-                provenance_expires_at: allocation.provenance_expires_at.get(),
-                enrollment_fingerprint: EnrollmentFingerprint::new(
-                    allocation.enrollment_fingerprint,
-                ),
-            },
-        )
-        .map_err(|error| {
-            StateError::invariant(format!("protocol enrollment transition failed: {error:?}"))
-        })?;
-        let shell = self.take_shell()?;
-        let barrier = match decide_enrolled_operation(shell, committed) {
-            AggregateOperationDecision::Commit(barrier) => barrier,
-            AggregateOperationDecision::Refused(refusal) => {
-                return Err(StateError::ShellRefused {
-                    reason: refusal.reason(),
-                });
-            }
-        };
-        let make_operation = |event: Vec<u8>| StoredOperation::Enrolled {
-            request: request.into(),
-            allocation: *allocation,
-            event,
-        };
-        let (shell, committed) =
-            commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
-        self.shell = Some(shell);
-        self.advance_log_head()?;
-        let outcome = committed.outcome.clone();
-        self.slots.insert(
-            allocation.participant_id,
-            Slot {
-                member: committed.member,
-                binding: committed.binding_state,
-                cell: DetachCell::default(),
-                enrollment_receipt: EnrollmentLiveReceipt::from_commit(outcome.clone()),
-                enrollment_outcome: committed.outcome,
-                enrollment_receipt_expires_at: allocation.receipt_expires_at.get(),
-                attach: None,
-                attach_provenance: std::collections::BTreeMap::new(),
-                attach_secret: AttachSecret::new(allocation.attach_secret),
-                exact_detach_token: None,
-            },
-        );
-        self.tokens.insert(
-            request.enrollment_token.into_bytes(),
-            allocation.participant_id,
-        );
-        self.next_participant = allocation
-            .participant_id
-            .checked_add(1)
-            .ok_or(StateError::AllocationExhausted {
-                domain: "participant index",
-            })?
-            .max(self.next_participant);
-        self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
-        Ok(outcome)
-    }
-
     /// Applies one credential-attach request end to end.
     ///
     /// Attach never creates a conversation: a fresh conversation id has no
@@ -448,14 +226,14 @@ impl ConversationAuthority {
             };
             slot.attach_provenance.insert(
                 previous.token.into_bytes(),
-                super::state::AttachProvenanceRecord {
+                AttachProvenanceRecord {
                     result_generation: previous.result_generation,
                     reason,
                     provenance_expires_at: previous.provenance_expires_at,
                 },
             );
         }
-        slot.attach = Some(super::state::AttachReceiptState {
+        slot.attach = Some(AttachReceiptState {
             token: request.attach_attempt_token,
             receipt: CredentialAttachLiveReceipt::from_commit(outcome.clone()),
             outcome: committed.outcome,
@@ -468,51 +246,6 @@ impl ConversationAuthority {
         self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
         Ok(outcome)
     }
-
-    /// Advances the position allocators past a replayed entry's positions.
-    fn observe_replayed_position(&mut self, order: u64, seq: u64) {
-        self.next_order = self.next_order.max(order.saturating_add(1));
-        self.next_seq = self.next_seq.max(seq.saturating_add(1));
-    }
-}
-
-/// One barrier resolution mode: live durable append or replay byte-check.
-#[derive(Clone, Copy)]
-pub(super) enum CommitMode<'a> {
-    /// Append the operation at the optimistic head, then commit.
-    Live(&'a dyn DurableAppend),
-    /// Cross-check re-minted canonical bytes against the stored entry.
-    Replay {
-        /// Canonical event bytes read from the durable entry.
-        stored_event: &'a [u8],
-        /// Durable log sequence of the entry (for drift diagnostics).
-        sequence: u64,
-    },
-}
-
-/// Resolves one pending aggregate barrier through the selected mode.
-pub(super) fn commit_through_barrier<T>(
-    barrier: liminal_protocol::lifecycle::AggregateOperationCommit<T>,
-    mode: CommitMode<'_>,
-    next_log_sequence: u64,
-    make_operation: &dyn Fn(Vec<u8>) -> StoredOperation,
-) -> Result<(liminal_protocol::lifecycle::ParticipantConversation, T), StateError> {
-    let event = barrier.event().encode_canonical();
-    match mode {
-        CommitMode::Live(appender) => {
-            let operation = make_operation(event);
-            appender.append(&operation, next_log_sequence)?;
-        }
-        CommitMode::Replay {
-            stored_event,
-            sequence,
-        } => {
-            if event != stored_event {
-                return Err(StateError::ReplayedEventDrift { sequence });
-            }
-        }
-    }
-    Ok(barrier.commit())
 }
 
 /// Builds the echo envelope of one credential-attach request.
@@ -777,62 +510,6 @@ fn credential_attach_refusal(
         CredentialAttachLookupResult::AuthorizedFresh { .. } => {
             return Err(StateError::invariant(
                 "authorized attach routed through the refusal mapper",
-            ));
-        }
-    };
-    Ok(response.into_server_value())
-}
-
-/// Builds the enrollment replay/known response for a mapped token.
-fn enrollment_replay_response(
-    slot: &Slot,
-    request: &EnrollmentRequest,
-    operation_facts: &OperationFacts,
-) -> Result<ServerValue, StateError> {
-    let now = u128::from(operation_facts.now_ms);
-    // The provenance window's `ReceiptExpired` wrapper is crate-sealed
-    // (`EnrollmentResponse::from_receipt_expired` is `pub(crate)`), so this
-    // binding degrades the provenance window to the permanent lifetime
-    // mapping: expired-receipt token replays answer `EnrollmentKnown`. This
-    // is the closest crate-expressible row and is recorded as a residual gap
-    // in the activation declaration.
-    //
-    // The gate reads the enrollment receipt's OWN deadline, fixed at enroll
-    // commit: later attaches never re-open the generation-1 secret-bearing
-    // receipt (secret receipts never outlive their signed TTL).
-    let phase = if now < slot.enrollment_receipt_expires_at {
-        EnrollmentTokenPhase::LiveReceipt {
-            identity: ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
-            receipt: &slot.enrollment_receipt,
-        }
-    } else {
-        EnrollmentTokenPhase::LifetimeMapping {
-            identity: ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
-        }
-    };
-    let response = match lookup_enrollment(phase, &slot.binding, request) {
-        EnrollmentLookupResult::EnrollmentKnown(value) => {
-            EnrollmentResponse::enrollment_known(value)
-        }
-        EnrollmentLookupResult::Bound(_) => {
-            EnrollmentResponse::bound(slot.enrollment_outcome.clone())
-        }
-        EnrollmentLookupResult::UnboundReceipt(_) => {
-            EnrollmentResponse::unbound_receipt(slot.enrollment_outcome.clone())
-        }
-        EnrollmentLookupResult::Retired(_) => {
-            return Err(StateError::invariant(
-                "retired identity observed in a binding that mints no tombstones",
-            ));
-        }
-        EnrollmentLookupResult::ReceiptExpired(_) => {
-            return Err(StateError::invariant(
-                "enrollment provenance phase is never constructed by this binding",
-            ));
-        }
-        EnrollmentLookupResult::AuthorizedNew => {
-            return Err(StateError::invariant(
-                "mapped enrollment token classified as authorized-new",
             ));
         }
     };

@@ -1,6 +1,7 @@
 //! Detach, cumulative-ack, and marker-ack arms plus the cold replay driver.
 //!
-//! Same discipline and error contract as [`super::ops_bind`]: shared lookups
+//! Same discipline and error contract as [`super::ops_enroll`] and
+//! [`super::ops_attach`]: shared lookups
 //! classify, crate transitions commit, the A3 aggregate barrier orders every
 //! shell event behind its durable append, and request-bound response
 //! authorities carry every reply.
@@ -17,11 +18,11 @@ use liminal_protocol::wire::{
     ParticipantAck, ParticipantAckResponse, ServerValue,
 };
 
+use super::barrier::{CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
 use super::log::{
     OperationLog, StoredAck, StoredBindingEpoch, StoredDetachRequest, StoredOperation,
 };
-use super::ops_bind::{CommitMode, OperationFacts, commit_through_barrier};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
