@@ -598,7 +598,7 @@ fn case_31_sequence_exhaustion_returns_exact_budget_and_unchanged_replay() {
                 l_other_times_e: 0,
             },
         }));
-    assert_eq!(refusal.response(), &expected);
+    assert_eq!(refusal.response().server_value(), &expected);
     assert_case_31_unchanged(
         refusal.unchanged().prestate(),
         &expected_frontiers,
@@ -615,7 +615,7 @@ fn case_31_sequence_exhaustion_returns_exact_budget_and_unchanged_replay() {
     else {
         panic!("unchanged case 31 state must replay the same refusal")
     };
-    assert_eq!(replayed.response(), &expected);
+    assert_eq!(replayed.response().server_value(), &expected);
     assert_case_31_unchanged(
         replayed.unchanged().prestate(),
         &expected_frontiers,
@@ -703,7 +703,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
         encoded_record_charge: encoded,
         max_ordinary_record_charge: bytes_max,
     });
-    assert_eq!(bytes.response(), &expected_bytes);
+    assert_eq!(bytes.response().server_value(), &expected_bytes);
     assert_eq!(
         bytes.unchanged().prestate().frontiers(),
         &expected_frontiers
@@ -723,7 +723,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
     else {
         panic!("size refusal must replay from returned prestate")
     };
-    assert_eq!(replayed.response(), &expected_bytes);
+    assert_eq!(replayed.response().server_value(), &expected_bytes);
 
     let entries_max = ResourceVector::new(0, 110);
     let RecordAdmissionDecision::Respond(entries) =
@@ -732,7 +732,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
         panic!("case 32 zero entry maximum must refuse")
     };
     assert_eq!(
-        entries.response(),
+        entries.response().server_value(),
         &ServerValue::RecordTooLarge(RecordTooLarge {
             request: envelope.clone(),
             dimension: ResourceDimension::Entries,
@@ -747,7 +747,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
         panic!("simultaneous case 32 failure must select entries")
     };
     assert_eq!(
-        simultaneous.response(),
+        simultaneous.response().server_value(),
         &ServerValue::RecordTooLarge(RecordTooLarge {
             request: envelope.clone(),
             dimension: ResourceDimension::Entries,
@@ -774,7 +774,10 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
     ) else {
         panic!("binding lookup must refuse before static size")
     };
-    assert!(matches!(no_binding.response(), ServerValue::NoBinding(_)));
+    assert!(matches!(
+        no_binding.response().server_value(),
+        ServerValue::NoBinding(_)
+    ));
     assert_eq!(
         no_binding.unchanged().prestate().frontiers(),
         &expected_frontiers
@@ -887,7 +890,7 @@ fn observer_fixed_point_refusal_maps_through_shared_selector_without_mutation() 
     ) else {
         panic!("capacity-walk floor must be blocked below observer 90")
     };
-    let ServerValue::ObserverBackpressure(value) = refusal.response() else {
+    let ServerValue::ObserverBackpressure(value) = refusal.response().server_value() else {
         panic!("fixed-point observer failure must map to observer response")
     };
     let crate::wire::ObserverBackpressure::RecordAdmission { state, .. } = value else {

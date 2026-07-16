@@ -1,11 +1,10 @@
 #![allow(clippy::expect_used, clippy::panic, clippy::too_many_lines)]
 
 use crate::wire::{
-    AttachAttemptToken, AttachEnvelope, AttachSecret, ConnectionConversationBindingOccupied,
-    ConnectionConversationCapacityExceeded, CredentialAttachRequest, EnrollmentEnvelope,
-    EnrollmentReceiptCapacityScope, EnrollmentRequest, EnrollmentToken, Generation,
-    IdentityCapacityExceeded, IdentityCapacityScope, ReceiptCapacityExceeded, ReceiptCapacityScope,
-    ResponseEnvelope, ServerValue,
+    AttachAttemptToken, AttachEnvelope, AttachSecret, CredentialAttachRequest,
+    CredentialAttachResponse, EnrollmentEnvelope, EnrollmentReceiptCapacityScope,
+    EnrollmentRequest, EnrollmentResponse, EnrollmentToken, Generation, IdentityCapacityExceeded,
+    IdentityCapacityScope, ReceiptCapacityScope,
 };
 
 use super::capacity::{
@@ -121,7 +120,6 @@ fn fresh_participant_counters_reject_nonempty_restored_state() {
 #[test]
 fn already_tracked_semantic_conversation_consumes_zero_capacity_at_full_limit() {
     let decision = select_semantic_connection_capacity(
-        ResponseEnvelope::Enrollment(enrollment_envelope()),
         ConnectionConversationTracking::AlreadyTracked,
         counter(2, 2),
     );
@@ -134,22 +132,15 @@ fn already_tracked_semantic_conversation_consumes_zero_capacity_at_full_limit() 
 
 #[test]
 fn first_untracked_semantic_conversation_returns_exact_capacity_refusal() {
-    let request = ResponseEnvelope::Enrollment(enrollment_envelope());
     assert_eq!(
         select_semantic_connection_capacity(
-            request.clone(),
             ConnectionConversationTracking::Untracked,
             counter(2, 2),
         ),
-        SemanticConnectionCapacityDecision::Respond(
-            ServerValue::ConnectionConversationCapacityExceeded(
-                ConnectionConversationCapacityExceeded::SemanticRequest { request, limit: 2 },
-            ),
-        ),
+        SemanticConnectionCapacityDecision::Respond { limit: 2 },
     );
 
     let decision = select_semantic_connection_capacity(
-        ResponseEnvelope::Enrollment(enrollment_envelope()),
         ConnectionConversationTracking::Untracked,
         counter(2, 1),
     );
@@ -170,12 +161,9 @@ fn binding_slot_selectors_return_exact_origin_specific_outcomes() {
                 participant_id: 999,
             },
         ),
-        BindingSlotDecision::Respond(ServerValue::ConnectionConversationBindingOccupied(
-            ConnectionConversationBindingOccupied::Enrollment {
-                conversation_id: enrollment_request.conversation_id,
-                enrollment_token: enrollment_request.enrollment_token,
-            },
-        )),
+        BindingSlotDecision::Respond(
+            EnrollmentResponse::connection_conversation_binding_occupied(&enrollment_envelope()),
+        ),
     );
     assert_eq!(
         select_enrollment_binding_slot(&enrollment_request, BindingSlotOccupancy::Empty),
@@ -197,15 +185,9 @@ fn binding_slot_selectors_return_exact_origin_specific_outcomes() {
             &attach_request,
             BindingSlotOccupancy::Occupied { participant_id: 74 },
         ),
-        BindingSlotDecision::Respond(ServerValue::ConnectionConversationBindingOccupied(
-            ConnectionConversationBindingOccupied::CredentialAttach {
-                conversation_id: attach_request.conversation_id,
-                participant_id: attach_request.participant_id,
-                capability_generation: attach_request.capability_generation,
-                attach_attempt_token: attach_request.attach_attempt_token,
-                accept_marker_delivery_seq: attach_request.accept_marker_delivery_seq,
-            },
-        )),
+        BindingSlotDecision::Respond(
+            CredentialAttachResponse::connection_conversation_binding_occupied(&attach_envelope()),
+        ),
     );
 }
 
@@ -220,36 +202,36 @@ fn enrollment_runtime_capacity_uses_the_exact_five_scope_precedence() {
         }
 
         let expected = match failing_index {
-            0 => ServerValue::IdentityCapacityExceeded(IdentityCapacityExceeded {
+            0 => EnrollmentResponse::identity_capacity_exceeded(IdentityCapacityExceeded {
                 request: enrollment_envelope(),
                 scope: IdentityCapacityScope::Server,
                 limit: 10,
                 occupied: 10,
             }),
-            1 => ServerValue::IdentityCapacityExceeded(IdentityCapacityExceeded {
+            1 => EnrollmentResponse::identity_capacity_exceeded(IdentityCapacityExceeded {
                 request: enrollment_envelope(),
                 scope: IdentityCapacityScope::Conversation,
                 limit: 11,
                 occupied: 11,
             }),
-            2 => ServerValue::ReceiptCapacityExceeded(ReceiptCapacityExceeded::Enrollment {
-                request: enrollment_envelope(),
-                scope: EnrollmentReceiptCapacityScope::LiveReceiptServer,
-                limit: 12,
-                occupied: 12,
-            }),
-            3 => ServerValue::ReceiptCapacityExceeded(ReceiptCapacityExceeded::Enrollment {
-                request: enrollment_envelope(),
-                scope: EnrollmentReceiptCapacityScope::ProvenanceServer,
-                limit: 13,
-                occupied: 13,
-            }),
-            4 => ServerValue::ReceiptCapacityExceeded(ReceiptCapacityExceeded::Enrollment {
-                request: enrollment_envelope(),
-                scope: EnrollmentReceiptCapacityScope::ProvenanceConversation,
-                limit: 14,
-                occupied: 14,
-            }),
+            2 => EnrollmentResponse::receipt_capacity_exceeded(
+                enrollment_envelope(),
+                EnrollmentReceiptCapacityScope::LiveReceiptServer,
+                12,
+                12,
+            ),
+            3 => EnrollmentResponse::receipt_capacity_exceeded(
+                enrollment_envelope(),
+                EnrollmentReceiptCapacityScope::ProvenanceServer,
+                13,
+                13,
+            ),
+            4 => EnrollmentResponse::receipt_capacity_exceeded(
+                enrollment_envelope(),
+                EnrollmentReceiptCapacityScope::ProvenanceConversation,
+                14,
+                14,
+            ),
             _ => panic!("five enrollment scopes are exhaustive"),
         };
 
@@ -310,14 +292,14 @@ fn credential_attach_capacity_uses_all_five_receipt_scopes_in_order() {
         let limit = 20 + u64::try_from(failing_index).expect("five indices fit u64");
         assert_eq!(
             select_credential_attach_capacity(&request, attach_counters(values)),
-            CredentialAttachCapacityDecision::Respond(ServerValue::ReceiptCapacityExceeded(
-                ReceiptCapacityExceeded::CredentialAttach {
-                    request: attach_envelope(),
+            CredentialAttachCapacityDecision::Respond(
+                CredentialAttachResponse::receipt_capacity_exceeded(
+                    attach_envelope(),
                     scope,
                     limit,
-                    occupied: limit,
-                },
-            )),
+                    limit,
+                ),
+            ),
         );
     }
 }

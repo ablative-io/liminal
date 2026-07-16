@@ -13,8 +13,8 @@ use crate::{
     outcome::CandidatePhase,
     wire::{
         BindingEpoch, ClosureCheckedEnvelope, DeliverySeq, OrderAllocatingEnvelope,
-        RecordAdmission, RecordAdmissionEnvelope, RecordCommitted, ResponseEnvelope,
-        SequenceAllocatingEnvelope, ServerValue, TransactionOrder,
+        RecordAdmission, RecordAdmissionEnvelope, RecordAdmissionResponse, RecordCommitted,
+        SequenceAllocatingEnvelope, TransactionOrder,
     },
 };
 
@@ -179,14 +179,14 @@ impl<'a, EF, V, LF> UnchangedRecordAdmission<'a, EF, V, LF> {
 /// Exact wire response paired with the unchanged replayable aggregate.
 #[derive(Debug)]
 pub struct RecordAdmissionRefusal<'a, EF, V, LF> {
-    response: ServerValue,
+    response: RecordAdmissionResponse,
     unchanged: UnchangedRecordAdmission<'a, EF, V, LF>,
 }
 
 impl<'a, EF, V, LF> RecordAdmissionRefusal<'a, EF, V, LF> {
-    /// Borrows the selected wire response.
+    /// Borrows the selected request-bound wire response.
     #[must_use]
-    pub const fn response(&self) -> &ServerValue {
+    pub const fn response(&self) -> &RecordAdmissionResponse {
         &self.response
     }
 
@@ -198,7 +198,12 @@ impl<'a, EF, V, LF> RecordAdmissionRefusal<'a, EF, V, LF> {
 
     /// Recovers the response and complete unchanged operation state.
     #[must_use]
-    pub fn into_parts(self) -> (ServerValue, UnchangedRecordAdmission<'a, EF, V, LF>) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        RecordAdmissionResponse,
+        UnchangedRecordAdmission<'a, EF, V, LF>,
+    ) {
         (self.response, self.unchanged)
     }
 }
@@ -520,36 +525,45 @@ pub fn apply_record_admission<EF, V, LF>(
         &lookup_request,
     ) {
         BindingRequiredLookupResult::Retired(value) => {
-            return refused(input, encoded_record_charge, ServerValue::Retired(value));
+            return refused(
+                input,
+                encoded_record_charge,
+                RecordAdmissionResponse::from_retired(value),
+            );
         }
         BindingRequiredLookupResult::ParticipantUnknown(value) => {
             return refused(
                 input,
                 encoded_record_charge,
-                ServerValue::ParticipantUnknown(value),
+                RecordAdmissionResponse::from_participant_unknown(value),
             );
         }
         BindingRequiredLookupResult::StaleAuthority(value) => {
             return refused(
                 input,
                 encoded_record_charge,
-                ServerValue::StaleAuthority(value),
+                RecordAdmissionResponse::from_stale_authority(value),
             );
         }
         BindingRequiredLookupResult::NoBinding(value) => {
-            return refused(input, encoded_record_charge, ServerValue::NoBinding(value));
+            return refused(
+                input,
+                encoded_record_charge,
+                RecordAdmissionResponse::from_no_binding(value),
+            );
         }
         BindingRequiredLookupResult::Authorized { .. } => {}
     }
 
     let connection_capacity = match select_semantic_connection_capacity(
-        ResponseEnvelope::RecordAdmission(envelope.clone()),
         input.connection_tracking,
         input.connection_capacity,
     ) {
         SemanticConnectionCapacityDecision::Commit(value) => value,
-        SemanticConnectionCapacityDecision::Respond(value) => {
-            return refused(input, encoded_record_charge, value);
+        SemanticConnectionCapacityDecision::Respond { limit } => {
+            let response =
+                RecordAdmissionResponse::connection_conversation_capacity_exceeded(envelope, limit);
+            return refused(input, encoded_record_charge, response);
         }
     };
 
@@ -563,7 +577,7 @@ pub fn apply_record_admission<EF, V, LF>(
             return refused(
                 input,
                 encoded_record_charge,
-                ServerValue::RecordTooLarge(value),
+                RecordAdmissionResponse::record_too_large(value),
             );
         }
     };
@@ -699,7 +713,7 @@ impl<'a, EF, V, LF> RecordAdmissionProjectionShell<'a, EF, V, LF> {
 fn refused<EF, V, LF>(
     prestate: RecordAdmissionPrestate<'_, EF, V, LF>,
     encoded_record_charge: ResourceVector,
-    response: ServerValue,
+    response: RecordAdmissionResponse,
 ) -> RecordAdmissionDecision<'_, EF, V, LF> {
     RecordAdmissionDecision::Respond(Box::new(RecordAdmissionRefusal {
         response,
@@ -724,7 +738,7 @@ fn nonzero_debt_response(
     accounting: ClosureAccounting,
     observer_progress: DeliverySeq,
     limits: OrdinaryProjectionLimits,
-) -> Result<ServerValue, RecordAdmissionFault> {
+) -> Result<RecordAdmissionResponse, RecordAdmissionFault> {
     let order = match allocate_order(
         OrderAllocatingEnvelope::RecordAdmission(envelope.clone()),
         frontiers.order().ledger(),
@@ -750,7 +764,7 @@ fn nonzero_debt_response(
     ) {
         ObserverFloorDecision::Eligible(_) => {}
         ObserverFloorDecision::Respond(value) => {
-            return Ok(ServerValue::ObserverBackpressure(value));
+            return Ok(RecordAdmissionResponse::from_observer_backpressure(value));
         }
     }
     let required = match RequiredCapacityPlan::ordinary(
@@ -778,7 +792,7 @@ fn nonzero_debt_response(
         required,
     ) {
         RemainingClosureDecision::Respond(value) => {
-            Ok(ServerValue::MarkerClosureCapacityExceeded(value))
+            Ok(RecordAdmissionResponse::from_marker_closure_capacity_exceeded(value))
         }
         RemainingClosureDecision::Eligible(_) => {
             let _ = order;
@@ -791,7 +805,7 @@ fn projection_failure(
     error: OrdinaryProjectionError,
     envelope: &RecordAdmissionEnvelope,
     accounting: ClosureAccounting,
-) -> Result<ServerValue, RecordAdmissionFault> {
+) -> Result<RecordAdmissionResponse, RecordAdmissionFault> {
     match error {
         OrdinaryProjectionError::Order(error) => order_failure(error),
         OrdinaryProjectionError::Sequence(error) => sequence_failure(error),
@@ -803,7 +817,9 @@ fn projection_failure(
             observer_progress,
             cap_floor,
         ) {
-            ObserverFloorDecision::Respond(value) => Ok(ServerValue::ObserverBackpressure(value)),
+            ObserverFloorDecision::Respond(value) => {
+                Ok(RecordAdmissionResponse::from_observer_backpressure(value))
+            }
             ObserverFloorDecision::Eligible(_) => Err(RecordAdmissionFault::Projection(
                 OrdinaryProjectionError::ObserverBackpressure {
                     cap_floor,
@@ -823,7 +839,7 @@ fn capacity_failure(
     required: crate::algebra::WideResourceVector,
     envelope: &RecordAdmissionEnvelope,
     accounting: ClosureAccounting,
-) -> Result<ServerValue, RecordAdmissionFault> {
+) -> Result<RecordAdmissionResponse, RecordAdmissionFault> {
     let required_capacity = match RequiredCapacityPlan::from_successors(&[required]) {
         Ok(value) => value,
         Err(error) => {
@@ -838,23 +854,29 @@ fn capacity_failure(
         required_capacity,
     ) {
         RemainingClosureDecision::Respond(value) => {
-            Ok(ServerValue::MarkerClosureCapacityExceeded(value))
+            Ok(RecordAdmissionResponse::from_marker_closure_capacity_exceeded(value))
         }
         RemainingClosureDecision::Eligible(_) => Err(RecordAdmissionFault::RefusalInvariant),
     }
 }
 
-fn order_failure(error: OrderAdmissionError) -> Result<ServerValue, RecordAdmissionFault> {
+fn order_failure(
+    error: OrderAdmissionError,
+) -> Result<RecordAdmissionResponse, RecordAdmissionFault> {
     match error {
-        OrderAdmissionError::Exhausted(value) => Ok(ServerValue::ConversationOrderExhausted(value)),
+        OrderAdmissionError::Exhausted(value) => Ok(
+            RecordAdmissionResponse::from_conversation_order_exhausted(value),
+        ),
         other => Err(RecordAdmissionFault::Order(other)),
     }
 }
 
-fn sequence_failure(error: SequenceAdmissionError) -> Result<ServerValue, RecordAdmissionFault> {
+fn sequence_failure(
+    error: SequenceAdmissionError,
+) -> Result<RecordAdmissionResponse, RecordAdmissionFault> {
     match error {
         SequenceAdmissionError::Exhausted(value) => {
-            Ok(ServerValue::ConversationSequenceExhausted(value))
+            Ok(RecordAdmissionResponse::from_conversation_sequence_exhausted(value))
         }
         other => Err(RecordAdmissionFault::Sequence(other)),
     }

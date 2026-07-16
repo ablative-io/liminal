@@ -269,7 +269,8 @@ fn token_replay_precedes_every_capacity_and_never_allocates() {
 
     assert!(matches!(
         replay,
-        InitialEnrollmentOperationDecision::Respond(ServerValue::Bound(_))
+        InitialEnrollmentOperationDecision::Respond(ref response)
+            if matches!(response.server_value(), ServerValue::Bound(_))
     ));
     assert_eq!(calls.get(), 0);
     assert_eq!(value_calls.get(), 0);
@@ -302,7 +303,8 @@ fn stage_six_and_eight_refusals_are_ordered_and_nonmutating() {
     );
     assert!(matches!(
         semantic,
-        InitialEnrollmentOperationDecision::Respond(
+        InitialEnrollmentOperationDecision::Respond(ref response) if matches!(
+            response.server_value(),
             ServerValue::ConnectionConversationCapacityExceeded(_)
         )
     ));
@@ -328,7 +330,8 @@ fn stage_six_and_eight_refusals_are_ordered_and_nonmutating() {
     );
     assert!(matches!(
         binding_occupied,
-        InitialEnrollmentOperationDecision::Respond(
+        InitialEnrollmentOperationDecision::Respond(ref response) if matches!(
+            response.server_value(),
             ServerValue::ConnectionConversationBindingOccupied(_)
         )
     ));
@@ -354,7 +357,10 @@ fn stage_six_and_eight_refusals_are_ordered_and_nonmutating() {
     );
     assert!(matches!(
         identity_capacity,
-        InitialEnrollmentOperationDecision::Respond(ServerValue::IdentityCapacityExceeded(_))
+        InitialEnrollmentOperationDecision::Respond(ref response) if matches!(
+            response.server_value(),
+            ServerValue::IdentityCapacityExceeded(_)
+        )
     ));
     assert_eq!(calls.get(), 0);
     assert_eq!(value_calls.get(), 0);
