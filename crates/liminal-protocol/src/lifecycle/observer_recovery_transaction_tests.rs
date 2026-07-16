@@ -23,12 +23,17 @@ use crate::wire::{
 
 use super::{
     ObserverProgressAdvanceDecision, ObserverProgressAdvanceError,
-    ObserverProgressAdvanceTransaction, ObserverProgressTrackError, ObserverRecoveryAggregate,
+    ObserverProgressAdvanceTransaction, ObserverProgressTrackDecision, ObserverProgressTrackError,
+    ObserverProgressTrackTransaction, ObserverRecoveryAggregate,
     ObserverRecoveryAggregateRestoreError, ObserverRecoveryTransaction,
     ObserverRecoveryTransactionDecision,
 };
 
 const CONVERSATIONS: [ConversationId; 4] = [101, 102, 103, 104];
+/// The model's registration pool: the four initially tracked conversations
+/// (so mid-sequence tracks exercise the duplicate refusal) plus four fresh
+/// conversations registered — or crashed — mid-interleaving.
+const TRACKABLE: [ConversationId; 8] = [101, 102, 103, 104, 105, 106, 107, 108];
 const INITIAL_PROGRESS: DeliverySeq = 10;
 const LIMIT: u64 = 16;
 
@@ -47,11 +52,30 @@ fn request(entries: &[(ConversationId, ObserverEpoch)]) -> ObserverRecoveryHands
 fn tracked_aggregate() -> ObserverRecoveryAggregate {
     let mut aggregate = ObserverRecoveryAggregate::new();
     for conversation_id in CONVERSATIONS {
-        aggregate
-            .track(conversation_id, INITIAL_PROGRESS)
-            .expect("fresh conversations track once");
+        aggregate =
+            track_transaction(aggregate.decide_track(conversation_id, INITIAL_PROGRESS)).commit();
     }
     aggregate
+}
+
+fn track_transaction(decision: ObserverProgressTrackDecision) -> ObserverProgressTrackTransaction {
+    match decision {
+        ObserverProgressTrackDecision::Commit(transaction) => transaction,
+        ObserverProgressTrackDecision::Refuse { error, .. } => {
+            panic!("a fresh registration must commit, refused with {error:?}")
+        }
+    }
+}
+
+fn refused_track(
+    decision: ObserverProgressTrackDecision,
+) -> (ObserverRecoveryAggregate, ObserverProgressTrackError) {
+    match decision {
+        ObserverProgressTrackDecision::Refuse { aggregate, error } => (aggregate, error),
+        ObserverProgressTrackDecision::Commit(transaction) => {
+            panic!("a duplicate registration must refuse, committed {transaction:?}")
+        }
+    }
 }
 
 fn commit_transaction(
@@ -88,22 +112,69 @@ fn refused_advance(
 }
 
 #[test]
-fn track_registers_once_and_refuses_duplicates() {
-    let mut aggregate = ObserverRecoveryAggregate::new();
+fn track_registers_once_and_refuses_duplicates_unchanged() {
+    let aggregate = ObserverRecoveryAggregate::new();
     assert_eq!(aggregate.observer_progress(101), None);
-    aggregate.track(101, 5).expect("fresh conversation tracks");
+    let transaction = track_transaction(aggregate.decide_track(101, 5));
+    assert_eq!(transaction.conversation_id(), 101);
+    assert_eq!(transaction.observer_progress(), 5);
+    let aggregate = transaction.commit();
     assert_eq!(aggregate.observer_progress(101), Some(5));
+
+    let (aggregate, error) = refused_track(aggregate.decide_track(101, 6));
     assert_eq!(
-        aggregate.track(101, 6),
-        Err(ObserverProgressTrackError::AlreadyTracked {
+        error,
+        ObserverProgressTrackError::AlreadyTracked {
             conversation_id: 101
-        })
+        }
     );
     assert_eq!(
         aggregate.observer_progress(101),
         Some(5),
-        "a refused duplicate track must not change the authoritative row"
+        "a refused duplicate track must return the aggregate unchanged"
     );
+}
+
+#[test]
+fn aborted_track_leaves_the_conversation_untracked() {
+    let aggregate = tracked_aggregate();
+    let before_progress = aggregate.progress_rows();
+    let before_armed = aggregate.armed_rows();
+
+    // Crash between the decision and the durable append: abort installs no
+    // progress row, so decide_recovery can never have read a phantom row.
+    let transaction = track_transaction(aggregate.decide_track(105, 7));
+    let aggregate = transaction.abort();
+    assert_eq!(aggregate.observer_progress(105), None);
+    assert_eq!(
+        aggregate.progress_rows(),
+        before_progress,
+        "an aborted track must not leave a live progress row durable state lacks"
+    );
+    assert_eq!(aggregate.armed_rows(), before_armed);
+}
+
+#[test]
+fn committed_track_is_readable_and_recoverable() {
+    let aggregate = track_transaction(tracked_aggregate().decide_track(105, 7)).commit();
+    assert_eq!(aggregate.observer_progress(105), Some(7));
+
+    // The registered row participates in recovery like any initial row.
+    let (aggregate, outcome) = commit_transaction(aggregate.decide_recovery(
+        &request(&[(105, 7)]),
+        LIMIT,
+        LIMIT,
+        &CONVERSATIONS,
+    ))
+    .commit();
+    assert_eq!(outcome.statuses.len(), 1);
+    assert_eq!(aggregate.armed_epoch(105), Some(7));
+
+    // The durable snapshot including the registered row restores exactly.
+    let restored =
+        ObserverRecoveryAggregate::restore(&aggregate.progress_rows(), &aggregate.armed_rows())
+            .expect("a durable snapshot containing a committed track restores");
+    assert_eq!(restored, aggregate);
 }
 
 #[test]
@@ -379,11 +450,17 @@ fn restore_round_trips_and_rejects_every_corruption_class() {
     );
 }
 
-/// One generated interleaving step: an acknowledgement/fate progress advance
-/// or an observer-recovery batch, each of which either commits or crashes
-/// (aborts) between the durable-append decision and its application.
+/// One generated interleaving step: a registration track, an
+/// acknowledgement/fate progress advance, or an observer-recovery batch,
+/// each of which either commits or crashes (aborts) between the
+/// durable-append decision and its application.
 #[derive(Clone, Debug)]
 enum ModelOp {
+    Track {
+        slot: usize,
+        progress: u64,
+        crash: bool,
+    },
     Advance {
         slot: usize,
         delta: u64,
@@ -397,6 +474,13 @@ enum ModelOp {
 
 fn op_strategy() -> impl Strategy<Value = ModelOp> {
     prop_oneof![
+        (0_usize..TRACKABLE.len(), 0_u64..20, any::<bool>()).prop_map(|(slot, progress, crash)| {
+            ModelOp::Track {
+                slot,
+                progress,
+                crash,
+            }
+        }),
         (0_usize..CONVERSATIONS.len(), 1_u64..4, any::<bool>())
             .prop_map(|(slot, delta, crash)| ModelOp::Advance { slot, delta, crash }),
         (
@@ -418,10 +502,12 @@ fn assert_equal_epoch_invariant(aggregate: &ObserverRecoveryAggregate) {
 }
 
 proptest! {
-    /// Arbitrary interleavings of recovery with acknowledgement/fate progress
-    /// never double-install or half-install arms, and every intermediate
-    /// durable state restores to exactly the live aggregate (crash replay
-    /// from any durable point converges).
+    /// Arbitrary interleavings of registration tracks, recovery, and
+    /// acknowledgement/fate progress never double-install or half-install
+    /// arms, and every intermediate durable state restores to exactly the
+    /// live aggregate (crash replay from any durable point converges) —
+    /// including states reached through mid-sequence tracked-but-crashed
+    /// registrations.
     #[test]
     fn interleavings_never_split_arm_installation_and_durable_replay_converges(
         ops in proptest::collection::vec(op_strategy(), 0..24)
@@ -434,6 +520,51 @@ proptest! {
 
         for op in ops {
             match op {
+                ModelOp::Track { slot, progress, crash } => {
+                    let conversation_id = TRACKABLE[slot];
+                    let already_tracked = live.observer_progress(conversation_id);
+                    let before_progress = live.progress_rows();
+                    let before_armed = live.armed_rows();
+
+                    live = match live.decide_track(conversation_id, progress) {
+                        ObserverProgressTrackDecision::Refuse { aggregate, error } => {
+                            prop_assert!(
+                                already_tracked.is_some(),
+                                "a fresh registration must not be refused"
+                            );
+                            prop_assert_eq!(
+                                error,
+                                ObserverProgressTrackError::AlreadyTracked { conversation_id }
+                            );
+                            prop_assert_eq!(aggregate.progress_rows(), before_progress);
+                            prop_assert_eq!(aggregate.armed_rows(), before_armed);
+                            aggregate
+                        }
+                        ObserverProgressTrackDecision::Commit(transaction) => {
+                            prop_assert!(
+                                already_tracked.is_none(),
+                                "a duplicate registration must refuse"
+                            );
+                            prop_assert_eq!(transaction.conversation_id(), conversation_id);
+                            prop_assert_eq!(transaction.observer_progress(), progress);
+                            if crash {
+                                // Crash between the decision and the durable
+                                // append: the registration installs nothing,
+                                // live or durable, so no later recovery can
+                                // arm against a phantom progress row.
+                                let aggregate = transaction.abort();
+                                prop_assert_eq!(aggregate.progress_rows(), before_progress);
+                                prop_assert_eq!(aggregate.armed_rows(), before_armed);
+                                aggregate
+                            } else {
+                                let aggregate = transaction.commit();
+                                // One durable transaction persists the row.
+                                durable_progress.insert(conversation_id, progress);
+                                aggregate
+                            }
+                        }
+                    };
+                }
                 ModelOp::Advance { slot, delta, crash } => {
                     let conversation_id = CONVERSATIONS[slot];
                     let current = live

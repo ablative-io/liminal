@@ -188,7 +188,8 @@ pub use membership::{
 };
 pub use observer_recovery::{
     ObserverProgressAdvanceDecision, ObserverProgressAdvanceError,
-    ObserverProgressAdvanceTransaction, ObserverProgressTrackError, ObserverRecoveryAggregate,
+    ObserverProgressAdvanceTransaction, ObserverProgressTrackDecision, ObserverProgressTrackError,
+    ObserverProgressTrackTransaction, ObserverRecoveryAggregate,
     ObserverRecoveryAggregateRestoreError, ObserverRecoveryArm, ObserverRecoveryCommit,
     ObserverRecoveryDecision, ObserverRecoveryTransaction, ObserverRecoveryTransactionDecision,
     apply_observer_recovery,

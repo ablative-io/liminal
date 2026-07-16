@@ -86,9 +86,14 @@ pub enum ObserverProgressAdvanceError {
 /// [`ObserverProgressAdvanceTransaction::commit`] applies the progress write
 /// and surrenders the fired arm — after the caller's durable append is
 /// confirmed — while [`ObserverProgressAdvanceTransaction::abort`] returns
-/// the aggregate byte-for-byte unchanged, arm still installed. No mutation in
-/// this module is exempt from the decide/commit/abort discipline, so live and
-/// durable state can never disagree about progress or an installed arm.
+/// the aggregate byte-for-byte unchanged, arm still installed. So does the
+/// registration feed: [`Self::decide_track`] consumes the aggregate and only
+/// [`ObserverProgressTrackTransaction::commit`] installs the new progress
+/// row, after the caller's durable append is confirmed, so a recovery batch
+/// can never plan an arm against a progress row that is not yet durable. No
+/// mutation in this module is exempt from the decide/commit/abort
+/// discipline, so live and durable state can never disagree about progress
+/// or an installed arm.
 ///
 /// The aggregate is deliberately not `Clone`: at most one owner may read
 /// progress for arm selection.
@@ -190,22 +195,38 @@ impl ObserverRecoveryAggregate {
             .collect()
     }
 
-    /// Registers a newly tracked conversation at its current progress.
+    /// Consumes the aggregate into one registration-track transaction.
     ///
-    /// # Errors
-    ///
-    /// Returns [`ObserverProgressTrackError::AlreadyTracked`] without any
-    /// change when the conversation already has an authoritative row.
-    pub fn track(
-        &mut self,
+    /// This is the registration feed for newly tracked conversations, and it
+    /// carries the same barrier as the other two mutations. Validation
+    /// happens here — an already tracked conversation refuses with the
+    /// aggregate unchanged — and a validated registration returns a pending
+    /// [`ObserverProgressTrackTransaction`] carrying the new progress row for
+    /// the caller's durable append. Nothing mutates until
+    /// [`ObserverProgressTrackTransaction::commit`] confirms the append;
+    /// [`ObserverProgressTrackTransaction::abort`] returns the aggregate
+    /// byte-for-byte unchanged, conversation still untracked. A recovery
+    /// batch therefore can never read a progress row whose durable append
+    /// has not been confirmed, so a crash after an arm install can never
+    /// strand a durable arm row without its progress row
+    /// ([`ObserverRecoveryAggregateRestoreError::ArmWithoutProgress`]).
+    #[must_use]
+    pub fn decide_track(
+        self,
         conversation_id: ConversationId,
         observer_progress: DeliverySeq,
-    ) -> Result<(), ObserverProgressTrackError> {
+    ) -> ObserverProgressTrackDecision {
         if self.progress.contains_key(&conversation_id) {
-            return Err(ObserverProgressTrackError::AlreadyTracked { conversation_id });
+            return ObserverProgressTrackDecision::Refuse {
+                aggregate: self,
+                error: ObserverProgressTrackError::AlreadyTracked { conversation_id },
+            };
         }
-        self.progress.insert(conversation_id, observer_progress);
-        Ok(())
+        ObserverProgressTrackDecision::Commit(ObserverProgressTrackTransaction {
+            aggregate: self,
+            conversation_id,
+            observer_progress,
+        })
     }
 
     /// Consumes the aggregate into one progress-advance transaction.
@@ -437,6 +458,65 @@ impl ObserverProgressAdvanceTransaction {
     }
 
     /// Cancels a failed durable append; neither progress nor arm changes.
+    #[must_use]
+    pub fn abort(self) -> ObserverRecoveryAggregate {
+        self.aggregate
+    }
+}
+
+/// Total transactional registration decision against the owned aggregate.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ObserverProgressTrackDecision {
+    /// The registration was refused; the aggregate is unchanged.
+    Refuse {
+        /// Unchanged aggregate returned to its owner.
+        aggregate: ObserverRecoveryAggregate,
+        /// Exact refusal.
+        error: ObserverProgressTrackError,
+    },
+    /// The registration validated; the progress row may commit atomically.
+    Commit(ObserverProgressTrackTransaction),
+}
+
+/// Ownership barrier between a validated registration and its durable append.
+///
+/// The aggregate is unreachable while the transaction is pending, so no
+/// recovery batch can plan an equal-epoch arm against a progress row whose
+/// durable append is not yet confirmed. Consuming [`Self::commit`] installs
+/// the new progress row — after the caller has confirmed the durable append —
+/// and consuming [`Self::abort`] returns the aggregate byte-for-byte
+/// unchanged, conversation still untracked, so a failed append never leaves
+/// a live progress row that durable state does not hold.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ObserverProgressTrackTransaction {
+    aggregate: ObserverRecoveryAggregate,
+    conversation_id: ConversationId,
+    observer_progress: DeliverySeq,
+}
+
+impl ObserverProgressTrackTransaction {
+    /// Returns the conversation whose progress row the durable append writes.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    /// Returns the registered hard observer progress for the durable append.
+    #[must_use]
+    pub const fn observer_progress(&self) -> DeliverySeq {
+        self.observer_progress
+    }
+
+    /// Installs the registered progress row after a confirmed durable append.
+    #[must_use]
+    pub fn commit(mut self) -> ObserverRecoveryAggregate {
+        self.aggregate
+            .progress
+            .insert(self.conversation_id, self.observer_progress);
+        self.aggregate
+    }
+
+    /// Cancels a failed durable append; the conversation stays untracked.
     #[must_use]
     pub fn abort(self) -> ObserverRecoveryAggregate {
         self.aggregate
