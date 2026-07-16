@@ -1,23 +1,41 @@
-//! Server-owned participant transport bindings.
+//! Server-owned participant storage and transport bindings.
 //!
-//! The repository modules are test-only executable regression fixtures. They
-//! must not become production bindings until one durable conversation
-//! aggregate can persist the protocol crate's complete typed transition.
+//! The conversation event stream, opaque aggregate owner, and connection-
+//! incarnation stream are production durability boundaries over protocol-owned
+//! transitions. The older crash/cursor/detach repositories remain test-only
+//! regression fixtures until their operations move behind the aggregate.
 
+#[allow(
+    dead_code,
+    reason = "production aggregate boundary is wired before its participant runtime consumer"
+)]
+mod aggregate;
+mod conversation_stream;
 #[cfg(test)]
 mod crash_repository;
 #[cfg(test)]
 mod cursor_repository;
 #[cfg(test)]
 mod detach_repository;
+#[allow(
+    dead_code,
+    reason = "production incarnation boundary is wired before listener startup consumes it"
+)]
+mod incarnation_stream;
 mod transport;
 
+#[cfg(test)]
+mod aggregate_tests;
+#[cfg(test)]
+mod conversation_stream_tests;
 #[cfg(test)]
 mod crash_repository_tests;
 #[cfg(test)]
 mod cursor_repository_tests;
 #[cfg(test)]
 mod detach_repository_tests;
+#[cfg(test)]
+mod incarnation_stream_tests;
 #[cfg(test)]
 mod transport_tests;
 
