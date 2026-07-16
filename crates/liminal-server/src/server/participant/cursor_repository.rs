@@ -221,11 +221,13 @@ impl CursorEpisodeRepository {
         }))
     }
 
-    /// Applies one shared cumulative-ack transition and appends its exact command.
+    /// Applies one shared cumulative-ack transition and appends its exact command
+    /// only when the protocol reports a committed event.
     ///
-    /// Mutation becomes visible from this repository only after the optimistic
-    /// append succeeds. Consequently an append conflict leaves the in-memory
-    /// episode at its durable pre-command state.
+    /// `NoOp`, `Gap`, and `Regression` consume no event and return without a
+    /// durable append. Committed mutation becomes visible from this repository
+    /// only after the optimistic append succeeds. Consequently an append conflict
+    /// leaves the in-memory episode at its durable pre-command state.
     ///
     /// # Errors
     ///
@@ -244,6 +246,9 @@ impl CursorEpisodeRepository {
                 command.contiguously_available_through,
             )
             .map_err(CursorRepositoryError::AckAuthorization)?;
+        if !matches!(&outcome, CumulativeAckOutcome::Committed(_)) {
+            return Ok(outcome);
+        }
         let payload = CursorEvent::Ack(command).encode()?;
         let assigned_sequence = self
             .store

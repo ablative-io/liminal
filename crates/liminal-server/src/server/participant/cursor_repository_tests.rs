@@ -8,7 +8,10 @@ use liminal_protocol::lifecycle::{
     BoundParticipantCursor, ClosureDebt, CumulativeAckOutcome, CursorProgressFact,
     CursorProgressKey,
 };
-use liminal_protocol::wire::{BindingEpoch, ConnectionIncarnation, Generation, ParticipantAck};
+use liminal_protocol::wire::{
+    AckRegressionReason, BindingEpoch, ConnectionIncarnation, Generation, ParticipantAck,
+    ParticipantAckEnvelope,
+};
 
 use super::cursor_repository::{CursorAckCommand, CursorEpisodeRepository, CursorEpisodeStart};
 
@@ -111,11 +114,32 @@ fn two_participants_ack_same_retained_suffix_and_survive_cold_reopen() -> Result
         );
     }
 
+    let before_regression = repository
+        .episode()
+        .encode()
+        .map_err(|error| format!("pre-regression episode serialization failed: {error:?}"))?;
+    let regression =
+        runtime.block_on(repository.acknowledge(ack_command(FIRST_PARTICIPANT, first_epoch, 1)))?;
+    let CumulativeAckOutcome::Regression(regression) = regression else {
+        return Err("ack below the durable cursor was not refused as a regression".into());
+    };
+    assert_eq!(
+        regression.request(),
+        &ParticipantAckEnvelope {
+            conversation_id: CONVERSATION_ID,
+            participant_id: FIRST_PARTICIPANT,
+            capability_generation: Generation::ONE,
+            through_seq: 1,
+        }
+    );
+    assert_eq!(regression.current_cursor(), 2);
+    assert_eq!(regression.reason(), AckRegressionReason::BelowCursor);
     assert_eq!(repository.next_expected_sequence(), 5);
     let before_restart = repository
         .episode()
         .encode()
         .map_err(|error| format!("pre-restart episode serialization failed: {error:?}"))?;
+    assert_eq!(before_restart, before_regression);
     runtime.block_on(repository.flush())?;
     let written_entries = runtime.block_on(store.read_from(STREAM_KEY, 0, 8))?;
     assert_eq!(written_entries.len(), 5);
