@@ -13,7 +13,8 @@ use crate::{
     wire::{
         AttachSecret, BindingEpoch, ConnectionIncarnation, ConversationSequenceExhausted,
         Generation, ObserverBackpressureState, RecordAdmission, RecordAdmissionEnvelope,
-        RecordCommitted, RecordTooLarge, SequenceAllocatingEnvelope, SequenceBudget, ServerValue,
+        RecordAdmissionResponse, RecordCommitted, RecordTooLarge, SequenceAllocatingEnvelope,
+        SequenceBudget, ServerValue,
     },
 };
 
@@ -33,8 +34,8 @@ use super::{
         UNIT, ordinary_capacity_walk_fixture, ordinary_capacity_walk_frontiers,
     },
     record_admission::{
-        RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionPrestate,
-        apply_record_admission,
+        RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionPersistenceParts,
+        RecordAdmissionPrestate, apply_record_admission,
     },
 };
 
@@ -384,6 +385,145 @@ fn capacity_walk_total_operation_commits_full_payload_and_replays_identically() 
 }
 
 #[test]
+fn into_persistence_parts_moves_the_complete_atomic_set_exactly_once() {
+    let fixture = ordinary_capacity_walk_fixture();
+    let member = test_member(
+        fixture.request.conversation_id,
+        fixture.request.capability_generation,
+        fixture.active_identities[0].cursor(),
+    );
+    let active = ActiveBinding {
+        participant_id: 0,
+        conversation_id: fixture.request.conversation_id,
+        binding_epoch: fixture.receiving_binding_epoch,
+    };
+    let binding = BindingState::Bound(active);
+    let payload = vec![0; 3 * usize::try_from(UNIT).expect("unit fits usize")];
+    let commit = committed(apply_record_admission(
+        prestate(
+            request(&fixture.request, &payload),
+            &member,
+            &binding,
+            fixture.receiving_binding_epoch,
+            ordinary_capacity_walk_frontiers(&fixture),
+            fixture.retained_charges.clone(),
+            fixture.closure_accounting,
+            fixture.encoded_record_charge,
+            fixture.observer_progress,
+            fixture.limits,
+        ),
+        fixture.encoded_record_charge,
+    ));
+
+    // Pre-move witnesses captured through the borrowing accessors only.
+    let expected_outcome = commit.outcome().clone();
+    let expected_record = commit.record().clone();
+    let expected_connection = commit.connection_capacity();
+    let expected_order = commit.order();
+    let expected_sequence = commit.sequence();
+    let expected_observer = commit.observer_floor();
+    let expected_closure = *commit.closure();
+    let expected_floor = commit.projection().floor();
+    let expected_retained_charge = commit.projection().retained_charge();
+    let expected_baseline = commit.projection().baseline();
+    let expected_accounting = commit.projection().accounting();
+    let expected_required = commit.projection().required_capacity();
+    let expected_caller_record = commit.projection().caller_record();
+    let expected_caller_charge = commit.projection().caller_charge();
+    let expected_row_charges = commit.projection().retained_charges().to_vec();
+    let expected_markers = commit.projection().new_marker_candidates().to_vec();
+    let expected_high = commit
+        .projection()
+        .frontiers()
+        .sequence()
+        .ledger()
+        .high_watermark();
+    let expected_retained_floor = commit.projection().frontiers().retained_floor();
+    let expected_rows: Vec<_> = commit
+        .projection()
+        .frontiers()
+        .retained_records()
+        .iter()
+        .map(|record| (record.delivery_seq, record.admission_order))
+        .collect();
+    let expected_cursor = commit
+        .projection()
+        .frontiers()
+        .active_identities()
+        .participants()[0]
+        .cursor();
+
+    // Consuming the commit moves the parts out. `RecordAdmissionCommit` is
+    // gone after this statement and `ClaimFrontiers` is neither `Clone` nor
+    // `Copy`, so no frontier, accounting, row, or marker authority stays
+    // reachable through a second owner; the borrow checker rejects any later
+    // use of `commit`. The exhaustive destructuring below (no `..` rest
+    // pattern) proves the complete atomic set is transferred.
+    let RecordAdmissionPersistenceParts {
+        outcome,
+        record,
+        connection_capacity,
+        order,
+        sequence,
+        observer_floor,
+        closure,
+        frontiers,
+        floor,
+        retained_charge,
+        baseline,
+        accounting,
+        required_capacity,
+        caller_record,
+        caller_charge,
+        retained_charges,
+        marker_candidates,
+    } = commit.into_persistence_parts();
+
+    assert_eq!(outcome, expected_outcome);
+    assert_eq!(record, expected_record);
+    assert_eq!(connection_capacity, expected_connection);
+    assert_eq!(order, expected_order);
+    assert_eq!(sequence, expected_sequence);
+    assert_eq!(observer_floor, expected_observer);
+    assert_eq!(closure, expected_closure);
+    assert_eq!(floor, expected_floor);
+    assert_eq!(retained_charge, expected_retained_charge);
+    assert_eq!(baseline, expected_baseline);
+    assert_eq!(accounting, expected_accounting);
+    assert_eq!(required_capacity, expected_required);
+    assert_eq!(caller_record, expected_caller_record);
+    assert_eq!(caller_charge, expected_caller_charge);
+    assert_eq!(retained_charges, expected_row_charges);
+    assert_eq!(marker_candidates, expected_markers);
+
+    // The moved frontier authority is the exact projected poststate.
+    assert_eq!(
+        frontiers.sequence().ledger().high_watermark(),
+        expected_high
+    );
+    assert_eq!(frontiers.retained_floor(), expected_retained_floor);
+    assert_eq!(
+        frontiers
+            .retained_records()
+            .iter()
+            .map(|record| (record.delivery_seq, record.admission_order))
+            .collect::<Vec<_>>(),
+        expected_rows
+    );
+    assert_eq!(
+        frontiers.active_identities().participants()[0].cursor(),
+        expected_cursor
+    );
+
+    // Cross-field authority coupling: the moved caller row is the committed
+    // record's exact key, and the moved outcome matches the moved record.
+    assert_eq!(caller_record.delivery_seq, record.delivery_seq());
+    assert_eq!(caller_record.admission_order, record.admission_order());
+    assert_eq!(outcome.delivery_seq(), record.delivery_seq());
+    assert_eq!(caller_charge.delivery_seq(), record.delivery_seq());
+}
+
+#[test]
 fn case_31_sequence_exhaustion_returns_exact_budget_and_unchanged_replay() {
     let conversation_id = 31_002;
     let generation = Generation::new((u64::MAX - 5) / 2).expect("frozen generation is nonzero");
@@ -459,7 +599,7 @@ fn case_31_sequence_exhaustion_returns_exact_budget_and_unchanged_replay() {
                 l_other_times_e: 0,
             },
         }));
-    assert_eq!(refusal.response(), &expected);
+    assert_eq!(refusal.response().server_value(), &expected);
     assert_case_31_unchanged(
         refusal.unchanged().prestate(),
         &expected_frontiers,
@@ -476,7 +616,7 @@ fn case_31_sequence_exhaustion_returns_exact_budget_and_unchanged_replay() {
     else {
         panic!("unchanged case 31 state must replay the same refusal")
     };
-    assert_eq!(replayed.response(), &expected);
+    assert_eq!(replayed.response().server_value(), &expected);
     assert_case_31_unchanged(
         replayed.unchanged().prestate(),
         &expected_frontiers,
@@ -564,7 +704,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
         encoded_record_charge: encoded,
         max_ordinary_record_charge: bytes_max,
     });
-    assert_eq!(bytes.response(), &expected_bytes);
+    assert_eq!(bytes.response().server_value(), &expected_bytes);
     assert_eq!(
         bytes.unchanged().prestate().frontiers(),
         &expected_frontiers
@@ -584,7 +724,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
     else {
         panic!("size refusal must replay from returned prestate")
     };
-    assert_eq!(replayed.response(), &expected_bytes);
+    assert_eq!(replayed.response().server_value(), &expected_bytes);
 
     let entries_max = ResourceVector::new(0, 110);
     let RecordAdmissionDecision::Respond(entries) =
@@ -593,7 +733,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
         panic!("case 32 zero entry maximum must refuse")
     };
     assert_eq!(
-        entries.response(),
+        entries.response().server_value(),
         &ServerValue::RecordTooLarge(RecordTooLarge {
             request: envelope.clone(),
             dimension: ResourceDimension::Entries,
@@ -608,7 +748,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
         panic!("simultaneous case 32 failure must select entries")
     };
     assert_eq!(
-        simultaneous.response(),
+        simultaneous.response().server_value(),
         &ServerValue::RecordTooLarge(RecordTooLarge {
             request: envelope.clone(),
             dimension: ResourceDimension::Entries,
@@ -635,9 +775,94 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
     ) else {
         panic!("binding lookup must refuse before static size")
     };
-    assert!(matches!(no_binding.response(), ServerValue::NoBinding(_)));
+    assert!(matches!(
+        no_binding.response().server_value(),
+        ServerValue::NoBinding(_)
+    ));
     assert_eq!(
         no_binding.unchanged().prestate().frontiers(),
+        &expected_frontiers
+    );
+}
+
+#[test]
+fn untracked_semantic_conversation_refusal_carries_exact_envelope_and_limit() {
+    let conversation_id = 33_002;
+    let generation = Generation::new(7).expect("seven is nonzero");
+    let binding_epoch = BindingEpoch::new(ConnectionIncarnation::new(33, 2), generation);
+    let retained = vec![ordinary_record(1, 1)];
+    let retained_charges = keyed_charges(&retained, ResourceVector::new(1, 100));
+    let frontiers =
+        || one_participant_frontiers(conversation_id, binding_epoch, 1, 1, 0, 1, retained.clone());
+    let member = test_member(conversation_id, generation, 0);
+    let binding = BindingState::Bound(ActiveBinding {
+        participant_id: 0,
+        conversation_id,
+        binding_epoch,
+    });
+    let envelope = RecordAdmissionEnvelope {
+        conversation_id,
+        participant_id: 0,
+        capability_generation: generation,
+    };
+    let accounting = clear_accounting(
+        WideResourceVector::new(2, 200),
+        ResourceVector::new(10, 1_000),
+    );
+    let limits = OrdinaryProjectionLimits::new(
+        ResourceVector::new(1, 100),
+        ResourceVector::new(2, 200),
+        ResourceVector::new(2, 200),
+    );
+    let encoded = ResourceVector::new(1, 100);
+    let expected_frontiers = frontiers();
+    let subject = RecordAdmissionPrestate::new(
+        request(&envelope, &[0; 9]),
+        PresentedIdentity::<TestFingerprint, TestFingerprint, TestFingerprint>::Live(&member),
+        &binding,
+        binding_epoch,
+        ConnectionConversationTracking::Untracked,
+        CapacityCounter::try_new(2, 2).expect("full test connection capacity is valid"),
+        accounting,
+        ResourceVector::new(2, 110),
+        frontiers(),
+        retained_charges,
+        1,
+        limits,
+    );
+    let RecordAdmissionDecision::Respond(refusal) = apply_record_admission(subject, encoded) else {
+        panic!("first untracked semantic conversation at the full limit must refuse")
+    };
+
+    // Register row 5641: the refusal carries the triggering request's exact
+    // common envelope plus the signed connection-conversation limit, asserted
+    // as the complete wire value through the production flow.
+    let expected = RecordAdmissionResponse::connection_conversation_capacity_exceeded(envelope, 2);
+    assert_eq!(refusal.response(), &expected);
+    assert_eq!(
+        refusal.unchanged().prestate().frontiers(),
+        &expected_frontiers
+    );
+    assert_eq!(
+        refusal
+            .unchanged()
+            .prestate()
+            .connection_capacity()
+            .occupied(),
+        2
+    );
+    assert_eq!(refusal.unchanged().encoded_record_charge(), encoded);
+
+    let (_, unchanged) = refusal.into_parts();
+    let (replay_prestate, replay_charge) = unchanged.into_parts();
+    let RecordAdmissionDecision::Respond(replayed) =
+        apply_record_admission(replay_prestate, replay_charge)
+    else {
+        panic!("capacity refusal must replay from the returned prestate")
+    };
+    assert_eq!(replayed.response(), &expected);
+    assert_eq!(
+        replayed.unchanged().prestate().frontiers(),
         &expected_frontiers
     );
 }
@@ -748,7 +973,7 @@ fn observer_fixed_point_refusal_maps_through_shared_selector_without_mutation() 
     ) else {
         panic!("capacity-walk floor must be blocked below observer 90")
     };
-    let ServerValue::ObserverBackpressure(value) = refusal.response() else {
+    let ServerValue::ObserverBackpressure(value) = refusal.response().server_value() else {
         panic!("fixed-point observer failure must map to observer response")
     };
     let crate::wire::ObserverBackpressure::RecordAdmission { state, .. } = value else {

@@ -9,7 +9,7 @@ use alloc::boxed::Box;
 
 use crate::wire::{
     AttachSecret, ClosureCheckedEnvelope, EnrollmentEnvelope, EnrollmentRequest,
-    OrderAllocatingEnvelope, ResponseEnvelope, SequenceAllocatingEnvelope, ServerValue,
+    EnrollmentResponse, OrderAllocatingEnvelope, SequenceAllocatingEnvelope,
 };
 
 use super::super::{
@@ -264,7 +264,7 @@ pub enum InitialEnrollmentOperationFault {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InitialEnrollmentOperationDecision<F> {
     /// Exact stable replay or first applicable wire refusal.
-    Respond(ServerValue),
+    Respond(EnrollmentResponse),
     /// Every stage passed and all resulting state may commit atomically.
     Commit(Box<InitialEnrollmentOperationCommit<F>>),
     /// Durable/configuration state violated a protocol invariant.
@@ -290,12 +290,12 @@ struct ClosedInitialEnrollment {
 }
 
 enum InitialEnrollmentGateFailure {
-    Respond(Box<ServerValue>),
+    Respond(Box<EnrollmentResponse>),
     Fault(Box<InitialEnrollmentOperationFault>),
 }
 
 impl InitialEnrollmentGateFailure {
-    fn respond(value: ServerValue) -> Self {
+    fn respond(value: EnrollmentResponse) -> Self {
         Self::Respond(Box::new(value))
     }
 
@@ -356,13 +356,19 @@ where
 
 fn initial_enrollment_lookup_response<EF, V, LF>(
     input: &InitialEnrollmentOperationInput<'_, EF, V, LF>,
-) -> Option<ServerValue> {
+) -> Option<EnrollmentResponse> {
     match lookup_enrollment(input.token_phase, input.lookup_binding, input.request) {
-        EnrollmentLookupResult::Retired(value) => Some(ServerValue::Retired(value)),
-        EnrollmentLookupResult::Bound(value) => Some(ServerValue::Bound(value)),
-        EnrollmentLookupResult::UnboundReceipt(value) => Some(ServerValue::UnboundReceipt(value)),
-        EnrollmentLookupResult::ReceiptExpired(value) => Some(ServerValue::ReceiptExpired(value)),
-        EnrollmentLookupResult::EnrollmentKnown(value) => Some(ServerValue::EnrollmentKnown(value)),
+        EnrollmentLookupResult::Retired(value) => Some(EnrollmentResponse::from_retired(value)),
+        EnrollmentLookupResult::Bound(value) => Some(EnrollmentResponse::from_bound(value)),
+        EnrollmentLookupResult::UnboundReceipt(value) => {
+            Some(EnrollmentResponse::from_unbound_receipt(value))
+        }
+        EnrollmentLookupResult::ReceiptExpired(value) => {
+            Some(EnrollmentResponse::from_receipt_expired(value))
+        }
+        EnrollmentLookupResult::EnrollmentKnown(value) => {
+            Some(EnrollmentResponse::enrollment_known(value))
+        }
         EnrollmentLookupResult::AuthorizedNew => None,
     }
 }
@@ -372,13 +378,17 @@ fn admit_initial_enrollment_capacity<EF, V, LF>(
     envelope: &EnrollmentEnvelope,
 ) -> Result<InitialEnrollmentCapacityPermits, InitialEnrollmentGateFailure> {
     let connection = match select_semantic_connection_capacity(
-        ResponseEnvelope::Enrollment(envelope.clone()),
         input.connection_tracking,
         input.connection_capacity,
     ) {
         SemanticConnectionCapacityDecision::Commit(value) => value,
-        SemanticConnectionCapacityDecision::Respond(value) => {
-            return Err(InitialEnrollmentGateFailure::respond(value));
+        SemanticConnectionCapacityDecision::Respond { limit } => {
+            return Err(InitialEnrollmentGateFailure::respond(
+                EnrollmentResponse::connection_conversation_capacity_exceeded(
+                    envelope.clone(),
+                    limit,
+                ),
+            ));
         }
     };
     if let BindingSlotDecision::Respond(value) =
@@ -419,9 +429,9 @@ fn plan_initial_enrollment_order(
 
 fn initial_enrollment_order_failure(error: OrderAdmissionError) -> InitialEnrollmentGateFailure {
     match error {
-        OrderAdmissionError::Exhausted(value) => {
-            InitialEnrollmentGateFailure::respond(ServerValue::ConversationOrderExhausted(value))
-        }
+        OrderAdmissionError::Exhausted(value) => InitialEnrollmentGateFailure::respond(
+            EnrollmentResponse::from_conversation_order_exhausted(value),
+        ),
         other => InitialEnrollmentGateFailure::fault(InitialEnrollmentOperationFault::Order(other)),
     }
 }
@@ -447,7 +457,7 @@ fn close_initial_enrollment(
         ObserverFloorDecision::Eligible(value) => value,
         ObserverFloorDecision::Respond(value) => {
             return Err(InitialEnrollmentGateFailure::respond(
-                ServerValue::ObserverBackpressure(value),
+                EnrollmentResponse::from_observer_backpressure(value),
             ));
         }
     };
@@ -458,7 +468,7 @@ fn close_initial_enrollment(
         RemainingClosureDecision::Eligible(value) => value,
         RemainingClosureDecision::Respond(value) => {
             return Err(InitialEnrollmentGateFailure::respond(
-                ServerValue::MarkerClosureCapacityExceeded(value),
+                EnrollmentResponse::from_marker_closure_capacity_exceeded(value),
             ));
         }
     };
@@ -475,9 +485,9 @@ fn initial_enrollment_sequence_failure(
     error: SequenceAdmissionError,
 ) -> InitialEnrollmentGateFailure {
     match error {
-        SequenceAdmissionError::Exhausted(value) => {
-            InitialEnrollmentGateFailure::respond(ServerValue::ConversationSequenceExhausted(value))
-        }
+        SequenceAdmissionError::Exhausted(value) => InitialEnrollmentGateFailure::respond(
+            EnrollmentResponse::from_conversation_sequence_exhausted(value),
+        ),
         other => {
             InitialEnrollmentGateFailure::fault(InitialEnrollmentOperationFault::Sequence(other))
         }

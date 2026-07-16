@@ -1,6 +1,6 @@
 use crate::wire::{
     BindingEpoch, ConversationId, DeliverySeq, Generation, MarkerAck, MarkerAckCommitted,
-    MarkerAckEnvelope, ParticipantId, ServerValue,
+    MarkerAckEnvelope, MarkerAckResponse, ParticipantId,
 };
 
 use super::{
@@ -141,7 +141,7 @@ impl MarkerAckCommitError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MarkerAckDecision {
     /// Authority or marker-proof response; membership is unchanged.
-    Respond(ServerValue),
+    Respond(MarkerAckResponse),
     /// Exact committed response paired with its proof and sole cursor update.
     Commit(MarkerAckCommit),
 }
@@ -171,16 +171,18 @@ pub fn apply_marker_ack<EF, V, LF>(
         &lookup_request,
     ) {
         BindingRequiredLookupResult::Retired(outcome) => {
-            return MarkerAckDecision::Respond(ServerValue::Retired(outcome));
+            return MarkerAckDecision::Respond(MarkerAckResponse::from_retired(outcome));
         }
         BindingRequiredLookupResult::ParticipantUnknown(outcome) => {
-            return MarkerAckDecision::Respond(ServerValue::ParticipantUnknown(outcome));
+            return MarkerAckDecision::Respond(MarkerAckResponse::from_participant_unknown(
+                outcome,
+            ));
         }
         BindingRequiredLookupResult::StaleAuthority(outcome) => {
-            return MarkerAckDecision::Respond(ServerValue::StaleAuthority(outcome));
+            return MarkerAckDecision::Respond(MarkerAckResponse::from_stale_authority(outcome));
         }
         BindingRequiredLookupResult::NoBinding(outcome) => {
-            return MarkerAckDecision::Respond(ServerValue::NoBinding(outcome));
+            return MarkerAckDecision::Respond(MarkerAckResponse::from_no_binding(outcome));
         }
         BindingRequiredLookupResult::Authorized { member, binding } => (member, binding),
     };
@@ -194,13 +196,13 @@ pub fn apply_marker_ack<EF, V, LF>(
     );
     match select_marker_proof(&exact_state, MarkerProofInput::marker_ack(request)) {
         MarkerProofDecision::AckNoOp(outcome) => {
-            MarkerAckDecision::Respond(ServerValue::AckNoOp(outcome))
+            MarkerAckDecision::Respond(MarkerAckResponse::from_ack_no_op(outcome))
         }
         MarkerProofDecision::MarkerMismatch(outcome) => {
-            MarkerAckDecision::Respond(ServerValue::MarkerMismatch(outcome))
+            MarkerAckDecision::Respond(MarkerAckResponse::from_marker_mismatch(outcome))
         }
         MarkerProofDecision::MarkerNotDelivered(outcome) => {
-            MarkerAckDecision::Respond(ServerValue::MarkerNotDelivered(outcome))
+            MarkerAckDecision::Respond(MarkerAckResponse::from_marker_not_delivered(outcome))
         }
         MarkerProofDecision::Permit(proof) => {
             let envelope = marker_ack_envelope(request);
