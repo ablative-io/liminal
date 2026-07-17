@@ -84,6 +84,7 @@ pub struct ClientParticipantAggregate {
     pub(super) binding: ClientBindingState,
     pub(super) expected: Option<ClientRequest>,
     pub(super) detach_replay: SdkDetachReplayAggregate,
+    pub(super) reconnect: ReconnectAggregate,
 }
 
 impl ClientParticipantAggregate {
@@ -94,6 +95,7 @@ impl ClientParticipantAggregate {
             binding: ClientBindingState::Unbound,
             expected: None,
             detach_replay: SdkDetachReplayAggregate::new(),
+            reconnect: ReconnectAggregate::new(),
         }
     }
 
@@ -113,6 +115,12 @@ impl ClientParticipantAggregate {
     #[must_use]
     pub const fn detach_replay(&self) -> &SdkDetachReplayAggregate {
         &self.detach_replay
+    }
+
+    /// Borrows the reconnect aggregate for status inspection.
+    #[must_use]
+    pub const fn reconnect(&self) -> &ReconnectAggregate {
+        &self.reconnect
     }
 }
 
@@ -481,8 +489,18 @@ const fn apply_attach_bound(aggregate: &mut ClientParticipantAggregate, value: &
 }
 
 mod correlation;
+mod reconnect;
 mod replay;
 
+pub use reconnect::{
+    EstablishedConnectionTransportFate, ExplicitReconnectAction, ProvedOnlineTransition,
+    ReconnectAggregate, ReconnectAttemptDecision, ReconnectAttemptFate,
+    ReconnectAttemptFateDecision, ReconnectAttemptFateRefusalReason, ReconnectAttemptPermit,
+    ReconnectAttemptRefusalReason, ReconnectFreshEvent, ReconnectInProgressAttempt,
+    ReconnectPermitDecision, ReconnectPermitRefusal, ReconnectPermitRefusalReason,
+    record_attempt_fate, record_explicit_reconnect, record_online_transition,
+    record_transport_fate, redeem_attempt,
+};
 pub use replay::{
     ApplyAttachDecision, ApplyDetachOutcomeDecision, ApplyLeaveDecision, DetachReplayApplied,
     DetachReplayOutcome, DetachReplayRefusal, DetachReplayRefusalReason, DetachReplayStatus,

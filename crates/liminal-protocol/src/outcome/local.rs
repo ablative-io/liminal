@@ -148,33 +148,46 @@ pub struct CredentialRecoveryLost {
     pub last_known_generation: Generation,
 }
 
-/// Reconnect lifecycle state required by the no-permit result.
+/// Reconnect lifecycle state reported without exposing permit identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconnectState {
-    /// Connection lifecycle is already reconnecting.
-    Reconnecting,
+    /// No authorization or attempt is outstanding.
+    Parked,
+    /// One fresh-event permit is outstanding.
+    PermitOutstanding,
+    /// One real connection attempt is in progress.
+    AttemptInProgress,
+    /// The connection is proved online.
+    Online,
 }
 
-/// Event required to mint one reconnect permit.
+/// Fresh event class required to mint one reconnect permit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconnectRequiredEvent {
-    /// A fresh transport fate must occur.
+    /// Established-connection transport fate.
     TransportFate,
+    /// Proved online transition.
+    OnlineTransition,
+    /// Explicit caller action.
+    ExplicitCallerAction,
 }
 
-/// Exact SDK-local reconnect-delay result.
+/// Exact SDK-local reconnect result, retained under its stable name.
+///
+/// The former delay field is deliberately absent: fresh events authorize one
+/// real attempt and never a timer arm.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReconnectDelayResult {
-    /// A fresh single-use permit was consumed.
+    /// A fresh single-use event permit was minted.
     ReconnectArmed {
-        /// Pure bounded reconnect delay.
-        delay_ms: u64,
+        /// Exact fresh event class that minted the permit.
+        event: ReconnectRequiredEvent,
     },
-    /// No fresh transport-fate permit exists.
+    /// No fresh event permit was minted.
     ReconnectNotArmed {
         /// Current reconnect state.
         state: ReconnectState,
-        /// Event required before another arm.
+        /// Event class required for a future authorization.
         required_event: ReconnectRequiredEvent,
     },
 }

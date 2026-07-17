@@ -20,6 +20,11 @@ use liminal_protocol::{
         mandatory_capacity, no_edge_legal, recovery_transfer, retained_baseline,
         zero_debt_admission,
     },
+    client::{
+        ClientParticipantAggregate, EstablishedConnectionTransportFate, ReconnectAttemptDecision,
+        ReconnectAttemptFate, ReconnectAttemptFateDecision, ReconnectPermitDecision,
+        record_attempt_fate, record_transport_fate, redeem_attempt,
+    },
     lifecycle::{
         ActiveBinding, AllocatedParticipantSlot, AttachCommitParameters, AttachSecretProof,
         AttachedRecordPosition, BindingState, BindingTerminalDisposition, BoundParticipantCursor,
@@ -32,7 +37,6 @@ use liminal_protocol::{
         RecoveredBindingFateTransition, StoredEdge, commit_attach, commit_detach,
         commit_enrollment, commit_leave,
     },
-    outcome::{ReconnectDelayResult, ReconnectRequiredEvent, ReconnectState},
     wire::{
         AttachAttemptToken, AttachEnvelope, AttachSecret, BindingEpoch, BindingRequiredEnvelope,
         ClientRequest, ClosureCapacityReason, ClosureCheckedEnvelope, ClosureRefusalReason,
@@ -1966,96 +1970,46 @@ fn acceptance_case_49_undelivered_marker_is_leave_only_and_never_fenced_recovery
 
 #[test]
 fn acceptance_case_50_reconnect_permits_are_single_use_and_wait_inventory_is_total() {
-    // Frozen PARTICIPANT-CONTRACT.md lines 4492-4507. Reconnect scheduling,
-    // dedup notification, pressure buffering, and the pinned multi-root audit are
-    // SDK/product mechanics outside liminal-protocol; this compact harness emits
-    // the crate's real ReconnectDelayResult values and records every mutation.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum ReconnectEntryPoint {
-        RustLifecycle,
-        RustRemoteHandle,
-        Gleam,
-        CallerTimer,
-    }
-
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    struct ReconnectHarness {
-        permit_delay_ms: Option<u64>,
-        state: ReconnectState,
-        attempts: u64,
-        last_delay_ms: Option<u64>,
-        timer_arms: u64,
-        network_opens: u64,
-    }
-
-    impl ReconnectHarness {
-        fn new() -> Self {
-            Self {
-                permit_delay_ms: None,
-                state: ReconnectState::Reconnecting,
-                attempts: 0,
-                last_delay_ms: None,
-                timer_arms: 0,
-                network_opens: 0,
-            }
+    // Frozen PARTICIPANT-CONTRACT.md lines 4492-4507. The client aggregate now
+    // owns the fresh-event authorization and opens no timer or transport itself.
+    let first = record_transport_fate(
+        ClientParticipantAggregate::new(),
+        EstablishedConnectionTransportFate::Lost,
+    );
+    let ReconnectPermitDecision::Permitted {
+        aggregate,
+        permit,
+        result,
+    } = first
+    else {
+        panic!("fresh transport fate must mint one permit");
+    };
+    assert_eq!(
+        result,
+        liminal_protocol::outcome::ReconnectDelayResult::ReconnectArmed {
+            event: liminal_protocol::outcome::ReconnectRequiredEvent::TransportFate,
         }
+    );
 
-        fn transport_fate(&mut self, delay_ms: u64) {
-            self.permit_delay_ms = Some(delay_ms);
-        }
-
-        fn reconnect(&mut self, entry: ReconnectEntryPoint) -> ReconnectDelayResult {
-            let Some(delay_ms) = self.permit_delay_ms.take() else {
-                return ReconnectDelayResult::ReconnectNotArmed {
-                    state: self.state,
-                    required_event: ReconnectRequiredEvent::TransportFate,
-                };
-            };
-            self.attempts += 1;
-            self.last_delay_ms = Some(delay_ms);
-            if entry == ReconnectEntryPoint::CallerTimer {
-                self.timer_arms += 1;
-            }
-            ReconnectDelayResult::ReconnectArmed { delay_ms }
-        }
-
-        fn manual_connect(&mut self) {
-            self.network_opens += 1;
-        }
-    }
-
-    for entry in [
-        ReconnectEntryPoint::RustLifecycle,
-        ReconnectEntryPoint::RustRemoteHandle,
-        ReconnectEntryPoint::Gleam,
-        ReconnectEntryPoint::CallerTimer,
-    ] {
-        let mut harness = ReconnectHarness::new();
-        harness.transport_fate(125);
-        assert_eq!(
-            harness.reconnect(entry),
-            ReconnectDelayResult::ReconnectArmed { delay_ms: 125 }
-        );
-        let after_first = harness;
-        assert_eq!(
-            harness.reconnect(entry),
-            ReconnectDelayResult::ReconnectNotArmed {
-                state: ReconnectState::Reconnecting,
-                required_event: ReconnectRequiredEvent::TransportFate,
-            }
-        );
-        assert_eq!(harness, after_first);
-        harness.transport_fate(250);
-        assert_eq!(
-            harness.reconnect(entry),
-            ReconnectDelayResult::ReconnectArmed { delay_ms: 250 }
-        );
-        assert_eq!(harness.attempts, 2);
-        assert_eq!(harness.last_delay_ms, Some(250));
-        assert_eq!(harness.network_opens, 0);
-        harness.manual_connect();
-        assert_eq!(harness.network_opens, 1);
-    }
+    let second = record_transport_fate(aggregate, EstablishedConnectionTransportFate::Lost);
+    let ReconnectPermitDecision::Refused(refusal) = second else {
+        panic!("second fresh event cannot replace outstanding authority");
+    };
+    let (aggregate, _) = refusal.into_parts();
+    let ReconnectAttemptDecision::Started { aggregate, attempt } =
+        redeem_attempt(aggregate, permit)
+    else {
+        panic!("one permit must start one real attempt");
+    };
+    let ReconnectAttemptFateDecision::Recorded(aggregate) =
+        record_attempt_fate(aggregate, attempt, ReconnectAttemptFate::Failed)
+    else {
+        panic!("typed failure must return the attempt to parked state");
+    };
+    assert_eq!(
+        aggregate.reconnect().state(),
+        liminal_protocol::outcome::ReconnectState::Parked
+    );
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct PressureHarness {
