@@ -1212,11 +1212,13 @@ name = "liminal-sdk"
 version = "0.2.4"
 dependencies = [
  "futures-core",
+ "liminal-protocol",
  "liminal-rs",
  "serde",
  "serde_json",
  "spin",
  "thiserror",
+ "tungstenite",
 ]
 
 [[package]]

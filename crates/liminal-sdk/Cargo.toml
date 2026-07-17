@@ -10,17 +10,21 @@ description = "Application-facing SDK traits for liminal messaging clients"
 
 [features]
 default = ["std"]
-# The real TCP transport requires std sockets and the canonical wire codec from
-# the `liminal` crate, so it is only available with the `std` feature.
-std = ["thiserror/std", "serde/std", "dep:liminal"]
+# The real TCP and WebSocket transports require std sockets and the canonical
+# wire codec from the `liminal` crate, so they are only available with the
+# `std` feature. The transport-neutral WebSocket driver and the client-unit
+# authority binding are `no_std + alloc` and always available.
+std = ["thiserror/std", "serde/std", "dep:liminal", "dep:tungstenite"]
 
 [dependencies]
 futures-core = { workspace = true }
 liminal = { workspace = true, optional = true }
+liminal-protocol = { workspace = true }
 serde = { workspace = true, features = ["alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
 spin = { workspace = true }
 thiserror = { workspace = true }
+tungstenite = { workspace = true, optional = true }
 
 [lints]
 workspace = true
