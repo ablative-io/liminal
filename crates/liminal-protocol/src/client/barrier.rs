@@ -229,8 +229,6 @@ pub enum IssuedExpectedOperationFate {
 pub enum IssuedExpectedOperationFateRefusalReason {
     /// No issued expected operation is retained.
     NoIssuedOperation,
-    /// Detach must remain governed by its lossless replay lifecycle.
-    DetachUsesReplay,
 }
 
 /// Complete decision for an issued operation whose process-local authority was lost.
@@ -243,6 +241,16 @@ pub enum IssuedExpectedOperationFateDecision {
         /// Exact operation terminalized as process-lost.
         request: ClientRequest,
         /// Consumed process fate.
+        fate: IssuedExpectedOperationFate,
+    },
+    /// A restored token-bearing detach lost only its process-local effect and
+    /// was parked for exact-token recovery.
+    DetachParked {
+        /// Resulting aggregate with no live send effect.
+        aggregate: ClientParticipantAggregate,
+        /// Exact detach retained for replay.
+        request: ClientRequest,
+        /// Consumed process-loss abandonment.
         fate: IssuedExpectedOperationFate,
     },
     /// Aggregate and fate were retained unchanged.
@@ -277,10 +285,30 @@ pub fn record_issued_expected_operation_fate(
         };
     }
     if matches!(expected.request, ClientRequest::Detach(_)) {
-        return IssuedExpectedOperationFateDecision::Refused {
+        let coupled_in_flight = matches!(
+            aggregate.detach_replay.status(),
+            Some(DetachReplayStatus::InFlight)
+        );
+        if !coupled_in_flight {
+            return IssuedExpectedOperationFateDecision::Refused {
+                aggregate,
+                fate,
+                reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
+            };
+        }
+        let request = expected.request.clone();
+        if let Some(expected) = aggregate.expected.as_mut() {
+            expected.issued = false;
+        }
+        if let replay::DetachReplayState::Recorded { status, .. } =
+            &mut aggregate.detach_replay.state
+        {
+            *status = DetachReplayStatus::Parked;
+        }
+        return IssuedExpectedOperationFateDecision::DetachParked {
             aggregate,
+            request,
             fate,
-            reason: IssuedExpectedOperationFateRefusalReason::DetachUsesReplay,
         };
     }
     match aggregate.expected.take() {

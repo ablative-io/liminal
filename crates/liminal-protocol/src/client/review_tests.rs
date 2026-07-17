@@ -292,16 +292,31 @@ fn m6_binding_state_gates_outbound_and_inbound() -> TestResult {
 }
 
 #[test]
-fn m7_actual_older_record_response_is_always_ambiguous() -> TestResult {
-    let expected = ClientRequest::RecordAdmission(RecordAdmission {
+fn m7_sequential_record_a_response_after_b_is_ambiguous() -> TestResult {
+    let request_a = ClientRequest::RecordAdmission(RecordAdmission {
         conversation_id: 41,
         participant_id: 42,
         capability_generation: generation(7)?,
         payload: vec![2],
     });
-    let (aggregate, operation) = committed_operation(bound(7)?, expected)?.into_parts();
-    let (_, correlation) = operation.into_request();
-    let older_response = ServerValue::RecordCommitted(RecordCommitted::new(
+    let (aggregate, operation_a) = committed_operation(bound(7)?, request_a)?.into_parts();
+    let (_, correlation_a) = operation_a.into_request();
+    let ExpectedOperationFateDecision::Recorded { aggregate, .. } = record_expected_operation_fate(
+        aggregate,
+        correlation_a,
+        ExpectedOperationTransportFate::ResponseUnavailable,
+    ) else {
+        return Err("A transport fate must consume A authority");
+    };
+    let request_b = ClientRequest::RecordAdmission(RecordAdmission {
+        conversation_id: 41,
+        participant_id: 42,
+        capability_generation: generation(7)?,
+        payload: vec![3],
+    });
+    let (aggregate, operation_b) = committed_operation(aggregate, request_b)?.into_parts();
+    let (_, correlation_b) = operation_b.into_request();
+    let response_a = ServerValue::RecordCommitted(RecordCommitted::new(
         RecordAdmissionEnvelope {
             conversation_id: 41,
             participant_id: 42,
@@ -309,17 +324,8 @@ fn m7_actual_older_record_response_is_always_ambiguous() -> TestResult {
         },
         8,
     ));
-    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, older_response.clone())
-    else {
-        return Err("older body-omitting response must never apply");
-    };
-    assert_eq!(
-        refusal.reason(),
-        ClientInboundRefusalReason::AmbiguousResponse
-    );
-    let (aggregate, _) = refusal.into_parts();
     let ClientCorrelatedInboundDecision::Refused(refusal) =
-        decide_correlated_inbound(aggregate, older_response, correlation)
+        decide_correlated_inbound(aggregate, response_a, correlation_b)
     else {
         return Err("caller-paired correlation must not prove response provenance");
     };
@@ -331,16 +337,32 @@ fn m7_actual_older_record_response_is_always_ambiguous() -> TestResult {
 }
 
 #[test]
-fn m7_actual_older_observer_response_cannot_apply() -> TestResult {
-    let expected = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+fn m7_sequential_observer_a_response_after_b_cannot_apply() -> TestResult {
+    let request_a = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
         observer_refusals: vec![ObserverRefusal {
             conversation_id: 71,
             refused_epoch: 72,
         }],
     });
-    let (aggregate, _) =
-        committed_operation(ClientParticipantAggregate::new(), expected)?.into_parts();
-    let older = ServerValue::ObserverRecoveryAccepted(ObserverRecoveryAccepted {
+    let (aggregate, operation_a) =
+        committed_operation(ClientParticipantAggregate::new(), request_a)?.into_parts();
+    let (_, correlation_a) = operation_a.into_request();
+    let ExpectedOperationFateDecision::Recorded { aggregate, .. } = record_expected_operation_fate(
+        aggregate,
+        correlation_a,
+        ExpectedOperationTransportFate::ResponseUnavailable,
+    ) else {
+        return Err("A observer fate must consume A authority");
+    };
+    let request_b = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+        observer_refusals: vec![ObserverRefusal {
+            conversation_id: 81,
+            refused_epoch: 82,
+        }],
+    });
+    let (aggregate, operation_b) = committed_operation(aggregate, request_b)?.into_parts();
+    let (_, correlation_b) = operation_b.into_request();
+    let response_a = ServerValue::ObserverRecoveryAccepted(ObserverRecoveryAccepted {
         statuses: vec![ObserverProgressStatus {
             conversation_id: 70,
             refused_epoch: 71,
@@ -349,27 +371,15 @@ fn m7_actual_older_observer_response_cannot_apply() -> TestResult {
             progressed: false,
         }],
     });
-    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, older) else {
+    let ClientCorrelatedInboundDecision::Refused(refusal) =
+        decide_correlated_inbound(aggregate, response_a, correlation_b)
+    else {
         return Err("older echoed observer list must not apply");
     };
     assert_eq!(
         refusal.reason(),
         ClientInboundRefusalReason::DelayedResponse
     );
-    let (aggregate, _) = refusal.into_parts();
-    let matching = ServerValue::ObserverRecoveryAccepted(ObserverRecoveryAccepted {
-        statuses: vec![ObserverProgressStatus {
-            conversation_id: 71,
-            refused_epoch: 72,
-            current_observer_progress: 73,
-            armed: true,
-            progressed: false,
-        }],
-    });
-    assert!(matches!(
-        decide_inbound(aggregate, matching),
-        ClientInboundDecision::Applied(_)
-    ));
     Ok(())
 }
 
@@ -381,12 +391,15 @@ fn m8_detach_and_resume_preserve_attach_secret() -> TestResult {
         *attach_secret = secret;
     }
     let request = detach(7, 62)?;
-    let (aggregate, _) = committed_operation(aggregate, request)?.into_parts();
+    let (aggregate, operation) = committed_operation(aggregate, request)?.into_parts();
+    let (_, correlation) = operation.into_request();
     let committed =
         crate::wire::DetachCommitted::new(41, 42, DetachAttemptToken::new([62; 16]), epoch(7)?, 0);
-    let ClientInboundDecision::Applied(applied) =
-        decide_inbound(aggregate, ServerValue::DetachCommitted(committed))
-    else {
+    let ClientCorrelatedInboundDecision::Applied(applied) = decide_correlated_inbound(
+        aggregate,
+        ServerValue::DetachCommitted(committed),
+        correlation,
+    ) else {
         return Err("exact detach commit must apply");
     };
     let (aggregate, _) = applied.into_parts();
@@ -437,7 +450,8 @@ fn m9_terminal_and_superseded_replay_yield_to_new_generation_detach() -> TestRes
 #[test]
 fn m10_retired_terminalizes_binding_and_future_operations() -> TestResult {
     let request = detach(7, 65)?;
-    let (aggregate, _) = committed_operation(bound(7)?, request)?.into_parts();
+    let (aggregate, operation) = committed_operation(bound(7)?, request)?.into_parts();
+    let (_, correlation) = operation.into_request();
     let retired = Retired::Participant {
         request: ParticipantReferenceEnvelope::Detach(DetachEnvelope {
             conversation_id: 41,
@@ -447,8 +461,8 @@ fn m10_retired_terminalizes_binding_and_future_operations() -> TestResult {
         }),
         retired_generation: generation(8)?,
     };
-    let ClientInboundDecision::Applied(applied) =
-        decide_inbound(aggregate, ServerValue::Retired(retired))
+    let ClientCorrelatedInboundDecision::Applied(applied) =
+        decide_correlated_inbound(aggregate, ServerValue::Retired(retired), correlation)
     else {
         return Err("correlated retirement must apply");
     };

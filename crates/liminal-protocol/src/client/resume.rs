@@ -2,7 +2,8 @@ use alloc::vec::Vec;
 
 use super::{
     ClientBindingState, ClientParticipantAggregate, DetachReplayStatus, DetachReplayTerminal,
-    ExpectedOperationState, ReconnectAggregate, SdkDetachReplayAggregate,
+    ExpectedOperationState, ReconnectAggregate, RestoredExpectedOperationAbandonment,
+    RestoredExpectedOperationAbandonmentReason, SdkDetachReplayAggregate,
     reconnect::ReconnectMachineState, replay::DetachReplayState,
 };
 use super::{resume_decode::decode_facts, resume_encode::encode_aggregate};
@@ -102,6 +103,8 @@ pub enum ClientResumeRestoreError {
     ExpectedBindingMismatch,
     /// Active detach replay is not coupled to its matching expected detach.
     ActiveReplayExpectedDetachMismatch,
+    /// An expected detach has no active matching replay lifecycle.
+    ExpectedDetachActiveReplayMismatch,
     /// Reconnect authorization is zero or exceeds its durable counter.
     InvalidReconnectAuthorization,
     /// Private canonical bytes no longer decode; this is unreachable through public construction.
@@ -116,8 +119,11 @@ pub enum ClientResumeRestoreError {
 /// is intentionally outside this `no_std` protocol crate, matching the server
 /// precedent in `lifecycle/storage.rs`, whose joint validation likewise does
 /// not prevent storage-owner double restore. Issuance flags are nevertheless
-/// preserved exactly, so a record that testifies an authority was already
-/// issued never silently re-mints that authority.
+/// preserved for token-bearing operations, so a record that testifies an
+/// authority was already issued never silently re-mints it. Tokenless
+/// `RecordAdmission` and `ObserverRecovery` are the deliberate exception: both
+/// resolve to typed abandonment on every restore because replay cannot be made
+/// at-most-once without an outbound attempt token.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientResumeRecord {
     canonical: Vec<u8>,
@@ -153,9 +159,25 @@ impl ClientResumeRecord {
         let facts =
             decode_facts(&self.canonical).map_err(ClientResumeRestoreError::CorruptRecord)?;
         validate_facts(&facts)?;
+        let mut expected = facts.expected;
+        let restored_abandonment = if expected.as_ref().is_some_and(|expected| {
+            matches!(
+                expected.request,
+                ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
+            )
+        }) {
+            expected
+                .take()
+                .map(|expected| RestoredExpectedOperationAbandonment {
+                    request: expected.request,
+                    reason: RestoredExpectedOperationAbandonmentReason::TokenlessAfterCrash,
+                })
+        } else {
+            None
+        };
         Ok(ClientParticipantAggregate {
             binding: facts.binding,
-            expected: facts.expected,
+            expected,
             next_operation_authorization: facts.next_operation_authorization,
             detach_replay: SdkDetachReplayAggregate {
                 state: facts.replay,
@@ -164,6 +186,7 @@ impl ClientResumeRecord {
                 state: facts.reconnect_state,
                 next_authorization: facts.next_authorization,
             },
+            restored_abandonment,
         })
     }
 }
@@ -186,8 +209,8 @@ impl super::ClientOperationCommit {
     /// Captures the committed successor as a publicly cold-restorable record.
     ///
     /// The caller persists these `LPCR` bytes before releasing the aggregate and
-    /// operation with [`Self::into_parts`]. Pending `LPCP` bytes cannot be
-    /// decoded or promoted through this API.
+    /// operation with [`Self::into_parts`]. No pending record or speculative
+    /// promotion format exists.
     ///
     /// # Errors
     ///
@@ -239,23 +262,38 @@ fn validate_facts(facts: &DecodedFacts) -> Result<(), ClientResumeRestoreError> 
     {
         return Err(ClientResumeRestoreError::ExpectedBindingMismatch);
     }
-    if let DetachReplayState::Recorded { request, status } = &facts.replay
-        && matches!(
-            status,
-            DetachReplayStatus::Parked | DetachReplayStatus::InFlight
-        )
-    {
-        let Some(expected) = facts.expected.as_ref() else {
-            return Err(ClientResumeRestoreError::ActiveReplayExpectedDetachMismatch);
+    let active_replay = match &facts.replay {
+        DetachReplayState::Recorded { request, status }
+            if matches!(
+                status,
+                DetachReplayStatus::Parked | DetachReplayStatus::InFlight
+            ) =>
+        {
+            Some((request, status))
+        }
+        DetachReplayState::Empty | DetachReplayState::Recorded { .. } => None,
+    };
+    let expected_detach = facts.expected.as_ref().and_then(|expected| {
+        let ClientRequest::Detach(value) = &expected.request else {
+            return None;
         };
-        let matches = matches!(&expected.request, ClientRequest::Detach(value)
+        Some((value, expected.issued))
+    });
+    match (active_replay, expected_detach) {
+        (Some((request, status)), Some((value, issued)))
             if value.conversation_id == request.conversation_id
                 && value.participant_id == request.participant_id
                 && value.capability_generation == request.capability_generation
-                && value.detach_attempt_token == request.detach_attempt_token);
-        if !matches || (matches!(status, DetachReplayStatus::InFlight) && !expected.issued) {
+                && value.detach_attempt_token == request.detach_attempt_token
+                && ((matches!(status, DetachReplayStatus::Parked) && !issued)
+                    || (matches!(status, DetachReplayStatus::InFlight) && issued)) => {}
+        (Some(_), _) => {
             return Err(ClientResumeRestoreError::ActiveReplayExpectedDetachMismatch);
         }
+        (None, Some(_)) => {
+            return Err(ClientResumeRestoreError::ExpectedDetachActiveReplayMismatch);
+        }
+        (None, None) => {}
     }
     if let DetachReplayState::Recorded {
         request,

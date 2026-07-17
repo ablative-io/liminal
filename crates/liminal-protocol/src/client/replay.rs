@@ -1,4 +1,4 @@
-use super::ClientParticipantAggregate;
+use super::{ClientParticipantAggregate, ClientResponseCorrelation};
 use crate::wire::{
     AttachBound, DetachCommitted, DetachEnvelope, DetachInProgress, LeaveCommitted,
     TerminalizedDetachCell,
@@ -242,6 +242,7 @@ impl<T> DetachReplayRefusal<T> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct DetachTransportAttempt {
     request: DetachEnvelope,
+    authorization: u64,
 }
 
 impl DetachTransportAttempt {
@@ -249,6 +250,19 @@ impl DetachTransportAttempt {
     #[must_use]
     pub const fn request(&self) -> &DetachEnvelope {
         &self.request
+    }
+
+    /// Consumes this one-use send effect into the exact wire envelope and its
+    /// lifecycle correlation. The correlation must be consumed by outcome,
+    /// transport fate, or typed abandonment before another attempt can start.
+    #[must_use]
+    pub const fn into_request(self) -> (DetachEnvelope, ClientResponseCorrelation) {
+        (
+            self.request,
+            ClientResponseCorrelation {
+                authorization: self.authorization,
+            },
+        )
     }
 }
 
@@ -290,7 +304,8 @@ pub fn transport_attempt_started(
         }
     };
     let expected_matches = aggregate.expected.as_ref().is_some_and(|expected| {
-        matches!(&expected.request, crate::wire::ClientRequest::Detach(value)
+        expected.authorization != 0
+            && matches!(&expected.request, crate::wire::ClientRequest::Detach(value)
             if value.conversation_id == request.conversation_id
                 && value.participant_id == request.participant_id
                 && value.capability_generation == request.capability_generation
@@ -303,6 +318,10 @@ pub fn transport_attempt_started(
             reason: DetachReplayRefusalReason::InvalidStatus,
         });
     }
+    let authorization = aggregate
+        .expected
+        .as_ref()
+        .map_or(0, |expected| expected.authorization);
     if let Some(expected) = aggregate.expected.as_mut() {
         expected.issued = true;
     }
@@ -311,7 +330,10 @@ pub fn transport_attempt_started(
     }
     DetachTransportAttemptDecision::Started {
         aggregate,
-        attempt: DetachTransportAttempt { request },
+        attempt: DetachTransportAttempt {
+            request,
+            authorization,
+        },
     }
 }
 
@@ -325,34 +347,37 @@ pub enum DetachTransportFate {
 /// Decision for returning an in-flight detach to parked replay.
 #[derive(Debug, PartialEq, Eq)]
 pub enum DetachTransportFateDecision {
-    /// Typed fate parked the exact request for replay.
+    /// Typed fate consumed the exact send authority and parked replay.
     Parked(DetachReplayApplied),
-    /// No in-flight attempt existed; state and fate are retained.
-    Refused(DetachReplayRefusal<DetachTransportFate>),
+    /// No matching in-flight attempt existed; state, authority, and fate are retained.
+    Refused(DetachReplayRefusal<(ClientResponseCorrelation, DetachTransportFate)>),
 }
 
-/// Applies typed transport fate; this is the only `InFlight -> Parked` path.
+/// Consumes the outstanding send authority with typed transport fate.
+///
+/// This is the live-process `InFlight -> Parked` path. It marks the matching
+/// expected detach unissued before allowing another attempt, so the consumed
+/// correlation and a replacement effect can never coexist.
 #[must_use]
-pub const fn transport_fate(
+pub fn transport_fate(
     mut aggregate: ClientParticipantAggregate,
+    correlation: ClientResponseCorrelation,
     fate: DetachTransportFate,
 ) -> DetachTransportFateDecision {
-    match &mut aggregate.detach_replay.state {
-        DetachReplayState::Recorded { status, .. }
-            if matches!(status, DetachReplayStatus::InFlight) =>
-        {
-            let _ = fate;
+    if detach_authority_matches(&aggregate, &correlation) {
+        if let DetachReplayState::Recorded { status, .. } = &mut aggregate.detach_replay.state {
             *status = DetachReplayStatus::Parked;
-            DetachTransportFateDecision::Parked(DetachReplayApplied { aggregate })
         }
-        DetachReplayState::Empty | DetachReplayState::Recorded { .. } => {
-            DetachTransportFateDecision::Refused(DetachReplayRefusal {
-                aggregate,
-                input: fate,
-                reason: DetachReplayRefusalReason::InvalidStatus,
-            })
+        if let Some(expected) = aggregate.expected.as_mut() {
+            expected.issued = false;
         }
+        return DetachTransportFateDecision::Parked(DetachReplayApplied { aggregate });
     }
+    DetachTransportFateDecision::Refused(DetachReplayRefusal {
+        aggregate,
+        input: (correlation, fate),
+        reason: DetachReplayRefusalReason::InvalidStatus,
+    })
 }
 
 /// Decision for applying a matching newer attach to replay.
@@ -361,7 +386,7 @@ pub enum ApplyAttachDecision {
     /// Matching attach superseded the old detach.
     Superseded(DetachReplayApplied),
     /// Non-matching attach was retained and replay state stayed exact.
-    Refused(DetachReplayRefusal<AttachBound>),
+    Refused(DetachReplayRefusal<(AttachBound, ClientResponseCorrelation)>),
 }
 
 /// Applies attach supersession without treating attach as transport fate.
@@ -369,13 +394,17 @@ pub enum ApplyAttachDecision {
 pub fn apply_attach(
     mut aggregate: ClientParticipantAggregate,
     attach: AttachBound,
+    correlation: ClientResponseCorrelation,
 ) -> ApplyAttachDecision {
-    if aggregate.detach_replay.apply_attach(&attach) {
+    if detach_authority_matches(&aggregate, &correlation)
+        && aggregate.detach_replay.apply_attach(&attach)
+    {
+        aggregate.expected = None;
         ApplyAttachDecision::Superseded(DetachReplayApplied { aggregate })
     } else {
         ApplyAttachDecision::Refused(DetachReplayRefusal {
             aggregate,
-            input: attach,
+            input: (attach, correlation),
             reason: DetachReplayRefusalReason::ForeignInput,
         })
     }
@@ -387,7 +416,7 @@ pub enum ApplyLeaveDecision {
     /// Matching Leave superseded the old detach.
     Superseded(DetachReplayApplied),
     /// Non-matching Leave was retained with unchanged replay.
-    Refused(DetachReplayRefusal<LeaveCommitted>),
+    Refused(DetachReplayRefusal<(LeaveCommitted, ClientResponseCorrelation)>),
 }
 
 /// Applies durable Leave supersession.
@@ -395,13 +424,17 @@ pub enum ApplyLeaveDecision {
 pub fn apply_leave_durable(
     mut aggregate: ClientParticipantAggregate,
     leave: LeaveCommitted,
+    correlation: ClientResponseCorrelation,
 ) -> ApplyLeaveDecision {
-    if aggregate.detach_replay.apply_leave(&leave) {
+    if detach_authority_matches(&aggregate, &correlation)
+        && aggregate.detach_replay.apply_leave(&leave)
+    {
+        aggregate.expected = None;
         ApplyLeaveDecision::Superseded(DetachReplayApplied { aggregate })
     } else {
         ApplyLeaveDecision::Refused(DetachReplayRefusal {
             aggregate,
-            input: leave,
+            input: (leave, correlation),
             reason: DetachReplayRefusalReason::ForeignInput,
         })
     }
@@ -424,7 +457,7 @@ pub enum ApplyDetachOutcomeDecision {
     /// Exact typed outcome terminalized replay.
     Terminal(DetachReplayApplied),
     /// Non-matching outcome was retained with unchanged replay.
-    Refused(DetachReplayRefusal<DetachReplayOutcome>),
+    Refused(DetachReplayRefusal<(DetachReplayOutcome, ClientResponseCorrelation)>),
 }
 
 /// Validates a typed detach outcome against the retained exact request.
@@ -432,7 +465,15 @@ pub enum ApplyDetachOutcomeDecision {
 pub fn apply_detach_outcome(
     mut aggregate: ClientParticipantAggregate,
     outcome: DetachReplayOutcome,
+    correlation: ClientResponseCorrelation,
 ) -> ApplyDetachOutcomeDecision {
+    if !detach_authority_matches(&aggregate, &correlation) {
+        return ApplyDetachOutcomeDecision::Refused(DetachReplayRefusal {
+            aggregate,
+            input: (outcome, correlation),
+            reason: DetachReplayRefusalReason::InvalidStatus,
+        });
+    }
     let applied = match &outcome {
         DetachReplayOutcome::DetachCommitted(value) => {
             aggregate.detach_replay.apply_detach_committed(value)
@@ -445,14 +486,39 @@ pub fn apply_detach_outcome(
             .apply_terminalized_detach_cell(value),
     };
     if applied {
+        aggregate.expected = None;
         ApplyDetachOutcomeDecision::Terminal(DetachReplayApplied { aggregate })
     } else {
         ApplyDetachOutcomeDecision::Refused(DetachReplayRefusal {
             aggregate,
-            input: outcome,
+            input: (outcome, correlation),
             reason: DetachReplayRefusalReason::ForeignInput,
         })
     }
+}
+
+fn detach_authority_matches(
+    aggregate: &ClientParticipantAggregate,
+    correlation: &ClientResponseCorrelation,
+) -> bool {
+    let Some(expected) = aggregate.expected.as_ref() else {
+        return false;
+    };
+    if !expected.issued || expected.authorization != correlation.authorization {
+        return false;
+    }
+    let DetachReplayState::Recorded {
+        request,
+        status: DetachReplayStatus::InFlight,
+    } = &aggregate.detach_replay.state
+    else {
+        return false;
+    };
+    matches!(&expected.request, crate::wire::ClientRequest::Detach(value)
+        if value.conversation_id == request.conversation_id
+            && value.participant_id == request.participant_id
+            && value.capability_generation == request.capability_generation
+            && value.detach_attempt_token == request.detach_attempt_token)
 }
 
 fn detach_committed_matches(request: &DetachEnvelope, value: &DetachCommitted) -> bool {

@@ -14,6 +14,8 @@ pub enum ClientInboundRefusalReason {
     DelayedResponse,
     /// Wire identity is insufficient to assign this value to one expected operation.
     AmbiguousResponse,
+    /// An expected-operation response was presented without its one-use send correlation.
+    MissingResponseAuthority,
 }
 
 /// Applied inbound value and resulting aggregate.
@@ -106,7 +108,7 @@ pub fn decide_inbound(
     aggregate: ClientParticipantAggregate,
     value: ServerValue,
 ) -> ClientInboundDecision {
-    decide_inbound_inner(aggregate, value)
+    decide_inbound_inner(aggregate, value, false)
 }
 
 /// Attempts correlation while retaining the process-local handle on refusal.
@@ -122,7 +124,27 @@ pub fn decide_correlated_inbound(
     value: ServerValue,
     correlation: ClientResponseCorrelation,
 ) -> ClientCorrelatedInboundDecision {
-    match decide_inbound_inner(aggregate, value) {
+    let current_authority = aggregate.expected.as_ref().is_some_and(|expected| {
+        expected.issued && expected.authorization == correlation.authorization
+    });
+    if !current_authority {
+        let decision = inbound_refusal(
+            aggregate,
+            value,
+            ClientInboundRefusalReason::DelayedResponse,
+        );
+        let ClientInboundDecision::Refused(refusal) = decision else {
+            unreachable!();
+        };
+        let (aggregate, value) = refusal.into_parts();
+        return ClientCorrelatedInboundDecision::Refused(ClientCorrelatedInboundRefusal {
+            aggregate,
+            value,
+            correlation,
+            reason: ClientInboundRefusalReason::DelayedResponse,
+        });
+    }
+    match decide_inbound_inner(aggregate, value, true) {
         ClientInboundDecision::Applied(applied) => {
             ClientCorrelatedInboundDecision::Applied(applied)
         }
@@ -142,6 +164,7 @@ pub fn decide_correlated_inbound(
 fn decide_inbound_inner(
     mut aggregate: ClientParticipantAggregate,
     value: ServerValue,
+    has_response_authority: bool,
 ) -> ClientInboundDecision {
     if aggregate.binding.is_left() {
         return inbound_refusal(aggregate, value, ClientInboundRefusalReason::AlreadyDead);
@@ -169,6 +192,14 @@ fn decide_inbound_inner(
             ClientInboundRefusalReason::DelayedResponse,
         );
     };
+
+    if !has_response_authority {
+        return inbound_refusal(
+            aggregate,
+            value,
+            ClientInboundRefusalReason::MissingResponseAuthority,
+        );
+    }
 
     if !aggregate.binding.accepts_request(&expected.request) {
         return inbound_refusal(

@@ -63,10 +63,13 @@ fn record_replay() -> TestResult<ClientParticipantAggregate> {
     else {
         return Err("bound detach must enter the durability barrier");
     };
-    let (aggregate, _) = pending.commit().into_parts();
-    let DetachTransportFateDecision::Parked(applied) =
-        transport_fate(aggregate, DetachTransportFate::ResponseUnavailable)
-    else {
+    let (aggregate, operation) = pending.commit().into_parts();
+    let (_, correlation) = operation.into_request();
+    let DetachTransportFateDecision::Parked(applied) = transport_fate(
+        aggregate,
+        correlation,
+        DetachTransportFate::ResponseUnavailable,
+    ) else {
         return Err("initial detach transport fate must park replay");
     };
     Ok(applied.into_aggregate())
@@ -83,6 +86,12 @@ fn start_replay(
     Ok((aggregate, attempt))
 }
 
+fn started_replay() -> TestResult<(ClientParticipantAggregate, ClientResponseCorrelation)> {
+    let (aggregate, attempt) = start_replay(record_replay()?)?;
+    let (_, correlation) = attempt.into_request();
+    Ok((aggregate, correlation))
+}
+
 #[test]
 fn operation_barrier_enforces_cardinality_and_exact_correlation() -> TestResult {
     let token = EnrollmentToken::new([1; 16]);
@@ -97,6 +106,7 @@ fn operation_barrier_enforces_cardinality_and_exact_correlation() -> TestResult 
     };
     let (aggregate, operation) = pending.commit().into_parts();
     assert_eq!(operation.request(), &request);
+    let (_, correlation) = operation.into_request();
 
     let refused_request = ClientRequest::Enrollment(EnrollmentRequest {
         conversation_id: 3,
@@ -123,14 +133,16 @@ fn operation_barrier_enforces_cardinality_and_exact_correlation() -> TestResult 
         10,
     )
     .into_server_value();
-    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, foreign) else {
+    let ClientCorrelatedInboundDecision::Refused(refusal) =
+        decide_correlated_inbound(aggregate, foreign, correlation)
+    else {
         return Err("foreign response cannot apply");
     };
     assert_eq!(
         refusal.reason(),
         ClientInboundRefusalReason::ForeignResponse
     );
-    let (aggregate, returned_foreign) = refusal.into_parts();
+    let (aggregate, returned_foreign, correlation) = refusal.into_parts();
     assert!(matches!(
         returned_foreign,
         ServerValue::ConnectionConversationCapacityExceeded(_)
@@ -145,14 +157,16 @@ fn operation_barrier_enforces_cardinality_and_exact_correlation() -> TestResult 
         10,
     )
     .into_server_value();
-    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, delayed) else {
+    let ClientCorrelatedInboundDecision::Refused(refusal) =
+        decide_correlated_inbound(aggregate, delayed, correlation)
+    else {
         return Err("older token cannot apply");
     };
     assert_eq!(
         refusal.reason(),
         ClientInboundRefusalReason::DelayedResponse
     );
-    let (aggregate, _) = refusal.into_parts();
+    let (aggregate, _, correlation) = refusal.into_parts();
     assert!(aggregate.has_expected_operation());
 
     let exact = EnrollmentResponse::connection_conversation_capacity_exceeded(
@@ -163,12 +177,20 @@ fn operation_barrier_enforces_cardinality_and_exact_correlation() -> TestResult 
         10,
     )
     .into_server_value();
-    let ClientInboundDecision::Applied(applied) = decide_inbound(aggregate, exact) else {
+    let ClientCorrelatedInboundDecision::Applied(applied) =
+        decide_correlated_inbound(aggregate, exact, correlation)
+    else {
         return Err("exact response must apply");
     };
     let (aggregate, _) = applied.into_parts();
     assert!(!aggregate.has_expected_operation());
+    assert_delayed_after_apply(aggregate, token)
+}
 
+fn assert_delayed_after_apply(
+    aggregate: ClientParticipantAggregate,
+    token: EnrollmentToken,
+) -> TestResult {
     let delayed_after_apply = EnrollmentResponse::connection_conversation_capacity_exceeded(
         crate::wire::EnrollmentEnvelope {
             conversation_id: 2,
@@ -237,23 +259,31 @@ fn replay_start_fate_replay_and_nonmatching_attach_preserve_authority() -> TestR
     ));
     let (aggregate, attempt) = start_replay(aggregate)?;
     assert_eq!(attempt.request(), &detach()?);
+    let (_, correlation) = attempt.into_request();
 
-    let ApplyAttachDecision::Refused(refusal) = apply_attach(aggregate, attach(99, 22)?) else {
+    let ApplyAttachDecision::Refused(refusal) =
+        apply_attach(aggregate, attach(99, 22)?, correlation)
+    else {
         return Err("foreign attach cannot supersede");
     };
-    let (aggregate, _) = refusal.into_parts();
+    let (aggregate, (_, correlation)) = refusal.into_parts();
     assert!(matches!(
         aggregate.detach_replay().status(),
         Some(DetachReplayStatus::InFlight)
     ));
 
-    let DetachTransportFateDecision::Parked(applied) =
-        transport_fate(aggregate, DetachTransportFate::ResponseUnavailable)
-    else {
+    let DetachTransportFateDecision::Parked(applied) = transport_fate(
+        aggregate,
+        correlation,
+        DetachTransportFate::ResponseUnavailable,
+    ) else {
         return Err("typed fate must park in-flight replay");
     };
-    let (aggregate, _) = start_replay(applied.into_aggregate())?;
-    let ApplyAttachDecision::Superseded(applied) = apply_attach(aggregate, attach(21, 22)?) else {
+    let (aggregate, attempt) = start_replay(applied.into_aggregate())?;
+    let (_, correlation) = attempt.into_request();
+    let ApplyAttachDecision::Superseded(applied) =
+        apply_attach(aggregate, attach(21, 22)?, correlation)
+    else {
         return Err("matching attach must supersede");
     };
     assert!(matches!(
@@ -275,7 +305,9 @@ fn replay_durable_leave_and_all_terminal_payloads_are_distinct() -> TestResult {
         2,
     )
     .ok_or("test leave ordering must be valid")?;
-    let ApplyLeaveDecision::Superseded(applied) = apply_leave_durable(record_replay()?, leave)
+    let (aggregate, correlation) = started_replay()?;
+    let ApplyLeaveDecision::Superseded(applied) =
+        apply_leave_durable(aggregate, leave, correlation)
     else {
         return Err("matching leave must supersede");
     };
@@ -287,9 +319,11 @@ fn replay_durable_leave_and_all_terminal_payloads_are_distinct() -> TestResult {
     let request = detach()?;
     let committed =
         crate::wire::DetachCommitted::new(21, 22, request.detach_attempt_token, epoch(7)?, 9);
+    let (aggregate, correlation) = started_replay()?;
     let ApplyDetachOutcomeDecision::Terminal(applied) = apply_detach_outcome(
-        record_replay()?,
+        aggregate,
         DetachReplayOutcome::DetachCommitted(committed),
+        correlation,
     ) else {
         return Err("exact commit must terminalize");
     };
@@ -307,9 +341,11 @@ fn replay_durable_leave_and_all_terminal_payloads_are_distinct() -> TestResult {
         presented_generation: generation(7)?,
         committed_binding_epoch: epoch(7)?,
     };
+    let (aggregate, correlation) = started_replay()?;
     let ApplyDetachOutcomeDecision::Terminal(applied) = apply_detach_outcome(
-        record_replay()?,
+        aggregate,
         DetachReplayOutcome::DetachInProgress(in_progress),
+        correlation,
     ) else {
         return Err("exact pending cell must terminalize");
     };
@@ -329,9 +365,11 @@ fn replay_durable_leave_and_all_terminal_payloads_are_distinct() -> TestResult {
         epoch(7)?,
         BindingStateView::Detached,
     );
+    let (aggregate, correlation) = started_replay()?;
     let ApplyDetachOutcomeDecision::Terminal(applied) = apply_detach_outcome(
-        record_replay()?,
+        aggregate,
         DetachReplayOutcome::TerminalizedDetachCell(cell),
+        correlation,
     ) else {
         return Err("exact terminalized cell must apply");
     };

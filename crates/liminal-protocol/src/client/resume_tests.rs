@@ -197,9 +197,33 @@ fn resume_round_trips_every_expected_operation_and_continuous_ack() -> TestResul
                     },
                 };
             }
-            let restored = round_trip(&aggregate)?;
-            assert_eq!(restored.expected, aggregate.expected);
+            assert_expected_restore(round_trip(&aggregate)?, &aggregate, &operation)?;
         }
+    }
+    Ok(())
+}
+
+fn assert_expected_restore(
+    mut restored: ClientParticipantAggregate,
+    original: &ClientParticipantAggregate,
+    operation: &ClientRequest,
+) -> TestResult {
+    if matches!(
+        operation,
+        ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
+    ) {
+        assert!(restored.expected.is_none());
+        let abandonment = restored
+            .take_restored_operation_abandonment()
+            .ok_or("tokenless restore must report abandonment")?;
+        assert_eq!(abandonment.request(), operation);
+        assert_eq!(
+            abandonment.reason(),
+            RestoredExpectedOperationAbandonmentReason::TokenlessAfterCrash
+        );
+    } else {
+        assert_eq!(restored.expected, original.expected);
+        assert!(restored.take_restored_operation_abandonment().is_none());
     }
     Ok(())
 }

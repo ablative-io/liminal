@@ -40,8 +40,10 @@
 //! 14. There is no speculative persistence format. A pending-window crash means
 //!     the operation did not happen and restart may record it again.
 //! 15. `RecordAdmission` responses are always ambiguous because wire identity is
-//!     insufficient; `ObserverRecovery` compares its echoed list. A sealed
-//!     transport-context upgrade belongs to the later SDK leg.
+//!     insufficient; `ObserverRecovery` compares its echoed list. As the M7
+//!     companion rule, both tokenless classes resolve as typed abandoned on every
+//!     restore and are never re-released. A later sealed-transport-context SDK leg
+//!     may add outbound attempt tokens and lift this restriction.
 //! 16. Issued permit loss and interrupted attempts have explicit typed process
 //!     fates; restore neither silently re-mints nor strands those states.
 //! 17. Detached bindings retain the attach secret because the complete client
@@ -51,30 +53,34 @@
 //!
 //! # Exhaustive constructible-state audit
 //!
-//! Every state reachable through decode, restore, or apply is listed here.
+//! Every state accepted by restore or reachable through a public apply path is
+//! listed here. The exhaustive conservation property test mechanically covers
+//! the **live authority** and **typed consumption** columns across 358 valid paths
+//! from a 3-operation × 10-transition alphabet through depth 7.
 //!
-//! | Owned fact / state | Producers | Typed exits or documented terminal reason |
-//! |---|---|---|
-//! | Binding `Unbound` | new, restore | enrollment/attach → `Bound`; observer recovery; mismatched participant request refuses |
-//! | Binding `Bound` | enrollment/attach, restore | detach → `Detached`; attach rotates; Leave/Retired → `Left` |
-//! | Binding `Detached` | detach commit, restore | exact-secret attach → `Bound`; Leave/Retired → `Left` |
-//! | Binding `Left` | Leave/Retired, restore | permanent terminal; inbound/outbound return `AlreadyDead` |
-//! | Expected `None` | new, exact response/fate, abort, restore | one [`record_operation`] admission |
-//! | Expected unissued non-detach | committed `LPCR`, restore | [`recover_expected_operation`] → issued once |
-//! | Expected issued non-detach | release/recovery, restore | exact inbound; correlation + response-unavailable; process-lost exit |
-//! | Expected unissued detach + replay `Parked` | committed `LPCR`, restore | expected recovery or replay start atomically marks issued |
-//! | Expected issued detach + active replay | either first-send path, restore | exact inbound; replay fate/start; duplicate recovery refuses |
-//! | Replay `Empty` | new, abort, restore | pending detach → `Parked` |
-//! | Replay `Parked` | committed detach/fate, restore | matching expected required; transport start → `InFlight` |
-//! | Replay `InFlight` | first-send path, restore | fate → `Parked`; outcome terminal; attach/Leave supersession |
-//! | Replay `Superseded` | matching newer attach, restore | terminal for old generation; newer-generation detach may replace |
-//! | Replay `LeaveSuperseded` | Leave/Retired, restore | terminal because binding is permanently `Left` |
-//! | Replay terminal: three payload arms | exact outcome, restore | lossless terminal; newer-generation detach may replace |
-//! | Reconnect `Parked` | new/failure/interruption, restore | typed fresh event → permit |
-//! | Reconnect permit unissued | committed restore testimony | one [`recover_reconnect_permit`] → issued |
-//! | Reconnect permit issued | fresh event/recovery, restore | held permit → attempt; process-lost → `Parked`; never re-minted |
-//! | Reconnect attempt | permit redemption, restore | held fate → `Online`/`Parked`; process-lost → `Parked` |
-//! | Reconnect `Online` | successful attempt, restore | later typed fresh event → permit |
+//! | Owned state | Restore/apply acceptance | Live authority | Typed consumption / exit |
+//! |---|---|---:|---|
+//! | Binding `Unbound` | new, restore | 0 | enrollment/attach → `Bound`; identity-bound requests refuse |
+//! | Binding `Bound` | enrollment/attach, restore | 0 | detach result → `Detached`; Leave/Retired → `Left` |
+//! | Binding `Detached` | detach result, restore | 0 | exact-secret attach → `Bound`; Leave/Retired → `Left` |
+//! | Binding `Left` | correlated Leave/Retired, restore | 0 | permanent; inbound/outbound return `AlreadyDead` |
+//! | Expected `None` | new, abort, consumed outcome/fate, restore | 0 | one [`record_operation`] admission |
+//! | Tokenless expected, live process only | record/commit/release | 0 or 1 | exact response remains conservative; fate consumes; every restore emits typed `TokenlessAfterCrash` abandonment and clears it |
+//! | Token-bearing non-detach, unissued | committed `LPCR`, restore | 0 | [`recover_expected_operation`] issues once |
+//! | Token-bearing non-detach, issued | release/recovery, restore | 1 live, or 1 lost testimony after crash | correlated outcome/fate, or typed `ProcessLost` |
+//! | Expected detach + replay `Parked` | commit, live fate, restore only when exact and unissued | 0 | recovery or replay start issues exactly one effect |
+//! | Expected detach + replay `InFlight` | release/start, restore only when exact and issued | 1 live, or 1 lost testimony after crash | correlated outcome/fate; typed `ProcessLost` parks exact-token replay |
+//! | Expected detach + replay `Empty`, `Superseded`, `LeaveSuperseded`, or terminal | never accepted | 0 | typed `ExpectedDetachActiveReplayMismatch` restore refusal |
+//! | Active replay without exact expected detach | never accepted | 0 | typed `ActiveReplayExpectedDetachMismatch` restore refusal |
+//! | Replay `Empty` | new, abort, restore without expected detach | 0 | admitted detach records `Parked` atomically |
+//! | Replay `Superseded` | authority-consuming matching attach, restore | 0 | old generation terminal; exact newer generation may replace |
+//! | Replay `LeaveSuperseded` | authority-consuming matching durable Leave, restore | 0 | proves only that matching Leave/retirement superseded replay; public [`apply_leave_durable`] does **not** change binding to `Left` |
+//! | Replay terminal (three exact payload arms) | authority-consuming exact outcome, restore | 0 | lossless terminal; exact newer-generation detach may replace |
+//! | Reconnect `Parked` | new/failure/interruption, restore | 0 | typed fresh event → permit |
+//! | Reconnect permit unissued | committed restore testimony | 0 | one [`recover_reconnect_permit`] issue |
+//! | Reconnect permit issued | event/recovery, restore | 1 or lost testimony | held permit → attempt; typed process loss → `Parked` |
+//! | Reconnect attempt | permit redemption, restore | 1 or lost testimony | held fate → `Online`/`Parked`; typed process loss → `Parked` |
+//! | Reconnect `Online` | successful fate, restore | 0 | later typed fresh event → permit |
 
 use crate::wire::{ClientRequest, Generation, ParticipantAckEnvelope};
 
@@ -259,6 +265,41 @@ pub(super) struct ExpectedOperationState {
     pub(super) authorization: u64,
 }
 
+/// Why a persisted expected operation was deliberately not re-released.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoredExpectedOperationAbandonmentReason {
+    /// The operation class has no outbound attempt token and cannot be proven
+    /// unsent after a crash.
+    TokenlessAfterCrash,
+}
+
+/// Typed restore resolution for an operation that cannot safely be re-issued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RestoredExpectedOperationAbandonment {
+    request: ClientRequest,
+    reason: RestoredExpectedOperationAbandonmentReason,
+}
+
+impl RestoredExpectedOperationAbandonment {
+    /// Borrows the exact operation the restore boundary abandoned.
+    #[must_use]
+    pub const fn request(&self) -> &ClientRequest {
+        &self.request
+    }
+
+    /// Reports the closed abandonment reason.
+    #[must_use]
+    pub const fn reason(&self) -> RestoredExpectedOperationAbandonmentReason {
+        self.reason
+    }
+
+    /// Consumes the resolution into the request callers may explicitly re-record.
+    #[must_use]
+    pub fn into_request(self) -> ClientRequest {
+        self.request
+    }
+}
+
 /// Non-cloneable client participant state shell.
 ///
 /// Its expected operation, credential-bearing binding, replay request, and
@@ -272,6 +313,7 @@ pub struct ClientParticipantAggregate {
     pub(super) next_operation_authorization: u64,
     pub(super) detach_replay: SdkDetachReplayAggregate,
     pub(super) reconnect: ReconnectAggregate,
+    pub(super) restored_abandonment: Option<RestoredExpectedOperationAbandonment>,
 }
 
 impl ClientParticipantAggregate {
@@ -284,6 +326,7 @@ impl ClientParticipantAggregate {
             next_operation_authorization: 0,
             detach_replay: SdkDetachReplayAggregate::new(),
             reconnect: ReconnectAggregate::new(),
+            restored_abandonment: None,
         }
     }
 
@@ -309,6 +352,17 @@ impl ClientParticipantAggregate {
     #[must_use]
     pub const fn reconnect(&self) -> &ReconnectAggregate {
         &self.reconnect
+    }
+
+    /// Takes the typed tokenless-operation resolution produced by cold restore.
+    ///
+    /// The expected slot is already empty when this value exists; taking the
+    /// event cannot mint or release executable authority.
+    #[must_use]
+    pub const fn take_restored_operation_abandonment(
+        &mut self,
+    ) -> Option<RestoredExpectedOperationAbandonment> {
+        self.restored_abandonment.take()
     }
 }
 
@@ -357,10 +411,14 @@ pub use resume::{
 };
 
 #[cfg(test)]
+mod authority_property_tests;
+#[cfg(test)]
 mod resume_tests;
 #[cfg(test)]
 mod review_tests;
 #[cfg(test)]
 mod round3_tests;
+#[cfg(test)]
+mod round4_tests;
 #[cfg(test)]
 mod tests;
