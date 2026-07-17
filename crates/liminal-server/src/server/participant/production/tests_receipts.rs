@@ -115,23 +115,22 @@ fn generation(value: u64) -> Result<Generation, Box<dyn Error>> {
     Generation::new(value).ok_or_else(|| "zero generation in test fixture".into())
 }
 
-/// Enrollment provenance window (register row 5652): an exact
-/// enrollment-token replay AFTER the receipt's own deadline but INSIDE its
-/// provenance window answers `ReceiptExpired` with reason `Deadline`, the
-/// minted result generation, and the CURRENT generation — never a
+/// Enrollment provenance window (register row 5652), in-window half: an
+/// exact enrollment-token replay AFTER the receipt's own deadline but INSIDE
+/// its provenance window answers `ReceiptExpired` with reason `Deadline`,
+/// the minted result generation, and the CURRENT generation — never a
 /// resurrected generation-1 secret-bearing receipt, even while a later
-/// attach's own receipt is live. AFTER the provenance window the permanent
-/// lifetime mapping answers `EnrollmentKnown`.
+/// attach's own receipt is live. The provenance TTL is deliberately huge so
+/// scheduler jitter cannot carry the replay past the window.
 #[test]
-fn enrollment_token_replay_walks_receipt_provenance_then_lifetime_phases()
+fn enrollment_token_replay_inside_provenance_window_is_receipt_expired()
 -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(61, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    // Enrollment receipt dies after 300ms; its provenance record survives
-    // until 900ms after commit.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 900));
+    // Enrollment receipt dies after 300ms; provenance stays open long after.
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 600_000));
     let conversation_id = 601;
     let enrollment_token = [61; 16];
 
@@ -199,9 +198,51 @@ fn enrollment_token_replay_walks_receipt_provenance_then_lifetime_phases()
     );
     assert_eq!(current_generation, generation(2)?);
     assert_eq!(reason, ReceiptExpiryReason::Deadline);
+    Ok(())
+}
 
-    // AFTER the provenance window: the permanent lifetime mapping.
-    sleep(Duration::from_millis(600));
+/// Enrollment provenance window (register row 5652), after-window half:
+/// once the provenance deadline has also passed, the permanent lifetime
+/// mapping answers `EnrollmentKnown` with the current generation. Sleeping
+/// past the window is jitter-safe in this direction (later is still after).
+#[test]
+fn enrollment_token_replay_after_provenance_window_is_enrollment_known()
+-> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let incarnation = ConnectionIncarnation::new(65, 1);
+    let store = open_disk_store_for_tests(&data_dir)?;
+    // Receipt window 300ms, provenance window 700ms.
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 700));
+    let conversation_id = 605;
+    let enrollment_token = [75; 16];
+
+    let receipt = enroll(&handler, incarnation, conversation_id, enrollment_token)?;
+    let participant_id = receipt.participant_id();
+    detach(
+        &handler,
+        incarnation,
+        conversation_id,
+        participant_id,
+        GEN_ONE,
+        [76; 16],
+    )?;
+    // Wait out BOTH enrollment windows, then rotate to generation 2 (the
+    // attach secret is credential authority, not receipt-window state).
+    sleep(Duration::from_millis(900));
+    let attached = attach(
+        &handler,
+        incarnation,
+        attach_request(
+            conversation_id,
+            participant_id,
+            GEN_ONE,
+            receipt.attach_secret(),
+            [77; 16],
+        ),
+    )?;
+    assert_eq!(attached.capability_generation(), generation(2)?);
+
     let after_window = dispatch(
         &handler,
         incarnation,
