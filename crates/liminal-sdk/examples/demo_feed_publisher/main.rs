@@ -2,8 +2,8 @@
 //!
 //! This is deliberately an example target, not part of `liminal-sdk`'s public API.
 //! Run it with `cargo run -p liminal-sdk --example demo_feed_publisher`.
-//! `LIMINAL_ADDRESS`, `LIMINAL_DEMO_CHANNEL`, and `LIMINAL_DEMO_GENERATION_FILE`
-//! override the documented defaults below.
+//! `LIMINAL_ADDRESS`, `LIMINAL_DEMO_CHANNEL`, `LIMINAL_DEMO_COMPONENT_ID`, and
+//! `LIMINAL_DEMO_GENERATION_FILE` override the documented defaults below.
 
 mod authority;
 mod cadence;
@@ -18,12 +18,13 @@ use std::thread;
 
 use authority::{FeedAuthority, FileGenerationStore};
 use cadence::{CadenceEngine, SNAPSHOT_PERIOD, TICK_INTERVAL};
-use envelope::{ContractId, PlaceholderEnvelopeCodec};
-use graph::DemoGraph;
+use envelope::{ComponentId, FrameEnvelopeCodec};
+use graph::GraphViewState;
 use liminal_sdk::PushClient;
 
 const DEFAULT_ADDRESS: &str = "127.0.0.1:9000";
 const DEFAULT_CHANNEL: &str = "frame.demo.graph-view";
+const DEFAULT_COMPONENT_ID: &str = "graph-view-demo";
 const DEFAULT_GENERATION_FILE: &str = ".liminal-demo-feed-generation";
 
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +38,8 @@ enum AppError {
     Authority(#[from] authority::AuthorityError),
     #[error(transparent)]
     Contract(#[from] envelope::EnvelopeError),
+    #[error(transparent)]
+    Graph(#[from] graph::GraphError),
     #[error("failed to connect demo publisher: {0}")]
     Connect(liminal_sdk::SdkError),
     #[error(transparent)]
@@ -54,14 +57,16 @@ fn configured(name: &'static str, default: &str) -> Result<String, AppError> {
 fn run() -> Result<(), AppError> {
     let address = configured("LIMINAL_ADDRESS", DEFAULT_ADDRESS)?;
     let channel = configured("LIMINAL_DEMO_CHANNEL", DEFAULT_CHANNEL)?;
+    let component_id = ComponentId::new(&configured(
+        "LIMINAL_DEMO_COMPONENT_ID",
+        DEFAULT_COMPONENT_ID,
+    )?)?;
     let generation_file = PathBuf::from(configured(
         "LIMINAL_DEMO_GENERATION_FILE",
         DEFAULT_GENERATION_FILE,
     )?);
 
-    let mut generation_store = FileGenerationStore::new(generation_file);
-    let authority = FeedAuthority::start(&mut generation_store)?;
-    let contract = ContractId::new("frame", "graph-view", 1)?;
+    let authority = FeedAuthority::start(FileGenerationStore::new(generation_file))?;
 
     // PushWriter is the existing SDK path that preserves these opaque bytes exactly.
     // Its schema id is zero and its `Result<(), SdkError>` is a write outcome, not a
@@ -70,10 +75,10 @@ fn run() -> Result<(), AppError> {
     let writer = client.writer_handle();
     let mut cadence = CadenceEngine::new(
         channel,
-        contract,
+        component_id,
         authority,
-        PlaceholderEnvelopeCodec,
-        DemoGraph::new(),
+        FrameEnvelopeCodec,
+        GraphViewState::new()?,
         writer,
         SNAPSHOT_PERIOD,
     )?;

@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Generation(u64);
 
 impl Generation {
@@ -13,13 +13,21 @@ impl Generation {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Sequence(u64);
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Cut {
+    generation: Generation,
+    seq: u64,
+}
 
-impl Sequence {
+impl Cut {
     #[must_use]
-    pub const fn get(self) -> u64 {
-        self.0
+    pub const fn generation(self) -> Generation {
+        self.generation
+    }
+
+    #[must_use]
+    pub const fn seq(self) -> u64 {
+        self.seq
     }
 }
 
@@ -87,18 +95,23 @@ pub enum AuthorityError {
     GenerationOverflow,
     #[error("sequence overflow for channel {0:?}")]
     SequenceOverflow(String),
+    #[error("channel {0:?} already minted its baseline in this generation")]
+    BaselineAlreadyMinted(String),
+    #[error("channel {0:?} cannot mint a delta before its baseline")]
+    BaselineMissing(String),
 }
 
-/// Process-scoped feed authority. It has no wall-clock or retry authority.
-#[derive(Debug)]
+/// Feed authority for monotonic, non-reusable `(generation, seq)` cuts.
+/// It has no wall-clock, delivery, reconnect, or retry authority.
 pub struct FeedAuthority {
     generation: Generation,
     channel_sequences: BTreeMap<String, u64>,
+    store: Box<dyn GenerationStore>,
 }
 
 impl FeedAuthority {
-    /// Starts one publisher authority and durably bumps its process generation once.
-    pub fn start(store: &mut impl GenerationStore) -> Result<Self, AuthorityError> {
+    /// Starts one process authority and durably mints its first generation once.
+    pub fn start(mut store: impl GenerationStore + 'static) -> Result<Self, AuthorityError> {
         let previous = store.load()?.map_or(0, std::convert::identity);
         let next = previous
             .checked_add(1)
@@ -107,42 +120,70 @@ impl FeedAuthority {
         Ok(Self {
             generation: Generation(next),
             channel_sequences: BTreeMap::new(),
+            store: Box::new(store),
         })
     }
 
-    #[must_use]
-    pub const fn generation(&self) -> Generation {
-        self.generation
+    /// Mints the unique baseline snapshot cut `(generation, 0)` for `channel`.
+    pub fn mint_baseline(&mut self, channel: &str) -> Result<Cut, AuthorityError> {
+        if self.channel_sequences.contains_key(channel) {
+            return Err(AuthorityError::BaselineAlreadyMinted(channel.to_owned()));
+        }
+        self.channel_sequences.insert(channel.to_owned(), 0);
+        Ok(Cut {
+            generation: self.generation,
+            seq: 0,
+        })
     }
 
-    pub fn next_sequence(&mut self, channel: &str) -> Result<Sequence, AuthorityError> {
+    /// Mints the next delta cut after an existing channel baseline.
+    pub fn mint_delta(&mut self, channel: &str) -> Result<Cut, AuthorityError> {
         let sequence = self
             .channel_sequences
-            .entry(channel.to_owned())
-            .or_default();
+            .get_mut(channel)
+            .ok_or_else(|| AuthorityError::BaselineMissing(channel.to_owned()))?;
         *sequence = sequence
             .checked_add(1)
             .ok_or_else(|| AuthorityError::SequenceOverflow(channel.to_owned()))?;
-        Ok(Sequence(*sequence))
+        Ok(Cut {
+            generation: self.generation,
+            seq: *sequence,
+        })
+    }
+
+    /// Wholesales authority state into the next durable generation and clears baselines.
+    pub fn advance_generation(&mut self) -> Result<Generation, AuthorityError> {
+        let next = self
+            .generation
+            .get()
+            .checked_add(1)
+            .ok_or(AuthorityError::GenerationOverflow)?;
+        self.store.persist(next)?;
+        self.generation = Generation(next);
+        self.channel_sequences.clear();
+        Ok(self.generation)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
     use super::{FeedAuthority, GenerationStore, GenerationStoreError};
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     struct MemoryStore {
-        value: Option<u64>,
+        value: Rc<Cell<Option<u64>>>,
     }
 
     impl GenerationStore for MemoryStore {
         fn load(&mut self) -> Result<Option<u64>, GenerationStoreError> {
-            Ok(self.value)
+            Ok(self.value.get())
         }
 
         fn persist(&mut self, generation: u64) -> Result<(), GenerationStoreError> {
-            self.value = Some(generation);
+            self.value.set(Some(generation));
             Ok(())
         }
     }
@@ -150,23 +191,40 @@ mod tests {
     #[test]
     fn generation_is_stable_within_run_and_bumps_on_restart()
     -> Result<(), Box<dyn std::error::Error>> {
-        let mut store = MemoryStore::default();
-        let first = FeedAuthority::start(&mut store)?;
-        assert_eq!(first.generation().get(), 1);
-        assert_eq!(first.generation(), first.generation());
+        let store = MemoryStore::default();
+        let first = FeedAuthority::start(store.clone())?;
+        assert_eq!(first.generation.get(), 1);
+        assert_eq!(first.generation, first.generation);
 
-        let second = FeedAuthority::start(&mut store)?;
-        assert_eq!(second.generation().get(), 2);
+        let second = FeedAuthority::start(store)?;
+        assert_eq!(second.generation.get(), 2);
         Ok(())
     }
 
     #[test]
-    fn sequence_is_monotonic_per_channel() -> Result<(), Box<dyn std::error::Error>> {
-        let mut store = MemoryStore::default();
-        let mut authority = FeedAuthority::start(&mut store)?;
-        assert_eq!(authority.next_sequence("a")?.get(), 1);
-        assert_eq!(authority.next_sequence("a")?.get(), 2);
-        assert_eq!(authority.next_sequence("b")?.get(), 1);
+    fn baseline_is_zero_and_deltas_are_monotonic_per_channel()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut authority = FeedAuthority::start(MemoryStore::default())?;
+        let baseline = authority.mint_baseline("a")?;
+        assert_eq!((baseline.generation().get(), baseline.seq()), (1, 0));
+        assert_eq!(authority.mint_delta("a")?.seq(), 1);
+        assert_eq!(authority.mint_delta("a")?.seq(), 2);
+        assert_eq!(authority.mint_baseline("b")?.seq(), 0);
+        assert!(authority.mint_baseline("a").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn wholesale_replace_bumps_generation_and_resets_baseline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut authority = FeedAuthority::start(MemoryStore::default())?;
+        let first = authority.mint_baseline("a")?;
+        let delta = authority.mint_delta("a")?;
+        authority.advance_generation()?;
+        let refreshed = authority.mint_baseline("a")?;
+        assert!(first < delta);
+        assert!(delta < refreshed);
+        assert_eq!((refreshed.generation().get(), refreshed.seq()), (2, 0));
         Ok(())
     }
 }
