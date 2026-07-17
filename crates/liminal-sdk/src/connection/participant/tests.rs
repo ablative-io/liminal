@@ -4,14 +4,17 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use liminal_protocol::lifecycle::{
-    ActiveBinding, BindingState, EnrollmentFingerprint, IdentityState, LiveMember,
-    LiveMemberRestore, ParticipantAckDecision, PresentedIdentity, apply_participant_ack,
+    ActiveBinding, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition, BindingState,
+    ClosureState, CommittedBindingTerminalPosition, DetachCell, EnrollmentFingerprint,
+    IdentityState, LiveMember, LiveMemberRestore, ParticipantAckDecision, PresentedIdentity,
+    apply_participant_ack, commit_attach, commit_detach,
 };
 use liminal_protocol::wire::{
     AckNoOp, AttachAttemptToken, AttachBound, AttachSecret, AuthenticationState, BindingEpoch,
-    ConnectionIncarnation, DetachAttemptToken, DetachEnvelope, DetachInProgress, Generation,
+    BindingStateView, ConnectionIncarnation, CredentialAttachRequest, DetachAttemptToken,
+    DetachEnvelope, DetachInProgress, DetachRequest, DetachStaleAuthority, Generation,
     InboundGateContext, NegotiatedParticipantCapability, ParticipantAck,
-    ParticipantCapabilityState, ParticipantFrame, ReceiverDirection, ServerValue,
+    ParticipantCapabilityState, ParticipantFrame, ReceiverDirection, ServerValue, StaleAuthority,
     ValidatedFrameLimit, encode, encoded_len,
 };
 
@@ -190,6 +193,120 @@ fn detach_in_progress_is_a_typed_terminal_status() {
         ParticipantTransition::DetachInProgress
     );
     assert_eq!(session.detach_replay_status(), DetachReplayStatus::Terminal);
+    assert_eq!(
+        session.on_replay_event(DetachReplayEvent::ExplicitCallerAction),
+        DetachReplayAction::None
+    );
+}
+
+fn terminalized_value() -> (ServerValue, BindingEpoch) {
+    let old_epoch = epoch(4, 11);
+    let new_epoch = epoch(5, 12);
+    let binding = ActiveBinding {
+        participant_id: PARTICIPANT_ID,
+        conversation_id: CONVERSATION_ID,
+        binding_epoch: old_epoch,
+    };
+    let request = DetachRequest {
+        conversation_id: CONVERSATION_ID,
+        participant_id: PARTICIPANT_ID,
+        capability_generation: generation(4),
+        detach_attempt_token: DetachAttemptToken::new([0xD3; 16]),
+    };
+    let verifier = [0xA5; 32];
+    let verified_detach = binding
+        .verify_detach_request(request.clone(), verifier)
+        .expect("request matches the old binding");
+    let member = LiveMember::restore(LiveMemberRestore {
+        participant_id: PARTICIPANT_ID,
+        conversation_id: CONVERSATION_ID,
+        generation: generation(4),
+        attach_secret: AttachSecret::new([0x44; 32]),
+        cursor: 0,
+        enrollment_fingerprint: EnrollmentFingerprint::new([0xE1; 32]),
+        latest_terminal: None,
+    })
+    .expect("terminalized fixture has valid membership");
+    let transition = commit_detach(
+        member,
+        verified_detach,
+        DetachCell::default(),
+        CommittedBindingTerminalPosition::new(9, 44),
+    )
+    .expect("empty detach cell commits");
+    let (member, _, _, committed, _) = transition.into_parts();
+    let attach = CredentialAttachRequest {
+        conversation_id: CONVERSATION_ID,
+        participant_id: PARTICIPANT_ID,
+        capability_generation: generation(4),
+        attach_secret: member.attach_secret(),
+        attach_attempt_token: AttachAttemptToken::new([0xA7; 16]),
+        accept_marker_delivery_seq: None,
+    };
+    let verified_attach = member
+        .verify_detached_attach(
+            BindingState::Detached,
+            ClosureState::Clear
+                .ordinary_detached_attach_admission()
+                .expect("clear closure admits attach"),
+            attach,
+            AttachSecretProof::Verified,
+            AttachCommitParameters {
+                binding: ActiveBinding {
+                    participant_id: PARTICIPANT_ID,
+                    conversation_id: CONVERSATION_ID,
+                    binding_epoch: new_epoch,
+                },
+                attach_secret: AttachSecret::new([0xB8; 32]),
+                attached_position: AttachedRecordPosition::new(10, 45),
+                receipt_expires_at: 1_000,
+                provenance_expires_at: 2_000,
+            },
+        )
+        .expect("detached attach is authorized");
+    let attached = commit_attach(verified_attach, DetachCell::Committed(committed))
+        .expect("attach terminalizes committed detach");
+    let DetachCell::Terminalized(terminalized) = attached.detach_cell else {
+        panic!("attach must produce the fourth detach-cell variant");
+    };
+    let verified_old = terminalized
+        .verify_exact(&request, verifier)
+        .expect("old token and verifier are exact");
+    let cell = verified_old.outcome(
+        CONVERSATION_ID,
+        generation(5),
+        BindingStateView::Bound {
+            current_binding_epoch: new_epoch,
+        },
+    );
+    (
+        ServerValue::StaleAuthority(StaleAuthority::Detach(
+            DetachStaleAuthority::TerminalizedDetachCell(cell),
+        )),
+        new_epoch,
+    )
+}
+
+#[test]
+fn terminalized_detach_cell_is_surfaced_as_a_terminal_bound_status() {
+    let mut session = ParticipantLifecycle::new();
+    session.record_detach(detach_request());
+    let (value, new_epoch) = terminalized_value();
+
+    let ParticipantReceive::Outcome(outcome) = loopback(&mut session, value.clone()) else {
+        panic!("loopback must surface terminalized detach cell");
+    };
+
+    assert_eq!(outcome.value(), &value);
+    assert_eq!(
+        outcome.transition(),
+        ParticipantTransition::TerminalizedDetachCell
+    );
+    assert_eq!(session.detach_replay_status(), DetachReplayStatus::Terminal);
+    let ParticipantClientState::Bound(bound) = session.state() else {
+        panic!("terminalized response says the current participant is bound");
+    };
+    assert_eq!(bound.binding_epoch(), new_epoch);
     assert_eq!(
         session.on_replay_event(DetachReplayEvent::ExplicitCallerAction),
         DetachReplayAction::None
