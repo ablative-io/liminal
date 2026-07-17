@@ -15,8 +15,8 @@ use std::time::Duration;
 
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachBound, AttachSecret, ClientRequest, ConnectionIncarnation,
-    CredentialAttachRequest, DetachAttemptToken, DetachRequest, EnrollmentKnown, EnrollmentRequest,
-    EnrollmentToken, Generation, ReceiptExpired, ReceiptExpiryReason, ReceiptReplay, ServerValue,
+    CredentialAttachRequest, DetachAttemptToken, DetachRequest, EnrollmentRequest, EnrollmentToken,
+    Generation, ReceiptExpired, ReceiptExpiryReason, ReceiptReplay, ServerValue,
     StaleOrUnknownReceipt,
 };
 
@@ -26,7 +26,7 @@ use super::ProductionParticipantHandler;
 use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config};
 
 /// Config whose receipt/provenance TTLs are short enough to wait out.
-const fn short_ttl_config(
+pub(super) const fn short_ttl_config(
     attach_receipt_ttl_ms: u64,
     receipt_provenance_ttl_ms: u64,
 ) -> ParticipantConfig {
@@ -36,7 +36,7 @@ const fn short_ttl_config(
     config
 }
 
-fn enroll(
+pub(super) fn enroll(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
     conversation_id: u64,
@@ -56,7 +56,7 @@ fn enroll(
     Ok(receipt)
 }
 
-fn detach(
+pub(super) fn detach(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
     conversation_id: u64,
@@ -80,7 +80,7 @@ fn detach(
     Ok(())
 }
 
-fn attach_request(
+pub(super) fn attach_request(
     conversation_id: u64,
     participant_id: u64,
     generation: Generation,
@@ -97,7 +97,7 @@ fn attach_request(
     })
 }
 
-fn attach(
+pub(super) fn attach(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
     request: ClientRequest,
@@ -109,165 +109,10 @@ fn attach(
     Ok(receipt)
 }
 
-const GEN_ONE: Generation = Generation::ONE;
+pub(super) const GEN_ONE: Generation = Generation::ONE;
 
-fn generation(value: u64) -> Result<Generation, Box<dyn Error>> {
+pub(super) fn generation(value: u64) -> Result<Generation, Box<dyn Error>> {
     Generation::new(value).ok_or_else(|| "zero generation in test fixture".into())
-}
-
-/// Enrollment provenance window (register row 5652), in-window half: an
-/// exact enrollment-token replay AFTER the receipt's own deadline but INSIDE
-/// its provenance window answers `ReceiptExpired` with reason `Deadline`,
-/// the minted result generation, and the CURRENT generation — never a
-/// resurrected generation-1 secret-bearing receipt, even while a later
-/// attach's own receipt is live. The provenance TTL is deliberately huge so
-/// scheduler jitter cannot carry the replay past the window.
-#[test]
-fn enrollment_token_replay_inside_provenance_window_is_receipt_expired()
--> Result<(), Box<dyn Error>> {
-    let home = tempfile::tempdir()?;
-    let data_dir = home.path().join("durability");
-    let incarnation = ConnectionIncarnation::new(61, 1);
-    let store = open_disk_store_for_tests(&data_dir)?;
-    // Enrollment receipt dies after 300ms; provenance stays open long after.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 600_000));
-    let conversation_id = 601;
-    let enrollment_token = [61; 16];
-
-    let receipt = enroll(&handler, incarnation, conversation_id, enrollment_token)?;
-    let participant_id = receipt.participant_id();
-    detach(
-        &handler,
-        incarnation,
-        conversation_id,
-        participant_id,
-        GEN_ONE,
-        [62; 16],
-    )?;
-    // Wait out the enrollment receipt's own signed window, staying inside
-    // its provenance window.
-    sleep(Duration::from_millis(500));
-    // A later attach opens a FRESH live window for its own receipt and moves
-    // the current generation to 2.
-    let attached = attach(
-        &handler,
-        incarnation,
-        attach_request(
-            conversation_id,
-            participant_id,
-            GEN_ONE,
-            receipt.attach_secret(),
-            [63; 16],
-        ),
-    )?;
-    assert_eq!(attached.capability_generation(), generation(2)?);
-
-    // INSIDE the enrollment provenance window: the exact ReceiptExpired row
-    // with reason Deadline, the minted result generation 1, and the current
-    // generation 2 — the attach's live window must NOT re-open the expired
-    // enrollment receipt.
-    let in_window = dispatch(
-        &handler,
-        incarnation,
-        ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id,
-            enrollment_token: EnrollmentToken::new(enrollment_token),
-        }),
-    )?;
-    let ServerValue::ReceiptExpired(ReceiptExpired::Enrollment {
-        conversation_id: expired_conversation,
-        token,
-        participant_id: expired_participant,
-        result_generation,
-        current_generation,
-        reason,
-    }) = in_window
-    else {
-        return Err(format!(
-            "enrollment token inside its provenance window must answer ReceiptExpired, got: \
-             {in_window:?}"
-        )
-        .into());
-    };
-    assert_eq!(expired_conversation, conversation_id);
-    assert_eq!(token, EnrollmentToken::new(enrollment_token));
-    assert_eq!(expired_participant, participant_id);
-    assert_eq!(
-        result_generation, GEN_ONE,
-        "enrollment provenance retains the minted result generation"
-    );
-    assert_eq!(current_generation, generation(2)?);
-    assert_eq!(reason, ReceiptExpiryReason::Deadline);
-    Ok(())
-}
-
-/// Enrollment provenance window (register row 5652), after-window half:
-/// once the provenance deadline has also passed, the permanent lifetime
-/// mapping answers `EnrollmentKnown` with the current generation. Sleeping
-/// past the window is jitter-safe in this direction (later is still after).
-#[test]
-fn enrollment_token_replay_after_provenance_window_is_enrollment_known()
--> Result<(), Box<dyn Error>> {
-    let home = tempfile::tempdir()?;
-    let data_dir = home.path().join("durability");
-    let incarnation = ConnectionIncarnation::new(65, 1);
-    let store = open_disk_store_for_tests(&data_dir)?;
-    // Receipt window 300ms, provenance window 700ms.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 700));
-    let conversation_id = 605;
-    let enrollment_token = [75; 16];
-
-    let receipt = enroll(&handler, incarnation, conversation_id, enrollment_token)?;
-    let participant_id = receipt.participant_id();
-    detach(
-        &handler,
-        incarnation,
-        conversation_id,
-        participant_id,
-        GEN_ONE,
-        [76; 16],
-    )?;
-    // Wait out BOTH enrollment windows, then rotate to generation 2 (the
-    // attach secret is credential authority, not receipt-window state).
-    sleep(Duration::from_millis(900));
-    let attached = attach(
-        &handler,
-        incarnation,
-        attach_request(
-            conversation_id,
-            participant_id,
-            GEN_ONE,
-            receipt.attach_secret(),
-            [77; 16],
-        ),
-    )?;
-    assert_eq!(attached.capability_generation(), generation(2)?);
-
-    let after_window = dispatch(
-        &handler,
-        incarnation,
-        ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id,
-            enrollment_token: EnrollmentToken::new(enrollment_token),
-        }),
-    )?;
-    let ServerValue::EnrollmentKnown(EnrollmentKnown {
-        conversation_id: known_conversation,
-        participant_id: known_participant,
-        current_generation,
-        ..
-    }) = after_window
-    else {
-        return Err(format!(
-            "enrollment token after its provenance window must map to EnrollmentKnown, got: \
-             {after_window:?}"
-        )
-        .into());
-    };
-    assert_eq!(known_conversation, conversation_id);
-    assert_eq!(known_participant, participant_id);
-    assert_eq!(current_generation, generation(2)?);
-    Ok(())
 }
 
 /// A deadline-provenance replay of an attach token carries the RESULT
@@ -342,8 +187,11 @@ fn superseded_receipt_keeps_provenance_then_degrades_to_stale_or_unknown()
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(63, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    // Receipt window 300ms, provenance window 700ms.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 700));
+    // Receipt window 2s, provenance window 2.5s: wide enough that the second
+    // rotation lands inside the first receipt's live window even under full
+    // parallel test-suite load (the Superseded reason depends on it), while
+    // the after-window half stays a bounded sleep.
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(2_000, 2_500));
     let conversation_id = 603;
 
     let receipt = enroll(&handler, incarnation, conversation_id, [67; 16])?;
@@ -413,8 +261,9 @@ fn superseded_receipt_keeps_provenance_then_degrades_to_stale_or_unknown()
     assert_eq!(reason, ReceiptExpiryReason::Superseded);
 
     // After the provenance window: exact-old degrades to the intentionally
-    // ambiguous StaleOrUnknownReceipt (no no-commit claim).
-    sleep(Duration::from_millis(900));
+    // ambiguous StaleOrUnknownReceipt (no no-commit claim). Sleeping late is
+    // safe in this direction.
+    sleep(Duration::from_millis(3_000));
     let after_window = dispatch(&handler, incarnation, first_request)?;
     let ServerValue::StaleOrUnknownReceipt(StaleOrUnknownReceipt {
         token,
