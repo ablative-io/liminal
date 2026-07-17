@@ -39,6 +39,63 @@ govern the body. Dispatch remains gated on the client unit landing (see
    returns with evidence — the blocking shim, timer pump, and TypeScript
    protocol reimplementation remain forbidden answers.
 
+## Boundary-read dispositions (Artemis Peach, 2026-07-17 — all ruled by the
+## tear seat; the pre-dispatch fold integrates F-items into the body text)
+
+- **F1 ACCEPTED (blocking-grade text fix).** R1.1's "unsupported
+  extension/subprotocol rejected" would reject every real browser (all three
+  engines offer `permessage-deflate` unremovably). Corrected contract:
+  extension OFFERS are DECLINED, never negotiated — the upgrade response
+  carries no `Sec-WebSocket-Extensions` header, pinned in the checkpoint-3
+  browser harness by asserting the absent header AND `ws.extensions === ""`
+  (which makes compression-off browser-observable). Malformed upgrades remain
+  rejected; subprotocols pinned separately (the liminal browser client offers
+  none).
+- **F2 ACCEPTED.** The WS library's reassembly bound is the real
+  pre-allocation limit: require `accept`/`client` config variants with
+  `max_message_size`/`max_frame_size` pinned to the liminal frame bound from
+  the named product limit. Oversize-declared messages must fail at the pinned
+  bound, not after a 64 MiB default buffer.
+- **F3 ACCEPTED.** Browser terminal-event mapping pinned in R3.1's trace
+  tests: abnormal loss fires `error` THEN `close` (two terminals, always);
+  clean close fires `close` alone; a commanded Close echoes as a later close
+  event. The driver is post-terminal-tolerant: the FIRST terminal mints the
+  one typed fate; subsequent terminals are typed no-ops at the driver and
+  never reach `record_transport_fate`.
+- **F4 ACCEPTED.** The wasm adapter sets `binaryType = "arraybuffer"` at
+  construction — the "blob" default demands async reads, which tempt exactly
+  the deferred machinery this brief forbids.
+- **F5 ACCEPTED (clarifying sentence).** The browser conversation surface
+  MIRRORS the `ConversationHandle` method set with equal semantics; it does
+  not implement the `Send + Sync` trait. Ruling 4's "no trait-bound change"
+  and R3.2's "preserves semantics" are both satisfied by the mirror shape —
+  the beamr-wasm `WasmVm` precedent. A STOP on this apparent contradiction is
+  therefore unfounded.
+- **F6 ACCEPTED (fold hygiene).** Ruling 1's origin cases enumerated into
+  R1.1 acceptance: listed-Origin upgrade passes; unlisted-Origin refuses
+  typed; empty/absent origin config refuses Origin-BEARING upgrades only
+  (native clients sending no Origin header pass); the checkpoint-3 harness
+  sends an Origin, so its test config must list it.
+- **Q-A RULED (keepalive), PROVISIONAL pending Tom's idle-cost sign-off.** A
+  server-side WS Ping schedule is authorized as TRANSPORT LIVENESS, with the
+  LAW-1 carve-out stated precisely: liveness pings never mint application
+  events, never re-arm application state, and never serve as a source of
+  truth — failure detection remains the socket's typed terminal events. The
+  interval is an explicit named config value; absent config = pings disabled
+  with proxy-idle-disconnect churn documented as the accepted consequence.
+  Bound: one ping per interval per connection; the idle cost is
+  interval × connection-count, stated and tested. Per the idle-cost doctrine
+  this carve-out is flagged to Tom and reversible by one line before
+  dispatch.
+- **Q-B RULED (send pressure).** The outbound-pressure authority for v1 is
+  the client unit itself: the at-most-one outstanding write-ahead operation
+  rule plus request-response correlation structurally bound request-class
+  outbound, and v1 browser traffic is user-action-scale. Observing
+  `bufferedAmount` — which has no event and therefore requires polling — is
+  FORBIDDEN. If a future component class needs bulk outbound streaming, it
+  arrives with its own typed flow-control brief; it does not bolt onto this
+  transport.
+
 **Liminal evidence pin:** `origin/main` at
 `2e5a731b5f009b0cac2b8c28b90f9b1245372732`.
 
