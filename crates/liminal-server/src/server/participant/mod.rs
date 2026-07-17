@@ -24,6 +24,7 @@ mod cursor_repository;
 mod detach_repository;
 mod dispatch;
 pub(super) mod incarnation_stream;
+mod production;
 mod transport;
 
 #[cfg(test)]
@@ -46,10 +47,11 @@ mod incarnation_stream_tests;
 mod transport_tests;
 
 pub use dispatch::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantDispatch,
-    ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
-    dispatch_generic_frame,
+    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantDispatch, ParticipantDispatchError, ParticipantSemanticError,
+    ParticipantSemanticHandler, dispatch_generic_frame,
 };
+pub(crate) use production::{ProductionParticipantHandler, constant_time_eq};
 pub use transport::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_value,
     gate_generic_frame, normalize_configured_frame_limit, preflight_generic_bytes,

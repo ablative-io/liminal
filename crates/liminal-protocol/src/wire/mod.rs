@@ -1,5 +1,6 @@
 //! Participant message discriminants, schemas, and deterministic wire codec.
 
+mod authority;
 mod closure;
 mod codec;
 mod envelope;
@@ -12,12 +13,18 @@ mod server_codec;
 mod tags;
 
 #[cfg(test)]
+mod authority_tests;
+#[cfg(test)]
 mod codec_tests;
 #[cfg(test)]
 mod server_codec_tests;
 #[cfg(test)]
 mod tags_tests;
 
+pub use authority::{
+    CredentialAttachResponse, DetachResponse, EnrollmentResponse, LeaveResponse, MarkerAckResponse,
+    ObserverRecoveryResponse, ParticipantAckResponse, RecordAdmissionResponse,
+};
 pub use closure::{
     ClosureCapacityReason, ClosureCheckedEnvelope, ClosureRefusalReason, ClosureSnapshot,
     MarkerClosureCapacityExceeded, ParticipantCursorProgressEdge, RepaymentEdge,

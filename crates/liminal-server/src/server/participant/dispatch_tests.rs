@@ -17,8 +17,9 @@ use liminal_protocol::{
 
 use super::{
     dispatch::{
-        ParticipantConnectionContext, ParticipantDispatch, ParticipantDispatchError,
-        ParticipantSemanticError, ParticipantSemanticHandler, dispatch_generic_frame,
+        ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
+        ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
+        dispatch_generic_frame,
     },
     transport::{ParticipantSession, normalize_configured_frame_limit},
 };
@@ -56,6 +57,7 @@ impl ParticipantSemanticHandler for RecordingHandler {
     fn handle(
         &self,
         context: ParticipantConnectionContext,
+        _conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         self.seen
@@ -122,9 +124,14 @@ fn decoded_request_reaches_handler_and_crate_value_is_framed() -> Result<(), Str
     let generic = participant_generic(request.clone())?;
     let handler = RecordingHandler::successful();
 
-    let ParticipantDispatch::Respond(response) =
-        dispatch_generic_frame(&generic, true, negotiated_session()?, context(), &handler)
-    else {
+    let ParticipantDispatch::Respond(response) = dispatch_generic_frame(
+        &generic,
+        true,
+        negotiated_session()?,
+        context(),
+        &mut ParticipantConnectionConversations::default(),
+        &handler,
+    ) else {
         return Err("semantic request did not produce a response".to_owned());
     };
     assert_eq!(handler.calls()?, 1);
@@ -161,7 +168,14 @@ fn gate_rejection_never_calls_semantics() -> Result<(), String> {
     let handler = RecordingHandler::successful();
 
     assert!(matches!(
-        dispatch_generic_frame(&generic, false, negotiated_session()?, context(), &handler,),
+        dispatch_generic_frame(
+            &generic,
+            false,
+            negotiated_session()?,
+            context(),
+            &mut ParticipantConnectionConversations::default(),
+            &handler,
+        ),
         ParticipantDispatch::RespondThenClose(_)
     ));
     assert_eq!(handler.calls()?, 0);
@@ -179,7 +193,14 @@ fn semantic_failure_is_fatal_and_has_no_wire_value() -> Result<(), String> {
     let handler = RecordingHandler::failing();
 
     assert!(matches!(
-        dispatch_generic_frame(&generic, true, negotiated_session()?, context(), &handler,),
+        dispatch_generic_frame(
+            &generic,
+            true,
+            negotiated_session()?,
+            context(),
+            &mut ParticipantConnectionConversations::default(),
+            &handler,
+        ),
         ParticipantDispatch::Fatal(ParticipantDispatchError::Semantic(
             ParticipantSemanticError::Unavailable
         ))
@@ -203,6 +224,7 @@ fn unrelated_generic_frame_bypasses_handler() -> Result<(), String> {
             true,
             ParticipantSession::default(),
             context(),
+            &mut ParticipantConnectionConversations::default(),
             &handler,
         ),
         ParticipantDispatch::NotParticipant
@@ -276,7 +298,14 @@ fn every_registered_client_request_reaches_the_same_semantic_seam() -> Result<()
     for request in &requests {
         let generic = participant_generic(request.clone())?;
         assert!(matches!(
-            dispatch_generic_frame(&generic, true, negotiated_session()?, context(), &handler,),
+            dispatch_generic_frame(
+                &generic,
+                true,
+                negotiated_session()?,
+                context(),
+                &mut ParticipantConnectionConversations::default(),
+                &handler,
+            ),
             ParticipantDispatch::Fatal(ParticipantDispatchError::Semantic(
                 ParticipantSemanticError::Unavailable
             ))

@@ -2155,6 +2155,7 @@ fn supervisor_with_orders_channel() -> Result<ConnectionSupervisor, Box<dyn std:
         auth: None,
         services: ServicesConfig::default(),
         limits: LimitsConfig::default(),
+        participant: None,
     };
     Ok(ConnectionSupervisor::from_config(&config)?)
 }
@@ -2179,6 +2180,7 @@ fn channel_free_config_with_profile(
             profile: profile.to_owned(),
         },
         limits: LimitsConfig::default(),
+        participant: None,
     })
 }
 
@@ -2347,6 +2349,7 @@ fn max_connections_refuses_past_the_cap() -> Result<(), Box<dyn std::error::Erro
             max_connections: 1,
             ..LimitsConfig::default()
         },
+        participant: None,
     };
     let supervisor = ConnectionSupervisor::from_config(&config)?;
 
@@ -2391,6 +2394,7 @@ fn concurrent_spawns_at_the_limit_admit_exactly_one() -> Result<(), Box<dyn std:
             max_connections: 2,
             ..LimitsConfig::default()
         },
+        participant: None,
     };
     let supervisor = ConnectionSupervisor::from_config(&config)?;
 
@@ -2455,6 +2459,7 @@ fn closed_connection_releases_its_admission_slot() -> Result<(), Box<dyn std::er
             max_connections: 1,
             ..LimitsConfig::default()
         },
+        participant: None,
     };
     let supervisor = ConnectionSupervisor::from_config(&config)?;
 

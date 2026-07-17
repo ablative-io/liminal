@@ -11,7 +11,7 @@ use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::conversation::ConnectionConversation;
 use super::services::ConnectionSubscription;
-use crate::server::participant::ParticipantSession;
+use crate::server::participant::{ParticipantConnectionConversations, ParticipantSession};
 
 /// State a connection process carries across scheduler slices: the resources it
 /// owns (subscriptions, conversations) plus the per-subscription delivery
@@ -32,6 +32,11 @@ pub(super) struct ConnectionProcessState {
     /// Shared participant capability state stored by a successful connection
     /// handshake and consumed by the `liminal-protocol` inbound gate.
     pub(super) participant_session: ParticipantSession,
+    /// Connection-local semantic-conversation dispatch map consumed by the
+    /// participant handler's stage-6 connection-conversation capacity gate.
+    /// Bounded by the signed `max_semantic_conversations_per_connection` and
+    /// dropped with the connection.
+    pub(super) participant_conversations: ParticipantConnectionConversations,
     /// Durable incarnation allocated and flushed before this process was spawned.
     /// `None` means the supervisor had no complete participant service installed.
     pub(super) connection_incarnation: Option<ConnectionIncarnation>,

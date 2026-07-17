@@ -9,11 +9,13 @@
 //! tests.
 
 mod admission;
+mod aggregate_commit;
 mod attach;
 mod binding;
 mod claim_frontier;
 mod closure_accounting;
 mod conversation;
+mod conversation_codec;
 mod cursor_facts;
 mod detach;
 mod edge;
@@ -23,9 +25,12 @@ mod incarnation;
 mod lookup;
 mod membership;
 mod observer_recovery;
+mod operation_event;
 mod operations;
 mod storage;
 
+#[cfg(test)]
+mod aggregate_commit_tests;
 #[cfg(test)]
 mod attach_tests;
 #[cfg(test)]
@@ -55,6 +60,10 @@ mod membership_tests;
 #[cfg(test)]
 mod observer_recovery_tests;
 #[cfg(test)]
+mod observer_recovery_transaction_tests;
+#[cfg(test)]
+mod operation_event_tests;
+#[cfg(test)]
 mod storage_tests;
 #[cfg(test)]
 mod test_support;
@@ -76,6 +85,13 @@ pub use admission::{
     select_semantic_connection_capacity,
 };
 use admission::{admit_sequence, allocate_order};
+pub use aggregate_commit::{
+    AggregateOperationCommit, AggregateOperationDecision, AggregateOperationFault,
+    AggregateOperationFaultReason, AggregateOperationRefusal, AggregateOperationResult,
+    decide_attached_operation, decide_detached_operation, decide_enrolled_operation,
+    decide_left_operation, decide_nonzero_debt_ack_operation,
+    decide_ordinary_binding_fate_operation, decide_recovered_binding_fate_operation,
+};
 pub use attach::{
     AttachCommit, AttachCommitError, AttachCommitParameters, AttachTransition,
     AttachVerificationError, VerifiedAttachCommit, commit_attach,
@@ -171,7 +187,15 @@ pub use membership::{
     RetiredIdentity, RetirementError, VerifiedLeaveRequest, commit_leave, commit_pending_leave,
 };
 pub use observer_recovery::{
-    ObserverRecoveryArm, ObserverRecoveryCommit, ObserverRecoveryDecision, apply_observer_recovery,
+    ObserverProgressAdvanceDecision, ObserverProgressAdvanceError,
+    ObserverProgressAdvanceTransaction, ObserverProgressTrackDecision, ObserverProgressTrackError,
+    ObserverProgressTrackTransaction, ObserverRecoveryAggregate,
+    ObserverRecoveryAggregateRestoreError, ObserverRecoveryArm, ObserverRecoveryCommit,
+    ObserverRecoveryDecision, ObserverRecoveryTransaction, ObserverRecoveryTransactionDecision,
+};
+pub use operation_event::{
+    AttachedOperation, BindingFateOperation, ConversationOperation, DetachedOperation,
+    EnrolledOperation, LeftOperation, NonzeroDebtAckOperation,
 };
 pub use operations::{
     CommittedOrdinaryRecord, InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
@@ -185,10 +209,11 @@ pub use operations::{
     OrdinaryRecordProjectionInput, ParticipantAckCommit, ParticipantAckCommitError,
     ParticipantAckDecision, ProjectedOrdinaryRecord, ReceiptDeadlineError, ReceiptDeadlines,
     RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionDrainFirst,
-    RecordAdmissionFailure, RecordAdmissionFault, RecordAdmissionPrestate, RecordAdmissionRefusal,
-    RetainedRecordCharge, UnchangedRecordAdmission, apply_initial_enrollment, apply_marker_ack,
+    RecordAdmissionFailure, RecordAdmissionFault, RecordAdmissionPersistenceParts,
+    RecordAdmissionPrestate, RecordAdmissionRefusal, RetainedRecordCharge,
+    UnchangedRecordAdmission, apply_initial_enrollment, apply_marker_ack,
     apply_nonzero_participant_ack, apply_participant_ack, apply_record_admission,
-    drain_next_marker, select_marker_proof,
+    classify_record_admission_binding, drain_next_marker, select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,
@@ -197,8 +222,8 @@ pub use storage::{
     DetachedCursorReleaseProvenanceRestore, DetachedMarkerReleaseRestore,
     FencedAttachCommitRestore, LeaveCommittedRestore, LiveIdentityRestore,
     MarkerCursorProgressRestore, MarkerDeliveryRestore, OrdinaryBindingAuthorityRestore,
-    OrdinaryBindingFateRestore, ParticipantLifecycleRestore, PendingFinalizationRestore,
-    PendingRecoveredCursorReleaseRestore, RecoveredBindingFateRestore,
-    RecoveredStorageCompletionRestore, RestoredBindingFateTerminal, RestoredParticipantLifecycle,
-    RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
+    OrdinaryBindingFateRestore, ParticipantConversationRestore, ParticipantConversationState,
+    ParticipantLifecycleRestore, PendingFinalizationRestore, PendingRecoveredCursorReleaseRestore,
+    RecoveredBindingFateRestore, RecoveredStorageCompletionRestore, RestoredBindingFateTerminal,
+    RestoredParticipantLifecycle, RetiredIdentityRestore, StorageRestoreError, StoredEdgeRestore,
 };

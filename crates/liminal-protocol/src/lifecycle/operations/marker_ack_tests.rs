@@ -6,9 +6,9 @@ use crate::algebra::WideResourceVector;
 use crate::wire::{
     AckNoOp, AttachSecret, BindingEpoch, BindingRequiredEnvelope, CommonStaleAuthorityEnvelope,
     ConnectionIncarnation, Generation, LeaveAttemptToken, LeaveRequest, MarkerAck,
-    MarkerAckCommitted, MarkerAckEnvelope, MarkerAckProof, MarkerMismatch, MarkerMismatchBody,
-    MarkerNotDelivered, MarkerNotDeliveredReason, MarkerProofRequest, ParticipantReferenceEnvelope,
-    ParticipantUnknown, Retired, ServerValue, StaleAuthority,
+    MarkerAckCommitted, MarkerAckEnvelope, MarkerAckProof, MarkerAckResponse, MarkerMismatch,
+    MarkerMismatchBody, MarkerNotDelivered, MarkerNotDeliveredReason, MarkerProofRequest,
+    ParticipantReferenceEnvelope, ParticipantUnknown, Retired, StaleAuthority,
 };
 
 use super::{
@@ -210,7 +210,7 @@ fn shared_lookup_precedence_runs_before_marker_proof() {
             &stale_request,
             &exact_state(),
         ),
-        MarkerAckDecision::Respond(ServerValue::Retired(Retired::Participant {
+        MarkerAckDecision::Respond(MarkerAckResponse::from_retired(Retired::Participant {
             request: ParticipantReferenceEnvelope::MarkerAck(envelope(2, MARKER_SEQ)),
             retired_generation: generation(3),
         })),
@@ -224,9 +224,11 @@ fn shared_lookup_precedence_runs_before_marker_proof() {
             &stale_request,
             &exact_state(),
         ),
-        MarkerAckDecision::Respond(ServerValue::ParticipantUnknown(ParticipantUnknown {
-            request: ParticipantReferenceEnvelope::MarkerAck(envelope(2, MARKER_SEQ)),
-        })),
+        MarkerAckDecision::Respond(MarkerAckResponse::from_participant_unknown(
+            ParticipantUnknown {
+                request: ParticipantReferenceEnvelope::MarkerAck(envelope(2, MARKER_SEQ)),
+            }
+        )),
     );
 
     let live: TestIdentity = IdentityState::Live(member(CURRENT_CURSOR));
@@ -238,10 +240,12 @@ fn shared_lookup_precedence_runs_before_marker_proof() {
             &stale_request,
             &exact_state(),
         ),
-        MarkerAckDecision::Respond(ServerValue::StaleAuthority(StaleAuthority::Live {
-            request: CommonStaleAuthorityEnvelope::MarkerAck(envelope(2, MARKER_SEQ)),
-            current_generation: generation(3),
-        })),
+        MarkerAckDecision::Respond(MarkerAckResponse::from_stale_authority(
+            StaleAuthority::Live {
+                request: CommonStaleAuthorityEnvelope::MarkerAck(envelope(2, MARKER_SEQ)),
+                current_generation: generation(3),
+            }
+        )),
     );
 
     assert_eq!(
@@ -252,7 +256,7 @@ fn shared_lookup_precedence_runs_before_marker_proof() {
             &request(3, MARKER_SEQ),
             &exact_state(),
         ),
-        MarkerAckDecision::Respond(ServerValue::NoBinding(crate::wire::NoBinding {
+        MarkerAckDecision::Respond(MarkerAckResponse::from_no_binding(crate::wire::NoBinding {
             request: BindingRequiredEnvelope::MarkerAck(envelope(3, MARKER_SEQ)),
         })),
     );
@@ -269,7 +273,7 @@ fn wrong_receiving_epoch_is_no_binding_before_marker_proof() {
             &request(3, MARKER_SEQ),
             &exact_state(),
         ),
-        MarkerAckDecision::Respond(ServerValue::NoBinding(crate::wire::NoBinding {
+        MarkerAckDecision::Respond(MarkerAckResponse::from_no_binding(crate::wire::NoBinding {
             request: BindingRequiredEnvelope::MarkerAck(envelope(3, MARKER_SEQ)),
         })),
     );
@@ -284,7 +288,7 @@ fn marker_refusals_and_exact_accepted_replay_are_typed_and_nonmutating() {
     let below = request(3, CURRENT_CURSOR - 1);
     assert_eq!(
         apply_marker_ack(presented, &binding(), epoch(3, 9), &below, &exact_state(),),
-        MarkerAckDecision::Respond(ServerValue::MarkerMismatch(MarkerMismatch {
+        MarkerAckDecision::Respond(MarkerAckResponse::from_marker_mismatch(MarkerMismatch {
             request: proof_request(3, CURRENT_CURSOR - 1),
             mismatch: MarkerMismatchBody::BelowCursor {
                 current_cursor: CURRENT_CURSOR,
@@ -301,7 +305,7 @@ fn marker_refusals_and_exact_accepted_replay_are_typed_and_nonmutating() {
             &request(3, MARKER_SEQ),
             &no_expected,
         ),
-        MarkerAckDecision::Respond(ServerValue::MarkerMismatch(MarkerMismatch {
+        MarkerAckDecision::Respond(MarkerAckResponse::from_marker_mismatch(MarkerMismatch {
             request: proof_request(3, MARKER_SEQ),
             mismatch: MarkerMismatchBody::NoMarkerExpected,
         })),
@@ -316,11 +320,13 @@ fn marker_refusals_and_exact_accepted_replay_are_typed_and_nonmutating() {
             &request(3, MARKER_SEQ),
             &undelivered,
         ),
-        MarkerAckDecision::Respond(ServerValue::MarkerNotDelivered(MarkerNotDelivered {
-            request: proof_request(3, MARKER_SEQ),
-            reason: MarkerNotDeliveredReason::NotDeliveredToProofEpoch,
-            expected_marker_delivery_seq: MARKER_SEQ,
-        })),
+        MarkerAckDecision::Respond(MarkerAckResponse::from_marker_not_delivered(
+            MarkerNotDelivered {
+                request: proof_request(3, MARKER_SEQ),
+                reason: MarkerNotDeliveredReason::NotDeliveredToProofEpoch,
+                expected_marker_delivery_seq: MARKER_SEQ,
+            }
+        )),
     );
 
     let accepted_member = member(MARKER_SEQ);
@@ -334,9 +340,9 @@ fn marker_refusals_and_exact_accepted_replay_are_typed_and_nonmutating() {
             &request(3, MARKER_SEQ),
             &accepted,
         ),
-        MarkerAckDecision::Respond(ServerValue::AckNoOp(AckNoOp::marker_ack(envelope(
-            3, MARKER_SEQ,
-        )))),
+        MarkerAckDecision::Respond(MarkerAckResponse::from_ack_no_op(AckNoOp::marker_ack(
+            envelope(3, MARKER_SEQ,)
+        ))),
     );
 
     assert_eq!(original_member.cursor(), CURRENT_CURSOR);

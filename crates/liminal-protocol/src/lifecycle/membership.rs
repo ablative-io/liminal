@@ -423,7 +423,6 @@ impl<EF, V, LF> RetiredIdentity<EF, V, LF> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
     pub(super) fn restore(
         participant_id: ParticipantId,
         conversation_id: ConversationId,

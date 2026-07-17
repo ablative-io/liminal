@@ -29,7 +29,7 @@ use crate::ServerError;
 use crate::server::participant::incarnation_stream::IncarnationStream;
 use crate::server::participant::{
     InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext,
-    ParticipantSemanticError, ParticipantSemanticHandler,
+    ParticipantConnectionConversations, ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
 #[derive(Debug)]
@@ -41,6 +41,7 @@ impl ParticipantSemanticHandler for RecordingParticipantHandler {
     fn handle(
         &self,
         context: ParticipantConnectionContext,
+        _conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         self.observations

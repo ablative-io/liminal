@@ -42,6 +42,17 @@ pub struct ServerConfig {
     /// silent "unlimited".
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Participant lifecycle activation (LP gap closure, Part B).
+    ///
+    /// When present the server installs the production participant semantic
+    /// handler and advertises the participant capability bit on every
+    /// connection. Every field inside is REQUIRED and carries NO default:
+    /// participant lifecycle values are deployment decisions, and an absent
+    /// field is a typed startup error rather than an assumed number. When the
+    /// section is absent the participant capability stays disabled and the
+    /// server behaves byte-identically to the pre-activation build.
+    #[serde(default)]
+    pub participant: Option<ParticipantConfig>,
 }
 
 impl ServerConfig {
@@ -340,6 +351,148 @@ const fn default_max_connection_inbox_bytes() -> usize {
 }
 const fn default_max_subscription_inbox_depth() -> usize {
     LimitsConfig::DEFAULT_MAX_SUBSCRIPTION_INBOX_DEPTH
+}
+
+/// Participant lifecycle configuration (`[participant]`).
+///
+/// Present iff the deployment activates the participant protocol. Every field
+/// is required — serde carries no defaults here, so a missing field fails
+/// config loading with a typed error naming the field, and
+/// [`ParticipantConfig::collect_errors`] rejects semantically impossible
+/// values during the same accumulated validation pass as the rest of the
+/// config. All values are deployment-owner decisions (no assumed defaults).
+///
+/// Every field here is consumed by the live production handler. The
+/// record-admission and leave-closure parameters (record/marker/mandatory/
+/// recovery charges) are deliberately absent until the claim-frontier
+/// acquisition lands: required-but-inert config would force deployment owners
+/// to author numbers that gate nothing today and silently become live limits
+/// later. They are reintroduced together with their real consumers and
+/// complete validation in the same commit (`deny_unknown_fields` makes a
+/// premature key a typed startup error, never a silent no-op).
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParticipantConfig {
+    /// Complete participant wire-frame limit (`WF`) negotiated with every
+    /// participant-capable connection. Must be at least the protocol's
+    /// minimum complete frame; enforced by the shared codec at service
+    /// construction and pre-checked during config validation.
+    pub wire_frame_limit: u64,
+    /// Secret-bearing attach/enrollment receipt lifetime in milliseconds.
+    pub attach_receipt_ttl_ms: u64,
+    /// Non-secret receipt-provenance lifetime in milliseconds. Must be at
+    /// least `attach_receipt_ttl_ms` (provenance explains the receipt and
+    /// cannot expire first).
+    pub receipt_provenance_ttl_ms: u64,
+    /// Server-wide cap on live secret-bearing receipts (enrollment and
+    /// credential-attach receipt bodies inside their own receipt windows,
+    /// across every conversation). R-D1 stage-8 scope `LiveReceiptServer`:
+    /// enrollment and credential attach refuse with the typed
+    /// `ReceiptCapacityExceeded` when reserving one more would exceed it.
+    pub max_live_attach_receipts_server: u64,
+    /// Per-participant cap on live secret-bearing receipts (stage-8 scope
+    /// `LiveReceiptParticipant`). A participant holds at most its enrollment
+    /// receipt plus its current attach receipt live at once, so values below
+    /// 3 refuse rotation while the enrollment receipt is still live.
+    pub max_live_attach_receipts_per_participant: u64,
+    /// Server-wide cap on retained non-secret provenance fingerprints
+    /// (stage-8 scope `ProvenanceServer`). A fingerprint exists from its
+    /// operation's commit through its own provenance deadline.
+    pub max_receipt_provenance_server: u64,
+    /// Per-conversation provenance-fingerprint cap (stage-8 scope
+    /// `ProvenanceConversation`).
+    pub max_receipt_provenance_per_conversation: u64,
+    /// Per-participant provenance-fingerprint cap (stage-8 scope
+    /// `ProvenanceParticipant`).
+    pub max_receipt_provenance_per_participant: u64,
+    /// Server-wide identity-slot limit (the contract's
+    /// `max_retired_identity_slots` server scope): the total number of
+    /// participant identities — live or retired — mintable across ALL
+    /// conversations. Enrollment refuses with server-scope
+    /// `IdentityCapacityExceeded` (tested BEFORE the conversation scope)
+    /// when every slot is reserved.
+    pub max_retired_identity_slots_server: u64,
+    /// Per-CONVERSATION identity limit `I` (the contract's half-open
+    /// `0..=I` bound on permanent participant ordinals — the conversation
+    /// scope of `max_retired_identity_slots`, NOT a per-participant
+    /// reservation). Enrollment assigns monotone participant indices in
+    /// `0..I` within one conversation and refuses with conversation-scope
+    /// `IdentityCapacityExceeded` when occupancy reaches this value; slots
+    /// and ids are never reused. The server-wide companion is
+    /// [`Self::max_retired_identity_slots_server`].
+    pub identity_slots: u64,
+    /// Maximum entries one observer-recovery handshake batch may name.
+    pub observer_recovery_max_entries: u64,
+    /// Semantic conversations one connection may track — the protocol's
+    /// signed connection-conversation limit. Consumed on BOTH of its contract
+    /// paths: the stage-6 capacity gate every conversation-scoped semantic
+    /// operation runs (register row 5641) and the observer-recovery batch
+    /// preflight (register row 5642), over one shared per-connection
+    /// dispatch map.
+    pub max_semantic_conversations_per_connection: u64,
+}
+
+impl ParticipantConfig {
+    /// Accumulates semantic validation errors for the participant section.
+    ///
+    /// Zero is rejected wherever it would be unlimited-by-silence, gate
+    /// nothing, or violate a protocol precondition; the TTL ordering mirrors
+    /// the protocol's own frozen configuration precedence.
+    pub(crate) fn collect_errors(&self, errors: &mut Vec<String>) {
+        // The receipt/identity block follows the contract's frozen nine-field
+        // validation order: both TTLs, the five receipt/provenance caps, the
+        // server identity limit, then the conversation identity limit.
+        let nonzero: [(&str, u64); 12] = [
+            ("wire_frame_limit", self.wire_frame_limit),
+            ("attach_receipt_ttl_ms", self.attach_receipt_ttl_ms),
+            ("receipt_provenance_ttl_ms", self.receipt_provenance_ttl_ms),
+            (
+                "max_live_attach_receipts_server",
+                self.max_live_attach_receipts_server,
+            ),
+            (
+                "max_live_attach_receipts_per_participant",
+                self.max_live_attach_receipts_per_participant,
+            ),
+            (
+                "max_receipt_provenance_server",
+                self.max_receipt_provenance_server,
+            ),
+            (
+                "max_receipt_provenance_per_conversation",
+                self.max_receipt_provenance_per_conversation,
+            ),
+            (
+                "max_receipt_provenance_per_participant",
+                self.max_receipt_provenance_per_participant,
+            ),
+            (
+                "max_retired_identity_slots_server",
+                self.max_retired_identity_slots_server,
+            ),
+            ("identity_slots", self.identity_slots),
+            (
+                "observer_recovery_max_entries",
+                self.observer_recovery_max_entries,
+            ),
+            (
+                "max_semantic_conversations_per_connection",
+                self.max_semantic_conversations_per_connection,
+            ),
+        ];
+        for (field, value) in nonzero {
+            if value == 0 {
+                errors.push(format!("participant.{field}: must be greater than zero"));
+            }
+        }
+        if self.receipt_provenance_ttl_ms < self.attach_receipt_ttl_ms {
+            errors.push(
+                "participant.receipt_provenance_ttl_ms: must be at least \
+                 attach_receipt_ttl_ms (provenance cannot expire before the receipt it explains)"
+                    .to_owned(),
+            );
+        }
+    }
 }
 
 /// Which connection-services adapter the server constructs (D2).

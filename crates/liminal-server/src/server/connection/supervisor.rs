@@ -869,12 +869,34 @@ impl SupervisorInner {
         let Some(authority) = self.incarnations.as_ref() else {
             return Ok(None);
         };
-        // Activation is server-sealed and test-only today, so no durable
-        // binding-origin, receipt, work-item, or recovery references can yet
-        // coexist with this authority; active connections are the exact current
-        // test inventory. A production token constructor must first replace this
-        // with the complete durable reference inventory. It must never publish a
-        // raw caller-supplied matrix.
+        // Production-era uniqueness invariant: every published incarnation is
+        // unique against ALL durable references — binding epochs committed
+        // into conversation logs included — by allocator-log monotonicity
+        // alone, not by the completeness of the reference set below.
+        //
+        //   1. Startup replays the durable allocator stream and STRICTLY
+        //      increments the server incarnation, fsyncing the Startup event
+        //      before any listener becomes ready
+        //      (`IncarnationStream::startup`); a server value is never wrapped
+        //      or reused, so no two process lifetimes share one.
+        //   2. Within a lifetime, allocations are serialized under this
+        //      authority's mutex, candidates start strictly above the durable
+        //      `last_examined_connection_ordinal`
+        //      (`allocate_connection_incarnation`), and every allocation's
+        //      event is appended and flushed BEFORE its pair is published
+        //      (`StartedIncarnationStream::allocate`), so ordinals never
+        //      repeat within a lifetime and replay restores a head at or
+        //      above every published ordinal.
+        //   3. A durable reference can only name a pair this allocator
+        //      previously PUBLISHED (binding epochs are committed only after
+        //      their connection was admitted), and the same store's flush
+        //      barrier orders the allocator event before any conversation-log
+        //      entry that references it.
+        //
+        // The live-connection reference set below is therefore defense in
+        // depth — a bounded collision skip against a rolled-back or divergent
+        // allocator stream — never the uniqueness foundation, and never a raw
+        // caller-supplied matrix.
         let references = self.runtime.complete_active_incarnation_references()?;
         authority.allocate(&references).map(Some)
     }
@@ -1843,10 +1865,12 @@ impl ConnectionRuntime {
         )
     }
 
-    /// Reads the complete active-connection incarnation set under the registry
-    /// lock for the sealed activation tests. Poisoning fails admission closed:
-    /// treating an unreadable registry as empty could let a replay collision
-    /// through.
+    /// Reads the complete active-connection incarnation set under the
+    /// registry lock — the bounded defense-in-depth collision-skip input to
+    /// incarnation allocation (uniqueness itself comes from allocator-log
+    /// monotonicity; see `allocate_connection_incarnation`). Poisoning fails
+    /// admission closed: treating an unreadable registry as empty would
+    /// silently drop the defense layer.
     fn complete_active_incarnation_references(
         &self,
     ) -> Result<Vec<ConnectionIncarnation>, ServerError> {

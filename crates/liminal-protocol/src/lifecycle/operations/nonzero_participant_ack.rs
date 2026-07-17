@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 
 use crate::wire::{
     AckCommitted, BindingEpoch, ConversationId, DeliverySeq, Generation, ParticipantAck,
-    ParticipantId, ServerValue,
+    ParticipantAckResponse, ParticipantId,
 };
 
 use super::super::{
@@ -241,7 +241,7 @@ pub enum NonzeroParticipantAckInvariantError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NonzeroParticipantAckDecision {
     /// Authority, regression, no-op, or gap response; aggregate is unchanged.
-    Respond(ServerValue),
+    Respond(ParticipantAckResponse),
     /// Durable aggregate state is internally inconsistent; nothing changed.
     Invariant(NonzeroParticipantAckInvariantError),
     /// Exact committed response paired with the sole aggregate mutation.
@@ -273,18 +273,24 @@ pub fn apply_nonzero_participant_ack<EF, V, LF>(
         &lookup_request,
     ) {
         BindingRequiredLookupResult::Retired(outcome) => {
-            return NonzeroParticipantAckDecision::Respond(ServerValue::Retired(outcome));
-        }
-        BindingRequiredLookupResult::ParticipantUnknown(outcome) => {
-            return NonzeroParticipantAckDecision::Respond(ServerValue::ParticipantUnknown(
+            return NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::from_retired(
                 outcome,
             ));
         }
+        BindingRequiredLookupResult::ParticipantUnknown(outcome) => {
+            return NonzeroParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_participant_unknown(outcome),
+            );
+        }
         BindingRequiredLookupResult::StaleAuthority(outcome) => {
-            return NonzeroParticipantAckDecision::Respond(ServerValue::StaleAuthority(outcome));
+            return NonzeroParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_stale_authority(outcome),
+            );
         }
         BindingRequiredLookupResult::NoBinding(outcome) => {
-            return NonzeroParticipantAckDecision::Respond(ServerValue::NoBinding(outcome));
+            return NonzeroParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_no_binding(outcome),
+            );
         }
         BindingRequiredLookupResult::Authorized { member, binding } => (member, binding),
     };
@@ -324,13 +330,13 @@ pub fn apply_nonzero_participant_ack<EF, V, LF>(
             }))
         }
         CumulativeAckOutcome::NoOp(outcome) => {
-            NonzeroParticipantAckDecision::Respond(ServerValue::AckNoOp(outcome))
+            NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::from_ack_no_op(outcome))
         }
         CumulativeAckOutcome::Gap(outcome) => {
-            NonzeroParticipantAckDecision::Respond(ServerValue::AckGap(outcome))
+            NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::ack_gap(outcome))
         }
         CumulativeAckOutcome::Regression(outcome) => {
-            NonzeroParticipantAckDecision::Respond(ServerValue::AckRegression(outcome))
+            NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::ack_regression(outcome))
         }
     }
 }

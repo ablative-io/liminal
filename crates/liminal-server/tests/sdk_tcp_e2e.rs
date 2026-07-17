@@ -170,6 +170,7 @@ impl RunningServer {
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
+            participant: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
@@ -203,6 +204,7 @@ impl RunningServer {
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
+            participant: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
@@ -234,6 +236,7 @@ impl RunningServer {
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
+            participant: None,
         };
         let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
         let supervisor = ConnectionSupervisor::with_services_and_notifier(services, notifier)?;
@@ -273,6 +276,7 @@ impl RunningServer {
             drain_timeout_ms: 30_000,
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
+            participant: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;

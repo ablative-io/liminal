@@ -221,6 +221,7 @@ mod tests {
             auth: None,
             services: crate::config::types::ServicesConfig::default(),
             limits: crate::config::types::LimitsConfig::default(),
+            participant: None,
         })
     }
 

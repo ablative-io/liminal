@@ -27,8 +27,8 @@ use crate::server::connection::services::{
 use crate::server::connection::worker_front_door::WorkerFrontDoorServices;
 use crate::server::participant::{
     InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext,
-    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSession,
-    preflight_generic_bytes,
+    ParticipantConnectionConversations, ParticipantSemanticError, ParticipantSemanticHandler,
+    ParticipantSession, preflight_generic_bytes,
 };
 
 /// Fixed connection pid used by the scheduler-free `apply_frame` unit tests.
@@ -204,6 +204,7 @@ impl ParticipantSemanticHandler for ProcessParticipantHandler {
     fn handle(
         &self,
         context: ParticipantConnectionContext,
+        _conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         self.seen
@@ -1209,7 +1210,8 @@ fn participant_request_without_capability_responds_with_exact_rejection_then_clo
 
 /// A complete installed participant service is advertised only on a process that
 /// carries the incarnation durably allocated before spawn. The same context then
-/// reaches the handler and its protocol-owned value round-trips on 0x1A.
+/// reaches the handler and its protocol-owned value round-trips on the
+/// `PARTICIPANT_FRAME_TYPE` frame.
 #[test]
 fn installed_participant_service_advertises_and_dispatches_with_exact_incarnation()
 -> Result<(), Box<dyn std::error::Error>> {

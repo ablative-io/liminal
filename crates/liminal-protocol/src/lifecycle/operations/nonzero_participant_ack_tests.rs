@@ -4,9 +4,9 @@ use alloc::{vec, vec::Vec};
 
 use crate::algebra::WideResourceVector;
 use crate::wire::{
-    AckCommitted, AckGap, AckNoOp, AckRegression, AttachSecret, BindingEpoch,
-    BindingRequiredEnvelope, ConnectionIncarnation, Generation, ParticipantAck,
-    ParticipantAckEnvelope, ParticipantUnknown, ServerValue,
+    AckCommitted, AckGap, AckRegression, AttachSecret, BindingEpoch, BindingRequiredEnvelope,
+    ConnectionIncarnation, Generation, ParticipantAck, ParticipantAckEnvelope,
+    ParticipantAckResponse, ParticipantUnknown,
 };
 
 use super::{
@@ -169,7 +169,7 @@ fn common_lookup_precedes_episode_validation_and_never_mutates() {
             H,
             &mismatched_episode,
         ),
-        NonzeroParticipantAckDecision::Respond(ServerValue::ParticipantUnknown(
+        NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::from_participant_unknown(
             ParticipantUnknown {
                 request: crate::wire::ParticipantReferenceEnvelope::ParticipantAck(
                     envelope(P0, 1,)
@@ -182,7 +182,8 @@ fn common_lookup_precedes_episode_validation_and_never_mutates() {
     let stale = request(P0, 2, 1);
     assert!(matches!(
         apply_for(&live, epoch(1, 0), &stale, H, &mismatched_episode),
-        NonzeroParticipantAckDecision::Respond(ServerValue::StaleAuthority(_))
+        NonzeroParticipantAckDecision::Respond(ref response)
+            if matches!(response.server_value(), crate::wire::ServerValue::StaleAuthority(_))
     ));
     assert_eq!(mismatched_episode, before);
 
@@ -195,9 +196,11 @@ fn common_lookup_precedes_episode_validation_and_never_mutates() {
             H,
             &mismatched_episode,
         ),
-        NonzeroParticipantAckDecision::Respond(ServerValue::NoBinding(crate::wire::NoBinding {
-            request: BindingRequiredEnvelope::ParticipantAck(envelope(P0, 1)),
-        },)),
+        NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::from_no_binding(
+            crate::wire::NoBinding {
+                request: BindingRequiredEnvelope::ParticipantAck(envelope(P0, 1)),
+            },
+        )),
     );
     assert_eq!(mismatched_episode, before);
 }
@@ -274,13 +277,13 @@ fn noop_gap_and_regression_return_wire_values_without_mutating_episode() {
     let live = member(P0, OBSERVER);
     assert_eq!(
         apply_for(&live, epoch(1, 0), &request(P0, 1, OBSERVER), H, &subject,),
-        NonzeroParticipantAckDecision::Respond(ServerValue::AckNoOp(AckNoOp::participant_ack(
-            envelope(P0, OBSERVER)
-        ),)),
+        NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::ack_no_op(envelope(
+            P0, OBSERVER
+        ))),
     );
     assert_eq!(
         apply_for(&live, epoch(1, 0), &request(P0, 1, H + 1), H, &subject),
-        NonzeroParticipantAckDecision::Respond(ServerValue::AckGap(
+        NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::ack_gap(
             AckGap::new(envelope(P0, H + 1), OBSERVER).expect("request above H is a gap"),
         )),
     );
@@ -303,7 +306,7 @@ fn noop_gap_and_regression_return_wire_values_without_mutating_episode() {
             H,
             &cursor_one_episode,
         ),
-        NonzeroParticipantAckDecision::Respond(ServerValue::AckRegression(
+        NonzeroParticipantAckDecision::Respond(ParticipantAckResponse::ack_regression(
             AckRegression::new(envelope(P0, OBSERVER), 1).expect("request is below durable cursor"),
         )),
     );
