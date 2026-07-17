@@ -39,6 +39,7 @@ clap = "4"
 # can satisfy both.)
 futures-core = { version = "0.3", default-features = false }
 haematite = "0.4.1"
+js-sys = "0.3.102"
 jsonschema = { version = "0.46.5", default-features = false }
 rand = "0.10.1"
 serde = { version = "1", default-features = false, features = ["derive"] }
@@ -54,6 +55,9 @@ tungstenite = { version = "0.30.0", default-features = false, features = ["hands
 tracing = "0.1"
 uuid = { version = "1.23.3", features = ["v4"] }
 wasm-bindgen = "0.2.105"
+# Feature-additive: members select the exact Web APIs they bind (web-sys
+# compiles only the requested interfaces).
+web-sys = "0.3.102"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

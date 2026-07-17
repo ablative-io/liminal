@@ -11,8 +11,10 @@
 //!   lives outside the aggregate.
 //! - The blocking std adapter, connection, and subscription stream (R2.1),
 //!   which drive the same driver commands with synchronous `tungstenite`,
-//!   matching the SDK's synchronous model. The later wasm leg binds the same
-//!   driver to browser callbacks; it is a separately dispatched delivery leg.
+//!   matching the SDK's synchronous model.
+//! - [`web_socket`] — the browser leg (R3.2): the platform-neutral F5 mirror
+//!   layer plus the `web-sys` shim behind the `browser` feature on wasm32,
+//!   binding the same driver to browser callbacks.
 //!
 //! The transport carries the canonical liminal wire protocol: one encoded
 //! frame is exactly one binary WebSocket message, encoded and decoded by
@@ -21,6 +23,7 @@
 
 pub mod binding;
 pub mod core;
+pub mod web_socket;
 
 #[cfg(feature = "std")]
 mod connection;
