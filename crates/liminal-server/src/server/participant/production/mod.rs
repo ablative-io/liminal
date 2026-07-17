@@ -43,4 +43,5 @@ mod tests_receipts;
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_residue;
 
+pub use facts::constant_time_eq;
 pub use handler::ProductionParticipantHandler;

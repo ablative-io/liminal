@@ -10,7 +10,7 @@
 //! diagnostic — no silent narrowing, no hand-built outcome.
 
 use liminal_protocol::lifecycle::{
-    LeaveLookupResult, LeaveSecretProof, PresentedIdentity, lookup_leave,
+    BindingState, LeaveLookupResult, LeaveSecretProof, PresentedIdentity, lookup_leave,
 };
 use liminal_protocol::wire::{
     BindingEpoch, ConnectionIncarnation, LeaveEnvelope, LeaveRequest, LeaveResponse,
@@ -34,20 +34,38 @@ impl ConversationAuthority {
         let envelope = leave_envelope(request);
         let receiving_epoch =
             BindingEpoch::new(receiving_incarnation, request.capability_generation);
-        let Some(slot) = self.slots.get(&request.participant_id) else {
-            return Ok(LeaveResponse::participant_unknown(envelope).into_server_value());
-        };
-        let secret_proof = if facts::constant_time_eq(
-            &slot.attach_secret.into_bytes(),
-            &request.attach_secret.into_bytes(),
-        ) {
-            LeaveSecretProof::Verified
-        } else {
-            LeaveSecretProof::Mismatch
-        };
+        // A missing slot is presented to the crate's lookup as an ABSENT
+        // identity with a detached placeholder binding — the same pattern the
+        // ack arms use — so participant-unknown classification has exactly one
+        // owner (`lookup_leave`'s `PresentedIdentity::Absent` arm). No stored
+        // secret exists for an absent slot, so the proof is `Mismatch`;
+        // identity precedence classifies before any secret is consulted.
+        let binding_detached = BindingState::Detached;
+        let (identity, binding, secret_proof) = self.slots.get(&request.participant_id).map_or(
+            (
+                PresentedIdentity::<Digest, Digest, Digest>::Absent,
+                &binding_detached,
+                LeaveSecretProof::Mismatch,
+            ),
+            |slot| {
+                let secret_proof = if facts::constant_time_eq(
+                    &slot.attach_secret.into_bytes(),
+                    &request.attach_secret.into_bytes(),
+                ) {
+                    LeaveSecretProof::Verified
+                } else {
+                    LeaveSecretProof::Mismatch
+                };
+                (
+                    PresentedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
+                    &slot.binding,
+                    secret_proof,
+                )
+            },
+        );
         let lookup = lookup_leave(
-            PresentedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
-            &slot.binding,
+            identity,
+            binding,
             Some(receiving_epoch),
             request,
             secret_proof,

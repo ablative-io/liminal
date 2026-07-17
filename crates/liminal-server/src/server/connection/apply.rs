@@ -19,7 +19,8 @@ use crate::ServerError;
 use crate::config::types::ServiceProfile;
 use crate::server::participant::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext, ParticipantDispatch,
-    ParticipantIngress, dispatch_generic_frame, encode_server_value, gate_generic_frame,
+    ParticipantIngress, constant_time_eq, dispatch_generic_frame, encode_server_value,
+    gate_generic_frame,
 };
 
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
@@ -399,27 +400,6 @@ fn connect_response(
         selected_version,
         capabilities,
     })
-}
-
-/// Constant-time byte-slice equality for the connection auth token.
-///
-/// A short-circuiting `==` returns as soon as it hits the first differing byte, so
-/// its running time leaks how many leading bytes a guess got right — the classic
-/// timing side channel that lets an attacker recover a secret one byte at a time.
-/// This folds an XOR of every overlapping byte pair into a single accumulator and
-/// never returns early, so the loop's work depends only on the input lengths, not
-/// on where (or whether) the first mismatch occurs. A length difference is folded
-/// in up front so unequal-length inputs still traverse the whole overlap and always
-/// report unequal. Implemented locally rather than pulling a crate: the only
-/// constant-time-compare dependency in the tree (`constant_time_eq`, transitively
-/// via blake3) is not a direct workspace dependency, and this five-line fold is the
-/// spec-sanctioned shape.
-fn constant_time_eq(expected: &[u8], candidate: &[u8]) -> bool {
-    let mut difference = u8::from(expected.len() != candidate.len());
-    for (left, right) in expected.iter().zip(candidate.iter()) {
-        difference |= left ^ right;
-    }
-    difference == 0
 }
 
 fn publish_response(

@@ -102,11 +102,25 @@ pub fn detach_request_verifier(request: &DetachRequest) -> Digest {
     digest
 }
 
-/// Constant-time byte-slice equality for presented secrets.
+/// Constant-time byte-slice equality for presented secrets and the
+/// connection auth token — the crate's SINGLE implementation.
 ///
-/// Folds an XOR of every byte pair into one accumulator and never returns
-/// early, so runtime depends only on input lengths — the same discipline as
-/// the connection auth-token comparison.
+/// A short-circuiting `==` returns as soon as it hits the first differing
+/// byte, so its running time leaks how many leading bytes a guess got right —
+/// the classic timing side channel that lets an attacker recover a secret one
+/// byte at a time. This folds an XOR of every overlapping byte pair into a
+/// single accumulator and never returns early, so the loop's work depends
+/// only on the input lengths, not on where (or whether) the first mismatch
+/// occurs. A length difference is folded in up front so unequal-length inputs
+/// still traverse the whole overlap and always report unequal.
+///
+/// Implemented locally rather than pulling a crate: the only
+/// constant-time-compare dependency in the tree (`constant_time_eq`,
+/// transitively via blake3) is not a direct workspace dependency, and this
+/// five-line fold is the spec-sanctioned shape. Every secret comparison in
+/// this crate (attach/leave secrets here, the connection auth token in the
+/// connection layer) routes through this one definition so a future
+/// hardening cannot miss a copy.
 #[must_use]
 pub fn constant_time_eq(expected: &[u8], candidate: &[u8]) -> bool {
     let mut difference = u8::from(expected.len() != candidate.len());
