@@ -2,10 +2,11 @@
 //!
 //! One `RemoteConversationHandle`/channel surface runs the same fixtures once
 //! with TCP and once with WebSocket, against scripted in-test servers that
-//! speak the canonical liminal wire protocol. The scripted servers exist so the
-//! client leg is proven independently of the sibling server acceptor (R1),
-//! which is owned by a separate delivery leg; full-stack parity against the
-//! real acceptor lands when both legs meet on an integration branch.
+//! speak the canonical liminal wire protocol. The scripted servers give the
+//! client leg hermetic control over adversarial cases (auth refusal, malformed
+//! bytes, oversize declarations, byte capture) that the real server never
+//! produces; parity against the real R1 acceptor is proven separately in
+//! `crates/liminal-server/tests/sdk_ws_e2e.rs`.
 
 use std::net::{TcpListener, TcpStream};
 use std::thread::JoinHandle;
@@ -19,7 +20,7 @@ use liminal_protocol::wire::FRAME_MAX;
 use liminal_sdk::remote::websocket::liminal_ws_message_bound;
 use liminal_sdk::{
     ChannelHandle, ConnectionPoolConfig, ConversationHandle, DeliveryAck, PressureResponse,
-    RemoteConfig, SdkError, SchemaMetadata, SchemaValidate, SubscriptionStream,
+    RemoteConfig, SchemaMetadata, SchemaValidate, SdkError, SubscriptionStream,
 };
 
 type TestResult<T = ()> = Result<T, String>;
@@ -110,8 +111,9 @@ impl ServerLink for TcpServerLink {
                     self.captured.push(bytes);
                     return Ok(frame);
                 }
-                Err(ProtocolError::IncompleteHeader { .. })
-                | Err(ProtocolError::TruncatedPayload { .. }) => {
+                Err(
+                    ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
+                ) => {
                     let mut chunk = [0_u8; 4096];
                     let read = self
                         .stream
@@ -219,7 +221,6 @@ impl ServerLink for WsServerLink {
         loop {
             match self.socket.read() {
                 Ok(_) => {}
-                Err(tungstenite::Error::ConnectionClosed) => return Ok(()),
                 Err(_) => return Ok(()),
             }
         }
@@ -251,14 +252,15 @@ fn script_handshake(link: &mut dyn ServerLink, expected_token: &[u8]) -> TestRes
     })
 }
 
-type Script = Box<dyn FnOnce(&mut dyn ServerLink) -> TestResult<Vec<Vec<u8>>> + Send>;
+type Script = Box<dyn FnOnce(&mut dyn ServerLink) -> TestResult<CapturedFrames> + Send>;
+/// Canonical frame byte images a script captured from the client.
+type CapturedFrames = Vec<Vec<u8>>;
+/// Join handle for a running script thread.
+type ScriptHandle = JoinHandle<TestResult<CapturedFrames>>;
 
 /// Spawns a one-connection scripted server, returning its client address for
 /// `kind` and a handle joining to the frames the script captured.
-fn spawn_script(
-    kind: TransportKind,
-    script: Script,
-) -> TestResult<(String, JoinHandle<TestResult<Vec<Vec<u8>>>>)> {
+fn spawn_script(kind: TransportKind, script: Script) -> TestResult<(String, ScriptHandle)> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|error| format!("script listener bind failed: {error}"))?;
     let port = listener
@@ -269,7 +271,7 @@ fn spawn_script(
         TransportKind::Tcp => format!("127.0.0.1:{port}"),
         TransportKind::Ws => format!("ws://127.0.0.1:{port}/liminal"),
     };
-    let handle = std::thread::spawn(move || -> TestResult<Vec<Vec<u8>>> {
+    let handle = std::thread::spawn(move || -> TestResult<CapturedFrames> {
         let (stream, _) = listener
             .accept()
             .map_err(|error| format!("script accept failed: {error}"))?;
@@ -311,7 +313,7 @@ fn connect(kind: TransportKind, address: &str) -> Result<RemoteConfig, SdkError>
     }
 }
 
-fn join_script(handle: JoinHandle<TestResult<Vec<Vec<u8>>>>) -> TestResult<Vec<Vec<u8>>> {
+fn join_script(handle: ScriptHandle) -> TestResult<CapturedFrames> {
     handle
         .join()
         .map_err(|_| "script thread panicked".to_string())?
@@ -498,7 +500,10 @@ fn silent_send_parity() -> TestResult {
                 let Frame::ConversationMessage { .. } = frame else {
                     return Err(format!("expected ConversationMessage, got {frame:?}"));
                 };
-                // Success is silence on the conversation path.
+                // Success is silence on the conversation path: hold the
+                // connection open through the client's brief error-drain
+                // window so the silence is genuine, not a socket teardown.
+                std::thread::sleep(Duration::from_millis(600));
                 Ok(Vec::new())
             }),
         )?;

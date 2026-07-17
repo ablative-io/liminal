@@ -24,7 +24,8 @@ pub use pressure::{DeliveryAck, PressureResponse};
 #[cfg(feature = "std")]
 pub use remote::{
     DeliveredMessage, OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame,
-    SubscriptionStream,
+    SubscriptionStream, WebSocketDeliveredMessage, WebSocketRemoteTransport,
+    WebSocketSubscriptionStream,
 };
 pub use remote::{
     RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SdkChannelHandle, SdkConfig,

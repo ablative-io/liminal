@@ -163,16 +163,10 @@ fn sdk_subscription_delivery_parity_over_real_acceptor() -> Result<(), Box<dyn E
     let server = RunningServer::start(None)?;
 
     // One subscriber per transport, both on the same channel of one server.
-    let tcp_stream = SubscriptionStream::open(
-        &server.address(TransportKind::Tcp),
-        CHANNEL,
-        Vec::new(),
-    )?;
-    let ws_stream = WebSocketSubscriptionStream::open(
-        &server.address(TransportKind::Ws),
-        CHANNEL,
-        Vec::new(),
-    )?;
+    let tcp_stream =
+        SubscriptionStream::open(&server.address(TransportKind::Tcp), CHANNEL, Vec::new())?;
+    let ws_stream =
+        WebSocketSubscriptionStream::open(&server.address(TransportKind::Ws), CHANNEL, Vec::new())?;
 
     // A keyed publish over TCP reports a genuine delivery ack because the two
     // real subscribers exist, and BOTH transports receive the delivery.
@@ -193,9 +187,11 @@ fn sdk_auth_parity_over_real_acceptor() -> Result<(), Box<dyn Error>> {
     let server = RunningServer::start(Some("right-token"))?;
     for kind in [TransportKind::Tcp, TransportKind::Ws] {
         // The wrong token is refused with a typed connection error on both
-        // transports; retry-free because the listener is already warm from the
-        // successful leg below running first would race, so probe order is
-        // wrong-then-right under the shared connect helper.
+        // transports. The shared connect helper retries within its window (it
+        // cannot distinguish a refusal from listener warmup), so this leg
+        // proves the refusal by exhausting that window without ever
+        // connecting; the right-token leg below then proves the same warm
+        // listener accepts.
         let refused = connect(&server, kind, b"wrong-token");
         assert!(
             refused.is_err(),
