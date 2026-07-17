@@ -1,102 +1,11 @@
-# liminal browser/WebSocket transport — goal session (TORN r1)
+# liminal browser/WebSocket transport — goal session (folded r1.1)
 
-**Status:** TORN 2026-07-17 by Waffles the Terrible (authoring seat), under
-Tom's keep-it-moving authority: the four open questions are RULED below and
-govern the body. Dispatch remains gated on the client unit landing (see
-"Required client-unit input") and on Artemis Peach's beamr-boundary read.
+**Status:** folded r1.1 — pre-dispatch complete (2026-07-17). The tear rulings
+and boundary-read dispositions are integrated into the requirement bodies.
+Dispatch remains gated on the client unit landing (see "Required client-unit
+input").
 
-## Tear rulings (2026-07-17)
-
-1. **TLS and origin (Q1).** v1's supported deployment contract is raw `ws://`
-   behind a named TLS-terminating proxy that owns `wss://` and certificates —
-   liminal grows NO TLS stack, keeping R1.1's first HTTP surface tiny. Origin
-   is nonetheless validated IN liminal's acceptor: an explicit allowed-origin
-   allow-list in server config, checked on every upgrade. There is no default
-   list — absent or empty origin configuration REFUSES browser-origin upgrades
-   with a typed error (fail closed; a deployment must state its origins to
-   serve browsers). Documented as the deployment contract in the brief's R1
-   acceptance.
-2. **Credential durability (Q2).** v1 rules issuer-epoch rotation: the binding
-   credential carries an issuer epoch; server restart rotates the epoch,
-   revoking every outstanding browser-binding credential at once. Browsers
-   re-establish through the normal reconnect + fresh-live-manifest path, which
-   the component contract already obligates them to support. Explicit and
-   tested — restart-revocation is an acceptance case, not an accident of
-   in-memory lifetime. Durable credential records can arrive later without
-   wire change precisely because the epoch is in the credential.
-3. **Connection cardinality (Q3).** One WebSocket connection per browser
-   surface, multiplexing MANY concurrently redeemed instance credentials —
-   R4's multiple active `subscription_id`s are the intended shape.
-   Per-connection instance-binding capacity is an explicit named config value
-   with a typed refusal at the bound (no assumed default). Revocation fan-out:
-   revoking one instance credential terminates that subscription only;
-   revoking the participant terminates the connection.
-4. **Wasm ownership shape (Q4).** The draft's proposal is CONFIRMED: the JS
-   socket stays outside the transport-neutral handle; events and commands
-   cross a channel seam; the wasm leg is a single-threaded, event-driven
-   driver. No trait-bound change to the public `ConversationHandle` in this
-   unit. If the wasm leg finds the channel seam insufficient, it STOPs and
-   returns with evidence — the blocking shim, timer pump, and TypeScript
-   protocol reimplementation remain forbidden answers.
-
-## Boundary-read dispositions (Artemis Peach, 2026-07-17 — all ruled by the
-## tear seat; the pre-dispatch fold integrates F-items into the body text)
-
-- **F1 ACCEPTED (blocking-grade text fix).** R1.1's "unsupported
-  extension/subprotocol rejected" would reject every real browser (all three
-  engines offer `permessage-deflate` unremovably). Corrected contract:
-  extension OFFERS are DECLINED, never negotiated — the upgrade response
-  carries no `Sec-WebSocket-Extensions` header, pinned in the checkpoint-3
-  browser harness by asserting the absent header AND `ws.extensions === ""`
-  (which makes compression-off browser-observable). Malformed upgrades remain
-  rejected; subprotocols pinned separately (the liminal browser client offers
-  none).
-- **F2 ACCEPTED.** The WS library's reassembly bound is the real
-  pre-allocation limit: require `accept`/`client` config variants with
-  `max_message_size`/`max_frame_size` pinned to the liminal frame bound from
-  the named product limit. Oversize-declared messages must fail at the pinned
-  bound, not after a 64 MiB default buffer.
-- **F3 ACCEPTED.** Browser terminal-event mapping pinned in R3.1's trace
-  tests: abnormal loss fires `error` THEN `close` (two terminals, always);
-  clean close fires `close` alone; a commanded Close echoes as a later close
-  event. The driver is post-terminal-tolerant: the FIRST terminal mints the
-  one typed fate; subsequent terminals are typed no-ops at the driver and
-  never reach `record_transport_fate`.
-- **F4 ACCEPTED.** The wasm adapter sets `binaryType = "arraybuffer"` at
-  construction — the "blob" default demands async reads, which tempt exactly
-  the deferred machinery this brief forbids.
-- **F5 ACCEPTED (clarifying sentence).** The browser conversation surface
-  MIRRORS the `ConversationHandle` method set with equal semantics; it does
-  not implement the `Send + Sync` trait. Ruling 4's "no trait-bound change"
-  and R3.2's "preserves semantics" are both satisfied by the mirror shape —
-  the beamr-wasm `WasmVm` precedent. A STOP on this apparent contradiction is
-  therefore unfounded.
-- **F6 ACCEPTED (fold hygiene).** Ruling 1's origin cases enumerated into
-  R1.1 acceptance: listed-Origin upgrade passes; unlisted-Origin refuses
-  typed; empty/absent origin config refuses Origin-BEARING upgrades only
-  (native clients sending no Origin header pass); the checkpoint-3 harness
-  sends an Origin, so its test config must list it.
-- **Q-A RULED (keepalive) — FINAL under Tom's keep-it-moving authority
-  (2026-07-17; the provisional flag was cleared by Tom's direction that
-  technically-correct dispositions are ruled at the tear seat).** A
-  server-side WS Ping schedule is authorized as TRANSPORT LIVENESS, with the
-  LAW-1 carve-out stated precisely: liveness pings never mint application
-  events, never re-arm application state, and never serve as a source of
-  truth — failure detection remains the socket's typed terminal events. The
-  interval is an explicit named config value; absent config = pings disabled
-  with proxy-idle-disconnect churn documented as the accepted consequence.
-  Bound: one ping per interval per connection; the idle cost is
-  interval × connection-count, stated and tested. Per the idle-cost doctrine
-  this carve-out is flagged to Tom and reversible by one line before
-  dispatch.
-- **Q-B RULED (send pressure).** The outbound-pressure authority for v1 is
-  the client unit itself: the at-most-one outstanding write-ahead operation
-  rule plus request-response correlation structurally bound request-class
-  outbound, and v1 browser traffic is user-action-scale. Observing
-  `bufferedAmount` — which has no event and therefore requires polling — is
-  FORBIDDEN. If a future component class needs bulk outbound streaming, it
-  arrives with its own typed flow-control brief; it does not bolt onto this
-  transport.
+**History:** 2026-07-17 — folded r1.1 integrates the decided pre-dispatch read.
 
 **Liminal evidence pin:** `origin/main` at
 `2e5a731b5f009b0cac2b8c28b90f9b1245372732`.
@@ -242,6 +151,14 @@ abstraction. The server's first HTTP surface accepts only the configured
 WebSocket Upgrade path; every ordinary HTTP request receives a small fixed
 non-success response and closes.
 
+The decided TLS/origin contract (tear Q1) is raw `ws://` behind a named
+TLS-terminating proxy that owns public `wss://` and certificates; liminal grows
+no TLS stack. Origin validation nonetheless belongs to this acceptor. Server
+configuration provides an explicit allowed-origin allow-list that is checked on
+every Origin-bearing upgrade. There is no default list: absent or empty origin
+configuration fails closed for browser-origin upgrades with a typed refusal,
+while a native client that sends no `Origin` header may upgrade.
+
 **Files:** `Cargo.toml`, `Cargo.lock`, `crates/liminal-server/Cargo.toml`;
 `crates/liminal-server/src/config/{types,env,file,validation}.rs`;
 `crates/liminal-server/src/server/{runtime,shutdown}.rs`; new
@@ -254,10 +171,19 @@ non-success response and closes.
    absent configuration starts no HTTP/WS listener and preserves current
    startup bytes and behavior. Address/path validation, bind errors, logs,
    readiness, stop-accepting, drain, and forced shutdown are covered.
-2. A valid Upgrade on the configured path succeeds. Wrong method/path/version,
-   malformed or oversized headers, unsupported extension/subprotocol, and plain
-   HTTP are bounded and rejected without entering liminal supervision.
-3. Dependency inspection proves there is no async runtime or framework added.
+2. **F6:** a listed-Origin upgrade on the configured path passes; an unlisted
+   Origin receives a typed refusal; empty or absent origin configuration refuses
+   Origin-bearing upgrades only; and a native client sending no Origin passes.
+   The checkpoint-3 browser harness sends an Origin and its test configuration
+   lists that Origin. Wrong method/path/version, malformed or oversized headers,
+   and plain HTTP remain bounded and rejected without entering supervision.
+3. **F1:** extension offers, including browsers' unavoidable
+   `permessage-deflate` offer, are declined and never negotiated. The upgrade
+   response has no `Sec-WebSocket-Extensions` header, and checkpoint 3 asserts
+   both the absent response header and `ws.extensions === ""`. Malformed
+   upgrades remain rejected. Subprotocols are separate: the liminal browser
+   client offers none, and any offered subprotocol is rejected.
+4. Dependency inspection proves there is no async runtime or framework added.
    Upgrade tests use raw HTTP bytes as well as a real WebSocket client; they do
    not test an implementation echo.
 
@@ -290,6 +216,15 @@ pending-reply, participant ingress, incarnation allocation, cleanup, and close-
 cause semantics as TCP. Do not make the current TCP listener accept HTTP, wrap
 `TcpStream` in a transport enum, or generalize its read/write hot path.
 
+**Q-A (keepalive) — FINAL:** a server-side WebSocket Ping schedule is authorized
+only as transport liveness, as a precise LAW-1 carve-out. Liveness pings never
+mint application events, never re-arm application state, and never serve as a
+source of truth; failure detection remains the socket's typed terminal events.
+The interval is an explicit named configuration value, and absent configuration
+means pings are disabled, with proxy-idle-disconnect churn accepted and
+documented. The bound is one ping per interval per connection; the idle cost is
+interval × connection-count and is stated and tested.
+
 **Files:** `crates/liminal-server/src/server/connection.rs` only for new module
 registration/re-export; new `connection/websocket*.rs`; runtime ownership in
 `server/runtime.rs` and `server/shutdown.rs`. Existing
@@ -314,8 +249,15 @@ Use blocking `tungstenite`, matching the SDK's current synchronous model. The
 transport uses the same canonical `liminal::protocol::encode/decode` and
 implements every `RemoteTransport` method; it does not call TCP transport
 methods, translate through JSON, or duplicate protocol correlation rules.
-`ws://` is required for the native loopback proof; `wss://` follows the resolved
-TLS ownership question below without changing the wire contract.
+`ws://` is required for the native loopback proof. Public `wss://` is owned by
+the named TLS-terminating proxy; liminal does not terminate TLS.
+
+**F2:** use `tungstenite` accept and client configuration variants whose
+`max_message_size` and `max_frame_size` are both pinned to the active liminal
+frame bound derived from the named product limit. This library reassembly bound
+is the pre-allocation authority on both native ends. An oversize-declared message
+fails at the pinned bound, never after allocation of the library's 64 MiB
+default buffer.
 
 **Files:** `Cargo.toml`, `Cargo.lock`, `crates/liminal-sdk/Cargo.toml`;
 `crates/liminal-sdk/src/remote.rs`, `remote/protocol.rs`, and new
@@ -342,6 +284,13 @@ replay, park, refusal, or terminal result exists. A WS close code, I/O string,
 timeout, or JavaScript event is diagnostic data only, never a fresh reconnect
 authorization.
 
+**Q-B (send pressure):** the client unit is the v1 outbound-pressure authority.
+Its at-most-one outstanding write-ahead operation rule plus request-response
+correlation structurally bounds request-class outbound traffic, and v1 browser
+traffic is user-action-scale. Observing `bufferedAmount` is FORBIDDEN: it has no
+event and would require polling. Any future bulk-outbound component class must
+arrive with its own typed flow-control brief rather than bolt onto this transport.
+
 **Files:** the SDK binding/wiring modules introduced by the reviewed client-unit
 integration; authoritative APIs remain
 `crates/liminal-protocol/src/client/{reconnect,replay}.rs` from `4118aa1`.
@@ -367,6 +316,13 @@ in-flight wire correlation state. The std adapter drives commands with blocking
 `tungstenite`; the later web adapter drives the same commands from browser
 callbacks. Neither adapter owns reconnect or participant decisions.
 
+**F3:** terminal-event handling is post-terminal-tolerant and follows
+first-terminal-mints-fate. Abnormal browser loss always produces `error` THEN
+`close`; clean close produces `close` alone; and a commanded `Close` echoes as a
+later close event. The first terminal mints exactly one typed fate. Every later
+terminal is a typed no-op inside the driver and never reaches
+`record_transport_fate`.
+
 **Files:** `crates/liminal-sdk/src/remote/websocket/core.rs` and target-specific
 siblings; feature/cfg wiring in `crates/liminal-sdk/{Cargo.toml,src/remote.rs}`.
 
@@ -374,21 +330,37 @@ siblings; feature/cfg wiring in `crates/liminal-sdk/{Cargo.toml,src/remote.rs}`.
 same command/event trace for std and a fake browser adapter; no platform type is
 present in the core module; binary messages retain canonical bytes; and no
 `poll`, interval, sleep, timeout-rearm, or runtime executor is required to make
-progress. Existing no-default wasm checks remain green after the native leg.
+progress. Trace tests pin F3's abnormal `error`-then-`close`, clean-close-only,
+and commanded-Close-then-later-close cases and prove exactly one recorded fate.
+Existing no-default wasm checks remain green after the native leg.
 
 ### R3.2 — wasm implementation is a separate bounded delivery leg
 
 The native checkpoint does not claim browser completion. After native review,
 a separate commit series adds `wasm-bindgen`/`web-sys` target-only dependencies
-and `WebSysWebSocketSocket`. It subscribes to `open`, `message`, `close`, and
-`error`; accepts only `ArrayBuffer`/byte binary data; feeds each callback once
-into the shared driver; and drains emitted commands without timer polling. The
-browser-visible API is the liminal-sdk conversation surface compiled to wasm,
-not a TypeScript protocol client. TypeScript may instantiate the wasm package,
-pass the server-issued binding credential, attach callbacks, and render decoded
-application data only. This bounded leg ends at the Rust/wasm socket adapter and
-a browser-run transport harness. It does NOT build frame's browser shell,
-rendering, manifest machinery, production bundler, or npm publication path.
+and `WebSysWebSocketSocket`. **F4:** the adapter sets
+`binaryType = "arraybuffer"` at construction, before subscribing to `open`,
+`message`, `close`, and `error`; it accepts only `ArrayBuffer`/byte binary data,
+feeds each callback once into the shared driver, and drains emitted commands
+without timer polling. Blob's asynchronous default is not supported.
+
+The decided wasm ownership shape (tear Q4) keeps the JavaScript socket outside
+the transport-neutral handle. Closed events and commands cross a channel seam,
+and the wasm leg remains single-threaded and event-driven; no public
+`ConversationHandle` trait-bound changes in this unit. **F5:** the exported
+browser conversation surface MIRRORS the `ConversationHandle` method set with
+equal semantics; it does not implement the `Send + Sync` trait, following the
+beamr-wasm `WasmVm` precedent. If the channel seam proves insufficient, work
+STOPS with evidence; a blocking shim, timer pump, or TypeScript protocol
+reimplementation is forbidden.
+
+The browser-visible API is the liminal-sdk conversation surface compiled to
+wasm, not a TypeScript protocol client. TypeScript may instantiate the wasm
+package, pass the server-issued binding credential, attach callbacks, and render
+decoded application data only. This bounded leg ends at the Rust/wasm socket
+adapter and a browser-run transport harness. It does NOT build frame's browser
+shell, rendering, manifest machinery, production bundler, or npm publication
+path.
 
 **Files:** target-specific manifest sections in `Cargo.toml` and
 `crates/liminal-sdk/Cargo.toml`; new
@@ -408,10 +380,10 @@ its repository owner; protocol logic may not move there.
    text messages and proves fragmented binary is delivered once after browser
    reassembly.
 4. The exported browser handle preserves liminal `ConversationHandle`
-   semantics. Any target-specific relaxation needed because the current trait
-   is `Send + Sync` (`crates/liminal-sdk/src/conversation.rs:80-119`) must be
-   settled in tear and represented as a typed SDK boundary, never hidden behind
-   polling or a second browser protocol.
+   semantics through F5's mirror-not-implementor shape. It does not implement
+   the native `Send + Sync` trait
+   (`crates/liminal-sdk/src/conversation.rs:80-119`), and no trait-bound change,
+   polling, or second browser protocol is introduced.
 
 ## R4 — concrete browser binding credential on the liminal wire
 
@@ -450,6 +422,20 @@ removes the active subscription before publishing the push/close consequence;
 a racing consuming act is refused server-side. The credential itself is never
 echoed in any response, push, log, metric label, or error.
 
+The decided credential-durability contract (tear Q2) is issuer-epoch rotation.
+The credential carries an issuer epoch, and server restart rotates the epoch to
+revoke every outstanding browser-binding credential at once. Browsers recover
+only through normal reconnect plus a fresh-live-manifest path. Restart
+revocation is explicit acceptance behavior, not an accident of in-memory
+lifetime; a later durable authority store must preserve these wire bytes.
+
+The decided connection cardinality (tear Q3) is one WebSocket connection per
+browser surface, multiplexing many concurrently redeemed instance credentials
+as multiple active `subscription_id`s. Per-connection instance-binding capacity
+is an explicit named configuration value with a typed refusal at the bound and
+no assumed default. Revoking one instance credential terminates only that
+subscription; revoking the participant terminates the connection.
+
 **Files:** `crates/liminal-protocol/src/wire/{primitives,tags,request,response,push,codec,server_codec,mod}.rs`
 and their existing focused test modules; SDK client correlation/resume handling
 from the `4118aa1` client unit; server authority/service dispatch under
@@ -471,7 +457,9 @@ aggregate decisions.
    cannot alias; credentials never appear in diagnostics.
 4. A reconnect test proves that a credential valid on connection A is checked
    again on B, B gets a new subscription ID, and revocation between A and B
-   yields `BrowserBindingUnavailable`. A live-revocation test removes delivery
+   yields `BrowserBindingUnavailable`. Server restart rotates the issuer epoch,
+   invalidates every previously issued credential, and requires reconnect plus
+   fresh-live-manifest issuance. A live-revocation test removes delivery
    authority and emits exactly one `BrowserBindingRevoked` for the active ID.
 5. Credential issuance/redemption uses a CSPRNG and constant-time secret
    comparison or a server-stored digest/MAC design; no raw credential is stored
@@ -480,6 +468,10 @@ aggregate decisions.
 6. `ClientParticipantAggregate`, reconnect, and detach replay own all resulting
    decisions. Server aggregate transition laws, claim-frontier arithmetic, and
    capability advertising are untouched.
+7. One browser-surface connection concurrently redeems multiple instance
+   credentials up to the named capacity. The next redemption receives the typed
+   bound refusal. Instance revocation removes only its subscription, while
+   participant revocation closes the connection.
 
 ## Boundaries and byte-identity discipline
 
@@ -562,9 +554,11 @@ commands on the declared final bytes with a clean worktree.
   reason. At most two review rounds per checkpoint, then escalate for a scope
   ruling rather than opening an exam loop.
 
-## Open questions for the tear
+## Pre-tear questions (historical prompt)
 
-These are genuine evidence gaps, not permission to defer the goal:
+These prompts are retained as drafting history. Their decided contracts are now
+stated directly in the R-sections above; they are not open implementation
+choices.
 
 1. **TLS and origin ownership.** The repository pins no public TLS terminator,
    certificate loader, allowed-origin policy, or `wss://` ownership for this
@@ -596,3 +590,98 @@ These are genuine evidence gaps, not permission to defer the goal:
    confirm that ownership shape or rule a target-specific trait-bound change;
    a blocking shim, timer pump, and separate TypeScript protocol are forbidden
    answers.
+
+## Retained tear and boundary-read audit record
+
+## Tear rulings (2026-07-17)
+
+1. **TLS and origin (Q1).** v1's supported deployment contract is raw `ws://`
+   behind a named TLS-terminating proxy that owns `wss://` and certificates —
+   liminal grows NO TLS stack, keeping R1.1's first HTTP surface tiny. Origin
+   is nonetheless validated IN liminal's acceptor: an explicit allowed-origin
+   allow-list in server config, checked on every upgrade. There is no default
+   list — absent or empty origin configuration REFUSES browser-origin upgrades
+   with a typed error (fail closed; a deployment must state its origins to
+   serve browsers). Documented as the deployment contract in the brief's R1
+   acceptance.
+2. **Credential durability (Q2).** v1 rules issuer-epoch rotation: the binding
+   credential carries an issuer epoch; server restart rotates the epoch,
+   revoking every outstanding browser-binding credential at once. Browsers
+   re-establish through the normal reconnect + fresh-live-manifest path, which
+   the component contract already obligates them to support. Explicit and
+   tested — restart-revocation is an acceptance case, not an accident of
+   in-memory lifetime. Durable credential records can arrive later without
+   wire change precisely because the epoch is in the credential.
+3. **Connection cardinality (Q3).** One WebSocket connection per browser
+   surface, multiplexing MANY concurrently redeemed instance credentials —
+   R4's multiple active `subscription_id`s are the intended shape.
+   Per-connection instance-binding capacity is an explicit named config value
+   with a typed refusal at the bound (no assumed default). Revocation fan-out:
+   revoking one instance credential terminates that subscription only;
+   revoking the participant terminates the connection.
+4. **Wasm ownership shape (Q4).** The draft's proposal is CONFIRMED: the JS
+   socket stays outside the transport-neutral handle; events and commands
+   cross a channel seam; the wasm leg is a single-threaded, event-driven
+   driver. No trait-bound change to the public `ConversationHandle` in this
+   unit. If the wasm leg finds the channel seam insufficient, it STOPs and
+   returns with evidence — the blocking shim, timer pump, and TypeScript
+   protocol reimplementation remain forbidden answers.
+
+## Boundary-read dispositions (Artemis Peach, 2026-07-17 — all ruled by the
+## tear seat; the pre-dispatch fold integrates F-items into the body text)
+
+- **F1 ACCEPTED (blocking-grade text fix).** R1.1's "unsupported
+  extension/subprotocol rejected" would reject every real browser (all three
+  engines offer `permessage-deflate` unremovably). Corrected contract:
+  extension OFFERS are DECLINED, never negotiated — the upgrade response
+  carries no `Sec-WebSocket-Extensions` header, pinned in the checkpoint-3
+  browser harness by asserting the absent header AND `ws.extensions === ""`
+  (which makes compression-off browser-observable). Malformed upgrades remain
+  rejected; subprotocols pinned separately (the liminal browser client offers
+  none).
+- **F2 ACCEPTED.** The WS library's reassembly bound is the real
+  pre-allocation limit: require `accept`/`client` config variants with
+  `max_message_size`/`max_frame_size` pinned to the liminal frame bound from
+  the named product limit. Oversize-declared messages must fail at the pinned
+  bound, not after a 64 MiB default buffer.
+- **F3 ACCEPTED.** Browser terminal-event mapping pinned in R3.1's trace
+  tests: abnormal loss fires `error` THEN `close` (two terminals, always);
+  clean close fires `close` alone; a commanded Close echoes as a later close
+  event. The driver is post-terminal-tolerant: the FIRST terminal mints the
+  one typed fate; subsequent terminals are typed no-ops at the driver and
+  never reach `record_transport_fate`.
+- **F4 ACCEPTED.** The wasm adapter sets `binaryType = "arraybuffer"` at
+  construction — the "blob" default demands async reads, which tempt exactly
+  the deferred machinery this brief forbids.
+- **F5 ACCEPTED (clarifying sentence).** The browser conversation surface
+  MIRRORS the `ConversationHandle` method set with equal semantics; it does
+  not implement the `Send + Sync` trait. Ruling 4's "no trait-bound change"
+  and R3.2's "preserves semantics" are both satisfied by the mirror shape —
+  the beamr-wasm `WasmVm` precedent. A STOP on this apparent contradiction is
+  therefore unfounded.
+- **F6 ACCEPTED (fold hygiene).** Ruling 1's origin cases enumerated into
+  R1.1 acceptance: listed-Origin upgrade passes; unlisted-Origin refuses
+  typed; empty/absent origin config refuses Origin-BEARING upgrades only
+  (native clients sending no Origin header pass); the checkpoint-3 harness
+  sends an Origin, so its test config must list it.
+- **Q-A RULED (keepalive) — FINAL under Tom's keep-it-moving authority
+  (2026-07-17; the provisional flag was cleared by Tom's direction that
+  technically-correct dispositions are ruled at the tear seat).** A
+  server-side WS Ping schedule is authorized as TRANSPORT LIVENESS, with the
+  LAW-1 carve-out stated precisely: liveness pings never mint application
+  events, never re-arm application state, and never serve as a source of
+  truth — failure detection remains the socket's typed terminal events. The
+  interval is an explicit named config value; absent config = pings disabled
+  with proxy-idle-disconnect churn documented as the accepted consequence.
+  Bound: one ping per interval per connection; the idle cost is
+  interval × connection-count, stated and tested. Per the idle-cost doctrine
+  this carve-out is flagged to Tom and reversible by one line before
+  dispatch.
+- **Q-B RULED (send pressure).** The outbound-pressure authority for v1 is
+  the client unit itself: the at-most-one outstanding write-ahead operation
+  rule plus request-response correlation structurally bound request-class
+  outbound, and v1 browser traffic is user-action-scale. Observing
+  `bufferedAmount` — which has no event and therefore requires polling — is
+  FORBIDDEN. If a future component class needs bulk outbound streaming, it
+  arrives with its own typed flow-control brief; it does not bolt onto this
+  transport.
