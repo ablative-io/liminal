@@ -857,3 +857,210 @@ fn non_ws_scheme_is_typed_refusal() -> TestResult {
     );
     Ok(())
 }
+
+// ---- LP-WS-TRANSPORT integration pass: participant transport parity ----
+
+use liminal_protocol::wire::{
+    AttachSecret, BindingEpoch, ClientRequest, ConnectionIncarnation, EnrollBound,
+    EnrollmentRequest, EnrollmentToken, Generation, PARTICIPANT_FRAME_TYPE, ParticipantFrame,
+    ReceiverDirection, ServerValue,
+};
+use liminal_sdk::{
+    ParticipantResumeStore, RemoteOperationRecordOutcome, RemoteParticipantHandle,
+    RemoteParticipantInbound, RemoteParticipantSendOutcome, RemoteReconnectAttemptOutcome,
+    RemoteReconnectPermitOutcome,
+};
+
+const PARTICIPANT_CONVERSATION: u64 = 21;
+const PARTICIPANT_ID: u64 = 22;
+
+/// Minimal durable store for participant fixtures: retains the latest bytes.
+#[derive(Debug, Default)]
+struct MemoryResumeStore {
+    committed: Vec<u8>,
+}
+
+impl ParticipantResumeStore for MemoryResumeStore {
+    fn persist(&mut self, canonical_lpcr: &[u8]) -> Result<(), SdkError> {
+        self.committed = canonical_lpcr.to_vec();
+        Ok(())
+    }
+}
+
+/// Encodes one participant frame into its complete canonical byte image.
+fn participant_frame_bytes(frame: &ParticipantFrame) -> TestResult<Vec<u8>> {
+    let needed = liminal_protocol::wire::encoded_len(frame)
+        .map_err(|error| format!("participant encoded_len failed: {error:?}"))?;
+    let mut bytes = vec![0_u8; needed];
+    let written = liminal_protocol::wire::encode(frame, &mut bytes)
+        .map_err(|error| format!("participant encode failed: {error:?}"))?;
+    bytes.truncate(written);
+    Ok(bytes)
+}
+
+/// Server side of one participant enrollment exchange: verifies the request
+/// and answers with the correlated `EnrollBound`.
+fn participant_enrollment_script(link: &mut dyn ServerLink) -> TestResult<Vec<Vec<u8>>> {
+    script_handshake(link, AUTH_TOKEN)?;
+    let frame = link.read_frame()?;
+    let Frame::Unknown {
+        type_id, payload, ..
+    } = frame
+    else {
+        return Err(format!("expected a participant frame, got {frame:?}"));
+    };
+    if type_id != PARTICIPANT_FRAME_TYPE {
+        return Err(format!("expected participant type 0x1A, got {type_id:#x}"));
+    }
+    let mut complete = vec![type_id, 0];
+    complete.extend_from_slice(&0_u32.to_be_bytes());
+    let length = u32::try_from(payload.len()).map_err(|_| "payload length".to_string())?;
+    complete.extend_from_slice(&length.to_be_bytes());
+    complete.extend_from_slice(&payload);
+    let decoded = liminal_protocol::wire::decode(&complete, ReceiverDirection::Server)
+        .map_err(|error| format!("participant request decode failed: {error:?}"))?;
+    let ParticipantFrame::ClientRequest(ClientRequest::Enrollment(request)) = decoded else {
+        return Err(format!("expected an enrollment request, got {decoded:?}"));
+    };
+    let generation = Generation::new(1).ok_or("generation 1 must construct")?;
+    let epoch = BindingEpoch::new(ConnectionIncarnation::new(3, 4), generation);
+    let bound = EnrollBound::new(
+        request.conversation_id,
+        request.enrollment_token,
+        PARTICIPANT_ID,
+        AttachSecret::new([9; 32]),
+        epoch,
+        100,
+        200,
+    )
+    .ok_or("generation-1 enroll bound must construct")?;
+    let response = participant_frame_bytes(&ParticipantFrame::ServerValue(ServerValue::EnrollBound(
+        bound,
+    )))?;
+    link.write_raw_message(&response)?;
+    Ok(link.captured_frames().to_vec())
+}
+
+#[test]
+fn participant_send_receive_parity() -> TestResult {
+    let mut captured_by_kind = Vec::new();
+    for kind in [TransportKind::Tcp, TransportKind::Ws] {
+        let (address, handle) = spawn_script(kind, Box::new(participant_enrollment_script))?;
+        let config = connect(kind, &address).map_err(|error| format!("connect: {error}"))?;
+        let participant = RemoteParticipantHandle::new(&config, MemoryResumeStore::default())
+            .map_err(|error| format!("participant handle failed: {error}"))?;
+
+        let request = ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: PARTICIPANT_CONVERSATION,
+            enrollment_token: EnrollmentToken::new([7; 16]),
+        });
+        let RemoteOperationRecordOutcome::Recorded(operation) = participant
+            .record_operation(request)
+            .map_err(|error| format!("record failed: {error}"))?
+        else {
+            return Err(format!("{kind:?} enrollment must be recorded"));
+        };
+        let outcome = participant
+            .send_operation(operation)
+            .map_err(|error| format!("send failed: {error}"))?;
+        let RemoteParticipantSendOutcome::Sent { provenance } = outcome else {
+            return Err(format!("{kind:?} participant send must succeed: {outcome:?}"));
+        };
+        assert_eq!(provenance.connection_id(), 1, "{kind:?} first connection");
+        assert_eq!(provenance.attempt_id(), 1, "{kind:?} first attempt");
+
+        let inbound = participant
+            .receive()
+            .map_err(|error| format!("{kind:?} participant receive failed: {error}"))?;
+        let RemoteParticipantInbound::Applied { value, provenance } = inbound else {
+            return Err(format!(
+                "{kind:?} correlated enroll bound must apply: {inbound:?}"
+            ));
+        };
+        assert!(matches!(value, ServerValue::EnrollBound(_)));
+        assert_eq!(provenance.connection_id(), 1);
+        assert_eq!(provenance.attempt_id(), 1);
+        captured_by_kind.push(join_script(handle)?);
+    }
+    // The same participant request produced identical canonical bytes over
+    // both transports (index 0 Connect, index 1 the participant frame).
+    assert_eq!(captured_by_kind[0], captured_by_kind[1]);
+    Ok(())
+}
+
+/// Runs one accepted connection's handshake for the reconnect fixture.
+fn reconnect_phase(kind: TransportKind, listener: TcpListener, close: bool) -> ScriptHandle {
+    std::thread::spawn(move || -> TestResult<CapturedFrames> {
+        let (stream, _) = listener
+            .accept()
+            .map_err(|error| format!("phase accept failed: {error}"))?;
+        drop(listener);
+        match kind {
+            TransportKind::Tcp => {
+                let mut link = TcpServerLink::new(stream)?;
+                script_handshake(&mut link, AUTH_TOKEN)?;
+                if close {
+                    link.close()?;
+                }
+                Ok(Vec::new())
+            }
+            TransportKind::Ws => {
+                let mut link = WsServerLink::accept(stream)?;
+                script_handshake(&mut link, AUTH_TOKEN)?;
+                if close {
+                    link.close()?;
+                }
+                Ok(Vec::new())
+            }
+        }
+    })
+}
+
+#[test]
+fn participant_reconnect_provenance_parity() -> TestResult {
+    for kind in [TransportKind::Tcp, TransportKind::Ws] {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .map_err(|error| format!("listener bind failed: {error}"))?;
+        let local = listener
+            .local_addr()
+            .map_err(|error| format!("listener addr failed: {error}"))?;
+        let address = match kind {
+            TransportKind::Tcp => local.to_string(),
+            TransportKind::Ws => format!("ws://{local}/liminal"),
+        };
+        let phase_one = reconnect_phase(kind, listener, true);
+        let config = connect(kind, &address).map_err(|error| format!("connect: {error}"))?;
+        phase_one
+            .join()
+            .map_err(|_| "phase-one script panicked".to_string())??;
+
+        let participant = RemoteParticipantHandle::new(&config, MemoryResumeStore::default())
+            .map_err(|error| format!("participant handle failed: {error}"))?;
+        let loss = participant
+            .record_established_transport_loss()
+            .map_err(|error| format!("loss record failed: {error}"))?;
+        let RemoteReconnectPermitOutcome::Permitted { permit, .. } = loss.reconnect else {
+            return Err(format!(
+                "{kind:?} transport loss must mint one reconnect permit"
+            ));
+        };
+
+        // The transports dial their recorded address, so the second listener
+        // rebinds the same port before the typed reconnect runs.
+        let listener = TcpListener::bind(local)
+            .map_err(|error| format!("phase-two rebind failed: {error}"))?;
+        let phase_two = reconnect_phase(kind, listener, false);
+        let outcome = participant
+            .reconnect(permit)
+            .map_err(|error| format!("reconnect failed: {error}"))?;
+        let RemoteReconnectAttemptOutcome::Connected { provenance } = outcome else {
+            return Err(format!("{kind:?} typed reconnect must connect: {outcome:?}"));
+        };
+        assert_eq!(provenance.connection_id(), 2, "{kind:?} second connection");
+        assert_eq!(provenance.attempt_id(), 2, "{kind:?} second attempt");
+        phase_two
+            .join()
+            .map_err(|_| "phase-two script panicked".to_string())??;
+    }
+    Ok(())
+}
