@@ -4,6 +4,7 @@ use super::*;
 use crate::wire::{
     AttachSecret, BindingEpoch, ClientRequest, ConnectionIncarnation, DetachAttemptToken,
     DetachEnvelope, DetachRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation,
+    ObserverProgressStatus, ObserverRecoveryAccepted, ObserverRecoveryHandshake, ObserverRefusal,
     ParticipantReferenceEnvelope, RecordAdmission, RecordAdmissionEnvelope, RecordCommitted,
     Retired, ServerValue,
 };
@@ -289,6 +290,55 @@ fn m7_body_omitting_record_response_requires_current_authorization() -> TestResu
     let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, response.clone())
     else {
         return Err("body-omitting response without current authority must be refused");
+    };
+    assert_eq!(
+        refusal.reason(),
+        ClientInboundRefusalReason::DelayedResponse
+    );
+    let (aggregate, _) = refusal.into_parts();
+    assert!(matches!(
+        decide_correlated_inbound(aggregate, response, correlation),
+        ClientCorrelatedInboundDecision::Applied(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn m7_body_omitting_observer_response_requires_current_authorization() -> TestResult {
+    let first = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+        observer_refusals: vec![],
+    });
+    let (aggregate, operation) =
+        committed_operation(ClientParticipantAggregate::new(), first)?.into_parts();
+    let (_, correlation) = operation.into_request_and_correlation();
+    let ExpectedOperationFateDecision::Recorded { aggregate, .. } = record_expected_operation_fate(
+        aggregate,
+        correlation,
+        ExpectedOperationTransportFate::ResponseUnavailable,
+    ) else {
+        return Err("lost first observer response must clear expectation");
+    };
+
+    let second = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+        observer_refusals: vec![ObserverRefusal {
+            conversation_id: 71,
+            refused_epoch: 72,
+        }],
+    });
+    let (aggregate, operation) = committed_operation(aggregate, second)?.into_parts();
+    let (_, correlation) = operation.into_request_and_correlation();
+    let response = ServerValue::ObserverRecoveryAccepted(ObserverRecoveryAccepted {
+        statuses: vec![ObserverProgressStatus {
+            conversation_id: 71,
+            refused_epoch: 72,
+            current_observer_progress: 73,
+            armed: true,
+            progressed: false,
+        }],
+    });
+    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, response.clone())
+    else {
+        return Err("observer response without current authority must be refused");
     };
     assert_eq!(
         refusal.reason(),

@@ -183,8 +183,18 @@ fn decide_inbound_with_authorization(
         expected.authorization,
         presented_authorization,
     ) {
-        let reason = if value.originating_request() == Some(expected.request.discriminant())
-            && correlation::same_identity(&value, &expected.request)
+        let same_request_class = value.originating_request()
+            == Some(expected.request.discriminant())
+            || matches!(
+                (&value, &expected.request),
+                (
+                    ServerValue::ObserverRecoveryAccepted(_)
+                        | ServerValue::InvalidObserverEpoch(_)
+                        | ServerValue::InvalidObserverEpochList(_),
+                    crate::wire::ClientRequest::ObserverRecovery(_)
+                )
+            );
+        let reason = if same_request_class && correlation::same_identity(&value, &expected.request)
         {
             ClientInboundRefusalReason::DelayedResponse
         } else {
