@@ -8,6 +8,12 @@ declare module "../wasm/liminal_protocol_wasm.js" {
     schemaId: Uint8Array,
     payload: Uint8Array,
   ): Uint8Array;
+  export function subscribe(
+    streamId: number,
+    channel: string,
+    acceptedSchemas: Uint8Array,
+  ): Uint8Array;
+  export function unsubscribe(streamId: number, subscriptionId: bigint): Uint8Array;
   const init: (input?: unknown) => Promise<unknown>;
   export default init;
 }

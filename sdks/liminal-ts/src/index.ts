@@ -58,3 +58,16 @@ export type {
 
 export { generate } from "./codegen.js";
 export type { ChannelDefinition, GenerateOptions } from "./codegen.js";
+
+export {
+  DEFAULT_FEED_CHANNEL,
+  LiminalFeedSource,
+  RESERVED_OBSERVABILITY_CHANNEL,
+} from "./feed-source.js";
+export { LiminalFeedSourceError } from "./feed-source-error.js";
+export type {
+  FeedSource,
+  LiminalFeedSourceErrorListener,
+  LiminalFeedSourceOptions,
+} from "./feed-source.js";
+export type { LiminalFeedSourceErrorCode } from "./feed-source-error.js";

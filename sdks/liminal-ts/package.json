@@ -1,6 +1,6 @@
 {
   "name": "@liminal/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript SDK facade for typed liminal channels backed by the Rust WASM protocol bridge",
   "license": "MIT",
   "repository": {
