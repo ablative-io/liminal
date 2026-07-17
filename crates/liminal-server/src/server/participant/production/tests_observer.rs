@@ -1,11 +1,12 @@
 //! Observer-recovery crash-window and durable-occupancy production tests.
 //!
-//! Two reachable states the observer aggregate must classify from durable
-//! reality rather than from lucky in-memory ordering: (1) an enrollment whose
-//! durable observer `Track` row was lost to a crash between the conversation
-//! append and the tracking append, and (2) a connection-conversation
-//! occupancy count taken while a conversation's in-memory owner had been
-//! discarded by another operation's failure.
+//! Two reachable states the observer aggregate must classify correctly: (1)
+//! an enrollment whose durable observer `Track` row was lost to a crash
+//! between the conversation append and the tracking append (recovered from
+//! durable reality), and (2) a connection-conversation occupancy count taken
+//! while a conversation's in-memory AUTHORITY owner had been discarded by
+//! another operation's failure (the connection's own dispatch map carries
+//! the occupancy).
 
 use std::error::Error;
 use std::sync::Arc;
@@ -138,12 +139,17 @@ fn enrolled_conversation_without_track_row_recovers_classification() -> Result<(
     Ok(())
 }
 
-/// Occupancy for the connection-conversation limit is derived from durable
-/// binding authority: discarding a conversation's in-memory owner (any failed
-/// operation does) must not open capacity the durable bindings still occupy.
+/// Occupancy for the connection-conversation limit lives in the connection's
+/// own dispatch map: discarding a conversation's in-memory AUTHORITY owner
+/// (any failed operation does) must not open capacity the connection's
+/// committed conversations still occupy — the map is connection state, not
+/// conversation-authority state.
 #[test]
-fn capacity_check_counts_durably_bound_conversation_after_owner_discard()
--> Result<(), Box<dyn Error>> {
+fn capacity_check_counts_tracked_conversation_after_owner_discard() -> Result<(), Box<dyn Error>> {
+    use crate::server::participant::ParticipantConnectionConversations;
+
+    use super::tests::dispatch_tracked;
+
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(83, 1);
@@ -154,9 +160,13 @@ fn capacity_check_counts_durably_bound_conversation_after_owner_discard()
 
     let store = open_disk_store_for_tests(&data_dir)?;
     let handler = ProductionParticipantHandler::new(store, config);
-    let enrolled = dispatch(
+    // ONE connection map across the whole scenario — exactly what one live
+    // connection incarnation holds for its lifetime.
+    let mut conversations = ParticipantConnectionConversations::default();
+    let enrolled = dispatch_tracked(
         &handler,
         incarnation,
+        &mut conversations,
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: bound_conversation,
             enrollment_token: EnrollmentToken::new([92; 16]),
@@ -165,10 +175,12 @@ fn capacity_check_counts_durably_bound_conversation_after_owner_discard()
     assert!(matches!(enrolled, ServerValue::EnrollBound(_)));
 
     // Discard the bound conversation's in-memory owner through a failing
-    // operation (record admission fails closed by design).
-    let failed = dispatch(
+    // operation (an AUTHORIZED record admission fails closed by design until
+    // the claim-frontier acquisition lands).
+    let failed = dispatch_tracked(
         &handler,
         incarnation,
+        &mut conversations,
         ClientRequest::RecordAdmission(RecordAdmission {
             conversation_id: bound_conversation,
             participant_id: 0,
@@ -181,12 +193,13 @@ fn capacity_check_counts_durably_bound_conversation_after_owner_discard()
         "record admission must fail closed: {failed:?}"
     );
 
-    // The recovery batch names a FRESH conversation. Durable reality still
-    // binds this connection to `bound_conversation`, so the configured limit
-    // of one is already occupied and the batch must refuse on capacity.
-    let value = dispatch(
+    // The recovery batch names a FRESH conversation. The connection map
+    // still tracks `bound_conversation`, so the configured limit of one is
+    // already occupied and the batch must refuse on capacity.
+    let value = dispatch_tracked(
         &handler,
         incarnation,
+        &mut conversations,
         ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
             observer_refusals: vec![ObserverRefusal {
                 conversation_id: fresh_conversation,
@@ -201,10 +214,9 @@ fn capacity_check_counts_durably_bound_conversation_after_owner_discard()
         },
     ) = value
     else {
-        return Err(format!(
-            "durably bound conversation must occupy the configured limit: {value:?}"
-        )
-        .into());
+        return Err(
+            format!("tracked conversation must occupy the configured limit: {value:?}").into(),
+        );
     };
     assert_eq!(refused_conversation, fresh_conversation);
     assert_eq!(limit, 1);

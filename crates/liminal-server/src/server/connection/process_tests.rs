@@ -27,8 +27,8 @@ use crate::server::connection::services::{
 use crate::server::connection::worker_front_door::WorkerFrontDoorServices;
 use crate::server::participant::{
     InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext,
-    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSession,
-    preflight_generic_bytes,
+    ParticipantConnectionConversations, ParticipantSemanticError, ParticipantSemanticHandler,
+    ParticipantSession, preflight_generic_bytes,
 };
 
 /// Fixed connection pid used by the scheduler-free `apply_frame` unit tests.
@@ -204,6 +204,7 @@ impl ParticipantSemanticHandler for ProcessParticipantHandler {
     fn handle(
         &self,
         context: ParticipantConnectionContext,
+        _conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         self.seen

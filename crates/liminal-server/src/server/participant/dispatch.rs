@@ -4,18 +4,71 @@
 //! decodes inbound frames, while an injected semantic handler returns one typed
 //! protocol value. The server then performs only generic-frame encoding.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use liminal::durability::DurableStore;
 use liminal::protocol::Frame;
+use liminal_protocol::lifecycle::ConnectionConversationTracking;
 use liminal_protocol::wire::{
-    ClientRequest, CodecError, ConnectionIncarnation, ServerValue, ValidatedFrameLimit,
+    ClientRequest, CodecError, ConnectionIncarnation, ConversationId, ServerValue,
+    ValidatedFrameLimit,
 };
 
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
     normalize_configured_frame_limit,
 };
+
+/// Connection-local semantic-conversation dispatch map (contract R-D1: the
+/// connection's binding/interest/dispatch maps are bounded by the signed
+/// `max_semantic_conversations_per_connection`).
+///
+/// One value lives in each connection process's state for the connection's
+/// lifetime and is dropped with it. A conversation enters the map exactly
+/// when a semantic operation for it COMMITS on this connection (the crate's
+/// `ConnectionConversationCapacityCommit::newly_tracked` verdict) or when an
+/// observer-recovery batch arms its refusal-only recipient; refusals and
+/// replays leave the map untouched, exactly as the crate's stage-6 selector
+/// leaves its counter unchanged. Growth is therefore bounded by the signed
+/// limit the stage-6 selector enforces.
+#[derive(Debug, Default)]
+pub struct ParticipantConnectionConversations {
+    tracked: BTreeSet<ConversationId>,
+}
+
+impl ParticipantConnectionConversations {
+    /// Stage-6 tracking fact for one conversation on this connection.
+    #[must_use]
+    pub fn tracking(&self, conversation_id: ConversationId) -> ConnectionConversationTracking {
+        if self.tracked.contains(&conversation_id) {
+            ConnectionConversationTracking::AlreadyTracked
+        } else {
+            ConnectionConversationTracking::Untracked
+        }
+    }
+
+    /// Current connection-conversation occupancy.
+    #[must_use]
+    pub fn occupied(&self) -> u64 {
+        // `usize` fits `u64` on every supported target; if that ever stopped
+        // holding, saturating at MAX fails CLOSED (capacity reads as full)
+        // rather than silently under-counting occupancy.
+        u64::try_from(self.tracked.len()).unwrap_or(u64::MAX)
+    }
+
+    /// Installs one conversation slot after a capacity-committing operation.
+    pub fn track(&mut self, conversation_id: ConversationId) {
+        self.tracked.insert(conversation_id);
+    }
+
+    /// Sorted tracked conversations (the observer-recovery preflight's
+    /// current-occupancy input).
+    #[must_use]
+    pub fn tracked_conversations(&self) -> Vec<ConversationId> {
+        self.tracked.iter().copied().collect()
+    }
+}
 
 /// Connection-scoped authority facts supplied to participant semantics.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +114,11 @@ pub enum ParticipantSemanticError {
 pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     /// Applies one already authenticated and capability-gated request.
     ///
+    /// `conversations` is the receiving connection's semantic-conversation
+    /// dispatch map: the handler reads it for the crate's stage-6
+    /// connection-conversation capacity facts and installs a slot exactly
+    /// when an operation's capacity commit reports `newly_tracked`.
+    ///
     /// # Errors
     ///
     /// Returns [`ParticipantSemanticError`] when no protocol value can be
@@ -68,6 +126,7 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     fn handle(
         &self,
         context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError>;
 }
@@ -175,6 +234,7 @@ pub fn dispatch_generic_frame(
     authenticated: bool,
     session: ParticipantSession,
     context: ParticipantConnectionContext,
+    conversations: &mut ParticipantConnectionConversations,
     handler: &dyn ParticipantSemanticHandler,
 ) -> ParticipantDispatch {
     let (value, close_after_response) = match gate_generic_frame(frame, authenticated, session) {
@@ -185,12 +245,14 @@ pub fn dispatch_generic_frame(
         ParticipantIngress::InvalidGenericFrame => {
             return ParticipantDispatch::Fatal(ParticipantDispatchError::InvalidGenericFrame);
         }
-        ParticipantIngress::Request(request) => match handler.handle(context, request) {
-            Ok(value) => (value, false),
-            Err(error) => {
-                return ParticipantDispatch::Fatal(ParticipantDispatchError::Semantic(error));
+        ParticipantIngress::Request(request) => {
+            match handler.handle(context, conversations, request) {
+                Ok(value) => (value, false),
+                Err(error) => {
+                    return ParticipantDispatch::Fatal(ParticipantDispatchError::Semantic(error));
+                }
             }
-        },
+        }
     };
     match encode_server_value(value) {
         Ok(frame) if close_after_response => ParticipantDispatch::RespondThenClose(frame),

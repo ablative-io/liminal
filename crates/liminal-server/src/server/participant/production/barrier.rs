@@ -7,8 +7,11 @@
 //! canonical bytes and cross-checks them against the stored entry, so byte
 //! drift between live and replayed decisions fails loudly.
 
-use liminal_protocol::lifecycle::ReceiptDeadlines;
-use liminal_protocol::wire::ConnectionIncarnation;
+use liminal_protocol::lifecycle::{
+    CapacityCounter, ConnectionConversationCapacityCommit, ConnectionConversationTracking,
+    ReceiptDeadlines, SemanticConnectionCapacityDecision, select_semantic_connection_capacity,
+};
+use liminal_protocol::wire::{ConnectionIncarnation, ServerValue};
 
 use super::log::StoredOperation;
 use super::state::{DurableAppend, StateError};
@@ -26,6 +29,10 @@ pub(super) struct OperationFacts {
     pub(super) attach_receipt_ttl_ms: u64,
     /// Configured non-secret provenance TTL.
     pub(super) receipt_provenance_ttl_ms: u64,
+    /// Whether the receiving connection already tracks this conversation.
+    pub(super) connection_tracking: ConnectionConversationTracking,
+    /// Signed connection-conversation limit with current occupancy.
+    pub(super) connection_capacity: CapacityCounter,
 }
 
 impl OperationFacts {
@@ -39,6 +46,47 @@ impl OperationFacts {
         .map_err(|error| {
             StateError::invariant(format!("validated TTL configuration rejected: {error:?}"))
         })
+    }
+
+    /// Runs the crate's stage-6 semantic connection-conversation capacity
+    /// selector for this operation's connection facts.
+    pub(super) const fn semantic_connection_capacity(&self) -> SemanticConnectionCapacityDecision {
+        select_semantic_connection_capacity(self.connection_tracking, self.connection_capacity)
+    }
+}
+
+/// One operation arm's response paired with its connection-tracking effect.
+///
+/// `newly_tracked` is `true` exactly when the operation COMMITTED and its
+/// stage-6 capacity commit reserved a new connection-conversation slot; every
+/// refusal and replay carries `false`, mirroring the crate's rule that a
+/// refused operation leaves the connection counter unchanged.
+#[derive(Debug)]
+pub(super) struct ArmOutcome {
+    /// Protocol-owned response value.
+    pub(super) value: ServerValue,
+    /// Whether the caller must install this conversation's connection slot.
+    pub(super) newly_tracked: bool,
+}
+
+impl ArmOutcome {
+    /// A refusal or replay: the connection's dispatch map is unchanged.
+    pub(super) const fn respond(value: ServerValue) -> Self {
+        Self {
+            value,
+            newly_tracked: false,
+        }
+    }
+
+    /// A committed operation carrying its stage-6 capacity commit.
+    pub(super) const fn committed(
+        value: ServerValue,
+        capacity: ConnectionConversationCapacityCommit,
+    ) -> Self {
+        Self {
+            value,
+            newly_tracked: capacity.newly_tracked(),
+        }
     }
 }
 

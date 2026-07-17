@@ -22,8 +22,8 @@ use liminal_protocol::wire::{
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
-    ParticipantConnectionContext, ParticipantDispatch, ParticipantSession, dispatch_generic_frame,
-    normalize_configured_frame_limit,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
+    ParticipantSession, dispatch_generic_frame, normalize_configured_frame_limit,
 };
 
 use super::ProductionParticipantHandler;
@@ -80,10 +80,28 @@ fn participant_generic(request: ClientRequest) -> Result<Frame, Box<dyn Error>> 
 }
 
 /// Dispatches one request through the live production seam and decodes the
-/// wire response back into a semantic value.
+/// wire response back into a semantic value, over a throwaway per-request
+/// connection map (each call behaves as a fresh connection).
 pub(super) fn dispatch(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
+    request: ClientRequest,
+) -> Result<ServerValue, Box<dyn Error>> {
+    dispatch_tracked(
+        handler,
+        incarnation,
+        &mut ParticipantConnectionConversations::default(),
+        request,
+    )
+}
+
+/// Dispatches one request through the live production seam over a CALLER-HELD
+/// connection map, so a test can drive one connection's semantic-conversation
+/// occupancy across requests.
+pub(super) fn dispatch_tracked(
+    handler: &ProductionParticipantHandler,
+    incarnation: ConnectionIncarnation,
+    conversations: &mut ParticipantConnectionConversations,
     request: ClientRequest,
 ) -> Result<ServerValue, Box<dyn Error>> {
     let generic = participant_generic(request)?;
@@ -92,6 +110,7 @@ pub(super) fn dispatch(
         true,
         negotiated_session()?,
         ParticipantConnectionContext::new(incarnation),
+        conversations,
         handler,
     );
     let ParticipantDispatch::Respond(response) = outcome else {

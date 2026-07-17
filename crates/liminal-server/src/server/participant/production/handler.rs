@@ -17,7 +17,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::{
-    ObserverProgressTrackDecision, ObserverRecoveryAggregate, ObserverRecoveryTransactionDecision,
+    CapacityCounter, ObserverProgressTrackDecision, ObserverRecoveryAggregate,
+    ObserverRecoveryTransactionDecision,
 };
 use liminal_protocol::wire::{
     ClientRequest, ConversationId, ObserverRecoveryHandshake, ObserverRecoveryResponse, ServerValue,
@@ -25,10 +26,11 @@ use liminal_protocol::wire::{
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
-    ParticipantConnectionContext, ParticipantSemanticError, ParticipantSemanticHandler,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticError,
+    ParticipantSemanticHandler,
 };
 
-use super::barrier::OperationFacts;
+use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
 use super::observer::{ObserverLog, ObserverRow};
@@ -93,8 +95,8 @@ impl ProductionParticipantHandler {
         operation: impl FnOnce(
             &mut ConversationAuthority,
             &dyn DurableAppend,
-        ) -> Result<ServerValue, StateError>,
-    ) -> Result<ServerValue, ParticipantSemanticError> {
+        ) -> Result<ArmOutcome, StateError>,
+    ) -> Result<ArmOutcome, ParticipantSemanticError> {
         let cell = self.cell(conversation_id)?;
         let mut owner: MutexGuard<'_, Option<ConversationAuthority>> =
             cell.lock()
@@ -192,17 +194,33 @@ impl ProductionParticipantHandler {
     fn operation_facts(
         &self,
         context: ParticipantConnectionContext,
+        conversation_id: ConversationId,
+        conversations: &ParticipantConnectionConversations,
     ) -> Result<OperationFacts, ParticipantSemanticError> {
         let now_ms =
             facts::now_unix_millis().map_err(|error| ParticipantSemanticError::Internal {
                 message: format!("participant clock read failed: {error}"),
             })?;
+        // The connection map only grows through capacity commits, so its
+        // occupancy always fits the validated nonzero signed limit; a counter
+        // rejection here is genuine internal drift and fails closed.
+        let connection_capacity = CapacityCounter::try_new(
+            self.config.max_semantic_conversations_per_connection,
+            conversations.occupied(),
+        )
+        .map_err(|error| ParticipantSemanticError::Internal {
+            message: format!(
+                "connection-conversation occupancy disagrees with its signed limit: {error:?}"
+            ),
+        })?;
         Ok(OperationFacts {
             receiving_incarnation: context.connection_incarnation(),
             now_ms,
             identity_slots: self.config.identity_slots,
             attach_receipt_ttl_ms: self.config.attach_receipt_ttl_ms,
             receipt_provenance_ttl_ms: self.config.receipt_provenance_ttl_ms,
+            connection_tracking: conversations.tracking(conversation_id),
+            connection_capacity,
         })
     }
 
@@ -213,7 +231,7 @@ impl ProductionParticipantHandler {
     /// before installation — a crash leaves the complete plan or none.
     fn apply_observer_recovery(
         &self,
-        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
         request: &ObserverRecoveryHandshake,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         // Crash-window repair pre-pass: every named conversation's observer
@@ -224,9 +242,11 @@ impl ProductionParticipantHandler {
         for refusal in &request.observer_refusals {
             self.ensure_tracking_from_log(refusal.conversation_id)?;
         }
-        // Connection-conversation tracking derived from binding authority:
-        // the conversations whose live binding epoch names this connection.
-        let tracked = self.bound_conversations(context)?;
+        // Connection-conversation occupancy is the SAME connection-local
+        // dispatch map the semantic stage-6 gate consumes, so the batch
+        // preflight and every semantic operation count against one signed
+        // bound.
+        let tracked = conversations.tracked_conversations();
         let observer_log = ObserverLog::new(Arc::clone(&self.store));
         let mut owner = self
             .observer
@@ -264,12 +284,18 @@ impl ProductionParticipantHandler {
                     .iter()
                     .map(|arm| (arm.conversation_id(), arm.refused_epoch()))
                     .collect::<Vec<_>>();
-                match block_on(observer_log.append(&ObserverRow::Arms { arms }, head))
+                match block_on(observer_log.append(&ObserverRow::Arms { arms: arms.clone() }, head))
                     .map_err(|error| bridge_error(&error))?
                 {
                     Ok(()) => {
                         let (aggregate, outcome) = transaction.commit();
                         *owner = Some((aggregate, head.saturating_add(1)));
+                        // Every armed refusal-only recipient occupies one
+                        // connection-conversation slot (the batch preflight
+                        // already admitted them against the signed bound).
+                        for (conversation_id, _) in arms {
+                            conversations.track(conversation_id);
+                        }
                         Ok(ObserverRecoveryResponse::accepted(outcome).into_server_value())
                     }
                     Err(error) => {
@@ -375,57 +401,25 @@ impl ProductionParticipantHandler {
         }
         Ok(())
     }
+}
 
-    /// Conversations whose current live binding names this connection.
-    ///
-    /// Binding occupancy is derived from DURABLE reality: a registry cell
-    /// whose in-memory owner was discarded by a failed operation is replayed
-    /// from its log before counting, so the observer-recovery capacity check
-    /// never under-reports a durably bound conversation.
-    fn bound_conversations(
+impl ProductionParticipantHandler {
+    /// Runs one conversation-scoped operation arm and applies its
+    /// connection-tracking effect to the connection's dispatch map.
+    fn conversation_operation(
         &self,
-        context: ParticipantConnectionContext,
-    ) -> Result<Vec<ConversationId>, ParticipantSemanticError> {
-        let cells: Vec<(ConversationId, Arc<Mutex<Option<ConversationAuthority>>>)> = {
-            let conversations =
-                self.conversations
-                    .lock()
-                    .map_err(|_| ParticipantSemanticError::Internal {
-                        message: "participant conversation registry lock is poisoned".to_owned(),
-                    })?;
-            conversations
-                .iter()
-                .map(|(conversation_id, cell)| (*conversation_id, Arc::clone(cell)))
-                .collect()
-        };
-        let mut bound = Vec::new();
-        for (conversation_id, cell) in cells {
-            let mut owner = cell
-                .lock()
-                .map_err(|_| ParticipantSemanticError::Internal {
-                    message: format!(
-                        "participant conversation {conversation_id} owner lock is poisoned"
-                    ),
-                })?;
-            if owner.is_none() {
-                let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
-                *owner = Some(self.replay_and_repair(conversation_id, &log)?);
-            }
-            let Some(authority) = owner.as_ref() else {
-                return Err(ParticipantSemanticError::Internal {
-                    message: format!("participant conversation {conversation_id} owner is absent"),
-                });
-            };
-            if !matches!(
-                authority.binding_slot_occupancy(context.connection_incarnation()),
-                liminal_protocol::lifecycle::BindingSlotOccupancy::Empty
-            ) {
-                bound.push(conversation_id);
-            }
-            drop(owner);
+        conversation_id: ConversationId,
+        conversations: &mut ParticipantConnectionConversations,
+        operation: impl FnOnce(
+            &mut ConversationAuthority,
+            &dyn DurableAppend,
+        ) -> Result<ArmOutcome, StateError>,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        let outcome = self.with_conversation(conversation_id, operation)?;
+        if outcome.newly_tracked {
+            conversations.track(conversation_id);
         }
-        bound.sort_unstable();
-        Ok(bound)
+        Ok(outcome.value)
     }
 }
 
@@ -433,15 +427,20 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
     fn handle(
         &self,
         context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         match request {
             ClientRequest::Enrollment(request) => {
-                let operation_facts = self.operation_facts(context)?;
-                let value =
-                    self.with_conversation(request.conversation_id, |authority, appender| {
+                let operation_facts =
+                    self.operation_facts(context, request.conversation_id, conversations)?;
+                let value = self.conversation_operation(
+                    request.conversation_id,
+                    conversations,
+                    |authority, appender| {
                         authority.apply_enrollment(&request, &operation_facts, appender)
-                    })?;
+                    },
+                )?;
                 // Only a fresh commit registers observer tracking; refusals
                 // and replays leave the observer log untouched (an already
                 // enrolled conversation was registered at its own commit or
@@ -452,40 +451,67 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                 Ok(value)
             }
             ClientRequest::CredentialAttach(request) => {
-                let operation_facts = self.operation_facts(context)?;
-                self.with_conversation(request.conversation_id, |authority, appender| {
-                    authority.apply_credential_attach(&request, &operation_facts, appender)
-                })
+                let operation_facts =
+                    self.operation_facts(context, request.conversation_id, conversations)?;
+                self.conversation_operation(
+                    request.conversation_id,
+                    conversations,
+                    |authority, appender| {
+                        authority.apply_credential_attach(&request, &operation_facts, appender)
+                    },
+                )
             }
             ClientRequest::Detach(request) => {
-                let operation_facts = self.operation_facts(context)?;
-                self.with_conversation(request.conversation_id, |authority, appender| {
-                    authority.apply_detach(&request, &operation_facts, appender)
-                })
+                let operation_facts =
+                    self.operation_facts(context, request.conversation_id, conversations)?;
+                self.conversation_operation(
+                    request.conversation_id,
+                    conversations,
+                    |authority, appender| {
+                        authority.apply_detach(&request, &operation_facts, appender)
+                    },
+                )
             }
             ClientRequest::ParticipantAck(request) => {
-                self.with_conversation(request.conversation_id, |authority, appender| {
-                    authority.apply_ack(&request, context.connection_incarnation(), appender)
-                })
+                let operation_facts =
+                    self.operation_facts(context, request.conversation_id, conversations)?;
+                self.conversation_operation(
+                    request.conversation_id,
+                    conversations,
+                    |authority, appender| authority.apply_ack(&request, &operation_facts, appender),
+                )
             }
             ClientRequest::MarkerAck(request) => {
-                self.with_conversation(request.conversation_id, |authority, _appender| {
-                    authority.apply_marker_ack(&request, context.connection_incarnation())
-                })
+                let operation_facts =
+                    self.operation_facts(context, request.conversation_id, conversations)?;
+                self.conversation_operation(
+                    request.conversation_id,
+                    conversations,
+                    |authority, _appender| authority.apply_marker_ack(&request, &operation_facts),
+                )
             }
             ClientRequest::Leave(request) => {
-                self.with_conversation(request.conversation_id, |authority, _appender| {
-                    authority.apply_leave(&request, context.connection_incarnation())
-                })
+                let operation_facts =
+                    self.operation_facts(context, request.conversation_id, conversations)?;
+                self.conversation_operation(
+                    request.conversation_id,
+                    conversations,
+                    |authority, _appender| authority.apply_leave(&request, &operation_facts),
+                )
             }
             ClientRequest::RecordAdmission(request) => {
-                let operation_facts = self.operation_facts(context)?;
-                self.with_conversation(request.conversation_id, |authority, _appender| {
-                    authority.apply_record_admission(&request, &operation_facts)
-                })
+                let operation_facts =
+                    self.operation_facts(context, request.conversation_id, conversations)?;
+                self.conversation_operation(
+                    request.conversation_id,
+                    conversations,
+                    |authority, _appender| {
+                        authority.apply_record_admission(&request, &operation_facts)
+                    },
+                )
             }
             ClientRequest::ObserverRecovery(request) => {
-                self.apply_observer_recovery(context, &request)
+                self.apply_observer_recovery(conversations, &request)
             }
         }
     }

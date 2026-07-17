@@ -185,7 +185,7 @@ fn connect_once(
 /// capability-missing frames receive the crate's exact typed rejection.
 fn participant_frame_response(
     runtime: &ConnectionRuntime,
-    state: &ConnectionProcessState,
+    state: &mut ConnectionProcessState,
     frame: &Frame,
 ) -> FrameAction {
     match (runtime.participant_service(), state.connection_incarnation) {
@@ -195,6 +195,7 @@ fn participant_frame_response(
                 state.authenticated,
                 state.participant_session,
                 ParticipantConnectionContext::new(connection_incarnation),
+                &mut state.participant_conversations,
                 service.handler(),
             ) {
                 ParticipantDispatch::NotParticipant => FrameAction::NoResponse,

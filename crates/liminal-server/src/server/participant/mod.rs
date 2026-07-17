@@ -47,9 +47,9 @@ mod incarnation_stream_tests;
 mod transport_tests;
 
 pub use dispatch::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantDispatch,
-    ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
-    dispatch_generic_frame,
+    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantDispatch, ParticipantDispatchError, ParticipantSemanticError,
+    ParticipantSemanticHandler, dispatch_generic_frame,
 };
 pub(crate) use production::{ProductionParticipantHandler, constant_time_eq};
 pub use transport::{

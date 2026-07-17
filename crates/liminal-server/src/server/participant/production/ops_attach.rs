@@ -18,8 +18,9 @@ use liminal_protocol::lifecycle::{
     BindingSlotDecision, BindingState, ClosureState, CommittedBindingTerminalPosition,
     CredentialAttachLiveReceipt, CredentialAttachLookupResult, CredentialAttachProvenance,
     CredentialAttachTokenPhase, MarkerProofDecision, MarkerProofInput, MarkerProofState,
-    PresentedIdentity, ResolvedIdentity, commit_attach, decide_attached_operation,
-    lookup_credential_attach, select_credential_attach_binding_slot, select_marker_proof,
+    PresentedIdentity, ResolvedIdentity, SemanticConnectionCapacityDecision, commit_attach,
+    decide_attached_operation, lookup_credential_attach, select_credential_attach_binding_slot,
+    select_marker_proof,
 };
 use liminal_protocol::wire::{
     AttachBound, AttachEnvelope, AttachSecret,
@@ -29,7 +30,7 @@ use liminal_protocol::wire::{
     ReceiptExpiryReason, ServerValue,
 };
 
-use super::barrier::{CommitMode, OperationFacts, commit_through_barrier};
+use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
 use super::log::{StoredAttachAllocation, StoredAttachRequest, StoredOperation};
 use super::state::{
@@ -48,10 +49,12 @@ impl ConversationAuthority {
         request: &CredentialAttachRequest,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
-    ) -> Result<ServerValue, StateError> {
+    ) -> Result<ArmOutcome, StateError> {
         let envelope = attach_envelope(request);
         let Some(slot) = self.slots.get(&request.participant_id) else {
-            return Ok(CredentialAttachResponse::participant_unknown(envelope).into_server_value());
+            return Ok(ArmOutcome::respond(
+                CredentialAttachResponse::participant_unknown(envelope).into_server_value(),
+            ));
         };
         let now = u128::from(operation_facts.now_ms);
         let (token_phase, secret_proof) = slot.attach_token_phase(request, now);
@@ -63,20 +66,35 @@ impl ConversationAuthority {
             secret_proof,
         );
         if !matches!(lookup, CredentialAttachLookupResult::AuthorizedFresh { .. }) {
-            return credential_attach_refusal(&lookup, envelope, slot);
+            return credential_attach_refusal(&lookup, envelope, slot).map(ArmOutcome::respond);
         }
+        // Stage 6, first half: connection-conversation capacity (register
+        // row 5641) — after the lookup stages, before binding-slot occupancy,
+        // the crate's frozen stage order.
+        let capacity = match operation_facts.semantic_connection_capacity() {
+            SemanticConnectionCapacityDecision::Commit(value) => value,
+            SemanticConnectionCapacityDecision::Respond { limit } => {
+                return Ok(ArmOutcome::respond(
+                    CredentialAttachResponse::connection_conversation_capacity_exceeded(
+                        envelope, limit,
+                    )
+                    .into_server_value(),
+                ));
+            }
+        };
         if let BindingSlotDecision::Respond(response) = select_credential_attach_binding_slot(
             request,
             self.binding_slot_occupancy(operation_facts.receiving_incarnation),
         ) {
-            return Ok(response.into_server_value());
+            return Ok(ArmOutcome::respond(response.into_server_value()));
         }
         // A marker-bearing attach is a fenced-recovery presentation: classify
         // it through the crate's total marker-proof selector against the
         // factual (empty) delivery state — a typed refusal, never a
         // connection-fatal invariant.
         if request.accept_marker_delivery_seq.is_some() {
-            return marker_bearing_attach_refusal(request, slot, operation_facts);
+            return marker_bearing_attach_refusal(request, slot, operation_facts)
+                .map(ArmOutcome::respond);
         }
         // Attach mode from binding authority (contract R-C1.3): a bound slot
         // for the SAME participant supersedes — one ordered
@@ -125,7 +143,10 @@ impl ConversationAuthority {
             superseded_terminal_seq,
         };
         let outcome = self.attach_commit(request, &allocation, CommitMode::Live(appender))?;
-        Ok(CredentialAttachResponse::attach_bound(outcome).into_server_value())
+        Ok(ArmOutcome::committed(
+            CredentialAttachResponse::attach_bound(outcome).into_server_value(),
+            capacity,
+        ))
     }
 
     /// Replays one committed attach entry from its stored inputs.

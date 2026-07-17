@@ -1,39 +1,50 @@
 //! Leave and ordinary record-admission arms.
 //!
 //! Both operations' COMMIT paths consume the conversation's validated
-//! claim-frontier authority, which this binding does not yet acquire (the A1
-//! whole-conversation restore capsule for a live conversation is the next
-//! unit). Leave therefore classifies every refusal arm through the shared
-//! lookup and fails closed only on an authorized Leave; record admission
-//! fails closed entirely, because even its refusal classification runs
-//! inside the frontier-consuming total selector. Every failure is a typed
-//! diagnostic — no silent narrowing, no hand-built outcome.
+//! claim-frontier authority, which this binding does not yet acquire: the
+//! crate exposes no frontier transitions for the attach/detach/ack
+//! operations this binding already commits, so a live [`ClaimFrontiers`]
+//! value cannot be maintained across the conversation's history, and the
+//! whole-conversation live-restore capsule is a separate protocol-crate
+//! unit (see the dated amendment in `docs/design/LP-GAP-CLOSURE-GOAL.md`).
+//!
+//! Until that unit lands, both arms classify every frozen pre-commit stage
+//! through crate selectors — lookup stages 2-5 and the stage-6
+//! connection-conversation capacity gate — and fail closed ONLY on a fully
+//! authorized commit, with a typed diagnostic. No lifecycle outcome is
+//! hand-built and no refusal is silently narrowed.
+//!
+//! [`ClaimFrontiers`]: liminal_protocol::lifecycle::ClaimFrontiers
 
 use liminal_protocol::lifecycle::{
-    BindingState, LeaveLookupResult, LeaveSecretProof, PresentedIdentity, lookup_leave,
+    BindingState, LeaveLookupResult, LeaveSecretProof, PresentedIdentity,
+    SemanticConnectionCapacityDecision, classify_record_admission_binding, lookup_leave,
 };
 use liminal_protocol::wire::{
-    BindingEpoch, ConnectionIncarnation, LeaveEnvelope, LeaveRequest, LeaveResponse,
-    RecordAdmission, ServerValue,
+    BindingEpoch, LeaveEnvelope, LeaveRequest, LeaveResponse, RecordAdmission,
+    RecordAdmissionResponse,
 };
 
-use super::barrier::OperationFacts;
+use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::{self, Digest};
 use super::state::{ConversationAuthority, StateError};
 
 impl ConversationAuthority {
     /// Applies one terminal Leave request.
     ///
-    /// Refusal arms are total through the shared lookup; an authorized Leave
-    /// fails closed until the claim-frontier acquisition lands.
+    /// Refusal arms are total through the shared lookup and the stage-6
+    /// capacity gate; an authorized Leave fails closed until the
+    /// claim-frontier acquisition lands.
     pub(super) fn apply_leave(
         &self,
         request: &LeaveRequest,
-        receiving_incarnation: ConnectionIncarnation,
-    ) -> Result<ServerValue, StateError> {
+        operation_facts: &OperationFacts,
+    ) -> Result<ArmOutcome, StateError> {
         let envelope = leave_envelope(request);
-        let receiving_epoch =
-            BindingEpoch::new(receiving_incarnation, request.capability_generation);
+        let receiving_epoch = BindingEpoch::new(
+            operation_facts.receiving_incarnation,
+            request.capability_generation,
+        );
         // A missing slot is presented to the crate's lookup as an ABSENT
         // identity with a detached placeholder binding — the same pattern the
         // ack arms use — so participant-unknown classification has exactly one
@@ -85,28 +96,79 @@ impl ConversationAuthority {
             }
             LeaveLookupResult::AuthorizedBound { .. }
             | LeaveLookupResult::AuthorizedDetached { .. } => {
+                // Stage 6 (register row 5641) precedes the authorized commit,
+                // so an untracked conversation over a full connection map
+                // still receives its typed refusal here.
+                if let SemanticConnectionCapacityDecision::Respond { limit } =
+                    operation_facts.semantic_connection_capacity()
+                {
+                    return Ok(ArmOutcome::respond(
+                        LeaveResponse::connection_conversation_capacity_exceeded(envelope, limit)
+                            .into_server_value(),
+                    ));
+                }
                 return Err(StateError::invariant(
-                    "authorized leave requires the claim-frontier authority; the A1 frontier \
-                     acquisition is not wired for leave in this binding yet",
+                    "authorized leave requires the claim-frontier authority; the live \
+                     claim-frontier acquisition is a separate protocol-crate unit (see the \
+                     LP-GAP-CLOSURE amendment)",
                 ));
             }
         };
-        Ok(response.into_server_value())
+        Ok(ArmOutcome::respond(response.into_server_value()))
     }
 
     /// Applies one ordinary record admission.
     ///
-    /// Fails closed before any durable touch: no genesis, no append, no
-    /// registry residue survives this arm.
+    /// Every frozen pre-commit stage this binding can honestly evaluate runs
+    /// through crate selectors: the binding-required lookup rows (stages
+    /// 2-5) through [`classify_record_admission_binding`] and the stage-6
+    /// connection-conversation capacity gate. A fully authorized record
+    /// fails closed BEFORE any durable touch — no genesis, no append, no
+    /// registry residue — because the later stages run inside the crate's
+    /// frontier-consuming total selector.
     pub(super) fn apply_record_admission(
         &self,
         request: &RecordAdmission,
         operation_facts: &OperationFacts,
-    ) -> Result<ServerValue, StateError> {
-        let _ = (request, operation_facts);
+    ) -> Result<ArmOutcome, StateError> {
+        let receiving_epoch = BindingEpoch::new(
+            operation_facts.receiving_incarnation,
+            request.capability_generation,
+        );
+        let binding_detached = BindingState::Detached;
+        let (identity, binding) = self.slots.get(&request.participant_id).map_or(
+            (
+                PresentedIdentity::<Digest, Digest, Digest>::Absent,
+                &binding_detached,
+            ),
+            |slot| {
+                (
+                    PresentedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
+                    &slot.binding,
+                )
+            },
+        );
+        if let Some(response) =
+            classify_record_admission_binding(identity, binding, receiving_epoch, request)
+        {
+            return Ok(ArmOutcome::respond(response.into_server_value()));
+        }
+        // Stage 6 (register row 5641) precedes every later admission stage.
+        if let SemanticConnectionCapacityDecision::Respond { limit } =
+            operation_facts.semantic_connection_capacity()
+        {
+            return Ok(ArmOutcome::respond(
+                RecordAdmissionResponse::connection_conversation_capacity_exceeded(
+                    record_envelope(request),
+                    limit,
+                )
+                .into_server_value(),
+            ));
+        }
         Err(StateError::invariant(format!(
-            "record admission for conversation {} requires the claim-frontier authority; the A1 \
-             frontier acquisition is not wired for records in this binding yet",
+            "authorized record admission for conversation {} requires the claim-frontier \
+             authority; the live claim-frontier acquisition is a separate protocol-crate unit \
+             (see the LP-GAP-CLOSURE amendment)",
             self.conversation_id
         )))
     }
@@ -119,5 +181,16 @@ const fn leave_envelope(request: &LeaveRequest) -> LeaveEnvelope {
         participant_id: request.participant_id,
         capability_generation: request.capability_generation,
         leave_attempt_token: request.leave_attempt_token,
+    }
+}
+
+/// Builds the echo envelope of one ordinary record admission.
+const fn record_envelope(
+    request: &RecordAdmission,
+) -> liminal_protocol::wire::RecordAdmissionEnvelope {
+    liminal_protocol::wire::RecordAdmissionEnvelope {
+        conversation_id: request.conversation_id,
+        participant_id: request.participant_id,
+        capability_generation: request.capability_generation,
     }
 }

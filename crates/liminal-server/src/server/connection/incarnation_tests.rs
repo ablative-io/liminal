@@ -19,8 +19,8 @@ use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
 use crate::server::listener::ServerListener;
 use crate::server::participant::incarnation_stream::IncarnationStream;
 use crate::server::participant::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantSemanticError,
-    ParticipantSemanticHandler,
+    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
 fn store() -> Result<Arc<dyn DurableStore>, Box<dyn std::error::Error>> {
@@ -65,6 +65,7 @@ impl ParticipantSemanticHandler for UnavailableParticipantHandler {
     fn handle(
         &self,
         _context: ParticipantConnectionContext,
+        _conversations: &mut ParticipantConnectionConversations,
         _request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         Err(ParticipantSemanticError::Unavailable)

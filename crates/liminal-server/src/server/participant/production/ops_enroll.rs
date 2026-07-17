@@ -16,8 +16,9 @@ use liminal_protocol::lifecycle::{
     BindingSlotDecision, CapacityCounter, CapacityCounterInvariantError, DetachCell,
     EnrollmentCommitParameters, EnrollmentFingerprint, EnrollmentLiveReceipt,
     EnrollmentLookupResult, EnrollmentProvenance, EnrollmentTokenPhase,
-    ParticipantSlotAllocatorProof, ResolvedIdentity, commit_enrollment, decide_enrolled_operation,
-    lookup_enrollment, select_enrollment_binding_slot,
+    ParticipantSlotAllocatorProof, ResolvedIdentity, SemanticConnectionCapacityDecision,
+    commit_enrollment, decide_enrolled_operation, lookup_enrollment,
+    select_enrollment_binding_slot,
 };
 use liminal_protocol::wire::{
     AttachSecret, BindingEpoch, EnrollBound, EnrollmentEnvelope, EnrollmentRequest,
@@ -25,7 +26,7 @@ use liminal_protocol::wire::{
     ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason, ServerValue,
 };
 
-use super::barrier::{CommitMode, OperationFacts, commit_through_barrier};
+use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
 use super::log::{StoredEnrollmentAllocation, StoredEnrollmentRequest, StoredOperation};
 use super::state::{ConversationAuthority, DurableAppend, Slot, StateError};
@@ -65,19 +66,36 @@ impl ConversationAuthority {
         request: &EnrollmentRequest,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
-    ) -> Result<ServerValue, StateError> {
+    ) -> Result<ArmOutcome, StateError> {
         let token_bytes = request.enrollment_token.into_bytes();
         if let Some(participant_id) = self.tokens.get(&token_bytes).copied() {
             let slot = self.slots.get(&participant_id).ok_or_else(|| {
                 StateError::invariant("enrollment token maps to a missing participant slot")
             })?;
-            return enrollment_replay_response(slot, request, operation_facts);
+            return enrollment_replay_response(slot, request, operation_facts)
+                .map(ArmOutcome::respond);
         }
+        // Stage 6, first half: connection-conversation capacity for the
+        // first semantic operation of an untracked conversation (register
+        // row 5641), AFTER token-replay lookup and BEFORE the binding slot —
+        // the crate's frozen order in `apply_initial_enrollment`.
+        let capacity = match operation_facts.semantic_connection_capacity() {
+            SemanticConnectionCapacityDecision::Commit(value) => value,
+            SemanticConnectionCapacityDecision::Respond { limit } => {
+                return Ok(ArmOutcome::respond(
+                    EnrollmentResponse::connection_conversation_capacity_exceeded(
+                        enrollment_envelope(request),
+                        limit,
+                    )
+                    .into_server_value(),
+                ));
+            }
+        };
         if let BindingSlotDecision::Respond(response) = select_enrollment_binding_slot(
             request,
             self.binding_slot_occupancy(operation_facts.receiving_incarnation),
         ) {
-            return Ok(response.into_server_value());
+            return Ok(ArmOutcome::respond(response.into_server_value()));
         }
         // Stage-8 conversation-scope identity capacity (contract: the
         // monotone `next_participant_index` in `0..=I`; when it equals `I`
@@ -93,7 +111,7 @@ impl ConversationAuthority {
             operation_facts.identity_slots,
             self.next_participant,
         )? {
-            return Ok(response.into_server_value());
+            return Ok(ArmOutcome::respond(response.into_server_value()));
         }
 
         let deadlines = operation_facts.deadlines()?;
@@ -114,7 +132,10 @@ impl ConversationAuthority {
             enrollment_fingerprint: facts::enrollment_fingerprint(request.enrollment_token),
         };
         let outcome = self.enroll_commit(request, &allocation, CommitMode::Live(appender))?;
-        Ok(EnrollmentResponse::enroll_bound(outcome).into_server_value())
+        Ok(ArmOutcome::committed(
+            EnrollmentResponse::enroll_bound(outcome).into_server_value(),
+            capacity,
+        ))
     }
 
     /// Replays one committed enrollment entry from its stored inputs.

@@ -9,16 +9,17 @@
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, BindingState, CommittedBindingTerminalPosition, DetachCell,
     DetachLookupContext, DetachLookupResult, DetachTokenResolution, MarkerAckDecision,
-    MarkerProofState, ParticipantAckDecision, PresentedIdentity, ResolvedIdentity, commit_detach,
-    decide_detached_operation, lookup_detach,
+    MarkerProofState, ParticipantAckDecision, PresentedIdentity, ResolvedIdentity,
+    SemanticConnectionCapacityDecision, commit_detach, decide_detached_operation, lookup_detach,
 };
 use liminal_protocol::lifecycle::{apply_marker_ack, apply_participant_ack};
 use liminal_protocol::wire::{
-    BindingEpoch, ConnectionIncarnation, DetachEnvelope, DetachRequest, DetachResponse, MarkerAck,
-    ParticipantAck, ParticipantAckResponse, ServerValue,
+    BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse, MarkerAck, MarkerAckEnvelope,
+    MarkerAckResponse, ParticipantAck, ParticipantAckEnvelope, ParticipantAckResponse,
+    ServerDiscriminant, ServerValue,
 };
 
-use super::barrier::{CommitMode, OperationFacts, commit_through_barrier};
+use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
 use super::log::{
     OperationLog, StoredAck, StoredBindingEpoch, StoredDetachRequest, StoredOperation,
@@ -32,7 +33,7 @@ impl ConversationAuthority {
         request: &DetachRequest,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
-    ) -> Result<ServerValue, StateError> {
+    ) -> Result<ArmOutcome, StateError> {
         let envelope = detach_envelope(request);
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
@@ -40,7 +41,9 @@ impl ConversationAuthority {
         );
         let verifier = facts::detach_request_verifier(request);
         let Some(slot) = self.slots.get(&request.participant_id) else {
-            return Ok(DetachResponse::participant_unknown(envelope).into_server_value());
+            return Ok(ArmOutcome::respond(
+                DetachResponse::participant_unknown(envelope).into_server_value(),
+            ));
         };
         let token_resolution = if slot.exact_detach_token == Some(request.detach_attempt_token) {
             DetachTokenResolution::Exact(ResolvedIdentity::<Digest, Digest, Digest>::Live(
@@ -62,19 +65,29 @@ impl ConversationAuthority {
         match lookup {
             DetachLookupResult::Authorized { .. } => {}
             DetachLookupResult::ParticipantUnknown(_) => {
-                return Ok(DetachResponse::participant_unknown(envelope).into_server_value());
+                return Ok(ArmOutcome::respond(
+                    DetachResponse::participant_unknown(envelope).into_server_value(),
+                ));
             }
             DetachLookupResult::NoBinding(_) => {
-                return Ok(DetachResponse::no_binding(envelope).into_server_value());
+                return Ok(ArmOutcome::respond(
+                    DetachResponse::no_binding(envelope).into_server_value(),
+                ));
             }
             DetachLookupResult::StaleAuthority(value) => {
-                return Ok(DetachResponse::stale_authority(value).into_server_value());
+                return Ok(ArmOutcome::respond(
+                    DetachResponse::stale_authority(value).into_server_value(),
+                ));
             }
             DetachLookupResult::DetachInProgress(value) => {
-                return Ok(DetachResponse::detach_in_progress(value).into_server_value());
+                return Ok(ArmOutcome::respond(
+                    DetachResponse::detach_in_progress(value).into_server_value(),
+                ));
             }
             DetachLookupResult::DetachCommitted(value) => {
-                return Ok(DetachResponse::detach_committed(value).into_server_value());
+                return Ok(ArmOutcome::respond(
+                    DetachResponse::detach_committed(value).into_server_value(),
+                ));
             }
             DetachLookupResult::Retired(_) => {
                 return Err(StateError::invariant(
@@ -87,6 +100,17 @@ impl ConversationAuthority {
                 ));
             }
         }
+        // Stage 6: connection-conversation capacity (register row 5641) —
+        // after the lookup stages, before the committing transaction.
+        let capacity = match operation_facts.semantic_connection_capacity() {
+            SemanticConnectionCapacityDecision::Commit(value) => value,
+            SemanticConnectionCapacityDecision::Respond { limit } => {
+                return Ok(ArmOutcome::respond(
+                    DetachResponse::connection_conversation_capacity_exceeded(envelope, limit)
+                        .into_server_value(),
+                ));
+            }
+        };
         let (terminal_order, terminal_seq) = self.allocate_position()?;
         let outcome = self.detach_commit(
             request,
@@ -96,7 +120,10 @@ impl ConversationAuthority {
             terminal_seq,
             CommitMode::Live(appender),
         )?;
-        Ok(DetachResponse::detach_committed(outcome).into_server_value())
+        Ok(ArmOutcome::committed(
+            DetachResponse::detach_committed(outcome).into_server_value(),
+            capacity,
+        ))
     }
 
     /// Replays one committed detach entry from its stored inputs.
@@ -217,15 +244,20 @@ impl ConversationAuthority {
     pub(super) fn apply_ack(
         &mut self,
         request: &ParticipantAck,
-        receiving_incarnation: ConnectionIncarnation,
+        operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
-    ) -> Result<ServerValue, StateError> {
-        let receiving_epoch =
-            BindingEpoch::new(receiving_incarnation, request.capability_generation);
+    ) -> Result<ArmOutcome, StateError> {
+        let receiving_epoch = BindingEpoch::new(
+            operation_facts.receiving_incarnation,
+            request.capability_generation,
+        );
         let contiguous = self.contiguously_available_through();
-        let outcome =
-            self.ack_commit(request, receiving_epoch.into(), contiguous, Some(appender))?;
-        Ok(outcome)
+        self.ack_commit(
+            request,
+            receiving_epoch.into(),
+            contiguous,
+            Some((operation_facts, appender)),
+        )
     }
 
     /// Replays one committed zero-debt ack entry from its stored inputs.
@@ -236,7 +268,7 @@ impl ConversationAuthority {
         contiguously_available_through: u64,
     ) -> Result<(), StateError> {
         let request = request.to_request()?;
-        let value = self.ack_commit(
+        let outcome = self.ack_commit(
             &request,
             receiving_epoch,
             contiguously_available_through,
@@ -244,7 +276,7 @@ impl ConversationAuthority {
         )?;
         // A durable ack entry is appended only for a committed decision, so a
         // replay that classifies as anything else diverged from history.
-        if !matches!(value, ServerValue::AckCommitted(_)) {
+        if !matches!(outcome.value, ServerValue::AckCommitted(_)) {
             return Err(StateError::invariant(
                 "durable zero-debt ack entry replayed to a non-committed decision",
             ));
@@ -255,15 +287,19 @@ impl ConversationAuthority {
 
     /// Shared zero-debt ack core: total selection plus the committed arm.
     ///
-    /// Live mode appends the entry (and advances the log head) only for the
-    /// committed decision; refusal decisions are pure responses.
+    /// Live mode carries the operation facts for the frozen stage-6
+    /// connection-conversation capacity gate and appends the entry (advancing
+    /// the log head) only for a capacity-admitted committed decision; replay
+    /// mode (`live: None`) reproduces the durable classification without any
+    /// connection-scoped gating, because the connection facts of the original
+    /// commit are not durable classification inputs.
     fn ack_commit(
         &mut self,
         request: &ParticipantAck,
         receiving_epoch: StoredBindingEpoch,
         contiguously_available_through: u64,
-        appender: Option<&dyn DurableAppend>,
-    ) -> Result<ServerValue, StateError> {
+        live: Option<(&OperationFacts, &dyn DurableAppend)>,
+    ) -> Result<ArmOutcome, StateError> {
         let receiving = receiving_epoch.to_epoch()?;
         let identity = self
             .slots
@@ -284,9 +320,56 @@ impl ConversationAuthority {
             contiguously_available_through,
         );
         match decision {
-            ParticipantAckDecision::Respond(response) => Ok(response.into_server_value()),
+            ParticipantAckDecision::Respond(response) => {
+                // The crate's total ack selector conflates the frozen stages:
+                // its lookup rows (2-5) precede stage-6 capacity, while its
+                // continuity rows (stage 7) follow it. The split below is a
+                // TRANSCRIPTION of the register's stage numbers over the
+                // typed discriminants — no lifecycle rule is re-derived.
+                let stage_seven = matches!(
+                    response.discriminant(),
+                    ServerDiscriminant::AckNoOp
+                        | ServerDiscriminant::AckGap
+                        | ServerDiscriminant::AckRegression
+                );
+                if stage_seven {
+                    if let Some((operation_facts, _)) = live {
+                        if let SemanticConnectionCapacityDecision::Respond { limit } =
+                            operation_facts.semantic_connection_capacity()
+                        {
+                            return Ok(ArmOutcome::respond(
+                                ParticipantAckResponse::connection_conversation_capacity_exceeded(
+                                    participant_ack_envelope(request),
+                                    limit,
+                                )
+                                .into_server_value(),
+                            ));
+                        }
+                    }
+                }
+                Ok(ArmOutcome::respond(response.into_server_value()))
+            }
             ParticipantAckDecision::Commit(commit) => {
-                if let Some(appender) = appender {
+                let mut newly_tracked = false;
+                if let Some((operation_facts, appender)) = live {
+                    // Stage 6 precedes the stage-13 commit: an untracked
+                    // conversation over a full connection map refuses before
+                    // anything durable or cursor-visible happens (the unused
+                    // commit decision is pure state that is simply not
+                    // applied).
+                    let capacity = match operation_facts.semantic_connection_capacity() {
+                        SemanticConnectionCapacityDecision::Commit(value) => value,
+                        SemanticConnectionCapacityDecision::Respond { limit } => {
+                            return Ok(ArmOutcome::respond(
+                                ParticipantAckResponse::connection_conversation_capacity_exceeded(
+                                    participant_ack_envelope(request),
+                                    limit,
+                                )
+                                .into_server_value(),
+                            ));
+                        }
+                    };
+                    newly_tracked = capacity.newly_tracked();
                     let operation = StoredOperation::ZeroDebtAck {
                         request: request.into(),
                         receiving_epoch,
@@ -301,7 +384,10 @@ impl ConversationAuthority {
                 let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
                     StateError::invariant(format!("ack cursor commit rejected: {error:?}"))
                 })?;
-                Ok(ParticipantAckResponse::ack_committed(outcome).into_server_value())
+                Ok(ArmOutcome {
+                    value: ParticipantAckResponse::ack_committed(outcome).into_server_value(),
+                    newly_tracked,
+                })
             }
         }
     }
@@ -315,10 +401,12 @@ impl ConversationAuthority {
     pub(super) fn apply_marker_ack(
         &self,
         request: &MarkerAck,
-        receiving_incarnation: ConnectionIncarnation,
-    ) -> Result<ServerValue, StateError> {
-        let receiving_epoch =
-            BindingEpoch::new(receiving_incarnation, request.capability_generation);
+        operation_facts: &OperationFacts,
+    ) -> Result<ArmOutcome, StateError> {
+        let receiving_epoch = BindingEpoch::new(
+            operation_facts.receiving_incarnation,
+            request.capability_generation,
+        );
         let identity = self
             .slots
             .get(&request.participant_id)
@@ -336,7 +424,31 @@ impl ConversationAuthority {
             .map_or(0, |slot| slot.member.cursor());
         let marker_state = MarkerProofState::new(cursor, false, None, receiving_epoch, None);
         match apply_marker_ack(identity, binding, receiving_epoch, request, &marker_state) {
-            MarkerAckDecision::Respond(response) => Ok(response.into_server_value()),
+            MarkerAckDecision::Respond(response) => {
+                // Same frozen-stage transcription as the normal-ack arm: the
+                // selector's lookup rows (2-5) precede stage-6 capacity; its
+                // marker-proof rows (stage 7) follow it.
+                let stage_seven = matches!(
+                    response.discriminant(),
+                    ServerDiscriminant::AckNoOp
+                        | ServerDiscriminant::MarkerNotDelivered
+                        | ServerDiscriminant::MarkerMismatch
+                );
+                if stage_seven {
+                    if let SemanticConnectionCapacityDecision::Respond { limit } =
+                        operation_facts.semantic_connection_capacity()
+                    {
+                        return Ok(ArmOutcome::respond(
+                            MarkerAckResponse::connection_conversation_capacity_exceeded(
+                                marker_ack_envelope(request),
+                                limit,
+                            )
+                            .into_server_value(),
+                        ));
+                    }
+                }
+                Ok(ArmOutcome::respond(response.into_server_value()))
+            }
             MarkerAckDecision::Commit(_) => Err(StateError::invariant(
                 "marker ack committed although no marker was ever delivered",
             )),
@@ -445,6 +557,26 @@ pub(super) struct DetachReplayInputs {
     pub(super) terminal_order: u64,
     /// Assigned terminal delivery sequence.
     pub(super) terminal_seq: u64,
+}
+
+/// Builds the echo envelope of one cumulative acknowledgement.
+const fn participant_ack_envelope(request: &ParticipantAck) -> ParticipantAckEnvelope {
+    ParticipantAckEnvelope {
+        conversation_id: request.conversation_id,
+        participant_id: request.participant_id,
+        capability_generation: request.capability_generation,
+        through_seq: request.through_seq,
+    }
+}
+
+/// Builds the echo envelope of one marker acknowledgement.
+const fn marker_ack_envelope(request: &MarkerAck) -> MarkerAckEnvelope {
+    MarkerAckEnvelope {
+        conversation_id: request.conversation_id,
+        participant_id: request.participant_id,
+        capability_generation: request.capability_generation,
+        marker_delivery_seq: request.marker_delivery_seq,
+    }
 }
 
 /// Builds the echo envelope of one detach request.
