@@ -131,15 +131,6 @@ pub fn decide_correlated_inbound(
         expected.issued && expected.authorization == correlation.authorization
     });
     if !current_authority {
-        let decision = inbound_refusal(
-            aggregate,
-            value,
-            ClientInboundRefusalReason::DelayedResponse,
-        );
-        let ClientInboundDecision::Refused(refusal) = decision else {
-            unreachable!();
-        };
-        let (aggregate, value) = refusal.into_parts();
         return ClientCorrelatedInboundDecision::Refused(ClientCorrelatedInboundRefusal {
             aggregate,
             value,

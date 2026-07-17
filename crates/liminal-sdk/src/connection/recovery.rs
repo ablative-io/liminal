@@ -129,7 +129,7 @@ impl SubscriptionRecovery {
         &self,
         event: &ConnectionEvent,
     ) -> Result<Vec<ResumeRequest>, SdkError> {
-        if matches!(event.previous, ConnectionState::Reconnecting { .. })
+        if matches!(event.previous, ConnectionState::Reconnecting)
             && event.current == ConnectionState::Connected
         {
             return self.resume_requests_for_active();
@@ -221,10 +221,7 @@ mod tests {
     fn reconnect_to_connected_transition_builds_resume_requests() -> Result<(), SdkError> {
         let mut recovery = SubscriptionRecovery::new();
         let subscription_id = SubscriptionId::new(13);
-        let event = ConnectionEvent::new(
-            ConnectionState::Reconnecting { attempt: 2 },
-            ConnectionState::Connected,
-        );
+        let event = ConnectionEvent::new(ConnectionState::Reconnecting, ConnectionState::Connected);
 
         recovery.acknowledge(subscription_id, 5);
 

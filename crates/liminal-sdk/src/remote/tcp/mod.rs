@@ -15,6 +15,7 @@
 //! connection lock for the duration of one request/response exchange.
 
 mod connection;
+mod participant;
 mod push_client;
 mod subscription;
 
@@ -22,7 +23,7 @@ pub use push_client::{OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame
 pub use subscription::{DeliveredMessage, SubscriptionStream};
 
 use alloc::format;
-use alloc::string::ToString;
+use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
@@ -37,9 +38,10 @@ use crate::{DeliveryAck, PressureResponse, SdkError};
 
 use self::connection::{Connection, unexpected_frame};
 use super::ServerAddress;
+use super::participant::ParticipantResponseProvenance;
 use super::protocol::{
-    RemoteTransport, WireConversationRequest, WirePublishRequest, WireResumeRequest,
-    WireSubscribeRequest,
+    ParticipantRemoteTransport, ParticipantTransportFrame, RemoteTransport,
+    WireConversationRequest, WirePublishRequest, WireResumeRequest, WireSubscribeRequest,
 };
 
 /// Application stream id used for non-subscription application frames.
@@ -49,9 +51,18 @@ const DEFAULT_MAX_IN_FLIGHT: u32 = 1;
 /// Schema id used for payloads whose schema is not carried on the wire.
 const SCHEMALESS_SCHEMA: &[u8] = &[];
 
+struct ConnectionSlot {
+    connection: Connection,
+    provenance: ParticipantResponseProvenance,
+    next_attempt_id: u64,
+    next_connection_id: u64,
+}
+
 /// Real TCP transport that exchanges canonical wire frames with a liminal server.
 pub struct TcpRemoteTransport {
-    connection: Arc<Mutex<Connection>>,
+    connection: Arc<Mutex<ConnectionSlot>>,
+    address: String,
+    auth_token: Vec<u8>,
 }
 
 impl fmt::Debug for TcpRemoteTransport {
@@ -71,10 +82,7 @@ impl TcpRemoteTransport {
     /// established, and [`SdkError::Protocol`] when the handshake frames cannot be
     /// encoded, sent, or are rejected by the server.
     pub fn connect(server_address: &ServerAddress) -> Result<Self, SdkError> {
-        let connection = Connection::connect(server_address.as_str())?;
-        Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
-        })
+        Self::connect_with_auth(server_address, &[])
     }
 
     /// Connects and handshakes carrying `auth_token`, for a server gated by an
@@ -92,15 +100,72 @@ impl TcpRemoteTransport {
         server_address: &ServerAddress,
         auth_token: &[u8],
     ) -> Result<Self, SdkError> {
-        let connection = Connection::connect_with_auth(server_address.as_str(), auth_token)?;
+        let address = server_address.as_str().to_string();
+        let connection = Connection::connect_with_auth(&address, auth_token)?;
         Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: Arc::new(Mutex::new(ConnectionSlot {
+                connection,
+                provenance: ParticipantResponseProvenance::new(1, 1),
+                next_attempt_id: 2,
+                next_connection_id: 2,
+            })),
+            address,
+            auth_token: auth_token.to_vec(),
         })
     }
 
     fn round_trip(&self, request: &Frame) -> Result<Frame, SdkError> {
-        let mut connection = self.connection.lock();
-        connection.round_trip(request)
+        self.connection.lock().connection.round_trip(request)
+    }
+}
+
+impl ParticipantRemoteTransport for TcpRemoteTransport {
+    fn send_participant(
+        &self,
+        _server_address: &ServerAddress,
+        request: &liminal_protocol::wire::ClientRequest,
+    ) -> Result<ParticipantResponseProvenance, SdkError> {
+        let mut slot = self.connection.lock();
+        slot.connection.send_participant(request)?;
+        Ok(slot.provenance)
+    }
+
+    fn receive_participant(
+        &self,
+        _server_address: &ServerAddress,
+    ) -> Result<ParticipantTransportFrame, SdkError> {
+        let mut slot = self.connection.lock();
+        let frame = slot.connection.receive_participant()?;
+        Ok(ParticipantTransportFrame {
+            frame,
+            provenance: slot.provenance,
+        })
+    }
+
+    fn reconnect_participant(
+        &self,
+        _server_address: &ServerAddress,
+    ) -> Result<ParticipantResponseProvenance, SdkError> {
+        let mut slot = self.connection.lock();
+        let attempt_id = slot.next_attempt_id;
+        slot.next_attempt_id =
+            slot.next_attempt_id
+                .checked_add(1)
+                .ok_or_else(|| SdkError::Connection {
+                    description: "participant transport attempt identity exhausted".to_string(),
+                })?;
+        let connection = Connection::connect_with_auth(&self.address, &self.auth_token)?;
+        let connection_id = slot.next_connection_id;
+        slot.next_connection_id =
+            slot.next_connection_id
+                .checked_add(1)
+                .ok_or_else(|| SdkError::Connection {
+                    description: "participant transport connection identity exhausted".to_string(),
+                })?;
+        let provenance = ParticipantResponseProvenance::new(connection_id, attempt_id);
+        slot.connection = connection;
+        slot.provenance = provenance;
+        Ok(provenance)
     }
 }
 
@@ -171,8 +236,11 @@ impl RemoteTransport for TcpRemoteTransport {
         let conversation_label = request.conversation_id().as_str();
         let conversation_id = conversation_wire_id(conversation_label);
         let envelope = build_envelope(SCHEMALESS_SCHEMA, request.payload());
-        let mut connection = self.connection.lock();
-        connection.send_conversation_message(conversation_id, conversation_label, envelope)
+        self.connection.lock().connection.send_conversation_message(
+            conversation_id,
+            conversation_label,
+            envelope,
+        )
     }
 
     fn request_reply_conversation(
@@ -183,8 +251,10 @@ impl RemoteTransport for TcpRemoteTransport {
         let conversation_label = request.conversation_id().as_str();
         let conversation_id = conversation_wire_id(conversation_label);
         let envelope = build_envelope(SCHEMALESS_SCHEMA, request.payload());
-        let mut connection = self.connection.lock();
-        connection.conversation_request_reply(conversation_id, conversation_label, envelope)
+        self.connection
+            .lock()
+            .connection
+            .conversation_request_reply(conversation_id, conversation_label, envelope)
     }
 
     fn resume(

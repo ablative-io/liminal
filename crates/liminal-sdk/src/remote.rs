@@ -1,36 +1,50 @@
 mod config;
 mod handles;
+
+mod participant;
 mod protocol;
 #[cfg(feature = "std")]
 mod tcp;
 pub mod websocket;
 
 #[cfg(feature = "std")]
+#[cfg(feature = "std")]
+use alloc::string::{String, ToString};
+use alloc::sync::Arc;
+
+pub use config::{SdkConfig, build_channel_handle, build_conversation_handle};
+
+use crate::{ConversationId, SdkError};
+use crate::connection::ConnectionPoolConfig;
+
+pub use handles::{
+    RemoteChannelHandle, RemoteConversationHandle, RemoteParticipantHandle, SdkChannelHandle,
+    SdkConversationHandle,
+};
+
+pub use participant::{
+    ParticipantResponseProvenance, ParticipantResumeStore, RemoteDetachReplayOutcome,
+    RemoteExpectedOperationRecovery, RemoteLostOperationResolution, RemoteLostReconnectResolution,
+    RemoteOperationRecordOutcome, RemoteOperationTransportFate, RemoteParticipantError,
+    RemoteParticipantInbound, RemoteParticipantOperation, RemoteParticipantSendOutcome,
+    RemoteReconnectAttemptOutcome, RemoteReconnectPermit, RemoteReconnectPermitOutcome,
+    RemoteReconnectPermitRecovery, RemoteReplayApplyOutcome, RemoteTransportLossOutcome,
+};
+
+use self::protocol::{ProtocolRemoteTransport, RemoteTransport};
+
 pub use tcp::{
     DeliveredMessage, OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame,
     SubscriptionStream, TcpRemoteTransport,
 };
-#[cfg(feature = "std")]
+
 pub use websocket::{
     WebSocketDeliveredMessage, WebSocketRemoteTransport, WebSocketSubscriptionStream,
-};
-
-pub use config::{SdkConfig, build_channel_handle, build_conversation_handle};
-pub use handles::{
-    RemoteChannelHandle, RemoteConversationHandle, SdkChannelHandle, SdkConversationHandle,
 };
 
 #[cfg(test)]
 mod tests;
 
-use alloc::string::{String, ToString};
-use alloc::sync::Arc;
-use core::time::Duration;
-
-use crate::connection::{ConnectionPoolConfig, ReconnectConfig, ReconnectJitter};
-use crate::{ConversationId, SdkError};
-
-use self::protocol::{ProtocolRemoteTransport, RemoteTransport};
 
 /// Application-level address for a remote liminal server.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -68,8 +82,6 @@ pub struct RemoteConfig {
     pub conversation_id: ConversationId,
     /// Caller/runtime-supplied connection pool configuration.
     pub pool_config: ConnectionPoolConfig,
-    /// Reconnect policy used by the SDK-003 lifecycle state machine.
-    pub reconnect_config: ReconnectConfig,
     transport: Arc<dyn RemoteTransport>,
     /// The concretely typed WebSocket transport, retained when
     /// [`connect_websocket`](Self::connect_websocket) installed it so callers
@@ -95,18 +107,10 @@ impl RemoteConfig {
             channel_name: channel_name.into(),
             conversation_id: conversation_id.into(),
             pool_config: pool_config.validate()?,
-            reconnect_config: ReconnectConfig::default(),
             transport: Arc::new(ProtocolRemoteTransport),
             #[cfg(feature = "std")]
             websocket: None,
         })
-    }
-
-    /// Replaces the reconnect configuration used by remote handles.
-    #[must_use]
-    pub const fn with_reconnect_config(mut self, reconnect_config: ReconnectConfig) -> Self {
-        self.reconnect_config = reconnect_config;
-        self
     }
 
     /// Opens a real TCP connection to the configured server and installs the
@@ -205,16 +209,6 @@ impl RemoteConfig {
     }
 }
 
-/// Deterministic jitter source for lifecycle integration tests and explicit reconnect calls.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoJitter;
-
-impl ReconnectJitter for NoJitter {
-    fn jitter(&mut self, attempt: u32, capped_delay: Duration) -> Duration {
-        core::hint::black_box((attempt, capped_delay));
-        Duration::ZERO
-    }
-}
 
 fn connection_error(description: &str) -> SdkError {
     SdkError::Connection {

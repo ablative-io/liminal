@@ -20,6 +20,7 @@ use liminal::protocol::{
     ProtocolVersion, decode, encode, encoded_len,
 };
 
+use super::participant;
 use crate::SdkError;
 
 /// Minimum protocol version this client advertises during the handshake.
@@ -50,16 +51,8 @@ pub(super) struct Connection {
 }
 
 impl Connection {
-    pub(super) fn connect(address: &str) -> Result<Self, SdkError> {
-        // Open access: an empty auth token is byte-identical to the pre-auth
-        // handshake a server with no `[auth]` section expects.
-        Self::connect_with_auth(address, &[])
-    }
-
     /// Connects and completes the handshake carrying `auth_token`, for a server
-    /// gated by an `[auth]` section. An empty slice is equivalent to [`connect`].
-    ///
-    /// [`connect`]: Self::connect
+    /// gated by an `[auth]` section. An empty slice selects open access.
     pub(super) fn connect_with_auth(address: &str, auth_token: &[u8]) -> Result<Self, SdkError> {
         let stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
             description: format!("failed to connect to {address}: {source}"),
@@ -93,6 +86,21 @@ impl Connection {
     pub(super) fn round_trip(&mut self, request: &Frame) -> Result<Frame, SdkError> {
         self.send(request)?;
         self.receive()
+    }
+
+    /// Writes one canonical participant request on this established connection.
+    pub(super) fn send_participant(
+        &mut self,
+        request: &liminal_protocol::wire::ClientRequest,
+    ) -> Result<(), SdkError> {
+        self.send(&participant::request_frame(request)?)
+    }
+
+    /// Reads and direction-decodes one canonical participant response.
+    pub(super) fn receive_participant(
+        &mut self,
+    ) -> Result<liminal_protocol::wire::ParticipantFrame, SdkError> {
+        participant::response_frame(self.receive()?)
     }
 
     fn handshake(&mut self, auth_token: &[u8]) -> Result<(), SdkError> {

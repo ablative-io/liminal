@@ -1,3 +1,15 @@
+mod constants;
+mod participant;
+mod payload;
+
+use constants::{
+    APPLICATION_STREAM_ID, FRAME_TYPE_ACCEPT, FRAME_TYPE_CONVERSATION_MESSAGE, FRAME_TYPE_DEFER,
+    FRAME_TYPE_PUBLISH, FRAME_TYPE_REJECT, FRAME_TYPE_RESUME, FRAME_TYPE_SUBSCRIBE,
+    WIRE_HEADER_LEN,
+};
+pub use participant::{ParticipantRemoteTransport, ParticipantTransportFrame};
+pub(super) use payload::{deserialize_payload, serialize_payload};
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -13,17 +25,9 @@ use crate::{
 
 use super::ServerAddress;
 
-const WIRE_HEADER_LEN: usize = 10;
-const FRAME_TYPE_SUBSCRIBE: u8 = 0x05;
-const FRAME_TYPE_PUBLISH: u8 = 0x09;
-const FRAME_TYPE_CONVERSATION_MESSAGE: u8 = 0x0D;
-const FRAME_TYPE_RESUME: u8 = 0x06;
-const FRAME_TYPE_ACCEPT: u8 = 0x10;
-const FRAME_TYPE_DEFER: u8 = 0x11;
-const FRAME_TYPE_REJECT: u8 = 0x12;
-const APPLICATION_STREAM_ID: u32 = 1;
-
-pub(super) trait RemoteTransport: fmt::Debug + Send + Sync {
+pub(super) trait RemoteTransport:
+    ParticipantRemoteTransport + fmt::Debug + Send + Sync
+{
     fn publish(
         &self,
         server_address: &ServerAddress,
@@ -422,24 +426,6 @@ enum WireBackpressure {
     Accept { credit: u32 },
     Defer { retry_after: Duration },
     Reject { reason: String },
-}
-
-pub(super) fn serialize_payload<M>(message: &M) -> Result<Vec<u8>, SdkError>
-where
-    M: Serialize,
-{
-    serde_json::to_vec(message).map_err(|source| SdkError::Serialization {
-        description: format!("failed to encode remote payload: {source}"),
-    })
-}
-
-pub(super) fn deserialize_payload<M>(payload: &[u8]) -> Result<M, SdkError>
-where
-    M: serde::de::DeserializeOwned,
-{
-    serde_json::from_slice(payload).map_err(|source| SdkError::Serialization {
-        description: format!("failed to decode remote reply payload: {source}"),
-    })
 }
 
 fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, SdkError> {

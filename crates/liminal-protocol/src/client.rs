@@ -545,6 +545,8 @@ mod resume_tests;
 #[cfg(test)]
 mod review_tests;
 #[cfg(test)]
+mod rider_tests;
+#[cfg(test)]
 mod round3_tests;
 #[cfg(test)]
 mod round4_tests;

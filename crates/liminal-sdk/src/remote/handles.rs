@@ -1,15 +1,14 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::time::Duration;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use spin::Mutex;
 
 use crate::connection::{
-    ConnectionEvent, ConnectionLifecycle, ConnectionPool, ConnectionState, ReconnectJitter,
-    ResumeRequest, SubscriptionId,
+    ConnectionEvent, ConnectionLifecycle, ConnectionPool, ConnectionState, ResumeRequest,
+    SubscriptionId,
 };
 use crate::embedded::{
     EmbeddedChannelHandle, EmbeddedConversationHandle, EmptyLifecycleStream, ReadyResult,
@@ -19,6 +18,8 @@ use crate::{
     ChannelHandle, ConversationHandle, ConversationId, DeliveryAck, PressureResponse,
     SchemaValidate, SdkError,
 };
+
+pub use super::participant::RemoteParticipantHandle;
 
 use super::config::SdkConfig;
 use super::protocol::{
@@ -54,8 +55,8 @@ impl RemoteChannelHandle {
             server_address: config.server_address.clone(),
             channel_name: config.channel_name.clone(),
             state: Arc::new(Mutex::new(RemoteChannelState {
-                lifecycle: ConnectionLifecycle::new(config.reconnect_config),
-                pool: ConnectionPool::new(config.pool_config, config.reconnect_config)?,
+                lifecycle: ConnectionLifecycle::new(),
+                pool: ConnectionPool::new(config.pool_config)?,
                 next_subscription: 0,
             })),
             transport: Arc::clone(&config.transport),
@@ -68,16 +69,13 @@ impl RemoteChannelHandle {
         self.state.lock().lifecycle.state().clone()
     }
 
-    /// Drives a reconnect attempt through the SDK-003 lifecycle state machine.
+    /// Records that an externally authorized real reconnect attempt started.
     ///
     /// # Errors
     ///
     /// Returns [`SdkError`] when the lifecycle rejects the transition.
-    pub fn reconnect<J>(&self, jitter: &mut J) -> Result<Duration, SdkError>
-    where
-        J: ReconnectJitter + ?Sized,
-    {
-        self.state.lock().lifecycle.reconnect(jitter)
+    pub fn reconnect_started(&self) -> Result<(), SdkError> {
+        self.state.lock().lifecycle.reconnect_started()
     }
 
     /// Marks the remote channel connected and builds subscription resume requests.
@@ -273,9 +271,7 @@ impl RemoteConversationHandle {
         Self {
             server_address: config.server_address.clone(),
             conversation_id: config.conversation_id.clone(),
-            lifecycle: Arc::new(Mutex::new(ConnectionLifecycle::new(
-                config.reconnect_config,
-            ))),
+            lifecycle: Arc::new(Mutex::new(ConnectionLifecycle::new())),
             transport: Arc::clone(&config.transport),
             pending_reply: Arc::new(Mutex::new(None)),
         }

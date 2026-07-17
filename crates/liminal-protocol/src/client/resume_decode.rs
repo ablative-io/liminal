@@ -9,8 +9,8 @@ use super::{
     },
 };
 use crate::wire::{
-    BindingEpoch, ConnectionIncarnation, DetachStaleAuthority, Generation, ParticipantFrame,
-    ReceiverDirection, ServerValue, StaleAuthority, decode,
+    BindingEpoch, ClientRequest, ConnectionIncarnation, DetachStaleAuthority, Generation,
+    ParticipantFrame, ReceiverDirection, ServerValue, StaleAuthority, decode,
 };
 
 pub(super) fn decode_facts(input: &[u8]) -> Result<DecodedFacts, ClientResumeRecordDecodeError> {
@@ -277,12 +277,22 @@ fn decode_abandonment(
             let was_issued = decode_bool(reader, ClientResumeRecordSection::Abandonment)?;
             let bytes = reader.blob()?;
             match decode(bytes, ReceiverDirection::Server) {
-                Ok(ParticipantFrame::ClientRequest(request)) => {
+                Ok(ParticipantFrame::ClientRequest(request))
+                    if matches!(
+                        request,
+                        ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
+                    ) =>
+                {
                     Ok(Some(RestoredExpectedOperationAbandonment {
                         request,
                         reason,
                         was_issued,
                     }))
+                }
+                Ok(ParticipantFrame::ClientRequest(request)) => {
+                    Err(ClientResumeRecordDecodeError::InvalidAbandonmentRequest {
+                        request: request.discriminant(),
+                    })
                 }
                 Ok(ParticipantFrame::ServerValue(_) | ParticipantFrame::ServerPush(_)) => {
                     Err(ClientResumeRecordDecodeError::NestedCodec {
