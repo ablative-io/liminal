@@ -410,6 +410,43 @@ impl ConnectionSupervisor {
         self.inner.runtime.services().flush_durable_state()
     }
 
+    /// LP-WS-TRANSPORT R1.3 sibling-transport spawn seam (ADDITIVE ONLY).
+    ///
+    /// Admits, allocates a durable connection incarnation for, spawns, and
+    /// registers a connection process whose handler is built by `build_factory`
+    /// over this supervisor's shared [`ConnectionRuntime`]. The WebSocket
+    /// sibling acceptor uses this so its connections share the ONE §5
+    /// `max_connections` admission bound, the one incarnation authority, the
+    /// one registry (controls, pushes, crash reap, drain, forced close), and the
+    /// one `apply_frame` seam with TCP connections. The TCP accept path above
+    /// (`spawn_connection`) is byte-for-byte untouched and never calls this.
+    ///
+    /// `fd_guard` is a host-held duplicate of the connection's underlying
+    /// socket, exactly like the TCP path's: it keeps the fd alive until the
+    /// single record-removal path has synchronously deregistered readiness.
+    ///
+    /// This method exists because Rust module privacy makes the runtime,
+    /// admission counter, incarnation authority, and registry unreachable from
+    /// the sibling `websocket` module family; it is the narrow additive seam
+    /// that shares them without generalizing any TCP hot path.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when admission is refused
+    /// ([`ServerError::ConnectionLimitReached`]), incarnation allocation fails,
+    /// or beamr spawn/registration fails.
+    pub(super) fn spawn_transport_connection(
+        &self,
+        peer_addr: Option<SocketAddr>,
+        fd_guard: TcpStream,
+        build_factory: &dyn Fn(
+            Arc<ConnectionRuntime>,
+            Option<ConnectionIncarnation>,
+        ) -> NativeHandlerFactory,
+    ) -> Result<ConnectionHandle, ServerError> {
+        self.inner
+            .spawn_transport_connection(peer_addr, fd_guard, build_factory)
+    }
+
     /// Stops the beamr scheduler used by connection processes.
     pub fn shutdown(&self) {
         // Remove every host record while the readiness owner is still live. The
@@ -854,6 +891,50 @@ impl SupervisorInner {
         // The reservation is now owned by the registered record: `remove` (the
         // single record-removal path — finish/mark_crashed/reap all funnel
         // through it) releases the admission when the record goes away.
+        reservation.convert();
+        Ok(ConnectionHandle {
+            pid,
+            peer_addr,
+            connection_incarnation,
+            supervisor: Arc::clone(self),
+        })
+    }
+
+    /// LP-WS-TRANSPORT R1.3: the sibling-transport spawn body. Mirrors
+    /// [`Self::spawn_connection`]'s admission → incarnation → spawn → register →
+    /// convert sequence exactly (same reservation guard, same failure rollback,
+    /// same single record-removal ownership), differing only in that the caller
+    /// supplies the native handler factory and the host-held fd guard instead of
+    /// a raw `TcpStream`. Purely additive; the TCP path never calls this.
+    fn spawn_transport_connection(
+        self: &Arc<Self>,
+        peer_addr: Option<SocketAddr>,
+        fd_guard: TcpStream,
+        build_factory: &dyn Fn(
+            Arc<ConnectionRuntime>,
+            Option<ConnectionIncarnation>,
+        ) -> NativeHandlerFactory,
+    ) -> Result<ConnectionHandle, ServerError> {
+        self.runtime.try_reserve_admission()?;
+        let reservation = AdmissionReservation {
+            runtime: &self.runtime,
+            armed: true,
+        };
+        let connection_incarnation = self.allocate_connection_incarnation()?;
+        let factory = build_factory(Arc::clone(&self.runtime), connection_incarnation);
+        let pid =
+            self.scheduler
+                .spawn_native(factory)
+                .map_err(|error| ServerError::ListenerAccept {
+                    message: format!("failed to spawn connection process: {error}"),
+                })?;
+        if let Err(error) =
+            self.runtime
+                .register_with_fd(pid, peer_addr, connection_incarnation, fd_guard)
+        {
+            self.scheduler.terminate_process(pid, ExitReason::Error);
+            return Err(error);
+        }
         reservation.convert();
         Ok(ConnectionHandle {
             pid,

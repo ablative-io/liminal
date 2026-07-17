@@ -42,6 +42,18 @@ pub struct ServerConfig {
     /// silent "unlimited".
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// Optional WebSocket transport acceptor (LP-WS-TRANSPORT R1).
+    ///
+    /// When present the server binds a sibling WebSocket listener carrying the
+    /// canonical liminal wire protocol (one binary message per canonical frame)
+    /// alongside the main TCP listener. When absent NO HTTP/WebSocket listener
+    /// is started and the server behaves byte-identically to the pre-WebSocket
+    /// build. Every field inside is a deployment decision; the origin allow-list
+    /// FAILS CLOSED (an absent or empty list refuses every Origin-bearing
+    /// upgrade) and the keepalive ping interval is disabled unless explicitly
+    /// configured.
+    #[serde(default)]
+    pub websocket: Option<WebSocketConfig>,
     /// Participant lifecycle activation (LP gap closure, Part B).
     ///
     /// When present the server installs the production participant semantic
@@ -160,6 +172,49 @@ pub struct AuthConfig {
     /// be non-empty when the `[auth]` section is present (an empty token is a
     /// config validation error, since it would gate nothing).
     pub token: String,
+}
+
+/// WebSocket transport acceptor configuration (`[websocket]`, LP-WS-TRANSPORT R1).
+///
+/// The sibling WebSocket route is an explicit opt-in: the section itself must be
+/// present for any HTTP/WebSocket listener to start, and inside it the listen
+/// address and the single exact upgrade path are required with no defaults.
+///
+/// The deployment TLS contract (tear ruling Q1) is raw `ws://` behind a named
+/// TLS-terminating proxy that owns public `wss://` and certificates; liminal
+/// grows no TLS stack. Origin validation nonetheless belongs to this acceptor:
+/// [`Self::allowed_origins`] is the explicit allow-list checked on every
+/// Origin-bearing upgrade, and there is NO default list — absent or empty
+/// configuration fails closed for browser-origin upgrades while a native client
+/// that sends no `Origin` header may still upgrade (F6).
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSocketConfig {
+    /// Socket address the WebSocket acceptor binds. Required; distinct from the
+    /// main wire listener, the health listener, and any cluster listener.
+    pub listen_address: SocketAddr,
+    /// The single exact HTTP request path that accepts WebSocket upgrades.
+    /// Required; must start with `/`. Every other path — and every ordinary
+    /// HTTP request — receives a small fixed non-success response and closes.
+    pub path: String,
+    /// Explicit browser-origin allow-list checked on every Origin-bearing
+    /// upgrade (F6). Entries are compared byte-exact against the request's
+    /// serialized `Origin` header value (RFC 6454 ASCII serialization, e.g.
+    /// `https://app.example.com`). Absent or empty means NO browser origin is
+    /// accepted (fail closed); native clients sending no `Origin` header are
+    /// unaffected.
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    /// Q-A transport-liveness keepalive: the server-side WebSocket Ping
+    /// interval in milliseconds. This is a precise LAW-1 carve-out — liveness
+    /// pings never mint application events, never re-arm application state, and
+    /// never serve as a source of truth; failure detection remains the socket's
+    /// typed terminal events. The bound is one ping per interval per
+    /// connection, so the idle cost is `interval x connection-count`. Absent
+    /// means pings are DISABLED, accepting proxy-idle-disconnect churn as the
+    /// documented consequence. A configured zero is a validation error.
+    #[serde(default)]
+    pub ping_interval_ms: Option<u64>,
 }
 
 /// Service construction profile selection (D2).

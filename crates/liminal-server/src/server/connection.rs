@@ -35,6 +35,8 @@ mod state;
 mod supervisor;
 #[path = "connection/wake.rs"]
 mod wake;
+#[path = "connection/websocket.rs"]
+mod websocket;
 #[path = "connection/worker_front_door.rs"]
 mod worker_front_door;
 
@@ -45,4 +47,5 @@ pub use services::{
     PublishOutcome, build_connection_services,
 };
 pub use supervisor::{ConnectionHandle, ConnectionSupervisor, PushReplyAwaiter};
+pub use websocket::WebSocketListener;
 pub use worker_front_door::WorkerFrontDoorServices;

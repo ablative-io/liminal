@@ -50,6 +50,7 @@ impl RunningServer {
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
             participant: None,
+            websocket: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;

@@ -7,6 +7,7 @@ use crate::config::file::load_config;
 use crate::config::types::{ClusterConfig, ServiceProfile};
 use crate::health::{ReadinessState, SharedReadinessState, start_health_server};
 use crate::server::connection::ConnectionSupervisor;
+use crate::server::connection::WebSocketListener;
 use crate::server::connection::services::{
     ChannelCluster, LiminalConnectionServices, build_connection_services,
 };
@@ -89,6 +90,17 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
     };
 
     let mut listener = ServerListener::bind(&config, connection_supervisor)?;
+    // LP-WS-TRANSPORT R1.1: the sibling WebSocket acceptor is explicit opt-in.
+    // Absent `[websocket]` binds nothing — no HTTP surface exists at all — and
+    // a bind failure fails startup BEFORE readiness reports the listeners
+    // bound, exactly like the main listener.
+    let mut websocket_listener = match config.websocket.as_ref() {
+        Some(websocket_config) => Some(WebSocketListener::bind(
+            websocket_config,
+            listener.supervisor(),
+        )?),
+        None => None,
+    };
     readiness.set_config_loaded(true);
     readiness.set_listener_bound(true);
 
@@ -116,7 +128,13 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
     }
 
     let supervisor = listener.supervisor();
-    let shutdown_result = run_shutdown_sequence(&mut listener, &supervisor, config.drain_timeout());
+    let shutdown_result = run_shutdown_sequence(
+        &mut listener,
+        websocket_listener.as_mut(),
+        &supervisor,
+        config.drain_timeout(),
+    );
+    drop(websocket_listener);
     drop(signal_registration);
     health_server.shutdown()?;
     shutdown_result

@@ -40,6 +40,7 @@ fn config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         services: ServicesConfig::default(),
         limits: LimitsConfig::default(),
         participant: None,
+        websocket: None,
     })
 }
 

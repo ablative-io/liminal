@@ -8,7 +8,7 @@ use signal_hook::consts::signal::{SIGINT, SIGTERM};
 use signal_hook::iterator::{Handle as SignalIteratorHandle, Signals};
 
 use crate::ServerError;
-use crate::server::connection::ConnectionSupervisor;
+use crate::server::connection::{ConnectionSupervisor, WebSocketListener};
 use crate::server::listener::ServerListener;
 
 const DRAIN_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
@@ -157,16 +157,27 @@ pub fn register_signal_handlers(
 
 /// Runs the graceful shutdown sequence after the handle has been activated.
 ///
+/// The optional sibling WebSocket listener (LP-WS-TRANSPORT R1) stops
+/// accepting — and interrupts its in-flight upgrade handshakes — in the same
+/// pre-notification window as the main listener, so no connection on EITHER
+/// transport can slip past the shutdown broadcast. Already-admitted WebSocket
+/// connections live in the shared supervisor and are drained/force-closed by
+/// the same sequence below.
+///
 /// # Errors
 /// Returns [`ServerError`] when stop-accepting or durable flush fails.
 pub fn run_shutdown_sequence(
     listener: &mut ServerListener,
+    websocket_listener: Option<&mut WebSocketListener>,
     supervisor: &ConnectionSupervisor,
     drain_timeout: Duration,
 ) -> Result<(), ServerError> {
     tracing::info!(?drain_timeout, "starting graceful shutdown sequence");
     // Stop accepting new connections first so none can slip into the accept
     // window after shutdown begins and miss the notification broadcast below.
+    if let Some(websocket_listener) = websocket_listener {
+        websocket_listener.stop_accepting()?;
+    }
     listener.stop_accepting()?;
     supervisor.notify_shutdown_subscribers();
 

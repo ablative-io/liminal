@@ -130,6 +130,51 @@ seed_nodes = ["127.0.0.1:9001"]
     }
 
     #[test]
+    fn websocket_section_parses_and_absent_section_stays_none()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // Absent section: no websocket configuration exists at all.
+        let absent_path = write_temp_config("ws-absent", valid_toml())?;
+        let absent = load_from_file(&absent_path)?;
+        remove_temp_file(&absent_path)?;
+        assert!(absent.websocket.is_none());
+
+        // Present section: every field parses, including the optional
+        // keepalive interval and origin allow-list.
+        let toml = format!(
+            "{}\n[websocket]\nlisten_address = \"127.0.0.1:8090\"\npath = \"/liminal\"\n\
+             allowed_origins = [\"https://app.example.com\"]\nping_interval_ms = 30000\n",
+            valid_toml()
+        );
+        let path = write_temp_config("ws-present", &toml)?;
+        let config = load_from_file(&path)?;
+        remove_temp_file(&path)?;
+        let websocket = config.websocket.ok_or("websocket section should parse")?;
+        assert_eq!(websocket.listen_address.to_string(), "127.0.0.1:8090");
+        assert_eq!(websocket.path, "/liminal");
+        assert_eq!(
+            websocket.allowed_origins,
+            vec!["https://app.example.com".to_owned()]
+        );
+        assert_eq!(websocket.ping_interval_ms, Some(30_000));
+
+        // Minimal section: origins default to the fail-closed empty list and
+        // the keepalive stays disabled.
+        let minimal = format!(
+            "{}\n[websocket]\nlisten_address = \"127.0.0.1:8091\"\npath = \"/liminal\"\n",
+            valid_toml()
+        );
+        let minimal_path = write_temp_config("ws-minimal", &minimal)?;
+        let minimal_config = load_from_file(&minimal_path)?;
+        remove_temp_file(&minimal_path)?;
+        let websocket = minimal_config
+            .websocket
+            .ok_or("minimal websocket section should parse")?;
+        assert!(websocket.allowed_origins.is_empty());
+        assert_eq!(websocket.ping_interval_ms, None);
+        Ok(())
+    }
+
+    #[test]
     fn missing_file_returns_config_load() {
         let path = temp_config_path("missing");
         let result = load_from_file(&path);

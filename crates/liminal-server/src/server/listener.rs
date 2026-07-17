@@ -319,6 +319,7 @@ mod tests {
             services: crate::config::types::ServicesConfig::default(),
             limits: crate::config::types::LimitsConfig::default(),
             participant: None,
+            websocket: None,
         })
     }
 }
