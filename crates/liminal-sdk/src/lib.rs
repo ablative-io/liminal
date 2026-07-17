@@ -13,9 +13,12 @@ pub mod types;
 
 pub use channel::ChannelHandle;
 pub use connection::{
-    ConnectionEvent, ConnectionEvents, ConnectionLifecycle, ConnectionPool, ConnectionPoolConfig,
-    ConnectionState, DisconnectReason, PoolConnectionId, ReconnectConfig, ReconnectJitter,
-    ResumeRequest, SubscriptionAssignment, SubscriptionId, SubscriptionRecovery,
+    BoundParticipant, ConnectionEvent, ConnectionEvents, ConnectionLifecycle, ConnectionPool,
+    ConnectionPoolConfig, ConnectionState, DetachReplayAction, DetachReplayEvent,
+    DetachReplayStatus, DisconnectReason, ParticipantClientState, ParticipantLifecycle,
+    ParticipantOutcome, ParticipantReceive, ParticipantResumeState, ParticipantTransition,
+    PoolConnectionId, ReconnectConfig, ReconnectJitter, ResumeRequest, SubscriptionAssignment,
+    SubscriptionId, SubscriptionRecovery,
 };
 pub use conversation::{ConversationEvent, ConversationHandle, ConversationId};
 pub use embedded::{EmbeddedChannelHandle, EmbeddedConfig, EmbeddedConversationHandle};
