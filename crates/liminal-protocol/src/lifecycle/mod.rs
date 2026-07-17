@@ -213,7 +213,7 @@ pub use operations::{
     RecordAdmissionPrestate, RecordAdmissionRefusal, RetainedRecordCharge,
     UnchangedRecordAdmission, apply_initial_enrollment, apply_marker_ack,
     apply_nonzero_participant_ack, apply_participant_ack, apply_record_admission,
-    drain_next_marker, select_marker_proof,
+    classify_record_admission_binding, drain_next_marker, select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,

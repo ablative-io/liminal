@@ -52,5 +52,5 @@ pub use record_admission::{
     CommittedOrdinaryRecord, RecordAdmissionCommit, RecordAdmissionDecision,
     RecordAdmissionDrainFirst, RecordAdmissionFailure, RecordAdmissionFault,
     RecordAdmissionPersistenceParts, RecordAdmissionPrestate, RecordAdmissionRefusal,
-    UnchangedRecordAdmission, apply_record_admission,
+    UnchangedRecordAdmission, apply_record_admission, classify_record_admission_binding,
 };

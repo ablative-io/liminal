@@ -500,6 +500,46 @@ pub enum RecordAdmissionDecision<'a, EF, V, LF> {
     Fault(Box<RecordAdmissionFailure<'a, EF, V, LF>>),
 }
 
+/// Classifies one ordinary record admission through the shared
+/// binding-required lookup WITHOUT consuming any claim-frontier authority.
+///
+/// This is the frontier-free prefix of [`apply_record_admission`]: exactly
+/// the frozen stage 2-5 rows (`Retired`, `ParticipantUnknown`,
+/// `StaleAuthority`, `NoBinding`) minted through the same sealed
+/// request-bound constructors the total selector uses. `None` means the
+/// presented authority is fully authorized and the operation must continue
+/// through the frontier-consuming total selector — a caller without that
+/// authority must fail closed rather than fabricate a later-stage outcome.
+#[must_use]
+pub fn classify_record_admission_binding<EF, V, LF>(
+    presented_identity: PresentedIdentity<'_, EF, V, LF>,
+    binding: &BindingState,
+    receiving_binding_epoch: BindingEpoch,
+    request: &RecordAdmission,
+) -> Option<RecordAdmissionResponse> {
+    let lookup_request = ParticipantBindingRequest::RecordAdmission(request.clone());
+    match lookup_binding_required(
+        presented_identity,
+        binding,
+        Some(receiving_binding_epoch),
+        &lookup_request,
+    ) {
+        BindingRequiredLookupResult::Retired(value) => {
+            Some(RecordAdmissionResponse::from_retired(value))
+        }
+        BindingRequiredLookupResult::ParticipantUnknown(value) => {
+            Some(RecordAdmissionResponse::from_participant_unknown(value))
+        }
+        BindingRequiredLookupResult::StaleAuthority(value) => {
+            Some(RecordAdmissionResponse::from_stale_authority(value))
+        }
+        BindingRequiredLookupResult::NoBinding(value) => {
+            Some(RecordAdmissionResponse::from_no_binding(value))
+        }
+        BindingRequiredLookupResult::Authorized { .. } => None,
+    }
+}
+
 /// Applies frozen stages 4-12 and constructs the exact phase-13 record commit.
 ///
 /// Binding-required lookup and receiving-epoch validation precede semantic

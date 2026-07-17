@@ -101,6 +101,20 @@ fn enrollment_constructors_stay_inside_the_register_rows() {
             }),
             ServerDiscriminant::ReceiptExpired,
         ),
+        // Row 5652 again, through the public field-wise constructor: the
+        // request-echo fields derive from the request's own envelope, the
+        // identity/provenance facts travel from the resolved lookup row, and
+        // the reason domain is exactly `Deadline | Superseded`.
+        (
+            EnrollmentResponse::receipt_expired(
+                &enrollment_envelope(),
+                3,
+                generation(1),
+                generation(2),
+                super::ReceiptExpiryReason::Deadline,
+            ),
+            ServerDiscriminant::ReceiptExpired,
+        ),
         // Row 5653: enrollment token mapping resolved to a tombstone.
         (
             EnrollmentResponse::from_retired(Retired::Enrollment {
@@ -163,6 +177,31 @@ fn enrollment_constructors_stay_inside_the_register_rows() {
             discriminant,
         );
     }
+}
+
+/// The public field-wise enrollment `receipt_expired` constructor mints the
+/// byte-identical row 5652 payload the crate-sealed lookup wrapper mints for
+/// the same facts, so a storage binding carrying lookup-resolved fields
+/// cannot drift from `lookup_enrollment`'s own wrapping.
+#[test]
+fn enrollment_receipt_expired_public_form_matches_the_sealed_lookup_wrapper() {
+    let envelope = enrollment_envelope();
+    let public_form = EnrollmentResponse::receipt_expired(
+        &envelope,
+        3,
+        generation(1),
+        generation(2),
+        super::ReceiptExpiryReason::Deadline,
+    );
+    let sealed_form = EnrollmentResponse::from_receipt_expired(ReceiptExpired::Enrollment {
+        conversation_id: envelope.conversation_id,
+        token: envelope.enrollment_token,
+        participant_id: 3,
+        result_generation: generation(1),
+        current_generation: generation(2),
+        reason: super::ReceiptExpiryReason::Deadline,
+    });
+    assert_eq!(public_form, sealed_form);
 }
 
 /// Credential-attach legal set: register rows 5639, 5641, 5643, 5644, 5645,

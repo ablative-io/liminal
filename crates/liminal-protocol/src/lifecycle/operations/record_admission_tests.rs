@@ -989,3 +989,84 @@ fn observer_fixed_point_refusal_maps_through_shared_selector_without_mutation() 
         89
     );
 }
+
+/// The frontier-free binding classifier mints exactly the frozen stage 2-5
+/// rows through the sealed request-bound constructors and stays silent for
+/// authorized presentations — a storage binding without live claim-frontier
+/// authority can classify every lookup refusal without touching frontiers.
+#[test]
+fn classify_record_admission_binding_covers_the_lookup_rows_and_only_those() {
+    use super::record_admission::classify_record_admission_binding;
+
+    let conversation_id = 33_001;
+    let generation = Generation::new(4).expect("four is nonzero");
+    let binding_epoch = BindingEpoch::new(ConnectionIncarnation::new(33, 1), generation);
+    let member = test_member(conversation_id, generation, 0);
+    let bound = BindingState::Bound(ActiveBinding {
+        participant_id: 0,
+        conversation_id,
+        binding_epoch,
+    });
+    let envelope = RecordAdmissionEnvelope {
+        conversation_id,
+        participant_id: 0,
+        capability_generation: generation,
+    };
+    let admission = request(&envelope, &[1, 2, 3]);
+
+    // Absent identity: ParticipantUnknown (stage 4).
+    let unknown = classify_record_admission_binding(
+        PresentedIdentity::<TestFingerprint, TestFingerprint, TestFingerprint>::Absent,
+        &BindingState::Detached,
+        binding_epoch,
+        &admission,
+    )
+    .expect("absent identity must classify");
+    assert_eq!(
+        unknown.discriminant(),
+        crate::wire::ServerDiscriminant::ParticipantUnknown
+    );
+
+    // Live identity with a stale presented generation: StaleAuthority (stage 4).
+    let stale_request = RecordAdmission {
+        capability_generation: Generation::new(3).expect("three is nonzero"),
+        ..admission.clone()
+    };
+    let stale = classify_record_admission_binding(
+        PresentedIdentity::<TestFingerprint, TestFingerprint, TestFingerprint>::Live(&member),
+        &bound,
+        BindingEpoch::new(ConnectionIncarnation::new(33, 1), generation),
+        &stale_request,
+    )
+    .expect("stale generation must classify");
+    assert_eq!(
+        stale.discriminant(),
+        crate::wire::ServerDiscriminant::StaleAuthority
+    );
+
+    // Live identity without a current binding: NoBinding (stage 5).
+    let detached = classify_record_admission_binding(
+        PresentedIdentity::<TestFingerprint, TestFingerprint, TestFingerprint>::Live(&member),
+        &BindingState::Detached,
+        binding_epoch,
+        &admission,
+    )
+    .expect("detached binding must classify");
+    assert_eq!(
+        detached.discriminant(),
+        crate::wire::ServerDiscriminant::NoBinding
+    );
+
+    // Fully authorized presentation: no refusal row — the frontier-consuming
+    // total selector owns everything past stage 5.
+    assert!(
+        classify_record_admission_binding(
+            PresentedIdentity::<TestFingerprint, TestFingerprint, TestFingerprint>::Live(&member),
+            &bound,
+            binding_epoch,
+            &admission,
+        )
+        .is_none(),
+        "authorized presentation must not mint a refusal"
+    );
+}

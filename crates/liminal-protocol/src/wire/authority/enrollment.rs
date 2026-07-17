@@ -5,10 +5,10 @@ use alloc::boxed::Box;
 use super::super::{
     ConnectionConversationBindingOccupied, ConnectionConversationCapacityExceeded,
     ConversationOrderExhausted, ConversationSequenceExhausted, EnrollBound, EnrollmentEnvelope,
-    EnrollmentKnown, EnrollmentReceiptCapacityScope, IdentityCapacityExceeded,
+    EnrollmentKnown, EnrollmentReceiptCapacityScope, Generation, IdentityCapacityExceeded,
     MarkerClosureCapacityExceeded, ObserverBackpressure, ObserverBackpressureState,
-    ReceiptCapacityExceeded, ReceiptExpired, ReceiptReplay, ResponseEnvelope, Retired,
-    ServerDiscriminant, ServerValue,
+    ReceiptCapacityExceeded, ReceiptExpired, ReceiptExpiryReason, ReceiptReplay, ResponseEnvelope,
+    Retired, ServerDiscriminant, ServerValue,
 };
 
 /// Server response bound to one enrollment request.
@@ -112,6 +112,35 @@ impl EnrollmentResponse {
     pub(crate) const fn from_receipt_expired(value: ReceiptExpired) -> Self {
         Self {
             value: ServerValue::ReceiptExpired(value),
+        }
+    }
+
+    /// Exact enrollment provenance window response with the flattened
+    /// request-echo fields derived from the request's own envelope (register
+    /// row 5652) — the same public field-wise form as the credential-attach
+    /// authority's `receipt_expired`.
+    ///
+    /// The participant id and both generations must come from the identity
+    /// resolved by the lifetime token mapping and its retained provenance
+    /// record; `presented_generation` is structurally `None` for enrollment
+    /// and the marker option is structurally absent.
+    #[must_use]
+    pub const fn receipt_expired(
+        request: &EnrollmentEnvelope,
+        participant_id: u64,
+        result_generation: Generation,
+        current_generation: Generation,
+        reason: ReceiptExpiryReason,
+    ) -> Self {
+        Self {
+            value: ServerValue::ReceiptExpired(ReceiptExpired::Enrollment {
+                conversation_id: request.conversation_id,
+                token: request.enrollment_token,
+                participant_id,
+                result_generation,
+                current_generation,
+                reason,
+            }),
         }
     }
 
