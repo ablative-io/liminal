@@ -38,8 +38,10 @@ pub(super) enum ScopeCounter {
     /// unable to admit one and refuses with its true numbers rather than
     /// admitting past the signed cap. This state is outside the contract's
     /// occupancy model (in-model occupancy never exceeds its limit), so its
-    /// refusal is selected at counter-construction time in the same fixed
-    /// scope order the crate applies.
+    /// refusal is selected at counter-construction time under the same
+    /// frozen scope order and first-full precedence the crate applies: an
+    /// exactly-full in-model scope EARLIER in the order answers first, with
+    /// its own numbers, so no later occupancy is disclosed past it.
     OverLimit {
         /// Signed limit currently configured.
         limit: u64,

@@ -18,7 +18,7 @@ use liminal_protocol::wire::{
 };
 
 use super::ProductionParticipantHandler;
-use super::tests::{dispatch, open_disk_store_for_tests};
+use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config};
 use super::tests_capacity::capacity_config;
 use super::tests_receipts::{GEN_ONE, attach, attach_request, detach, enroll, generation};
 
@@ -287,6 +287,97 @@ fn full_provenance_participant_scope_refuses_and_in_window_unknown_is_stale_auth
     };
     assert_eq!(current_generation, generation(2)?);
     Ok(())
+}
+
+/// Out-of-model over-limit refusal with true numbers on the attach arm: two
+/// retained enrollment fingerprints, then a restart whose server provenance
+/// cap was lowered to 1 BENEATH that durable occupancy. Every earlier scope
+/// in the frozen five-scope order has headroom, so the reconnecting attach
+/// refuses at `ProvenanceServer` with the lowered limit and the true
+/// occupancy — never admitting past the signed cap.
+#[test]
+fn attach_over_limit_scope_refuses_with_true_numbers() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let conversation_id = 748;
+    let participant_id;
+    let secret;
+
+    {
+        let store = open_disk_store_for_tests(&data_dir)?;
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+        let incarnation = ConnectionIncarnation::new(82, 1);
+        let receipt = enroll(&handler, incarnation, conversation_id, [61; 16])?;
+        participant_id = receipt.participant_id();
+        secret = receipt.attach_secret();
+        enroll(&handler, incarnation, 749, [62; 16])?;
+    }
+
+    // RESTART with the server provenance cap lowered beneath the two
+    // retained in-window fingerprints; the client reconnects and attaches.
+    let store = open_disk_store_for_tests(&data_dir)?;
+    let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
+    let handler = ProductionParticipantHandler::new(store, config)?;
+    let refused = dispatch(
+        &handler,
+        ConnectionIncarnation::new(82, 2),
+        attach_request(conversation_id, participant_id, GEN_ONE, secret, [63; 16]),
+    )?;
+    assert_attach_receipt_refusal(
+        &refused,
+        conversation_id,
+        ReceiptCapacityScope::ProvenanceServer,
+        1,
+        2,
+    )
+}
+
+/// Frozen first-full precedence across the model boundary on the attach
+/// arm: `LiveReceiptServer` is exactly full IN model (two live enrollment
+/// receipts against a cap of 2) while the LATER `ProvenanceServer` scope is
+/// over-limit (cap lowered to 1 beneath 2 retained fingerprints). The
+/// contract's suborder says the first full scope answers and no later
+/// occupancy is disclosed, so the refusal must name `LiveReceiptServer`
+/// with the live-receipt numbers — never the later provenance scope's.
+#[test]
+fn attach_mixed_full_and_over_limit_refuses_the_earlier_full_scope() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let conversation_id = 750;
+    let participant_id;
+    let secret;
+
+    {
+        let store = open_disk_store_for_tests(&data_dir)?;
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+        let incarnation = ConnectionIncarnation::new(83, 1);
+        let receipt = enroll(&handler, incarnation, conversation_id, [64; 16])?;
+        participant_id = receipt.participant_id();
+        secret = receipt.attach_secret();
+        enroll(&handler, incarnation, 751, [65; 16])?;
+    }
+
+    // RESTART: LiveReceiptServer exactly full in model (both enrollment
+    // receipts are still inside their 60s window), ProvenanceServer
+    // over-limit out of model.
+    let store = open_disk_store_for_tests(&data_dir)?;
+    let config = capacity_config(|c| {
+        c.max_live_attach_receipts_server = 2;
+        c.max_receipt_provenance_server = 1;
+    });
+    let handler = ProductionParticipantHandler::new(store, config)?;
+    let refused = dispatch(
+        &handler,
+        ConnectionIncarnation::new(83, 2),
+        attach_request(conversation_id, participant_id, GEN_ONE, secret, [66; 16]),
+    )?;
+    assert_attach_receipt_refusal(
+        &refused,
+        conversation_id,
+        ReceiptCapacityScope::LiveReceiptServer,
+        2,
+        2,
+    )
 }
 
 /// Request-time expiry, late-safe half (sleeping longer only strengthens the

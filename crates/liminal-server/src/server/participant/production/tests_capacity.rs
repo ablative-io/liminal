@@ -184,6 +184,90 @@ fn enrollment_provenance_server_scope_refusal() -> Result<(), Box<dyn Error>> {
     )
 }
 
+/// Out-of-model over-limit refusal with true numbers: two retained
+/// enrollment fingerprints, then a restart whose server provenance cap was
+/// lowered to 1 BENEATH that durable occupancy. Every earlier scope in the
+/// frozen order has headroom, so the next enrollment refuses at
+/// `ProvenanceServer` with the lowered limit and the true occupancy — never
+/// admitting past the signed cap and never inventing in-model numbers.
+#[test]
+fn enrollment_over_limit_scope_refuses_with_true_numbers() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let incarnation = ConnectionIncarnation::new(80, 1);
+
+    {
+        let store = open_disk_store_for_tests(&data_dir)?;
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+        enroll(&handler, incarnation, 751, [61; 16])?;
+        enroll(&handler, incarnation, 752, [62; 16])?;
+    }
+
+    // RESTART with the server provenance cap lowered beneath the two
+    // retained in-window fingerprints.
+    let store = open_disk_store_for_tests(&data_dir)?;
+    let config = capacity_config(|c| c.max_receipt_provenance_server = 1);
+    let handler = ProductionParticipantHandler::new(store, config)?;
+    let refused = dispatch(&handler, incarnation, enrollment_request(753, [63; 16]))?;
+    assert_enrollment_receipt_refusal(
+        &refused,
+        753,
+        EnrollmentReceiptCapacityScope::ProvenanceServer,
+        1,
+        2,
+    )
+}
+
+/// Frozen first-full precedence across the model boundary: the identity
+/// Server scope is exactly full IN model (2 identities against a cap of 2)
+/// while a LATER scope is over-limit (server provenance cap lowered to 1
+/// beneath 2 retained fingerprints). The contract's seven-scope suborder
+/// says the first full scope answers and no later occupancy is disclosed,
+/// so the refusal must be `IdentityCapacityExceeded` scope `Server` with the
+/// identity numbers — never the later provenance scope's.
+#[test]
+fn enrollment_mixed_full_and_over_limit_refuses_the_earlier_full_scope()
+-> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let incarnation = ConnectionIncarnation::new(81, 1);
+
+    {
+        let store = open_disk_store_for_tests(&data_dir)?;
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+        enroll(&handler, incarnation, 761, [64; 16])?;
+        enroll(&handler, incarnation, 762, [65; 16])?;
+    }
+
+    // RESTART: identity Server exactly full in model, ProvenanceServer
+    // over-limit out of model.
+    let store = open_disk_store_for_tests(&data_dir)?;
+    let config = capacity_config(|c| {
+        c.max_retired_identity_slots_server = 2;
+        c.max_receipt_provenance_server = 1;
+    });
+    let handler = ProductionParticipantHandler::new(store, config)?;
+    let refused = dispatch(&handler, incarnation, enrollment_request(763, [66; 16]))?;
+    let ServerValue::IdentityCapacityExceeded(IdentityCapacityExceeded {
+        request,
+        scope,
+        limit,
+        occupied,
+    }) = refused
+    else {
+        return Err(format!(
+            "the earlier full identity Server scope must answer before the later over-limit \
+             provenance scope, got: {refused:?}"
+        )
+        .into());
+    };
+    assert_eq!(request.conversation_id, 763);
+    assert_eq!(scope, IdentityCapacityScope::Server);
+    assert_eq!(limit, 2);
+    assert_eq!(occupied, 2);
+    Ok(())
+}
+
 /// Conversation-scope provenance capacity: a second identity in the SAME
 /// conversation refuses with `ProvenanceConversation`, while the same
 /// enrollment on a fresh conversation still admits — the scope is really

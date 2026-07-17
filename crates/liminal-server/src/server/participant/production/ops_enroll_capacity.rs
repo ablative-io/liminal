@@ -102,13 +102,41 @@ enum EnrollmentScope {
     Receipt(EnrollmentReceiptCapacityScope),
 }
 
+/// Binds one refusing enrollment scope to its exact typed wire row.
+const fn enrollment_scope_refusal(
+    request: &EnrollmentRequest,
+    scope: EnrollmentScope,
+    limit: u64,
+    occupied: u64,
+) -> EnrollmentResponse {
+    match scope {
+        EnrollmentScope::Identity(scope) => {
+            EnrollmentResponse::identity_capacity_exceeded(IdentityCapacityExceeded {
+                request: enrollment_envelope(request),
+                scope,
+                limit,
+                occupied,
+            })
+        }
+        EnrollmentScope::Receipt(scope) => EnrollmentResponse::receipt_capacity_exceeded(
+            enrollment_envelope(request),
+            scope,
+            limit,
+            occupied,
+        ),
+    }
+}
+
 /// Builds enrollment's five refusable stage-8 scope counters in the frozen
 /// order (identity Server, identity Conversation, `LiveReceiptServer`,
 /// `ProvenanceServer`, `ProvenanceConversation`) plus the two provably empty
-/// per-participant counters, or the first over-limit scope's refusal with
-/// its true numbers (a configuration lowered beneath retained occupancy is
-/// outside the crate's occupancy model and refuses rather than admitting
-/// past the signed cap).
+/// per-participant counters. A scope whose configured limit was lowered
+/// beneath retained durable occupancy is outside the crate's occupancy model
+/// (over-limit) and refuses at counter construction rather than admitting
+/// past the signed cap — but the contract's first-full precedence still
+/// holds: the refusal names the FIRST scope in the frozen order unable to
+/// admit one, so an earlier exactly-full scope answers with its own true
+/// numbers and no later scope's occupancy is disclosed.
 fn enrollment_scope_counters(
     request: &EnrollmentRequest,
     operation_facts: &OperationFacts,
@@ -145,29 +173,28 @@ fn enrollment_scope_counters(
         ),
     ];
     let mut counters = Vec::with_capacity(ordered.len());
+    // Contract precedence (frozen seven-scope suborder): "The first full
+    // scope returns its named IdentityCapacityExceeded or
+    // ReceiptCapacityExceeded; no later occupancy is disclosed." An
+    // out-of-model over-limit scope must not answer past an earlier in-model
+    // full scope, so the walk remembers the first exactly-full counter it
+    // passes and refuses THAT scope when a later over-limit scope ends the
+    // walk. When every scope is in model, the crate selector below stays the
+    // sole decision owner.
+    let mut first_full: Option<(EnrollmentScope, u64, u64)> = None;
     for (limit, occupied, scope) in ordered {
         match scope_counter(limit, occupied)? {
-            ScopeCounter::Valid(counter) => counters.push(counter),
+            ScopeCounter::Valid(counter) => {
+                if first_full.is_none() && counter.is_full() {
+                    first_full = Some((scope, counter.limit(), counter.occupied()));
+                }
+                counters.push(counter);
+            }
             ScopeCounter::OverLimit { limit, occupied } => {
-                let response = match scope {
-                    EnrollmentScope::Identity(scope) => {
-                        EnrollmentResponse::identity_capacity_exceeded(IdentityCapacityExceeded {
-                            request: enrollment_envelope(request),
-                            scope,
-                            limit,
-                            occupied,
-                        })
-                    }
-                    EnrollmentScope::Receipt(scope) => {
-                        EnrollmentResponse::receipt_capacity_exceeded(
-                            enrollment_envelope(request),
-                            scope,
-                            limit,
-                            occupied,
-                        )
-                    }
-                };
-                return Ok(Err(response));
+                let (scope, limit, occupied) = first_full.unwrap_or((scope, limit, occupied));
+                return Ok(Err(enrollment_scope_refusal(
+                    request, scope, limit, occupied,
+                )));
             }
         }
     }
