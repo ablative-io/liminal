@@ -45,13 +45,17 @@ semantics. Capability advertising stays ON; do not revisit it.
 **1 — sealed client correlation and detach replay.** `ClientRequest` is exhaustive (`wire/request.rs:118-153`), while
 `ServerValue` is independently exhaustive and `originating_request` yields only a discriminant
 (`wire/response.rs:1705-1780`, `:1841-1944`). Add non-`Clone`, private-field `ClientParticipantAggregate` and sealed,
-non-`Clone` `ExpectedParticipantOperation`. Mint the latter only through a client durability barrier with the crate's
-decide → durable persist → commit/abort shape (`lifecycle/aggregate_commit.rs:51-128`, consumed at
+non-`Clone` `ExpectedParticipantOperation`. Mint the latter only through a client durability barrier with the ruled
+commit-seal → persist → release order (Tom's round-3 ruling, 2026-07-17, superseding this brief's earlier
+decide → persist → commit sketch; precedent `lifecycle/aggregate_commit.rs:51-128`, consumed at
 `crates/liminal-server/src/server/participant/production/barrier.rs:127-149`): `record_operation` returns a pending
-decision holding the expected operation and successor aggregate as private, unreachable state; the caller durably
-persists the encoded `ClientResumeRecord` carrying that pending operation, then `commit()` releases both; `abort()`
-returns the unchanged aggregate and request. The crate owns no storage and cannot observe the write — the barrier's
-guarantee is reachability: nothing executable escapes while the decision is speculative. Minimum public seam:
+decision holding the expected operation and successor aggregate as private, unreachable state; `commit()` seals it
+into a committed record that exposes canonical `ClientResumeRecord` bytes while still withholding all authority; the
+caller durably persists those bytes; only then does `into_parts()` release the successor aggregate and one-use
+operation. `abort()` before commit returns the unchanged aggregate and request. Speculative pre-commit state is never
+encodable — the sealed committed record is the only byte source, so no pending-state bytes can exist to be promoted.
+The crate owns no storage and cannot observe the write — the barrier's guarantee is reachability: nothing executable
+escapes before the seal, and nothing releases before the caller's persist step. Minimum public seam:
 
 ```rust
 pub fn record_operation(
