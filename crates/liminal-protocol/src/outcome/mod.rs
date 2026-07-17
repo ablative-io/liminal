@@ -36,10 +36,9 @@ pub use keepalive::{
     StartupKeepaliveReason,
 };
 pub use local::{
-    AuthoritySuperseded, CredentialRecoveryLost, ParkOrderCounter, ReconnectDelayResult,
-    ReconnectRequiredEvent, ReconnectState, RecordAdmissionOperation, RecordAdmissionUnknown,
-    SdkDetachReplayAuthority, SdkObserverParkCapacityExceeded, SdkParkOrderExhausted,
-    SdkParticipantRequestTooLarge,
+    CredentialRecoveryLost, ParkOrderCounter, ReconnectDelayResult, ReconnectRequiredEvent,
+    ReconnectState, RecordAdmissionOperation, RecordAdmissionUnknown,
+    SdkObserverParkCapacityExceeded, SdkParkOrderExhausted, SdkParticipantRequestTooLarge,
 };
 pub use parking::{
     CheckedMultiplyOverflow, CheckedOperation, HandshakeSizeOperands, ParkingLimitField,

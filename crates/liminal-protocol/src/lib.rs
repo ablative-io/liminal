@@ -10,6 +10,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod algebra;
+pub mod client;
 pub mod lifecycle;
 pub mod outcome;
 pub mod wire;

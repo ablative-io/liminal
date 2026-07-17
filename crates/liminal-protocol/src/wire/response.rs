@@ -377,6 +377,27 @@ impl TerminalizedDetachCell {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) const fn for_client_test(
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        capability_generation: Generation,
+        detach_attempt_token: DetachAttemptToken,
+        current_generation: Generation,
+        committed_binding_epoch: BindingEpoch,
+        binding_state: BindingStateView,
+    ) -> Self {
+        Self {
+            conversation_id,
+            participant_id,
+            capability_generation,
+            detach_attempt_token,
+            current_generation,
+            committed_binding_epoch,
+            binding_state,
+        }
+    }
+
     /// Conversation from the old detach request.
     #[must_use]
     pub const fn conversation_id(&self) -> ConversationId {
