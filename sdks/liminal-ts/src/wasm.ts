@@ -13,6 +13,19 @@ export interface WasmSendOptions {
   readonly streamId?: number;
 }
 
+export interface WasmSubscribeOptions {
+  readonly connectionId: number;
+  readonly channel: string;
+  readonly acceptedSchemas?: readonly Uint8Array[];
+  readonly streamId?: number;
+}
+
+export interface WasmUnsubscribeOptions {
+  readonly connectionId: number;
+  readonly subscriptionId: bigint;
+  readonly streamId?: number;
+}
+
 export interface WasmReceiveOptions {
   readonly connectionId: number;
   readonly frame: Uint8Array;
@@ -32,11 +45,23 @@ export interface WasmSendResult {
   readonly frame: Uint8Array;
 }
 
-export interface WasmMessagePayload {
+export interface WasmFrameResult {
+  readonly frame: Uint8Array;
+}
+
+export interface WasmReceivedFrame {
   readonly channel: string;
-  readonly payload: unknown;
+  readonly frameType: number;
+  readonly streamId: number;
+  readonly subscriptionId?: bigint;
+  readonly reasonCode?: number;
+  /** Exact payload bytes; no JSON decode/re-encode is performed. */
+  readonly payload: Uint8Array;
   readonly consumedBytes: number;
 }
+
+/** @deprecated Use {@link WasmReceivedFrame}; retained as a source-compatible alias. */
+export type WasmMessagePayload = WasmReceivedFrame;
 
 export interface WasmCloseResult {
   readonly frame: Uint8Array;
@@ -45,7 +70,9 @@ export interface WasmCloseResult {
 export interface WasmProtocolBindings {
   connect(options: WasmConnectOptions): Promise<WasmConnected> | WasmConnected;
   send(options: WasmSendOptions): Promise<WasmSendResult> | WasmSendResult;
-  receive(options: WasmReceiveOptions): Promise<WasmMessagePayload | undefined> | WasmMessagePayload | undefined;
+  subscribe(options: WasmSubscribeOptions): Promise<WasmFrameResult> | WasmFrameResult;
+  unsubscribe(options: WasmUnsubscribeOptions): Promise<WasmFrameResult> | WasmFrameResult;
+  receive(options: WasmReceiveOptions): Promise<WasmReceivedFrame> | WasmReceivedFrame;
   close(options: WasmCloseOptions): Promise<WasmCloseResult> | WasmCloseResult;
 }
 
@@ -60,12 +87,15 @@ type GeneratedWasmModule = {
   default(input?: unknown): Promise<unknown>;
   connect(authToken: Uint8Array): Uint8Array;
   send(streamId: number, channel: string, schemaId: Uint8Array, payload: Uint8Array): Uint8Array;
+  subscribe(streamId: number, channel: string, acceptedSchemas: Uint8Array): Uint8Array;
+  unsubscribe(streamId: number, subscriptionId: bigint): Uint8Array;
   receive(frame: Uint8Array): Uint8Array;
   close(): Uint8Array;
 };
 
 const textEncoder = new TextEncoder();
-const textDecoder = new TextDecoder();
+const RECEIVE_PREFIX_LENGTH = 19;
+const DEFAULT_GLUE_SPECIFIER = "../../wasm/liminal_protocol_wasm.js";
 let activeBindings: Promise<WasmProtocolBindings> | undefined;
 
 export async function connect(
@@ -84,10 +114,26 @@ export async function send(
   return bindings.send(options);
 }
 
+export async function subscribe(
+  options: WasmSubscribeOptions,
+  loadOptions: WasmLoadOptions = {},
+): Promise<WasmFrameResult> {
+  const bindings = await loadBindings(loadOptions);
+  return bindings.subscribe(options);
+}
+
+export async function unsubscribe(
+  options: WasmUnsubscribeOptions,
+  loadOptions: WasmLoadOptions = {},
+): Promise<WasmFrameResult> {
+  const bindings = await loadBindings(loadOptions);
+  return bindings.unsubscribe(options);
+}
+
 export async function receive(
   options: WasmReceiveOptions,
   loadOptions: WasmLoadOptions = {},
-): Promise<WasmMessagePayload | undefined> {
+): Promise<WasmReceivedFrame> {
   const bindings = await loadBindings(loadOptions);
   return bindings.receive(options);
 }
@@ -141,13 +187,21 @@ async function instantiateBindings(source?: WasmSource): Promise<WasmProtocolBin
         ),
       };
     },
+    subscribe(options) {
+      return {
+        frame: module.subscribe(
+          options.streamId ?? 1,
+          options.channel,
+          flattenSchemaIds(options.acceptedSchemas ?? []),
+        ),
+      };
+    },
+    unsubscribe(options) {
+      return { frame: module.unsubscribe(options.streamId ?? 1, options.subscriptionId) };
+    },
     receive(options) {
       const decoded = module.receive(options.frame);
-      if (decoded.byteLength === 0) {
-        return undefined;
-      }
-      const { consumedBytes, payload } = decodePayload(decoded);
-      return { channel: options.channel ?? "", payload, consumedBytes };
+      return { channel: options.channel ?? "", ...decodeReceivedFrame(decoded) };
     },
     close() {
       return { frame: module.close() };
@@ -157,20 +211,25 @@ async function instantiateBindings(source?: WasmSource): Promise<WasmProtocolBin
 
 async function loadGeneratedModule(source?: WasmSource): Promise<GeneratedWasmModule> {
   try {
-    const module = await import(defaultGlueUrl().href) as GeneratedWasmModule;
-    await module.default({ module_or_path: await wasmInitInput(source) });
+    const module = await import(DEFAULT_GLUE_SPECIFIER) as GeneratedWasmModule;
+    if (source === undefined) {
+      // In browsers wasm-bindgen resolves its sibling asset relative to the
+      // generated glue module. Node callers can provide bytes via `source`.
+      await module.default();
+    } else {
+      await module.default({ module_or_path: await wasmInitInput(source) });
+    }
     return module;
   } catch (cause) {
     throw wasmError("Failed to load liminal protocol WASM module", cause);
   }
 }
 
-async function wasmInitInput(source?: WasmSource): Promise<WasmSource> {
-  const resolved = source ?? defaultWasmUrl();
-  if (resolved instanceof WebAssembly.Module) {
-    return resolved;
+async function wasmInitInput(source: WasmSource): Promise<WasmSource> {
+  if (source instanceof WebAssembly.Module) {
+    return source;
   }
-  return readWasmBytes(resolved);
+  return readWasmBytes(source);
 }
 
 async function readWasmBytes(source: URL | string | ArrayBuffer | Uint8Array): Promise<ArrayBuffer> {
@@ -180,7 +239,15 @@ async function readWasmBytes(source: URL | string | ArrayBuffer | Uint8Array): P
   if (source instanceof Uint8Array) {
     return copyBytes(source);
   }
-  const url = typeof source === "string" ? new URL(source, import.meta.url) : source;
+  let url: URL;
+  try {
+    url = typeof source === "string" ? new URL(source) : source;
+  } catch (cause) {
+    throw wasmError(
+      "String WASM sources must be absolute URLs; use URL or Uint8Array for relative assets",
+      cause,
+    );
+  }
   if (url.protocol === "file:" && isNodeRuntime()) {
     const { readFile } = await import("node:fs/promises");
     return copyBytes(await readFile(url));
@@ -206,22 +273,35 @@ function encodePayload(payload: unknown): Uint8Array {
   return textEncoder.encode(serialized);
 }
 
-function decodePayload(decoded: Uint8Array): { readonly consumedBytes: number; readonly payload: unknown } {
-  if (decoded.byteLength < 4) {
-    throw wasmError("Decoded protocol payload did not include a length prefix");
+function flattenSchemaIds(schemaIds: readonly Uint8Array[]): Uint8Array {
+  const flattened = new Uint8Array(schemaIds.length * 32);
+  schemaIds.forEach((schemaId, index) => {
+    if (schemaId.byteLength !== 32) {
+      throw wasmError("Accepted schema ids must be exactly 32 bytes");
+    }
+    flattened.set(schemaId, index * 32);
+  });
+  return flattened;
+}
+
+function decodeReceivedFrame(decoded: Uint8Array): Omit<WasmReceivedFrame, "channel"> {
+  if (decoded.byteLength < RECEIVE_PREFIX_LENGTH) {
+    throw wasmError("Decoded protocol frame did not include typed receive metadata");
   }
   const view = new DataView(decoded.buffer, decoded.byteOffset, decoded.byteLength);
   const consumedBytes = view.getUint32(0);
-  const payloadBytes = decoded.slice(4);
-  if (payloadBytes.byteLength === 0) {
-    return { consumedBytes, payload: undefined };
-  }
-  const text = textDecoder.decode(payloadBytes);
-  try {
-    return { consumedBytes, payload: JSON.parse(text) };
-  } catch {
-    return { consumedBytes, payload: text };
-  }
+  const frameType = view.getUint8(4);
+  const streamId = view.getUint32(5);
+  const subscriptionId = view.getBigUint64(9);
+  const reasonCode = view.getUint16(17);
+  return {
+    consumedBytes,
+    frameType,
+    streamId,
+    ...(frameType === 0x06 ? { subscriptionId } : {}),
+    ...([0x03, 0x07, 0x0b, 0x0f].includes(frameType) ? { reasonCode } : {}),
+    payload: decoded.slice(RECEIVE_PREFIX_LENGTH),
+  };
 }
 
 function emptySchemaId(): Uint8Array {
@@ -234,19 +314,11 @@ function copyBytes(bytes: Uint8Array): ArrayBuffer {
   return copy.buffer;
 }
 
-function defaultGlueUrl(): URL {
-  return new URL("../wasm/liminal_protocol_wasm.js", import.meta.url);
-}
-
-function defaultWasmUrl(): URL {
-  return new URL("../wasm/liminal_protocol_wasm_bg.wasm", import.meta.url);
-}
-
 function assertBindings(value: unknown): asserts value is WasmProtocolBindings {
   if (!isRecord(value)) {
     throw wasmError("Loaded WASM bridge did not expose protocol bindings");
   }
-  const missing = ["connect", "send", "receive", "close"].filter(
+  const missing = ["connect", "send", "subscribe", "unsubscribe", "receive", "close"].filter(
     (name) => typeof value[name] !== "function",
   );
   if (missing.length > 0) {

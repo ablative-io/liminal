@@ -1,6 +1,6 @@
 {
   "name": "@liminal/sdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript SDK facade for typed liminal channels backed by the Rust WASM protocol bridge",
   "license": "MIT",
   "repository": {
@@ -26,6 +26,7 @@
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pretest": "npm run build:wasm",
     "test:build": "node -e \"require('fs').rmSync('dist-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json",
     "test": "npm run test:build && node --test \"dist-test/tests/**/*.test.js\"",
     "build:wasm": "wasm-pack build wasm-src --target web --out-dir ../wasm --out-name liminal_protocol_wasm",
