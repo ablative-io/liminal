@@ -76,7 +76,9 @@ govern the body. Dispatch remains gated on the client unit landing (see
   typed; empty/absent origin config refuses Origin-BEARING upgrades only
   (native clients sending no Origin header pass); the checkpoint-3 harness
   sends an Origin, so its test config must list it.
-- **Q-A RULED (keepalive), PROVISIONAL pending Tom's idle-cost sign-off.** A
+- **Q-A RULED (keepalive) — FINAL under Tom's keep-it-moving authority
+  (2026-07-17; the provisional flag was cleared by Tom's direction that
+  technically-correct dispositions are ruled at the tear seat).** A
   server-side WS Ping schedule is authorized as TRANSPORT LIVENESS, with the
   LAW-1 carve-out stated precisely: liveness pings never mint application
   events, never re-arm application state, and never serve as a source of
