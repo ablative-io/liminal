@@ -15,6 +15,13 @@ default = ["std"]
 # `std` feature. The transport-neutral WebSocket driver and the client-unit
 # authority binding are `no_std + alloc` and always available.
 std = ["thiserror/std", "serde/std", "dep:liminal", "dep:tungstenite"]
+# The browser (`web-sys`) WebSocket adapter (LP-WS-TRANSPORT R3.2). The
+# JavaScript bindings only exist on `wasm32-unknown-unknown`, so the optional
+# dependencies live in that target's section below and the adapter module is
+# additionally gated on `target_arch = "wasm32"`. The adapter's pure
+# conversion layer (the F5 mirror) has no platform type and is always
+# compiled, so the deterministic driver-trace suites pin it natively.
+browser = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
 
 [dependencies]
 futures-core = { workspace = true }
@@ -25,6 +32,21 @@ serde_json = { workspace = true, features = ["alloc"] }
 spin = { workspace = true }
 thiserror = { workspace = true }
 tungstenite = { workspace = true, optional = true }
+
+# The browser adapter binds exactly the Web APIs it drives; `web-sys` compiles
+# only the listed interfaces. These dependencies exist solely for the
+# `browser` feature on the browser wasm target.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+js-sys = { workspace = true, optional = true }
+wasm-bindgen = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = [
+    "BinaryType",
+    "Blob",
+    "CloseEvent",
+    "Event",
+    "MessageEvent",
+    "WebSocket",
+] }
 
 [lints]
 workspace = true
