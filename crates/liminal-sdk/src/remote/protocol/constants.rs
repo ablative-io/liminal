@@ -1,0 +1,9 @@
+pub(super) const WIRE_HEADER_LEN: usize = 10;
+pub(super) const FRAME_TYPE_SUBSCRIBE: u8 = 0x05;
+pub(super) const FRAME_TYPE_PUBLISH: u8 = 0x09;
+pub(super) const FRAME_TYPE_CONVERSATION_MESSAGE: u8 = 0x0D;
+pub(super) const FRAME_TYPE_RESUME: u8 = 0x06;
+pub(super) const FRAME_TYPE_ACCEPT: u8 = 0x10;
+pub(super) const FRAME_TYPE_DEFER: u8 = 0x11;
+pub(super) const FRAME_TYPE_REJECT: u8 = 0x12;
+pub(super) const APPLICATION_STREAM_ID: u32 = 1;

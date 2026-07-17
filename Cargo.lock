@@ -1185,7 +1185,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "liminal-protocol"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proptest",
 ]
@@ -1209,9 +1209,10 @@ dependencies = [
 
 [[package]]
 name = "liminal-sdk"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "futures-core",
+ "liminal-protocol",
  "liminal-rs",
  "serde",
  "serde_json",

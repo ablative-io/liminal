@@ -1,6 +1,6 @@
 [package]
 name = "liminal-sdk"
-version = "0.2.4"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,6 +17,7 @@ std = ["thiserror/std", "serde/std", "dep:liminal"]
 [dependencies]
 futures-core = { workspace = true }
 liminal = { workspace = true, optional = true }
+liminal-protocol = { workspace = true }
 serde = { workspace = true, features = ["alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
 spin = { workspace = true }
