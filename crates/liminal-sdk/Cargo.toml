@@ -23,5 +23,10 @@ serde_json = { workspace = true, features = ["alloc"] }
 spin = { workspace = true }
 thiserror = { workspace = true }
 
+[[example]]
+name = "demo_feed_publisher"
+path = "examples/demo_feed_publisher/main.rs"
+required-features = ["std"]
+
 [lints]
 workspace = true
