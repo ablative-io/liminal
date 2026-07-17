@@ -17,6 +17,7 @@ std = ["thiserror/std", "serde/std", "dep:liminal"]
 [dependencies]
 futures-core = { workspace = true }
 liminal = { workspace = true, optional = true }
+liminal-protocol = { workspace = true }
 serde = { workspace = true, features = ["alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }
 spin = { workspace = true }

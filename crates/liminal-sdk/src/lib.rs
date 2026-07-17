@@ -16,6 +16,7 @@ pub use connection::{
     ConnectionEvent, ConnectionEvents, ConnectionLifecycle, ConnectionPool, ConnectionPoolConfig,
     ConnectionState, DisconnectReason, PoolConnectionId, ReconnectConfig, ReconnectJitter,
     ResumeRequest, SubscriptionAssignment, SubscriptionId, SubscriptionRecovery,
+    receive_participant_frame,
 };
 pub use conversation::{ConversationEvent, ConversationHandle, ConversationId};
 pub use embedded::{EmbeddedChannelHandle, EmbeddedConfig, EmbeddedConversationHandle};
