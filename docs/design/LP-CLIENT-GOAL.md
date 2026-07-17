@@ -45,8 +45,13 @@ semantics. Capability advertising stays ON; do not revisit it.
 **1 — sealed client correlation and detach replay.** `ClientRequest` is exhaustive (`wire/request.rs:118-153`), while
 `ServerValue` is independently exhaustive and `originating_request` yields only a discriminant
 (`wire/response.rs:1705-1780`, `:1841-1944`). Add non-`Clone`, private-field `ClientParticipantAggregate` and sealed,
-non-`Clone` `ExpectedParticipantOperation`. Mint the latter only after the exact request crosses a client durability
-barrier; abort returns the unchanged aggregate and request. Minimum public seam:
+non-`Clone` `ExpectedParticipantOperation`. Mint the latter only through a client durability barrier with the crate's
+decide → durable persist → commit/abort shape (`lifecycle/aggregate_commit.rs:51-128`, consumed at
+`crates/liminal-server/src/server/participant/production/barrier.rs:127-149`): `record_operation` returns a pending
+decision holding the expected operation and successor aggregate as private, unreachable state; the caller durably
+persists the encoded `ClientResumeRecord` carrying that pending operation, then `commit()` releases both; `abort()`
+returns the unchanged aggregate and request. The crate owns no storage and cannot observe the write — the barrier's
+guarantee is reachability: nothing executable escapes while the decision is speculative. Minimum public seam:
 
 ```rust
 pub fn record_operation(
@@ -55,16 +60,21 @@ pub fn record_operation(
 ) -> ClientOperationRecordDecision;
 pub fn decide_inbound(
     aggregate: ClientParticipantAggregate,
-    expected: ExpectedParticipantOperation,
     value: ServerValue,
 ) -> ClientInboundDecision;
 ```
 
-`decide_inbound` performs request identity, operation, conversation, participant, token, generation, and binding
-correlation inside the crate and matches every `ServerValue` arm. Applied effects return resulting aggregate and typed
-value; refusals return unchanged aggregate, expected authority, and value. Distinguish at least already-dead, foreign-
-response, and delayed-response refusals. No boolean/string/generic error, dropped packet, or caller relabeling of a
-decoded value as applied is permitted.
+The aggregate owns the outstanding-operation state and ALL match selection: `decide_inbound` takes no expected-
+operation parameter, because caller pre-selection of which operation a response correlates against is itself the
+correlation decision. Cardinality is a crate-enforced rule: at most ONE outstanding write-ahead operation at a time;
+`record_operation` while one is expected returns a typed refusal carrying the unchanged aggregate and the refused
+request — no queue, no silent replacement. Continuous acknowledgements are not write-ahead operations and never occupy
+the slot; their outcomes, like server-initiated values with no originating request, route through their own crate
+rules. `decide_inbound` performs request identity, operation, conversation, participant, token, generation, and
+binding correlation inside the crate and matches every `ServerValue` arm. Applied effects return resulting aggregate
+and typed value; refusals return the unchanged aggregate — still holding its expected authority — and the refused
+value. Distinguish at least already-dead, foreign-response, and delayed-response refusals. No boolean/string/generic
+error, dropped packet, or caller relabeling of a decoded value as applied is permitted.
 
 Add `SdkDetachReplayAggregate`, retaining the exact private `DetachEnvelope` (`wire/envelope.rs:30-41`), and subsume
 standalone `SdkDetachReplayAuthority`: no public `supersede` escape may bypass the aggregate. Closed status vocabulary:
@@ -159,7 +169,8 @@ supersedes its timer interpretation: a fresh event permits one real attempt, nev
 4. Prove one-use: first redemption starts one attempt; double/stale redemption refuses without mutation; failure parks;
    no timer path exists; cloning/reusing a moved permit fails to compile.
 5. Drive already-dead, foreign, delayed/older, and exact response correlation. Refusals retain aggregate, expected
-   authority, and value; only exact responses apply.
+   authority, and value; only exact responses apply. Prove the cardinality rule: `record_operation` while one
+   operation is outstanding refuses without mutation, and a pending decision releases nothing before `commit()`.
 
 **Checkpoint 1 declaration:** on one clean commit run roadmap protocol gates
 (`docs/design/LP-ROADMAP.md:50-67`), no-default-features build, and relevant workspace gates. Push; state commit, module
