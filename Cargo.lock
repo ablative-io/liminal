@@ -1149,9 +1149,10 @@ dependencies = [
 
 [[package]]
 name = "liminal-sdk"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "futures-core",
+ "liminal-protocol",
  "liminal-rs",
  "serde",
  "serde_json",
