@@ -83,6 +83,12 @@ pub(super) struct Slot {
     /// Enrollment receipt deadline, fixed at enroll commit and never
     /// rewritten by later attaches (epoch milliseconds).
     pub(super) enrollment_receipt_expires_at: u128,
+    /// Enrollment provenance deadline, fixed at enroll commit (epoch
+    /// milliseconds). Between the receipt deadline and this deadline an exact
+    /// enrollment-token replay answers the contract's `ReceiptExpired` row
+    /// with reason `Deadline`; after it, the permanent lifetime mapping
+    /// answers `EnrollmentKnown`.
+    pub(super) enrollment_provenance_expires_at: u128,
     /// Current attach receipt with its own independent deadline pair.
     pub(super) attach: Option<AttachReceiptState>,
     /// Bounded provenance fingerprints of ended attach receipts, keyed by

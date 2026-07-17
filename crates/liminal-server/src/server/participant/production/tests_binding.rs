@@ -259,3 +259,101 @@ fn marker_bearing_attach_refuses_no_marker_expected() -> Result<(), Box<dyn Erro
     assert_eq!(proof.requested_marker_delivery_seq, 9);
     Ok(())
 }
+
+/// Register row 5655, conversation scope (contract: the monotone
+/// `next_participant_index` in `0..=I`; when it equals `I` the
+/// conversation-scope `IdentityCapacityExceeded` wins): with
+/// `identity_slots = 4`, four enrollments mint ordinals 0..=3 and the fifth
+/// returns the typed refusal with exact `scope`/`limit`/`occupied` — the
+/// connection stays open and nothing is minted for the refused token.
+#[test]
+fn enrollment_at_identity_limit_returns_typed_capacity_refusal_without_minting()
+-> Result<(), Box<dyn Error>> {
+    use liminal_protocol::wire::{IdentityCapacityExceeded, IdentityCapacityScope};
+
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let conversation_id = 801;
+    let store = open_disk_store_for_tests(&data_dir)?;
+    let config = test_participant_config();
+    assert_eq!(config.identity_slots, 4, "fixture assumes four slots");
+    let handler = ProductionParticipantHandler::new(store, config);
+
+    // Four distinct enrollments from four connection incarnations mint the
+    // exact permanent ordinals 0..=3.
+    for slot in 0..4_u64 {
+        let enrolled = dispatch(
+            &handler,
+            ConnectionIncarnation::new(81, slot + 1),
+            ClientRequest::Enrollment(EnrollmentRequest {
+                conversation_id,
+                enrollment_token: EnrollmentToken::new([90 + u8::try_from(slot)?; 16]),
+            }),
+        )?;
+        let ServerValue::EnrollBound(receipt) = enrolled else {
+            return Err(format!("enrollment {slot} did not bind: {enrolled:?}").into());
+        };
+        assert_eq!(receipt.participant_id(), slot);
+    }
+
+    // The fifth enrollment is the exact conversation-scope typed refusal.
+    let refused_token = [99; 16];
+    let refused = dispatch(
+        &handler,
+        ConnectionIncarnation::new(81, 5),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new(refused_token),
+        }),
+    )?;
+    let ServerValue::IdentityCapacityExceeded(IdentityCapacityExceeded {
+        request,
+        scope,
+        limit,
+        occupied,
+    }) = refused
+    else {
+        return Err(
+            format!("fifth enrollment must be IdentityCapacityExceeded, got: {refused:?}").into(),
+        );
+    };
+    assert_eq!(request.conversation_id, conversation_id);
+    assert_eq!(
+        request.enrollment_token,
+        EnrollmentToken::new(refused_token)
+    );
+    assert_eq!(scope, IdentityCapacityScope::Conversation);
+    assert_eq!(limit, 4);
+    assert_eq!(occupied, 4);
+
+    // Nothing was minted: the refused token is NOT a lifetime mapping — its
+    // replay refuses again instead of answering a replay row.
+    let replayed = dispatch(
+        &handler,
+        ConnectionIncarnation::new(81, 6),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new(refused_token),
+        }),
+    )?;
+    assert!(
+        matches!(replayed, ServerValue::IdentityCapacityExceeded(_)),
+        "the refused token must not have minted a mapping: {replayed:?}"
+    );
+
+    // A different conversation is an independent identity domain: the same
+    // deployment still enrolls ordinal 0 there.
+    let sibling = dispatch(
+        &handler,
+        ConnectionIncarnation::new(81, 7),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: conversation_id + 1,
+            enrollment_token: EnrollmentToken::new([98; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt) = sibling else {
+        return Err(format!("sibling conversation enrollment did not bind: {sibling:?}").into());
+    };
+    assert_eq!(receipt.participant_id(), 0);
+    Ok(())
+}

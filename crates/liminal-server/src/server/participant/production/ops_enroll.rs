@@ -13,14 +13,16 @@
 
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AllocatedParticipantSlot, AttachedRecordPosition,
-    BindingSlotDecision, DetachCell, EnrollmentCommitParameters, EnrollmentFingerprint,
-    EnrollmentLiveReceipt, EnrollmentLookupResult, EnrollmentTokenPhase,
+    BindingSlotDecision, CapacityCounter, CapacityCounterInvariantError, DetachCell,
+    EnrollmentCommitParameters, EnrollmentFingerprint, EnrollmentLiveReceipt,
+    EnrollmentLookupResult, EnrollmentProvenance, EnrollmentTokenPhase,
     ParticipantSlotAllocatorProof, ResolvedIdentity, commit_enrollment, decide_enrolled_operation,
     lookup_enrollment, select_enrollment_binding_slot,
 };
 use liminal_protocol::wire::{
-    AttachSecret, BindingEpoch, EnrollBound, EnrollmentRequest, EnrollmentResponse, Generation,
-    ServerValue,
+    AttachSecret, BindingEpoch, EnrollBound, EnrollmentEnvelope, EnrollmentRequest,
+    EnrollmentResponse, Generation, IdentityCapacityExceeded, IdentityCapacityScope,
+    ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason, ServerValue,
 };
 
 use super::barrier::{CommitMode, OperationFacts, commit_through_barrier};
@@ -75,6 +77,22 @@ impl ConversationAuthority {
             request,
             self.binding_slot_occupancy(operation_facts.receiving_incarnation),
         ) {
+            return Ok(response.into_server_value());
+        }
+        // Stage-8 conversation-scope identity capacity (contract: the
+        // monotone `next_participant_index` in `0..=I`; when it equals `I`
+        // the conversation-scope `IdentityCapacityExceeded` wins) — BEFORE
+        // genesis, secret mint, or any durable touch, so the refused request
+        // provably mints nothing. The decision is the crate's bounded-counter
+        // algebra over the true occupancy; the server supplies only the
+        // configured limit and the replayed allocation fact. The server-scope
+        // identity counter has no configured limit in this deployment surface
+        // yet and is recorded as an open gap in the goal document.
+        if let Some(response) = identity_capacity_refusal(
+            request,
+            operation_facts.identity_slots,
+            self.next_participant,
+        )? {
             return Ok(response.into_server_value());
         }
 
@@ -182,6 +200,7 @@ impl ConversationAuthority {
                 enrollment_receipt: EnrollmentLiveReceipt::from_commit(outcome.clone()),
                 enrollment_outcome: committed.outcome,
                 enrollment_receipt_expires_at: allocation.receipt_expires_at.get(),
+                enrollment_provenance_expires_at: allocation.provenance_expires_at.get(),
                 attach: None,
                 attach_provenance: std::collections::BTreeMap::new(),
                 attach_secret: AttachSecret::new(allocation.attach_secret),
@@ -204,6 +223,43 @@ impl ConversationAuthority {
     }
 }
 
+/// Classifies conversation-scope identity capacity for one fresh enrollment.
+///
+/// `Some(response)` is the exact register row 5655 refusal (`scope:
+/// Conversation`, signed `limit`, true `occupied`, requested 1); `None`
+/// admits the enrollment. The full/not-full judgment is the crate's
+/// [`CapacityCounter`] algebra. An occupancy above the signed limit is a
+/// configuration lowered underneath durable allocations: the enrollment is
+/// refused with the true numbers rather than minting past the signed cap.
+fn identity_capacity_refusal(
+    request: &EnrollmentRequest,
+    identity_slots: u64,
+    next_participant: u64,
+) -> Result<Option<EnrollmentResponse>, StateError> {
+    let (full, limit, occupied) = match CapacityCounter::try_new(identity_slots, next_participant) {
+        Ok(counter) => (counter.is_full(), counter.limit(), counter.occupied()),
+        Err(CapacityCounterInvariantError::OccupiedExceedsLimit { occupied, limit }) => {
+            (true, limit, occupied)
+        }
+        Err(CapacityCounterInvariantError::ZeroLimit) => {
+            return Err(StateError::invariant(
+                "validated identity_slots configuration rejected: zero limit",
+            ));
+        }
+    };
+    if !full {
+        return Ok(None);
+    }
+    Ok(Some(EnrollmentResponse::identity_capacity_exceeded(
+        IdentityCapacityExceeded {
+            request: enrollment_envelope(request),
+            scope: IdentityCapacityScope::Conversation,
+            limit,
+            occupied,
+        },
+    )))
+}
+
 /// Builds the enrollment replay/known response for a mapped token.
 fn enrollment_replay_response(
     slot: &Slot,
@@ -211,25 +267,29 @@ fn enrollment_replay_response(
     operation_facts: &OperationFacts,
 ) -> Result<ServerValue, StateError> {
     let now = u128::from(operation_facts.now_ms);
-    // The provenance window's `ReceiptExpired` wrapper is crate-sealed
-    // (`EnrollmentResponse::from_receipt_expired` is `pub(crate)`), so this
-    // binding degrades the provenance window to the permanent lifetime
-    // mapping: expired-receipt token replays answer `EnrollmentKnown`. This
-    // is the closest crate-expressible row and is recorded as a residual gap
-    // in the activation declaration.
-    //
-    // The gate reads the enrollment receipt's OWN deadline, fixed at enroll
-    // commit: later attaches never re-open the generation-1 secret-bearing
-    // receipt (secret receipts never outlive their signed TTL).
+    // Three token phases against the enrollment receipt's OWN deadline pair,
+    // fixed at enroll commit: later attaches never re-open the generation-1
+    // secret-bearing receipt (secret receipts never outlive their signed
+    // TTL), and the non-secret provenance record explains the ended receipt
+    // exactly through its own deadline. The enrollment receipt in this
+    // binding is ended only by its deadline (nothing supersedes an enrollment
+    // token), so the retained provenance reason is `Deadline`.
+    let identity = ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member);
     let phase = if now < slot.enrollment_receipt_expires_at {
         EnrollmentTokenPhase::LiveReceipt {
-            identity: ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
+            identity,
             receipt: &slot.enrollment_receipt,
         }
-    } else {
-        EnrollmentTokenPhase::LifetimeMapping {
-            identity: ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
+    } else if now < slot.enrollment_provenance_expires_at {
+        EnrollmentTokenPhase::Provenance {
+            identity,
+            provenance: EnrollmentProvenance::new(
+                slot.enrollment_outcome.capability_generation(),
+                ReceiptExpiryReason::Deadline,
+            ),
         }
+    } else {
+        EnrollmentTokenPhase::LifetimeMapping { identity }
     };
     let response = match lookup_enrollment(phase, &slot.binding, request) {
         EnrollmentLookupResult::EnrollmentKnown(value) => {
@@ -241,14 +301,33 @@ fn enrollment_replay_response(
         EnrollmentLookupResult::UnboundReceipt(_) => {
             EnrollmentResponse::unbound_receipt(slot.enrollment_outcome.clone())
         }
+        EnrollmentLookupResult::ReceiptExpired(value) => {
+            // Every classified fact travels FROM the crate's lookup value
+            // into the request-bound response authority — the same pattern as
+            // the credential-attach provenance arm.
+            let WireReceiptExpired::Enrollment {
+                participant_id,
+                result_generation,
+                current_generation,
+                reason,
+                ..
+            } = value
+            else {
+                return Err(StateError::invariant(
+                    "credential-attach provenance row observed in the enrollment lookup",
+                ));
+            };
+            EnrollmentResponse::receipt_expired(
+                &enrollment_envelope(request),
+                participant_id,
+                result_generation,
+                current_generation,
+                reason,
+            )
+        }
         EnrollmentLookupResult::Retired(_) => {
             return Err(StateError::invariant(
                 "retired identity observed in a binding that mints no tombstones",
-            ));
-        }
-        EnrollmentLookupResult::ReceiptExpired(_) => {
-            return Err(StateError::invariant(
-                "enrollment provenance phase is never constructed by this binding",
             ));
         }
         EnrollmentLookupResult::AuthorizedNew => {
@@ -258,4 +337,12 @@ fn enrollment_replay_response(
         }
     };
     Ok(response.into_server_value())
+}
+
+/// Builds the echo envelope of one enrollment request.
+const fn enrollment_envelope(request: &EnrollmentRequest) -> EnrollmentEnvelope {
+    EnrollmentEnvelope {
+        conversation_id: request.conversation_id,
+        enrollment_token: request.enrollment_token,
+    }
 }
