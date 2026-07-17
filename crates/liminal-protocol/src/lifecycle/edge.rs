@@ -897,8 +897,9 @@ impl OrdinaryBindingAuthority {
 
 /// Exact no-marker fate derived from an ordinary attach and its durable death.
 ///
-/// Fields are private and the only public producer consumes an [`AttachCommit`]
-/// carrying ordinary provenance. A fenced attach cannot produce this type, so
+/// Fields are private and the only public producer consumes an
+/// [`AttachCommit`](crate::lifecycle::AttachCommit) carrying ordinary
+/// provenance. A fenced attach cannot produce this type, so
 /// executing it cannot bypass [`FencedAttachCommit::recovered_binding_fate`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingFate {
