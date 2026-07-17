@@ -170,6 +170,23 @@ fn newer_attach_consumes_authority_and_old_detach_is_never_resent() {
 }
 
 #[test]
+fn durable_leave_cancels_old_detach_before_another_event() {
+    let mut session = ParticipantLifecycle::new();
+    session.record_detach(detach_request());
+
+    session.record_leave_durable();
+
+    assert_eq!(
+        session.detach_replay_status(),
+        DetachReplayStatus::LeaveSuperseded
+    );
+    assert_eq!(
+        session.on_replay_event(DetachReplayEvent::ExplicitCallerAction),
+        DetachReplayAction::None
+    );
+}
+
+#[test]
 fn detach_in_progress_is_a_typed_terminal_status() {
     let mut session = ParticipantLifecycle::new();
     session.record_detach(detach_request());
