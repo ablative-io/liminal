@@ -5,7 +5,7 @@ use crate::wire::{
 };
 
 /// Closed, lossless detach replay status vocabulary.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetachReplayStatus {
     /// The exact detach is durably parked for a transport attempt.
     Parked,
@@ -20,7 +20,7 @@ pub enum DetachReplayStatus {
 }
 
 /// Typed terminal detach replay outcomes retained without projection.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DetachReplayTerminal {
     /// Exact committed detach result.
     DetachCommitted(DetachCommitted),
@@ -30,7 +30,7 @@ pub enum DetachReplayTerminal {
     TerminalizedDetachCell(TerminalizedDetachCell),
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum DetachReplayState {
     Empty,
     Recorded {

@@ -3,7 +3,7 @@ use crate::wire::{
     AttachAttemptToken, AttachSecret, BindingEpoch, BindingStateView, ClientRequest,
     ConnectionIncarnation, DetachAttemptToken, DetachEnvelope, DetachInProgress, EnrollmentRequest,
     EnrollmentResponse, EnrollmentToken, Generation, LeaveAttemptToken, LeaveCommitted,
-    TerminalizedDetachCell,
+    ServerValue, TerminalizedDetachCell,
 };
 
 type TestResult<T = ()> = Result<T, &'static str>;

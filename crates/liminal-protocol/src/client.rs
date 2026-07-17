@@ -5,9 +5,7 @@
 //! pending resume bytes before committing an operation; speculative executable
 //! authority is otherwise unreachable.
 
-use crate::wire::{
-    AttachBound, ClientRequest, Generation, ParticipantAckEnvelope, ReceiptReplay, ServerValue,
-};
+use crate::wire::{ClientRequest, Generation, ParticipantAckEnvelope};
 
 /// Coarse client binding state without exposing credential-bearing state parts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -155,6 +153,8 @@ impl ExpectedParticipantOperation {
 pub enum ClientOperationRecordRefusalReason {
     /// Another write-ahead operation remains outstanding.
     OutstandingOperation,
+    /// A different detach replay request remains retained.
+    DetachReplayOutstanding,
 }
 
 /// Unchanged aggregate and request refused before persistence.
@@ -199,6 +199,7 @@ impl ClientContinuousOperation {
 pub struct ClientPendingOperationRecord {
     successor: ClientParticipantAggregate,
     operation: ExpectedParticipantOperation,
+    recorded_detach: bool,
 }
 
 impl ClientPendingOperationRecord {
@@ -217,6 +218,9 @@ impl ClientPendingOperationRecord {
     #[must_use]
     pub fn abort(mut self) -> (ClientParticipantAggregate, ClientRequest) {
         self.successor.expected = None;
+        if self.recorded_detach {
+            self.successor.detach_replay.state = replay::DetachReplayState::Empty;
+        }
         (self.successor, self.operation.request)
     }
 }
@@ -270,236 +274,62 @@ pub fn record_operation(
             reason: ClientOperationRecordRefusalReason::OutstandingOperation,
         });
     }
+    let mut recorded_detach = false;
+    if let ClientRequest::Detach(value) = &request {
+        let envelope = crate::wire::DetachEnvelope {
+            conversation_id: value.conversation_id,
+            participant_id: value.participant_id,
+            capability_generation: value.capability_generation,
+            detach_attempt_token: value.detach_attempt_token,
+        };
+        match &aggregate.detach_replay.state {
+            replay::DetachReplayState::Empty => {
+                aggregate.detach_replay.state = replay::DetachReplayState::Recorded {
+                    request: envelope,
+                    status: DetachReplayStatus::Parked,
+                };
+                recorded_detach = true;
+            }
+            replay::DetachReplayState::Recorded {
+                request: retained, ..
+            } if retained == &envelope => {}
+            replay::DetachReplayState::Recorded { .. } => {
+                return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
+                    aggregate,
+                    request,
+                    reason: ClientOperationRecordRefusalReason::DetachReplayOutstanding,
+                });
+            }
+        }
+    }
     aggregate.expected = Some(request.clone());
     ClientOperationRecordDecision::Pending(ClientPendingOperationRecord {
         successor: aggregate,
         operation: ExpectedParticipantOperation { request },
+        recorded_detach,
     })
-}
-
-/// Closed refusal classes for inbound semantic values.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClientInboundRefusalReason {
-    /// A durable Leave already terminalized the local participant.
-    AlreadyDead,
-    /// The value names another operation or participant identity.
-    ForeignResponse,
-    /// The value is absent an expectation or belongs to an older request.
-    DelayedResponse,
-}
-
-/// Applied inbound value and resulting aggregate.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClientInboundApplied {
-    aggregate: ClientParticipantAggregate,
-    value: ServerValue,
-}
-
-impl ClientInboundApplied {
-    /// Releases the resulting aggregate and exact applied value.
-    #[must_use]
-    pub fn into_parts(self) -> (ClientParticipantAggregate, ServerValue) {
-        (self.aggregate, self.value)
-    }
-}
-
-/// Refused inbound value paired with the unchanged aggregate.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClientInboundRefusal {
-    aggregate: ClientParticipantAggregate,
-    value: ServerValue,
-    reason: ClientInboundRefusalReason,
-}
-
-impl ClientInboundRefusal {
-    /// Returns the closed refusal reason.
-    #[must_use]
-    pub const fn reason(&self) -> ClientInboundRefusalReason {
-        self.reason
-    }
-
-    /// Releases the unchanged aggregate and exact refused value.
-    #[must_use]
-    pub fn into_parts(self) -> (ClientParticipantAggregate, ServerValue) {
-        (self.aggregate, self.value)
-    }
-}
-
-/// Exhaustive inbound correlation decision.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ClientInboundDecision {
-    /// The crate correlated and applied the typed value.
-    Applied(ClientInboundApplied),
-    /// The crate retained both authority and value unchanged.
-    Refused(ClientInboundRefusal),
-}
-
-/// Correlates and applies one server value inside the client aggregate.
-#[must_use]
-pub fn decide_inbound(
-    mut aggregate: ClientParticipantAggregate,
-    value: ServerValue,
-) -> ClientInboundDecision {
-    if aggregate.binding.is_left() {
-        return inbound_refusal(aggregate, value, ClientInboundRefusalReason::AlreadyDead);
-    }
-
-    if let Some(request) = correlation::participant_ack_request(&value) {
-        if aggregate.binding.matches_ack(request) {
-            return ClientInboundDecision::Applied(ClientInboundApplied { aggregate, value });
-        }
-        return inbound_refusal(
-            aggregate,
-            value,
-            ClientInboundRefusalReason::ForeignResponse,
-        );
-    }
-
-    if matches!(value, ServerValue::ParticipantTransportRejected(_)) {
-        return ClientInboundDecision::Applied(ClientInboundApplied { aggregate, value });
-    }
-
-    let Some(expected) = aggregate.expected.as_ref() else {
-        return inbound_refusal(
-            aggregate,
-            value,
-            ClientInboundRefusalReason::DelayedResponse,
-        );
-    };
-
-    if !correlation::matches_request(&value, expected) {
-        let reason = if value.originating_request() == Some(expected.discriminant())
-            && correlation::same_identity(&value, expected)
-        {
-            ClientInboundRefusalReason::DelayedResponse
-        } else {
-            ClientInboundRefusalReason::ForeignResponse
-        };
-        return inbound_refusal(aggregate, value, reason);
-    }
-
-    aggregate.expected = None;
-    apply_correlated_value(&mut aggregate, &value);
-    ClientInboundDecision::Applied(ClientInboundApplied { aggregate, value })
-}
-
-const fn inbound_refusal(
-    aggregate: ClientParticipantAggregate,
-    value: ServerValue,
-    reason: ClientInboundRefusalReason,
-) -> ClientInboundDecision {
-    ClientInboundDecision::Refused(ClientInboundRefusal {
-        aggregate,
-        value,
-        reason,
-    })
-}
-
-fn apply_correlated_value(aggregate: &mut ClientParticipantAggregate, value: &ServerValue) {
-    match value {
-        ServerValue::EnrollBound(value) => apply_enroll_bound(aggregate, value),
-        ServerValue::Bound(ReceiptReplay::Enrollment(value)) => {
-            apply_enroll_bound(aggregate, value);
-        }
-        ServerValue::AttachBound(value)
-        | ServerValue::Bound(ReceiptReplay::CredentialAttach(value)) => {
-            apply_attach_bound(aggregate, value);
-            aggregate.detach_replay.apply_attach(value);
-        }
-        ServerValue::DetachCommitted(value) => {
-            aggregate.binding = ClientBindingState::Detached {
-                conversation_id: value.conversation_id(),
-                participant_id: value.participant_id(),
-                generation: value.capability_generation(),
-            };
-            aggregate.detach_replay.apply_detach_committed(value);
-        }
-        ServerValue::DetachInProgress(value) => {
-            aggregate.detach_replay.apply_detach_in_progress(value);
-        }
-        ServerValue::StaleAuthority(crate::wire::StaleAuthority::Detach(
-            crate::wire::DetachStaleAuthority::TerminalizedDetachCell(value),
-        )) => {
-            aggregate
-                .detach_replay
-                .apply_terminalized_detach_cell(value);
-        }
-        ServerValue::LeaveCommitted(value) => {
-            aggregate.binding = ClientBindingState::Left {
-                conversation_id: value.conversation_id(),
-                participant_id: value.participant_id(),
-                generation: value.retired_generation(),
-            };
-            aggregate.detach_replay.apply_leave(value);
-        }
-        ServerValue::ParticipantTransportRejected(_)
-        | ServerValue::AttemptTokenBodyConflict(_)
-        | ServerValue::ConnectionConversationCapacityExceeded(_)
-        | ServerValue::ConnectionConversationBindingOccupied(_)
-        | ServerValue::ConversationOrderExhausted(_)
-        | ServerValue::ParticipantUnknown(_)
-        | ServerValue::NoBinding(_)
-        | ServerValue::StaleAuthority(_)
-        | ServerValue::Retired(_)
-        | ServerValue::MarkerClosureCapacityExceeded(_)
-        | ServerValue::EnrollmentKnown(_)
-        | ServerValue::ReceiptExpired(_)
-        | ServerValue::ReceiptCapacityExceeded(_)
-        | ServerValue::IdentityCapacityExceeded(_)
-        | ServerValue::ObserverBackpressure(_)
-        | ServerValue::ConversationSequenceExhausted(_)
-        | ServerValue::StaleOrUnknownReceipt(_)
-        | ServerValue::MarkerNotDelivered(_)
-        | ServerValue::MarkerMismatch(_)
-        | ServerValue::UnboundReceipt(_)
-        | ServerValue::AckCommitted(_)
-        | ServerValue::AckNoOp(_)
-        | ServerValue::AckGap(_)
-        | ServerValue::AckRegression(_)
-        | ServerValue::MarkerAckCommitted(_)
-        | ServerValue::RecordCommitted(_)
-        | ServerValue::RecordTooLarge(_)
-        | ServerValue::ObserverRecoveryAccepted(_)
-        | ServerValue::InvalidObserverEpoch(_)
-        | ServerValue::InvalidObserverEpochList(_) => {}
-    }
-}
-
-const fn apply_enroll_bound(
-    aggregate: &mut ClientParticipantAggregate,
-    value: &crate::wire::EnrollBound,
-) {
-    aggregate.binding = ClientBindingState::Bound {
-        conversation_id: value.conversation_id(),
-        participant_id: value.participant_id(),
-        generation: value.capability_generation(),
-        attach_secret: value.attach_secret(),
-        binding_epoch: value.origin_binding_epoch(),
-    };
-}
-
-const fn apply_attach_bound(aggregate: &mut ClientParticipantAggregate, value: &AttachBound) {
-    aggregate.binding = ClientBindingState::Bound {
-        conversation_id: value.conversation_id(),
-        participant_id: value.participant_id(),
-        generation: value.capability_generation(),
-        attach_secret: value.attach_secret(),
-        binding_epoch: value.origin_binding_epoch(),
-    };
 }
 
 mod correlation;
+mod inbound;
 mod reconnect;
 mod replay;
+mod resume;
+mod resume_decode;
+mod resume_encode;
 
+pub use inbound::{
+    ClientInboundApplied, ClientInboundDecision, ClientInboundRefusal, ClientInboundRefusalReason,
+    decide_inbound,
+};
 pub use reconnect::{
     EstablishedConnectionTransportFate, ExplicitReconnectAction, ProvedOnlineTransition,
     ReconnectAggregate, ReconnectAttemptDecision, ReconnectAttemptFate,
     ReconnectAttemptFateDecision, ReconnectAttemptFateRefusalReason, ReconnectAttemptPermit,
     ReconnectAttemptRefusalReason, ReconnectFreshEvent, ReconnectInProgressAttempt,
     ReconnectPermitDecision, ReconnectPermitRefusal, ReconnectPermitRefusalReason,
-    record_attempt_fate, record_explicit_reconnect, record_online_transition,
-    record_transport_fate, redeem_attempt,
+    RecoveredReconnectPermitDecision, record_attempt_fate, record_explicit_reconnect,
+    record_online_transition, record_transport_fate, recover_reconnect_permit, redeem_attempt,
 };
 pub use replay::{
     ApplyAttachDecision, ApplyDetachOutcomeDecision, ApplyLeaveDecision, DetachReplayApplied,
@@ -509,6 +339,12 @@ pub use replay::{
     SdkDetachReplayAggregate, apply_attach, apply_detach_outcome, apply_leave_durable,
     record_detach, transport_attempt_started, transport_fate,
 };
+pub use resume::{
+    ClientResumeRecord, ClientResumeRecordDecodeError, ClientResumeRecordEncodeError,
+    ClientResumeRecordSection, ClientResumeRestoreError,
+};
 
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;

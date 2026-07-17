@@ -43,7 +43,7 @@ impl ReconnectFreshEvent {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ReconnectMachineState {
     Parked,
     Permit {
@@ -91,6 +91,19 @@ impl ReconnectAggregate {
 /// use liminal_protocol::client::ReconnectAttemptPermit;
 /// fn clone_is_forbidden(permit: ReconnectAttemptPermit) {
 ///     let _duplicate = permit.clone();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use liminal_protocol::client::{
+///     ClientParticipantAggregate, ReconnectAttemptPermit, redeem_attempt,
+/// };
+/// fn moved_reuse_is_forbidden(
+///     aggregate: ClientParticipantAggregate,
+///     permit: ReconnectAttemptPermit,
+/// ) {
+///     let _started = redeem_attempt(aggregate, permit);
+///     let _reuse = permit;
 /// }
 /// ```
 #[derive(Debug, PartialEq, Eq)]
@@ -234,6 +247,59 @@ const fn record_fresh_event(
         result: ReconnectDelayResult::ReconnectArmed {
             event: event.required_event(),
         },
+    }
+}
+
+/// Decision for releasing a validated cold-restored permit exactly once.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RecoveredReconnectPermitDecision {
+    /// Restore authority released one permit and marked it issued.
+    Recovered {
+        /// Resulting aggregate.
+        aggregate: ClientParticipantAggregate,
+        /// One-use restored permit.
+        permit: ReconnectAttemptPermit,
+    },
+    /// No unissued restored permit exists.
+    NotAvailable {
+        /// Unchanged aggregate.
+        aggregate: ClientParticipantAggregate,
+        /// Current reconnect state.
+        state: ReconnectState,
+    },
+}
+
+/// Releases an unissued permit created only by validated cold restore.
+#[must_use]
+pub const fn recover_reconnect_permit(
+    mut aggregate: ClientParticipantAggregate,
+) -> RecoveredReconnectPermitDecision {
+    match aggregate.reconnect.state {
+        ReconnectMachineState::Permit {
+            authorization,
+            event,
+            issued: false,
+        } => {
+            aggregate.reconnect.state = ReconnectMachineState::Permit {
+                authorization,
+                event,
+                issued: true,
+            };
+            RecoveredReconnectPermitDecision::Recovered {
+                aggregate,
+                permit: ReconnectAttemptPermit {
+                    authorization,
+                    event,
+                },
+            }
+        }
+        ReconnectMachineState::Parked
+        | ReconnectMachineState::Permit { .. }
+        | ReconnectMachineState::Attempt { .. }
+        | ReconnectMachineState::Online => {
+            let state = aggregate.reconnect.state();
+            RecoveredReconnectPermitDecision::NotAvailable { aggregate, state }
+        }
     }
 }
 
