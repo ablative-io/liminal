@@ -25,6 +25,8 @@ pub mod core;
 #[cfg(feature = "std")]
 mod connection;
 #[cfg(feature = "std")]
+mod participant;
+#[cfg(feature = "std")]
 mod std_socket;
 #[cfg(feature = "std")]
 mod subscription;
@@ -118,9 +120,10 @@ mod transport {
     use spin::Mutex;
 
     use crate::remote::ServerAddress;
+    use crate::remote::participant::ParticipantResponseProvenance;
     use crate::remote::protocol::{
-        RemoteTransport, WireConversationRequest, WirePublishRequest, WireResumeRequest,
-        WireSubscribeRequest,
+        ParticipantRemoteTransport, ParticipantTransportFrame, RemoteTransport,
+        WireConversationRequest, WirePublishRequest, WireResumeRequest, WireSubscribeRequest,
     };
     use crate::{DeliveryAck, PressureResponse, SdkError};
 
@@ -212,6 +215,31 @@ mod transport {
         fn round_trip(&self, request: &Frame) -> Result<Frame, SdkError> {
             let mut connection = self.connection.lock();
             connection.round_trip(request)
+        }
+    }
+
+    impl ParticipantRemoteTransport for WebSocketRemoteTransport {
+        fn send_participant(
+            &self,
+            _server_address: &ServerAddress,
+            request: &liminal_protocol::wire::ClientRequest,
+        ) -> Result<ParticipantResponseProvenance, SdkError> {
+            self.connection.lock().send_participant(request)
+        }
+
+        fn receive_participant(
+            &self,
+            _server_address: &ServerAddress,
+        ) -> Result<ParticipantTransportFrame, SdkError> {
+            let (frame, provenance) = self.connection.lock().receive_participant()?;
+            Ok(ParticipantTransportFrame { frame, provenance })
+        }
+
+        fn reconnect_participant(
+            &self,
+            _server_address: &ServerAddress,
+        ) -> Result<ParticipantResponseProvenance, SdkError> {
+            self.connection.lock().reconnect_participant()
         }
     }
 

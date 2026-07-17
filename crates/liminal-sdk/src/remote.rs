@@ -204,7 +204,6 @@ impl RemoteConfig {
     }
 }
 
-
 fn connection_error(description: &str) -> SdkError {
     SdkError::Connection {
         description: description.to_string(),

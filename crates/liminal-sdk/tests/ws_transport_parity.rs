@@ -670,9 +670,8 @@ fn resume_parity() -> TestResult {
         handle_channel
             .acknowledge(subscription_id, 5)
             .map_err(|error| format!("acknowledge failed: {error}"))?;
-        let mut jitter = liminal_sdk::remote::NoJitter;
         handle_channel
-            .reconnect(&mut jitter)
+            .reconnect_started()
             .map_err(|error| format!("lifecycle reconnect failed: {error}"))?;
         let result = handle_channel.connected();
         assert!(
@@ -934,9 +933,9 @@ fn participant_enrollment_script(link: &mut dyn ServerLink) -> TestResult<Vec<Ve
         200,
     )
     .ok_or("generation-1 enroll bound must construct")?;
-    let response = participant_frame_bytes(&ParticipantFrame::ServerValue(ServerValue::EnrollBound(
-        bound,
-    )))?;
+    let response = participant_frame_bytes(&ParticipantFrame::ServerValue(
+        ServerValue::EnrollBound(bound),
+    ))?;
     link.write_raw_message(&response)?;
     Ok(link.captured_frames().to_vec())
 }
@@ -964,7 +963,9 @@ fn participant_send_receive_parity() -> TestResult {
             .send_operation(operation)
             .map_err(|error| format!("send failed: {error}"))?;
         let RemoteParticipantSendOutcome::Sent { provenance } = outcome else {
-            return Err(format!("{kind:?} participant send must succeed: {outcome:?}"));
+            return Err(format!(
+                "{kind:?} participant send must succeed: {outcome:?}"
+            ));
         };
         assert_eq!(provenance.connection_id(), 1, "{kind:?} first connection");
         assert_eq!(provenance.attempt_id(), 1, "{kind:?} first attempt");
@@ -1054,7 +1055,9 @@ fn participant_reconnect_provenance_parity() -> TestResult {
             .reconnect(permit)
             .map_err(|error| format!("reconnect failed: {error}"))?;
         let RemoteReconnectAttemptOutcome::Connected { provenance } = outcome else {
-            return Err(format!("{kind:?} typed reconnect must connect: {outcome:?}"));
+            return Err(format!(
+                "{kind:?} typed reconnect must connect: {outcome:?}"
+            ));
         };
         assert_eq!(provenance.connection_id(), 2, "{kind:?} second connection");
         assert_eq!(provenance.attempt_id(), 2, "{kind:?} second attempt");

@@ -20,11 +20,15 @@ use alloc::vec::Vec;
 
 use liminal::protocol::{CONVERSATION_REPLY_REQUESTED_FLAG, Frame, MessageEnvelope};
 
+use liminal_protocol::wire::ParticipantFrame;
+
 use crate::SdkError;
+use crate::remote::participant::ParticipantResponseProvenance;
 
 use self::exchange::{
     APPLICATION_STREAM_ID, ExchangeError, LinkLoss, WsLink, drain_conversation_error,
-    ensure_conversation_open, exchange_correlated, handshake, loss_error, send_frame,
+    ensure_conversation_open, exchange_correlated, handshake, loss_error,
+    receive_participant_frame, send_frame,
 };
 use super::binding::{
     AttemptFateOutcome, LossRecordOutcome, OpenRequestDecision, WebSocketAuthorityBinding,
@@ -43,6 +47,11 @@ pub(super) struct WsConnection {
     /// Diagnostic description of the most recent loss, enriching the typed
     /// errors returned while no link exists.
     last_loss: Option<String>,
+    /// Participant provenance for the currently established socket, counted
+    /// exactly like the TCP transport's connection slot.
+    provenance: ParticipantResponseProvenance,
+    next_attempt_id: u64,
+    next_connection_id: u64,
 }
 
 impl WsConnection {
@@ -65,6 +74,9 @@ impl WsConnection {
             binding: WebSocketAuthorityBinding::new(),
             link: None,
             last_loss: None,
+            provenance: ParticipantResponseProvenance::new(1, 1),
+            next_attempt_id: 2,
+            next_connection_id: 2,
         };
         connection.open_authorized()?;
         Ok(connection)
@@ -247,6 +259,73 @@ impl WsConnection {
                 ))),
             }
         })
+    }
+
+    /// Writes one canonical participant request on the established link and
+    /// returns the provenance of the socket that carried it (TCP parity).
+    pub(super) fn send_participant(
+        &mut self,
+        request: &liminal_protocol::wire::ClientRequest,
+    ) -> Result<ParticipantResponseProvenance, SdkError> {
+        let frame = super::participant::request_frame(request)?;
+        self.with_link(|link| send_frame(link, &frame))?;
+        Ok(self.provenance)
+    }
+
+    /// Blocks for the next canonical participant frame, draining unsolicited
+    /// deliveries, and returns it with the delivering socket's provenance.
+    pub(super) fn receive_participant(
+        &mut self,
+    ) -> Result<(ParticipantFrame, ParticipantResponseProvenance), SdkError> {
+        let frame = self.with_link(receive_participant_frame)?;
+        let participant = super::participant::response_frame(frame)?;
+        Ok((participant, self.provenance))
+    }
+
+    /// Replaces the socket for the participant machinery (TCP parity): the
+    /// attempt identity is consumed before the dial, the connection identity
+    /// only on success, and the fresh provenance names both.
+    ///
+    /// A still-established link is first closed locally and its typed
+    /// terminal recorded, so the replacement open still traverses the client
+    /// unit's one-permit-per-open law; the TCP transport instead drops its
+    /// old socket silently, which the WebSocket unit deliberately does not.
+    pub(super) fn reconnect_participant(
+        &mut self,
+    ) -> Result<ParticipantResponseProvenance, SdkError> {
+        let attempt_id = self.next_attempt_id;
+        self.next_attempt_id =
+            self.next_attempt_id
+                .checked_add(1)
+                .ok_or_else(|| SdkError::Connection {
+                    description: "participant transport attempt identity exhausted".to_string(),
+                })?;
+        if let Some(mut link) = self.link.take() {
+            if link.driver.command_close().is_ok() {
+                link.socket.execute_close();
+            }
+            let outcome = self
+                .binding
+                .established_terminal(&super::core::TransportTerminal::CloseCompleted);
+            if let super::binding::LossRecordOutcome::Refused(refusal) = outcome {
+                return Err(SdkError::Protocol {
+                    description: format!(
+                        "client authority refused the replacement-close fate: {refusal:?}"
+                    ),
+                });
+            }
+        }
+        self.open_authorized()?;
+        let connection_id = self.next_connection_id;
+        self.next_connection_id =
+            self.next_connection_id
+                .checked_add(1)
+                .ok_or_else(|| SdkError::Connection {
+                    description: "participant transport connection identity exhausted".to_string(),
+                })?;
+        let provenance = ParticipantResponseProvenance::new(connection_id, attempt_id);
+        self.provenance = provenance;
+        Ok(provenance)
     }
 
     /// Runs one link operation, routing a loss through the client unit and

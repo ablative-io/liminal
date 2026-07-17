@@ -187,6 +187,29 @@ fn receive_correlated(link: &mut WsLink) -> Result<Frame, ExchangeError> {
     }
 }
 
+/// Blocks for the next non-delivery frame with no exchange outstanding: the
+/// participant receive path. Unsolicited deliveries are drained exactly like
+/// the TCP transport's receive loop; a read-window expiry is a typed error
+/// with the link retained (TCP parity: a participant receive timeout does not
+/// poison the message-framed connection).
+pub(super) fn receive_participant_frame(link: &mut WsLink) -> Result<Frame, ExchangeError> {
+    loop {
+        match read_step(link, None)? {
+            LinkRead::TimedOut => {
+                return Err(ExchangeError::Local(SdkError::Connection {
+                    description: "timed out waiting for a participant websocket frame".to_string(),
+                }));
+            }
+            LinkRead::Frame { bytes, correlation } => match correlation {
+                FrameCorrelation::UnsolicitedDelivery => {}
+                FrameCorrelation::CorrelatedResponse | FrameCorrelation::UnsolicitedFrame => {
+                    return decode_response(link, &bytes);
+                }
+            },
+        }
+    }
+}
+
 /// One validated read outcome surfaced to the exchange loops.
 enum LinkRead {
     /// A validated canonical frame with its correlation class.
