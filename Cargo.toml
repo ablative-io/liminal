@@ -24,7 +24,7 @@ authors = [
 # because the bare name is taken on crates.io, but is imported as `liminal`.
 [workspace.dependencies]
 liminal = { package = "liminal-rs", version = "0.2.5", path = "crates/liminal" }
-liminal-protocol = { version = "0.1.0", path = "crates/liminal-protocol" }
+liminal-protocol = { version = "0.2.0", path = "crates/liminal-protocol" }
 liminal-sdk = { version = "0.2.4", path = "crates/liminal-sdk" }
 
 anyhow = "1"
