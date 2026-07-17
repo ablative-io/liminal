@@ -389,8 +389,12 @@ pub struct ParticipantConfig {
     pub identity_slots: u64,
     /// Maximum entries one observer-recovery handshake batch may name.
     pub observer_recovery_max_entries: u64,
-    /// Semantic conversations one connection may track (the protocol's
-    /// connection-conversation limit used by observer recovery).
+    /// Semantic conversations one connection may track — the protocol's
+    /// signed connection-conversation limit. Consumed on BOTH of its contract
+    /// paths: the stage-6 capacity gate every conversation-scoped semantic
+    /// operation runs (register row 5641) and the observer-recovery batch
+    /// preflight (register row 5642), over one shared per-connection
+    /// dispatch map.
     pub max_semantic_conversations_per_connection: u64,
 }
 

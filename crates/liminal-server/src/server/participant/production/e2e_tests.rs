@@ -1,9 +1,16 @@
 //! Full participant E2E over a real socket against a running server.
 //!
-//! Enroll → attach lifecycle → acks → detach → replay of the old detach
-//! token, asserting the terminalized cell carries the OLD committed epoch —
-//! every request and response wire-encoded end to end through the production
-//! connection supervisor and the installed production semantic handler.
+//! Enroll → ack → records (the typed refusal surface live today) → detach →
+//! attach → replay of the old detach token, asserting the terminalized cell
+//! carries the OLD committed epoch — every request and response wire-encoded
+//! end to end through the production connection supervisor and the installed
+//! production semantic handler.
+//!
+//! The mandated COMMITTED-records step remains blocked on the live
+//! claim-frontier acquisition (see the dated amendment in
+//! `docs/design/LP-GAP-CLOSURE-GOAL.md`); the records step here pins the
+//! typed lookup surface the reduced arm serves without tearing the
+//! connection down.
 
 use std::error::Error;
 use std::io::{Read, Write};
@@ -257,6 +264,26 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     assert!(
         matches!(acked, ServerValue::AckCommitted(_)),
         "ack did not commit: {acked:?}"
+    );
+
+    // Records over the same live socket: the arm's typed refusal surface.
+    // An unknown participant's record admission answers the exact
+    // ParticipantUnknown row and the connection stays open (a COMMITTED
+    // record is blocked on the claim-frontier acquisition — the reduced
+    // surface is recorded in the goal document's dated amendment).
+    let record_refused = roundtrip(
+        &mut client,
+        &mut inbound,
+        ClientRequest::RecordAdmission(liminal_protocol::wire::RecordAdmission {
+            conversation_id: CONVERSATION,
+            participant_id: participant + 7,
+            capability_generation: Generation::ONE,
+            payload: vec![1, 2, 3],
+        }),
+    )?;
+    assert!(
+        matches!(record_refused, ServerValue::ParticipantUnknown(_)),
+        "unknown-participant record must answer ParticipantUnknown: {record_refused:?}"
     );
 
     // Detach (the OLD epoch is committed into the cell here).

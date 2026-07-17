@@ -142,6 +142,59 @@ the decision-arm migration across those lifecycle files is IN-MANDATE for
 the A5 lane. The explicit DO-NOT files (`lifecycle/conversation.rs`,
 `lifecycle/storage.rs`, `liminal-server`) remain untouched and out of scope.
 
+**2026-07-17 (activation fix round) — reduced B1 surface: RecordAdmission and
+authorized Leave fail closed pending the live claim-frontier acquisition.**
+The B1 mandate as written ("the handler implements the eight request variants
+through the protocol seam") is NOT fully closable inside this lane, and the
+prior declaration's claim that all eight variants dispatch through crate
+transitions was wrong for RecordAdmission and the authorized Leave arms. The
+exact obstacle, verified against the crate surface: (a) `commit_leave`/
+`commit_pending_leave` consume a `PreparedLeaveAuthority` and
+`apply_record_admission` consumes a `RecordAdmissionPrestate`, both of which
+require a validated `ClaimFrontiers` value; (b) `ClaimFrontiers` is
+constructible only from `from_initial_enrollment` (participant zero, at
+enrollment) or `restore` (complete per-participant sequence/order claim
+state), and the crate exposes NO frontier transitions for the attach, detach,
+subsequent-enrollment, or ack operations this binding already commits — so a
+live frontier value cannot be maintained across a conversation's history and
+a restore-based acquisition requires durable claim/retained-record facts the
+transition-input log does not carry (this is the A1 whole-conversation
+LIVE-restore capsule, a separate protocol-crate unit); (c) the record/leave
+closure parameters (`max_ordinary_record_charge`, projection limits, retained
+caps) are deployment-owner configuration values that per this document's own
+config note land only together with their real consumers — inventing them
+here would violate the no-assumed-defaults rule.
+
+What lands in this round instead: both arms classify every frozen pre-commit
+stage through crate selectors — the stage 2-5 lookup rows via
+`classify_record_admission_binding` / `lookup_leave` and the stage-6
+connection-conversation capacity gate — and fail closed with a typed
+diagnostic ONLY on a fully authorized commit; production-path tests pin the
+typed refusal rows, and the E2E's records step exercises this reduced typed
+surface over the wire. Residual consequences, all open until the frontier
+unit lands: a fully AUTHORIZED RecordAdmission or Leave still fails the
+connection closed while `PARTICIPANT_CAPABILITY_BIT` is advertised — whether
+advertising with this reduced surface is acceptable is an ESCALATED decision
+for the session owner, not settled here; the mandated committed-records E2E
+step stays blocked; the server-scope identity-capacity counter
+(`max_retired_identity_slots`, server scope) has no configured limit yet, so
+only the conversation scope refuses.
+
+**2026-07-17 (activation fix round) — connection-incarnation unseal
+reconciliation.** `allocate_connection_incarnation`'s seal comment demanded a
+"complete durable reference inventory" before production use; the durable
+inventory was never wired and is NOT needed for uniqueness. The recorded
+proof (now also at the call site in `supervisor.rs`): startup strictly
+increments the server incarnation and fsyncs it before any listener is ready;
+allocations are mutex-serialized, propose ordinals strictly above the durable
+`last_examined_connection_ordinal`, and fsync their event before publication;
+durable references can only name previously published pairs, and the shared
+store's flush barrier orders the allocator event before any conversation-log
+entry referencing it. Published pairs are therefore unique against ALL
+durable references by allocator-log monotonicity alone; the live-connection
+reference set is bounded defense in depth against a rolled-back allocator
+stream.
+
 ## Declaration
 
 Commit hash; per-gap closure evidence (file:line of the new public

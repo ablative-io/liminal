@@ -470,3 +470,82 @@ fn semantic_conversations_beyond_connection_limit_refuse_with_exact_envelope()
     );
     Ok(())
 }
+
+/// The record-admission arm classifies every frozen lookup row (stages 2-5)
+/// through the crate's frontier-free binding classifier: unknown participant,
+/// stale generation, and no-binding each answer their exact typed rows over
+/// the production dispatch seam — the connection stays open throughout.
+#[test]
+fn record_admission_lookup_rows_classify_typed_over_production_dispatch()
+-> Result<(), Box<dyn Error>> {
+    use liminal_protocol::wire::{DetachAttemptToken, DetachRequest, RecordAdmission};
+
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let incarnation = ConnectionIncarnation::new(86, 1);
+    let conversation_id = 904;
+    let store = open_disk_store_for_tests(&data_dir)?;
+    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+
+    let enrolled = dispatch(
+        &handler,
+        incarnation,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([120; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt) = enrolled else {
+        return Err(format!("enrollment did not bind: {enrolled:?}").into());
+    };
+    let participant_id = receipt.participant_id();
+    let record = |participant: u64, generation: Generation| {
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id: participant,
+            capability_generation: generation,
+            payload: vec![7, 7, 7],
+        })
+    };
+
+    // Stage 4: unknown participant.
+    let unknown = dispatch(&handler, incarnation, record(55, Generation::ONE))?;
+    assert!(
+        matches!(unknown, ServerValue::ParticipantUnknown(_)),
+        "unknown participant must answer ParticipantUnknown: {unknown:?}"
+    );
+
+    // Stage 4: live identity, stale presented generation.
+    let stale = dispatch(
+        &handler,
+        incarnation,
+        record(participant_id, generation(2)?),
+    )?;
+    assert!(
+        matches!(stale, ServerValue::StaleAuthority(_)),
+        "stale generation must answer StaleAuthority: {stale:?}"
+    );
+
+    // Stage 5: authorized identity without a current binding.
+    let detached = dispatch(
+        &handler,
+        incarnation,
+        ClientRequest::Detach(DetachRequest {
+            conversation_id,
+            participant_id,
+            capability_generation: Generation::ONE,
+            detach_attempt_token: DetachAttemptToken::new([121; 16]),
+        }),
+    )?;
+    assert!(matches!(detached, ServerValue::DetachCommitted(_)));
+    let unbound = dispatch(
+        &handler,
+        incarnation,
+        record(participant_id, Generation::ONE),
+    )?;
+    assert!(
+        matches!(unbound, ServerValue::NoBinding(_)),
+        "detached participant must answer NoBinding: {unbound:?}"
+    );
+    Ok(())
+}
