@@ -163,16 +163,10 @@ fn sdk_subscription_delivery_parity_over_real_acceptor() -> Result<(), Box<dyn E
     let server = RunningServer::start(None)?;
 
     // One subscriber per transport, both on the same channel of one server.
-    let tcp_stream = SubscriptionStream::open(
-        &server.address(TransportKind::Tcp),
-        CHANNEL,
-        Vec::new(),
-    )?;
-    let ws_stream = WebSocketSubscriptionStream::open(
-        &server.address(TransportKind::Ws),
-        CHANNEL,
-        Vec::new(),
-    )?;
+    let tcp_stream =
+        SubscriptionStream::open(&server.address(TransportKind::Tcp), CHANNEL, Vec::new())?;
+    let ws_stream =
+        WebSocketSubscriptionStream::open(&server.address(TransportKind::Ws), CHANNEL, Vec::new())?;
 
     // A keyed publish over TCP reports a genuine delivery ack because the two
     // real subscribers exist, and BOTH transports receive the delivery.

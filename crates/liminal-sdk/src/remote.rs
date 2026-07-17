@@ -3,11 +3,16 @@ mod handles;
 mod protocol;
 #[cfg(feature = "std")]
 mod tcp;
+pub mod websocket;
 
 #[cfg(feature = "std")]
 pub use tcp::{
     DeliveredMessage, OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame,
     SubscriptionStream, TcpRemoteTransport,
+};
+#[cfg(feature = "std")]
+pub use websocket::{
+    WebSocketDeliveredMessage, WebSocketRemoteTransport, WebSocketSubscriptionStream,
 };
 
 pub use config::{SdkConfig, build_channel_handle, build_conversation_handle};
@@ -66,6 +71,11 @@ pub struct RemoteConfig {
     /// Reconnect policy used by the SDK-003 lifecycle state machine.
     pub reconnect_config: ReconnectConfig,
     transport: Arc<dyn RemoteTransport>,
+    /// The concretely typed WebSocket transport, retained when
+    /// [`connect_websocket`](Self::connect_websocket) installed it so callers
+    /// can drive its typed reconnect path.
+    #[cfg(feature = "std")]
+    websocket: Option<Arc<websocket::WebSocketRemoteTransport>>,
 }
 
 impl RemoteConfig {
@@ -87,6 +97,8 @@ impl RemoteConfig {
             pool_config: pool_config.validate()?,
             reconnect_config: ReconnectConfig::default(),
             transport: Arc::new(ProtocolRemoteTransport),
+            #[cfg(feature = "std")]
+            websocket: None,
         })
     }
 
@@ -112,6 +124,7 @@ impl RemoteConfig {
     pub fn connect_tcp(mut self) -> Result<Self, SdkError> {
         let transport = self::tcp::TcpRemoteTransport::connect(&self.server_address)?;
         self.transport = Arc::new(transport);
+        self.websocket = None;
         Ok(self)
     }
 
@@ -134,7 +147,61 @@ impl RemoteConfig {
         let transport =
             self::tcp::TcpRemoteTransport::connect_with_auth(&self.server_address, auth_token)?;
         self.transport = Arc::new(transport);
+        self.websocket = None;
         Ok(self)
+    }
+
+    /// Opens a real WebSocket connection to the configured `ws://` server
+    /// address and installs the live wire transport, replacing the in-process
+    /// protocol transport.
+    ///
+    /// This performs the WebSocket upgrade and the protocol handshake
+    /// (`Connect` -> `ConnectAck`) eagerly through the client unit's typed
+    /// permit path, so a returned configuration is already connected.
+    /// Subsequent publish, subscribe, and conversation calls traverse the
+    /// socket; the concretely typed transport stays reachable through
+    /// [`websocket_transport`](Self::websocket_transport) for the typed
+    /// reconnect path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the address is not a usable
+    /// `ws://` URL, the connection cannot be established, or the handshake is
+    /// rejected, and [`SdkError::Protocol`] when frames cannot be encoded.
+    #[cfg(feature = "std")]
+    pub fn connect_websocket(self) -> Result<Self, SdkError> {
+        self.connect_websocket_with_auth(&[])
+    }
+
+    /// Opens a real WebSocket connection whose handshake carries
+    /// `auth_token`, for a server gated by an `[auth]` section, and installs
+    /// the live wire transport. Additive to [`connect_websocket`]: an empty
+    /// token behaves identically to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the connection cannot be
+    /// established or the token is rejected, and [`SdkError::Protocol`] when
+    /// the handshake frames cannot be encoded or sent.
+    ///
+    /// [`connect_websocket`]: Self::connect_websocket
+    #[cfg(feature = "std")]
+    pub fn connect_websocket_with_auth(mut self, auth_token: &[u8]) -> Result<Self, SdkError> {
+        let transport = Arc::new(websocket::WebSocketRemoteTransport::connect_with_auth(
+            &self.server_address,
+            auth_token,
+        )?);
+        self.transport = Arc::clone(&transport) as Arc<dyn RemoteTransport>;
+        self.websocket = Some(transport);
+        Ok(self)
+    }
+
+    /// The concretely typed WebSocket transport installed by
+    /// [`connect_websocket`](Self::connect_websocket), when one is installed.
+    #[cfg(feature = "std")]
+    #[must_use]
+    pub fn websocket_transport(&self) -> Option<Arc<websocket::WebSocketRemoteTransport>> {
+        self.websocket.clone()
     }
 }
 

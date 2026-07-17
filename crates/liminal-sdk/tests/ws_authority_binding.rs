@@ -46,7 +46,9 @@ fn authorize(binding: &mut WebSocketAuthorityBinding) -> TestResult<ReconnectFre
 fn establish(binding: &mut WebSocketAuthorityBinding) -> TestResult {
     authorize(binding)?;
     match binding.connection_established() {
-        AttemptFateOutcome::Recorded { state } if state == ReconnectState::Online => Ok(()),
+        AttemptFateOutcome::Recorded {
+            state: ReconnectState::Online,
+        } => Ok(()),
         other => Err(format!("established fate must record Online: {other:?}")),
     }
 }
@@ -73,7 +75,9 @@ fn explicit_connect_authorizes_exactly_one_open() -> TestResult {
 
     match binding.connection_established() {
         AttemptFateOutcome::Recorded { state } => assert_eq!(state, ReconnectState::Online),
-        other => return Err(format!("established fate must be recorded: {other:?}")),
+        other @ AttemptFateOutcome::Refused(_) => {
+            return Err(format!("established fate must be recorded: {other:?}"));
+        }
     }
     Ok(())
 }
@@ -85,7 +89,9 @@ fn open_failure_returns_parked_with_no_retry_authority() -> TestResult {
 
     match binding.open_failed() {
         AttemptFateOutcome::Recorded { state } => assert_eq!(state, ReconnectState::Parked),
-        other => return Err(format!("open failure must record Parked: {other:?}")),
+        other @ AttemptFateOutcome::Refused(_) => {
+            return Err(format!("open failure must record Parked: {other:?}"));
+        }
     }
 
     // No timer or retry effect: the failure minted nothing, and a stray
@@ -136,13 +142,15 @@ fn established_loss_retains_permit_for_one_reconnect_open() -> TestResult {
     assert!(matches!(event, ReconnectFreshEvent::TransportFate(_)));
     match binding.connection_established() {
         AttemptFateOutcome::Recorded { state } => assert_eq!(state, ReconnectState::Online),
-        other => return Err(format!("reconnect open must record Online: {other:?}")),
+        other @ AttemptFateOutcome::Refused(_) => {
+            return Err(format!("reconnect open must record Online: {other:?}"));
+        }
     }
     Ok(())
 }
 
 #[test]
-fn loss_reported_while_parked_is_refused_unchanged() -> TestResult {
+fn loss_reported_while_parked_is_refused_unchanged() {
     // Already-parked point: no established connection exists, so a loss report
     // is a typed refusal and the aggregate does not move.
     let mut binding = WebSocketAuthorityBinding::new();
@@ -152,7 +160,6 @@ fn loss_reported_while_parked_is_refused_unchanged() -> TestResult {
         LossRecordOutcome::Refused(LossRecordRefusal::NotEstablished)
     ));
     assert_eq!(binding.reconnect_state(), ReconnectState::Parked);
-    Ok(())
 }
 
 #[test]
@@ -161,9 +168,8 @@ fn loss_during_open_in_progress_is_refused_unchanged() -> TestResult {
     // an established-loss report is a typed refusal, not a second authority.
     let mut binding = WebSocketAuthorityBinding::new();
     authorize(&mut binding)?;
-    let outcome = binding.established_terminal(&TransportTerminal::SocketFailed(
-        SocketFailure::Transport,
-    ));
+    let outcome =
+        binding.established_terminal(&TransportTerminal::SocketFailed(SocketFailure::Transport));
     assert!(matches!(
         outcome,
         LossRecordOutcome::Refused(LossRecordRefusal::NotEstablished)
@@ -283,7 +289,9 @@ fn detach_in_flight_socket_loss_parks_replay_via_typed_fate() -> TestResult {
 
     match binding.detach_send_lost(correlation) {
         DetachLossOutcome::Parked => {}
-        other => return Err(format!("detach-in-flight loss must park replay: {other:?}")),
+        other @ DetachLossOutcome::Refused(_) => {
+            return Err(format!("detach-in-flight loss must park replay: {other:?}"));
+        }
     }
     assert_eq!(
         binding.aggregate().detach_replay().status(),
@@ -298,7 +306,9 @@ fn detach_loss_without_in_flight_send_is_refused_unchanged() -> TestResult {
     let mut binding = WebSocketAuthorityBinding::with_aggregate(aggregate);
     match binding.detach_send_lost(correlation) {
         DetachLossOutcome::Parked => {}
-        other => return Err(format!("first loss must park: {other:?}")),
+        other @ DetachLossOutcome::Refused(_) => {
+            return Err(format!("first loss must park: {other:?}"));
+        }
     }
 
     // The correlation was consumed; a second loss report finds no in-flight
@@ -308,7 +318,9 @@ fn detach_loss_without_in_flight_send_is_refused_unchanged() -> TestResult {
         DetachLossOutcome::Refused(reason) => {
             assert_eq!(reason, DetachReplayRefusalReason::InvalidStatus);
         }
-        other => return Err(format!("second loss must refuse: {other:?}")),
+        other @ DetachLossOutcome::Parked => {
+            return Err(format!("second loss must refuse: {other:?}"));
+        }
     }
     assert_eq!(
         binding.aggregate().detach_replay().status(),

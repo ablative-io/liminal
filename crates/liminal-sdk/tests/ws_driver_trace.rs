@@ -262,9 +262,7 @@ fn declared_length_beyond_frame_bound_is_typed_violation() -> TestResult {
         matches!(
             step.output,
             DriverOutput::Terminal(TransportTerminal::ProtocolViolation(
-                FrameViolation::TruncatedBody { .. }
-            )) | DriverOutput::Terminal(TransportTerminal::ProtocolViolation(
-                FrameViolation::DeclaredBeyondBound { .. }
+                FrameViolation::TruncatedBody { .. } | FrameViolation::DeclaredBeyondBound { .. }
             ))
         ),
         "oversize declaration without body must be refused, got {step:?}"
@@ -319,7 +317,9 @@ fn f3_commanded_close_echo_mints_close_completed_once() -> TestResult {
         .command_close()
         .map_err(|refusal| format!("established close must be accepted: {refusal:?}"))?;
     if command != SocketCommand::Close {
-        return Err(format!("close must emit the Close command, got {command:?}"));
+        return Err(format!(
+            "close must emit the Close command, got {command:?}"
+        ));
     }
     assert_eq!(driver.phase(), DriverPhase::Closing);
 
