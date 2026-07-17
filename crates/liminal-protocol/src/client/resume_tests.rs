@@ -45,8 +45,33 @@ fn round_trip(aggregate: &ClientParticipantAggregate) -> TestResult<ClientPartic
 
 fn aggregate_with_replay(status: DetachReplayStatus) -> TestResult<ClientParticipantAggregate> {
     let mut aggregate = ClientParticipantAggregate::new();
+    let replay_request = request()?;
+    if matches!(
+        status,
+        DetachReplayStatus::Parked | DetachReplayStatus::InFlight
+    ) {
+        let issued = matches!(status, DetachReplayStatus::InFlight);
+        aggregate.binding = ClientBindingState::Bound {
+            conversation_id: replay_request.conversation_id,
+            participant_id: replay_request.participant_id,
+            generation: replay_request.capability_generation,
+            attach_secret: AttachSecret::new([13; 32]),
+            binding_epoch: epoch(7)?,
+        };
+        aggregate.expected = Some(ExpectedOperationState {
+            request: ClientRequest::Detach(DetachRequest {
+                conversation_id: replay_request.conversation_id,
+                participant_id: replay_request.participant_id,
+                capability_generation: replay_request.capability_generation,
+                detach_attempt_token: replay_request.detach_attempt_token,
+            }),
+            issued,
+            authorization: 1,
+        });
+        aggregate.next_operation_authorization = 1;
+    }
     aggregate.detach_replay.state = super::replay::DetachReplayState::Recorded {
-        request: request()?,
+        request: replay_request,
         status,
     };
     Ok(aggregate)
@@ -139,11 +164,15 @@ fn resume_round_trips_every_expected_operation_and_continuous_ack() -> TestResul
                     | ClientRequest::MarkerAck(_)
                     | ClientRequest::RecordAdmission(_)
             ) {
+                let attach_secret = match &operation {
+                    ClientRequest::Leave(value) => value.attach_secret,
+                    _ => AttachSecret::new([2; 32]),
+                };
                 aggregate.binding = ClientBindingState::Bound {
                     conversation_id: 1,
                     participant_id: 2,
                     generation,
-                    attach_secret: AttachSecret::new([2; 32]),
+                    attach_secret,
                     binding_epoch: epoch(2)?,
                 };
             }
@@ -153,11 +182,31 @@ fn resume_round_trips_every_expected_operation_and_continuous_ack() -> TestResul
                 authorization: 1,
             });
             aggregate.next_operation_authorization = 1;
+            if let ClientRequest::Detach(value) = &operation {
+                aggregate.detach_replay.state = super::replay::DetachReplayState::Recorded {
+                    request: crate::wire::DetachEnvelope {
+                        conversation_id: value.conversation_id,
+                        participant_id: value.participant_id,
+                        capability_generation: value.capability_generation,
+                        detach_attempt_token: value.detach_attempt_token,
+                    },
+                    status: if issued {
+                        DetachReplayStatus::InFlight
+                    } else {
+                        DetachReplayStatus::Parked
+                    },
+                };
+            }
             let restored = round_trip(&aggregate)?;
             assert_eq!(restored.expected, aggregate.expected);
         }
     }
+    Ok(())
+}
 
+#[test]
+fn continuous_ack_remains_outside_resume_slot() -> TestResult {
+    let generation = generation(2)?;
     let ack = ClientRequest::ParticipantAck(ParticipantAck {
         conversation_id: 1,
         participant_id: 2,

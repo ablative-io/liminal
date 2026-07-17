@@ -5,7 +5,9 @@ use super::{
     ExpectedOperationState, ReconnectAggregate, ReconnectFreshEvent,
     reconnect::ReconnectMachineState,
     replay::DetachReplayState,
-    resume::{ClientResumeRecordEncodeError, ClientResumeRecordSection, HEADER_LEN, VERSION},
+    resume::{
+        ClientResumeRecordEncodeError, ClientResumeRecordSection, HEADER_LEN, MAGIC, VERSION,
+    },
 };
 use crate::wire::{
     BindingEpoch, DetachStaleAuthority, Generation, ParticipantFrame, ServerValue, StaleAuthority,
@@ -14,7 +16,6 @@ use crate::wire::{
 
 pub(super) fn encode_aggregate(
     aggregate: &ClientParticipantAggregate,
-    magic: [u8; 4],
 ) -> Result<Vec<u8>, ClientResumeRecordEncodeError> {
     let mut payload = Vec::new();
     encode_binding(&aggregate.binding, &mut payload);
@@ -25,7 +26,7 @@ pub(super) fn encode_aggregate(
     let payload_len =
         u64::try_from(payload.len()).map_err(|_| ClientResumeRecordEncodeError::LengthOverflow)?;
     let mut output = Vec::with_capacity(HEADER_LEN.saturating_add(payload.len()));
-    output.extend_from_slice(&magic);
+    output.extend_from_slice(&MAGIC);
     put_u16(&mut output, VERSION);
     put_u64(&mut output, payload_len);
     output.extend_from_slice(&payload);

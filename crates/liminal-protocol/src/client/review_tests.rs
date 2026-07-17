@@ -112,7 +112,7 @@ fn b2_restored_attempt_has_typed_process_loss_exit() -> TestResult {
 }
 
 #[test]
-fn b3_speculative_bytes_cannot_promote_to_executable_state() -> TestResult {
+fn b3_commit_seal_record_restores_before_authority_release() -> TestResult {
     let request = ClientRequest::Enrollment(EnrollmentRequest {
         conversation_id: 41,
         enrollment_token: EnrollmentToken::new([44; 16]),
@@ -122,13 +122,6 @@ fn b3_speculative_bytes_cannot_promote_to_executable_state() -> TestResult {
     else {
         return Err("enrollment must become pending");
     };
-    let bytes = pending
-        .encode_resume_record()
-        .map_err(|_| "speculative record must encode")?;
-    assert!(matches!(
-        ClientResumeRecord::decode_canonical(&bytes),
-        Err(ClientResumeRecordDecodeError::InvalidMagic { .. })
-    ));
     let commit = pending.commit();
     let restored = commit
         .resume_record()
@@ -172,6 +165,33 @@ fn b4_cold_restored_expected_operation_is_released_once() -> TestResult {
 }
 
 #[test]
+fn b4_restored_issued_operation_has_typed_process_loss_exit() -> TestResult {
+    let request = ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: 41,
+        enrollment_token: EnrollmentToken::new([46; 16]),
+    });
+    let commit = committed_operation(ClientParticipantAggregate::new(), request)?;
+    let (aggregate, operation) = commit.into_parts();
+    let (_request, _correlation) = operation.into_request();
+    let restored = aggregate
+        .resume_record()
+        .map_err(|_| "issued aggregate must encode")?
+        .restore()
+        .map_err(|_| "issued aggregate must restore")?;
+    let IssuedExpectedOperationFateDecision::Recorded { aggregate, .. } =
+        record_issued_expected_operation_fate(restored, IssuedExpectedOperationFate::ProcessLost)
+    else {
+        return Err("restored issued operation must have process-loss exit");
+    };
+    assert!(!aggregate.has_expected_operation());
+    assert!(matches!(
+        record_issued_expected_operation_fate(aggregate, IssuedExpectedOperationFate::ProcessLost,),
+        IssuedExpectedOperationFateDecision::Refused { .. }
+    ));
+    Ok(())
+}
+
+#[test]
 fn b5_detach_has_exactly_one_initial_send_authority() -> TestResult {
     let commit = committed_operation(bound(7)?, detach(7, 46)?)?;
     let cold = commit
@@ -194,6 +214,24 @@ fn b5_detach_has_exactly_one_initial_send_authority() -> TestResult {
     assert!(matches!(
         transport_attempt_started(aggregate),
         DetachTransportAttemptDecision::Refused(_)
+    ));
+
+    let inverse = committed_operation(bound(7)?, detach(7, 48)?)?
+        .resume_record()
+        .map_err(|_| "inverse detach commit must encode")?
+        .restore()
+        .map_err(|_| "inverse detach commit must restore")?;
+    let DetachTransportAttemptDecision::Started { aggregate, .. } =
+        transport_attempt_started(inverse)
+    else {
+        return Err("inverse order must release exactly one replay send");
+    };
+    assert!(matches!(
+        recover_expected_operation(aggregate),
+        RecoveredExpectedOperationDecision::NotAvailable {
+            already_issued: true,
+            ..
+        }
     ));
     Ok(())
 }
@@ -254,80 +292,72 @@ fn m6_binding_state_gates_outbound_and_inbound() -> TestResult {
 }
 
 #[test]
-fn m7_body_omitting_record_response_requires_current_authorization() -> TestResult {
-    let first = ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: 41,
-        participant_id: 42,
-        capability_generation: generation(7)?,
-        payload: vec![1],
-    });
-    let (aggregate, operation) = committed_operation(bound(7)?, first)?.into_parts();
-    let (_, correlation) = operation.into_request_and_correlation();
-    let ExpectedOperationFateDecision::Recorded { aggregate, .. } = record_expected_operation_fate(
-        aggregate,
-        correlation,
-        ExpectedOperationTransportFate::ResponseUnavailable,
-    ) else {
-        return Err("lost first response must clear expectation");
-    };
-
-    let second = ClientRequest::RecordAdmission(RecordAdmission {
+fn m7_actual_older_record_response_is_always_ambiguous() -> TestResult {
+    let expected = ClientRequest::RecordAdmission(RecordAdmission {
         conversation_id: 41,
         participant_id: 42,
         capability_generation: generation(7)?,
         payload: vec![2],
     });
-    let (aggregate, operation) = committed_operation(aggregate, second)?.into_parts();
-    let (_, correlation) = operation.into_request_and_correlation();
-    let response = ServerValue::RecordCommitted(RecordCommitted::new(
+    let (aggregate, operation) = committed_operation(bound(7)?, expected)?.into_parts();
+    let (_, correlation) = operation.into_request();
+    let older_response = ServerValue::RecordCommitted(RecordCommitted::new(
         RecordAdmissionEnvelope {
             conversation_id: 41,
             participant_id: 42,
             capability_generation: generation(7)?,
         },
-        9,
+        8,
     ));
-    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, response.clone())
+    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, older_response.clone())
     else {
-        return Err("body-omitting response without current authority must be refused");
+        return Err("older body-omitting response must never apply");
+    };
+    assert_eq!(
+        refusal.reason(),
+        ClientInboundRefusalReason::AmbiguousResponse
+    );
+    let (aggregate, _) = refusal.into_parts();
+    let ClientCorrelatedInboundDecision::Refused(refusal) =
+        decide_correlated_inbound(aggregate, older_response, correlation)
+    else {
+        return Err("caller-paired correlation must not prove response provenance");
+    };
+    assert_eq!(
+        refusal.reason(),
+        ClientInboundRefusalReason::AmbiguousResponse
+    );
+    Ok(())
+}
+
+#[test]
+fn m7_actual_older_observer_response_cannot_apply() -> TestResult {
+    let expected = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+        observer_refusals: vec![ObserverRefusal {
+            conversation_id: 71,
+            refused_epoch: 72,
+        }],
+    });
+    let (aggregate, _) =
+        committed_operation(ClientParticipantAggregate::new(), expected)?.into_parts();
+    let older = ServerValue::ObserverRecoveryAccepted(ObserverRecoveryAccepted {
+        statuses: vec![ObserverProgressStatus {
+            conversation_id: 70,
+            refused_epoch: 71,
+            current_observer_progress: 73,
+            armed: true,
+            progressed: false,
+        }],
+    });
+    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, older) else {
+        return Err("older echoed observer list must not apply");
     };
     assert_eq!(
         refusal.reason(),
         ClientInboundRefusalReason::DelayedResponse
     );
     let (aggregate, _) = refusal.into_parts();
-    assert!(matches!(
-        decide_correlated_inbound(aggregate, response, correlation),
-        ClientCorrelatedInboundDecision::Applied(_)
-    ));
-    Ok(())
-}
-
-#[test]
-fn m7_body_omitting_observer_response_requires_current_authorization() -> TestResult {
-    let first = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
-        observer_refusals: vec![],
-    });
-    let (aggregate, operation) =
-        committed_operation(ClientParticipantAggregate::new(), first)?.into_parts();
-    let (_, correlation) = operation.into_request_and_correlation();
-    let ExpectedOperationFateDecision::Recorded { aggregate, .. } = record_expected_operation_fate(
-        aggregate,
-        correlation,
-        ExpectedOperationTransportFate::ResponseUnavailable,
-    ) else {
-        return Err("lost first observer response must clear expectation");
-    };
-
-    let second = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
-        observer_refusals: vec![ObserverRefusal {
-            conversation_id: 71,
-            refused_epoch: 72,
-        }],
-    });
-    let (aggregate, operation) = committed_operation(aggregate, second)?.into_parts();
-    let (_, correlation) = operation.into_request_and_correlation();
-    let response = ServerValue::ObserverRecoveryAccepted(ObserverRecoveryAccepted {
+    let matching = ServerValue::ObserverRecoveryAccepted(ObserverRecoveryAccepted {
         statuses: vec![ObserverProgressStatus {
             conversation_id: 71,
             refused_epoch: 72,
@@ -336,18 +366,9 @@ fn m7_body_omitting_observer_response_requires_current_authorization() -> TestRe
             progressed: false,
         }],
     });
-    let ClientInboundDecision::Refused(refusal) = decide_inbound(aggregate, response.clone())
-    else {
-        return Err("observer response without current authority must be refused");
-    };
-    assert_eq!(
-        refusal.reason(),
-        ClientInboundRefusalReason::DelayedResponse
-    );
-    let (aggregate, _) = refusal.into_parts();
     assert!(matches!(
-        decide_correlated_inbound(aggregate, response, correlation),
-        ClientCorrelatedInboundDecision::Applied(_)
+        decide_inbound(aggregate, matching),
+        ClientInboundDecision::Applied(_)
     ));
     Ok(())
 }

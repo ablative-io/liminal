@@ -12,6 +12,8 @@ pub enum ClientInboundRefusalReason {
     ForeignResponse,
     /// The value is absent an expectation or belongs to an older request.
     DelayedResponse,
+    /// Wire identity is insufficient to assign this value to one expected operation.
+    AmbiguousResponse,
 }
 
 /// Applied inbound value and resulting aggregate.
@@ -104,23 +106,23 @@ pub fn decide_inbound(
     aggregate: ClientParticipantAggregate,
     value: ServerValue,
 ) -> ClientInboundDecision {
-    decide_inbound_with_authorization(aggregate, value, None)
+    decide_inbound_inner(aggregate, value)
 }
 
-/// Correlates a body-omitting response with the non-cloneable capability released
-/// beside the exact request.
+/// Attempts correlation while retaining the process-local handle on refusal.
 ///
-/// `RecordAdmission` payload and `ObserverRecovery` list identity are deliberately
-/// absent from their wire responses. The brief still requires delayed-response
-/// refusal, so those two classes apply only through this authorization-bearing
-/// decision. No caller-supplied identifier or response relabeling is accepted.
+/// A caller-paired handle is not provenance: `RecordAdmission` remains
+/// [`ClientInboundRefusalReason::AmbiguousResponse`] even through this function.
+/// `ObserverRecovery` instead uses identity echoed in the wire response. A future
+/// SDK leg may upgrade this seam with sealed transport context unavailable to
+/// ordinary callers.
 #[must_use]
 pub fn decide_correlated_inbound(
     aggregate: ClientParticipantAggregate,
     value: ServerValue,
     correlation: ClientResponseCorrelation,
 ) -> ClientCorrelatedInboundDecision {
-    match decide_inbound_with_authorization(aggregate, value, Some(correlation.authorization)) {
+    match decide_inbound_inner(aggregate, value) {
         ClientInboundDecision::Applied(applied) => {
             ClientCorrelatedInboundDecision::Applied(applied)
         }
@@ -137,10 +139,9 @@ pub fn decide_correlated_inbound(
     }
 }
 
-fn decide_inbound_with_authorization(
+fn decide_inbound_inner(
     mut aggregate: ClientParticipantAggregate,
     value: ServerValue,
-    presented_authorization: Option<u64>,
 ) -> ClientInboundDecision {
     if aggregate.binding.is_left() {
         return inbound_refusal(aggregate, value, ClientInboundRefusalReason::AlreadyDead);
@@ -177,12 +178,19 @@ fn decide_inbound_with_authorization(
         );
     }
 
-    if !correlation::matches_request(
-        &value,
-        &expected.request,
-        expected.authorization,
-        presented_authorization,
-    ) {
+    if matches!(
+        expected.request,
+        crate::wire::ClientRequest::RecordAdmission(_)
+    ) && value.originating_request() == Some(crate::wire::ClientDiscriminant::RecordAdmission)
+    {
+        return inbound_refusal(
+            aggregate,
+            value,
+            ClientInboundRefusalReason::AmbiguousResponse,
+        );
+    }
+
+    if !correlation::matches_request(&value, &expected.request) {
         let same_request_class = value.originating_request()
             == Some(expected.request.discriminant())
             || matches!(

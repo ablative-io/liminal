@@ -1,9 +1,9 @@
 //! Transport-agnostic client participant state and sealed effects.
 //!
 //! The client aggregate owns correlation, detach replay, and the durability
-//! barrier for one outstanding write-ahead operation. Callers persist the
-//! pending resume bytes before committing an operation; speculative executable
-//! authority is otherwise unreachable.
+//! barrier for one outstanding operation. The authorized round-3 order is
+//! commit-seal, persist the committed resume record, then release executable
+//! authority; pending has no durable form.
 //!
 //! # `LP-CLIENT-GOAL` API-shape rationale
 //!
@@ -17,9 +17,8 @@
 //!    reconnect state would separate permit identity from participant facts.
 //! 3. [`recover_reconnect_permit`] exists because an unissued committed cold
 //!    record must release its permit once without making permits cloneable.
-//! 4. [`ClientParticipantAggregate::resume_record`] and the pending/commit
-//!    record methods expose durable bytes while keeping speculative aggregate and
-//!    execution authority sealed.
+//! 4. Only the commit seal exposes a durable record; pending has no encoder. The
+//!    authorized round-3 order is commit-seal, persist committed `LPCR`, release.
 //! 5. The retained name [`crate::outcome::ReconnectDelayResult`] carries an
 //!    event, never a delay: the brief explicitly supersedes timer scheduling.
 //! 6. A different retained detach is refused while live, but terminal or
@@ -38,16 +37,44 @@
 //!     the pending-to-commit barrier; detach recovery also marks replay in flight.
 //! 13. Replay inspection returns `None` only for its named Empty state; terminal
 //!     payloads remain lossless and distinct.
-//! 14. Speculative `LPCP` and committed `LPCR` envelopes are distinct so pending
-//!     bytes cannot be decoded and promoted before [`ClientPendingOperationRecord::commit`].
-//! 15. [`ClientResponseCorrelation`] supplies persisted local identity for
-//!     `RecordAdmission` and `ObserverRecovery` responses whose wire bodies omit it.
+//! 14. There is no speculative persistence format. A pending-window crash means
+//!     the operation did not happen and restart may record it again.
+//! 15. `RecordAdmission` responses are always ambiguous because wire identity is
+//!     insufficient; `ObserverRecovery` compares its echoed list. A sealed
+//!     transport-context upgrade belongs to the later SDK leg.
 //! 16. Issued permit loss and interrupted attempts have explicit typed process
 //!     fates; restore neither silently re-mints nor strands those states.
 //! 17. Detached bindings retain the attach secret because the complete client
 //!     record must remain capable of a later credential attach after restart.
-//! 18. The first detach send is the committed [`ExpectedParticipantOperation`];
-//!     replay starts in flight at release, guaranteeing one send authority.
+//! 18. Expected recovery and replay-start atomically share one detach issuance
+//!     bit, guaranteeing one first-send authority in either call order.
+//!
+//! # Exhaustive constructible-state audit
+//!
+//! Every state reachable through decode, restore, or apply is listed here.
+//!
+//! | Owned fact / state | Producers | Typed exits or documented terminal reason |
+//! |---|---|---|
+//! | Binding `Unbound` | new, restore | enrollment/attach → `Bound`; observer recovery; mismatched participant request refuses |
+//! | Binding `Bound` | enrollment/attach, restore | detach → `Detached`; attach rotates; Leave/Retired → `Left` |
+//! | Binding `Detached` | detach commit, restore | exact-secret attach → `Bound`; Leave/Retired → `Left` |
+//! | Binding `Left` | Leave/Retired, restore | permanent terminal; inbound/outbound return `AlreadyDead` |
+//! | Expected `None` | new, exact response/fate, abort, restore | one [`record_operation`] admission |
+//! | Expected unissued non-detach | committed `LPCR`, restore | [`recover_expected_operation`] → issued once |
+//! | Expected issued non-detach | release/recovery, restore | exact inbound; correlation + response-unavailable; process-lost exit |
+//! | Expected unissued detach + replay `Parked` | committed `LPCR`, restore | expected recovery or replay start atomically marks issued |
+//! | Expected issued detach + active replay | either first-send path, restore | exact inbound; replay fate/start; duplicate recovery refuses |
+//! | Replay `Empty` | new, abort, restore | pending detach → `Parked` |
+//! | Replay `Parked` | committed detach/fate, restore | matching expected required; transport start → `InFlight` |
+//! | Replay `InFlight` | first-send path, restore | fate → `Parked`; outcome terminal; attach/Leave supersession |
+//! | Replay `Superseded` | matching newer attach, restore | terminal for old generation; newer-generation detach may replace |
+//! | Replay `LeaveSuperseded` | Leave/Retired, restore | terminal because binding is permanently `Left` |
+//! | Replay terminal: three payload arms | exact outcome, restore | lossless terminal; newer-generation detach may replace |
+//! | Reconnect `Parked` | new/failure/interruption, restore | typed fresh event → permit |
+//! | Reconnect permit unissued | committed restore testimony | one [`recover_reconnect_permit`] → issued |
+//! | Reconnect permit issued | fresh event/recovery, restore | held permit → attempt; process-lost → `Parked`; never re-minted |
+//! | Reconnect attempt | permit redemption, restore | held fate → `Online`/`Parked`; process-lost → `Parked` |
+//! | Reconnect `Online` | successful attempt, restore | later typed fresh event → permit |
 
 use crate::wire::{ClientRequest, Generation, ParticipantAckEnvelope};
 
@@ -125,10 +152,11 @@ impl ClientBindingState {
             ClientRequest::Enrollment(_) => matches!(self, Self::Unbound),
             ClientRequest::CredentialAttach(value) => {
                 matches!(self, Self::Unbound)
-                    || self.matches_identity(
+                    || self.matches_credential(
                         value.conversation_id,
                         value.participant_id,
                         value.capability_generation,
+                        value.attach_secret,
                         true,
                     )
             }
@@ -144,10 +172,11 @@ impl ClientBindingState {
                 value.capability_generation,
                 false,
             ),
-            ClientRequest::Leave(value) => self.matches_identity(
+            ClientRequest::Leave(value) => self.matches_credential(
                 value.conversation_id,
                 value.participant_id,
                 value.capability_generation,
+                value.attach_secret,
                 true,
             ),
             ClientRequest::MarkerAck(value) => self.matches_identity(
@@ -191,6 +220,32 @@ impl ClientBindingState {
             } if allow_detached => {
                 (*conversation_id, *participant_id, *generation)
                     == (conversation, participant, generation_value)
+            }
+            Self::Unbound | Self::Detached { .. } | Self::Left { .. } => false,
+        }
+    }
+
+    fn matches_credential(
+        &self,
+        conversation: u64,
+        participant: u64,
+        generation_value: Generation,
+        presented_secret: crate::wire::AttachSecret,
+        allow_detached: bool,
+    ) -> bool {
+        match self {
+            Self::Bound { attach_secret, .. } => {
+                *attach_secret == presented_secret
+                    && self.matches_identity(
+                        conversation,
+                        participant,
+                        generation_value,
+                        allow_detached,
+                    )
+            }
+            Self::Detached { attach_secret, .. } if allow_detached => {
+                *attach_secret == presented_secret
+                    && self.matches_identity(conversation, participant, generation_value, true)
             }
             Self::Unbound | Self::Detached { .. } | Self::Left { .. } => false,
         }
@@ -305,5 +360,7 @@ pub use resume::{
 mod resume_tests;
 #[cfg(test)]
 mod review_tests;
+#[cfg(test)]
+mod round3_tests;
 #[cfg(test)]
 mod tests;

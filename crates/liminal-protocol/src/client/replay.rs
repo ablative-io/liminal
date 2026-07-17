@@ -267,17 +267,20 @@ pub enum DetachTransportAttemptDecision {
 }
 
 /// Moves a parked detach to in-flight and releases its exact send effect.
+///
+/// If the matching committed expected detach was still unissued, this path
+/// atomically marks it issued. Consequently the inverse restore order
+/// (`transport_attempt_started` before `recover_expected_operation`) cannot
+/// release a second initial-send authority.
 #[must_use]
 pub fn transport_attempt_started(
     mut aggregate: ClientParticipantAggregate,
 ) -> DetachTransportAttemptDecision {
-    let request = match &mut aggregate.detach_replay.state {
-        DetachReplayState::Recorded { request, status }
-            if matches!(status, DetachReplayStatus::Parked) =>
-        {
-            *status = DetachReplayStatus::InFlight;
-            request.clone()
-        }
+    let request = match &aggregate.detach_replay.state {
+        DetachReplayState::Recorded {
+            request,
+            status: DetachReplayStatus::Parked,
+        } => request.clone(),
         DetachReplayState::Empty | DetachReplayState::Recorded { .. } => {
             return DetachTransportAttemptDecision::Refused(DetachReplayRefusal {
                 aggregate,
@@ -286,6 +289,26 @@ pub fn transport_attempt_started(
             });
         }
     };
+    let expected_matches = aggregate.expected.as_ref().is_some_and(|expected| {
+        matches!(&expected.request, crate::wire::ClientRequest::Detach(value)
+            if value.conversation_id == request.conversation_id
+                && value.participant_id == request.participant_id
+                && value.capability_generation == request.capability_generation
+                && value.detach_attempt_token == request.detach_attempt_token)
+    });
+    if !expected_matches {
+        return DetachTransportAttemptDecision::Refused(DetachReplayRefusal {
+            aggregate,
+            input: (),
+            reason: DetachReplayRefusalReason::InvalidStatus,
+        });
+    }
+    if let Some(expected) = aggregate.expected.as_mut() {
+        expected.issued = true;
+    }
+    if let DetachReplayState::Recorded { status, .. } = &mut aggregate.detach_replay.state {
+        *status = DetachReplayStatus::InFlight;
+    }
     DetachTransportAttemptDecision::Started {
         aggregate,
         attempt: DetachTransportAttempt { request },

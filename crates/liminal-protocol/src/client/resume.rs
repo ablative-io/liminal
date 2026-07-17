@@ -9,7 +9,6 @@ use super::{resume_decode::decode_facts, resume_encode::encode_aggregate};
 use crate::wire::{ClientRequest, CodecError};
 
 pub(super) const MAGIC: [u8; 4] = *b"LPCR";
-pub(super) const SPECULATIVE_MAGIC: [u8; 4] = *b"LPCP";
 pub(super) const VERSION: u16 = 1;
 pub(super) const HEADER_LEN: usize = 14;
 
@@ -101,6 +100,8 @@ pub enum ClientResumeRestoreError {
     InvalidOperationAuthorization,
     /// Expected operation is illegal for the restored binding state or identity.
     ExpectedBindingMismatch,
+    /// Active detach replay is not coupled to its matching expected detach.
+    ActiveReplayExpectedDetachMismatch,
     /// Reconnect authorization is zero or exceeds its durable counter.
     InvalidReconnectAuthorization,
     /// Private canonical bytes no longer decode; this is unreachable through public construction.
@@ -176,25 +177,8 @@ impl ClientParticipantAggregate {
     /// be represented canonically.
     pub fn resume_record(&self) -> Result<ClientResumeRecord, ClientResumeRecordEncodeError> {
         Ok(ClientResumeRecord {
-            canonical: encode_aggregate(self, MAGIC)?,
+            canonical: encode_aggregate(self)?,
         })
-    }
-}
-
-impl super::ClientPendingOperationRecord {
-    /// Encodes the speculative successor under the non-restorable `LPCP` magic.
-    ///
-    /// No aggregate, request, executable operation, or publicly restorable
-    /// `LPCR` envelope escapes through this method. This explicit speculative
-    /// shape is the brief-required distinction between write-ahead persistence
-    /// and cold restore of a committed fact.
-    ///
-    /// # Errors
-    ///
-    /// Returns a typed nested-codec or length error; callers can then abort the
-    /// pending decision unchanged.
-    pub fn encode_resume_record(&self) -> Result<Vec<u8>, ClientResumeRecordEncodeError> {
-        encode_aggregate(&self.successor, SPECULATIVE_MAGIC)
     }
 }
 
@@ -210,7 +194,7 @@ impl super::ClientOperationCommit {
     /// Returns a typed nested-codec or length error before authority release.
     pub fn resume_record(&self) -> Result<ClientResumeRecord, ClientResumeRecordEncodeError> {
         Ok(ClientResumeRecord {
-            canonical: encode_aggregate(&self.aggregate, MAGIC)?,
+            canonical: encode_aggregate(&self.aggregate)?,
         })
     }
 }
@@ -254,6 +238,24 @@ fn validate_facts(facts: &DecodedFacts) -> Result<(), ClientResumeRestoreError> 
         .is_some_and(|expected| !facts.binding.accepts_request(&expected.request))
     {
         return Err(ClientResumeRestoreError::ExpectedBindingMismatch);
+    }
+    if let DetachReplayState::Recorded { request, status } = &facts.replay
+        && matches!(
+            status,
+            DetachReplayStatus::Parked | DetachReplayStatus::InFlight
+        )
+    {
+        let Some(expected) = facts.expected.as_ref() else {
+            return Err(ClientResumeRestoreError::ActiveReplayExpectedDetachMismatch);
+        };
+        let matches = matches!(&expected.request, ClientRequest::Detach(value)
+            if value.conversation_id == request.conversation_id
+                && value.participant_id == request.participant_id
+                && value.capability_generation == request.capability_generation
+                && value.detach_attempt_token == request.detach_attempt_token);
+        if !matches || (matches!(status, DetachReplayStatus::InFlight) && !expected.issued) {
+            return Err(ClientResumeRestoreError::ActiveReplayExpectedDetachMismatch);
+        }
     }
     if let DetachReplayState::Recorded {
         request,

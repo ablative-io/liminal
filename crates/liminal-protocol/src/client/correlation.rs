@@ -88,14 +88,56 @@ impl RequestKey {
     }
 }
 
-pub(super) fn matches_request(
+/// Matches only response identity carried by the wire itself.
+///
+/// `RecordAdmission` deliberately has no echoed payload/token and therefore
+/// never matches here. A future SDK integration may supply a sealed transport
+/// context, but no caller-pairable value is accepted as provenance in this leg.
+pub(super) fn matches_request(value: &ServerValue, request: &ClientRequest) -> bool {
+    match request {
+        ClientRequest::RecordAdmission(_) => false,
+        ClientRequest::ObserverRecovery(expected) => observer_response_matches(value, expected),
+        _ => response_key(value, 0) == RequestKey::from_request(request, 0),
+    }
+}
+
+fn observer_response_matches(
     value: &ServerValue,
-    request: &ClientRequest,
-    expected_authorization: u64,
-    presented_authorization: Option<u64>,
+    expected: &crate::wire::ObserverRecoveryHandshake,
 ) -> bool {
-    response_key(value, presented_authorization.unwrap_or(0))
-        == RequestKey::from_request(request, expected_authorization)
+    match value {
+        ServerValue::ObserverRecoveryAccepted(response) => {
+            response.statuses.len() == expected.observer_refusals.len()
+                && response
+                    .statuses
+                    .iter()
+                    .zip(&expected.observer_refusals)
+                    .all(|(actual, expected)| {
+                        actual.conversation_id == expected.conversation_id
+                            && actual.refused_epoch == expected.refused_epoch
+                    })
+        }
+        ServerValue::InvalidObserverEpoch(response) if expected.observer_refusals.len() == 1 => {
+            let Some(expected) = expected.observer_refusals.first() else {
+                return false;
+            };
+            match response {
+                crate::wire::InvalidObserverEpoch::ConversationUnknown {
+                    conversation_id,
+                    presented_epoch,
+                }
+                | crate::wire::InvalidObserverEpoch::EpochAhead {
+                    conversation_id,
+                    presented_epoch,
+                    ..
+                } => {
+                    *conversation_id == expected.conversation_id
+                        && *presented_epoch == expected.refused_epoch
+                }
+            }
+        }
+        _ => false,
+    }
 }
 
 pub(super) fn same_identity(value: &ServerValue, request: &ClientRequest) -> bool {

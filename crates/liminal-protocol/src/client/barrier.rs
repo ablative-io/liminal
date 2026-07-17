@@ -17,20 +17,14 @@ impl ExpectedParticipantOperation {
         &self.request
     }
 
-    /// Consumes the authority into the exact transport-agnostic request.
-    #[must_use]
-    pub fn into_request(self) -> ClientRequest {
-        self.request
-    }
-
     /// Consumes the send authority into its exact request and a non-cloneable
     /// response-correlation capability.
     ///
-    /// The brief permits the wire to omit record payload and recovery-list
-    /// identity. This process-local capability carries the persisted operation
-    /// authorization needed to reject an older body-omitting response.
+    /// Returning both values from the advertised send path prevents successful
+    /// request extraction from silently discarding the only typed handle that
+    /// can terminalize an issued operation after transport loss.
     #[must_use]
-    pub fn into_request_and_correlation(self) -> (ClientRequest, ClientResponseCorrelation) {
+    pub fn into_request(self) -> (ClientRequest, ClientResponseCorrelation) {
         (
             self.request,
             ClientResponseCorrelation {
@@ -100,13 +94,18 @@ impl ClientContinuousOperation {
     }
 }
 
-/// Pending durability decision whose executable parts remain unreachable.
+/// Pending decision whose successor and executable parts remain unreachable.
 ///
-/// Its encoded bytes are deliberately speculative and are rejected by
-/// [`crate::client::ClientResumeRecord::decode_canonical`]. Calling
-/// [`Self::commit`] records the commit fact in the type system; callers then
-/// persist the committed record exposed by [`ClientOperationCommit`] before
-/// releasing executable authority.
+/// Round-3's authorized order is commit-seal, persist the committed `LPCR`, then
+/// release. Pending has no persistence API: a crash here means the operation did
+/// not happen and the caller may record it again after restart.
+///
+/// ```compile_fail
+/// use liminal_protocol::client::ClientPendingOperationRecord;
+/// fn speculative_persistence_is_forbidden(pending: ClientPendingOperationRecord) {
+///     let _bytes = pending.encode_resume_record();
+/// }
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientPendingOperationRecord {
     pub(super) successor: ClientParticipantAggregate,
@@ -141,9 +140,9 @@ impl ClientPendingOperationRecord {
 
 /// Committed operation decision that still seals aggregate and execution authority.
 ///
-/// The brief's durability barrier requires the committed resume bytes exposed
-/// by this value to be persisted before [`Self::into_parts`] is called. Unlike
-/// speculative pending bytes, those bytes are accepted by cold restore.
+/// This implements the authorized round-3 mandate's governing order:
+/// commit-seal, persist the committed `LPCR` exposed by this value, then call
+/// [`Self::into_parts`] to release authority.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientOperationCommit {
     pub(super) aggregate: ClientParticipantAggregate,
@@ -214,6 +213,86 @@ pub fn recover_expected_operation(
         operation: ExpectedParticipantOperation {
             request,
             authorization,
+        },
+    }
+}
+
+/// Typed process fate for an issued operation restored without its process-local handle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssuedExpectedOperationFate {
+    /// Process termination lost the issued operation and response correlation.
+    ProcessLost,
+}
+
+/// Reason issued-operation process-loss recovery was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssuedExpectedOperationFateRefusalReason {
+    /// No issued expected operation is retained.
+    NoIssuedOperation,
+    /// Detach must remain governed by its lossless replay lifecycle.
+    DetachUsesReplay,
+}
+
+/// Complete decision for an issued operation whose process-local authority was lost.
+#[derive(Debug, PartialEq, Eq)]
+pub enum IssuedExpectedOperationFateDecision {
+    /// Process loss cleared the non-detach expected slot.
+    Recorded {
+        /// Resulting aggregate.
+        aggregate: ClientParticipantAggregate,
+        /// Exact operation terminalized as process-lost.
+        request: ClientRequest,
+        /// Consumed process fate.
+        fate: IssuedExpectedOperationFate,
+    },
+    /// Aggregate and fate were retained unchanged.
+    Refused {
+        /// Unchanged aggregate.
+        aggregate: ClientParticipantAggregate,
+        /// Retained process fate.
+        fate: IssuedExpectedOperationFate,
+        /// Closed refusal reason.
+        reason: IssuedExpectedOperationFateRefusalReason,
+    },
+}
+
+/// Records process loss for a restored issued non-detach operation.
+#[must_use]
+pub fn record_issued_expected_operation_fate(
+    mut aggregate: ClientParticipantAggregate,
+    fate: IssuedExpectedOperationFate,
+) -> IssuedExpectedOperationFateDecision {
+    let Some(expected) = aggregate.expected.as_ref() else {
+        return IssuedExpectedOperationFateDecision::Refused {
+            aggregate,
+            fate,
+            reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
+        };
+    };
+    if !expected.issued {
+        return IssuedExpectedOperationFateDecision::Refused {
+            aggregate,
+            fate,
+            reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
+        };
+    }
+    if matches!(expected.request, ClientRequest::Detach(_)) {
+        return IssuedExpectedOperationFateDecision::Refused {
+            aggregate,
+            fate,
+            reason: IssuedExpectedOperationFateRefusalReason::DetachUsesReplay,
+        };
+    }
+    match aggregate.expected.take() {
+        Some(expected) => IssuedExpectedOperationFateDecision::Recorded {
+            aggregate,
+            request: expected.request,
+            fate,
+        },
+        None => IssuedExpectedOperationFateDecision::Refused {
+            aggregate,
+            fate,
+            reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
         },
     }
 }
@@ -376,7 +455,6 @@ pub fn record_operation(
             reason: ClientOperationRecordRefusalReason::AuthorizationExhausted,
         });
     };
-    aggregate.next_operation_authorization = authorization;
     let mut prior_replay = None;
     if let ClientRequest::Detach(value) = &request {
         let envelope = crate::wire::DetachEnvelope {
@@ -414,6 +492,7 @@ pub fn record_operation(
             }
         }
     }
+    aggregate.next_operation_authorization = authorization;
     aggregate.expected = Some(ExpectedOperationState {
         request: request.clone(),
         issued: false,

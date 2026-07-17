@@ -223,7 +223,8 @@ fn abort_and_continuous_ack_release_no_speculative_slot() -> TestResult {
     };
     let (aggregate, operation) = continuous.into_parts();
     assert!(!aggregate.has_expected_operation());
-    assert_eq!(operation.into_request(), ack);
+    let (request, _correlation) = operation.into_request();
+    assert_eq!(request, ack);
     Ok(())
 }
 
