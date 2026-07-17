@@ -37,6 +37,12 @@ tungstenite = { workspace = true, optional = true }
 # only the listed interfaces. These dependencies exist solely for the
 # `browser` feature on the browser wasm target.
 
+
+[[example]]
+name = "demo_feed_publisher"
+path = "examples/demo_feed_publisher/main.rs"
+required-features = ["std"]
+
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys = { workspace = true, optional = true }
 wasm-bindgen = { workspace = true, optional = true }
