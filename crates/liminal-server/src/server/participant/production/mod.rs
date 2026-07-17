@@ -18,6 +18,7 @@ mod facts;
 mod handler;
 mod log;
 mod observer;
+mod ops_acks;
 mod ops_attach;
 mod ops_enroll;
 mod ops_frontier;
