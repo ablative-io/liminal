@@ -2,30 +2,30 @@ use alloc::vec::Vec;
 
 use super::{
     ClientBindingState, ClientParticipantAggregate, DetachReplayStatus, DetachReplayTerminal,
-    ReconnectAggregate, ReconnectFreshEvent,
+    ExpectedOperationState, ReconnectAggregate, ReconnectFreshEvent,
     reconnect::ReconnectMachineState,
     replay::DetachReplayState,
-    resume::{
-        ClientResumeRecordEncodeError, ClientResumeRecordSection, HEADER_LEN, MAGIC, VERSION,
-    },
+    resume::{ClientResumeRecordEncodeError, ClientResumeRecordSection, HEADER_LEN, VERSION},
 };
 use crate::wire::{
-    BindingEpoch, ClientRequest, DetachStaleAuthority, Generation, ParticipantFrame, ServerValue,
-    StaleAuthority, encode, encoded_len,
+    BindingEpoch, DetachStaleAuthority, Generation, ParticipantFrame, ServerValue, StaleAuthority,
+    encode, encoded_len,
 };
 
 pub(super) fn encode_aggregate(
     aggregate: &ClientParticipantAggregate,
+    magic: [u8; 4],
 ) -> Result<Vec<u8>, ClientResumeRecordEncodeError> {
     let mut payload = Vec::new();
     encode_binding(&aggregate.binding, &mut payload);
+    put_u64(&mut payload, aggregate.next_operation_authorization);
     encode_expected(aggregate.expected.as_ref(), &mut payload)?;
     encode_replay(&aggregate.detach_replay.state, &mut payload)?;
     encode_reconnect(&aggregate.reconnect, &mut payload);
     let payload_len =
         u64::try_from(payload.len()).map_err(|_| ClientResumeRecordEncodeError::LengthOverflow)?;
     let mut output = Vec::with_capacity(HEADER_LEN.saturating_add(payload.len()));
-    output.extend_from_slice(&MAGIC);
+    output.extend_from_slice(&magic);
     put_u16(&mut output, VERSION);
     put_u64(&mut output, payload_len);
     output.extend_from_slice(&payload);
@@ -53,7 +53,11 @@ fn encode_binding(binding: &ClientBindingState, output: &mut Vec<u8>) {
             conversation_id,
             participant_id,
             generation,
-        } => encode_terminal_binding(2, *conversation_id, *participant_id, *generation, output),
+            attach_secret,
+        } => {
+            encode_terminal_binding(2, *conversation_id, *participant_id, *generation, output);
+            output.extend_from_slice(attach_secret.as_bytes());
+        }
         ClientBindingState::Left {
             conversation_id,
             participant_id,
@@ -82,7 +86,7 @@ fn encode_epoch(epoch: BindingEpoch, output: &mut Vec<u8>) {
 }
 
 fn encode_expected(
-    expected: Option<&ClientRequest>,
+    expected: Option<&ExpectedOperationState>,
     output: &mut Vec<u8>,
 ) -> Result<(), ClientResumeRecordEncodeError> {
     let Some(request) = expected else {
@@ -90,8 +94,10 @@ fn encode_expected(
         return Ok(());
     };
     output.push(1);
+    output.push(u8::from(request.issued));
+    put_u64(output, request.authorization);
     let frame = encode_frame(
-        &ParticipantFrame::ClientRequest(request.clone()),
+        &ParticipantFrame::ClientRequest(request.request.clone()),
         ClientResumeRecordSection::ExpectedOperation,
     )?;
     put_blob(output, &frame)?;
@@ -146,11 +152,12 @@ fn encode_reconnect(reconnect: &ReconnectAggregate, output: &mut Vec<u8>) {
         ReconnectMachineState::Permit {
             authorization,
             event,
-            ..
+            issued,
         } => {
             output.push(1);
             put_u64(output, authorization);
             encode_event(event, output);
+            output.push(u8::from(issued));
         }
         ReconnectMachineState::Attempt {
             authorization,

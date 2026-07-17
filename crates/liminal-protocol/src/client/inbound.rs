@@ -1,4 +1,6 @@
-use super::{ClientBindingState, ClientParticipantAggregate, correlation};
+use super::{
+    ClientBindingState, ClientParticipantAggregate, ClientResponseCorrelation, correlation,
+};
 use crate::wire::{AttachBound, ReceiptReplay, ServerValue};
 
 /// Closed refusal classes for inbound semantic values.
@@ -58,11 +60,87 @@ pub enum ClientInboundDecision {
     Refused(ClientInboundRefusal),
 }
 
+/// Refused body-omitting response with the exact local correlation retained.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ClientCorrelatedInboundRefusal {
+    aggregate: ClientParticipantAggregate,
+    value: ServerValue,
+    correlation: ClientResponseCorrelation,
+    reason: ClientInboundRefusalReason,
+}
+
+impl ClientCorrelatedInboundRefusal {
+    /// Returns the closed refusal reason.
+    #[must_use]
+    pub const fn reason(&self) -> ClientInboundRefusalReason {
+        self.reason
+    }
+
+    /// Releases every unchanged input, including the non-cloneable correlation.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        ClientParticipantAggregate,
+        ServerValue,
+        ClientResponseCorrelation,
+    ) {
+        (self.aggregate, self.value, self.correlation)
+    }
+}
+
+/// Inbound decision for response classes whose wire envelopes omit request identity.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClientCorrelatedInboundDecision {
+    /// The exact local operation authorization and wire envelope both matched.
+    Applied(ClientInboundApplied),
+    /// Aggregate, value, and correlation were retained unchanged.
+    Refused(ClientCorrelatedInboundRefusal),
+}
+
 /// Correlates and applies one server value inside the client aggregate.
 #[must_use]
 pub fn decide_inbound(
+    aggregate: ClientParticipantAggregate,
+    value: ServerValue,
+) -> ClientInboundDecision {
+    decide_inbound_with_authorization(aggregate, value, None)
+}
+
+/// Correlates a body-omitting response with the non-cloneable capability released
+/// beside the exact request.
+///
+/// `RecordAdmission` payload and `ObserverRecovery` list identity are deliberately
+/// absent from their wire responses. The brief still requires delayed-response
+/// refusal, so those two classes apply only through this authorization-bearing
+/// decision. No caller-supplied identifier or response relabeling is accepted.
+#[must_use]
+pub fn decide_correlated_inbound(
+    aggregate: ClientParticipantAggregate,
+    value: ServerValue,
+    correlation: ClientResponseCorrelation,
+) -> ClientCorrelatedInboundDecision {
+    match decide_inbound_with_authorization(aggregate, value, Some(correlation.authorization)) {
+        ClientInboundDecision::Applied(applied) => {
+            ClientCorrelatedInboundDecision::Applied(applied)
+        }
+        ClientInboundDecision::Refused(refusal) => {
+            let reason = refusal.reason();
+            let (aggregate, value) = refusal.into_parts();
+            ClientCorrelatedInboundDecision::Refused(ClientCorrelatedInboundRefusal {
+                aggregate,
+                value,
+                correlation,
+                reason,
+            })
+        }
+    }
+}
+
+fn decide_inbound_with_authorization(
     mut aggregate: ClientParticipantAggregate,
     value: ServerValue,
+    presented_authorization: Option<u64>,
 ) -> ClientInboundDecision {
     if aggregate.binding.is_left() {
         return inbound_refusal(aggregate, value, ClientInboundRefusalReason::AlreadyDead);
@@ -91,9 +169,22 @@ pub fn decide_inbound(
         );
     };
 
-    if !correlation::matches_request(&value, expected) {
-        let reason = if value.originating_request() == Some(expected.discriminant())
-            && correlation::same_identity(&value, expected)
+    if !aggregate.binding.accepts_request(&expected.request) {
+        return inbound_refusal(
+            aggregate,
+            value,
+            ClientInboundRefusalReason::ForeignResponse,
+        );
+    }
+
+    if !correlation::matches_request(
+        &value,
+        &expected.request,
+        expected.authorization,
+        presented_authorization,
+    ) {
+        let reason = if value.originating_request() == Some(expected.request.discriminant())
+            && correlation::same_identity(&value, &expected.request)
         {
             ClientInboundRefusalReason::DelayedResponse
         } else {
@@ -131,10 +222,16 @@ fn apply_correlated_value(aggregate: &mut ClientParticipantAggregate, value: &Se
             aggregate.detach_replay.apply_attach(value);
         }
         ServerValue::DetachCommitted(value) => {
+            let attach_secret = match aggregate.binding {
+                ClientBindingState::Bound { attach_secret, .. }
+                | ClientBindingState::Detached { attach_secret, .. } => attach_secret,
+                ClientBindingState::Unbound | ClientBindingState::Left { .. } => return,
+            };
             aggregate.binding = ClientBindingState::Detached {
                 conversation_id: value.conversation_id(),
                 participant_id: value.participant_id(),
                 generation: value.capability_generation(),
+                attach_secret,
             };
             aggregate.detach_replay.apply_detach_committed(value);
         }
@@ -156,6 +253,9 @@ fn apply_correlated_value(aggregate: &mut ClientParticipantAggregate, value: &Se
             };
             aggregate.detach_replay.apply_leave(value);
         }
+        ServerValue::Retired(value) => {
+            apply_retired(aggregate, value);
+        }
         ServerValue::ParticipantTransportRejected(_)
         | ServerValue::AttemptTokenBodyConflict(_)
         | ServerValue::ConnectionConversationCapacityExceeded(_)
@@ -164,7 +264,6 @@ fn apply_correlated_value(aggregate: &mut ClientParticipantAggregate, value: &Se
         | ServerValue::ParticipantUnknown(_)
         | ServerValue::NoBinding(_)
         | ServerValue::StaleAuthority(_)
-        | ServerValue::Retired(_)
         | ServerValue::MarkerClosureCapacityExceeded(_)
         | ServerValue::EnrollmentKnown(_)
         | ServerValue::ReceiptExpired(_)
@@ -210,4 +309,58 @@ const fn apply_attach_bound(aggregate: &mut ClientParticipantAggregate, value: &
         attach_secret: value.attach_secret(),
         binding_epoch: value.origin_binding_epoch(),
     };
+}
+
+fn apply_retired(aggregate: &mut ClientParticipantAggregate, value: &crate::wire::Retired) {
+    let (conversation_id, participant_id, generation) = match value {
+        crate::wire::Retired::Enrollment {
+            request,
+            participant_id,
+            retired_generation,
+        } => (
+            request.conversation_id,
+            *participant_id,
+            *retired_generation,
+        ),
+        crate::wire::Retired::Participant {
+            request,
+            retired_generation,
+        } => {
+            let (conversation_id, participant_id) = participant_reference_identity(request);
+            (conversation_id, participant_id, *retired_generation)
+        }
+    };
+    aggregate.binding = ClientBindingState::Left {
+        conversation_id,
+        participant_id,
+        generation,
+    };
+    aggregate
+        .detach_replay
+        .apply_retired(conversation_id, participant_id, generation);
+}
+
+const fn participant_reference_identity(
+    request: &crate::wire::ParticipantReferenceEnvelope,
+) -> (u64, u64) {
+    match request {
+        crate::wire::ParticipantReferenceEnvelope::CredentialAttach(value) => {
+            (value.conversation_id, value.participant_id)
+        }
+        crate::wire::ParticipantReferenceEnvelope::Detach(value) => {
+            (value.conversation_id, value.participant_id)
+        }
+        crate::wire::ParticipantReferenceEnvelope::ParticipantAck(value) => {
+            (value.conversation_id, value.participant_id)
+        }
+        crate::wire::ParticipantReferenceEnvelope::Leave(value) => {
+            (value.conversation_id, value.participant_id)
+        }
+        crate::wire::ParticipantReferenceEnvelope::MarkerAck(value) => {
+            (value.conversation_id, value.participant_id)
+        }
+        crate::wire::ParticipantReferenceEnvelope::RecordAdmission(value) => {
+            (value.conversation_id, value.participant_id)
+        }
+    }
 }

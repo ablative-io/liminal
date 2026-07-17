@@ -70,6 +70,32 @@ impl SdkDetachReplayAggregate {
         }
     }
 
+    pub(super) const fn mark_initial_attempt_started(&mut self) {
+        if let DetachReplayState::Recorded { status, .. } = &mut self.state {
+            if matches!(status, DetachReplayStatus::Parked) {
+                *status = DetachReplayStatus::InFlight;
+            }
+        }
+    }
+
+    pub(super) fn can_replace_with(&self, request: &DetachEnvelope) -> bool {
+        match &self.state {
+            DetachReplayState::Recorded {
+                request: retained,
+                status,
+            } => {
+                retained.conversation_id == request.conversation_id
+                    && retained.participant_id == request.participant_id
+                    && request.capability_generation > retained.capability_generation
+                    && matches!(
+                        status,
+                        DetachReplayStatus::Superseded | DetachReplayStatus::Terminal(_)
+                    )
+            }
+            DetachReplayState::Empty => false,
+        }
+    }
+
     pub(super) fn apply_attach(&mut self, attach: &AttachBound) -> bool {
         let DetachReplayState::Recorded { request, status } = &mut self.state else {
             return false;
@@ -93,6 +119,26 @@ impl SdkDetachReplayAggregate {
         if leave.conversation_id() == request.conversation_id
             && leave.participant_id() == request.participant_id
             && leave.presented_generation() == request.capability_generation
+        {
+            *status = DetachReplayStatus::LeaveSuperseded;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(super) fn apply_retired(
+        &mut self,
+        conversation_id: u64,
+        participant_id: u64,
+        retired_generation: crate::wire::Generation,
+    ) -> bool {
+        let DetachReplayState::Recorded { request, status } = &mut self.state else {
+            return false;
+        };
+        if request.conversation_id == conversation_id
+            && request.participant_id == participant_id
+            && retired_generation >= request.capability_generation
         {
             *status = DetachReplayStatus::LeaveSuperseded;
             true
@@ -189,36 +235,6 @@ impl<T> DetachReplayRefusal<T> {
     #[must_use]
     pub fn into_parts(self) -> (ClientParticipantAggregate, T) {
         (self.aggregate, self.input)
-    }
-}
-
-/// Decision for recording an exact detach replay request.
-#[derive(Debug, PartialEq, Eq)]
-pub enum RecordDetachDecision {
-    /// The request is durably parked.
-    Recorded(DetachReplayApplied),
-    /// Existing replay authority was preserved.
-    Refused(DetachReplayRefusal<DetachEnvelope>),
-}
-
-/// Records the exact detach envelope without exposing replay state parts.
-#[must_use]
-pub const fn record_detach(
-    mut aggregate: ClientParticipantAggregate,
-    request: DetachEnvelope,
-) -> RecordDetachDecision {
-    if matches!(aggregate.detach_replay.state, DetachReplayState::Empty) {
-        aggregate.detach_replay.state = DetachReplayState::Recorded {
-            request,
-            status: DetachReplayStatus::Parked,
-        };
-        RecordDetachDecision::Recorded(DetachReplayApplied { aggregate })
-    } else {
-        RecordDetachDecision::Refused(DetachReplayRefusal {
-            aggregate,
-            input: request,
-            reason: DetachReplayRefusalReason::AlreadyRecorded,
-        })
     }
 }
 

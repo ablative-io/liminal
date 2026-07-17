@@ -4,6 +4,50 @@
 //! barrier for one outstanding write-ahead operation. Callers persist the
 //! pending resume bytes before committing an operation; speculative executable
 //! authority is otherwise unreachable.
+//!
+//! # `LP-CLIENT-GOAL` API-shape rationale
+//!
+//! The Phase 1 brief requires authority-safe shapes rather than caller-owned
+//! state parts. The resulting public shape is deliberate:
+//!
+//! 1. Replay and reconnect transitions consume and return the root aggregate so
+//!    their facts are persisted atomically; standalone state-part recomposition
+//!    is not representable.
+//! 2. [`ReconnectAggregate`] has no public constructor because fresh detached
+//!    reconnect state would separate permit identity from participant facts.
+//! 3. [`recover_reconnect_permit`] exists because an unissued committed cold
+//!    record must release its permit once without making permits cloneable.
+//! 4. [`ClientParticipantAggregate::resume_record`] and the pending/commit
+//!    record methods expose durable bytes while keeping speculative aggregate and
+//!    execution authority sealed.
+//! 5. The retained name [`crate::outcome::ReconnectDelayResult`] carries an
+//!    event, never a delay: the brief explicitly supersedes timer scheduling.
+//! 6. A different retained detach is refused while live, but terminal or
+//!    attach-superseded replay yields only to an exact newer-generation detach.
+//! 7. Terminalized-detach fixture construction remains `cfg(test)` only; wire
+//!    authority construction is not weakened in production.
+//! 8. Detach recording is atomic with [`record_operation`], so no public raw
+//!    envelope-to-replay mint or second caller-owned persistence step exists.
+//! 9. [`DetachTransportFate`] is closed to response unavailability because this
+//!    protocol crate owns no socket, runtime, or transport handle.
+//! 10. [`DetachReplayOutcome`] is exhaustive so a generic server value cannot be
+//!     relabeled by a caller as one of the three terminal detach outcomes.
+//! 11. Reconnect fresh-event producers are separate typed functions rather than
+//!     a generic event-injection seam, limiting minting to the brief's classes.
+//! 12. [`recover_expected_operation`] is the one-use post-restore counterpart to
+//!     the pending-to-commit barrier; detach recovery also marks replay in flight.
+//! 13. Replay inspection returns `None` only for its named Empty state; terminal
+//!     payloads remain lossless and distinct.
+//! 14. Speculative `LPCP` and committed `LPCR` envelopes are distinct so pending
+//!     bytes cannot be decoded and promoted before [`ClientPendingOperationRecord::commit`].
+//! 15. [`ClientResponseCorrelation`] supplies persisted local identity for
+//!     `RecordAdmission` and `ObserverRecovery` responses whose wire bodies omit it.
+//! 16. Issued permit loss and interrupted attempts have explicit typed process
+//!     fates; restore neither silently re-mints nor strands those states.
+//! 17. Detached bindings retain the attach secret because the complete client
+//!     record must remain capable of a later credential attach after restart.
+//! 18. The first detach send is the committed [`ExpectedParticipantOperation`];
+//!     replay starts in flight at release, guaranteeing one send authority.
 
 use crate::wire::{ClientRequest, Generation, ParticipantAckEnvelope};
 
@@ -34,6 +78,7 @@ pub(super) enum ClientBindingState {
         conversation_id: u64,
         participant_id: u64,
         generation: Generation,
+        attach_secret: crate::wire::AttachSecret,
     },
     Left {
         conversation_id: u64,
@@ -71,16 +116,105 @@ impl ClientBindingState {
             Self::Unbound | Self::Detached { .. } | Self::Left { .. } => false,
         }
     }
+
+    fn accepts_request(&self, request: &ClientRequest) -> bool {
+        if self.is_left() {
+            return false;
+        }
+        match request {
+            ClientRequest::Enrollment(_) => matches!(self, Self::Unbound),
+            ClientRequest::CredentialAttach(value) => {
+                matches!(self, Self::Unbound)
+                    || self.matches_identity(
+                        value.conversation_id,
+                        value.participant_id,
+                        value.capability_generation,
+                        true,
+                    )
+            }
+            ClientRequest::Detach(value) => self.matches_identity(
+                value.conversation_id,
+                value.participant_id,
+                value.capability_generation,
+                false,
+            ),
+            ClientRequest::ParticipantAck(value) => self.matches_identity(
+                value.conversation_id,
+                value.participant_id,
+                value.capability_generation,
+                false,
+            ),
+            ClientRequest::Leave(value) => self.matches_identity(
+                value.conversation_id,
+                value.participant_id,
+                value.capability_generation,
+                true,
+            ),
+            ClientRequest::MarkerAck(value) => self.matches_identity(
+                value.conversation_id,
+                value.participant_id,
+                value.capability_generation,
+                false,
+            ),
+            ClientRequest::RecordAdmission(value) => self.matches_identity(
+                value.conversation_id,
+                value.participant_id,
+                value.capability_generation,
+                false,
+            ),
+            ClientRequest::ObserverRecovery(_) => true,
+        }
+    }
+
+    fn matches_identity(
+        &self,
+        conversation: u64,
+        participant: u64,
+        generation_value: Generation,
+        allow_detached: bool,
+    ) -> bool {
+        match self {
+            Self::Bound {
+                conversation_id,
+                participant_id,
+                generation,
+                ..
+            } => {
+                (*conversation_id, *participant_id, *generation)
+                    == (conversation, participant, generation_value)
+            }
+            Self::Detached {
+                conversation_id,
+                participant_id,
+                generation,
+                ..
+            } if allow_detached => {
+                (*conversation_id, *participant_id, *generation)
+                    == (conversation, participant, generation_value)
+            }
+            Self::Unbound | Self::Detached { .. } | Self::Left { .. } => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct ExpectedOperationState {
+    pub(super) request: ClientRequest,
+    pub(super) issued: bool,
+    pub(super) authorization: u64,
 }
 
 /// Non-cloneable client participant state shell.
 ///
 /// Its expected operation, credential-bearing binding, replay request, and
-/// reconnect state are private so callers must delegate every decision.
+/// reconnect state are private so callers must delegate every decision. This
+/// brief-required root ownership prevents callers from recombining independently
+/// persisted authorities into a state the crate never validated.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientParticipantAggregate {
     pub(super) binding: ClientBindingState,
-    pub(super) expected: Option<ClientRequest>,
+    pub(super) expected: Option<ExpectedOperationState>,
+    pub(super) next_operation_authorization: u64,
     pub(super) detach_replay: SdkDetachReplayAggregate,
     pub(super) reconnect: ReconnectAggregate,
 }
@@ -92,6 +226,7 @@ impl ClientParticipantAggregate {
         Self {
             binding: ClientBindingState::Unbound,
             expected: None,
+            next_operation_authorization: 0,
             detach_replay: SdkDetachReplayAggregate::new(),
             reconnect: ReconnectAggregate::new(),
         }
@@ -128,188 +263,7 @@ impl Default for ClientParticipantAggregate {
     }
 }
 
-/// Sealed, non-cloneable authority to execute exactly the committed operation.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ExpectedParticipantOperation {
-    request: ClientRequest,
-}
-
-impl ExpectedParticipantOperation {
-    /// Borrows the exact request released by the durability barrier.
-    #[must_use]
-    pub const fn request(&self) -> &ClientRequest {
-        &self.request
-    }
-
-    /// Consumes the authority into the exact transport-agnostic request.
-    #[must_use]
-    pub fn into_request(self) -> ClientRequest {
-        self.request
-    }
-}
-
-/// Reason an operation could not enter the write-ahead slot.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ClientOperationRecordRefusalReason {
-    /// Another write-ahead operation remains outstanding.
-    OutstandingOperation,
-    /// A different detach replay request remains retained.
-    DetachReplayOutstanding,
-}
-
-/// Unchanged aggregate and request refused before persistence.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClientOperationRecordRefusal {
-    aggregate: ClientParticipantAggregate,
-    request: ClientRequest,
-    reason: ClientOperationRecordRefusalReason,
-}
-
-impl ClientOperationRecordRefusal {
-    /// Returns the closed refusal reason.
-    #[must_use]
-    pub const fn reason(&self) -> ClientOperationRecordRefusalReason {
-        self.reason
-    }
-
-    /// Recovers the unchanged aggregate and refused request.
-    #[must_use]
-    pub fn into_parts(self) -> (ClientParticipantAggregate, ClientRequest) {
-        (self.aggregate, self.request)
-    }
-}
-
-/// Continuous acknowledgement that bypasses the write-ahead slot.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClientContinuousOperation {
-    aggregate: ClientParticipantAggregate,
-    operation: ExpectedParticipantOperation,
-}
-
-impl ClientContinuousOperation {
-    /// Releases the unchanged aggregate and executable acknowledgement.
-    #[must_use]
-    pub fn into_parts(self) -> (ClientParticipantAggregate, ExpectedParticipantOperation) {
-        (self.aggregate, self.operation)
-    }
-}
-
-/// Pending durability decision whose executable parts remain unreachable.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClientPendingOperationRecord {
-    successor: ClientParticipantAggregate,
-    operation: ExpectedParticipantOperation,
-    recorded_detach: bool,
-}
-
-impl ClientPendingOperationRecord {
-    /// Releases the successor aggregate and one-use executable authority after
-    /// the caller durably persists the pending resume record.
-    #[must_use]
-    pub fn commit(self) -> ClientOperationCommit {
-        ClientOperationCommit {
-            aggregate: self.successor,
-            operation: self.operation,
-        }
-    }
-
-    /// Aborts the speculative successor and returns the unchanged aggregate and
-    /// refused request.
-    #[must_use]
-    pub fn abort(mut self) -> (ClientParticipantAggregate, ClientRequest) {
-        self.successor.expected = None;
-        if self.recorded_detach {
-            self.successor.detach_replay.state = replay::DetachReplayState::Empty;
-        }
-        (self.successor, self.operation.request)
-    }
-}
-
-/// Durable operation commit containing the correlated aggregate and execution authority.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ClientOperationCommit {
-    aggregate: ClientParticipantAggregate,
-    operation: ExpectedParticipantOperation,
-}
-
-impl ClientOperationCommit {
-    /// Releases the committed aggregate and one-use expected operation.
-    #[must_use]
-    pub fn into_parts(self) -> (ClientParticipantAggregate, ExpectedParticipantOperation) {
-        (self.aggregate, self.operation)
-    }
-}
-
-/// Complete write-ahead admission decision.
-#[derive(Debug, PartialEq, Eq)]
-pub enum ClientOperationRecordDecision {
-    /// Durability must precede commit and execution.
-    Pending(ClientPendingOperationRecord),
-    /// Continuous acknowledgements execute without occupying the slot.
-    Continuous(ClientContinuousOperation),
-    /// The one permitted slot is already occupied.
-    Refused(ClientOperationRecordRefusal),
-}
-
-/// Records one operation behind the client durability barrier.
-///
-/// Continuous acknowledgements bypass the write-ahead slot. Every other request
-/// is rejected while an expected operation exists; the crate never queues or
-/// silently replaces it.
-#[must_use]
-pub fn record_operation(
-    mut aggregate: ClientParticipantAggregate,
-    request: ClientRequest,
-) -> ClientOperationRecordDecision {
-    if matches!(request, ClientRequest::ParticipantAck(_)) {
-        return ClientOperationRecordDecision::Continuous(ClientContinuousOperation {
-            aggregate,
-            operation: ExpectedParticipantOperation { request },
-        });
-    }
-    if aggregate.expected.is_some() {
-        return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
-            aggregate,
-            request,
-            reason: ClientOperationRecordRefusalReason::OutstandingOperation,
-        });
-    }
-    let mut recorded_detach = false;
-    if let ClientRequest::Detach(value) = &request {
-        let envelope = crate::wire::DetachEnvelope {
-            conversation_id: value.conversation_id,
-            participant_id: value.participant_id,
-            capability_generation: value.capability_generation,
-            detach_attempt_token: value.detach_attempt_token,
-        };
-        match &aggregate.detach_replay.state {
-            replay::DetachReplayState::Empty => {
-                aggregate.detach_replay.state = replay::DetachReplayState::Recorded {
-                    request: envelope,
-                    status: DetachReplayStatus::Parked,
-                };
-                recorded_detach = true;
-            }
-            replay::DetachReplayState::Recorded {
-                request: retained, ..
-            } if retained == &envelope => {}
-            replay::DetachReplayState::Recorded { .. } => {
-                return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
-                    aggregate,
-                    request,
-                    reason: ClientOperationRecordRefusalReason::DetachReplayOutstanding,
-                });
-            }
-        }
-    }
-    aggregate.expected = Some(request.clone());
-    ClientOperationRecordDecision::Pending(ClientPendingOperationRecord {
-        successor: aggregate,
-        operation: ExpectedParticipantOperation { request },
-        recorded_detach,
-    })
-}
-
+mod barrier;
 mod correlation;
 mod inbound;
 mod reconnect;
@@ -318,26 +272,29 @@ mod resume;
 mod resume_decode;
 mod resume_encode;
 
+pub use barrier::*;
 pub use inbound::{
-    ClientInboundApplied, ClientInboundDecision, ClientInboundRefusal, ClientInboundRefusalReason,
-    decide_inbound,
+    ClientCorrelatedInboundDecision, ClientCorrelatedInboundRefusal, ClientInboundApplied,
+    ClientInboundDecision, ClientInboundRefusal, ClientInboundRefusalReason,
+    decide_correlated_inbound, decide_inbound,
 };
 pub use reconnect::{
-    EstablishedConnectionTransportFate, ExplicitReconnectAction, ProvedOnlineTransition,
-    ReconnectAggregate, ReconnectAttemptDecision, ReconnectAttemptFate,
-    ReconnectAttemptFateDecision, ReconnectAttemptFateRefusalReason, ReconnectAttemptPermit,
-    ReconnectAttemptRefusalReason, ReconnectFreshEvent, ReconnectInProgressAttempt,
-    ReconnectPermitDecision, ReconnectPermitRefusal, ReconnectPermitRefusalReason,
-    RecoveredReconnectPermitDecision, record_attempt_fate, record_explicit_reconnect,
+    EstablishedConnectionTransportFate, ExplicitReconnectAction, InterruptedReconnectAttemptFate,
+    IssuedReconnectPermitFate, ProvedOnlineTransition, ReconnectAggregate,
+    ReconnectAttemptDecision, ReconnectAttemptFate, ReconnectAttemptFateDecision,
+    ReconnectAttemptFateRefusalReason, ReconnectAttemptPermit, ReconnectAttemptRefusalReason,
+    ReconnectFreshEvent, ReconnectInProgressAttempt, ReconnectPermitDecision,
+    ReconnectPermitRefusal, ReconnectPermitRefusalReason, ReconnectRestoreExitDecision,
+    ReconnectRestoreExitRefusalReason, RecoveredReconnectPermitDecision, record_attempt_fate,
+    record_explicit_reconnect, record_interrupted_attempt_fate, record_issued_permit_fate,
     record_online_transition, record_transport_fate, recover_reconnect_permit, redeem_attempt,
 };
 pub use replay::{
     ApplyAttachDecision, ApplyDetachOutcomeDecision, ApplyLeaveDecision, DetachReplayApplied,
     DetachReplayOutcome, DetachReplayRefusal, DetachReplayRefusalReason, DetachReplayStatus,
     DetachReplayTerminal, DetachTransportAttempt, DetachTransportAttemptDecision,
-    DetachTransportFate, DetachTransportFateDecision, RecordDetachDecision,
-    SdkDetachReplayAggregate, apply_attach, apply_detach_outcome, apply_leave_durable,
-    record_detach, transport_attempt_started, transport_fate,
+    DetachTransportFate, DetachTransportFateDecision, SdkDetachReplayAggregate, apply_attach,
+    apply_detach_outcome, apply_leave_durable, transport_attempt_started, transport_fate,
 };
 pub use resume::{
     ClientResumeRecord, ClientResumeRecordDecodeError, ClientResumeRecordEncodeError,
@@ -346,5 +303,7 @@ pub use resume::{
 
 #[cfg(test)]
 mod resume_tests;
+#[cfg(test)]
+mod review_tests;
 #[cfg(test)]
 mod tests;

@@ -2,13 +2,14 @@ use alloc::vec::Vec;
 
 use super::{
     ClientBindingState, ClientParticipantAggregate, DetachReplayStatus, DetachReplayTerminal,
-    ReconnectAggregate, SdkDetachReplayAggregate, reconnect::ReconnectMachineState,
-    replay::DetachReplayState,
+    ExpectedOperationState, ReconnectAggregate, SdkDetachReplayAggregate,
+    reconnect::ReconnectMachineState, replay::DetachReplayState,
 };
 use super::{resume_decode::decode_facts, resume_encode::encode_aggregate};
 use crate::wire::{ClientRequest, CodecError};
 
 pub(super) const MAGIC: [u8; 4] = *b"LPCR";
+pub(super) const SPECULATIVE_MAGIC: [u8; 4] = *b"LPCP";
 pub(super) const VERSION: u16 = 1;
 pub(super) const HEADER_LEN: usize = 14;
 
@@ -96,6 +97,10 @@ pub enum ClientResumeRestoreError {
     ContinuousAckOutstanding,
     /// Replay terminal payload does not match its retained exact detach request.
     ReplayTerminalMismatch,
+    /// Expected operation authorization is zero or exceeds its durable counter.
+    InvalidOperationAuthorization,
+    /// Expected operation is illegal for the restored binding state or identity.
+    ExpectedBindingMismatch,
     /// Reconnect authorization is zero or exceeds its durable counter.
     InvalidReconnectAuthorization,
     /// Private canonical bytes no longer decode; this is unreachable through public construction.
@@ -103,6 +108,15 @@ pub enum ClientResumeRestoreError {
 }
 
 /// Private-field, inert, canonical client persistence record.
+///
+/// This type proves only that bytes are a canonical committed-record envelope;
+/// the storage owner remains responsible for admitting bytes from exactly one
+/// cold process epoch. Preventing two processes from restoring the same bytes
+/// is intentionally outside this `no_std` protocol crate, matching the server
+/// precedent in `lifecycle/storage.rs`, whose joint validation likewise does
+/// not prevent storage-owner double restore. Issuance flags are nevertheless
+/// preserved exactly, so a record that testifies an authority was already
+/// issued never silently re-mints that authority.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientResumeRecord {
     canonical: Vec<u8>,
@@ -138,26 +152,15 @@ impl ClientResumeRecord {
         let facts =
             decode_facts(&self.canonical).map_err(ClientResumeRestoreError::CorruptRecord)?;
         validate_facts(&facts)?;
-        let reconnect_state = match facts.reconnect_state {
-            ReconnectMachineState::Permit {
-                authorization,
-                event,
-                ..
-            } => ReconnectMachineState::Permit {
-                authorization,
-                event,
-                issued: false,
-            },
-            state => state,
-        };
         Ok(ClientParticipantAggregate {
             binding: facts.binding,
             expected: facts.expected,
+            next_operation_authorization: facts.next_operation_authorization,
             detach_replay: SdkDetachReplayAggregate {
                 state: facts.replay,
             },
             reconnect: ReconnectAggregate {
-                state: reconnect_state,
+                state: facts.reconnect_state,
                 next_authorization: facts.next_authorization,
             },
         })
@@ -173,29 +176,49 @@ impl ClientParticipantAggregate {
     /// be represented canonically.
     pub fn resume_record(&self) -> Result<ClientResumeRecord, ClientResumeRecordEncodeError> {
         Ok(ClientResumeRecord {
-            canonical: encode_aggregate(self)?,
+            canonical: encode_aggregate(self, MAGIC)?,
         })
     }
 }
 
 impl super::ClientPendingOperationRecord {
-    /// Encodes the speculative successor that must become durable before commit.
+    /// Encodes the speculative successor under the non-restorable `LPCP` magic.
     ///
-    /// No aggregate, request, or executable operation escapes through this
-    /// method.
+    /// No aggregate, request, executable operation, or publicly restorable
+    /// `LPCR` envelope escapes through this method. This explicit speculative
+    /// shape is the brief-required distinction between write-ahead persistence
+    /// and cold restore of a committed fact.
     ///
     /// # Errors
     ///
     /// Returns a typed nested-codec or length error; callers can then abort the
     /// pending decision unchanged.
     pub fn encode_resume_record(&self) -> Result<Vec<u8>, ClientResumeRecordEncodeError> {
-        encode_aggregate(&self.successor)
+        encode_aggregate(&self.successor, SPECULATIVE_MAGIC)
+    }
+}
+
+impl super::ClientOperationCommit {
+    /// Captures the committed successor as a publicly cold-restorable record.
+    ///
+    /// The caller persists these `LPCR` bytes before releasing the aggregate and
+    /// operation with [`Self::into_parts`]. Pending `LPCP` bytes cannot be
+    /// decoded or promoted through this API.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed nested-codec or length error before authority release.
+    pub fn resume_record(&self) -> Result<ClientResumeRecord, ClientResumeRecordEncodeError> {
+        Ok(ClientResumeRecord {
+            canonical: encode_aggregate(&self.aggregate, MAGIC)?,
+        })
     }
 }
 
 pub(super) struct DecodedFacts {
     pub(super) binding: ClientBindingState,
-    pub(super) expected: Option<ClientRequest>,
+    pub(super) next_operation_authorization: u64,
+    pub(super) expected: Option<ExpectedOperationState>,
     pub(super) replay: DetachReplayState,
     pub(super) reconnect_state: ReconnectMachineState,
     pub(super) next_authorization: u64,
@@ -211,8 +234,26 @@ fn validate_facts(facts: &DecodedFacts) -> Result<(), ClientResumeRestoreError> 
     {
         return Err(ClientResumeRestoreError::BindingGenerationMismatch);
     }
-    if matches!(facts.expected, Some(ClientRequest::ParticipantAck(_))) {
+    if matches!(
+        facts.expected,
+        Some(ExpectedOperationState {
+            request: ClientRequest::ParticipantAck(_),
+            ..
+        })
+    ) {
         return Err(ClientResumeRestoreError::ContinuousAckOutstanding);
+    }
+    if facts.expected.as_ref().is_some_and(|expected| {
+        expected.authorization == 0 || expected.authorization > facts.next_operation_authorization
+    }) {
+        return Err(ClientResumeRestoreError::InvalidOperationAuthorization);
+    }
+    if facts
+        .expected
+        .as_ref()
+        .is_some_and(|expected| !facts.binding.accepts_request(&expected.request))
+    {
+        return Err(ClientResumeRestoreError::ExpectedBindingMismatch);
     }
     if let DetachReplayState::Recorded {
         request,

@@ -59,6 +59,10 @@ pub(super) enum ReconnectMachineState {
 }
 
 /// Non-cloneable reconnect producer and single-attempt state shell.
+///
+/// The brief keeps this state inside [`ClientParticipantAggregate`], rather
+/// than exposing a fresh public constructor, so persisted authorization and the
+/// root participant facts cannot be independently recombined.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReconnectAggregate {
     pub(super) state: ReconnectMachineState,
@@ -269,7 +273,11 @@ pub enum RecoveredReconnectPermitDecision {
     },
 }
 
-/// Releases an unissued permit created only by validated cold restore.
+/// Releases an unissued permit created only by a committed cold record.
+///
+/// A record whose own issuance bit is true is never re-minted. The storage
+/// owner may instead record [`IssuedReconnectPermitFate::ProcessLost`] through
+/// [`record_issued_permit_fate`] to abandon the lost process-local capability.
 #[must_use]
 pub const fn recover_reconnect_permit(
     mut aggregate: ClientParticipantAggregate,
@@ -299,6 +307,98 @@ pub const fn recover_reconnect_permit(
         | ReconnectMachineState::Online => {
             let state = aggregate.reconnect.state();
             RecoveredReconnectPermitDecision::NotAvailable { aggregate, state }
+        }
+    }
+}
+
+/// Typed crash fate for a permit that its record says was already issued.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IssuedReconnectPermitFate {
+    /// The process-local permit was lost during process termination.
+    ProcessLost,
+}
+
+/// Typed crash fate for an attempt interrupted before its transport fate arrived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InterruptedReconnectAttemptFate {
+    /// Process termination lost the process-local in-progress attempt authority.
+    ProcessLost,
+}
+
+/// Reason a restored reconnect-state exit was refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectRestoreExitRefusalReason {
+    /// The aggregate does not retain an issued permit.
+    NoIssuedPermit,
+    /// The aggregate does not retain an in-progress attempt.
+    NoAttempt,
+}
+
+/// Complete decision for terminalizing process-local reconnect authority lost on restore.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ReconnectRestoreExitDecision<F> {
+    /// Lost process authority was recorded and reconnect returned to Parked.
+    Recorded {
+        /// Resulting aggregate.
+        aggregate: ClientParticipantAggregate,
+        /// Consumed typed process fate.
+        fate: F,
+    },
+    /// State did not match; aggregate and fate are unchanged.
+    Refused {
+        /// Unchanged aggregate.
+        aggregate: ClientParticipantAggregate,
+        /// Retained typed process fate.
+        fate: F,
+        /// Closed refusal reason.
+        reason: ReconnectRestoreExitRefusalReason,
+    },
+}
+
+/// Records loss of an already-issued permit after cold process replacement.
+///
+/// This transition does not mint a replacement. It parks the producer so only
+/// a later fresh event can authorize a new real attempt.
+#[must_use]
+pub const fn record_issued_permit_fate(
+    mut aggregate: ClientParticipantAggregate,
+    fate: IssuedReconnectPermitFate,
+) -> ReconnectRestoreExitDecision<IssuedReconnectPermitFate> {
+    if matches!(
+        aggregate.reconnect.state,
+        ReconnectMachineState::Permit { issued: true, .. }
+    ) {
+        aggregate.reconnect.state = ReconnectMachineState::Parked;
+        ReconnectRestoreExitDecision::Recorded { aggregate, fate }
+    } else {
+        ReconnectRestoreExitDecision::Refused {
+            aggregate,
+            fate,
+            reason: ReconnectRestoreExitRefusalReason::NoIssuedPermit,
+        }
+    }
+}
+
+/// Records that a cold-restored in-progress attempt lost its process authority.
+///
+/// Attempt is therefore not a restore sink: this typed crash decision parks it
+/// without manufacturing success, failure, a timer, or a replacement permit.
+#[must_use]
+pub const fn record_interrupted_attempt_fate(
+    mut aggregate: ClientParticipantAggregate,
+    fate: InterruptedReconnectAttemptFate,
+) -> ReconnectRestoreExitDecision<InterruptedReconnectAttemptFate> {
+    if matches!(
+        aggregate.reconnect.state,
+        ReconnectMachineState::Attempt { .. }
+    ) {
+        aggregate.reconnect.state = ReconnectMachineState::Parked;
+        ReconnectRestoreExitDecision::Recorded { aggregate, fate }
+    } else {
+        ReconnectRestoreExitDecision::Refused {
+            aggregate,
+            fate,
+            reason: ReconnectRestoreExitRefusalReason::NoAttempt,
         }
     }
 }

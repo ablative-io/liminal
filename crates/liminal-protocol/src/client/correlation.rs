@@ -10,7 +10,7 @@ use crate::wire::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RequestKey {
     Unsolicited,
-    ObserverRecovery,
+    ObserverRecovery(u64),
     Enrollment(u64, crate::wire::EnrollmentToken),
     Attach(
         u64,
@@ -23,11 +23,11 @@ enum RequestKey {
     Ack(u64, u64, Generation, u64),
     Leave(u64, u64, Generation, crate::wire::LeaveAttemptToken),
     MarkerAck(u64, u64, Generation, u64),
-    Record(u64, u64, Generation),
+    Record(u64, u64, Generation, u64),
 }
 
 impl RequestKey {
-    const fn from_request(request: &ClientRequest) -> Self {
+    const fn from_request(request: &ClientRequest, authorization: u64) -> Self {
         match request {
             ClientRequest::Enrollment(value) => {
                 Self::Enrollment(value.conversation_id, value.enrollment_token)
@@ -67,8 +67,9 @@ impl RequestKey {
                 value.conversation_id,
                 value.participant_id,
                 value.capability_generation,
+                authorization,
             ),
-            ClientRequest::ObserverRecovery(_) => Self::ObserverRecovery,
+            ClientRequest::ObserverRecovery(_) => Self::ObserverRecovery(authorization),
         }
     }
 
@@ -81,18 +82,24 @@ impl RequestKey {
             | (Self::Leave(lc, lp, ..), Self::Leave(rc, rp, ..))
             | (Self::MarkerAck(lc, lp, ..), Self::MarkerAck(rc, rp, ..))
             | (Self::Record(lc, lp, ..), Self::Record(rc, rp, ..)) => lc == rc && lp == rp,
-            (Self::ObserverRecovery, Self::ObserverRecovery) => true,
+            (Self::ObserverRecovery(_), Self::ObserverRecovery(_)) => true,
             _ => false,
         }
     }
 }
 
-pub(super) fn matches_request(value: &ServerValue, request: &ClientRequest) -> bool {
-    response_key(value) == RequestKey::from_request(request)
+pub(super) fn matches_request(
+    value: &ServerValue,
+    request: &ClientRequest,
+    expected_authorization: u64,
+    presented_authorization: Option<u64>,
+) -> bool {
+    response_key(value, presented_authorization.unwrap_or(0))
+        == RequestKey::from_request(request, expected_authorization)
 }
 
 pub(super) fn same_identity(value: &ServerValue, request: &ClientRequest) -> bool {
-    response_key(value).same_identity(RequestKey::from_request(request))
+    response_key(value, 0).same_identity(RequestKey::from_request(request, 0))
 }
 
 pub(super) const fn participant_ack_request(
@@ -107,8 +114,8 @@ pub(super) const fn participant_ack_request(
     }
 }
 
-fn response_key(value: &ServerValue) -> RequestKey {
-    match value {
+fn response_key(value: &ServerValue, ambiguous_authorization: u64) -> RequestKey {
+    let key = match value {
         ServerValue::ParticipantTransportRejected(_) => RequestKey::Unsolicited,
         ServerValue::AttemptTokenBodyConflict(value) => attempt_conflict(value),
         ServerValue::ConnectionConversationCapacityExceeded(value) => connection_capacity(value),
@@ -182,7 +189,17 @@ fn response_key(value: &ServerValue) -> RequestKey {
         ServerValue::RecordTooLarge(value) => record(&value.request),
         ServerValue::ObserverRecoveryAccepted(_)
         | ServerValue::InvalidObserverEpoch(_)
-        | ServerValue::InvalidObserverEpochList(_) => RequestKey::ObserverRecovery,
+        | ServerValue::InvalidObserverEpochList(_) => RequestKey::ObserverRecovery(0),
+    };
+    match key {
+        RequestKey::Record(conversation, participant, generation, _) => RequestKey::Record(
+            conversation,
+            participant,
+            generation,
+            ambiguous_authorization,
+        ),
+        RequestKey::ObserverRecovery(_) => RequestKey::ObserverRecovery(ambiguous_authorization),
+        other => other,
     }
 }
 
@@ -224,7 +241,7 @@ const fn connection_capacity(
             request, ..
         } => response_envelope(request),
         crate::wire::ConnectionConversationCapacityExceeded::ObserverRecovery { .. } => {
-            RequestKey::ObserverRecovery
+            RequestKey::ObserverRecovery(0)
         }
     }
 }
@@ -308,6 +325,7 @@ const fn record(value: &RecordAdmissionEnvelope) -> RequestKey {
         value.conversation_id,
         value.participant_id,
         value.capability_generation,
+        0,
     )
 }
 

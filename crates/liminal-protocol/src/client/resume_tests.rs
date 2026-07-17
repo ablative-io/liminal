@@ -67,6 +67,7 @@ fn resume_round_trips_every_binding_and_expected_operation() -> TestResult {
             conversation_id: 1,
             participant_id: 2,
             generation: generation(3)?,
+            attach_secret: AttachSecret::new([4; 32]),
         },
         ClientBindingState::Left {
             conversation_id: 1,
@@ -80,7 +81,11 @@ fn resume_round_trips_every_binding_and_expected_operation() -> TestResult {
         let restored = round_trip(&aggregate)?;
         assert_eq!(restored.binding, binding);
     }
+    Ok(())
+}
 
+#[test]
+fn resume_round_trips_every_expected_operation_and_continuous_ack() -> TestResult {
     let generation = generation(2)?;
     let operations = vec![
         ClientRequest::Enrollment(EnrollmentRequest {
@@ -125,22 +130,32 @@ fn resume_round_trips_every_binding_and_expected_operation() -> TestResult {
         }),
     ];
     for operation in operations {
-        let ClientOperationRecordDecision::Pending(pending) =
-            record_operation(ClientParticipantAggregate::new(), operation.clone())
-        else {
-            return Err("write-ahead operation must become pending");
-        };
-        let bytes = pending
-            .encode_resume_record()
-            .map_err(|_| "pending successor must encode")?;
-        let restored = ClientResumeRecord::decode_canonical(&bytes)
-            .map_err(|_| "pending record must decode")?
-            .restore()
-            .map_err(|_| "pending record must restore")?;
-        assert_eq!(restored.expected.as_ref(), Some(&operation));
-        let (aborted, returned) = pending.abort();
-        assert!(!aborted.has_expected_operation());
-        assert_eq!(returned, operation);
+        for issued in [false, true] {
+            let mut aggregate = ClientParticipantAggregate::new();
+            if matches!(
+                operation,
+                ClientRequest::Detach(_)
+                    | ClientRequest::Leave(_)
+                    | ClientRequest::MarkerAck(_)
+                    | ClientRequest::RecordAdmission(_)
+            ) {
+                aggregate.binding = ClientBindingState::Bound {
+                    conversation_id: 1,
+                    participant_id: 2,
+                    generation,
+                    attach_secret: AttachSecret::new([2; 32]),
+                    binding_epoch: epoch(2)?,
+                };
+            }
+            aggregate.expected = Some(ExpectedOperationState {
+                request: operation.clone(),
+                issued,
+                authorization: 1,
+            });
+            aggregate.next_operation_authorization = 1;
+            let restored = round_trip(&aggregate)?;
+            assert_eq!(restored.expected, aggregate.expected);
+        }
     }
 
     let ack = ClientRequest::ParticipantAck(ParticipantAck {
@@ -149,8 +164,16 @@ fn resume_round_trips_every_binding_and_expected_operation() -> TestResult {
         capability_generation: generation,
         through_seq: 9,
     });
+    let mut aggregate = ClientParticipantAggregate::new();
+    aggregate.binding = ClientBindingState::Bound {
+        conversation_id: 1,
+        participant_id: 2,
+        generation,
+        attach_secret: AttachSecret::new([2; 32]),
+        binding_epoch: epoch(2)?,
+    };
     assert!(matches!(
-        record_operation(ClientParticipantAggregate::new(), ack),
+        record_operation(aggregate, ack),
         ClientOperationRecordDecision::Continuous(_)
     ));
     Ok(())
@@ -231,7 +254,9 @@ fn resume_round_trips_every_replay_status_and_terminal_payload() -> TestResult {
 #[test]
 fn restored_permit_is_released_once_and_failure_parks_without_timer() -> TestResult {
     let ReconnectPermitDecision::Permitted {
-        aggregate, permit, ..
+        mut aggregate,
+        permit,
+        ..
     } = record_transport_fate(
         ClientParticipantAggregate::new(),
         EstablishedConnectionTransportFate::Lost,
@@ -258,6 +283,13 @@ fn restored_permit_is_released_once_and_failure_parks_without_timer() -> TestRes
     else {
         return Err("permit for another fresh event must refuse stale");
     };
+    if let super::reconnect::ReconnectMachineState::Permit { issued, .. } =
+        &mut aggregate.reconnect.state
+    {
+        *issued = false;
+    } else {
+        return Err("fixture must retain permit state");
+    }
     let record = aggregate
         .resume_record()
         .map_err(|_| "permit state must encode")?;

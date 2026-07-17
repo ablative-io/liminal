@@ -44,10 +44,30 @@ fn attach(conversation_id: u64, participant_id: u64) -> TestResult<crate::wire::
 }
 
 fn record_replay() -> TestResult<ClientParticipantAggregate> {
-    let RecordDetachDecision::Recorded(applied) =
-        record_detach(ClientParticipantAggregate::new(), detach()?)
+    let envelope = detach()?;
+    let mut aggregate = ClientParticipantAggregate::new();
+    aggregate.binding = ClientBindingState::Bound {
+        conversation_id: envelope.conversation_id,
+        participant_id: envelope.participant_id,
+        generation: envelope.capability_generation,
+        attach_secret: AttachSecret::new([25; 32]),
+        binding_epoch: epoch(7)?,
+    };
+    let request = ClientRequest::Detach(crate::wire::DetachRequest {
+        conversation_id: envelope.conversation_id,
+        participant_id: envelope.participant_id,
+        capability_generation: envelope.capability_generation,
+        detach_attempt_token: envelope.detach_attempt_token,
+    });
+    let ClientOperationRecordDecision::Pending(pending) = record_operation(aggregate, request)
     else {
-        return Err("fresh aggregate must record detach");
+        return Err("bound detach must enter the durability barrier");
+    };
+    let (aggregate, _) = pending.commit().into_parts();
+    let DetachTransportFateDecision::Parked(applied) =
+        transport_fate(aggregate, DetachTransportFate::ResponseUnavailable)
+    else {
+        return Err("initial detach transport fate must park replay");
     };
     Ok(applied.into_aggregate())
 }
@@ -179,9 +199,16 @@ fn abort_and_continuous_ack_release_no_speculative_slot() -> TestResult {
     else {
         return Err("operation must be pending");
     };
-    let (aggregate, returned) = pending.abort();
+    let (mut aggregate, returned) = pending.abort();
     assert_eq!(returned, request);
     assert!(!aggregate.has_expected_operation());
+    aggregate.binding = ClientBindingState::Bound {
+        conversation_id: 5,
+        participant_id: 6,
+        generation: Generation::ONE,
+        attach_secret: AttachSecret::new([8; 32]),
+        binding_epoch: epoch(1)?,
+    };
 
     let ack = ClientRequest::ParticipantAck(crate::wire::ParticipantAck {
         conversation_id: 5,

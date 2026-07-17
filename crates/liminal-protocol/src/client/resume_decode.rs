@@ -1,5 +1,6 @@
 use super::{
-    ClientBindingState, DetachReplayStatus, DetachReplayTerminal, ReconnectFreshEvent,
+    ClientBindingState, DetachReplayStatus, DetachReplayTerminal, ExpectedOperationState,
+    ReconnectFreshEvent,
     reconnect::ReconnectMachineState,
     replay::DetachReplayState,
     resume::{
@@ -7,8 +8,8 @@ use super::{
     },
 };
 use crate::wire::{
-    BindingEpoch, ClientRequest, ConnectionIncarnation, DetachStaleAuthority, Generation,
-    ParticipantFrame, ReceiverDirection, ServerValue, StaleAuthority, decode,
+    BindingEpoch, ConnectionIncarnation, DetachStaleAuthority, Generation, ParticipantFrame,
+    ReceiverDirection, ServerValue, StaleAuthority, decode,
 };
 
 pub(super) fn decode_facts(input: &[u8]) -> Result<DecodedFacts, ClientResumeRecordDecodeError> {
@@ -29,6 +30,7 @@ pub(super) fn decode_facts(input: &[u8]) -> Result<DecodedFacts, ClientResumeRec
         });
     }
     let binding = decode_binding(&mut reader)?;
+    let next_operation_authorization = reader.u64()?;
     let expected = decode_expected(&mut reader)?;
     let replay = decode_replay(&mut reader)?;
     let (reconnect_state, next_authorization) = decode_reconnect(&mut reader)?;
@@ -39,6 +41,7 @@ pub(super) fn decode_facts(input: &[u8]) -> Result<DecodedFacts, ClientResumeRec
     }
     Ok(DecodedFacts {
         binding,
+        next_operation_authorization,
         expected,
         replay,
         reconnect_state,
@@ -54,7 +57,7 @@ fn decode_binding(
         1 => {
             let conversation_id = reader.u64()?;
             let participant_id = reader.u64()?;
-            let generation = decode_generation(reader)?;
+            let generation = decode_generation(reader, ClientResumeRecordSection::Binding)?;
             let attach_secret = crate::wire::AttachSecret::new(reader.array::<32>()?);
             let binding_epoch = decode_epoch(reader)?;
             Ok(ClientBindingState::Bound {
@@ -68,12 +71,14 @@ fn decode_binding(
         tag @ (2 | 3) => {
             let conversation_id = reader.u64()?;
             let participant_id = reader.u64()?;
-            let generation = decode_generation(reader)?;
+            let generation = decode_generation(reader, ClientResumeRecordSection::Binding)?;
             if tag == 2 {
+                let attach_secret = crate::wire::AttachSecret::new(reader.array::<32>()?);
                 Ok(ClientBindingState::Detached {
                     conversation_id,
                     participant_id,
                     generation,
+                    attach_secret,
                 })
             } else {
                 Ok(ClientBindingState::Left {
@@ -92,13 +97,19 @@ fn decode_binding(
 
 fn decode_expected(
     reader: &mut Reader<'_>,
-) -> Result<Option<ClientRequest>, ClientResumeRecordDecodeError> {
+) -> Result<Option<ExpectedOperationState>, ClientResumeRecordDecodeError> {
     match reader.u8()? {
         0 => Ok(None),
         1 => {
+            let issued = decode_bool(reader, ClientResumeRecordSection::ExpectedOperation)?;
+            let authorization = reader.u64()?;
             let bytes = reader.blob()?;
             match decode(bytes, ReceiverDirection::Server) {
-                Ok(ParticipantFrame::ClientRequest(request)) => Ok(Some(request)),
+                Ok(ParticipantFrame::ClientRequest(request)) => Ok(Some(ExpectedOperationState {
+                    request,
+                    issued,
+                    authorization,
+                })),
                 Ok(ParticipantFrame::ServerValue(_) | ParticipantFrame::ServerPush(_)) => {
                     Err(ClientResumeRecordDecodeError::NestedCodec {
                         section: ClientResumeRecordSection::ExpectedOperation,
@@ -134,7 +145,7 @@ fn decode_replay(
     let request = crate::wire::DetachEnvelope {
         conversation_id: reader.u64()?,
         participant_id: reader.u64()?,
-        capability_generation: decode_generation(reader)?,
+        capability_generation: decode_generation(reader, ClientResumeRecordSection::DetachReplay)?,
         detach_attempt_token: crate::wire::DetachAttemptToken::new(reader.array::<16>()?),
     };
     let status = match tag {
@@ -198,11 +209,16 @@ fn decode_reconnect(
     let next_authorization = reader.u64()?;
     let state = match reader.u8()? {
         0 => ReconnectMachineState::Parked,
-        1 => ReconnectMachineState::Permit {
-            authorization: reader.u64()?,
-            event: decode_event(reader)?,
-            issued: false,
-        },
+        1 => {
+            let authorization = reader.u64()?;
+            let event = decode_event(reader)?;
+            let issued = decode_bool(reader, ClientResumeRecordSection::Reconnect)?;
+            ReconnectMachineState::Permit {
+                authorization,
+                event,
+                issued,
+            }
+        }
         2 => ReconnectMachineState::Attempt {
             authorization: reader.u64()?,
             event: decode_event(reader)?,
@@ -238,9 +254,23 @@ fn decode_event(
     }
 }
 
-fn decode_generation(reader: &mut Reader<'_>) -> Result<Generation, ClientResumeRecordDecodeError> {
+fn decode_bool(
+    reader: &mut Reader<'_>,
+    section: ClientResumeRecordSection,
+) -> Result<bool, ClientResumeRecordDecodeError> {
+    match reader.u8()? {
+        0 => Ok(false),
+        1 => Ok(true),
+        tag => Err(ClientResumeRecordDecodeError::InvalidTag { section, tag }),
+    }
+}
+
+fn decode_generation(
+    reader: &mut Reader<'_>,
+    section: ClientResumeRecordSection,
+) -> Result<Generation, ClientResumeRecordDecodeError> {
     Generation::new(reader.u64()?).ok_or(ClientResumeRecordDecodeError::NestedCodec {
-        section: ClientResumeRecordSection::Binding,
+        section,
         source: None,
     })
 }
@@ -248,7 +278,7 @@ fn decode_generation(reader: &mut Reader<'_>) -> Result<Generation, ClientResume
 fn decode_epoch(reader: &mut Reader<'_>) -> Result<BindingEpoch, ClientResumeRecordDecodeError> {
     Ok(BindingEpoch::new(
         ConnectionIncarnation::new(reader.u64()?, reader.u64()?),
-        decode_generation(reader)?,
+        decode_generation(reader, ClientResumeRecordSection::Binding)?,
     ))
 }
 
