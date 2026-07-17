@@ -691,7 +691,7 @@ fn push_masked_payload(frame: &mut Vec<u8>, payload: &[u8]) {
     if payload.len() < 126 {
         frame.push(0x80 | u8::try_from(payload.len()).unwrap_or(125));
     } else {
-        frame.push(0x80 | 126);
+        frame.push(0x80 | 0x7E);
         frame.extend(
             u16::try_from(payload.len())
                 .unwrap_or(u16::MAX)
