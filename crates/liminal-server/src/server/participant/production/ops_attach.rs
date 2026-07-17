@@ -254,6 +254,21 @@ impl ConversationAuthority {
                 },
             );
         }
+        // The FIRST rotation also ends the enrollment receipt's secret body
+        // (contract R-C0: a newer generation ends every older secret-bearing
+        // receipt): `Superseded` when the enrollment receipt was still live
+        // at the admitted commit clock, `Deadline` when its own deadline had
+        // already ended it. Set once and never rewritten, so the retained
+        // enrollment provenance reason is the exact end-of-body fact.
+        if slot.enrollment_receipt_ended.is_none() {
+            slot.enrollment_receipt_ended = Some(
+                if u128::from(allocation.admitted_now_ms) < slot.enrollment_receipt_expires_at {
+                    ReceiptExpiryReason::Superseded
+                } else {
+                    ReceiptExpiryReason::Deadline
+                },
+            );
+        }
         slot.attach = Some(AttachReceiptState {
             token: request.attach_attempt_token,
             receipt: CredentialAttachLiveReceipt::from_commit(outcome.clone()),

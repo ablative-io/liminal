@@ -77,18 +77,32 @@ pub(super) struct Slot {
     /// Four-variant detach replay cell.
     pub(super) cell: DetachCell<Digest>,
     /// Exact committed enrollment receipt held for lookup-phase resolution.
+    /// Served only while the receipt body is live (its own deadline unpassed
+    /// AND [`Self::enrollment_receipt_ended`] unset).
     pub(super) enrollment_receipt: EnrollmentLiveReceipt,
-    /// Exact committed enrollment payload held for byte-identical replay.
+    /// Exact committed enrollment payload held for byte-identical replay
+    /// while the receipt is live, and for the provenance row's result
+    /// generation afterwards.
     pub(super) enrollment_outcome: EnrollBound,
     /// Enrollment receipt deadline, fixed at enroll commit and never
     /// rewritten by later attaches (epoch milliseconds).
     pub(super) enrollment_receipt_expires_at: u128,
     /// Enrollment provenance deadline, fixed at enroll commit (epoch
-    /// milliseconds). Between the receipt deadline and this deadline an exact
+    /// milliseconds). Between the receipt's end and this deadline an exact
     /// enrollment-token replay answers the contract's `ReceiptExpired` row
-    /// with reason `Deadline`; after it, the permanent lifetime mapping
-    /// answers `EnrollmentKnown`.
+    /// with the exact terminal reason; after it, the permanent lifetime
+    /// mapping answers `EnrollmentKnown`.
     pub(super) enrollment_provenance_expires_at: u128,
+    /// Exact terminal reason recorded when a committed credential attach
+    /// ended the enrollment receipt's body (contract R-C0: the reason is
+    /// `Superseded` when the newer generation ended a still-live receipt,
+    /// `Deadline` when the receipt's own deadline had already ended it).
+    /// `None` while no attach has committed; a receipt that dies by its own
+    /// deadline with no attach keeps `None` and classifies as `Deadline` at
+    /// lookup time. Set once by the FIRST rotation and never rewritten —
+    /// derived from the committing attach's admitted clock, so cold replay
+    /// reproduces the identical record.
+    pub(super) enrollment_receipt_ended: Option<ReceiptExpiryReason>,
     /// Current attach receipt with its own independent deadline pair.
     pub(super) attach: Option<AttachReceiptState>,
     /// Bounded provenance fingerprints of ended attach receipts, keyed by

@@ -222,6 +222,7 @@ impl ConversationAuthority {
                 enrollment_outcome: committed.outcome,
                 enrollment_receipt_expires_at: allocation.receipt_expires_at.get(),
                 enrollment_provenance_expires_at: allocation.provenance_expires_at.get(),
+                enrollment_receipt_ended: None,
                 attach: None,
                 attach_provenance: std::collections::BTreeMap::new(),
                 attach_secret: AttachSecret::new(allocation.attach_secret),
@@ -289,14 +290,16 @@ fn enrollment_replay_response(
 ) -> Result<ServerValue, StateError> {
     let now = u128::from(operation_facts.now_ms);
     // Three token phases against the enrollment receipt's OWN deadline pair,
-    // fixed at enroll commit: later attaches never re-open the generation-1
-    // secret-bearing receipt (secret receipts never outlive their signed
-    // TTL), and the non-secret provenance record explains the ended receipt
-    // exactly through its own deadline. The enrollment receipt in this
-    // binding is ended only by its deadline (nothing supersedes an enrollment
-    // token), so the retained provenance reason is `Deadline`.
+    // fixed at enroll commit. The receipt body ends EITHER by its own
+    // deadline OR when a committed credential attach mints a newer
+    // generation (contract R-C0 supersession: the invalidated generation-1
+    // secret payload is never re-served once rotation ended it); the
+    // non-secret provenance record then explains the ended receipt with its
+    // exact terminal reason through its own deadline.
     let identity = ResolvedIdentity::<Digest, Digest, Digest>::Live(&slot.member);
-    let phase = if now < slot.enrollment_receipt_expires_at {
+    let receipt_live =
+        slot.enrollment_receipt_ended.is_none() && now < slot.enrollment_receipt_expires_at;
+    let phase = if receipt_live {
         EnrollmentTokenPhase::LiveReceipt {
             identity,
             receipt: &slot.enrollment_receipt,
@@ -306,7 +309,8 @@ fn enrollment_replay_response(
             identity,
             provenance: EnrollmentProvenance::new(
                 slot.enrollment_outcome.capability_generation(),
-                ReceiptExpiryReason::Deadline,
+                slot.enrollment_receipt_ended
+                    .unwrap_or(ReceiptExpiryReason::Deadline),
             ),
         }
     } else {

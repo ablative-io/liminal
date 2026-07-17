@@ -42,6 +42,9 @@ mod tests_observer;
 mod tests_receipts;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_receipts_enrollment;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_residue;
 
 pub use facts::constant_time_eq;
