@@ -38,7 +38,7 @@ fn attach_while_bound_same_connection_supersedes_and_survives_cold_reopen()
 
     {
         let store = open_disk_store_for_tests(&data_dir)?;
-        let handler = ProductionParticipantHandler::new(store, test_participant_config());
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
         let enrolled = dispatch(
             &handler,
             incarnation,
@@ -99,7 +99,7 @@ fn attach_while_bound_same_connection_supersedes_and_survives_cold_reopen()
 
     // COLD RESTART: the superseding handoff replays from the durable log.
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     // Enrollment record seq 1, superseded terminal seq 2, attached record
     // seq 3: the new epoch acknowledges the full contiguous suffix.
     let acked = dispatch(
@@ -135,7 +135,7 @@ fn attach_while_bound_from_new_incarnation_recovers_crashed_binding() -> Result<
 
     {
         let store = open_disk_store_for_tests(&data_dir)?;
-        let handler = ProductionParticipantHandler::new(store, test_participant_config());
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
         let enrolled = dispatch(
             &handler,
             ConnectionIncarnation::new(72, 1),
@@ -182,7 +182,7 @@ fn attach_while_bound_from_new_incarnation_recovers_crashed_binding() -> Result<
     // COLD RESTART, then another crash-shaped rotation: the replayed
     // superseding entry restores a bound slot that supersedes again.
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let third = dispatch(
         &handler,
         ConnectionIncarnation::new(73, 1),
@@ -213,7 +213,7 @@ fn marker_bearing_attach_refuses_no_marker_expected() -> Result<(), Box<dyn Erro
     let incarnation = ConnectionIncarnation::new(74, 1);
     let conversation_id = 703;
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
 
     let enrolled = dispatch(
         &handler,
@@ -277,7 +277,7 @@ fn enrollment_at_identity_limit_returns_typed_capacity_refusal_without_minting()
     let store = open_disk_store_for_tests(&data_dir)?;
     let config = test_participant_config();
     assert_eq!(config.identity_slots, 4, "fixture assumes four slots");
-    let handler = ProductionParticipantHandler::new(store, config);
+    let handler = ProductionParticipantHandler::new(store, config)?;
 
     // Four distinct enrollments from four connection incarnations mint the
     // exact permanent ordinals 0..=3.
@@ -381,7 +381,7 @@ fn semantic_conversations_beyond_connection_limit_refuse_with_exact_envelope()
     let store = open_disk_store_for_tests(&data_dir)?;
     let mut config = test_participant_config();
     config.max_semantic_conversations_per_connection = 2;
-    let handler = ProductionParticipantHandler::new(store, config);
+    let handler = ProductionParticipantHandler::new(store, config)?;
     let mut conversations = ParticipantConnectionConversations::default();
 
     // Two enrollments fill the connection's two conversation slots.
@@ -485,7 +485,7 @@ fn record_admission_lookup_rows_classify_typed_over_production_dispatch()
     let incarnation = ConnectionIncarnation::new(86, 1);
     let conversation_id = 904;
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
 
     let enrolled = dispatch(
         &handler,

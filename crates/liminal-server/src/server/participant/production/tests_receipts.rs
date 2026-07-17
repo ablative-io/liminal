@@ -124,7 +124,7 @@ fn attach_deadline_provenance_replay_carries_result_generation() -> Result<(), B
     let incarnation = ConnectionIncarnation::new(62, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
     // Receipt dies after 300ms; provenance stays open long after.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 600_000));
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 600_000))?;
     let conversation_id = 602;
 
     let receipt = enroll(&handler, incarnation, conversation_id, [64; 16])?;
@@ -191,7 +191,7 @@ fn superseded_receipt_keeps_provenance_then_degrades_to_stale_or_unknown()
     // rotation lands inside the first receipt's live window even under full
     // parallel test-suite load (the Superseded reason depends on it), while
     // the after-window half stays a bounded sleep.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(2_000, 2_500));
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(2_000, 2_500))?;
     let conversation_id = 603;
 
     let receipt = enroll(&handler, incarnation, conversation_id, [67; 16])?;
@@ -294,7 +294,7 @@ fn live_receipt_replays_with_invalidated_old_secret() -> Result<(), Box<dyn Erro
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(64, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let conversation_id = 604;
 
     let receipt = enroll(&handler, incarnation, conversation_id, [72; 16])?;

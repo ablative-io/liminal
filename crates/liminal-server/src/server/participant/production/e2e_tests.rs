@@ -197,15 +197,10 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let data_dir = home.path().join("durability");
     let store = open_disk_store_for_tests(&data_dir)?;
     let config = test_participant_config();
-    let participant_service = InstalledParticipantService::new(
-        Arc::new(ProductionParticipantHandler::new(
-            Arc::clone(&store),
-            config,
-        )),
-        store,
-        config.wire_frame_limit,
-    )
-    .map_err(|error| format!("{error:?}"))?;
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
+    let participant_service =
+        InstalledParticipantService::new(Arc::new(handler), store, config.wire_frame_limit)
+            .map_err(|error| format!("{error:?}"))?;
     let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
         participant_service,
     });

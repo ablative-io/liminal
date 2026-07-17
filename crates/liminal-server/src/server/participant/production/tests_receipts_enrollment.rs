@@ -39,7 +39,7 @@ fn enrollment_token_replay_inside_provenance_window_is_receipt_expired()
     let incarnation = ConnectionIncarnation::new(61, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
     // Enrollment receipt dies after 300ms; provenance stays open long after.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 600_000));
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 600_000))?;
     let conversation_id = 601;
     let enrollment_token = [61; 16];
 
@@ -122,7 +122,7 @@ fn enrollment_token_replay_after_provenance_window_is_enrollment_known()
     let incarnation = ConnectionIncarnation::new(65, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
     // Receipt window 300ms, provenance window 700ms.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 700));
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(300, 700))?;
     let conversation_id = 605;
     let enrollment_token = [75; 16];
 
@@ -194,7 +194,7 @@ fn attach_inside_enrollment_receipt_window_supersedes_the_receipt() -> Result<()
     let incarnation = ConnectionIncarnation::new(66, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
     // Receipt 60s, provenance 600s: the attach lands well inside BOTH.
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let conversation_id = 606;
     let enrollment_token = [78; 16];
 
@@ -279,7 +279,7 @@ fn superseded_enrollment_token_maps_to_enrollment_known_after_provenance()
     // Receipt 1500ms, provenance 1600ms: the attach normally lands inside
     // the live window (Superseded); the post-window assertion holds either
     // way.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(1_500, 1_600));
+    let handler = ProductionParticipantHandler::new(store, short_ttl_config(1_500, 1_600))?;
     let conversation_id = 607;
     let enrollment_token = [81; 16];
 

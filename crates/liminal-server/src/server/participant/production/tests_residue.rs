@@ -32,7 +32,7 @@ fn refused_probes_of_fresh_conversations_leave_no_durable_or_registry_residue()
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(51, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config());
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
 
     // One refused probe per pure-refusal arm, each on its own fresh id.
     let acked = dispatch(

@@ -23,16 +23,36 @@ pub(super) struct OperationFacts {
     pub(super) receiving_incarnation: ConnectionIncarnation,
     /// Admitted wall-clock read for deadline derivation and receipt phases.
     pub(super) now_ms: u64,
-    /// Configured identity slots per enrolled participant.
+    /// Configured per-conversation identity limit `I` (the contract's
+    /// half-open `0..=I` bound on permanent participant ordinals).
     pub(super) identity_slots: u64,
     /// Configured secret-bearing receipt TTL.
     pub(super) attach_receipt_ttl_ms: u64,
     /// Configured non-secret provenance TTL.
     pub(super) receipt_provenance_ttl_ms: u64,
+    /// Signed R-D1 stage-8 identity/receipt capacity limits.
+    pub(super) receipt_limits: ReceiptCapacityLimits,
     /// Whether the receiving connection already tracks this conversation.
     pub(super) connection_tracking: ConnectionConversationTracking,
     /// Signed connection-conversation limit with current occupancy.
     pub(super) connection_capacity: CapacityCounter,
+}
+
+/// Signed stage-8 capacity limits, straight from validated configuration.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ReceiptCapacityLimits {
+    /// Server-wide identity-slot limit.
+    pub(super) identity_server: u64,
+    /// Server-wide live-receipt cap.
+    pub(super) live_receipts_server: u64,
+    /// Per-participant live-receipt cap.
+    pub(super) live_receipts_per_participant: u64,
+    /// Server-wide provenance-fingerprint cap.
+    pub(super) provenance_server: u64,
+    /// Per-conversation provenance-fingerprint cap.
+    pub(super) provenance_per_conversation: u64,
+    /// Per-participant provenance-fingerprint cap.
+    pub(super) provenance_per_participant: u64,
 }
 
 impl OperationFacts {

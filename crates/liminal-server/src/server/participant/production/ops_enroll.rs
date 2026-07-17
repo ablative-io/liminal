@@ -13,20 +13,20 @@
 
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AllocatedParticipantSlot, AttachedRecordPosition,
-    BindingSlotDecision, CapacityCounter, CapacityCounterInvariantError, DetachCell,
-    EnrollmentCommitParameters, EnrollmentFingerprint, EnrollmentLiveReceipt,
-    EnrollmentLookupResult, EnrollmentProvenance, EnrollmentTokenPhase,
+    BindingSlotDecision, DetachCell, EnrollmentCommitParameters, EnrollmentFingerprint,
+    EnrollmentLiveReceipt, EnrollmentLookupResult, EnrollmentProvenance, EnrollmentTokenPhase,
     ParticipantSlotAllocatorProof, ResolvedIdentity, SemanticConnectionCapacityDecision,
     commit_enrollment, decide_enrolled_operation, lookup_enrollment,
     select_enrollment_binding_slot,
 };
 use liminal_protocol::wire::{
     AttachSecret, BindingEpoch, EnrollBound, EnrollmentEnvelope, EnrollmentRequest,
-    EnrollmentResponse, Generation, IdentityCapacityExceeded, IdentityCapacityScope,
-    ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason, ServerValue,
+    EnrollmentResponse, Generation, ReceiptExpired as WireReceiptExpired, ReceiptExpiryReason,
+    ServerValue,
 };
 
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
+use super::capacity::{ServerCapacity, Stage8Outcome};
 use super::facts::{self, Digest};
 use super::log::{StoredEnrollmentAllocation, StoredEnrollmentRequest, StoredOperation};
 use super::state::{ConversationAuthority, DurableAppend, Slot, StateError};
@@ -65,6 +65,7 @@ impl ConversationAuthority {
         &mut self,
         request: &EnrollmentRequest,
         operation_facts: &OperationFacts,
+        server_capacity: &ServerCapacity,
         appender: &dyn DurableAppend,
     ) -> Result<ArmOutcome, StateError> {
         let token_bytes = request.enrollment_token.into_bytes();
@@ -97,24 +98,24 @@ impl ConversationAuthority {
         ) {
             return Ok(ArmOutcome::respond(response.into_server_value()));
         }
-        // Stage-8 conversation-scope identity capacity (contract: the
-        // monotone `next_participant_index` in `0..=I`; when it equals `I`
-        // the conversation-scope `IdentityCapacityExceeded` wins) — BEFORE
-        // genesis, secret mint, or any durable touch, so the refused request
-        // provably mints nothing. The decision is the crate's bounded-counter
-        // algebra over the true occupancy; the server supplies only the
-        // configured limit and the replayed allocation fact. The server-scope
-        // identity counter has no configured limit in this deployment surface
-        // yet and is recorded as an open gap in the goal document.
-        if let Some(response) = identity_capacity_refusal(
-            request,
-            operation_facts.identity_slots,
-            self.next_participant,
-        )? {
-            return Ok(ArmOutcome::respond(response.into_server_value()));
-        }
-
+        // Stage 8 (R-D1): the complete runtime identity/receipt capacity
+        // family in R-C0's seven-scope order — identity Server, identity
+        // Conversation, LiveReceiptServer, ProvenanceServer, then
+        // ProvenanceConversation can refuse; both per-participant scopes are
+        // provably empty for the not-yet-minted identity. Decided BEFORE
+        // genesis, secret mint, or any durable touch, so a refused request
+        // provably mints nothing; the atomic check-and-reserve makes
+        // concurrent enrollments on other conversations unable to admit past
+        // a server scope.
         let deadlines = operation_facts.deadlines()?;
+        let reservation =
+            match self.enrollment_stage8(request, operation_facts, server_capacity, &deadlines)? {
+                Stage8Outcome::Refused(response) => {
+                    return Ok(ArmOutcome::respond(response.into_server_value()));
+                }
+                Stage8Outcome::Reserved(reservation) => reservation,
+            };
+
         // The one conversation-creating arm: genesis is durable exactly when
         // an authorized enrollment is about to append its own entry.
         self.ensure_genesis(appender)?;
@@ -132,6 +133,9 @@ impl ConversationAuthority {
             enrollment_fingerprint: facts::enrollment_fingerprint(request.enrollment_token),
         };
         let outcome = self.enroll_commit(request, &allocation, CommitMode::Live(appender))?;
+        // The durable append succeeded: the stage-8 reservation becomes
+        // permanent (enrollment retires no earlier receipt).
+        reservation.confirm(&[]);
         Ok(ArmOutcome::committed(
             EnrollmentResponse::enroll_bound(outcome).into_server_value(),
             capacity,
@@ -245,43 +249,6 @@ impl ConversationAuthority {
     }
 }
 
-/// Classifies conversation-scope identity capacity for one fresh enrollment.
-///
-/// `Some(response)` is the exact register row 5655 refusal (`scope:
-/// Conversation`, signed `limit`, true `occupied`, requested 1); `None`
-/// admits the enrollment. The full/not-full judgment is the crate's
-/// [`CapacityCounter`] algebra. An occupancy above the signed limit is a
-/// configuration lowered underneath durable allocations: the enrollment is
-/// refused with the true numbers rather than minting past the signed cap.
-fn identity_capacity_refusal(
-    request: &EnrollmentRequest,
-    identity_slots: u64,
-    next_participant: u64,
-) -> Result<Option<EnrollmentResponse>, StateError> {
-    let (full, limit, occupied) = match CapacityCounter::try_new(identity_slots, next_participant) {
-        Ok(counter) => (counter.is_full(), counter.limit(), counter.occupied()),
-        Err(CapacityCounterInvariantError::OccupiedExceedsLimit { occupied, limit }) => {
-            (true, limit, occupied)
-        }
-        Err(CapacityCounterInvariantError::ZeroLimit) => {
-            return Err(StateError::invariant(
-                "validated identity_slots configuration rejected: zero limit",
-            ));
-        }
-    };
-    if !full {
-        return Ok(None);
-    }
-    Ok(Some(EnrollmentResponse::identity_capacity_exceeded(
-        IdentityCapacityExceeded {
-            request: enrollment_envelope(request),
-            scope: IdentityCapacityScope::Conversation,
-            limit,
-            occupied,
-        },
-    )))
-}
-
 /// Builds the enrollment replay/known response for a mapped token.
 fn enrollment_replay_response(
     slot: &Slot,
@@ -365,7 +332,7 @@ fn enrollment_replay_response(
 }
 
 /// Builds the echo envelope of one enrollment request.
-const fn enrollment_envelope(request: &EnrollmentRequest) -> EnrollmentEnvelope {
+pub(super) const fn enrollment_envelope(request: &EnrollmentRequest) -> EnrollmentEnvelope {
     EnrollmentEnvelope {
         conversation_id: request.conversation_id,
         enrollment_token: request.enrollment_token,

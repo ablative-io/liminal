@@ -384,8 +384,42 @@ pub struct ParticipantConfig {
     /// least `attach_receipt_ttl_ms` (provenance explains the receipt and
     /// cannot expire first).
     pub receipt_provenance_ttl_ms: u64,
-    /// Identity slots reserved per enrolled participant (the protocol's
-    /// half-open identity limit consumed by the slot allocator).
+    /// Server-wide cap on live secret-bearing receipts (enrollment and
+    /// credential-attach receipt bodies inside their own receipt windows,
+    /// across every conversation). R-D1 stage-8 scope `LiveReceiptServer`:
+    /// enrollment and credential attach refuse with the typed
+    /// `ReceiptCapacityExceeded` when reserving one more would exceed it.
+    pub max_live_attach_receipts_server: u64,
+    /// Per-participant cap on live secret-bearing receipts (stage-8 scope
+    /// `LiveReceiptParticipant`). A participant holds at most its enrollment
+    /// receipt plus its current attach receipt live at once, so values below
+    /// 3 refuse rotation while the enrollment receipt is still live.
+    pub max_live_attach_receipts_per_participant: u64,
+    /// Server-wide cap on retained non-secret provenance fingerprints
+    /// (stage-8 scope `ProvenanceServer`). A fingerprint exists from its
+    /// operation's commit through its own provenance deadline.
+    pub max_receipt_provenance_server: u64,
+    /// Per-conversation provenance-fingerprint cap (stage-8 scope
+    /// `ProvenanceConversation`).
+    pub max_receipt_provenance_per_conversation: u64,
+    /// Per-participant provenance-fingerprint cap (stage-8 scope
+    /// `ProvenanceParticipant`).
+    pub max_receipt_provenance_per_participant: u64,
+    /// Server-wide identity-slot limit (the contract's
+    /// `max_retired_identity_slots` server scope): the total number of
+    /// participant identities — live or retired — mintable across ALL
+    /// conversations. Enrollment refuses with server-scope
+    /// `IdentityCapacityExceeded` (tested BEFORE the conversation scope)
+    /// when every slot is reserved.
+    pub max_retired_identity_slots_server: u64,
+    /// Per-CONVERSATION identity limit `I` (the contract's half-open
+    /// `0..=I` bound on permanent participant ordinals — the conversation
+    /// scope of `max_retired_identity_slots`, NOT a per-participant
+    /// reservation). Enrollment assigns monotone participant indices in
+    /// `0..I` within one conversation and refuses with conversation-scope
+    /// `IdentityCapacityExceeded` when occupancy reaches this value; slots
+    /// and ids are never reused. The server-wide companion is
+    /// [`Self::max_retired_identity_slots_server`].
     pub identity_slots: u64,
     /// Maximum entries one observer-recovery handshake batch may name.
     pub observer_recovery_max_entries: u64,
@@ -405,10 +439,37 @@ impl ParticipantConfig {
     /// nothing, or violate a protocol precondition; the TTL ordering mirrors
     /// the protocol's own frozen configuration precedence.
     pub(crate) fn collect_errors(&self, errors: &mut Vec<String>) {
-        let nonzero: [(&str, u64); 6] = [
+        // The receipt/identity block follows the contract's frozen nine-field
+        // validation order: both TTLs, the five receipt/provenance caps, the
+        // server identity limit, then the conversation identity limit.
+        let nonzero: [(&str, u64); 12] = [
             ("wire_frame_limit", self.wire_frame_limit),
             ("attach_receipt_ttl_ms", self.attach_receipt_ttl_ms),
             ("receipt_provenance_ttl_ms", self.receipt_provenance_ttl_ms),
+            (
+                "max_live_attach_receipts_server",
+                self.max_live_attach_receipts_server,
+            ),
+            (
+                "max_live_attach_receipts_per_participant",
+                self.max_live_attach_receipts_per_participant,
+            ),
+            (
+                "max_receipt_provenance_server",
+                self.max_receipt_provenance_server,
+            ),
+            (
+                "max_receipt_provenance_per_conversation",
+                self.max_receipt_provenance_per_conversation,
+            ),
+            (
+                "max_receipt_provenance_per_participant",
+                self.max_receipt_provenance_per_participant,
+            ),
+            (
+                "max_retired_identity_slots_server",
+                self.max_retired_identity_slots_server,
+            ),
             ("identity_slots", self.identity_slots),
             (
                 "observer_recovery_max_entries",

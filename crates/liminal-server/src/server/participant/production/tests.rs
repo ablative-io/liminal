@@ -34,6 +34,12 @@ pub(super) const fn test_participant_config() -> ParticipantConfig {
         wire_frame_limit: 65_536,
         attach_receipt_ttl_ms: 60_000,
         receipt_provenance_ttl_ms: 600_000,
+        max_live_attach_receipts_server: 1_024,
+        max_live_attach_receipts_per_participant: 8,
+        max_receipt_provenance_server: 4_096,
+        max_receipt_provenance_per_conversation: 256,
+        max_receipt_provenance_per_participant: 64,
+        max_retired_identity_slots_server: 1_024,
         identity_slots: 4,
         observer_recovery_max_entries: 64,
         max_semantic_conversations_per_connection: 32,
@@ -144,7 +150,7 @@ fn terminalized_detach_cold_reopen_carries_old_epoch_through_dispatch() -> Resul
 
     {
         let store = open_disk_store_for_tests(&data_dir)?;
-        let handler = ProductionParticipantHandler::new(store, test_participant_config());
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
 
         let enrolled = dispatch(
             &handler,
@@ -201,7 +207,7 @@ fn terminalized_detach_cold_reopen_carries_old_epoch_through_dispatch() -> Resul
     // COLD RESTART: every live handle above is dropped; reopen the same
     // database directory and rebuild the handler from durable reality alone.
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let replayed = dispatch(
         &handler,
         ConnectionIncarnation::new(12, 1),
@@ -246,7 +252,7 @@ fn two_participant_same_suffix_acks_and_regression_refusal_survive_cold_reopen()
 
     {
         let store = open_disk_store_for_tests(&data_dir)?;
-        let handler = ProductionParticipantHandler::new(store, test_participant_config());
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
 
         let enrolled_a = dispatch(
             &handler,
@@ -302,7 +308,7 @@ fn two_participant_same_suffix_acks_and_regression_refusal_survive_cold_reopen()
 
     // COLD RESTART, then the regression refusal.
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let regressed = dispatch(
         &handler,
         incarnation_b,
@@ -344,7 +350,7 @@ fn marker_ack_refuses_through_crate_selector() -> Result<(), Box<dyn Error>> {
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(31, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
 
     let enrolled = dispatch(
         &handler,
@@ -409,7 +415,7 @@ fn observer_recovery_classifies_exact_rows_over_durable_tracking() -> Result<(),
 
     {
         let store = open_disk_store_for_tests(&data_dir)?;
-        let handler = ProductionParticipantHandler::new(store, test_participant_config());
+        let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
         // Enrollment registers the conversation's observer progress row.
         let enrolled = dispatch(
             &handler,
@@ -424,7 +430,7 @@ fn observer_recovery_classifies_exact_rows_over_durable_tracking() -> Result<(),
 
     // Cold reopen: the recovery batches run over durably restored rows only.
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     // Tracked conversation, durable progress 0, refused epoch 1: the ONE
     // contract row for these facts is EpochAhead with exact fields.
     let ahead = dispatch(

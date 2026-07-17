@@ -16,26 +16,23 @@
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition,
     BindingSlotDecision, BindingState, ClosureState, CommittedBindingTerminalPosition,
-    CredentialAttachLiveReceipt, CredentialAttachLookupResult, CredentialAttachProvenance,
-    CredentialAttachTokenPhase, MarkerProofDecision, MarkerProofInput, MarkerProofState,
-    PresentedIdentity, ResolvedIdentity, SemanticConnectionCapacityDecision, commit_attach,
-    decide_attached_operation, lookup_credential_attach, select_credential_attach_binding_slot,
-    select_marker_proof,
+    CredentialAttachLiveReceipt, CredentialAttachLookupResult, PresentedIdentity,
+    SemanticConnectionCapacityDecision, commit_attach, decide_attached_operation,
+    lookup_credential_attach, select_credential_attach_binding_slot,
 };
 use liminal_protocol::wire::{
-    AttachBound, AttachEnvelope, AttachSecret,
-    AttemptTokenBodyConflict as WireAttemptTokenBodyConflict, BindingEpoch,
-    CredentialAttachRequest, CredentialAttachResponse, Generation, MarkerMismatch,
-    MarkerNotDelivered, MarkerProofRequest, ReceiptExpired as WireReceiptExpired,
-    ReceiptExpiryReason, ServerValue,
+    AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, CredentialAttachRequest,
+    CredentialAttachResponse, Generation, ReceiptExpiryReason,
 };
 
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
+use super::capacity::ServerCapacity;
 use super::facts::{self, Digest};
 use super::log::{StoredAttachAllocation, StoredAttachRequest, StoredOperation};
+use super::ops_attach_capacity::AttachStage8;
+use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
 use super::state::{
-    AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend, Slot,
-    StateError,
+    AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend, StateError,
 };
 
 impl ConversationAuthority {
@@ -48,15 +45,21 @@ impl ConversationAuthority {
         &mut self,
         request: &CredentialAttachRequest,
         operation_facts: &OperationFacts,
+        server_capacity: &ServerCapacity,
         appender: &dyn DurableAppend,
     ) -> Result<ArmOutcome, StateError> {
         let envelope = attach_envelope(request);
+        let now = u128::from(operation_facts.now_ms);
+        // Request-time expiry of retained provenance fingerprints (contract
+        // R-C0: retained only through their provenance deadlines). Safe
+        // before lookup: an expired record and a pruned record classify
+        // identically through the generation-window witness.
+        self.prune_expired_provenance(now);
         let Some(slot) = self.slots.get(&request.participant_id) else {
             return Ok(ArmOutcome::respond(
                 CredentialAttachResponse::participant_unknown(envelope).into_server_value(),
             ));
         };
-        let now = u128::from(operation_facts.now_ms);
         let (token_phase, secret_proof) = slot.attach_token_phase(request, now);
         let lookup = lookup_credential_attach(
             token_phase,
@@ -96,6 +99,27 @@ impl ConversationAuthority {
             return marker_bearing_attach_refusal(request, slot, operation_facts)
                 .map(ArmOutcome::respond);
         }
+        // Stage 8 (R-D1): credential attach's exact five-scope
+        // receipt/provenance order, decided through the crate's verified
+        // selector against per-participant/per-conversation occupancies from
+        // this authority and server occupancies from the shared ledger; the
+        // reservation is atomic with the check.
+        let deadlines = operation_facts.deadlines()?;
+        let (reservation, retire) = match self.attach_stage8(
+            request,
+            slot,
+            operation_facts,
+            server_capacity,
+            &deadlines,
+        )? {
+            AttachStage8::Refused(response) => {
+                return Ok(ArmOutcome::respond(response.into_server_value()));
+            }
+            AttachStage8::Reserved {
+                reservation,
+                retire,
+            } => (reservation, retire),
+        };
         // Attach mode from binding authority (contract R-C1.3): a bound slot
         // for the SAME participant supersedes — one ordered
         // Detached(Superseded)/Attached handoff, even on this connection
@@ -110,7 +134,6 @@ impl ConversationAuthority {
             }
         };
 
-        let deadlines = operation_facts.deadlines()?;
         // The rotation result: the new binding epoch carries the successor of
         // the verified current generation (the crate's ResultGeneration law).
         let next_generation = request
@@ -143,6 +166,11 @@ impl ConversationAuthority {
             superseded_terminal_seq,
         };
         let outcome = self.attach_commit(request, &allocation, CommitMode::Live(appender))?;
+        // The durable append succeeded: the stage-8 reservation becomes
+        // permanent and the receipts this rotation retired early (the
+        // superseded attach receipt and, on the first rotation, the ended
+        // enrollment receipt) leave the server-scope ledger.
+        reservation.confirm(&retire);
         Ok(ArmOutcome::committed(
             CredentialAttachResponse::attach_bound(outcome).into_server_value(),
             capacity,
@@ -285,83 +313,13 @@ impl ConversationAuthority {
 }
 
 /// Builds the echo envelope of one credential-attach request.
-const fn attach_envelope(request: &CredentialAttachRequest) -> AttachEnvelope {
+pub(super) const fn attach_envelope(request: &CredentialAttachRequest) -> AttachEnvelope {
     AttachEnvelope {
         conversation_id: request.conversation_id,
         participant_id: request.participant_id,
         capability_generation: request.capability_generation,
         attach_attempt_token: request.attach_attempt_token,
         accept_marker_delivery_seq: request.accept_marker_delivery_seq,
-    }
-}
-
-impl Slot {
-    /// Resolves the credential-attach token phase and its phase-scoped
-    /// constant-time secret proof.
-    ///
-    /// The token phase resolves against the CURRENT receipt's own deadline
-    /// pair first, then against the retained provenance fingerprints of ended
-    /// receipts. Each receipt's windows are fixed at its own commit; a later
-    /// attach never re-opens them. The verifier is phase-scoped (contract
-    /// R-C0): a live receipt replay verifies against the receipt's own
-    /// committed presented secret (contract row 4 recovers a lost rotation
-    /// with the invalidated OLD secret); every other phase verifies against
-    /// the slot's current secret. Provenance phases ignore the proof by
-    /// construction of their result path.
-    fn attach_token_phase(
-        &self,
-        request: &CredentialAttachRequest,
-        now: u128,
-    ) -> (
-        CredentialAttachTokenPhase<'_, Digest, Digest, Digest>,
-        AttachSecretProof,
-    ) {
-        let identity = ResolvedIdentity::<Digest, Digest, Digest>::Live(&self.member);
-        let mut verifier_bytes = self.attach_secret.into_bytes();
-        let token_phase = match self.attach.as_ref() {
-            Some(attach) if attach.token == request.attach_attempt_token => {
-                if now < attach.receipt_expires_at {
-                    verifier_bytes = attach.verifier;
-                    CredentialAttachTokenPhase::LiveReceipt {
-                        identity,
-                        receipt: &attach.receipt,
-                    }
-                } else if now < attach.provenance_expires_at {
-                    CredentialAttachTokenPhase::Provenance {
-                        identity,
-                        provenance: CredentialAttachProvenance::new(
-                            attach.result_generation,
-                            ReceiptExpiryReason::Deadline,
-                        ),
-                    }
-                } else {
-                    CredentialAttachTokenPhase::AfterProvenance
-                }
-            }
-            _ => match self
-                .attach_provenance
-                .get(&request.attach_attempt_token.into_bytes())
-            {
-                Some(record) if now < record.provenance_expires_at => {
-                    CredentialAttachTokenPhase::Provenance {
-                        identity,
-                        provenance: CredentialAttachProvenance::new(
-                            record.result_generation,
-                            record.reason,
-                        ),
-                    }
-                }
-                Some(_) => CredentialAttachTokenPhase::AfterProvenance,
-                None => CredentialAttachTokenPhase::NoMatch,
-            },
-        };
-        let secret_proof =
-            if facts::constant_time_eq(&verifier_bytes, &request.attach_secret.into_bytes()) {
-                AttachSecretProof::Verified
-            } else {
-                AttachSecretProof::Mismatch
-            };
-        (token_phase, secret_proof)
     }
 }
 
@@ -411,143 +369,4 @@ fn verify_attach_mode(
     .map_err(|error| {
         StateError::invariant(format!("protocol attach verification failed: {error:?}"))
     })
-}
-
-/// Classifies a marker-bearing (fenced-recovery) attach through the crate's
-/// total marker-proof selector against the factual delivery state.
-///
-/// This binding delivers no markers yet (no delivery pump exists for
-/// participant records), so the durable marker facts are empty: no expected
-/// marker, no delivery witness. The crate selects the exact typed refusal; a
-/// permitted fenced attach is unreachable until delivery exists, and
-/// observing one is a loud invariant failure — never a silently hand-built
-/// outcome.
-fn marker_bearing_attach_refusal(
-    request: &CredentialAttachRequest,
-    slot: &Slot,
-    operation_facts: &OperationFacts,
-) -> Result<ServerValue, StateError> {
-    let Some(input) = MarkerProofInput::credential_attach(request) else {
-        return Err(StateError::invariant(
-            "marker-bearing attach classification without a presented marker",
-        ));
-    };
-    let proof_epoch = BindingEpoch::new(
-        operation_facts.receiving_incarnation,
-        request.capability_generation,
-    );
-    let marker_state = MarkerProofState::new(slot.member.cursor(), false, None, proof_epoch, None);
-    let response = match select_marker_proof(&marker_state, input) {
-        MarkerProofDecision::MarkerMismatch(MarkerMismatch {
-            request: MarkerProofRequest::CredentialAttach(proof),
-            mismatch,
-        }) => CredentialAttachResponse::marker_mismatch(proof, mismatch),
-        MarkerProofDecision::MarkerNotDelivered(MarkerNotDelivered {
-            request: MarkerProofRequest::CredentialAttach(proof),
-            reason,
-            expected_marker_delivery_seq,
-        }) => CredentialAttachResponse::marker_not_delivered(
-            proof,
-            reason,
-            expected_marker_delivery_seq,
-        ),
-        MarkerProofDecision::MarkerMismatch(_) | MarkerProofDecision::MarkerNotDelivered(_) => {
-            return Err(StateError::invariant(
-                "attach marker proof classified under a foreign operation envelope",
-            ));
-        }
-        MarkerProofDecision::AckNoOp(_) => {
-            return Err(StateError::invariant(
-                "attach marker proof classified as a marker-ack no-op",
-            ));
-        }
-        MarkerProofDecision::Permit(_) => {
-            return Err(StateError::invariant(
-                "marker proof permitted although no marker was ever delivered",
-            ));
-        }
-    };
-    Ok(response.into_server_value())
-}
-
-/// Maps a non-authorized credential-attach lookup onto its bound response.
-///
-/// Every classified fact travels FROM the crate's lookup value into the
-/// response authority — the conflict kind, the provenance row's generations
-/// and terminal reason — with no server-side re-derivation of any lifecycle
-/// rule.
-fn credential_attach_refusal(
-    lookup: &CredentialAttachLookupResult<'_, Digest>,
-    envelope: AttachEnvelope,
-    slot: &Slot,
-) -> Result<ServerValue, StateError> {
-    let response = match lookup {
-        CredentialAttachLookupResult::ParticipantUnknown(_) => {
-            CredentialAttachResponse::participant_unknown(envelope)
-        }
-        CredentialAttachLookupResult::StaleAuthority(_) => {
-            CredentialAttachResponse::stale_authority(envelope, slot.member.generation())
-        }
-        CredentialAttachLookupResult::AttemptTokenBodyConflict(value) => {
-            let WireAttemptTokenBodyConflict::CredentialAttach { conflict, .. } = value else {
-                return Err(StateError::invariant(
-                    "leave conflict row observed in the credential-attach lookup",
-                ));
-            };
-            CredentialAttachResponse::attempt_token_body_conflict(&envelope, *conflict)
-        }
-        CredentialAttachLookupResult::Bound(_) => {
-            let outcome = slot
-                .attach
-                .as_ref()
-                .map(|attach| attach.outcome.clone())
-                .ok_or_else(|| {
-                    StateError::invariant("attach receipt replay without a stored receipt")
-                })?;
-            CredentialAttachResponse::bound(outcome)
-        }
-        CredentialAttachLookupResult::UnboundReceipt(_) => {
-            let outcome = slot
-                .attach
-                .as_ref()
-                .map(|attach| attach.outcome.clone())
-                .ok_or_else(|| {
-                    StateError::invariant("attach receipt replay without a stored receipt")
-                })?;
-            CredentialAttachResponse::unbound_receipt(outcome)
-        }
-        CredentialAttachLookupResult::ReceiptExpired(value) => {
-            let WireReceiptExpired::CredentialAttach {
-                result_generation,
-                current_generation,
-                reason,
-                ..
-            } = value
-            else {
-                return Err(StateError::invariant(
-                    "enrollment provenance row observed in the credential-attach lookup",
-                ));
-            };
-            CredentialAttachResponse::receipt_expired(
-                &envelope,
-                *result_generation,
-                *current_generation,
-                *reason,
-            )
-        }
-        CredentialAttachLookupResult::StaleOrUnknownReceipt(value) => {
-            CredentialAttachResponse::stale_or_unknown_receipt(value.clone())
-        }
-        CredentialAttachLookupResult::Retired(_) => {
-            return Err(StateError::invariant(
-                "retired identity observed in a binding that mints no tombstones",
-            ));
-        }
-        CredentialAttachLookupResult::AuthorizedFresh { .. } => {
-            return Err(StateError::invariant(
-                "authorized attach routed through the refusal mapper",
-            ));
-        }
-    };
-    Ok(response.into_server_value())
 }

@@ -14,15 +14,22 @@
 //! implementation of lifecycle rules.
 
 mod barrier;
+mod capacity;
 mod facts;
 mod handler;
+mod handler_observer;
 mod log;
 mod observer;
+mod occupancy;
 mod ops_acks;
 mod ops_attach;
+mod ops_attach_capacity;
+mod ops_attach_lookup;
 mod ops_enroll;
+mod ops_enroll_capacity;
 mod ops_frontier;
 mod ops_session;
+mod registry;
 mod state;
 
 #[cfg(test)]
@@ -34,6 +41,12 @@ mod tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_binding;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_capacity;
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_capacity_attach;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_observer;

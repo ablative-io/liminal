@@ -16,13 +16,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
-use liminal_protocol::lifecycle::{
-    CapacityCounter, ObserverProgressTrackDecision, ObserverRecoveryAggregate,
-    ObserverRecoveryTransactionDecision,
-};
-use liminal_protocol::wire::{
-    ClientRequest, ConversationId, ObserverRecoveryHandshake, ObserverRecoveryResponse, ServerValue,
-};
+use liminal_protocol::lifecycle::{CapacityCounter, ObserverRecoveryAggregate};
+use liminal_protocol::wire::{ClientRequest, ConversationId, ServerValue};
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
@@ -30,10 +25,11 @@ use crate::server::participant::{
     ParticipantSemanticHandler,
 };
 
-use super::barrier::{ArmOutcome, OperationFacts};
+use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
+use super::capacity::ServerCapacity;
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
-use super::observer::{ObserverLog, ObserverRow};
+use super::registry::ConversationRegistry;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 /// Production semantic handler backed by the shared durable store.
@@ -42,27 +38,85 @@ use super::state::{ConversationAuthority, DurableAppend, StateError};
 /// the deployment's `[participant]` configuration is present.
 #[derive(Debug)]
 pub struct ProductionParticipantHandler {
-    store: Arc<dyn DurableStore>,
-    config: ParticipantConfig,
+    pub(super) store: Arc<dyn DurableStore>,
+    pub(super) config: ParticipantConfig,
     conversations: Mutex<HashMap<ConversationId, Arc<Mutex<Option<ConversationAuthority>>>>>,
     /// Server-wide observer-recovery aggregate paired with its durable row
     /// head (`None` until first restored).
-    observer: Mutex<Option<(ObserverRecoveryAggregate, u64)>>,
+    pub(super) observer: Mutex<Option<(ObserverRecoveryAggregate, u64)>>,
+    /// Server-scope stage-8 occupancy ledger (identity slots, live receipts,
+    /// provenance fingerprints), restored from every durable conversation at
+    /// construction and kept exact by commit reservations and replay folds.
+    capacity: ServerCapacity,
+    /// Durable registry of created conversations: one row appended before
+    /// each conversation's genesis append, read at startup to enumerate
+    /// every durable conversation for the capacity restore.
+    registry: ConversationRegistry,
 }
 
 impl ProductionParticipantHandler {
-    /// Creates the handler over the server's shared durable store.
-    #[must_use]
-    pub fn new(store: Arc<dyn DurableStore>, config: ParticipantConfig) -> Self {
-        Self {
+    /// Creates the handler over the server's shared durable store, replaying
+    /// every durable conversation so the server-scope capacity ledger is
+    /// exact against durable truth from the first request (a restart must
+    /// not forget reserved identity slots or in-window receipts).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParticipantSemanticError`] when the durable store cannot be
+    /// scanned or a conversation log fails replay — the server refuses to
+    /// start over state it cannot account for.
+    pub fn new(
+        store: Arc<dyn DurableStore>,
+        config: ParticipantConfig,
+    ) -> Result<Self, ParticipantSemanticError> {
+        let registry = ConversationRegistry::new(Arc::clone(&store));
+        let handler = Self {
             store,
             config,
             conversations: Mutex::new(HashMap::new()),
             observer: Mutex::new(None),
-        }
+            capacity: ServerCapacity::default(),
+            registry,
+        };
+        handler.restore_all_conversations()?;
+        Ok(handler)
     }
 
-    fn cell(
+    /// Startup restore: enumerates every registered conversation and replays
+    /// it, folding each conversation's server-scope contribution into the
+    /// capacity ledger.
+    ///
+    /// A registry row whose conversation never got its genesis append (the
+    /// crash window between the two ordered appends) replays empty and is
+    /// evicted exactly like a refused probe.
+    fn restore_all_conversations(&self) -> Result<(), ParticipantSemanticError> {
+        let conversation_ids = self.registry.restore().map_err(|error| log_error(&error))?;
+        for conversation_id in conversation_ids {
+            let cell = self.cell(conversation_id)?;
+            let mut owner = cell
+                .lock()
+                .map_err(|_| ParticipantSemanticError::Internal {
+                    message: format!(
+                        "participant conversation {conversation_id} owner lock is poisoned"
+                    ),
+                })?;
+            if owner.is_none() {
+                let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
+                let replayed = self.replay_and_repair(conversation_id, &log)?;
+                let durably_empty = replayed.next_log_sequence == 0;
+                if durably_empty {
+                    drop(owner);
+                    self.evict_uncommitted(conversation_id, &cell)?;
+                    continue;
+                }
+                *owner = Some(replayed);
+            }
+            drop(owner);
+        }
+        Ok(())
+    }
+
+    pub(super) fn cell(
         &self,
         conversation_id: ConversationId,
     ) -> Result<Arc<Mutex<Option<ConversationAuthority>>>, ParticipantSemanticError> {
@@ -115,7 +169,11 @@ impl ProductionParticipantHandler {
                 message: format!("participant conversation {conversation_id} owner is absent"),
             });
         };
-        let appender = LogAppender { log: &log };
+        let appender = LogAppender {
+            log: &log,
+            registry: &self.registry,
+            conversation_id,
+        };
         let (result, durably_empty) = match operation(authority, &appender) {
             Ok(value) => {
                 let durably_empty = authority.next_log_sequence == 0;
@@ -143,17 +201,34 @@ impl ProductionParticipantHandler {
     /// to a crash between the enrollment append and the tracking append is
     /// re-registered idempotently here, so observer recovery is derivable
     /// from the conversation log itself on any first touch.
-    fn replay_and_repair(
+    pub(super) fn replay_and_repair(
         &self,
         conversation_id: ConversationId,
         log: &OperationLog,
     ) -> Result<ConversationAuthority, ParticipantSemanticError> {
-        let replayed = block_on(ConversationAuthority::replay(conversation_id, log))
+        let mut replayed = block_on(ConversationAuthority::replay(conversation_id, log))
             .map_err(|error| bridge_error(&error))?
             .map_err(|error| state_error(&error))?;
         if !replayed.tokens.is_empty() {
             self.ensure_observer_tracked(conversation_id)?;
         }
+        // Request-time expiry over the replayed state (replay rebuilds every
+        // retired rotation's fingerprint; the ones past their deadlines are
+        // dropped under this touch's clock read), then fold the
+        // conversation's complete server-scope contribution into the ledger
+        // — a replace, so a discarded-and-replayed owner never double
+        // counts and the ledger self-heals from durable truth.
+        let now = facts::now_unix_millis().map_err(|error| ParticipantSemanticError::Internal {
+            message: format!("participant clock read failed: {error}"),
+        })?;
+        let now = u128::from(now);
+        replayed.prune_expired_provenance(now);
+        let contribution = replayed
+            .capacity_contribution(now)
+            .map_err(|error| state_error(&error))?;
+        self.capacity
+            .fold_conversation(conversation_id, contribution)
+            .map_err(|error| state_error(&error))?;
         Ok(replayed)
     }
 
@@ -163,7 +238,7 @@ impl ProductionParticipantHandler {
     /// may have installed a fresh cell already); a concurrent holder of the
     /// evicted cell stays correct because every durable append is optimistic
     /// on its exact sequence and cold replay is the source of truth.
-    fn evict_uncommitted(
+    pub(super) fn evict_uncommitted(
         &self,
         conversation_id: ConversationId,
         cell: &Arc<Mutex<Option<ConversationAuthority>>>,
@@ -219,187 +294,17 @@ impl ProductionParticipantHandler {
             identity_slots: self.config.identity_slots,
             attach_receipt_ttl_ms: self.config.attach_receipt_ttl_ms,
             receipt_provenance_ttl_ms: self.config.receipt_provenance_ttl_ms,
+            receipt_limits: ReceiptCapacityLimits {
+                identity_server: self.config.max_retired_identity_slots_server,
+                live_receipts_server: self.config.max_live_attach_receipts_server,
+                live_receipts_per_participant: self.config.max_live_attach_receipts_per_participant,
+                provenance_server: self.config.max_receipt_provenance_server,
+                provenance_per_conversation: self.config.max_receipt_provenance_per_conversation,
+                provenance_per_participant: self.config.max_receipt_provenance_per_participant,
+            },
             connection_tracking: conversations.tracking(conversation_id),
             connection_capacity,
         })
-    }
-
-    /// Applies one observer-recovery batch through the A4 atomic transaction.
-    ///
-    /// The aggregate is owned by the transaction between the progress read
-    /// and the arm installation, and the whole arm plan is durably appended
-    /// before installation — a crash leaves the complete plan or none.
-    fn apply_observer_recovery(
-        &self,
-        conversations: &mut ParticipantConnectionConversations,
-        request: &ObserverRecoveryHandshake,
-    ) -> Result<ServerValue, ParticipantSemanticError> {
-        // Crash-window repair pre-pass: every named conversation's observer
-        // registration is made derivable from its own durable conversation
-        // log before the batch classifies, so an enrollment whose Track row
-        // was lost between the two appends is re-registered idempotently
-        // instead of being refused forever.
-        for refusal in &request.observer_refusals {
-            self.ensure_tracking_from_log(refusal.conversation_id)?;
-        }
-        // Connection-conversation occupancy is the SAME connection-local
-        // dispatch map the semantic stage-6 gate consumes, so the batch
-        // preflight and every semantic operation count against one signed
-        // bound.
-        let tracked = conversations.tracked_conversations();
-        let observer_log = ObserverLog::new(Arc::clone(&self.store));
-        let mut owner = self
-            .observer
-            .lock()
-            .map_err(|_| ParticipantSemanticError::Internal {
-                message: "observer recovery aggregate lock is poisoned".to_owned(),
-            })?;
-        if owner.is_none() {
-            let restored = block_on(observer_log.restore())
-                .map_err(|error| bridge_error(&error))?
-                .map_err(|error| log_error(&error))?;
-            *owner = Some((restored.aggregate, restored.next_sequence));
-        }
-        let (aggregate, head) = owner
-            .take()
-            .ok_or_else(|| ParticipantSemanticError::Internal {
-                message: "observer recovery aggregate is absent".to_owned(),
-            })?;
-        let result = match aggregate.decide_recovery(
-            request,
-            self.config.observer_recovery_max_entries,
-            self.config.max_semantic_conversations_per_connection,
-            &tracked,
-        ) {
-            ObserverRecoveryTransactionDecision::Respond {
-                aggregate,
-                response,
-            } => {
-                *owner = Some((aggregate, head));
-                Ok(response.into_server_value())
-            }
-            ObserverRecoveryTransactionDecision::Commit(transaction) => {
-                let arms = transaction
-                    .arms()
-                    .iter()
-                    .map(|arm| (arm.conversation_id(), arm.refused_epoch()))
-                    .collect::<Vec<_>>();
-                match block_on(observer_log.append(&ObserverRow::Arms { arms: arms.clone() }, head))
-                    .map_err(|error| bridge_error(&error))?
-                {
-                    Ok(()) => {
-                        let (aggregate, outcome) = transaction.commit();
-                        *owner = Some((aggregate, head.saturating_add(1)));
-                        // Every armed refusal-only recipient occupies one
-                        // connection-conversation slot (the batch preflight
-                        // already admitted them against the signed bound).
-                        for (conversation_id, _) in arms {
-                            conversations.track(conversation_id);
-                        }
-                        Ok(ObserverRecoveryResponse::accepted(outcome).into_server_value())
-                    }
-                    Err(error) => {
-                        // Nothing installed; the aggregate is durably restored
-                        // on the next observer operation.
-                        Err(state_error(&StateError::Log(error)))
-                    }
-                }
-            }
-        };
-        drop(owner);
-        result
-    }
-
-    /// Registers a conversation's observer progress row on first touch.
-    ///
-    /// Idempotent: an already-tracked conversation returns unchanged.
-    fn ensure_observer_tracked(
-        &self,
-        conversation_id: ConversationId,
-    ) -> Result<(), ParticipantSemanticError> {
-        let observer_log = ObserverLog::new(Arc::clone(&self.store));
-        let mut owner = self
-            .observer
-            .lock()
-            .map_err(|_| ParticipantSemanticError::Internal {
-                message: "observer recovery aggregate lock is poisoned".to_owned(),
-            })?;
-        if owner.is_none() {
-            let restored = block_on(observer_log.restore())
-                .map_err(|error| bridge_error(&error))?
-                .map_err(|error| log_error(&error))?;
-            *owner = Some((restored.aggregate, restored.next_sequence));
-        }
-        let (aggregate, head) = owner
-            .take()
-            .ok_or_else(|| ParticipantSemanticError::Internal {
-                message: "observer recovery aggregate is absent".to_owned(),
-            })?;
-        let result = match aggregate.decide_track(conversation_id, 0) {
-            ObserverProgressTrackDecision::Refuse { aggregate, .. } => {
-                // Already tracked — the registration is durable.
-                *owner = Some((aggregate, head));
-                Ok(())
-            }
-            ObserverProgressTrackDecision::Commit(transaction) => {
-                match block_on(observer_log.append(
-                    &ObserverRow::Track {
-                        conversation_id,
-                        observer_progress: 0,
-                    },
-                    head,
-                ))
-                .map_err(|error| bridge_error(&error))?
-                {
-                    Ok(()) => {
-                        *owner = Some((transaction.commit(), head.saturating_add(1)));
-                        Ok(())
-                    }
-                    Err(error) => Err(state_error(&StateError::Log(error))),
-                }
-            }
-        };
-        drop(owner);
-        result
-    }
-
-    /// Ensures a conversation's observer registration is derivable from its
-    /// own durable log (idempotent crash-window repair).
-    ///
-    /// A never-committed conversation id leaves no residue: its probe cell is
-    /// evicted. An already-live enrolled owner re-registers idempotently,
-    /// covering an earlier failed Track append inside this process lifetime.
-    fn ensure_tracking_from_log(
-        &self,
-        conversation_id: ConversationId,
-    ) -> Result<(), ParticipantSemanticError> {
-        let cell = self.cell(conversation_id)?;
-        let mut owner = cell
-            .lock()
-            .map_err(|_| ParticipantSemanticError::Internal {
-                message: format!(
-                    "participant conversation {conversation_id} owner lock is poisoned"
-                ),
-            })?;
-        if owner.is_none() {
-            let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
-            let replayed = self.replay_and_repair(conversation_id, &log)?;
-            if replayed.next_log_sequence == 0 {
-                drop(owner);
-                return self.evict_uncommitted(conversation_id, &cell);
-            }
-            *owner = Some(replayed);
-            drop(owner);
-            return Ok(());
-        }
-        let enrolled = owner
-            .as_ref()
-            .is_some_and(|authority| !authority.tokens.is_empty());
-        drop(owner);
-        if enrolled {
-            self.ensure_observer_tracked(conversation_id)?;
-        }
-        Ok(())
     }
 }
 
@@ -438,7 +343,12 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                     request.conversation_id,
                     conversations,
                     |authority, appender| {
-                        authority.apply_enrollment(&request, &operation_facts, appender)
+                        authority.apply_enrollment(
+                            &request,
+                            &operation_facts,
+                            &self.capacity,
+                            appender,
+                        )
                     },
                 )?;
                 // Only a fresh commit registers observer tracking; refusals
@@ -457,7 +367,12 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                     request.conversation_id,
                     conversations,
                     |authority, appender| {
-                        authority.apply_credential_attach(&request, &operation_facts, appender)
+                        authority.apply_credential_attach(
+                            &request,
+                            &operation_facts,
+                            &self.capacity,
+                            appender,
+                        )
                     },
                 )
             }
@@ -517,9 +432,15 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
     }
 }
 
-/// Bridges the synchronous state seam onto the async durable log.
+/// Bridges the synchronous state seam onto the async durable log, and keeps
+/// the conversation registry complete by construction: the one
+/// conversation-creating append (genesis at sequence zero) is preceded by a
+/// durable registry row, so startup can enumerate every conversation stream
+/// that exists.
 struct LogAppender<'a> {
     log: &'a OperationLog,
+    registry: &'a ConversationRegistry,
+    conversation_id: ConversationId,
 }
 
 impl DurableAppend for LogAppender<'_> {
@@ -528,23 +449,28 @@ impl DurableAppend for LogAppender<'_> {
         operation: &StoredOperation,
         expected_sequence: u64,
     ) -> Result<(), OperationLogError> {
+        if expected_sequence == 0 && matches!(operation, StoredOperation::Genesis { .. }) {
+            self.registry.register(self.conversation_id)?;
+        }
         block_on(self.log.append(operation, expected_sequence))?
     }
 }
 
-fn state_error(error: &StateError) -> ParticipantSemanticError {
+pub(super) fn state_error(error: &StateError) -> ParticipantSemanticError {
     ParticipantSemanticError::Internal {
         message: format!("participant production operation failed: {error}"),
     }
 }
 
-fn log_error(error: &OperationLogError) -> ParticipantSemanticError {
+pub(super) fn log_error(error: &OperationLogError) -> ParticipantSemanticError {
     ParticipantSemanticError::Internal {
         message: format!("participant production log failed: {error}"),
     }
 }
 
-fn bridge_error(error: &liminal::durability::bridge::BridgeError) -> ParticipantSemanticError {
+pub(super) fn bridge_error(
+    error: &liminal::durability::bridge::BridgeError,
+) -> ParticipantSemanticError {
     ParticipantSemanticError::Internal {
         message: format!("participant durability bridge failed: {error}"),
     }

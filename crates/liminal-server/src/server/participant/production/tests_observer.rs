@@ -89,7 +89,7 @@ fn enrolled_conversation_without_track_row_recovers_classification() -> Result<(
     {
         let disk = open_disk_store_for_tests(&data_dir)?;
         let failing: Arc<dyn DurableStore> = Arc::new(ObserverAppendFailingStore { inner: disk });
-        let handler = ProductionParticipantHandler::new(failing, test_participant_config());
+        let handler = ProductionParticipantHandler::new(failing, test_participant_config())?;
         // The enrollment's conversation append succeeds; the Track append
         // fails — exactly the crash window. The request itself fails loudly.
         let result = dispatch(
@@ -106,10 +106,11 @@ fn enrolled_conversation_without_track_row_recovers_classification() -> Result<(
         );
     }
 
-    // Cold reopen over the plain store: the handshake is the FIRST touch of
-    // this conversation — no prior conversation request repairs it.
+    // Cold reopen over the plain store: no conversation REQUEST precedes the
+    // handshake (startup restore replays the registered conversation and
+    // performs the same idempotent Track repair the first touch would).
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, test_participant_config());
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let value = dispatch(
         &handler,
         ConnectionIncarnation::new(82, 1),
@@ -159,7 +160,7 @@ fn capacity_check_counts_tracked_conversation_after_owner_discard() -> Result<()
     config.max_semantic_conversations_per_connection = 1;
 
     let store = open_disk_store_for_tests(&data_dir)?;
-    let handler = ProductionParticipantHandler::new(store, config);
+    let handler = ProductionParticipantHandler::new(store, config)?;
     // ONE connection map across the whole scenario — exactly what one live
     // connection incarnation holds for its lifetime.
     let mut conversations = ParticipantConnectionConversations::default();

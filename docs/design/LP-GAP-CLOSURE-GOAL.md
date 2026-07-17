@@ -195,6 +195,52 @@ durable references by allocator-log monotonicity alone; the live-connection
 reference set is bounded defense in depth against a rolled-back allocator
 stream.
 
+**2026-07-17 (activation review fix round 2) — R-C0 stage-8 receipt/identity
+capacity family CLOSED; enrollment receipt supersession CLOSED.** The review
+round found the stage-8 receipt/provenance capacity family silently absent
+(the crate's verified seven-scope/five-scope selectors bypassed, no receipt
+caps in `ParticipantConfig`, `ReceiptCapacityExceeded` rows unreachable,
+expired fingerprints retained forever) and enrollment receipt supersession
+unimplemented. Both are now closed on the production path:
+
+1. `ParticipantConfig` gains the five receipt/provenance cap fields AND
+   `max_retired_identity_slots_server`, all REQUIRED with no defaults,
+   validated in the contract's frozen nine-field order. Closing the
+   previously recorded server-scope identity gap is a compile-required
+   consequence of routing enrollment through the crate's seven-scope
+   `select_enrollment_capacity` (its first scope IS identity Server); the
+   earlier amendment's open-gap note is superseded.
+2. Both arms run the frozen stage-8 position: enrollment through
+   `select_enrollment_capacity`, credential attach through
+   `select_credential_attach_capacity`, over per-conversation/per-participant
+   occupancies computed from the conversation authority and server-scope
+   occupancies from a shared in-memory ledger with atomic check-and-reserve
+   (rolled back on any pre-publication failure). A scope whose configured
+   limit was lowered beneath retained occupancy refuses with true numbers at
+   counter construction, in the same fixed scope order.
+3. Cleanup is request-time checks only, never a sweep: retained provenance
+   fingerprints prune at their own deadlines on the next request touching
+   them, and the classification of an unmatched token derives from the R-C0
+   completeness rule (rotation-from-presented-generation witness in window →
+   `StaleAuthority` no-commit proof; otherwise `StaleOrUnknownReceipt`), so
+   pruning never regresses an exact old token to a false no-commit claim.
+   The contract's "admitted durable deadline events" half of the cleanup
+   sentence stays open with the delivery machinery it belongs to: no timer
+   or deadline-event infrastructure exists in this binding (LAW-1), and the
+   request-time checks alone bound retained state through the caps.
+4. Server-scope exactness across restarts comes from a durable conversation
+   registry (`liminal:participant-conversation-registry`): one row appended
+   and flushed immediately BEFORE each conversation's genesis append, read
+   at handler construction to replay every durable conversation into the
+   ledger. A store-prefix scan was rejected: haematite's scan visits only
+   shards already materialised in this process, so it is silently empty on a
+   freshly reopened database.
+5. A committed credential attach now ends the enrollment receipt body with
+   the exact terminal reason (`Superseded` inside the receipt's live window,
+   `Deadline` after it), derived from the committing operation's admitted
+   clock so cold replay reproduces the identical record; the invalidated
+   generation-1 secret payload is never re-served after rotation.
+
 ## Declaration
 
 Commit hash; per-gap closure evidence (file:line of the new public

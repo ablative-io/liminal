@@ -39,6 +39,16 @@ pub enum ServerError {
     #[error("participant server-incarnation namespace is exhausted")]
     ServerIncarnationExhausted,
 
+    /// Production participant startup restore failed: the durable
+    /// conversation streams could not be scanned or replayed, so the
+    /// server-scope capacity ledger cannot be made exact and the server
+    /// refuses to start over state it cannot account for.
+    #[error("participant startup restore failed: {message}")]
+    ParticipantStartupRestore {
+        /// Underlying durable, replay, or bridge diagnostic.
+        message: String,
+    },
+
     /// The current durable server incarnation has no collision-free connection
     /// ordinal left, so the accepted socket was not admitted.
     #[error(

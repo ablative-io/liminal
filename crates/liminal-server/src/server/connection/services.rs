@@ -386,11 +386,13 @@ impl LiminalConnectionServices {
             .participant
             .as_ref()
             .map(|participant| {
+                let handler =
+                    ProductionParticipantHandler::new(Arc::clone(&durable_store), *participant)
+                        .map_err(|error| ServerError::ParticipantStartupRestore {
+                            message: error.to_string(),
+                        })?;
                 InstalledParticipantService::new(
-                    Arc::new(ProductionParticipantHandler::new(
-                        Arc::clone(&durable_store),
-                        *participant,
-                    )),
+                    Arc::new(handler),
                     Arc::clone(&durable_store),
                     participant.wire_frame_limit,
                 )
