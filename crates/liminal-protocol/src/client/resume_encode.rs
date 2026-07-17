@@ -2,7 +2,8 @@ use alloc::vec::Vec;
 
 use super::{
     ClientBindingState, ClientParticipantAggregate, DetachReplayStatus, DetachReplayTerminal,
-    ExpectedOperationState, ReconnectAggregate, ReconnectFreshEvent,
+    ExpectedOperationState, LostAuthorityKind, LostAuthorityTestimony, ReconnectAggregate,
+    ReconnectFreshEvent, RestoredExpectedOperationAbandonment,
     reconnect::ReconnectMachineState,
     replay::DetachReplayState,
     resume::{
@@ -23,6 +24,7 @@ pub(super) fn encode_aggregate(
     encode_expected(aggregate.expected.as_ref(), &mut payload)?;
     encode_replay(&aggregate.detach_replay.state, &mut payload)?;
     encode_reconnect(&aggregate.reconnect, &mut payload);
+    encode_abandonment(aggregate.restored_abandonment.as_ref(), &mut payload)?;
     let payload_len =
         u64::try_from(payload.len()).map_err(|_| ClientResumeRecordEncodeError::LengthOverflow)?;
     let mut output = Vec::with_capacity(HEADER_LEN.saturating_add(payload.len()));
@@ -97,9 +99,45 @@ fn encode_expected(
     output.push(1);
     output.push(u8::from(request.issued));
     put_u64(output, request.authorization);
+    encode_testimony(request.lost.as_ref(), output);
     let frame = encode_frame(
         &ParticipantFrame::ClientRequest(request.request.clone()),
         ClientResumeRecordSection::ExpectedOperation,
+    )?;
+    put_blob(output, &frame)?;
+    Ok(())
+}
+
+/// Serializes a pending lost-authority testimony so that no encode path can
+/// silently drop it: the bytes carry the atom (r2, 2026-07-18).
+fn encode_testimony(testimony: Option<&LostAuthorityTestimony>, output: &mut Vec<u8>) {
+    output.push(match testimony.map(LostAuthorityTestimony::kind) {
+        None => 0,
+        Some(LostAuthorityKind::IssuedOperationCorrelation) => 1,
+        Some(LostAuthorityKind::DetachTransportAttempt) => 2,
+        Some(LostAuthorityKind::ReconnectPermit) => 3,
+        Some(LostAuthorityKind::ReconnectAttempt) => 4,
+    });
+}
+
+/// Serializes the pending tokenless abandonment so it survives
+/// encode-without-take (r2, 2026-07-18).
+fn encode_abandonment(
+    abandonment: Option<&RestoredExpectedOperationAbandonment>,
+    output: &mut Vec<u8>,
+) -> Result<(), ClientResumeRecordEncodeError> {
+    let Some(abandonment) = abandonment else {
+        output.push(0);
+        return Ok(());
+    };
+    output.push(1);
+    output.push(match abandonment.reason {
+        super::RestoredExpectedOperationAbandonmentReason::TokenlessAfterCrash => 0,
+    });
+    output.push(u8::from(abandonment.was_issued));
+    let frame = encode_frame(
+        &ParticipantFrame::ClientRequest(abandonment.request.clone()),
+        ClientResumeRecordSection::Abandonment,
     )?;
     put_blob(output, &frame)?;
     Ok(())
@@ -170,6 +208,7 @@ fn encode_reconnect(reconnect: &ReconnectAggregate, output: &mut Vec<u8>) {
         }
         ReconnectMachineState::Online => output.push(3),
     }
+    encode_testimony(reconnect.lost.as_ref(), output);
 }
 
 fn encode_event(event: ReconnectFreshEvent, output: &mut Vec<u8>) {

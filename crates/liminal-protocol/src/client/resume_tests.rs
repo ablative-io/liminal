@@ -67,6 +67,7 @@ fn aggregate_with_replay(status: DetachReplayStatus) -> TestResult<ClientPartici
             }),
             issued,
             authorization: 1,
+            lost: None,
         });
         aggregate.next_operation_authorization = 1;
     }
@@ -180,6 +181,7 @@ fn resume_round_trips_every_expected_operation_and_continuous_ack() -> TestResul
                 request: operation.clone(),
                 issued,
                 authorization: 1,
+                lost: None,
             });
             aggregate.next_operation_authorization = 1;
             if let ClientRequest::Detach(value) = &operation {
@@ -222,7 +224,28 @@ fn assert_expected_restore(
             RestoredExpectedOperationAbandonmentReason::TokenlessAfterCrash
         );
     } else {
-        assert_eq!(restored.expected, original.expected);
+        let expected = restored.expected.as_ref().ok_or("expected must survive")?;
+        let original = original
+            .expected
+            .as_ref()
+            .ok_or("fixture must retain expected")?;
+        assert_eq!(expected.request, original.request);
+        assert_eq!(expected.issued, original.issued);
+        assert_eq!(expected.authorization, original.authorization);
+        if original.issued {
+            let kind = if matches!(operation, ClientRequest::Detach(_)) {
+                LostAuthorityKind::DetachTransportAttempt
+            } else {
+                LostAuthorityKind::IssuedOperationCorrelation
+            };
+            assert_eq!(
+                expected.lost.as_ref().map(LostAuthorityTestimony::kind),
+                Some(kind),
+                "restore must testify the destroyed issued authority"
+            );
+        } else {
+            assert!(expected.lost.is_none());
+        }
         assert!(restored.take_restored_operation_abandonment().is_none());
     }
     Ok(())

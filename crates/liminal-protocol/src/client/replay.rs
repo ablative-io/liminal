@@ -200,6 +200,9 @@ pub enum DetachReplayRefusalReason {
     InvalidStatus,
     /// The typed input does not match the retained exact detach request.
     ForeignInput,
+    /// A restore already testified the in-flight send authority destroyed;
+    /// only the pending testimony can resolve it (r2, 2026-07-18).
+    LostAuthorityPending,
 }
 
 /// Applied detach replay transition.
@@ -364,6 +367,13 @@ pub fn transport_fate(
     correlation: ClientResponseCorrelation,
     fate: DetachTransportFate,
 ) -> DetachTransportFateDecision {
+    if aggregate.operation_loss_pending() {
+        return DetachTransportFateDecision::Refused(DetachReplayRefusal {
+            aggregate,
+            input: (correlation, fate),
+            reason: DetachReplayRefusalReason::LostAuthorityPending,
+        });
+    }
     if detach_authority_matches(&aggregate, &correlation) {
         if let DetachReplayState::Recorded { status, .. } = &mut aggregate.detach_replay.state {
             *status = DetachReplayStatus::Parked;
@@ -396,6 +406,13 @@ pub fn apply_attach(
     attach: AttachBound,
     correlation: ClientResponseCorrelation,
 ) -> ApplyAttachDecision {
+    if aggregate.operation_loss_pending() {
+        return ApplyAttachDecision::Refused(DetachReplayRefusal {
+            aggregate,
+            input: (attach, correlation),
+            reason: DetachReplayRefusalReason::LostAuthorityPending,
+        });
+    }
     if detach_authority_matches(&aggregate, &correlation)
         && aggregate.detach_replay.apply_attach(&attach)
     {
@@ -426,6 +443,13 @@ pub fn apply_leave_durable(
     leave: LeaveCommitted,
     correlation: ClientResponseCorrelation,
 ) -> ApplyLeaveDecision {
+    if aggregate.operation_loss_pending() {
+        return ApplyLeaveDecision::Refused(DetachReplayRefusal {
+            aggregate,
+            input: (leave, correlation),
+            reason: DetachReplayRefusalReason::LostAuthorityPending,
+        });
+    }
     if detach_authority_matches(&aggregate, &correlation)
         && aggregate.detach_replay.apply_leave(&leave)
     {
@@ -467,6 +491,13 @@ pub fn apply_detach_outcome(
     outcome: DetachReplayOutcome,
     correlation: ClientResponseCorrelation,
 ) -> ApplyDetachOutcomeDecision {
+    if aggregate.operation_loss_pending() {
+        return ApplyDetachOutcomeDecision::Refused(DetachReplayRefusal {
+            aggregate,
+            input: (outcome, correlation),
+            reason: DetachReplayRefusalReason::LostAuthorityPending,
+        });
+    }
     if !detach_authority_matches(&aggregate, &correlation) {
         return ApplyDetachOutcomeDecision::Refused(DetachReplayRefusal {
             aggregate,

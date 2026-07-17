@@ -47,6 +47,13 @@ pub enum ClientOperationRecordRefusalReason {
     OutstandingOperation,
     /// A different detach replay request remains retained.
     DetachReplayOutstanding,
+    /// The retained same-envelope replay status is not compatible with a fresh
+    /// first send; re-recording would revive expected-detach authority over an
+    /// inactive replay (r2, 2026-07-18).
+    DetachReplayIncompatible,
+    /// A pending tokenless abandonment must be taken before another tokenless
+    /// operation is recorded (r2, 2026-07-18).
+    AbandonmentPending,
     /// The request is not legal for the retained binding identity or state.
     BindingMismatch,
     /// A durable Leave or retirement made the participant permanently dead.
@@ -217,111 +224,89 @@ pub fn recover_expected_operation(
     }
 }
 
-/// Typed process fate for an issued operation restored without its process-local handle.
+/// Reason a lost-authority resolution was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IssuedExpectedOperationFate {
-    /// Process termination lost the issued operation and response correlation.
-    ProcessLost,
+pub enum LostAuthorityResolutionRefusalReason {
+    /// No serialized lost-authority testimony is pending in this domain.
+    NoPendingTestimony,
 }
 
-/// Reason issued-operation process-loss recovery was refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IssuedExpectedOperationFateRefusalReason {
-    /// No issued expected operation is retained.
-    NoIssuedOperation,
-}
-
-/// Complete decision for an issued operation whose process-local authority was lost.
+/// Complete decision for resolving a restored operation-authority loss.
+///
+/// This is the sole recovery path for the operation-domain testimony minted by
+/// validated cold restore (`LP-CLIENT-GOAL` piece 4, r2, 2026-07-18). It takes
+/// no fate parameter: the serialized testimony inside the aggregate is the
+/// consumed value, so a process-loss fate is not publicly constructible and
+/// cannot terminalize an operation whose live correlation still exists.
 #[derive(Debug, PartialEq, Eq)]
-pub enum IssuedExpectedOperationFateDecision {
-    /// Process loss cleared the non-detach expected slot.
+pub enum LostOperationAuthorityDecision {
+    /// The consumed testimony terminalized the lost non-detach operation.
     Recorded {
-        /// Resulting aggregate.
+        /// Resulting aggregate with an empty expected-operation slot.
         aggregate: ClientParticipantAggregate,
-        /// Exact operation terminalized as process-lost.
+        /// Exact operation whose issued authority was destroyed.
         request: ClientRequest,
-        /// Consumed process fate.
-        fate: IssuedExpectedOperationFate,
+        /// Consumed take-once testimony.
+        testimony: super::LostAuthorityTestimony,
     },
-    /// A restored token-bearing detach lost only its process-local effect and
-    /// was parked for exact-token recovery.
+    /// The consumed testimony parked the exact-token detach for replay.
     DetachParked {
         /// Resulting aggregate with no live send effect.
         aggregate: ClientParticipantAggregate,
         /// Exact detach retained for replay.
         request: ClientRequest,
-        /// Consumed process-loss abandonment.
-        fate: IssuedExpectedOperationFate,
+        /// Consumed take-once testimony.
+        testimony: super::LostAuthorityTestimony,
     },
-    /// Aggregate and fate were retained unchanged.
+    /// No pending testimony existed; the aggregate is unchanged.
     Refused {
         /// Unchanged aggregate.
         aggregate: ClientParticipantAggregate,
-        /// Retained process fate.
-        fate: IssuedExpectedOperationFate,
         /// Closed refusal reason.
-        reason: IssuedExpectedOperationFateRefusalReason,
+        reason: LostAuthorityResolutionRefusalReason,
     },
 }
 
-/// Records process loss for a restored issued non-detach operation.
+/// Consumes the pending operation-domain lost-authority testimony exactly once.
+///
+/// A second call after consumption returns a typed refusal without mutation,
+/// so the take-once atom can never resolve the same loss twice.
 #[must_use]
-pub fn record_issued_expected_operation_fate(
+pub fn resolve_lost_operation_authority(
     mut aggregate: ClientParticipantAggregate,
-    fate: IssuedExpectedOperationFate,
-) -> IssuedExpectedOperationFateDecision {
-    let Some(expected) = aggregate.expected.as_ref() else {
-        return IssuedExpectedOperationFateDecision::Refused {
+) -> LostOperationAuthorityDecision {
+    let Some(expected) = aggregate.expected.as_mut() else {
+        return LostOperationAuthorityDecision::Refused {
             aggregate,
-            fate,
-            reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
+            reason: LostAuthorityResolutionRefusalReason::NoPendingTestimony,
         };
     };
-    if !expected.issued {
-        return IssuedExpectedOperationFateDecision::Refused {
+    let Some(testimony) = expected.lost.take() else {
+        return LostOperationAuthorityDecision::Refused {
             aggregate,
-            fate,
-            reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
+            reason: LostAuthorityResolutionRefusalReason::NoPendingTestimony,
         };
-    }
+    };
     if matches!(expected.request, ClientRequest::Detach(_)) {
-        let coupled_in_flight = matches!(
-            aggregate.detach_replay.status(),
-            Some(DetachReplayStatus::InFlight)
-        );
-        if !coupled_in_flight {
-            return IssuedExpectedOperationFateDecision::Refused {
-                aggregate,
-                fate,
-                reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
-            };
-        }
+        expected.issued = false;
         let request = expected.request.clone();
-        if let Some(expected) = aggregate.expected.as_mut() {
-            expected.issued = false;
-        }
         if let replay::DetachReplayState::Recorded { status, .. } =
             &mut aggregate.detach_replay.state
         {
             *status = DetachReplayStatus::Parked;
         }
-        return IssuedExpectedOperationFateDecision::DetachParked {
+        return LostOperationAuthorityDecision::DetachParked {
             aggregate,
             request,
-            fate,
+            testimony,
         };
     }
-    match aggregate.expected.take() {
-        Some(expected) => IssuedExpectedOperationFateDecision::Recorded {
-            aggregate,
-            request: expected.request,
-            fate,
-        },
-        None => IssuedExpectedOperationFateDecision::Refused {
-            aggregate,
-            fate,
-            reason: IssuedExpectedOperationFateRefusalReason::NoIssuedOperation,
-        },
+    let request = expected.request.clone();
+    aggregate.expected = None;
+    LostOperationAuthorityDecision::Recorded {
+        aggregate,
+        request,
+        testimony,
     }
 }
 
@@ -341,6 +326,9 @@ pub enum ExpectedOperationFateRefusalReason {
     StaleCorrelation,
     /// Detach must use its lossless replay-specific transport fate.
     DetachUsesReplayFate,
+    /// A restore already testified this issued authority destroyed; only the
+    /// pending testimony can resolve it (r2, 2026-07-18).
+    LostAuthorityPending,
 }
 
 /// Complete typed fate decision for an issued non-detach operation.
@@ -393,6 +381,14 @@ pub fn record_expected_operation_fate(
             correlation,
             fate,
             reason: ExpectedOperationFateRefusalReason::NoIssuedOperation,
+        };
+    }
+    if expected.lost.is_some() {
+        return ExpectedOperationFateDecision::Refused {
+            aggregate,
+            correlation,
+            fate,
+            reason: ExpectedOperationFateRefusalReason::LostAuthorityPending,
         };
     }
     if expected.authorization != correlation.authorization {
@@ -476,6 +472,18 @@ pub fn record_operation(
             reason: ClientOperationRecordRefusalReason::OutstandingOperation,
         });
     }
+    if aggregate.restored_abandonment.is_some()
+        && matches!(
+            request,
+            ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
+        )
+    {
+        return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
+            aggregate,
+            request,
+            reason: ClientOperationRecordRefusalReason::AbandonmentPending,
+        });
+    }
     let Some(authorization) = aggregate.next_operation_authorization.checked_add(1) else {
         return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
             aggregate,
@@ -483,48 +491,22 @@ pub fn record_operation(
             reason: ClientOperationRecordRefusalReason::AuthorizationExhausted,
         });
     };
-    let mut prior_replay = None;
-    if let ClientRequest::Detach(value) = &request {
-        let envelope = crate::wire::DetachEnvelope {
-            conversation_id: value.conversation_id,
-            participant_id: value.participant_id,
-            capability_generation: value.capability_generation,
-            detach_attempt_token: value.detach_attempt_token,
-        };
-        match &aggregate.detach_replay.state {
-            replay::DetachReplayState::Empty => {
-                prior_replay = Some(aggregate.detach_replay.state.clone());
-                aggregate.detach_replay.state = replay::DetachReplayState::Recorded {
-                    request: envelope,
-                    status: DetachReplayStatus::Parked,
-                };
-            }
-            replay::DetachReplayState::Recorded {
-                request: retained, ..
-            } if retained == &envelope => {}
-            replay::DetachReplayState::Recorded { .. }
-                if aggregate.detach_replay.can_replace_with(&envelope) =>
-            {
-                prior_replay = Some(aggregate.detach_replay.state.clone());
-                aggregate.detach_replay.state = replay::DetachReplayState::Recorded {
-                    request: envelope,
-                    status: DetachReplayStatus::Parked,
-                };
-            }
-            replay::DetachReplayState::Recorded { .. } => {
-                return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
-                    aggregate,
-                    request,
-                    reason: ClientOperationRecordRefusalReason::DetachReplayOutstanding,
-                });
-            }
+    let prior_replay = match admit_detach_replay(&mut aggregate, &request) {
+        Ok(prior_replay) => prior_replay,
+        Err(reason) => {
+            return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
+                aggregate,
+                request,
+                reason,
+            });
         }
-    }
+    };
     aggregate.next_operation_authorization = authorization;
     aggregate.expected = Some(ExpectedOperationState {
         request: request.clone(),
         issued: false,
         authorization,
+        lost: None,
     });
     ClientOperationRecordDecision::Pending(ClientPendingOperationRecord {
         successor: aggregate,
@@ -534,4 +516,59 @@ pub fn record_operation(
         },
         prior_replay,
     })
+}
+
+/// Atomically admits a detach into the replay lifecycle during recording.
+///
+/// Re-recording the retained same envelope is admitted only over a `Parked`
+/// replay: a superseded, Leave-superseded, terminal, or in-flight replay
+/// status is not compatible with a fresh first send and refuses with a typed
+/// reason instead of reviving expected-detach authority over an inactive
+/// replay (r2, 2026-07-18).
+fn admit_detach_replay(
+    aggregate: &mut ClientParticipantAggregate,
+    request: &ClientRequest,
+) -> Result<Option<replay::DetachReplayState>, ClientOperationRecordRefusalReason> {
+    let ClientRequest::Detach(value) = request else {
+        return Ok(None);
+    };
+    let envelope = crate::wire::DetachEnvelope {
+        conversation_id: value.conversation_id,
+        participant_id: value.participant_id,
+        capability_generation: value.capability_generation,
+        detach_attempt_token: value.detach_attempt_token,
+    };
+    match &aggregate.detach_replay.state {
+        replay::DetachReplayState::Empty => {
+            let prior = aggregate.detach_replay.state.clone();
+            aggregate.detach_replay.state = replay::DetachReplayState::Recorded {
+                request: envelope,
+                status: DetachReplayStatus::Parked,
+            };
+            Ok(Some(prior))
+        }
+        replay::DetachReplayState::Recorded {
+            request: retained,
+            status,
+        } if retained == &envelope => {
+            if matches!(status, DetachReplayStatus::Parked) {
+                Ok(Some(aggregate.detach_replay.state.clone()))
+            } else {
+                Err(ClientOperationRecordRefusalReason::DetachReplayIncompatible)
+            }
+        }
+        replay::DetachReplayState::Recorded { .. }
+            if aggregate.detach_replay.can_replace_with(&envelope) =>
+        {
+            let prior = aggregate.detach_replay.state.clone();
+            aggregate.detach_replay.state = replay::DetachReplayState::Recorded {
+                request: envelope,
+                status: DetachReplayStatus::Parked,
+            };
+            Ok(Some(prior))
+        }
+        replay::DetachReplayState::Recorded { .. } => {
+            Err(ClientOperationRecordRefusalReason::DetachReplayOutstanding)
+        }
+    }
 }

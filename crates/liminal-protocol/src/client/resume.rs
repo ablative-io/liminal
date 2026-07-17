@@ -2,9 +2,9 @@ use alloc::vec::Vec;
 
 use super::{
     ClientBindingState, ClientParticipantAggregate, DetachReplayStatus, DetachReplayTerminal,
-    ExpectedOperationState, ReconnectAggregate, RestoredExpectedOperationAbandonment,
-    RestoredExpectedOperationAbandonmentReason, SdkDetachReplayAggregate,
-    reconnect::ReconnectMachineState, replay::DetachReplayState,
+    ExpectedOperationState, LostAuthorityKind, LostAuthorityTestimony, ReconnectAggregate,
+    RestoredExpectedOperationAbandonment, RestoredExpectedOperationAbandonmentReason,
+    SdkDetachReplayAggregate, reconnect::ReconnectMachineState, replay::DetachReplayState,
 };
 use super::{resume_decode::decode_facts, resume_encode::encode_aggregate};
 use crate::wire::{ClientRequest, CodecError};
@@ -24,6 +24,8 @@ pub enum ClientResumeRecordSection {
     DetachReplay,
     /// Reconnect permit or attempt state.
     Reconnect,
+    /// Pending tokenless abandonment.
+    Abandonment,
 }
 
 /// Failure while creating a canonical record from live client state.
@@ -107,6 +109,13 @@ pub enum ClientResumeRestoreError {
     ExpectedDetachActiveReplayMismatch,
     /// Reconnect authorization is zero or exceeds its durable counter.
     InvalidReconnectAuthorization,
+    /// A serialized lost-authority testimony does not match the destroyed
+    /// authority its slot and state imply (r2, 2026-07-18).
+    LostAuthorityTestimonyMismatch,
+    /// A pending tokenless abandonment coexists with a tokenless expected
+    /// operation, which the crate's admission gate never produces
+    /// (r2, 2026-07-18).
+    PendingAbandonmentConflict,
     /// Private canonical bytes no longer decode; this is unreachable through public construction.
     CorruptRecord(ClientResumeRecordDecodeError),
 }
@@ -160,21 +169,48 @@ impl ClientResumeRecord {
             decode_facts(&self.canonical).map_err(ClientResumeRestoreError::CorruptRecord)?;
         validate_facts(&facts)?;
         let mut expected = facts.expected;
-        let restored_abandonment = if expected.as_ref().is_some_and(|expected| {
+        let tokenless = expected.as_ref().is_some_and(|expected| {
             matches!(
                 expected.request,
                 ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
             )
-        }) {
+        });
+        let restored_abandonment = if tokenless {
             expected
                 .take()
                 .map(|expected| RestoredExpectedOperationAbandonment {
                     request: expected.request,
                     reason: RestoredExpectedOperationAbandonmentReason::TokenlessAfterCrash,
+                    was_issued: expected.issued,
                 })
         } else {
-            None
+            facts.abandonment
         };
+        if let Some(expected) = expected.as_mut()
+            && expected.issued
+            && expected.lost.is_none()
+        {
+            let kind = if matches!(expected.request, ClientRequest::Detach(_)) {
+                LostAuthorityKind::DetachTransportAttempt
+            } else {
+                LostAuthorityKind::IssuedOperationCorrelation
+            };
+            expected.lost = Some(LostAuthorityTestimony::mint(kind));
+        }
+        let mut reconnect_lost = facts.reconnect_lost;
+        if reconnect_lost.is_none() {
+            reconnect_lost = match facts.reconnect_state {
+                ReconnectMachineState::Permit { issued: true, .. } => Some(
+                    LostAuthorityTestimony::mint(LostAuthorityKind::ReconnectPermit),
+                ),
+                ReconnectMachineState::Attempt { .. } => Some(LostAuthorityTestimony::mint(
+                    LostAuthorityKind::ReconnectAttempt,
+                )),
+                ReconnectMachineState::Parked
+                | ReconnectMachineState::Permit { issued: false, .. }
+                | ReconnectMachineState::Online => None,
+            };
+        }
         Ok(ClientParticipantAggregate {
             binding: facts.binding,
             expected,
@@ -185,6 +221,7 @@ impl ClientResumeRecord {
             reconnect: ReconnectAggregate {
                 state: facts.reconnect_state,
                 next_authorization: facts.next_authorization,
+                lost: reconnect_lost,
             },
             restored_abandonment,
         })
@@ -229,6 +266,8 @@ pub(super) struct DecodedFacts {
     pub(super) replay: DetachReplayState,
     pub(super) reconnect_state: ReconnectMachineState,
     pub(super) next_authorization: u64,
+    pub(super) reconnect_lost: Option<LostAuthorityTestimony>,
+    pub(super) abandonment: Option<RestoredExpectedOperationAbandonment>,
 }
 
 fn validate_facts(facts: &DecodedFacts) -> Result<(), ClientResumeRestoreError> {
@@ -310,6 +349,55 @@ fn validate_facts(facts: &DecodedFacts) -> Result<(), ClientResumeRestoreError> 
     };
     if authorization.is_some_and(|value| value == 0 || value > facts.next_authorization) {
         return Err(ClientResumeRestoreError::InvalidReconnectAuthorization);
+    }
+    validate_testimony_coupling(facts)?;
+    Ok(())
+}
+
+/// Enforces both coupling directions for the serialized loss atoms: an atom
+/// whose slot or state does not imply the recorded destruction is refused, and
+/// a pending abandonment can never coexist with the tokenless expected
+/// operation that would mint a second one (r2, 2026-07-18).
+fn validate_testimony_coupling(facts: &DecodedFacts) -> Result<(), ClientResumeRestoreError> {
+    if let Some(expected) = facts.expected.as_ref()
+        && let Some(testimony) = expected.lost.as_ref()
+    {
+        let tokenless = matches!(
+            expected.request,
+            ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
+        );
+        let expected_kind = if matches!(expected.request, ClientRequest::Detach(_)) {
+            LostAuthorityKind::DetachTransportAttempt
+        } else {
+            LostAuthorityKind::IssuedOperationCorrelation
+        };
+        if !expected.issued || tokenless || testimony.kind() != expected_kind {
+            return Err(ClientResumeRestoreError::LostAuthorityTestimonyMismatch);
+        }
+    }
+    if let Some(testimony) = facts.reconnect_lost.as_ref() {
+        let state_kind = match facts.reconnect_state {
+            ReconnectMachineState::Permit { issued: true, .. } => {
+                Some(LostAuthorityKind::ReconnectPermit)
+            }
+            ReconnectMachineState::Attempt { .. } => Some(LostAuthorityKind::ReconnectAttempt),
+            ReconnectMachineState::Parked
+            | ReconnectMachineState::Permit { issued: false, .. }
+            | ReconnectMachineState::Online => None,
+        };
+        if state_kind != Some(testimony.kind()) {
+            return Err(ClientResumeRestoreError::LostAuthorityTestimonyMismatch);
+        }
+    }
+    if facts.abandonment.is_some()
+        && facts.expected.as_ref().is_some_and(|expected| {
+            matches!(
+                expected.request,
+                ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
+            )
+        })
+    {
+        return Err(ClientResumeRestoreError::PendingAbandonmentConflict);
     }
     Ok(())
 }

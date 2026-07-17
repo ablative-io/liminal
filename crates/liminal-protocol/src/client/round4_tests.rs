@@ -54,6 +54,7 @@ fn expected_detach(token: u8, issued: bool) -> TestResult<ExpectedOperationState
         request: detach_request(token)?,
         issued,
         authorization: 1,
+        lost: None,
     })
 }
 
@@ -109,6 +110,7 @@ fn active_replay_requires_exact_expected_detach_full_matrix() -> TestResult {
                 }),
                 issued: matches!(status, DetachReplayStatus::InFlight),
                 authorization: 1,
+                lost: None,
             }),
             Some(expected_detach(
                 146,
@@ -165,6 +167,7 @@ fn inbound_wrong_secret_refuses_with_authority_retained() -> TestResult {
         }),
         issued: true,
         authorization: 1,
+        lost: None,
     });
     aggregate.next_operation_authorization = 1;
     let response = crate::wire::AttachBound::ordinary(
@@ -208,6 +211,7 @@ fn tokenless_restore_is_typed_abandoned_and_never_released() -> TestResult {
             request: request.clone(),
             issued,
             authorization: 1,
+            lost: None,
         });
         aggregate.next_operation_authorization = 1;
         let mut restored = aggregate

@@ -1,4 +1,7 @@
-use super::ClientParticipantAggregate;
+use super::{
+    ClientParticipantAggregate, LostAuthorityTestimony,
+    barrier::LostAuthorityResolutionRefusalReason,
+};
 use crate::outcome::{ReconnectDelayResult, ReconnectRequiredEvent, ReconnectState};
 
 /// Established-connection transport fate authorizing one reconnect attempt.
@@ -67,6 +70,7 @@ pub(super) enum ReconnectMachineState {
 pub struct ReconnectAggregate {
     pub(super) state: ReconnectMachineState,
     pub(super) next_authorization: u64,
+    pub(super) lost: Option<LostAuthorityTestimony>,
 }
 
 impl ReconnectAggregate {
@@ -74,6 +78,7 @@ impl ReconnectAggregate {
         Self {
             state: ReconnectMachineState::Parked,
             next_authorization: 0,
+            lost: None,
         }
     }
 
@@ -275,9 +280,10 @@ pub enum RecoveredReconnectPermitDecision {
 
 /// Releases an unissued permit created only by a committed cold record.
 ///
-/// A record whose own issuance bit is true is never re-minted. The storage
-/// owner may instead record [`IssuedReconnectPermitFate::ProcessLost`] through
-/// [`record_issued_permit_fate`] to abandon the lost process-local capability.
+/// A record whose own issuance bit is true is never re-minted: restore
+/// testifies that loss instead, and only [`resolve_lost_reconnect_authority`]
+/// consumes the serialized testimony to abandon the lost process-local
+/// capability.
 #[must_use]
 pub const fn recover_reconnect_permit(
     mut aggregate: ClientParticipantAggregate,
@@ -311,95 +317,51 @@ pub const fn recover_reconnect_permit(
     }
 }
 
-/// Typed crash fate for a permit that its record says was already issued.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum IssuedReconnectPermitFate {
-    /// The process-local permit was lost during process termination.
-    ProcessLost,
-}
-
-/// Typed crash fate for an attempt interrupted before its transport fate arrived.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InterruptedReconnectAttemptFate {
-    /// Process termination lost the process-local in-progress attempt authority.
-    ProcessLost,
-}
-
-/// Reason a restored reconnect-state exit was refused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReconnectRestoreExitRefusalReason {
-    /// The aggregate does not retain an issued permit.
-    NoIssuedPermit,
-    /// The aggregate does not retain an in-progress attempt.
-    NoAttempt,
-}
-
-/// Complete decision for terminalizing process-local reconnect authority lost on restore.
+/// Complete decision for resolving restored reconnect-authority loss.
+///
+/// This is the sole recovery path for the reconnect-domain testimony minted by
+/// validated cold restore (`LP-CLIENT-GOAL` pieces 3 and 4, r2, 2026-07-18).
+/// It takes no fate parameter: reconnect process-fate values are not publicly
+/// constructible, so a caller can never terminalize an issued permit or
+/// in-progress attempt whose live authority still exists.
 #[derive(Debug, PartialEq, Eq)]
-pub enum ReconnectRestoreExitDecision<F> {
-    /// Lost process authority was recorded and reconnect returned to Parked.
+pub enum LostReconnectAuthorityDecision {
+    /// The consumed testimony parked the producer without minting a
+    /// replacement; only a later fresh event authorizes a new real attempt.
     Recorded {
-        /// Resulting aggregate.
+        /// Resulting aggregate parked without timer or replacement authority.
         aggregate: ClientParticipantAggregate,
-        /// Consumed typed process fate.
-        fate: F,
+        /// Consumed take-once testimony.
+        testimony: LostAuthorityTestimony,
     },
-    /// State did not match; aggregate and fate are unchanged.
+    /// No pending testimony existed; the aggregate is unchanged.
     Refused {
         /// Unchanged aggregate.
         aggregate: ClientParticipantAggregate,
-        /// Retained typed process fate.
-        fate: F,
         /// Closed refusal reason.
-        reason: ReconnectRestoreExitRefusalReason,
+        reason: LostAuthorityResolutionRefusalReason,
     },
 }
 
-/// Records loss of an already-issued permit after cold process replacement.
+/// Consumes the pending reconnect-domain lost-authority testimony exactly once.
 ///
-/// This transition does not mint a replacement. It parks the producer so only
-/// a later fresh event can authorize a new real attempt.
+/// A second call after consumption returns a typed refusal without mutation.
 #[must_use]
-pub const fn record_issued_permit_fate(
+pub const fn resolve_lost_reconnect_authority(
     mut aggregate: ClientParticipantAggregate,
-    fate: IssuedReconnectPermitFate,
-) -> ReconnectRestoreExitDecision<IssuedReconnectPermitFate> {
-    if matches!(
-        aggregate.reconnect.state,
-        ReconnectMachineState::Permit { issued: true, .. }
-    ) {
-        aggregate.reconnect.state = ReconnectMachineState::Parked;
-        ReconnectRestoreExitDecision::Recorded { aggregate, fate }
-    } else {
-        ReconnectRestoreExitDecision::Refused {
-            aggregate,
-            fate,
-            reason: ReconnectRestoreExitRefusalReason::NoIssuedPermit,
+) -> LostReconnectAuthorityDecision {
+    match aggregate.reconnect.lost.take() {
+        Some(testimony) => {
+            aggregate.reconnect.state = ReconnectMachineState::Parked;
+            LostReconnectAuthorityDecision::Recorded {
+                aggregate,
+                testimony,
+            }
         }
-    }
-}
-
-/// Records that a cold-restored in-progress attempt lost its process authority.
-///
-/// Attempt is therefore not a restore sink: this typed crash decision parks it
-/// without manufacturing success, failure, a timer, or a replacement permit.
-#[must_use]
-pub const fn record_interrupted_attempt_fate(
-    mut aggregate: ClientParticipantAggregate,
-    fate: InterruptedReconnectAttemptFate,
-) -> ReconnectRestoreExitDecision<InterruptedReconnectAttemptFate> {
-    if matches!(
-        aggregate.reconnect.state,
-        ReconnectMachineState::Attempt { .. }
-    ) {
-        aggregate.reconnect.state = ReconnectMachineState::Parked;
-        ReconnectRestoreExitDecision::Recorded { aggregate, fate }
-    } else {
-        ReconnectRestoreExitDecision::Refused {
+        None => LostReconnectAuthorityDecision::Refused {
             aggregate,
-            fate,
-            reason: ReconnectRestoreExitRefusalReason::NoAttempt,
-        }
+            reason: LostAuthorityResolutionRefusalReason::NoPendingTestimony,
+        },
     }
 }
 
@@ -425,6 +387,9 @@ pub enum ReconnectAttemptRefusalReason {
     NoPermit,
     /// Permit belongs to an older or different authorization.
     StalePermit,
+    /// A restore already testified the issued authority destroyed; only the
+    /// pending testimony can resolve it (r2, 2026-07-18).
+    LostAuthorityPending,
 }
 
 /// Complete permit redemption decision.
@@ -454,6 +419,13 @@ pub fn redeem_attempt(
     mut aggregate: ClientParticipantAggregate,
     permit: ReconnectAttemptPermit,
 ) -> ReconnectAttemptDecision {
+    if aggregate.reconnect.lost.is_some() {
+        return ReconnectAttemptDecision::Refused {
+            aggregate,
+            permit,
+            reason: ReconnectAttemptRefusalReason::LostAuthorityPending,
+        };
+    }
     match aggregate.reconnect.state {
         ReconnectMachineState::Permit {
             authorization,
@@ -503,6 +475,9 @@ pub enum ReconnectAttemptFateRefusalReason {
     NoAttempt,
     /// Attempt belongs to an older authorization.
     StaleAttempt,
+    /// A restore already testified the in-progress authority destroyed; only
+    /// the pending testimony can resolve it (r2, 2026-07-18).
+    LostAuthorityPending,
 }
 
 /// Complete attempt-fate decision.
@@ -530,6 +505,14 @@ pub fn record_attempt_fate(
     attempt: ReconnectInProgressAttempt,
     fate: ReconnectAttemptFate,
 ) -> ReconnectAttemptFateDecision {
+    if aggregate.reconnect.lost.is_some() {
+        return ReconnectAttemptFateDecision::Refused {
+            aggregate,
+            attempt,
+            fate,
+            reason: ReconnectAttemptFateRefusalReason::LostAuthorityPending,
+        };
+    }
     match aggregate.reconnect.state {
         ReconnectMachineState::Attempt {
             authorization,

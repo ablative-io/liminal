@@ -72,9 +72,26 @@ fn b1_resume_preserves_issued_permit_testimony() -> TestResult {
     else {
         return Err("issued testimony must not re-mint permit");
     };
+    assert_eq!(
+        aggregate
+            .lost_reconnect_testimony()
+            .map(super::LostAuthorityTestimony::kind),
+        Some(LostAuthorityKind::ReconnectPermit)
+    );
+    let LostReconnectAuthorityDecision::Recorded {
+        aggregate,
+        testimony,
+    } = resolve_lost_reconnect_authority(aggregate)
+    else {
+        return Err("issued-permit loss must resolve through its testimony");
+    };
+    assert_eq!(testimony.kind(), LostAuthorityKind::ReconnectPermit);
     assert!(matches!(
-        record_issued_permit_fate(aggregate, IssuedReconnectPermitFate::ProcessLost),
-        ReconnectRestoreExitDecision::Recorded { .. }
+        resolve_lost_reconnect_authority(aggregate),
+        LostReconnectAuthorityDecision::Refused {
+            reason: LostAuthorityResolutionRefusalReason::NoPendingTestimony,
+            ..
+        }
     ));
     Ok(())
 }
@@ -99,10 +116,16 @@ fn b2_restored_attempt_has_typed_process_loss_exit() -> TestResult {
         .map_err(|_| "attempt must encode")?
         .restore()
         .map_err(|_| "attempt must restore")?;
-    let ReconnectRestoreExitDecision::Recorded { aggregate, .. } =
-        record_interrupted_attempt_fate(restored, InterruptedReconnectAttemptFate::ProcessLost)
+    assert_eq!(
+        restored
+            .lost_reconnect_testimony()
+            .map(super::LostAuthorityTestimony::kind),
+        Some(LostAuthorityKind::ReconnectAttempt)
+    );
+    let LostReconnectAuthorityDecision::Recorded { aggregate, .. } =
+        resolve_lost_reconnect_authority(restored)
     else {
-        return Err("restored attempt must have typed exit");
+        return Err("restored attempt must resolve through its testimony");
     };
     assert!(matches!(
         record_transport_fate(aggregate, EstablishedConnectionTransportFate::Lost),
@@ -178,15 +201,24 @@ fn b4_restored_issued_operation_has_typed_process_loss_exit() -> TestResult {
         .map_err(|_| "issued aggregate must encode")?
         .restore()
         .map_err(|_| "issued aggregate must restore")?;
-    let IssuedExpectedOperationFateDecision::Recorded { aggregate, .. } =
-        record_issued_expected_operation_fate(restored, IssuedExpectedOperationFate::ProcessLost)
+    assert_eq!(
+        restored
+            .lost_operation_testimony()
+            .map(super::LostAuthorityTestimony::kind),
+        Some(LostAuthorityKind::IssuedOperationCorrelation)
+    );
+    let LostOperationAuthorityDecision::Recorded { aggregate, .. } =
+        resolve_lost_operation_authority(restored)
     else {
-        return Err("restored issued operation must have process-loss exit");
+        return Err("restored issued operation must resolve through its testimony");
     };
     assert!(!aggregate.has_expected_operation());
     assert!(matches!(
-        record_issued_expected_operation_fate(aggregate, IssuedExpectedOperationFate::ProcessLost,),
-        IssuedExpectedOperationFateDecision::Refused { .. }
+        resolve_lost_operation_authority(aggregate),
+        LostOperationAuthorityDecision::Refused {
+            reason: LostAuthorityResolutionRefusalReason::NoPendingTestimony,
+            ..
+        }
     ));
     Ok(())
 }
@@ -257,6 +289,7 @@ fn m6_binding_state_gates_outbound_and_inbound() -> TestResult {
         request: enrollment,
         issued: true,
         authorization: 1,
+        lost: None,
     });
     aggregate.next_operation_authorization = 1;
     let response = EnrollBound::new(

@@ -1,6 +1,7 @@
 use super::{
     ClientBindingState, DetachReplayStatus, DetachReplayTerminal, ExpectedOperationState,
-    ReconnectFreshEvent,
+    LostAuthorityKind, LostAuthorityTestimony, ReconnectFreshEvent,
+    RestoredExpectedOperationAbandonment, RestoredExpectedOperationAbandonmentReason,
     reconnect::ReconnectMachineState,
     replay::DetachReplayState,
     resume::{
@@ -33,7 +34,8 @@ pub(super) fn decode_facts(input: &[u8]) -> Result<DecodedFacts, ClientResumeRec
     let next_operation_authorization = reader.u64()?;
     let expected = decode_expected(&mut reader)?;
     let replay = decode_replay(&mut reader)?;
-    let (reconnect_state, next_authorization) = decode_reconnect(&mut reader)?;
+    let (reconnect_state, next_authorization, reconnect_lost) = decode_reconnect(&mut reader)?;
+    let abandonment = decode_abandonment(&mut reader)?;
     if reader.remaining() != 0 {
         return Err(ClientResumeRecordDecodeError::TrailingBytes {
             remaining: reader.remaining(),
@@ -46,6 +48,8 @@ pub(super) fn decode_facts(input: &[u8]) -> Result<DecodedFacts, ClientResumeRec
         replay,
         reconnect_state,
         next_authorization,
+        reconnect_lost,
+        abandonment,
     })
 }
 
@@ -103,12 +107,14 @@ fn decode_expected(
         1 => {
             let issued = decode_bool(reader, ClientResumeRecordSection::ExpectedOperation)?;
             let authorization = reader.u64()?;
+            let lost = decode_testimony(reader, ClientResumeRecordSection::ExpectedOperation)?;
             let bytes = reader.blob()?;
             match decode(bytes, ReceiverDirection::Server) {
                 Ok(ParticipantFrame::ClientRequest(request)) => Ok(Some(ExpectedOperationState {
                     request,
                     issued,
                     authorization,
+                    lost,
                 })),
                 Ok(ParticipantFrame::ServerValue(_) | ParticipantFrame::ServerPush(_)) => {
                     Err(ClientResumeRecordDecodeError::NestedCodec {
@@ -205,7 +211,10 @@ fn decode_terminal(
 
 fn decode_reconnect(
     reader: &mut Reader<'_>,
-) -> Result<(ReconnectMachineState, u64), ClientResumeRecordDecodeError> {
+) -> Result<
+    (ReconnectMachineState, u64, Option<LostAuthorityTestimony>),
+    ClientResumeRecordDecodeError,
+> {
     let next_authorization = reader.u64()?;
     let state = match reader.u8()? {
         0 => ReconnectMachineState::Parked,
@@ -231,7 +240,67 @@ fn decode_reconnect(
             });
         }
     };
-    Ok((state, next_authorization))
+    let lost = decode_testimony(reader, ClientResumeRecordSection::Reconnect)?;
+    Ok((state, next_authorization, lost))
+}
+
+fn decode_testimony(
+    reader: &mut Reader<'_>,
+    section: ClientResumeRecordSection,
+) -> Result<Option<LostAuthorityTestimony>, ClientResumeRecordDecodeError> {
+    let kind = match reader.u8()? {
+        0 => return Ok(None),
+        1 => LostAuthorityKind::IssuedOperationCorrelation,
+        2 => LostAuthorityKind::DetachTransportAttempt,
+        3 => LostAuthorityKind::ReconnectPermit,
+        4 => LostAuthorityKind::ReconnectAttempt,
+        tag => return Err(ClientResumeRecordDecodeError::InvalidTag { section, tag }),
+    };
+    Ok(Some(LostAuthorityTestimony::mint(kind)))
+}
+
+fn decode_abandonment(
+    reader: &mut Reader<'_>,
+) -> Result<Option<RestoredExpectedOperationAbandonment>, ClientResumeRecordDecodeError> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => {
+            let reason = match reader.u8()? {
+                0 => RestoredExpectedOperationAbandonmentReason::TokenlessAfterCrash,
+                tag => {
+                    return Err(ClientResumeRecordDecodeError::InvalidTag {
+                        section: ClientResumeRecordSection::Abandonment,
+                        tag,
+                    });
+                }
+            };
+            let was_issued = decode_bool(reader, ClientResumeRecordSection::Abandonment)?;
+            let bytes = reader.blob()?;
+            match decode(bytes, ReceiverDirection::Server) {
+                Ok(ParticipantFrame::ClientRequest(request)) => {
+                    Ok(Some(RestoredExpectedOperationAbandonment {
+                        request,
+                        reason,
+                        was_issued,
+                    }))
+                }
+                Ok(ParticipantFrame::ServerValue(_) | ParticipantFrame::ServerPush(_)) => {
+                    Err(ClientResumeRecordDecodeError::NestedCodec {
+                        section: ClientResumeRecordSection::Abandonment,
+                        source: None,
+                    })
+                }
+                Err(source) => Err(ClientResumeRecordDecodeError::NestedCodec {
+                    section: ClientResumeRecordSection::Abandonment,
+                    source: Some(source),
+                }),
+            }
+        }
+        tag => Err(ClientResumeRecordDecodeError::InvalidTag {
+            section: ClientResumeRecordSection::Abandonment,
+            tag,
+        }),
+    }
 }
 
 fn decode_event(

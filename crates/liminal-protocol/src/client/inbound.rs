@@ -16,6 +16,9 @@ pub enum ClientInboundRefusalReason {
     AmbiguousResponse,
     /// An expected-operation response was presented without its one-use send correlation.
     MissingResponseAuthority,
+    /// A restore already testified the issued send authority destroyed; only
+    /// the pending testimony can resolve the operation (r2, 2026-07-18).
+    LostAuthorityPending,
 }
 
 /// Applied inbound value and resulting aggregate.
@@ -192,6 +195,14 @@ fn decide_inbound_inner(
             ClientInboundRefusalReason::DelayedResponse,
         );
     };
+
+    if expected.lost.is_some() {
+        return inbound_refusal(
+            aggregate,
+            value,
+            ClientInboundRefusalReason::LostAuthorityPending,
+        );
+    }
 
     if !has_response_authority {
         return inbound_refusal(
