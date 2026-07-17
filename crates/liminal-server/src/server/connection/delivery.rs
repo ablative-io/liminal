@@ -44,6 +44,42 @@ pub(super) const DELIVERY_SLICE_BUDGET: usize = 32;
 /// use, so a shed reads as a server-side subscription failure to the client.
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
 
+/// The pump's outbound seam (LP-WS-TRANSPORT R1.3): a bounded frame sink the
+/// delivery pump enqueues `Deliver`/`SubscribeError` frames into.
+///
+/// [`OutboundWriter`] (the TCP byte queue) and the WebSocket sibling's
+/// message-framed queue both implement it, so BOTH transports run this ONE
+/// pump — the WebSocket path reuses the delivery logic rather than reimplement
+/// it, and the TCP call sites compile unchanged against the same methods they
+/// always called. The trait deliberately mirrors `OutboundWriter`'s inherent
+/// signatures exactly; it adds no new behaviour.
+pub(super) trait DeliverySink {
+    /// The sink's fixed capacity in bytes (the spec-inherent single-frame bound).
+    fn capacity(&self) -> usize;
+    /// Whether `needed` more bytes fit within the remaining capacity.
+    fn has_room(&self, needed: usize) -> bool;
+    /// Encodes `frame` into the sink.
+    ///
+    /// # Errors
+    /// Returns [`OutboundError`] when the frame overflows the bounded sink or
+    /// cannot be encoded — fatal for the connection, exactly as before.
+    fn enqueue_frame(&mut self, frame: &Frame) -> Result<(), OutboundError>;
+}
+
+impl DeliverySink for OutboundWriter {
+    fn capacity(&self) -> usize {
+        Self::capacity(self)
+    }
+
+    fn has_room(&self, needed: usize) -> bool {
+        Self::has_room(self, needed)
+    }
+
+    fn enqueue_frame(&mut self, frame: &Frame) -> Result<(), OutboundError> {
+        Self::enqueue_frame(self, frame)
+    }
+}
+
 /// Drains ready envelopes from this connection's subscriptions into `outbound`,
 /// encoding each as a `Deliver` frame, up to `budget` frames total this slice.
 ///
@@ -51,9 +87,9 @@ const SERVER_ERROR_CODE: u16 = 0xFFFF;
 /// Returns [`OutboundError`] when the outbound buffer overflows or a delivery
 /// frame cannot be encoded — both are fatal and tear the connection down, since a
 /// dropped or truncated delivery would desync the subscription stream.
-pub(super) fn service_subscriptions(
+pub(super) fn service_subscriptions<Sink: DeliverySink>(
     state: &mut ConnectionProcessState,
-    outbound: &mut OutboundWriter,
+    outbound: &mut Sink,
     budget: usize,
 ) -> Result<Vec<u64>, OutboundError> {
     // Destructure so the subscription map, the delivery-sequence map, and the

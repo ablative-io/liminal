@@ -16,6 +16,10 @@ const CLUSTER_SEED_NODES: &str = "LIMINAL_CLUSTER_SEED_NODES";
 const CLUSTER_LISTEN_ADDRESS: &str = "LIMINAL_CLUSTER_LISTEN_ADDRESS";
 const CLUSTER_COOKIE: &str = "LIMINAL_CLUSTER_COOKIE";
 const AUTH_TOKEN: &str = "LIMINAL_AUTH_TOKEN";
+const WEBSOCKET_LISTEN_ADDRESS: &str = "LIMINAL_WEBSOCKET_LISTEN_ADDRESS";
+const WEBSOCKET_PATH: &str = "LIMINAL_WEBSOCKET_PATH";
+const WEBSOCKET_ALLOWED_ORIGINS: &str = "LIMINAL_WEBSOCKET_ALLOWED_ORIGINS";
+const WEBSOCKET_PING_INTERVAL_MS: &str = "LIMINAL_WEBSOCKET_PING_INTERVAL_MS";
 
 /// Applies supported `LIMINAL_` environment variable overrides to a config.
 ///
@@ -23,11 +27,14 @@ const AUTH_TOKEN: &str = "LIMINAL_AUTH_TOKEN";
 /// variables are `LIMINAL_LISTEN_ADDRESS`, `LIMINAL_HEALTH_LISTEN_ADDRESS`,
 /// `LIMINAL_DRAIN_TIMEOUT_MS`, `LIMINAL_PERSISTENCE_PATH`,
 /// `LIMINAL_CLUSTER_NODE_NAME`, `LIMINAL_CLUSTER_SEED_NODES`,
-/// `LIMINAL_CLUSTER_LISTEN_ADDRESS`, `LIMINAL_CLUSTER_COOKIE`, and
-/// `LIMINAL_AUTH_TOKEN`.
+/// `LIMINAL_CLUSTER_LISTEN_ADDRESS`, `LIMINAL_CLUSTER_COOKIE`,
+/// `LIMINAL_AUTH_TOKEN`, `LIMINAL_WEBSOCKET_LISTEN_ADDRESS`,
+/// `LIMINAL_WEBSOCKET_PATH`, `LIMINAL_WEBSOCKET_ALLOWED_ORIGINS`, and
+/// `LIMINAL_WEBSOCKET_PING_INTERVAL_MS`.
 ///
-/// Unlike the cluster overrides — which refuse to fabricate a `[cluster]` section
-/// that the file did not declare (a partially-specified cluster is unsafe) —
+/// Unlike the cluster and websocket overrides — which refuse to fabricate a
+/// `[cluster]`/`[websocket]` section that the file did not declare (a
+/// partially-specified section is unsafe) —
 /// `LIMINAL_AUTH_TOKEN` MAY create the `[auth]` section when the file omits it.
 /// The auth section is a single scalar secret with no other required fields, so a
 /// deployment can inject the token purely from the environment (the idiomatic way
@@ -88,6 +95,25 @@ where
             CLUSTER_COOKIE => {
                 let cookie = env_string(CLUSTER_COOKIE, &value)?;
                 cluster_required(&mut config, CLUSTER_COOKIE)?.cookie = cookie;
+            }
+            WEBSOCKET_LISTEN_ADDRESS => {
+                let listen_address = parse_socket_addr(WEBSOCKET_LISTEN_ADDRESS, &value)?;
+                websocket_required(&mut config, WEBSOCKET_LISTEN_ADDRESS)?.listen_address =
+                    listen_address;
+            }
+            WEBSOCKET_PATH => {
+                let path = env_string(WEBSOCKET_PATH, &value)?;
+                websocket_required(&mut config, WEBSOCKET_PATH)?.path = path;
+            }
+            WEBSOCKET_ALLOWED_ORIGINS => {
+                let allowed_origins = parse_allowed_origins(&value)?;
+                websocket_required(&mut config, WEBSOCKET_ALLOWED_ORIGINS)?.allowed_origins =
+                    allowed_origins;
+            }
+            WEBSOCKET_PING_INTERVAL_MS => {
+                let interval = parse_u64(WEBSOCKET_PING_INTERVAL_MS, &value)?;
+                websocket_required(&mut config, WEBSOCKET_PING_INTERVAL_MS)?.ping_interval_ms =
+                    Some(interval);
             }
             AUTH_TOKEN => {
                 // A single scalar secret is allowed to create the `[auth]` section
@@ -161,6 +187,52 @@ fn env_string(name: &str, value: &OsStr) -> Result<String, ServerError> {
     })
 }
 
+/// Parses the comma-separated `LIMINAL_WEBSOCKET_ALLOWED_ORIGINS` list. An
+/// empty value yields the empty (fail-closed) list; entries are trimmed and an
+/// empty entry between commas is a typed error rather than a silently dropped
+/// origin. Semantic origin-shape checks stay in config validation so file- and
+/// environment-sourced lists are held to the identical rules.
+fn parse_allowed_origins(value: &OsStr) -> Result<Vec<String>, ServerError> {
+    let value = env_string(WEBSOCKET_ALLOWED_ORIGINS, value)?;
+    if value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    value
+        .split(',')
+        .enumerate()
+        .map(|(index, candidate)| {
+            let candidate = candidate.trim();
+            if candidate.is_empty() {
+                Err(config_load(format!(
+                    "environment variable {WEBSOCKET_ALLOWED_ORIGINS} contains an empty origin \
+                     at position {}",
+                    index + 1
+                )))
+            } else {
+                Ok(candidate.to_owned())
+            }
+        })
+        .collect()
+}
+
+/// Mirrors [`cluster_required`]: the `[websocket]` section has two required
+/// fields with no defaults, so the environment may adjust a declared section but
+/// must never fabricate a partially-specified acceptor.
+fn websocket_required<'a>(
+    config: &'a mut ServerConfig,
+    name: &str,
+) -> Result<&'a mut super::types::WebSocketConfig, ServerError> {
+    config
+        .websocket
+        .as_mut()
+        .ok_or_else(|| ServerError::ConfigValidation {
+            message: format!(
+                "environment variable {name} requires a [websocket] section in the configuration \
+                 file"
+            ),
+        })
+}
+
 fn cluster_required<'a>(
     config: &'a mut ServerConfig,
     name: &str,
@@ -222,6 +294,7 @@ mod tests {
             services: crate::config::types::ServicesConfig::default(),
             limits: crate::config::types::LimitsConfig::default(),
             participant: None,
+            websocket: None,
         })
     }
 
@@ -508,6 +581,105 @@ target_channel = "orders"
 
         assert_eq!(config.listen_address, socket("0.0.0.0:9090")?);
 
+        Ok(())
+    }
+
+    // ---- LP-WS-TRANSPORT R1.1: [websocket] environment overrides ----
+
+    fn sample_config_with_websocket() -> Result<ServerConfig, Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.websocket = Some(crate::config::types::WebSocketConfig {
+            listen_address: socket("127.0.0.1:8082")?,
+            path: "/liminal".to_owned(),
+            allowed_origins: Vec::new(),
+            ping_interval_ms: None,
+        });
+        Ok(config)
+    }
+
+    #[test]
+    fn websocket_overrides_replace_declared_section_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = sample_config_with_websocket()?;
+        let config = apply_env_overrides_from(
+            config,
+            vec![
+                env_pair("LIMINAL_WEBSOCKET_LISTEN_ADDRESS", "0.0.0.0:9292"),
+                env_pair("LIMINAL_WEBSOCKET_PATH", "/bridge"),
+                env_pair(
+                    "LIMINAL_WEBSOCKET_ALLOWED_ORIGINS",
+                    "https://a.example.com, https://b.example.com",
+                ),
+                env_pair("LIMINAL_WEBSOCKET_PING_INTERVAL_MS", "15000"),
+            ],
+        )?;
+        let websocket = config.websocket.ok_or("websocket section missing")?;
+        assert_eq!(websocket.listen_address, socket("0.0.0.0:9292")?);
+        assert_eq!(websocket.path, "/bridge");
+        assert_eq!(
+            websocket.allowed_origins,
+            vec![
+                "https://a.example.com".to_owned(),
+                "https://b.example.com".to_owned()
+            ]
+        );
+        assert_eq!(websocket.ping_interval_ms, Some(15_000));
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_override_without_declared_section_is_refused()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (name, value) in [
+            ("LIMINAL_WEBSOCKET_LISTEN_ADDRESS", "0.0.0.0:9292"),
+            ("LIMINAL_WEBSOCKET_PATH", "/bridge"),
+            ("LIMINAL_WEBSOCKET_ALLOWED_ORIGINS", "https://a.example.com"),
+            ("LIMINAL_WEBSOCKET_PING_INTERVAL_MS", "15000"),
+        ] {
+            let config = sample_config()?;
+            let result = apply_env_overrides_from(config, vec![env_pair(name, value)]);
+            let Err(ServerError::ConfigValidation { message }) = result else {
+                return Err(format!("{name}: fabricating [websocket] must be refused").into());
+            };
+            assert!(
+                message.contains("[websocket]"),
+                "{name}: expected a section-required error, got: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_empty_origin_list_override_is_fail_closed()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let config = sample_config_with_websocket()?;
+        let config = apply_env_overrides_from(
+            config,
+            vec![env_pair("LIMINAL_WEBSOCKET_ALLOWED_ORIGINS", "")],
+        )?;
+        let websocket = config.websocket.ok_or("websocket section missing")?;
+        assert!(websocket.allowed_origins.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_origin_list_with_empty_entry_is_refused() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let config = sample_config_with_websocket()?;
+        let result = apply_env_overrides_from(
+            config,
+            vec![env_pair(
+                "LIMINAL_WEBSOCKET_ALLOWED_ORIGINS",
+                "https://a.example.com,,https://b.example.com",
+            )],
+        );
+        let Err(ServerError::ConfigLoad { message }) = result else {
+            return Err("an empty origin entry must be a typed load error".into());
+        };
+        assert!(
+            message.contains("empty origin"),
+            "expected an empty-origin error, got: {message}"
+        );
         Ok(())
     }
 }

@@ -1261,6 +1261,7 @@ mod durable_store_tests {
             },
             limits: LimitsConfig::default(),
             participant: None,
+            websocket: None,
         }
     }
 

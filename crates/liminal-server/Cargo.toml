@@ -22,6 +22,7 @@ thiserror = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+tungstenite = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }

@@ -317,6 +317,7 @@ fn ephemeral_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>>
         services: crate::config::types::ServicesConfig::default(),
         limits: crate::config::types::LimitsConfig::default(),
         participant: None,
+        websocket: None,
     })
 }
 
@@ -338,6 +339,7 @@ fn durable_orders_config() -> Result<ServerConfig, Box<dyn std::error::Error>> {
         services: crate::config::types::ServicesConfig::default(),
         limits: crate::config::types::LimitsConfig::default(),
         participant: None,
+        websocket: None,
     })
 }
 

@@ -50,6 +50,7 @@ tempfile = "3"
 thiserror = { version = "2", default-features = false }
 tokio = "1"
 toml = "0.8"
+tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"] }
 tracing = "0.1"
 uuid = { version = "1.23.3", features = ["v4"] }
 wasm-bindgen = "0.2.105"

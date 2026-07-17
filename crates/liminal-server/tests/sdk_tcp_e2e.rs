@@ -171,6 +171,7 @@ impl RunningServer {
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
             participant: None,
+            websocket: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
@@ -205,6 +206,7 @@ impl RunningServer {
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
             participant: None,
+            websocket: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;
@@ -237,6 +239,7 @@ impl RunningServer {
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
             participant: None,
+            websocket: None,
         };
         let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
         let supervisor = ConnectionSupervisor::with_services_and_notifier(services, notifier)?;
@@ -277,6 +280,7 @@ impl RunningServer {
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
             participant: None,
+            websocket: None,
         };
         let supervisor = ConnectionSupervisor::from_config(&config)?;
         let listener = ServerListener::bind(&config, supervisor)?;

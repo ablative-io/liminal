@@ -37,6 +37,7 @@ pub fn validate(config: &mut ServerConfig, base_dir: Option<&Path>) -> Result<()
     validate_cluster(config, &mut errors);
     validate_auth(config, &mut errors);
     validate_services(config, &mut errors);
+    validate_websocket(config, &mut errors);
     config.limits.collect_errors(&mut errors);
     validate_participant(config, &mut errors);
     load_channel_schemas(config, base_dir, &mut errors);
@@ -308,6 +309,154 @@ fn validate_services(config: &ServerConfig, errors: &mut Vec<String>) {
     }
 }
 
+/// Semantic checks for the optional `[websocket]` section (LP-WS-TRANSPORT R1.1).
+///
+/// The acceptor is explicit opt-in; when the section is present its listen
+/// address must be a usable, isolated port and its upgrade path must be a single
+/// exact absolute path. The origin allow-list FAILS CLOSED by design, so an
+/// absent or empty list is VALID configuration (it refuses every Origin-bearing
+/// upgrade); individual entries are still checked for obvious malformation so a
+/// typo'd entry cannot silently never match. A configured-but-zero keepalive
+/// interval is rejected: zero is not "disabled" (absence is) and would otherwise
+/// be an unbounded ping rate.
+fn validate_websocket(config: &ServerConfig, errors: &mut Vec<String>) {
+    let Some(websocket) = config.websocket.as_ref() else {
+        return;
+    };
+    validate_websocket_endpoint(config, websocket, errors);
+    validate_websocket_origins(websocket, errors);
+    validate_websocket_keepalive(websocket, errors);
+}
+
+/// Address and upgrade-path rules for the `[websocket]` section.
+fn validate_websocket_endpoint(
+    config: &ServerConfig,
+    websocket: &super::types::WebSocketConfig,
+    errors: &mut Vec<String>,
+) {
+    if websocket.listen_address.port() == 0 {
+        errors.push("websocket.listen_address: port must be non-zero".to_owned());
+    }
+    if websocket.listen_address == config.listen_address {
+        errors.push(
+            "websocket.listen_address: must differ from listen_address (the WebSocket \
+             acceptor is a sibling listener, not the main wire port)"
+                .to_owned(),
+        );
+    }
+    if websocket.listen_address == config.health_listen_address {
+        errors.push("websocket.listen_address: must differ from health_listen_address".to_owned());
+    }
+    if let Some(cluster) = config.cluster.as_ref() {
+        if websocket.listen_address == cluster.listen_address {
+            errors.push(
+                "websocket.listen_address: must differ from cluster.listen_address".to_owned(),
+            );
+        }
+    }
+
+    if websocket.path.is_empty() {
+        errors.push("websocket.path: upgrade path must not be empty".to_owned());
+    } else if !websocket.path.starts_with('/') {
+        errors.push("websocket.path: upgrade path must start with '/'".to_owned());
+    }
+    if websocket
+        .path
+        .chars()
+        .any(|character| character.is_ascii_whitespace() || character.is_ascii_control())
+    {
+        errors.push(
+            "websocket.path: upgrade path must not contain whitespace or control characters"
+                .to_owned(),
+        );
+    }
+    if websocket.path.contains(['?', '#']) {
+        errors.push(
+            "websocket.path: upgrade path is a single exact path and must not carry a query \
+             or fragment"
+                .to_owned(),
+        );
+    }
+}
+
+/// F6 allow-list entry hygiene: the list itself may be empty (fail closed),
+/// but a present entry must be a serialized origin that COULD ever match.
+fn validate_websocket_origins(websocket: &super::types::WebSocketConfig, errors: &mut Vec<String>) {
+    let mut seen_origins = BTreeSet::new();
+    for origin in &websocket.allowed_origins {
+        if origin.is_empty() {
+            errors.push("websocket.allowed_origins: origin entries must not be empty".to_owned());
+            continue;
+        }
+        if origin
+            .chars()
+            .any(|character| character.is_ascii_whitespace() || character.is_ascii_control())
+        {
+            errors.push(format!(
+                "websocket.allowed_origins: origin '{origin}' must not contain whitespace or \
+                 control characters"
+            ));
+        }
+        // `null` is the serialized opaque origin (sandboxed documents); every
+        // other legal entry is a scheme://host[:port] serialization with no
+        // trailing slash or path (RFC 6454 — the browser sends exactly that
+        // serialization, so anything else could never match).
+        if origin != "null" {
+            match origin.split_once("://") {
+                None => errors.push(format!(
+                    "websocket.allowed_origins: origin '{origin}' must be a serialized origin \
+                     (scheme://host[:port]) or the literal 'null'"
+                )),
+                Some((scheme, rest)) => {
+                    if scheme.is_empty() || rest.is_empty() {
+                        errors.push(format!(
+                            "websocket.allowed_origins: origin '{origin}' must name both a \
+                             scheme and a host"
+                        ));
+                    }
+                    if rest.contains('/') {
+                        errors.push(format!(
+                            "websocket.allowed_origins: origin '{origin}' must not contain a \
+                             path or trailing slash (a serialized Origin header never does)"
+                        ));
+                    }
+                }
+            }
+        }
+        if !seen_origins.insert(origin.as_str()) {
+            errors.push(format!(
+                "websocket.allowed_origins: duplicate origin '{origin}'"
+            ));
+        }
+    }
+}
+
+/// Q-A keepalive rules: zero is not "disabled" (absence is), and an extreme
+/// interval must refuse at validation rather than panic on clock arithmetic.
+fn validate_websocket_keepalive(
+    websocket: &super::types::WebSocketConfig,
+    errors: &mut Vec<String>,
+) {
+    match websocket.ping_interval_ms {
+        Some(0) => errors.push(
+            "websocket.ping_interval_ms: must be greater than zero when configured (omit the \
+             key to disable keepalive pings)"
+                .to_owned(),
+        ),
+        Some(interval_ms) => {
+            // S5 precedent: an extreme duration must be a typed refusal at
+            // validation, never a later monotonic-clock addition panic.
+            let interval = std::time::Duration::from_millis(interval_ms);
+            if std::time::Instant::now().checked_add(interval).is_none() {
+                errors.push(format!(
+                    "websocket.ping_interval_ms: {interval_ms} overflows the monotonic clock"
+                ));
+            }
+        }
+        None => {}
+    }
+}
+
 /// Semantic checks for the optional `[participant]` section: the shared
 /// nonzero/ordering rules plus the protocol codec's own minimum-frame check on
 /// `wire_frame_limit`, so an impossible limit fails at validation rather than
@@ -430,6 +579,7 @@ mod tests {
             services: ServicesConfig::default(),
             limits: LimitsConfig::default(),
             participant: None,
+            websocket: None,
         })
     }
 
@@ -1018,6 +1168,157 @@ mod tests {
             message.contains("installs no participant service"),
             "expected worker-front-door participant rejection, got: {message}"
         );
+        Ok(())
+    }
+
+    // ---- LP-WS-TRANSPORT R1.1: [websocket] section validation ----
+
+    fn sample_websocket()
+    -> Result<crate::config::types::WebSocketConfig, Box<dyn std::error::Error>> {
+        Ok(crate::config::types::WebSocketConfig {
+            listen_address: socket("127.0.0.1:8082")?,
+            path: "/liminal".to_owned(),
+            allowed_origins: vec!["https://app.example.com".to_owned()],
+            ping_interval_ms: Some(30_000),
+        })
+    }
+
+    #[test]
+    fn valid_websocket_section_passes_validation() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        config.websocket = Some(sample_websocket()?);
+        validate(&mut config, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_empty_origin_list_is_valid_fail_closed_configuration()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        let mut websocket = sample_websocket()?;
+        websocket.allowed_origins = Vec::new();
+        config.websocket = Some(websocket);
+        validate(&mut config, None)?;
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_zero_port_is_a_typed_config_error() -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        let mut websocket = sample_websocket()?;
+        websocket.listen_address = socket("127.0.0.1:0")?;
+        config.websocket = Some(websocket);
+        let message = config_validation_message(validate(&mut config, None));
+        assert!(
+            message.contains("websocket.listen_address"),
+            "expected websocket.listen_address error, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_address_conflicts_are_typed_config_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for conflict in ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:9000"] {
+            let mut config = sample_config()?;
+            let mut websocket = sample_websocket()?;
+            websocket.listen_address = socket(conflict)?;
+            config.websocket = Some(websocket);
+            let message = config_validation_message(validate(&mut config, None));
+            assert!(
+                message.contains("websocket.listen_address: must differ from"),
+                "expected an address-conflict error for {conflict}, got: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_path_rules_are_typed_config_errors() -> Result<(), Box<dyn std::error::Error>> {
+        for (bad_path, expectation) in [
+            ("", "must not be empty"),
+            ("liminal", "must start with '/'"),
+            ("/limi nal", "whitespace"),
+            ("/liminal?x=1", "query"),
+            ("/liminal#frag", "query"),
+        ] {
+            let mut config = sample_config()?;
+            let mut websocket = sample_websocket()?;
+            websocket.path = bad_path.to_owned();
+            config.websocket = Some(websocket);
+            let message = config_validation_message(validate(&mut config, None));
+            assert!(
+                message.contains("websocket.path") && message.contains(expectation),
+                "expected websocket.path '{bad_path}' to report '{expectation}', got: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_malformed_origin_entries_are_typed_config_errors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        for (bad_origin, expectation) in [
+            ("", "must not be empty"),
+            ("app.example.com", "serialized origin"),
+            ("https://app.example.com/", "path or trailing slash"),
+            ("https://app.example.com/app", "path or trailing slash"),
+            ("https:// app.example.com", "whitespace"),
+        ] {
+            let mut config = sample_config()?;
+            let mut websocket = sample_websocket()?;
+            websocket.allowed_origins = vec![bad_origin.to_owned()];
+            config.websocket = Some(websocket);
+            let message = config_validation_message(validate(&mut config, None));
+            assert!(
+                message.contains("websocket.allowed_origins") && message.contains(expectation),
+                "expected origin '{bad_origin}' to report '{expectation}', got: {message}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_duplicate_origin_is_a_typed_config_error() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut config = sample_config()?;
+        let mut websocket = sample_websocket()?;
+        websocket.allowed_origins = vec![
+            "https://app.example.com".to_owned(),
+            "https://app.example.com".to_owned(),
+        ];
+        config.websocket = Some(websocket);
+        let message = config_validation_message(validate(&mut config, None));
+        assert!(
+            message.contains("duplicate origin"),
+            "expected a duplicate-origin error, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_zero_ping_interval_is_a_typed_config_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        let mut websocket = sample_websocket()?;
+        websocket.ping_interval_ms = Some(0);
+        config.websocket = Some(websocket);
+        let message = config_validation_message(validate(&mut config, None));
+        assert!(
+            message.contains("websocket.ping_interval_ms"),
+            "expected a zero-interval error, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn websocket_absent_ping_interval_means_disabled_and_valid()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut config = sample_config()?;
+        let mut websocket = sample_websocket()?;
+        websocket.ping_interval_ms = None;
+        config.websocket = Some(websocket);
+        validate(&mut config, None)?;
         Ok(())
     }
 }
