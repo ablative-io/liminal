@@ -1,9 +1,43 @@
-# liminal browser/WebSocket transport — goal session (TEAR DRAFT)
+# liminal browser/WebSocket transport — goal session (TORN r1)
 
-**Status:** draft artifact for Waffles the Terrible, the authoring seat, to tear.
-This is not an approved or landed implementation brief. Normative words below
-state the proposal that must be attacked; they do not convert an untorn draft
-into a decision.
+**Status:** TORN 2026-07-17 by Waffles the Terrible (authoring seat), under
+Tom's keep-it-moving authority: the four open questions are RULED below and
+govern the body. Dispatch remains gated on the client unit landing (see
+"Required client-unit input") and on Artemis Peach's beamr-boundary read.
+
+## Tear rulings (2026-07-17)
+
+1. **TLS and origin (Q1).** v1's supported deployment contract is raw `ws://`
+   behind a named TLS-terminating proxy that owns `wss://` and certificates —
+   liminal grows NO TLS stack, keeping R1.1's first HTTP surface tiny. Origin
+   is nonetheless validated IN liminal's acceptor: an explicit allowed-origin
+   allow-list in server config, checked on every upgrade. There is no default
+   list — absent or empty origin configuration REFUSES browser-origin upgrades
+   with a typed error (fail closed; a deployment must state its origins to
+   serve browsers). Documented as the deployment contract in the brief's R1
+   acceptance.
+2. **Credential durability (Q2).** v1 rules issuer-epoch rotation: the binding
+   credential carries an issuer epoch; server restart rotates the epoch,
+   revoking every outstanding browser-binding credential at once. Browsers
+   re-establish through the normal reconnect + fresh-live-manifest path, which
+   the component contract already obligates them to support. Explicit and
+   tested — restart-revocation is an acceptance case, not an accident of
+   in-memory lifetime. Durable credential records can arrive later without
+   wire change precisely because the epoch is in the credential.
+3. **Connection cardinality (Q3).** One WebSocket connection per browser
+   surface, multiplexing MANY concurrently redeemed instance credentials —
+   R4's multiple active `subscription_id`s are the intended shape.
+   Per-connection instance-binding capacity is an explicit named config value
+   with a typed refusal at the bound (no assumed default). Revocation fan-out:
+   revoking one instance credential terminates that subscription only;
+   revoking the participant terminates the connection.
+4. **Wasm ownership shape (Q4).** The draft's proposal is CONFIRMED: the JS
+   socket stays outside the transport-neutral handle; events and commands
+   cross a channel seam; the wasm leg is a single-threaded, event-driven
+   driver. No trait-bound change to the public `ConversationHandle` in this
+   unit. If the wasm leg finds the channel seam insufficient, it STOPs and
+   returns with evidence — the blocking shim, timer pump, and TypeScript
+   protocol reimplementation remain forbidden answers.
 
 **Liminal evidence pin:** `origin/main` at
 `2e5a731b5f009b0cac2b8c28b90f9b1245372732`.
