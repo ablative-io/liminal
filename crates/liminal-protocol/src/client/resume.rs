@@ -83,6 +83,12 @@ pub enum ClientResumeRecordDecodeError {
         /// Exact wire codec error when structural decode failed.
         source: Option<CodecError>,
     },
+    /// A serialized tokenless-after-crash abandonment carried an operation class
+    /// that has a wire attempt token and therefore cannot use that resolution.
+    InvalidAbandonmentRequest {
+        /// Rejected token-bearing request class.
+        request: crate::wire::ClientDiscriminant,
+    },
     /// Extra bytes followed the four exact sections.
     TrailingBytes {
         /// Number of unexpected bytes.
