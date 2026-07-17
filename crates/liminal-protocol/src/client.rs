@@ -413,6 +413,8 @@ pub use resume::{
 #[cfg(test)]
 mod authority_property_tests;
 #[cfg(test)]
+mod r2_tests;
+#[cfg(test)]
 mod resume_tests;
 #[cfg(test)]
 mod review_tests;
