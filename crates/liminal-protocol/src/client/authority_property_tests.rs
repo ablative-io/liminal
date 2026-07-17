@@ -367,6 +367,9 @@ impl Harness {
                     }
                     Root::Pending(_) => return Ok(None),
                 };
+                let canonical = record.encode_canonical();
+                let record = ClientResumeRecord::decode_canonical(&canonical)
+                    .map_err(|_| "canonical record must decode")?;
                 if self.live.count() == 1 {
                     self.live = LiveAuthority::None;
                     self.lost += 1;
