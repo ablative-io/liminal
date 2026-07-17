@@ -1,4 +1,6 @@
 use std::io;
+use std::sync::Arc;
+use std::thread;
 
 use liminal_protocol::wire::{
     AuthorityStateTag, BindingStateTag, ClientDiscriminant, ClientRequest, DetachAttemptToken,
@@ -6,7 +8,7 @@ use liminal_protocol::wire::{
     ProtocolVersion, RecordAdmission, ServerDiscriminant, ServerValue, decode_server_value_body,
 };
 
-use super::support::{Action, Loopback, MemoryStore};
+use super::support::{Action, Loopback, MemoryStore, PausedReconnectLoopback};
 use super::{
     CONVERSATION, PARTICIPANT, TestResult, enroll, enroll_bound, epoch, generation, recorded, sent,
 };
@@ -116,6 +118,48 @@ fn issued_tokenless_restore_reports_durable_abandonment() -> TestResult {
     assert!(abandonment.was_issued());
     assert!(restored.take_restored_operation_abandonment()?.is_none());
     loopback.finish()?;
+    Ok(())
+}
+
+#[test]
+fn in_progress_real_reconnect_restores_take_once_testimony() -> TestResult {
+    let loopback = PausedReconnectLoopback::spawn()?;
+    let config = loopback.connected_config()?;
+    let store = MemoryStore::default();
+    let observed = store.clone();
+    let handle = Arc::new(RemoteParticipantHandle::new(&config, store)?);
+    let super::RemoteReconnectPermitOutcome::Permitted { permit, .. } =
+        handle.record_explicit_reconnect()?
+    else {
+        return Err(io::Error::other("explicit event must mint reconnect authority").into());
+    };
+
+    let reconnect_handle = Arc::clone(&handle);
+    let reconnect = thread::spawn(move || reconnect_handle.reconnect(permit));
+    loopback.wait_until_attempt_started()?;
+    let canonical_attempt = observed.bytes()?;
+
+    let restored =
+        RemoteParticipantHandle::restore(&config, MemoryStore::default(), &canonical_attempt)?;
+    assert_eq!(
+        restored.resolve_lost_reconnect_authority()?,
+        super::RemoteLostReconnectResolution::Recorded {
+            testimony: liminal_protocol::client::LostAuthorityKind::ReconnectAttempt,
+        }
+    );
+    assert!(matches!(
+        restored.resolve_lost_reconnect_authority()?,
+        super::RemoteLostReconnectResolution::Refused { .. }
+    ));
+
+    loopback.finish()?;
+    let reconnect = reconnect
+        .join()
+        .map_err(|_| io::Error::other("real reconnect thread panicked"))??;
+    assert!(matches!(
+        reconnect,
+        super::RemoteReconnectAttemptOutcome::Connected { .. }
+    ));
     Ok(())
 }
 

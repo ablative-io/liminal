@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -70,6 +71,69 @@ impl Loopback {
     }
 }
 
+pub(super) struct PausedReconnectLoopback {
+    address: String,
+    attempt_started: Receiver<()>,
+    release_attempt: SyncSender<()>,
+    task: JoinHandle<io::Result<()>>,
+}
+
+impl PausedReconnectLoopback {
+    pub(super) fn spawn() -> io::Result<Self> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let address = listener.local_addr()?.to_string();
+        let (started_tx, attempt_started) = mpsc::sync_channel(1);
+        let (release_attempt, release_rx) = mpsc::sync_channel(1);
+        let task = thread::spawn(move || {
+            {
+                let (mut stream, _) = listener.accept()?;
+                handshake(&mut stream)?;
+            }
+            let (mut stream, _) = listener.accept()?;
+            let connect = read_generic(&mut stream)?;
+            ensure_connect(&connect)?;
+            started_tx
+                .send(())
+                .map_err(|_| io::Error::other("reconnect observer was dropped"))?;
+            release_rx
+                .recv()
+                .map_err(|_| io::Error::other("reconnect release was dropped"))?;
+            write_connect_ack(&mut stream)
+        });
+        Ok(Self {
+            address,
+            attempt_started,
+            release_attempt,
+            task,
+        })
+    }
+
+    pub(super) fn connected_config(&self) -> Result<RemoteConfig, SdkError> {
+        RemoteConfig::new(
+            self.address.clone(),
+            "participant-tests",
+            "participant-tests",
+            ConnectionPoolConfig::new(1, 4, 16),
+        )?
+        .connect_tcp()
+    }
+
+    pub(super) fn wait_until_attempt_started(&self) -> io::Result<()> {
+        self.attempt_started
+            .recv()
+            .map_err(|_| io::Error::other("paused reconnect server stopped early"))
+    }
+
+    pub(super) fn finish(self) -> io::Result<()> {
+        self.release_attempt
+            .send(())
+            .map_err(|_| io::Error::other("paused reconnect server stopped early"))?;
+        self.task
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("loopback server thread panicked")))
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(super) struct MemoryStore {
     bytes: Arc<Mutex<Vec<u8>>>,
@@ -97,17 +161,27 @@ impl ParticipantResumeStore for MemoryStore {
 }
 
 fn handshake(stream: &mut TcpStream) -> io::Result<()> {
-    match read_generic(stream)? {
-        Frame::Connect { .. } => write_generic(
-            stream,
-            &Frame::ConnectAck {
-                flags: 0,
-                selected_version: ProtocolVersion::new(1, 0),
-                capabilities: 1,
-            },
-        ),
+    let connect = read_generic(stream)?;
+    ensure_connect(&connect)?;
+    write_connect_ack(stream)
+}
+
+fn ensure_connect(frame: &Frame) -> io::Result<()> {
+    match frame {
+        Frame::Connect { .. } => Ok(()),
         _ => Err(io::Error::other("loopback expected Connect handshake")),
     }
+}
+
+fn write_connect_ack(stream: &mut TcpStream) -> io::Result<()> {
+    write_generic(
+        stream,
+        &Frame::ConnectAck {
+            flags: 0,
+            selected_version: ProtocolVersion::new(1, 0),
+            capabilities: 1,
+        },
+    )
 }
 
 fn ensure_participant_request(frame: Frame) -> io::Result<()> {
