@@ -5,7 +5,6 @@ use alloc::vec::Vec;
 use core::fmt;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use core::time::Duration;
 
 use futures_core::Stream;
 
@@ -39,6 +38,26 @@ pub enum DisconnectReason {
     Error,
     /// The connection closed because a timeout elapsed.
     Timeout,
+}
+
+/// Fresh external event authorizing exactly one reconnect attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReconnectEvent {
+    /// Fate of an established connection requires recovery.
+    EstablishedConnectionFate,
+    /// The transport proved a fresh transition to online.
+    ProvedOnlineTransition,
+    /// The caller explicitly requested one attempt.
+    ExplicitCallerAction,
+}
+
+/// One event-authorized reconnect attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReconnectAttempt {
+    /// Zero-based attempt number for the current disruption sequence.
+    pub attempt: u32,
+    /// Fresh event consumed by this attempt.
+    pub event: ReconnectEvent,
 }
 
 /// Event emitted after a connection lifecycle transition succeeds.
@@ -112,104 +131,11 @@ where
     }
 }
 
-/// Configures exponential reconnect backoff.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReconnectConfig {
-    /// Initial retry delay before exponential growth is applied.
-    pub base_delay: Duration,
-    /// Maximum delay used for the exponential component before jitter is added.
-    pub max_delay: Duration,
-}
-
-impl ReconnectConfig {
-    /// Creates a reconnect configuration from base and maximum delays.
-    #[must_use]
-    pub const fn new(base_delay: Duration, max_delay: Duration) -> Self {
-        Self {
-            base_delay,
-            max_delay,
-        }
-    }
-
-    /// Computes `min(base_delay * 2^attempt, max_delay)` before jitter.
-    #[must_use]
-    pub fn capped_delay(self, attempt: u32) -> Duration {
-        let base_nanos = self.base_delay.as_nanos();
-        let max_nanos = self.max_delay.as_nanos();
-
-        if base_nanos == 0 || max_nanos == 0 {
-            return Duration::ZERO;
-        }
-
-        let multiplier = 1_u128.checked_shl(attempt).unwrap_or(u128::MAX);
-        let scaled_nanos = base_nanos.saturating_mul(multiplier);
-        duration_from_nanos(core::cmp::min(scaled_nanos, max_nanos))
-    }
-
-    /// Computes the retry delay for an attempt using an injected random jitter source.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SdkError`] if the jitter source returns a value above 50% of the
-    /// capped exponential delay.
-    pub fn retry_delay<J>(self, attempt: u32, jitter: &mut J) -> Result<Duration, SdkError>
-    where
-        J: ReconnectJitter + ?Sized,
-    {
-        let capped_delay = self.capped_delay(attempt);
-        let jitter_delay = jitter.jitter(attempt, capped_delay);
-        self.retry_delay_with_jitter(attempt, jitter_delay)
-    }
-
-    /// Computes the retry delay for an attempt using a precomputed jitter value.
-    ///
-    /// This helper is useful for deterministic tests and for transport layers
-    /// that produce randomness externally. The jitter value must be between zero
-    /// and 50% of the capped exponential delay.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SdkError`] if `jitter` is greater than 50% of the capped delay.
-    pub fn retry_delay_with_jitter(
-        self,
-        attempt: u32,
-        jitter: Duration,
-    ) -> Result<Duration, SdkError> {
-        let capped_delay = self.capped_delay(attempt);
-        let jitter_limit = capped_delay / 2;
-
-        if jitter > jitter_limit {
-            return Err(connection_error(format!(
-                "reconnect jitter {jitter:?} exceeds 50% limit {jitter_limit:?}"
-            )));
-        }
-
-        Ok(capped_delay.checked_add(jitter).unwrap_or(Duration::MAX))
-    }
-}
-
-impl Default for ReconnectConfig {
-    fn default() -> Self {
-        Self::new(Duration::from_millis(100), Duration::from_secs(30))
-    }
-}
-
-/// Source of random reconnect jitter.
-///
-/// Implementations must return a random value from zero through 50% of the
-/// supplied capped delay. The SDK validates that upper bound before using the
-/// value so reconnection never falls back to a fixed retry interval.
-pub trait ReconnectJitter: fmt::Debug {
-    /// Returns random jitter for a reconnect attempt and capped base delay.
-    fn jitter(&mut self, attempt: u32, capped_delay: Duration) -> Duration;
-}
-
 type ConnectionObserver = Box<dyn FnMut(&ConnectionEvent) + Send>;
 
 /// Owns the SDK connection lifecycle state and emits validated transitions.
 pub struct ConnectionLifecycle {
     state: ConnectionState,
-    reconnect_config: ReconnectConfig,
     next_reconnect_attempt: u32,
     observers: Vec<ConnectionObserver>,
 }
@@ -217,10 +143,9 @@ pub struct ConnectionLifecycle {
 impl ConnectionLifecycle {
     /// Creates a lifecycle in the [`ConnectionState::Connecting`] state.
     #[must_use]
-    pub fn new(reconnect_config: ReconnectConfig) -> Self {
+    pub const fn new() -> Self {
         Self {
             state: ConnectionState::Connecting,
-            reconnect_config,
             next_reconnect_attempt: 0,
             observers: Vec::new(),
         }
@@ -230,12 +155,6 @@ impl ConnectionLifecycle {
     #[must_use]
     pub const fn state(&self) -> &ConnectionState {
         &self.state
-    }
-
-    /// Returns the reconnect backoff configuration.
-    #[must_use]
-    pub const fn reconnect_config(&self) -> ReconnectConfig {
-        self.reconnect_config
     }
 
     /// Registers an observer that is called after each successful transition.
@@ -274,33 +193,48 @@ impl ConnectionLifecycle {
         }
     }
 
-    /// Transitions to reconnecting and returns the next retry delay.
+    /// Consumes one fresh external event and starts one reconnect attempt.
     ///
-    /// The first reconnect attempt after a successful connection uses attempt
-    /// zero. Each subsequent reconnect attempt increments the counter until a
-    /// successful [`Self::connected`] transition resets it.
+    /// No delay is computed and no timer is armed. A second attempt is rejected
+    /// while the first remains in flight; callers must record its fate through
+    /// [`Self::reconnect_failed`] or [`Self::connected`] before another fresh
+    /// event can be consumed.
     ///
     /// # Errors
     ///
-    /// Returns [`SdkError`] when reconnecting from the current state is invalid or
-    /// when the jitter source exceeds the allowed jitter range.
-    pub fn reconnect<J>(&mut self, jitter: &mut J) -> Result<Duration, SdkError>
-    where
-        J: ReconnectJitter + ?Sized,
-    {
+    /// Returns [`SdkError`] when an attempt is already in flight.
+    pub fn reconnect(&mut self, event: ReconnectEvent) -> Result<ReconnectAttempt, SdkError> {
         match self.state {
             ConnectionState::Connecting
             | ConnectionState::Connected
-            | ConnectionState::Reconnecting { .. } => {
+            | ConnectionState::Disconnected { .. } => {
                 let attempt = self.next_reconnect_attempt;
-                let delay = self.reconnect_config.retry_delay(attempt, jitter)?;
                 self.next_reconnect_attempt = attempt.saturating_add(1);
                 self.transition(ConnectionState::Reconnecting { attempt });
-                Ok(delay)
+                Ok(ReconnectAttempt { attempt, event })
             }
-            ConnectionState::Disconnected { .. } => {
+            ConnectionState::Reconnecting { .. } => {
                 Err(invalid_transition(&self.state, "Reconnecting"))
             }
+        }
+    }
+
+    /// Parks a failed reconnect attempt in a typed disconnected state.
+    ///
+    /// This transition never schedules another attempt. Only a subsequent call
+    /// to [`Self::reconnect`] carrying a fresh external event can leave the
+    /// disconnected state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] unless a reconnect attempt is in flight.
+    pub fn reconnect_failed(&mut self, reason: DisconnectReason) -> Result<(), SdkError> {
+        match self.state {
+            ConnectionState::Reconnecting { .. } => {
+                self.transition(ConnectionState::Disconnected { reason });
+                Ok(())
+            }
+            _ => Err(invalid_transition(&self.state, "Disconnected")),
         }
     }
 
@@ -335,7 +269,7 @@ impl ConnectionLifecycle {
 
 impl Default for ConnectionLifecycle {
     fn default() -> Self {
-        Self::new(ReconnectConfig::default())
+        Self::new()
     }
 }
 
@@ -344,7 +278,6 @@ impl fmt::Debug for ConnectionLifecycle {
         formatter
             .debug_struct("ConnectionLifecycle")
             .field("state", &self.state)
-            .field("reconnect_config", &self.reconnect_config)
             .field("next_reconnect_attempt", &self.next_reconnect_attempt)
             .field("observers", &self.observers.len())
             .finish()
@@ -359,22 +292,6 @@ fn invalid_transition(previous: &ConnectionState, requested: &str) -> SdkError {
 
 const fn connection_error(description: String) -> SdkError {
     SdkError::Connection { description }
-}
-
-fn duration_from_nanos(nanos: u128) -> Duration {
-    const NANOS_PER_SECOND: u128 = 1_000_000_000;
-
-    let seconds = nanos / NANOS_PER_SECOND;
-    let subsecond_nanos = nanos % NANOS_PER_SECOND;
-
-    let Ok(seconds) = u64::try_from(seconds) else {
-        return Duration::MAX;
-    };
-    let Ok(subsecond_nanos) = u32::try_from(subsecond_nanos) else {
-        return Duration::MAX;
-    };
-
-    Duration::new(seconds, subsecond_nanos)
 }
 
 #[cfg(test)]

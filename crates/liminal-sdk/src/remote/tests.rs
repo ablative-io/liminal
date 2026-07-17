@@ -3,7 +3,7 @@ use serde::Serialize;
 use super::*;
 use crate::{
     ChannelHandle, ConnectionPoolConfig, ConnectionState, EmbeddedConfig, PressureResponse,
-    ResumeRequest, SchemaMetadata, SchemaValidate,
+    ReconnectEvent, ResumeRequest, SchemaMetadata, SchemaValidate,
 };
 
 #[derive(Serialize)]
@@ -48,11 +48,10 @@ fn remote_handle_uses_lifecycle_and_recovery_on_reconnect() -> Result<(), SdkErr
         ConnectionPoolConfig::new(2, 10, 16),
     )?;
     let handle = RemoteChannelHandle::new(&config)?;
-    let mut jitter = NoJitter;
     let subscription_id = handle.track_subscription()?;
 
     handle.acknowledge(subscription_id, 7)?;
-    handle.reconnect(&mut jitter)?;
+    handle.reconnect(ReconnectEvent::EstablishedConnectionFate)?;
     let resume_requests = handle.connected()?;
 
     assert_eq!(handle.connection_state(), ConnectionState::Connected);

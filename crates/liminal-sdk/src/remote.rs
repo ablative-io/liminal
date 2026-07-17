@@ -20,9 +20,8 @@ mod tests;
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
-use core::time::Duration;
 
-use crate::connection::{ConnectionPoolConfig, ReconnectConfig, ReconnectJitter};
+use crate::connection::ConnectionPoolConfig;
 use crate::{ConversationId, SdkError};
 
 use self::protocol::{ProtocolRemoteTransport, RemoteTransport};
@@ -63,8 +62,6 @@ pub struct RemoteConfig {
     pub conversation_id: ConversationId,
     /// Caller/runtime-supplied connection pool configuration.
     pub pool_config: ConnectionPoolConfig,
-    /// Reconnect policy used by the SDK-003 lifecycle state machine.
-    pub reconnect_config: ReconnectConfig,
     transport: Arc<dyn RemoteTransport>,
 }
 
@@ -85,16 +82,8 @@ impl RemoteConfig {
             channel_name: channel_name.into(),
             conversation_id: conversation_id.into(),
             pool_config: pool_config.validate()?,
-            reconnect_config: ReconnectConfig::default(),
             transport: Arc::new(ProtocolRemoteTransport),
         })
-    }
-
-    /// Replaces the reconnect configuration used by remote handles.
-    #[must_use]
-    pub const fn with_reconnect_config(mut self, reconnect_config: ReconnectConfig) -> Self {
-        self.reconnect_config = reconnect_config;
-        self
     }
 
     /// Opens a real TCP connection to the configured server and installs the
@@ -135,17 +124,6 @@ impl RemoteConfig {
             self::tcp::TcpRemoteTransport::connect_with_auth(&self.server_address, auth_token)?;
         self.transport = Arc::new(transport);
         Ok(self)
-    }
-}
-
-/// Deterministic jitter source for lifecycle integration tests and explicit reconnect calls.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoJitter;
-
-impl ReconnectJitter for NoJitter {
-    fn jitter(&mut self, attempt: u32, capped_delay: Duration) -> Duration {
-        core::hint::black_box((attempt, capped_delay));
-        Duration::ZERO
     }
 }
 

@@ -4,8 +4,7 @@ use alloc::vec::Vec;
 use crate::SdkError;
 
 use super::{
-    ConnectionEvent, ConnectionLifecycle, ReconnectConfig, ResumeRequest, SubscriptionId,
-    SubscriptionRecovery,
+    ConnectionEvent, ConnectionLifecycle, ResumeRequest, SubscriptionId, SubscriptionRecovery,
 };
 
 /// Caller-supplied connection pool sizing and resource configuration.
@@ -86,11 +85,11 @@ struct PoolConnection {
 }
 
 impl PoolConnection {
-    fn new(id: PoolConnectionId, reconnect_config: ReconnectConfig) -> Self {
+    fn new(id: PoolConnectionId) -> Self {
         Self {
             id,
             subscription_count: 0,
-            lifecycle: ConnectionLifecycle::new(reconnect_config),
+            lifecycle: ConnectionLifecycle::new(),
             recovery: SubscriptionRecovery::new(),
         }
     }
@@ -109,18 +108,12 @@ impl ConnectionPool {
     /// # Errors
     ///
     /// Returns [`SdkError`] if the supplied configuration is invalid.
-    pub fn new(
-        config: ConnectionPoolConfig,
-        reconnect_config: ReconnectConfig,
-    ) -> Result<Self, SdkError> {
+    pub fn new(config: ConnectionPoolConfig) -> Result<Self, SdkError> {
         let config = config.validate()?;
         let mut connections = Vec::with_capacity(config.max_connections);
 
         for slot in 0..config.max_connections {
-            connections.push(PoolConnection::new(
-                PoolConnectionId::new(slot),
-                reconnect_config,
-            ));
+            connections.push(PoolConnection::new(PoolConnectionId::new(slot)));
         }
 
         Ok(Self {
@@ -302,13 +295,13 @@ mod tests {
     fn invalid_pool_size_is_rejected() {
         let config = ConnectionPoolConfig::new(0, 10, 16);
 
-        assert!(ConnectionPool::new(config, ReconnectConfig::default()).is_err());
+        assert!(ConnectionPool::new(config).is_err());
     }
 
     #[test]
     fn subscriptions_are_distributed_across_connections() -> Result<(), SdkError> {
         let config = ConnectionPoolConfig::new(2, 10, 16);
-        let mut pool = ConnectionPool::new(config, ReconnectConfig::default())?;
+        let mut pool = ConnectionPool::new(config)?;
 
         let first = pool.assign_subscription(SubscriptionId::new(1))?;
         let second = pool.assign_subscription(SubscriptionId::new(2))?;
@@ -324,7 +317,7 @@ mod tests {
     #[test]
     fn multiple_subscriptions_share_configured_connections() -> Result<(), SdkError> {
         let config = ConnectionPoolConfig::new(1, 20, 32);
-        let mut pool = ConnectionPool::new(config, ReconnectConfig::default())?;
+        let mut pool = ConnectionPool::new(config)?;
 
         let first = pool.assign_subscription(SubscriptionId::new(10))?;
         let second = pool.assign_subscription(SubscriptionId::new(11))?;
@@ -338,7 +331,7 @@ mod tests {
     #[test]
     fn pooled_recovery_builds_resume_requests_on_reconnect() -> Result<(), SdkError> {
         let config = ConnectionPoolConfig::new(2, 10, 16);
-        let mut pool = ConnectionPool::new(config, ReconnectConfig::default())?;
+        let mut pool = ConnectionPool::new(config)?;
         let first = SubscriptionId::new(21);
         let second = SubscriptionId::new(22);
         let event = ConnectionEvent::new(
@@ -362,7 +355,7 @@ mod tests {
     #[test]
     fn unsubscribe_removes_assignment() -> Result<(), SdkError> {
         let config = ConnectionPoolConfig::new(2, 10, 16);
-        let mut pool = ConnectionPool::new(config, ReconnectConfig::default())?;
+        let mut pool = ConnectionPool::new(config)?;
         let subscription_id = SubscriptionId::new(31);
         let assignment = pool.assign_subscription(subscription_id)?;
 
@@ -377,7 +370,7 @@ mod tests {
     #[test]
     fn non_reconnect_transition_does_not_resume() -> Result<(), SdkError> {
         let config = ConnectionPoolConfig::new(2, 10, 16);
-        let mut pool = ConnectionPool::new(config, ReconnectConfig::default())?;
+        let mut pool = ConnectionPool::new(config)?;
         let event = ConnectionEvent::new(
             ConnectionState::Connected,
             ConnectionState::Disconnected {

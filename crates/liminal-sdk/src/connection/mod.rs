@@ -5,7 +5,7 @@ pub mod recovery;
 
 pub use lifecycle::{
     ConnectionEvent, ConnectionEvents, ConnectionLifecycle, ConnectionState, DisconnectReason,
-    ReconnectConfig, ReconnectJitter,
+    ReconnectAttempt, ReconnectEvent,
 };
 pub use participant::{
     BoundParticipant, DetachReplayAction, DetachReplayEvent, DetachReplayStatus,

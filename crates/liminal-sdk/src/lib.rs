@@ -17,7 +17,7 @@ pub use connection::{
     ConnectionPoolConfig, ConnectionState, DetachReplayAction, DetachReplayEvent,
     DetachReplayStatus, DisconnectReason, ParticipantClientState, ParticipantLifecycle,
     ParticipantOutcome, ParticipantReceive, ParticipantResumeState, ParticipantTransition,
-    PoolConnectionId, ReconnectConfig, ReconnectJitter, ResumeRequest, SubscriptionAssignment,
+    PoolConnectionId, ReconnectAttempt, ReconnectEvent, ResumeRequest, SubscriptionAssignment,
     SubscriptionId, SubscriptionRecovery,
 };
 pub use conversation::{ConversationEvent, ConversationHandle, ConversationId};

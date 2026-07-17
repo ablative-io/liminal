@@ -6,9 +6,8 @@ use std::time::Duration;
 use liminal_sdk::embedded::{EmbeddedChannelBackend, EmbeddedChannelMessage};
 use liminal_sdk::{
     ChannelHandle, ConnectionLifecycle, ConnectionState, ConversationEvent, ConversationId,
-    DisconnectReason, EmbeddedChannelHandle, EmbeddedConfig, PressureResponse, ReconnectConfig,
-    ReconnectJitter, SchemaMetadata, SchemaValidate, SdkError, SubscriptionId,
-    SubscriptionRecovery,
+    DisconnectReason, EmbeddedChannelHandle, EmbeddedConfig, PressureResponse, ReconnectEvent,
+    SchemaMetadata, SchemaValidate, SdkError, SubscriptionId, SubscriptionRecovery,
 };
 use serde::Deserialize;
 use serde::Serialize;
@@ -28,16 +27,6 @@ struct ScenarioSuite {
 struct Scenario {
     name: String,
     expected: Value,
-}
-
-#[derive(Debug)]
-struct FixedJitter;
-
-impl ReconnectJitter for FixedJitter {
-    fn jitter(&mut self, attempt: u32, capped_delay: Duration) -> Duration {
-        std::hint::black_box((attempt, capped_delay));
-        Duration::ZERO
-    }
 }
 
 #[derive(Debug)]
@@ -152,9 +141,7 @@ fn observe_reconnect_after_drop() -> Result<Value, SdkError> {
     lifecycle.connected()?;
     transitions.push(state_name(lifecycle.state()));
 
-    let mut jitter = FixedJitter;
-    let delay = lifecycle.reconnect(&mut jitter)?;
-    std::hint::black_box(delay);
+    lifecycle.reconnect(ReconnectEvent::EstablishedConnectionFate)?;
     transitions.push(state_name(lifecycle.state()));
     if let ConnectionState::Reconnecting { attempt } = lifecycle.state() {
         attempts.push(*attempt);
@@ -252,11 +239,8 @@ fn observe_conversation_lifecycle() -> Value {
     json!({ "events": normalized })
 }
 
-fn lifecycle() -> ConnectionLifecycle {
-    ConnectionLifecycle::new(ReconnectConfig::new(
-        Duration::from_millis(10),
-        Duration::from_millis(100),
-    ))
+const fn lifecycle() -> ConnectionLifecycle {
+    ConnectionLifecycle::new()
 }
 
 const fn state_name(state: &ConnectionState) -> &'static str {

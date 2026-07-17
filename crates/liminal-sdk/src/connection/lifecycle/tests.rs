@@ -1,29 +1,12 @@
 use alloc::sync::Arc;
-use core::time::Duration;
 use spin::Mutex;
 
 use crate::SdkError;
 
 use super::{
-    ConnectionEvent, ConnectionLifecycle, ConnectionState, DisconnectReason, ReconnectConfig,
-    ReconnectJitter,
+    ConnectionEvent, ConnectionLifecycle, ConnectionState, DisconnectReason, ReconnectAttempt,
+    ReconnectEvent,
 };
-
-#[derive(Debug)]
-struct FixedJitter(Duration);
-
-impl FixedJitter {
-    const fn new(delay: Duration) -> Self {
-        Self(delay)
-    }
-}
-
-impl ReconnectJitter for FixedJitter {
-    fn jitter(&mut self, attempt: u32, capped_delay: Duration) -> Duration {
-        let _ = (attempt, capped_delay);
-        self.0
-    }
-}
 
 #[test]
 fn disconnected_to_connected_is_rejected() -> Result<(), SdkError> {
@@ -94,10 +77,9 @@ fn disconnect_from_reconnecting_is_observable() -> Result<(), SdkError> {
     let events = Arc::new(Mutex::new(Vec::new()));
     let observed = Arc::clone(&events);
     let mut lifecycle = ConnectionLifecycle::default();
-    let mut jitter = FixedJitter::new(Duration::ZERO);
 
     lifecycle.connected()?;
-    lifecycle.reconnect(&mut jitter)?;
+    lifecycle.reconnect(ReconnectEvent::EstablishedConnectionFate)?;
     assert_eq!(
         lifecycle.state(),
         &ConnectionState::Reconnecting { attempt: 0 }
@@ -151,83 +133,74 @@ fn disconnect_from_disconnected_is_rejected() -> Result<(), SdkError> {
 }
 
 #[test]
-fn reconnect_delay_uses_exponential_backoff_and_jitter() -> Result<(), SdkError> {
-    let config = ReconnectConfig::new(Duration::from_secs(1), Duration::from_secs(10));
-
-    for attempt in 0_u32..=10 {
-        // Independently assert the exponential formula `min(base * 2^attempt,
-        // max_delay)` against hardcoded expectations so a wrong formula (e.g.
-        // `3^attempt`) would fail here rather than being echoed back.
-        let expected_capped = match attempt {
-            0 => Duration::from_secs(1),
-            1 => Duration::from_secs(2),
-            2 => Duration::from_secs(4),
-            3 => Duration::from_secs(8),
-            _ => Duration::from_secs(10), // base * 2^attempt saturates at max_delay
-        };
-        let capped_delay = config.capped_delay(attempt);
-        assert_eq!(capped_delay, expected_capped, "attempt {attempt}");
-
-        let jitter = capped_delay / 2;
-        let delay = config.retry_delay_with_jitter(attempt, jitter)?;
-
-        assert_eq!(delay, expected_capped + jitter, "attempt {attempt}");
-    }
+fn reconnect_consumes_one_fresh_event_and_rejects_rearm() -> Result<(), SdkError> {
+    let mut lifecycle = ConnectionLifecycle::default();
+    lifecycle.connected()?;
 
     assert_eq!(
-        config.retry_delay_with_jitter(0, Duration::from_millis(500))?,
-        Duration::from_millis(1_500)
-    );
-    assert_eq!(
-        config.retry_delay_with_jitter(3, Duration::from_secs(4))?,
-        Duration::from_secs(12)
+        lifecycle.reconnect(ReconnectEvent::EstablishedConnectionFate)?,
+        ReconnectAttempt {
+            attempt: 0,
+            event: ReconnectEvent::EstablishedConnectionFate,
+        }
     );
     assert!(
-        config
-            .retry_delay_with_jitter(3, Duration::from_millis(4_001))
-            .is_err()
+        lifecycle
+            .reconnect(ReconnectEvent::ExplicitCallerAction)
+            .is_err(),
+        "an in-flight attempt cannot be re-armed"
+    );
+    assert_eq!(
+        lifecycle.state(),
+        &ConnectionState::Reconnecting { attempt: 0 }
     );
     Ok(())
 }
 
 #[test]
-fn reconnect_delay_saturates_to_max_delay_on_large_attempts() {
-    let config = ReconnectConfig::new(Duration::MAX, Duration::from_secs(30));
+fn failed_attempt_parks_until_another_fresh_event() -> Result<(), SdkError> {
+    let mut lifecycle = ConnectionLifecycle::default();
+    lifecycle.connected()?;
+    lifecycle.reconnect(ReconnectEvent::EstablishedConnectionFate)?;
+    lifecycle.reconnect_failed(DisconnectReason::Error)?;
 
-    assert_eq!(config.capped_delay(1), Duration::from_secs(30));
+    assert_eq!(
+        lifecycle.state(),
+        &ConnectionState::Disconnected {
+            reason: DisconnectReason::Error,
+        }
+    );
+    assert_eq!(
+        lifecycle.reconnect(ReconnectEvent::ProvedOnlineTransition)?,
+        ReconnectAttempt {
+            attempt: 1,
+            event: ReconnectEvent::ProvedOnlineTransition,
+        }
+    );
+    Ok(())
 }
 
 #[test]
 fn successful_connection_resets_reconnect_attempts() -> Result<(), SdkError> {
     let mut lifecycle = ConnectionLifecycle::default();
-    let mut jitter = FixedJitter::new(Duration::ZERO);
-
     lifecycle.connected()?;
+    lifecycle.reconnect(ReconnectEvent::EstablishedConnectionFate)?;
+    lifecycle.reconnect_failed(DisconnectReason::Error)?;
     assert_eq!(
-        lifecycle.reconnect(&mut jitter)?,
-        Duration::from_millis(100)
-    );
-    assert_eq!(
-        lifecycle.state(),
-        &ConnectionState::Reconnecting { attempt: 0 }
-    );
-    assert_eq!(
-        lifecycle.reconnect(&mut jitter)?,
-        Duration::from_millis(200)
-    );
-    assert_eq!(
-        lifecycle.state(),
-        &ConnectionState::Reconnecting { attempt: 1 }
+        lifecycle.reconnect(ReconnectEvent::ExplicitCallerAction)?,
+        ReconnectAttempt {
+            attempt: 1,
+            event: ReconnectEvent::ExplicitCallerAction,
+        }
     );
 
     lifecycle.connected()?;
     assert_eq!(
-        lifecycle.reconnect(&mut jitter)?,
-        Duration::from_millis(100)
-    );
-    assert_eq!(
-        lifecycle.state(),
-        &ConnectionState::Reconnecting { attempt: 0 }
+        lifecycle.reconnect(ReconnectEvent::EstablishedConnectionFate)?,
+        ReconnectAttempt {
+            attempt: 0,
+            event: ReconnectEvent::EstablishedConnectionFate,
+        }
     );
     Ok(())
 }
