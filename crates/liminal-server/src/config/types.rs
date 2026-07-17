@@ -187,6 +187,17 @@ pub struct AuthConfig {
 /// Origin-bearing upgrade, and there is NO default list — absent or empty
 /// configuration fails closed for browser-origin upgrades while a native client
 /// that sends no `Origin` header may still upgrade (F6).
+///
+/// OPERATOR NOTE — the same deployment contract covers the pre-upgrade window
+/// (domain-owner ruling, 2026-07-18): the fronting proxy must ALSO enforce
+/// pre-upgrade read timeouts, handshake concurrency limits, and connection
+/// rate limits. Between TCP accept and a completed WebSocket upgrade this
+/// listener does not count the socket against `[limits] max_connections` and
+/// applies no read deadline of its own (only the fixed request-head size
+/// bound), so a deployment that exposes this port without the named proxy is
+/// out of contract on untrusted networks. A named handshake read-deadline
+/// config plus an in-flight handshake cap derived from the configured
+/// `max_connections` value is the ledgered post-demo hardening.
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSocketConfig {

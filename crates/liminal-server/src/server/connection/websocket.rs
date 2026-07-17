@@ -18,6 +18,18 @@
 //! is no default list, so absent/empty configuration fails closed for browsers
 //! while native no-`Origin` clients may upgrade.
 //!
+//! Deployment contract, pre-upgrade window (domain-owner ruling, 2026-07-18,
+//! same shape as the Q1 TLS ruling): the named fronting proxy ALSO owns
+//! pre-upgrade read-timeout, handshake-concurrency, and rate bounds. This
+//! listener's pre-upgrade window is UNCOUNTED and UNDEADLINED: a socket that
+//! has been accepted but has not completed its upgrade is outside the shared
+//! §5 `max_connections` bound and its handshake read has no deadline — only
+//! its SIZE is bounded, by [`MAX_UPGRADE_REQUEST_BYTES`]. An unproxied
+//! deployment is therefore out of contract for untrusted networks. The
+//! ledgered follow-up (post-demo hardening, option (a)) is a named handshake
+//! read-deadline config value plus an in-flight handshake cap derived from the
+//! configured §5 `max_connections` value — never an invented constant.
+//!
 //! Extension posture (F1): extension offers — including the `permessage-deflate`
 //! offer every browser engine sends unremovably — are DECLINED, never
 //! negotiated. The upgrade response is built by this module and carries no

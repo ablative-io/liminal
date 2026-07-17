@@ -685,3 +685,23 @@ choices.
   FORBIDDEN. If a future component class needs bulk outbound streaming, it
   arrives with its own typed flow-control brief; it does not bolt onto this
   transport.
+
+## Post-landing ruling (2026-07-18) — pre-upgrade window ownership
+
+- **Finding (domain-owner review, MAJOR, trust boundary).** The R1 acceptor's
+  pre-upgrade handshake window sits OUTSIDE the shared §5 `max_connections`
+  bound: `read_upgrade_request` loops on blocking reads with no deadline, and
+  the handshake supervisor's in-flight registry is uncapped, so pre-upgrade
+  sockets are unbounded in both time and count — unlike TCP's
+  counted-before-first-byte admission. Only the request-head SIZE is bounded
+  (`MAX_UPGRADE_REQUEST_BYTES`).
+- **Ruling (same shape as the Q1 TLS-termination ruling).** The named fronting
+  proxy owns pre-upgrade read-timeout, handshake-concurrency, and rate bounds.
+  The raw-`ws://` listener's pre-upgrade window is the proxy's responsibility
+  by deployment contract, and an unproxied deployment is out of contract for
+  untrusted networks. Recorded in the acceptor module doc
+  (`connection/websocket.rs`) and the operator-facing `WebSocketConfig` doc
+  (`config/types.rs`); zero behavior change.
+- **Ledgered follow-up (post-demo hardening, option (a)).** A named handshake
+  read-deadline config value plus an in-flight handshake cap derived from the
+  configured §5 `max_connections` value — never an invented constant.
