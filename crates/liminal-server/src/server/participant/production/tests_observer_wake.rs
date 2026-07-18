@@ -130,6 +130,16 @@ fn ack(
     conversation_id: u64,
     participant_id: u64,
 ) -> Result<ServerValue, Box<dyn Error>> {
+    ack_through(service, incarnation, conversation_id, participant_id, 2)
+}
+
+fn ack_through(
+    service: &InstalledParticipantService,
+    incarnation: ConnectionIncarnation,
+    conversation_id: u64,
+    participant_id: u64,
+    through_seq: u64,
+) -> Result<ServerValue, Box<dyn Error>> {
     apply(
         service,
         incarnation,
@@ -138,7 +148,7 @@ fn ack(
             conversation_id,
             participant_id,
             capability_generation: Generation::ONE,
-            through_seq: 2,
+            through_seq,
         }),
     )
 }
@@ -457,3 +467,6 @@ fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Bo
     flush_fault_reopen_cuts()?;
     pre_handoff_process_cut()
 }
+
+#[path = "tests_observer_wake_coalescing.rs"]
+mod coalescing;
