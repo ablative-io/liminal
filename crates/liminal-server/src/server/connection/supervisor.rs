@@ -460,8 +460,29 @@ impl ConnectionSupervisor {
 
     /// R7 test instrument: slices serviced by connection `pid` since spawn.
     #[cfg(test)]
-    pub(super) fn slice_count(&self, pid: u64) -> u64 {
+    pub(crate) fn slice_count(&self, pid: u64) -> u64 {
         self.inner.runtime.slice_count(pid)
+    }
+
+    /// Installs a one-use readiness marker for the next serviced slice of `pid`.
+    #[cfg(test)]
+    pub(crate) fn observe_next_slice(&self, pid: u64) -> Receiver<u64> {
+        self.inner.runtime.observe_next_slice(pid)
+    }
+
+    /// Installs a one-use readiness marker for the next genuine scheduler park of
+    /// `pid`. The delivered value is the process's slice count at the final probe
+    /// that selected `Wait`.
+    #[cfg(test)]
+    pub(crate) fn observe_next_park(&self, pid: u64) -> Receiver<u64> {
+        self.inner.runtime.observe_next_park(pid)
+    }
+
+    /// Returns a marker for the current park when `pid` is already settled, or
+    /// the next park when a coalesced readiness event has started another slice.
+    #[cfg(test)]
+    pub(crate) fn observe_settled_park(&self, pid: u64) -> Receiver<u64> {
+        self.inner.runtime.observe_settled_park(pid)
     }
 
     /// Reserved push reply slots outstanding (test observability for the public
@@ -1133,6 +1154,16 @@ pub(super) struct ConnectionRuntime {
     /// reads this; the instrument lands now with a test proving it counts slices.
     #[cfg(test)]
     slice_counts: Mutex<HashMap<u64, u64>>,
+    /// One-use readiness markers for the next serviced slice of a process.
+    #[cfg(test)]
+    slice_observers: Mutex<HashMap<u64, Sender<u64>>>,
+    /// One-use readiness markers emitted only after the real final probe selects
+    /// `Wait`, immediately before the native process returns to the scheduler.
+    #[cfg(test)]
+    park_observers: Mutex<HashMap<u64, Sender<u64>>>,
+    /// Most recent slice count whose real final probe selected `Wait`.
+    #[cfg(test)]
+    park_counts: Mutex<HashMap<u64, u64>>,
     /// Deterministic test gate placed after arm and before the final probe.
     #[cfg(test)]
     pre_wait_barrier: Mutex<Option<PreWaitBarrier>>,
@@ -1201,6 +1232,12 @@ impl ConnectionRuntime {
             scheduler,
             #[cfg(test)]
             slice_counts: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            slice_observers: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            park_observers: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            park_counts: Mutex::new(HashMap::new()),
             #[cfg(test)]
             pre_wait_barrier: Mutex::new(None),
             #[cfg(test)]
@@ -1294,8 +1331,68 @@ impl ConnectionRuntime {
     /// slice; the park-flip's quiescence assertion reads [`Self::slice_count`].
     #[cfg(test)]
     pub(super) fn record_slice(&self, pid: u64) {
-        if let Ok(mut counts) = self.slice_counts.lock() {
-            *counts.entry(pid).or_insert(0) += 1;
+        let count = if let Ok(mut counts) = self.slice_counts.lock() {
+            let count = counts.entry(pid).or_insert(0);
+            *count += 1;
+            *count
+        } else {
+            return;
+        };
+        if let Ok(mut observers) = self.slice_observers.lock()
+            && let Some(observer) = observers.remove(&pid)
+        {
+            let _ = observer.send(count);
+        }
+    }
+
+    #[cfg(test)]
+    fn observe_next_slice(&self, pid: u64) -> Receiver<u64> {
+        let (sender, receiver) = channel();
+        if let Ok(mut observers) = self.slice_observers.lock() {
+            observers.insert(pid, sender);
+        }
+        receiver
+    }
+
+    #[cfg(test)]
+    fn observe_next_park(&self, pid: u64) -> Receiver<u64> {
+        let (sender, receiver) = channel();
+        if let Ok(mut observers) = self.park_observers.lock() {
+            observers.insert(pid, sender);
+        }
+        receiver
+    }
+
+    #[cfg(test)]
+    fn observe_settled_park(&self, pid: u64) -> Receiver<u64> {
+        let (sender, receiver) = channel();
+        let Ok(counts) = self.slice_counts.lock() else {
+            return receiver;
+        };
+        let current = counts.get(&pid).copied().unwrap_or(0);
+        let Ok(parks) = self.park_counts.lock() else {
+            return receiver;
+        };
+        if current > 0 && parks.get(&pid).copied() == Some(current) {
+            let _ = sender.send(current);
+        } else if let Ok(mut observers) = self.park_observers.lock() {
+            observers.insert(pid, sender);
+        }
+        drop(parks);
+        drop(counts);
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(super) fn record_park(&self, pid: u64) {
+        let count = self.slice_count(pid);
+        if let Ok(mut parks) = self.park_counts.lock() {
+            parks.insert(pid, count);
+        }
+        if let Ok(mut observers) = self.park_observers.lock()
+            && let Some(observer) = observers.remove(&pid)
+        {
+            let _ = observer.send(count);
         }
     }
 

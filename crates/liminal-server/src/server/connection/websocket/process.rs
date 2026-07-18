@@ -179,6 +179,8 @@ impl WebSocketConnectionProcess {
     /// delivery pump, the keepalive schedule, the outbound drain, timers,
     /// readiness arming, and the final probe.
     fn handle_slice(&mut self, pid: u64, ctx: &mut NativeContext<'_>) -> NativeOutcome {
+        #[cfg(test)]
+        self.runtime.record_slice(pid);
         if !self.runtime.is_registered(pid) {
             return NativeOutcome::Continue;
         }
@@ -261,7 +263,11 @@ impl WebSocketConnectionProcess {
         }
         match self.final_probe(pid) {
             Ok(true) => NativeOutcome::Continue,
-            Ok(false) => NativeOutcome::Wait,
+            Ok(false) => {
+                #[cfg(test)]
+                self.runtime.record_park(pid);
+                NativeOutcome::Wait
+            }
             Err(error) => self.fail_slice(pid, &error),
         }
     }

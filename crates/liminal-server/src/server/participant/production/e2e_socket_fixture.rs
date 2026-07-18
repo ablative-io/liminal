@@ -6,6 +6,7 @@ use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
 use liminal::protocol::{Frame, ProtocolVersion};
@@ -14,8 +15,14 @@ use liminal_protocol::wire::{
     ParticipantFrame, ParticipantId, ReceiverDirection, ServerPush, ServerValue,
     decode as decode_participant,
 };
+use tungstenite::Message;
+use tungstenite::client::IntoClientRequest;
+use tungstenite::protocol::WebSocket;
 
-use crate::server::connection::{ConnectionHandle, ConnectionServices, ConnectionSupervisor};
+use crate::config::types::WebSocketConfig;
+use crate::server::connection::{
+    ConnectionHandle, ConnectionServices, ConnectionSupervisor, WebSocketListener,
+};
 use crate::server::participant::{
     InstalledParticipantService, ObserverPublicationTarget, PARTICIPANT_CAPABILITY_BIT,
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
@@ -24,7 +31,12 @@ use crate::server::participant::{
 
 use super::super::ProductionParticipantHandler;
 use super::super::tests::{open_disk_store_for_tests, test_participant_config};
-use super::{ParticipantOnlyServices, encode_frame, read_frame, roundtrip, tcp_pair};
+use super::{
+    ParticipantOnlyServices, encode_frame, encode_request, read_frame, roundtrip, tcp_pair,
+};
+
+const WEBSOCKET_PATH: &str = "/participant";
+const WEBSOCKET_ORIGIN: &str = "https://participant.test";
 
 #[derive(Debug)]
 struct PublicationGate {
@@ -142,6 +154,16 @@ pub(in crate::server::participant::production) struct SocketPeer {
     connection: Option<ConnectionHandle>,
 }
 
+pub(in crate::server::participant::production) struct WebSocketPeer {
+    socket: WebSocket<TcpStream>,
+    pid: u64,
+}
+
+pub(in crate::server::participant::production) struct WebSocketEndpoint {
+    listener: WebSocketListener,
+    pub(in crate::server::participant::production) peer: WebSocketPeer,
+}
+
 impl SocketFixture {
     pub(in crate::server::participant::production) fn start(
         data_dir: &Path,
@@ -214,6 +236,91 @@ impl SocketFixture {
             client,
             inbound,
             connection: Some(connection),
+        })
+    }
+
+    pub(in crate::server::participant::production) fn pid(&self) -> u64 {
+        self.connection.pid()
+    }
+
+    pub(in crate::server::participant::production) fn observe_next_park(
+        &self,
+        pid: u64,
+    ) -> Receiver<u64> {
+        self.supervisor.observe_next_park(pid)
+    }
+
+    pub(in crate::server::participant::production) fn observe_settled_park(
+        &self,
+        pid: u64,
+    ) -> Receiver<u64> {
+        self.supervisor.observe_settled_park(pid)
+    }
+
+    pub(in crate::server::participant::production) fn observe_next_slice(
+        &self,
+        pid: u64,
+    ) -> Receiver<u64> {
+        self.supervisor.observe_next_slice(pid)
+    }
+
+    pub(in crate::server::participant::production) fn slice_count(&self, pid: u64) -> u64 {
+        self.supervisor.slice_count(pid)
+    }
+
+    pub(in crate::server::participant::production) fn spawn_websocket_peer(
+        &self,
+    ) -> Result<WebSocketEndpoint, Box<dyn Error>> {
+        let listener = WebSocketListener::bind(
+            &WebSocketConfig {
+                listen_address: "127.0.0.1:0".parse()?,
+                path: WEBSOCKET_PATH.to_owned(),
+                allowed_origins: vec![WEBSOCKET_ORIGIN.to_owned()],
+                ping_interval_ms: None,
+            },
+            self.supervisor.clone(),
+        )?;
+        let before = self.supervisor.active_connection_pids();
+        let stream = TcpStream::connect(listener.local_addr())?;
+        stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+        let mut request =
+            format!("ws://{}{WEBSOCKET_PATH}", listener.local_addr()).into_client_request()?;
+        request
+            .headers_mut()
+            .insert("Origin", WEBSOCKET_ORIGIN.parse()?);
+        let (mut socket, _) = tungstenite::client::client(request, stream)?;
+        socket.send(Message::Binary(
+            encode_frame(&Frame::Connect {
+                flags: 0,
+                min_version: ProtocolVersion::new(1, 0),
+                max_version: ProtocolVersion::new(1, 0),
+                auth_token: Vec::new(),
+            })?
+            .into(),
+        ))?;
+        let ack_bytes = read_websocket_binary(&mut socket)?;
+        let (ack, consumed) = liminal::protocol::decode(&ack_bytes)?;
+        if consumed != ack_bytes.len()
+            || !matches!(
+                ack,
+                Frame::ConnectAck { capabilities, .. }
+                    if capabilities == PARTICIPANT_CAPABILITY_BIT
+            )
+        {
+            return Err(
+                format!("WebSocket participant capability was not advertised: {ack:?}").into(),
+            );
+        }
+        let pid = self
+            .supervisor
+            .active_connection_pids()
+            .into_iter()
+            .find(|pid| !before.contains(pid))
+            .ok_or("WebSocket connection process was not registered")?;
+        Ok(WebSocketEndpoint {
+            listener,
+            peer: WebSocketPeer { socket, pid },
         })
     }
 
@@ -315,6 +422,56 @@ impl SocketPeer {
     ) -> Result<ServerValue, Box<dyn Error>> {
         roundtrip(&mut self.client, &mut self.inbound, request)
     }
+}
+
+impl WebSocketPeer {
+    pub(in crate::server::participant::production) const fn pid(&self) -> u64 {
+        self.pid
+    }
+
+    pub(in crate::server::participant::production) fn request(
+        &mut self,
+        request: ClientRequest,
+    ) -> Result<ServerValue, Box<dyn Error>> {
+        self.socket
+            .send(Message::Binary(encode_request(request)?.into()))?;
+        let bytes = read_websocket_binary(&mut self.socket)?;
+        let decoded = decode_participant(&bytes, ReceiverDirection::Client)
+            .map_err(|error| format!("{error:?}"))?;
+        let ParticipantFrame::ServerValue(value) = decoded else {
+            return Err(format!("expected WebSocket participant value, got {decoded:?}").into());
+        };
+        Ok(value)
+    }
+
+    pub(in crate::server::participant::production) fn read_push(
+        &mut self,
+    ) -> Result<ServerPush, Box<dyn Error>> {
+        let bytes = read_websocket_binary(&mut self.socket)?;
+        let decoded = decode_participant(&bytes, ReceiverDirection::Client)
+            .map_err(|error| format!("{error:?}"))?;
+        let ParticipantFrame::ServerPush(push) = decoded else {
+            return Err(format!("expected WebSocket participant push, got {decoded:?}").into());
+        };
+        Ok(push)
+    }
+}
+
+impl WebSocketEndpoint {
+    pub(in crate::server::participant::production) fn stop(self) -> Result<(), Box<dyn Error>> {
+        let Self { listener, peer } = self;
+        drop(peer);
+        listener.shutdown()?;
+        Ok(())
+    }
+}
+
+fn read_websocket_binary(socket: &mut WebSocket<TcpStream>) -> Result<Vec<u8>, Box<dyn Error>> {
+    let message = socket.read()?;
+    let Message::Binary(bytes) = message else {
+        return Err(format!("expected one binary WebSocket message, got {message:?}").into());
+    };
+    Ok(bytes.to_vec())
 }
 
 fn connect_socket(

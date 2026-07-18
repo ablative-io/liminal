@@ -10,6 +10,7 @@ use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 use liminal::protocol::{
@@ -187,6 +188,146 @@ fn roundtrip(
         return Err("participant response did not decode as a server value".into());
     };
     Ok(value)
+}
+
+fn await_genuine_park(
+    server: &SocketFixture,
+    pid: u64,
+    marker: Receiver<u64>,
+) -> Result<u64, Box<dyn Error>> {
+    marker
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("process {pid} did not report its final-probe park: {error}"))?;
+    let parked_at = server
+        .observe_settled_park(pid)
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("process {pid} did not settle after its park: {error}"))?;
+    assert_eq!(server.slice_count(pid), parked_at);
+    Ok(parked_at)
+}
+
+fn assert_idle_slice_count_is_stable(
+    server: &SocketFixture,
+    pid: u64,
+    parked_at: u64,
+) -> Result<(), Box<dyn Error>> {
+    let unexpected_slice = server.observe_next_slice(pid);
+    assert!(
+        matches!(
+            unexpected_slice.recv_timeout(Duration::from_millis(100)),
+            Err(RecvTimeoutError::Timeout)
+        ),
+        "parked process {pid} serviced a slice without a readiness event"
+    );
+    assert_eq!(
+        server.slice_count(pid),
+        parked_at,
+        "parked process {pid} polled while idle"
+    );
+    Ok(())
+}
+
+#[test]
+fn parked_tcp_and_websocket_processes_wake_on_outbox_without_polling() -> Result<(), Box<dyn Error>>
+{
+    const TCP_CONVERSATION: u64 = 0x21_01;
+    const WS_CONVERSATION: u64 = 0x21_02;
+
+    // TCP: an enrollment request gives the real process a deterministic event
+    // after the park marker is installed. The marker is emitted only when the
+    // production final probe returns false and the native process selects Wait.
+    let tcp_home = tempfile::tempdir()?;
+    let mut tcp_server = SocketFixture::start(&tcp_home.path().join("tcp"))?;
+    let tcp_pid = tcp_server.pid();
+    let initial_tcp_park = tcp_server.observe_next_park(tcp_pid);
+    let tcp_recipient = tcp_server.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: TCP_CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0x21; 16]),
+    }))?;
+    let ServerValue::EnrollBound(tcp_recipient) = tcp_recipient else {
+        return Err(format!("TCP recipient enrollment did not bind: {tcp_recipient:?}").into());
+    };
+    let parked_at = await_genuine_park(&tcp_server, tcp_pid, initial_tcp_park)?;
+    assert_idle_slice_count_is_stable(&tcp_server, tcp_pid, parked_at)?;
+
+    let tcp_wake_park = tcp_server.observe_next_park(tcp_pid);
+    let mut tcp_sender_socket = tcp_server.spawn_peer()?;
+    let tcp_sender = tcp_sender_socket.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: TCP_CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0x22; 16]),
+    }))?;
+    let ServerValue::EnrollBound(tcp_sender) = tcp_sender else {
+        return Err(format!("TCP sender enrollment did not bind: {tcp_sender:?}").into());
+    };
+    let tcp_push = tcp_server.read_push()?;
+    assert_eq!(
+        tcp_push,
+        ServerPush::ParticipantDelivery(liminal_protocol::wire::ParticipantDelivery {
+            conversation_id: TCP_CONVERSATION,
+            delivery_seq: 2,
+            record: ParticipantRecord::Attached {
+                affected_participant_id: tcp_sender.participant_id(),
+                binding_epoch: tcp_sender.origin_binding_epoch(),
+            },
+        })
+    );
+    assert_ne!(tcp_recipient.participant_id(), tcp_sender.participant_id());
+    let reparks_at = await_genuine_park(&tcp_server, tcp_pid, tcp_wake_park)?;
+    assert!(reparks_at > parked_at);
+    assert_idle_slice_count_is_stable(&tcp_server, tcp_pid, reparks_at)?;
+    drop(tcp_sender_socket);
+    tcp_server.stop();
+
+    // WebSocket: the sibling listener installs the same production participant
+    // service and registry into an actual WebSocket connection process. Its own
+    // final probe must park, wake from the eligible source-batch commit, publish
+    // one binary participant frame, and repark without an idle slice.
+    let ws_home = tempfile::tempdir()?;
+    let mut ws_server = SocketFixture::start(&ws_home.path().join("websocket"))?;
+    let mut ws_endpoint = ws_server.spawn_websocket_peer()?;
+    let ws_pid = ws_endpoint.peer.pid();
+    let initial_ws_park = ws_server.observe_next_park(ws_pid);
+    let ws_recipient = ws_endpoint
+        .peer
+        .request(ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: WS_CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0x23; 16]),
+        }))?;
+    let ServerValue::EnrollBound(ws_recipient) = ws_recipient else {
+        return Err(
+            format!("WebSocket recipient enrollment did not bind: {ws_recipient:?}").into(),
+        );
+    };
+    let ws_parked_at = await_genuine_park(&ws_server, ws_pid, initial_ws_park)?;
+    assert_idle_slice_count_is_stable(&ws_server, ws_pid, ws_parked_at)?;
+
+    let ws_wake_park = ws_server.observe_next_park(ws_pid);
+    let ws_sender = ws_server.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: WS_CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0x24; 16]),
+    }))?;
+    let ServerValue::EnrollBound(ws_sender) = ws_sender else {
+        return Err(format!("WebSocket sender enrollment did not bind: {ws_sender:?}").into());
+    };
+    let ws_push = ws_endpoint.peer.read_push()?;
+    assert_eq!(
+        ws_push,
+        ServerPush::ParticipantDelivery(liminal_protocol::wire::ParticipantDelivery {
+            conversation_id: WS_CONVERSATION,
+            delivery_seq: 2,
+            record: ParticipantRecord::Attached {
+                affected_participant_id: ws_sender.participant_id(),
+                binding_epoch: ws_sender.origin_binding_epoch(),
+            },
+        })
+    );
+    assert_ne!(ws_recipient.participant_id(), ws_sender.participant_id());
+    let ws_reparks_at = await_genuine_park(&ws_server, ws_pid, ws_wake_park)?;
+    assert!(ws_reparks_at > ws_parked_at);
+    assert_idle_slice_count_is_stable(&ws_server, ws_pid, ws_reparks_at)?;
+    ws_endpoint.stop()?;
+    ws_server.stop();
+    Ok(())
 }
 
 #[test]

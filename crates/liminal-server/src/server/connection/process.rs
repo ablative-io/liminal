@@ -248,7 +248,11 @@ impl ConnectionProcess {
                 }
                 NativeOutcome::Continue
             }
-            Ok(false) => NativeOutcome::Wait,
+            Ok(false) => {
+                #[cfg(test)]
+                self.runtime.record_park(pid);
+                NativeOutcome::Wait
+            }
             Err(error) => self.fail_slice(pid, &error),
         }
     }
