@@ -240,7 +240,6 @@ impl ConversationAuthority {
         })
     }
 
-    /// Replays one v2 Left row through the same protocol-owned settled Leave
     /// Replays one v2 Left row through the same protocol-owned Leave
     /// transition and validates every persisted tombstone allocation.
     pub(super) fn replay_leave(&mut self, row: &StoredLeave) -> Result<(), StateError> {
