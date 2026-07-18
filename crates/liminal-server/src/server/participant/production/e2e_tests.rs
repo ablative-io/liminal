@@ -19,9 +19,10 @@ use liminal::protocol::{
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, CredentialAttachRequest, DetachAttemptToken, DetachRequest,
     DetachStaleAuthority, EnrollmentRequest, EnrollmentToken, Generation, PARTICIPANT_FRAME_TYPE,
-    ParticipantAck, ParticipantFrame, ReceiverDirection, RecordAdmission,
-    RecordAdmissionAttemptToken, ServerValue, StaleAuthority, decode as decode_participant,
-    encode as encode_participant, encoded_len as participant_encoded_len,
+    ParticipantAck, ParticipantFrame, ParticipantRecord, ReceiverDirection, RecordAdmission,
+    RecordAdmissionAttemptToken, ServerPush, ServerValue, StaleAuthority,
+    decode as decode_participant, encode as encode_participant,
+    encoded_len as participant_encoded_len,
 };
 
 use crate::ServerError;
@@ -181,6 +182,108 @@ fn roundtrip(
         return Err("participant response did not decode as a server value".into());
     };
     Ok(value)
+}
+
+#[test]
+fn ack_after_reattach_before_replay_accepts_after_reconciliation() -> Result<(), Box<dyn Error>> {
+    const CONVERSATION: u64 = 527;
+
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let mut server = SocketFixture::start_with_replay_gate(&data_dir)?;
+    let mut sender_socket = server.spawn_peer()?;
+
+    let enrolled = server.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0x27; 16]),
+    }))?;
+    let ServerValue::EnrollBound(recipient) = enrolled else {
+        return Err(format!("recipient enrollment did not bind: {enrolled:?}").into());
+    };
+    let sender_enrolled = sender_socket.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0xA7; 16]),
+    }))?;
+    let ServerValue::EnrollBound(sender) = sender_enrolled else {
+        return Err(format!("sender enrollment did not bind: {sender_enrolled:?}").into());
+    };
+    let ServerPush::ParticipantDelivery(offered_on_e) = server.read_push()? else {
+        return Err("epoch-E offer was not a participant delivery".into());
+    };
+    assert_eq!(offered_on_e.conversation_id, CONVERSATION);
+    assert_eq!(offered_on_e.delivery_seq, 2);
+    assert_eq!(
+        offered_on_e.record,
+        ParticipantRecord::Attached {
+            affected_participant_id: sender.participant_id(),
+            binding_epoch: sender.origin_binding_epoch(),
+        }
+    );
+    let recipient_id = recipient.participant_id();
+    let obligation_seq = offered_on_e.delivery_seq;
+    let reconciled = server.participant_owner_facts(CONVERSATION, recipient_id)?;
+    assert_eq!(reconciled.frontier_cursor, 0);
+    assert_eq!(reconciled.outbox_ack_through, 0);
+    assert_eq!(reconciled.next_live_obligation, Some(obligation_seq));
+
+    server.block_publication_replay()?;
+    let mut reattached_socket = server.spawn_peer()?;
+    let attached =
+        reattached_socket.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id: CONVERSATION,
+            participant_id: recipient_id,
+            capability_generation: Generation::ONE,
+            attach_secret: recipient.attach_secret(),
+            attach_attempt_token: AttachAttemptToken::new([0xB7; 16]),
+            accept_marker_delivery_seq: None,
+        }))?;
+    let ServerValue::AttachBound(reattached) = attached else {
+        return Err(format!("recipient reattach did not bind E+1: {attached:?}").into());
+    };
+    assert_eq!(
+        reattached.capability_generation(),
+        Generation::new(2).ok_or("generation two is nonzero")?
+    );
+    assert_ne!(
+        reattached.origin_binding_epoch(),
+        recipient.origin_binding_epoch()
+    );
+    assert!(
+        server.blocked_publication_scans()? > 0,
+        "the replay gate did not intercept the first E+1 publication selection"
+    );
+
+    let before_ack = server.participant_owner_facts(CONVERSATION, recipient_id)?;
+    assert_eq!(before_ack.frontier_cursor, 0);
+    assert_eq!(before_ack.outbox_ack_through, 0);
+    assert_eq!(before_ack.next_live_obligation, Some(obligation_seq));
+    let truthful_ack = ParticipantAck {
+        conversation_id: CONVERSATION,
+        participant_id: recipient_id,
+        capability_generation: reattached.capability_generation(),
+        through_seq: obligation_seq,
+    };
+    let outcome = reattached_socket.request(ClientRequest::ParticipantAck(truthful_ack))?;
+    let ServerValue::AckCommitted(committed) = outcome else {
+        return Err(format!("pre-replay reconciled ack was refused: {outcome:?}").into());
+    };
+    assert_eq!(committed.request().conversation_id, CONVERSATION);
+    assert_eq!(committed.request().participant_id, recipient_id);
+    assert_eq!(committed.request().through_seq, obligation_seq);
+
+    let after_ack = server.participant_owner_facts(CONVERSATION, recipient_id)?;
+    assert_eq!(after_ack.frontier_cursor, obligation_seq);
+    assert_eq!(after_ack.outbox_ack_through, obligation_seq);
+    assert_eq!(after_ack.next_live_obligation, None);
+    assert_eq!(
+        after_ack.live_record_count + 1,
+        before_ack.live_record_count
+    );
+    assert!(after_ack.charged_bytes < before_ack.charged_bytes);
+    drop(reattached_socket);
+    drop(sender_socket);
+    server.stop();
+    Ok(())
 }
 
 const CONVERSATION: u64 = 401;

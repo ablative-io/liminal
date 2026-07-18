@@ -39,6 +39,13 @@ impl PublicationGate {
             blocked_scans: AtomicU64::new(0),
         }
     }
+
+    const fn open() -> Self {
+        Self {
+            open: AtomicBool::new(true),
+            blocked_scans: AtomicU64::new(0),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -132,7 +139,7 @@ pub(in crate::server::participant::production) struct SocketFixture {
 pub(in crate::server::participant::production) struct SocketPeer {
     client: TcpStream,
     inbound: Vec<u8>,
-    connection: ConnectionHandle,
+    connection: Option<ConnectionHandle>,
 }
 
 impl SocketFixture {
@@ -146,6 +153,12 @@ impl SocketFixture {
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
         Self::start_inner(data_dir, Some(Arc::new(PublicationGate::closed())))
+    }
+
+    pub(in crate::server::participant::production) fn start_with_replay_gate(
+        data_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(data_dir, Some(Arc::new(PublicationGate::open())))
     }
 
     fn start_inner(
@@ -200,8 +213,19 @@ impl SocketFixture {
         Ok(SocketPeer {
             client,
             inbound,
-            connection,
+            connection: Some(connection),
         })
+    }
+
+    pub(in crate::server::participant::production) fn block_publication_replay(
+        &self,
+    ) -> Result<(), Box<dyn Error>> {
+        let gate = self
+            .publication_gate
+            .as_ref()
+            .ok_or("socket fixture has no publication gate")?;
+        gate.open.store(false, Ordering::SeqCst);
+        Ok(())
     }
 
     pub(in crate::server::participant::production) fn read_push(
@@ -321,6 +345,8 @@ fn connect_socket(
 
 impl Drop for SocketPeer {
     fn drop(&mut self) {
-        let _ = &self.connection;
+        if let Some(connection) = self.connection.take() {
+            drop(connection);
+        }
     }
 }
