@@ -9,11 +9,14 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use crate::{algebra::ResourceVector, wire::RecordAdmission};
 
 use super::super::{
-    AttachCommit, AttachTransition, ClaimFrontiers, ClosureAccounting, CommittedDetachTransition,
-    FrontierBinding, FrontierParticipant, InitialEnrollmentFrontierCommit, MarkerAckCommit,
-    NonzeroParticipantAckCommit, OrderLedger, ParticipantAckCommit, RetainedCausalRecord,
-    RetainedCausalRecordKind, SequenceLedger, StoredEdge,
-    claim_frontier::LiveFrontierTransitionError,
+    AttachCommit, AttachTransition, BindingState, ClaimFrontiers, ClosureAccounting,
+    CommittedDetachTransition, DetachCell, FrontierBinding, FrontierParticipant, IdentityState,
+    InitialEnrollmentFrontierCommit, LeaveCommitError, LeaveCommitParameters, LiveMember,
+    MarkerAckCommit, NonzeroParticipantAckCommit, OrderLedger, ParticipantAckCommit,
+    PendingFinalization, PendingLeaveCommitParameters, PrepareLeaveAuthorityError,
+    RetainedCausalRecord, RetainedCausalRecordKind, SequenceLedger, StoredEdge,
+    VerifiedLeaveRequest, claim_frontier::LiveFrontierTransitionError, commit_leave,
+    commit_pending_leave,
 };
 use super::{
     InitialEnrollmentOperationCommit, MarkerDrainCommit, RecordAdmissionPersistenceParts,
@@ -199,6 +202,178 @@ impl LiveFrontierOwner {
             successor,
         )
     }
+}
+
+/// Complete move-only settled Leave result: tombstone and executable owner.
+#[derive(Debug, PartialEq, Eq)]
+pub struct LiveLeaveCommit<EF, V, LF> {
+    identity: IdentityState<EF, V, LF>,
+    owner: LiveFrontierOwner,
+}
+
+impl<EF, V, LF> LiveLeaveCommit<EF, V, LF> {
+    /// Consumes the atomic result into its inseparable tombstone and owner.
+    #[must_use]
+    pub fn into_parts(self) -> (IdentityState<EF, V, LF>, LiveFrontierOwner) {
+        (self.identity, self.owner)
+    }
+}
+
+/// Typed failure of the protocol-owned settled Leave live transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveLeaveError {
+    /// Claim-frontier Leave authority could not be prepared.
+    Prepare(PrepareLeaveAuthorityError),
+    /// Membership retirement rejected inconsistent authority.
+    Commit(LeaveCommitError),
+    /// Canonical Left-row charge did not name the protocol-produced row.
+    RetainedCharge,
+    /// Resulting retained-row count exceeded the signed cap.
+    RetainedRecordLimit,
+    /// Resulting closure accounting exceeded configured capacity.
+    ClosureAccounting,
+    /// Leave did not produce a retired identity.
+    Identity,
+}
+
+/// Commits settled bound or detached Leave through one complete live owner.
+///
+/// # Errors
+///
+/// Returns [`LiveLeaveError`] when preparation or retirement authority is
+/// inconsistent, the caller's keyed Left charge does not match the committed
+/// row, or the resulting retention/closure accounting exceeds its authority.
+pub fn commit_settled_leave_frontier<EF, V, LF, D>(
+    owner: LiveFrontierOwner,
+    member: LiveMember<EF>,
+    binding: BindingState,
+    detach_cell: DetachCell<D>,
+    verified: VerifiedLeaveRequest<V, LF>,
+    left_delivery_seq: u64,
+    left_charge: RetainedRecordCharge,
+) -> Result<LiveLeaveCommit<EF, V, LF>, LiveLeaveError> {
+    let LiveFrontierOwner {
+        frontiers,
+        closure_accounting,
+        mut retained_charges,
+        retained_record_limit,
+    } = owner;
+    let authority = frontiers
+        .prepare_settled_leave_authority(&member, binding)
+        .map_err(LiveLeaveError::Prepare)?;
+    let commit = commit_leave(
+        member,
+        binding,
+        detach_cell,
+        verified,
+        authority,
+        LeaveCommitParameters { left_delivery_seq },
+    )
+    .map_err(LiveLeaveError::Commit)?;
+    let (identity, frontiers) = commit.into_parts();
+    let IdentityState::Retired(retired) = &identity else {
+        return Err(LiveLeaveError::Identity);
+    };
+    if left_charge.delivery_seq() != retired.committed_result().left_delivery_seq()
+        || left_charge.admission_order() != retired.left_admission_order()
+        || left_charge.encoded_charge().entries != 1
+    {
+        return Err(LiveLeaveError::RetainedCharge);
+    }
+    retained_charges.push(left_charge);
+    retained_charges.sort_unstable_by_key(|charge| charge.delivery_seq());
+    let retained_len = u64::try_from(frontiers.retained_records().len())
+        .map_err(|_| LiveLeaveError::RetainedRecordLimit)?;
+    if retained_len > retained_record_limit
+        || retained_charges.len() != frontiers.retained_records().len()
+    {
+        return Err(LiveLeaveError::RetainedRecordLimit);
+    }
+    let closure_accounting = accounting_after_rows(closure_accounting, &[left_charge])
+        .ok_or(LiveLeaveError::ClosureAccounting)?;
+    Ok(LiveLeaveCommit {
+        identity,
+        owner: LiveFrontierOwner {
+            frontiers,
+            closure_accounting,
+            retained_charges,
+            retained_record_limit,
+        },
+    })
+}
+
+/// Commits a pending binding terminal immediately before Leave through one
+/// complete live owner.
+///
+/// # Errors
+///
+/// Returns [`LiveLeaveError`] when pending preparation or retirement authority
+/// is inconsistent, either caller charge does not match its protocol-produced
+/// row, or resulting retention/closure accounting exceeds its authority.
+pub fn commit_pending_leave_frontier<EF, V, LF, D>(
+    owner: LiveFrontierOwner,
+    member: LiveMember<EF>,
+    pending: PendingFinalization,
+    detach_cell: DetachCell<D>,
+    verified: VerifiedLeaveRequest<V, LF>,
+    parameters: PendingLeaveCommitParameters,
+    charges: [RetainedRecordCharge; 2],
+) -> Result<LiveLeaveCommit<EF, V, LF>, LiveLeaveError> {
+    let [terminal_charge, left_charge] = charges;
+    let terminal_delivery_seq = parameters.terminal_delivery_seq;
+    let LiveFrontierOwner {
+        frontiers,
+        closure_accounting,
+        mut retained_charges,
+        retained_record_limit,
+    } = owner;
+    let authority = frontiers
+        .prepare_pending_leave_authority(&member, pending)
+        .map_err(LiveLeaveError::Prepare)?;
+    let commit = commit_pending_leave(
+        member,
+        pending,
+        detach_cell,
+        verified,
+        authority,
+        parameters,
+    )
+    .map_err(LiveLeaveError::Commit)?;
+    let (identity, frontiers) = commit.into_parts();
+    let IdentityState::Retired(retired) = &identity else {
+        return Err(LiveLeaveError::Identity);
+    };
+    if retired.committed_result().prior_terminal_delivery_seq() != Some(terminal_delivery_seq)
+        || terminal_charge.delivery_seq() != terminal_delivery_seq
+        || terminal_charge.admission_order() != pending.admission_order()
+        || terminal_charge.encoded_charge().entries != 1
+        || left_charge.delivery_seq() != retired.committed_result().left_delivery_seq()
+        || left_charge.admission_order() != retired.left_admission_order()
+        || left_charge.encoded_charge().entries != 1
+    {
+        return Err(LiveLeaveError::RetainedCharge);
+    }
+    retained_charges.extend([terminal_charge, left_charge]);
+    retained_charges.sort_unstable_by_key(|charge| charge.delivery_seq());
+    let retained_len = u64::try_from(frontiers.retained_records().len())
+        .map_err(|_| LiveLeaveError::RetainedRecordLimit)?;
+    if retained_len > retained_record_limit
+        || retained_charges.len() != frontiers.retained_records().len()
+    {
+        return Err(LiveLeaveError::RetainedRecordLimit);
+    }
+    let closure_accounting =
+        accounting_after_rows(closure_accounting, &[terminal_charge, left_charge])
+            .ok_or(LiveLeaveError::ClosureAccounting)?;
+    Ok(LiveLeaveCommit {
+        identity,
+        owner: LiveFrontierOwner {
+            frontiers,
+            closure_accounting,
+            retained_charges,
+            retained_record_limit,
+        },
+    })
 }
 
 /// Exact charges for a credential attach's one or two retained rows.

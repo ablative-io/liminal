@@ -1231,6 +1231,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "beamr 0.15.2",
+ "blake3",
  "clap",
  "futures-core",
  "haematite",

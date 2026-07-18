@@ -359,9 +359,7 @@ impl ConversationAuthority {
             }
             StoredOperation::RecordAdmission { row } => self.replay_record_admission(&row, config),
             StoredOperation::MarkerDrained { row } => self.replay_marker_drain(&row),
-            StoredOperation::Left { .. } => Err(StateError::invariant(
-                "v2 Leave row reached replay before its transition handler",
-            )),
+            StoredOperation::Left { row } => self.replay_leave(&row),
         }
     }
 }

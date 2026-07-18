@@ -165,6 +165,12 @@ pub(super) fn ordinary_record_charge(
     Ok(ResourceVector::new(1, bytes))
 }
 
+/// Exact fixed-width canonical retained-row charge for `Left`.
+pub(super) const fn left_record_charge() -> ResourceVector {
+    // kind + conversation + participant + generation + token + order + sequence
+    ResourceVector::new(1, 1 + (5 * 8) + 16)
+}
+
 /// Signed ordinary projection vectors consumed by the total selector.
 pub(super) const fn ordinary_projection_limits(
     config: &ParticipantConfig,

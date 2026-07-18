@@ -201,9 +201,9 @@ pub use operations::{
     AttachFrontierCharges, CommittedOrdinaryRecord, InitialEnrollmentCommitValues,
     InitialEnrollmentOperationCommit, InitialEnrollmentOperationDecision,
     InitialEnrollmentOperationFault, InitialEnrollmentOperationInput, LiveFrontierCommit,
-    LiveFrontierError, LiveFrontierFailure, LiveFrontierOwner, LiveFrontierResult, MarkerAckCommit,
-    MarkerAckCommitError, MarkerAckDecision, MarkerDrainCommit, MarkerDrainError,
-    MarkerProofDecision, MarkerProofInput, MarkerProofPermit, MarkerProofState,
+    LiveFrontierError, LiveFrontierFailure, LiveFrontierOwner, LiveFrontierResult, LiveLeaveCommit,
+    LiveLeaveError, MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, MarkerDrainCommit,
+    MarkerDrainError, MarkerProofDecision, MarkerProofInput, MarkerProofPermit, MarkerProofState,
     NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
     NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError, OrdinaryProjectionError,
     OrdinaryProjectionLimits, OrdinaryRecordDrainFirst, OrdinaryRecordProjectionDecision,
@@ -216,8 +216,8 @@ pub use operations::{
     apply_enrollment_frontier, apply_initial_enrollment, apply_marker_ack,
     apply_marker_ack_frontier, apply_nonzero_participant_ack,
     apply_nonzero_participant_ack_frontier, apply_participant_ack, apply_participant_ack_frontier,
-    apply_record_admission, classify_record_admission_binding, drain_next_marker,
-    select_marker_proof,
+    apply_record_admission, classify_record_admission_binding, commit_pending_leave_frontier,
+    commit_settled_leave_frontier, drain_next_marker, select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,

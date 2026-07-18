@@ -15,8 +15,8 @@ use liminal::durability::{DurabilityError, DurableStore};
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, BindingEpoch, ConnectionIncarnation, CredentialAttachRequest,
     DeliverySeq, DetachAttemptToken, DetachRequest, EnrollmentRequest, EnrollmentToken, Generation,
-    LeaveRequest, ParticipantAck, ParticipantId, RecordAdmission, RecordAdmissionAttemptToken,
-    TransactionOrder,
+    LeaveAttemptToken, LeaveRequest, ParticipantAck, ParticipantId, RecordAdmission,
+    RecordAdmissionAttemptToken, TransactionOrder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -308,6 +308,18 @@ impl From<&LeaveRequest> for StoredLeaveRequest {
             attach_secret: request.attach_secret.into_bytes(),
             token: request.leave_attempt_token.into_bytes(),
         }
+    }
+}
+
+impl StoredLeaveRequest {
+    pub(super) fn into_request(self) -> Result<LeaveRequest, OperationLogError> {
+        Ok(LeaveRequest {
+            conversation_id: self.conversation_id,
+            participant_id: self.participant_id,
+            capability_generation: stored_generation(self.capability_generation)?,
+            attach_secret: AttachSecret::new(self.attach_secret),
+            leave_attempt_token: LeaveAttemptToken::new(self.token),
+        })
     }
 }
 

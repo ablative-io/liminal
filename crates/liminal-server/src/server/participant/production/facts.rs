@@ -5,7 +5,7 @@
 //! non-secret request bodies, and monotonic clock reads. No lifecycle rule
 //! lives here — the protocol crate decides what each fact means.
 
-use liminal_protocol::wire::{DetachRequest, EnrollmentToken};
+use liminal_protocol::wire::{DetachRequest, EnrollmentToken, LeaveRequest};
 
 /// Fixed server-side fingerprint width shared by every lifecycle digest.
 ///
@@ -100,6 +100,36 @@ pub fn detach_request_verifier(request: &DetachRequest) -> Digest {
         *slot = *byte;
     }
     digest
+}
+
+/// Stable non-reversible verifier for the presented Leave attach secret.
+///
+/// The token and public request body deliberately do not enter this proof:
+/// retired lookup checks the token first and must still distinguish a verified
+/// same-token generation conflict from a stale secret presentation.
+#[must_use]
+pub fn leave_request_verifier(request: &LeaveRequest) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"liminal/leave/secret-verifier/v2");
+    hasher.update(&request.attach_secret.into_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+/// Stable domain-separated canonical Leave fingerprint for the tombstone.
+#[must_use]
+pub fn leave_fingerprint(request: &LeaveRequest) -> Digest {
+    leave_digest(b"liminal/leave/fingerprint/v2", request)
+}
+
+fn leave_digest(domain: &[u8], request: &LeaveRequest) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(domain);
+    hasher.update(&request.conversation_id.to_be_bytes());
+    hasher.update(&request.participant_id.to_be_bytes());
+    hasher.update(&request.capability_generation.get().to_be_bytes());
+    hasher.update(&request.attach_secret.into_bytes());
+    hasher.update(&request.leave_attempt_token.into_bytes());
+    *hasher.finalize().as_bytes()
 }
 
 /// Constant-time byte-slice equality for presented secrets and the

@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use liminal_protocol::lifecycle::{
     BindingState, ConversationDecision, ConversationGenesis, ConversationRefusalReason,
     CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveFrontierOwner, LiveMember,
-    ParticipantConversation,
+    ParticipantConversation, RetiredIdentity,
 };
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachBound, AttachSecret, DeliverySeq, DetachAttemptToken, EnrollBound,
@@ -129,6 +129,8 @@ pub(super) struct ConversationAuthority {
     pub(super) frontier: Option<LiveFrontierOwner>,
     /// Live participant slots keyed by permanent participant id.
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
+    /// Permanent retired identity tombstones keyed by participant id.
+    pub(super) retired: BTreeMap<ParticipantId, RetiredIdentity<Digest, Digest, Digest>>,
     /// Permanent enrollment-token index.
     pub(super) tokens: BTreeMap<[u8; 16], ParticipantId>,
     /// Next unallocated transaction order.
@@ -219,6 +221,7 @@ impl ConversationAuthority {
             shell: None,
             frontier: None,
             slots: BTreeMap::new(),
+            retired: BTreeMap::new(),
             tokens: BTreeMap::new(),
             next_order: 0,
             next_seq: 1,

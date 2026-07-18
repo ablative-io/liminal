@@ -8,7 +8,7 @@ use liminal::durability::bridge::block_on;
 use liminal::durability::{DurabilityError, DurableStore, StoredEntry, open_ephemeral};
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, Generation,
-    RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
+    LeaveAttemptToken, LeaveRequest, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
 };
 
 use super::ProductionParticipantHandler;
@@ -207,6 +207,33 @@ fn enrolled_fault_handler(
     Ok(handler)
 }
 
+fn enrolled_fault_leave_handler(
+    fault: &Arc<FaultStore>,
+    incarnation: ConnectionIncarnation,
+) -> Result<(ProductionParticipantHandler, LeaveRequest), Box<dyn Error>> {
+    let store: Arc<dyn DurableStore> = fault.clone();
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let value = dispatch(
+        &handler,
+        incarnation,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0xF5; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt) = value else {
+        return Err(format!("fault-test enrollment did not bind: {value:?}").into());
+    };
+    let request = LeaveRequest {
+        conversation_id: CONVERSATION,
+        participant_id: receipt.participant_id(),
+        capability_generation: Generation::ONE,
+        attach_secret: receipt.attach_secret(),
+        leave_attempt_token: LeaveAttemptToken::new([0xF6; 16]),
+    };
+    Ok((handler, request))
+}
+
 #[test]
 fn record_append_failure_publishes_no_response_or_poststate() -> Result<(), Box<dyn Error>> {
     let inner: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
@@ -283,5 +310,81 @@ fn record_flush_failure_replays_only_a_complete_row() -> Result<(), Box<dyn Erro
         return Err("post-fault cold replay did not admit the next record".into());
     };
     assert_eq!(committed.delivery_seq(), 3);
+    Ok(())
+}
+
+#[test]
+fn leave_append_failure_publishes_no_response_or_tombstone() -> Result<(), Box<dyn Error>> {
+    let inner: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let fault = Arc::new(FaultStore {
+        inner: Arc::clone(&inner),
+        fail_append: AtomicBool::new(false),
+        fail_flush: AtomicBool::new(false),
+    });
+    let incarnation = ConnectionIncarnation::new(47, 1);
+    let (handler, request) = enrolled_fault_leave_handler(&fault, incarnation)?;
+    fault.fail_append.store(true, Ordering::SeqCst);
+
+    let failed = dispatch(&handler, incarnation, ClientRequest::Leave(request.clone()));
+    assert!(
+        failed.is_err(),
+        "Leave append fault returned a response: {failed:?}"
+    );
+    let cell = handler.cell(CONVERSATION)?;
+    assert!(
+        cell.lock()
+            .map_err(|_| "test conversation owner lock poisoned")?
+            .is_none(),
+        "Leave append fault published in-memory tombstone state"
+    );
+    let rows = block_on(inner.read_from(&format!("{STREAM_PREFIX}{CONVERSATION}"), 0, 8))??;
+    assert_eq!(rows.len(), 2, "Leave append fault persisted a Left row");
+
+    fault.fail_append.store(false, Ordering::SeqCst);
+    let committed = dispatch(&handler, incarnation, ClientRequest::Leave(request))?;
+    assert!(matches!(committed, ServerValue::LeaveCommitted(_)));
+    Ok(())
+}
+
+#[test]
+fn leave_flush_failure_replays_only_a_complete_tombstone() -> Result<(), Box<dyn Error>> {
+    let inner: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let fault = Arc::new(FaultStore {
+        inner: Arc::clone(&inner),
+        fail_append: AtomicBool::new(false),
+        fail_flush: AtomicBool::new(false),
+    });
+    let incarnation = ConnectionIncarnation::new(48, 1);
+    let (handler, request) = enrolled_fault_leave_handler(&fault, incarnation)?;
+    fault.fail_flush.store(true, Ordering::SeqCst);
+
+    let failed = dispatch(&handler, incarnation, ClientRequest::Leave(request.clone()));
+    assert!(
+        failed.is_err(),
+        "Leave flush fault returned a response: {failed:?}"
+    );
+    let cell = handler.cell(CONVERSATION)?;
+    assert!(
+        cell.lock()
+            .map_err(|_| "test conversation owner lock poisoned")?
+            .is_none(),
+        "Leave flush fault published in-memory tombstone state"
+    );
+    let rows = block_on(inner.read_from(&format!("{STREAM_PREFIX}{CONVERSATION}"), 0, 8))??;
+    assert_eq!(
+        rows.len(),
+        3,
+        "the backend exposes one complete uncertain Left row, never a partial row"
+    );
+    let stored: serde_json::Value = serde_json::from_slice(&rows[2].payload)?;
+    assert_eq!(stored["schema_version"], SCHEMA_VERSION);
+    assert_eq!(stored["operation"]["operation"], "left");
+
+    fault.fail_flush.store(false, Ordering::SeqCst);
+    drop(handler);
+    let store: Arc<dyn DurableStore> = fault;
+    let reopened = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let replayed = dispatch(&reopened, incarnation, ClientRequest::Leave(request))?;
+    assert!(matches!(replayed, ServerValue::LeaveCommitted(_)));
     Ok(())
 }

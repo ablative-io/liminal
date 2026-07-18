@@ -75,26 +75,31 @@ impl ConversationAuthority {
     ) -> Result<ConversationContribution, StateError> {
         let mut entries = Vec::new();
         for (token, participant_id) in &self.tokens {
-            let slot = self.slots.get(participant_id).ok_or_else(|| {
-                StateError::invariant("enrollment token maps to a missing participant slot")
-            })?;
-            if slot.enrollment_receipt_ended.is_none() && now < slot.enrollment_receipt_expires_at {
-                entries.push(OccupancyEntry {
-                    expires_at: slot.enrollment_receipt_expires_at,
-                    conversation_id: self.conversation_id,
-                    participant_id: *participant_id,
-                    kind: ResourceKind::EnrollmentReceipt,
-                    token: *token,
-                });
-            }
-            if now < slot.enrollment_provenance_expires_at {
-                entries.push(OccupancyEntry {
-                    expires_at: slot.enrollment_provenance_expires_at,
-                    conversation_id: self.conversation_id,
-                    participant_id: *participant_id,
-                    kind: ResourceKind::EnrollmentProvenance,
-                    token: *token,
-                });
+            if let Some(slot) = self.slots.get(participant_id) {
+                if slot.enrollment_receipt_ended.is_none()
+                    && now < slot.enrollment_receipt_expires_at
+                {
+                    entries.push(OccupancyEntry {
+                        expires_at: slot.enrollment_receipt_expires_at,
+                        conversation_id: self.conversation_id,
+                        participant_id: *participant_id,
+                        kind: ResourceKind::EnrollmentReceipt,
+                        token: *token,
+                    });
+                }
+                if now < slot.enrollment_provenance_expires_at {
+                    entries.push(OccupancyEntry {
+                        expires_at: slot.enrollment_provenance_expires_at,
+                        conversation_id: self.conversation_id,
+                        participant_id: *participant_id,
+                        kind: ResourceKind::EnrollmentProvenance,
+                        token: *token,
+                    });
+                }
+            } else if !self.retired.contains_key(participant_id) {
+                return Err(StateError::invariant(
+                    "enrollment token maps to neither a live nor retired participant",
+                ));
             }
         }
         for (participant_id, slot) in &self.slots {

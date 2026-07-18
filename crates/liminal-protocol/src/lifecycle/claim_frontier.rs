@@ -2673,6 +2673,32 @@ impl ClaimFrontiers {
         })
     }
 
+    /// Returns the exact causal key a settled bound/detached Leave would
+    /// consume without relinquishing frontier authority.
+    ///
+    /// This planning view exists so a durable binding can compute the
+    /// canonical keyed `Left` row charge before calling the consuming commit.
+    /// The consuming preparation reruns the same validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PrepareLeaveAuthorityError`] under the same preconditions as
+    /// [`Self::prepare_settled_leave_authority`].
+    pub fn planned_settled_leave_admission_order<F>(
+        &self,
+        member: &LiveMember<F>,
+        binding_state: BindingState,
+    ) -> Result<super::AdmissionOrder, PrepareLeaveAuthorityError> {
+        let (participant_id, ended_binding_epoch) =
+            validate_settled_leave_prestate(self, member, binding_state)?;
+        let selection = select_leave_order(&self.order, participant_id, ended_binding_epoch, None)?;
+        Ok(super::AdmissionOrder::new(
+            selection.selected_major,
+            CandidatePhase::MembershipExit,
+            participant_id,
+        ))
+    }
+
     /// Consumes the exact settled bound/detached `X` authority and relays the
     /// surviving order lane behind the selected `Left` major.
     ///
@@ -2690,39 +2716,8 @@ impl ClaimFrontiers {
         member: &LiveMember<F>,
         binding_state: BindingState,
     ) -> Result<PreparedLeaveAuthority, PrepareLeaveAuthorityError> {
-        let participant_id = member.participant_id();
-        validate_leave_identity(&self, member)?;
-        if !self.order.immutable_candidates.is_empty() {
-            return Err(PrepareLeaveAuthorityError::ImmutablePrefix);
-        }
-        let ended_binding_epoch = match binding_state {
-            BindingState::Detached => {
-                let Some(participant) = active_participant(&self.active_identities, participant_id)
-                else {
-                    return Err(PrepareLeaveAuthorityError::Identity);
-                };
-                if !matches!(participant.binding, FrontierBinding::Detached(_)) {
-                    return Err(PrepareLeaveAuthorityError::Binding);
-                }
-                None
-            }
-            BindingState::Bound(binding)
-                if binding.conversation_id == self.conversation_id
-                    && binding.participant_id == participant_id =>
-            {
-                let Some(participant) = active_participant(&self.active_identities, participant_id)
-                else {
-                    return Err(PrepareLeaveAuthorityError::Identity);
-                };
-                if participant.binding != FrontierBinding::Bound(binding.binding_epoch) {
-                    return Err(PrepareLeaveAuthorityError::Binding);
-                }
-                Some(binding.binding_epoch)
-            }
-            BindingState::Bound(_) | BindingState::PendingFinalization(_) => {
-                return Err(PrepareLeaveAuthorityError::Binding);
-            }
-        };
+        let (participant_id, ended_binding_epoch) =
+            validate_settled_leave_prestate(&self, member, binding_state)?;
         let left_transaction_order =
             consume_leave_order_lane(&mut self.order, participant_id, ended_binding_epoch, None)?;
         Ok(PreparedLeaveAuthority::settled(
@@ -2731,6 +2726,29 @@ impl ClaimFrontiers {
             participant_id,
             ended_binding_epoch,
             left_transaction_order,
+        ))
+    }
+
+    /// Returns the exact causal key a pending-terminal Leave would consume
+    /// after its immutable terminal, without relinquishing frontier authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PrepareLeaveAuthorityError`] under the same preconditions as
+    /// [`Self::prepare_pending_leave_authority`].
+    pub fn planned_pending_leave_admission_order<F>(
+        &self,
+        member: &LiveMember<F>,
+        pending: PendingFinalization,
+    ) -> Result<super::AdmissionOrder, PrepareLeaveAuthorityError> {
+        let (participant_id, expected_order) =
+            validate_pending_leave_prestate(self, member, pending)?;
+        let selection =
+            select_leave_order(&self.order, participant_id, None, Some(expected_order))?;
+        Ok(super::AdmissionOrder::new(
+            selection.selected_major,
+            CandidatePhase::MembershipExit,
+            participant_id,
         ))
     }
 
@@ -2752,41 +2770,8 @@ impl ClaimFrontiers {
         member: &LiveMember<F>,
         pending: PendingFinalization,
     ) -> Result<PreparedLeaveAuthority, PrepareLeaveAuthorityError> {
-        let participant_id = member.participant_id();
-        validate_leave_identity(&self, member)?;
-        if pending.conversation_id() != self.conversation_id
-            || pending.participant_id() != participant_id
-        {
-            return Err(PrepareLeaveAuthorityError::Binding);
-        }
-        let Some(participant) = active_participant(&self.active_identities, participant_id) else {
-            return Err(PrepareLeaveAuthorityError::Identity);
-        };
-        if participant.binding != FrontierBinding::Detached(pending.binding_epoch()) {
-            return Err(PrepareLeaveAuthorityError::Binding);
-        }
-        let expected_order = pending.admission_order();
-        let exact_sequence_candidate = matches!(
-            self.sequence.immutable_candidates.as_slice(),
-            [ImmutableSequenceCandidate::BindingTerminal {
-                admission_order,
-                owner,
-                ..
-            }] if *admission_order == expected_order
-                && owner.participant_index == participant_id
-                && owner.binding_epoch == pending.binding_epoch()
-        );
-        let exact_order_candidate = matches!(
-            self.order.immutable_candidates.as_slice(),
-            [ImmutableOrderCandidateMajor {
-                transaction_order,
-                candidate_keys,
-            }] if *transaction_order == expected_order.transaction_order()
-                && candidate_keys.as_slice() == [expected_order]
-        );
-        if !exact_sequence_candidate || !exact_order_candidate {
-            return Err(PrepareLeaveAuthorityError::PendingCandidate);
-        }
+        let (participant_id, expected_order) =
+            validate_pending_leave_prestate(&self, member, pending)?;
         let left_transaction_order =
             consume_leave_order_lane(&mut self.order, participant_id, None, Some(expected_order))?;
         Ok(PreparedLeaveAuthority::pending(
@@ -3523,6 +3508,92 @@ fn validate_leave_identity<F>(
         return Err(PrepareLeaveAuthorityError::Identity);
     }
     Ok(())
+}
+
+fn validate_settled_leave_prestate<F>(
+    frontiers: &ClaimFrontiers,
+    member: &LiveMember<F>,
+    binding_state: BindingState,
+) -> Result<(ParticipantId, Option<BindingEpoch>), PrepareLeaveAuthorityError> {
+    let participant_id = member.participant_id();
+    validate_leave_identity(frontiers, member)?;
+    if !frontiers.order.immutable_candidates.is_empty() {
+        return Err(PrepareLeaveAuthorityError::ImmutablePrefix);
+    }
+    let ended_binding_epoch = match binding_state {
+        BindingState::Detached => {
+            let Some(participant) =
+                active_participant(&frontiers.active_identities, participant_id)
+            else {
+                return Err(PrepareLeaveAuthorityError::Identity);
+            };
+            if !matches!(participant.binding, FrontierBinding::Detached(_)) {
+                return Err(PrepareLeaveAuthorityError::Binding);
+            }
+            None
+        }
+        BindingState::Bound(binding)
+            if binding.conversation_id == frontiers.conversation_id
+                && binding.participant_id == participant_id =>
+        {
+            let Some(participant) =
+                active_participant(&frontiers.active_identities, participant_id)
+            else {
+                return Err(PrepareLeaveAuthorityError::Identity);
+            };
+            if participant.binding != FrontierBinding::Bound(binding.binding_epoch) {
+                return Err(PrepareLeaveAuthorityError::Binding);
+            }
+            Some(binding.binding_epoch)
+        }
+        BindingState::Bound(_) | BindingState::PendingFinalization(_) => {
+            return Err(PrepareLeaveAuthorityError::Binding);
+        }
+    };
+    Ok((participant_id, ended_binding_epoch))
+}
+
+fn validate_pending_leave_prestate<F>(
+    frontiers: &ClaimFrontiers,
+    member: &LiveMember<F>,
+    pending: PendingFinalization,
+) -> Result<(ParticipantId, super::AdmissionOrder), PrepareLeaveAuthorityError> {
+    let participant_id = member.participant_id();
+    validate_leave_identity(frontiers, member)?;
+    if pending.conversation_id() != frontiers.conversation_id
+        || pending.participant_id() != participant_id
+    {
+        return Err(PrepareLeaveAuthorityError::Binding);
+    }
+    let Some(participant) = active_participant(&frontiers.active_identities, participant_id) else {
+        return Err(PrepareLeaveAuthorityError::Identity);
+    };
+    if participant.binding != FrontierBinding::Detached(pending.binding_epoch()) {
+        return Err(PrepareLeaveAuthorityError::Binding);
+    }
+    let expected_order = pending.admission_order();
+    let exact_sequence_candidate = matches!(
+        frontiers.sequence.immutable_candidates.as_slice(),
+        [ImmutableSequenceCandidate::BindingTerminal {
+            admission_order,
+            owner,
+            ..
+        }] if *admission_order == expected_order
+            && owner.participant_index == participant_id
+            && owner.binding_epoch == pending.binding_epoch()
+    );
+    let exact_order_candidate = matches!(
+        frontiers.order.immutable_candidates.as_slice(),
+        [ImmutableOrderCandidateMajor {
+            transaction_order,
+            candidate_keys,
+        }] if *transaction_order == expected_order.transaction_order()
+            && candidate_keys.as_slice() == [expected_order]
+    );
+    if !exact_sequence_candidate || !exact_order_candidate {
+        return Err(PrepareLeaveAuthorityError::PendingCandidate);
+    }
+    Ok((participant_id, expected_order))
 }
 
 #[derive(Clone, Copy)]

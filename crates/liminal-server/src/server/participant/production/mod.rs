@@ -29,6 +29,7 @@ mod ops_attach_lookup;
 mod ops_enroll;
 mod ops_enroll_capacity;
 mod ops_frontier;
+mod ops_leave;
 mod ops_session;
 mod registry;
 mod state;
@@ -50,6 +51,8 @@ mod tests_capacity;
 mod tests_capacity_attach;
 #[cfg(test)]
 mod tests_config_d2;
+#[cfg(test)]
+mod tests_leave;
 #[cfg(test)]
 mod tests_log_v2;
 #[cfg(test)]
