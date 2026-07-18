@@ -8,8 +8,9 @@ use liminal::durability::{DurableStore, open_ephemeral};
 use liminal::protocol::{encode, encoded_len};
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, ClientRequest, ConnectionIncarnation,
-    CredentialAttachRequest, EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck,
-    RecordAdmission, RecordAdmissionAttemptToken, ServerPush, ServerValue,
+    CredentialAttachRequest, DetachAttemptToken, DetachRequest, EnrollmentRequest, EnrollmentToken,
+    Generation, ParticipantAck, RecordAdmission, RecordAdmissionAttemptToken, ServerPush,
+    ServerValue,
 };
 
 use crate::server::participant::{
@@ -80,6 +81,27 @@ fn attach(
         generation: bound.capability_generation(),
         secret: bound.attach_secret(),
     })
+}
+
+fn detach(
+    handler: &ProductionParticipantHandler,
+    member: Member,
+    token: u8,
+) -> Result<(), Box<dyn Error>> {
+    let value = dispatch(
+        handler,
+        member.connection,
+        ClientRequest::Detach(DetachRequest {
+            conversation_id: CONVERSATION,
+            participant_id: member.participant_id,
+            capability_generation: member.generation,
+            detach_attempt_token: DetachAttemptToken::new([token; 16]),
+        }),
+    )?;
+    if !matches!(value, ServerValue::DetachCommitted(_)) {
+        return Err(format!("detach {token:#x} did not commit: {value:?}").into());
+    }
+    Ok(())
 }
 
 fn admit(
@@ -218,5 +240,57 @@ fn socket_offer_and_write_never_reclaim() -> Result<(), Box<dyn Error>> {
         ServerValue::AckCommitted(_)
     ));
     assert!(replay_sequences(&handler, reattached)?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn reattach_replays_unacked_in_order_after_acked_frontier() -> Result<(), Box<dyn Error>> {
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let recipient = enroll(&handler, ConnectionIncarnation::new(0xC9, 11), 0x51)?;
+    let sender = enroll(&handler, ConnectionIncarnation::new(0xC9, 12), 0x52)?;
+    assert!(matches!(
+        ack(&handler, recipient, 2)?,
+        ServerValue::AckCommitted(_)
+    ));
+
+    let snapshot_included = vec![
+        admit(&handler, sender, 0x61)?,
+        admit(&handler, sender, 0x62)?,
+        admit(&handler, sender, 0x63)?,
+    ];
+    assert_eq!(snapshot_included, vec![3, 4, 5]);
+
+    detach(&handler, recipient, 0x64)?;
+    let committed_while_detached = admit(&handler, sender, 0x65)?;
+    assert_eq!(committed_while_detached, 7);
+
+    let first_reattach = attach(
+        &handler,
+        recipient,
+        ConnectionIncarnation::new(0xC9, 13),
+        0x66,
+    )?;
+    assert_eq!(
+        replay_sequences(&handler, first_reattach)?,
+        snapshot_included,
+        "only obligations snapshot-included while bound replay after the acked frontier"
+    );
+
+    let second_reattach = attach(
+        &handler,
+        first_reattach,
+        ConnectionIncarnation::new(0xC9, 14),
+        0x67,
+    )?;
+    assert_eq!(
+        replay_sequences(&handler, second_reattach)?,
+        snapshot_included,
+        "reattaching again before ack must duplicate the same ordered obligations"
+    );
+    assert!(
+        !replay_sequences(&handler, second_reattach)?.contains(&committed_while_detached),
+        "a record committed after detach created an obligation for the detached identity"
+    );
     Ok(())
 }
