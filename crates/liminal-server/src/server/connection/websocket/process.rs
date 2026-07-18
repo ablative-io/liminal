@@ -36,6 +36,9 @@ use liminal_protocol::wire::ConnectionIncarnation;
 use super::super::apply::apply_frame;
 use super::super::delivery::{DELIVERY_SLICE_BUDGET, service_subscriptions};
 use super::super::outbound::{DrainOutcome, OutboundError};
+use super::super::participant_delivery::{
+    UNIT2_PUSH_SLICE_BUDGET, has_held_participant_head, service_participant_publications,
+};
 use super::super::services::server_error_from_protocol;
 use super::super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::super::supervisor::{ConnectionControl, ConnectionRuntime};
@@ -147,8 +150,14 @@ impl WebSocketConnectionProcess {
             limits.max_pending_conversation_replies_per_connection,
             super::super::pending_reply::DEFAULT_REPLY_TIMEOUT,
         );
+        let participant_publication = connection_incarnation.and_then(|_| {
+            runtime
+                .participant_service()
+                .map(|service| service.new_publication_inbox())
+        });
         let state = ConnectionProcessState {
             connection_incarnation,
+            participant_publication,
             pending_replies,
             ..ConnectionProcessState::default()
         };
@@ -173,6 +182,9 @@ impl WebSocketConnectionProcess {
         if !self.runtime.is_registered(pid) {
             return NativeOutcome::Continue;
         }
+        if let Err(error) = self.ensure_participant_publication_registered(pid) {
+            return self.fail_slice(pid, &error);
+        }
         match self.service_socket(pid) {
             SliceStep::Stop(reason) => return NativeOutcome::Stop(reason),
             SliceStep::Continue => {}
@@ -184,6 +196,21 @@ impl WebSocketConnectionProcess {
                 "outbound overflow while writing conversation replies; tearing down"
             );
             return self.stop_crashed(pid);
+        }
+        if let Some(service) = self.runtime.participant_service() {
+            if let Err(error) = service_participant_publications(
+                &mut self.state,
+                service,
+                &mut self.outbound,
+                UNIT2_PUSH_SLICE_BUDGET,
+            ) {
+                tracing::error!(
+                    connection_pid = pid,
+                    %error,
+                    "participant publication failed; tearing down the connection"
+                );
+                return self.stop_crashed(pid);
+            }
         }
         match service_subscriptions(&mut self.state, &mut self.outbound, DELIVERY_SLICE_BUDGET) {
             Ok(shed) => self.shed_subscriptions(shed),
@@ -219,6 +246,9 @@ impl WebSocketConnectionProcess {
             return self.fail_slice(pid, &error);
         }
         if drain == DrainOutcome::Progress {
+            return NativeOutcome::Continue;
+        }
+        if drain == DrainOutcome::Drained && has_held_participant_head(&self.state) {
             return NativeOutcome::Continue;
         }
         let interest = if drain == DrainOutcome::WouldBlockWithResidue {
@@ -571,9 +601,44 @@ impl WebSocketConnectionProcess {
 
     /// The TCP process's conversation/pending-reply release, byte-for-byte.
     fn release_conversations(&mut self) {
+        self.release_participant_publication();
         self.state.pending_replies.cancel_all();
         for (_conversation_id, conversation) in std::mem::take(&mut self.state.conversations) {
             conversation.finalize();
+        }
+    }
+
+    fn ensure_participant_publication_registered(&mut self, pid: u64) -> Result<(), ServerError> {
+        if self.state.participant_publication_registered {
+            return Ok(());
+        }
+        let (Some(incarnation), Some(inbox), Some(service), Some(waker)) = (
+            self.state.connection_incarnation,
+            self.state.participant_publication.as_ref(),
+            self.runtime.participant_service(),
+            self.runtime.ready_waker(pid),
+        ) else {
+            return Ok(());
+        };
+        service
+            .publication_registry()
+            .register(incarnation, inbox, waker)
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("participant publication registry failed: {error}"),
+            })?;
+        self.state.participant_publication_registered = true;
+        Ok(())
+    }
+
+    fn release_participant_publication(&mut self) {
+        if self.state.participant_publication_registered {
+            if let (Some(incarnation), Some(service)) = (
+                self.state.connection_incarnation,
+                self.runtime.participant_service(),
+            ) {
+                service.publication_registry().deregister(incarnation);
+            }
+            self.state.participant_publication_registered = false;
         }
     }
 
@@ -696,6 +761,14 @@ impl WebSocketConnectionProcess {
                 .subscriptions
                 .values()
                 .any(|subscription| subscription.is_overflowed() || subscription.has_pending());
+        let participant_ready = match self.state.participant_publication.as_ref() {
+            Some(inbox) => inbox
+                .has_pending()
+                .map_err(|error| ServerError::ListenerAccept {
+                    message: format!("participant publication final probe failed: {error}"),
+                })?,
+            None => false,
+        };
         let reply_ready = self.state.pending_replies.has_due(Instant::now())
             || self
                 .state
@@ -707,6 +780,7 @@ impl WebSocketConnectionProcess {
         Ok(socket_ready
             || self.inbound_budget_exhausted
             || subscription_ready
+            || participant_ready
             || reply_ready
             || self.runtime.has_control(pid))
     }

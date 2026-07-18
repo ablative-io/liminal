@@ -25,6 +25,7 @@ mod detach_repository;
 mod dispatch;
 pub(super) mod incarnation_stream;
 mod production;
+mod publication;
 mod transport;
 
 #[cfg(test)]
@@ -52,7 +53,12 @@ pub use dispatch::{
     ParticipantSemanticHandler, dispatch_generic_frame,
 };
 pub(crate) use production::{ProductionParticipantHandler, constant_time_eq};
+pub use publication::{ParticipantOfferedProgress, ParticipantPublication};
+pub(crate) use publication::{
+    ParticipantPublicationError, ParticipantPublicationInbox, ParticipantPublicationRegistry,
+};
 pub use transport::{
-    PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_value,
-    gate_generic_frame, normalize_configured_frame_limit, preflight_generic_bytes,
+    PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_push,
+    encode_server_value, gate_generic_frame, normalize_configured_frame_limit,
+    preflight_generic_bytes,
 };

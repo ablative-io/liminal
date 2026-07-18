@@ -15,6 +15,9 @@ use liminal_protocol::wire::ConnectionIncarnation;
 use super::apply::apply_frame;
 use super::delivery::{DELIVERY_SLICE_BUDGET, service_subscriptions};
 use super::outbound::{DrainOutcome, OutboundWriter};
+use super::participant_delivery::{
+    UNIT2_PUSH_SLICE_BUDGET, has_held_participant_head, service_participant_publications,
+};
 use super::services::server_error_from_protocol;
 use super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
@@ -101,8 +104,14 @@ impl ConnectionProcess {
             limits.max_pending_conversation_replies_per_connection,
             super::pending_reply::DEFAULT_REPLY_TIMEOUT,
         );
+        let participant_publication = connection_incarnation.and_then(|_| {
+            runtime
+                .participant_service()
+                .map(|service| service.new_publication_inbox())
+        });
         let state = ConnectionProcessState {
             connection_incarnation,
+            participant_publication,
             pending_replies,
             ..ConnectionProcessState::default()
         };
@@ -137,6 +146,9 @@ impl ConnectionProcess {
         if !self.runtime.is_registered(pid) {
             return NativeOutcome::Continue;
         }
+        if let Err(error) = self.ensure_participant_publication_registered(pid) {
+            return self.fail_slice(pid, &error);
+        }
         match self.service_socket(pid) {
             SliceStep::Stop(reason) => return NativeOutcome::Stop(reason),
             SliceStep::Continue => {}
@@ -155,6 +167,24 @@ impl ConnectionProcess {
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return NativeOutcome::Stop(ExitReason::Error);
+        }
+        if let Some(service) = self.runtime.participant_service() {
+            if let Err(error) = service_participant_publications(
+                &mut self.state,
+                service,
+                &mut self.outbound,
+                UNIT2_PUSH_SLICE_BUDGET,
+            ) {
+                tracing::error!(
+                    connection_pid = pid,
+                    %error,
+                    "participant publication failed; tearing down the connection"
+                );
+                self.release_conversations();
+                self.runtime
+                    .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+                return NativeOutcome::Stop(ExitReason::Error);
+            }
         }
         // Pump subscriptions into the outbound buffer. An overflow (or an encode
         // fault) is fatal: a dropped or truncated delivery would desync the stream,
@@ -195,6 +225,9 @@ impl ConnectionProcess {
         // A successful budget-limited write proves immediately actionable work
         // remains. Do not arm a permanently-writable socket in this state.
         if drain == DrainOutcome::Progress {
+            return NativeOutcome::Continue;
+        }
+        if drain == DrainOutcome::Drained && has_held_participant_head(&self.state) {
             return NativeOutcome::Continue;
         }
         let interest = if drain == DrainOutcome::WouldBlockWithResidue {
@@ -310,6 +343,7 @@ impl ConnectionProcess {
     /// conversation map is drained, so a second call finds nothing — the explicit
     /// paths and the backstop cannot double-finalize.
     fn release_conversations(&mut self) {
+        self.release_participant_publication();
         // R1(vi)/§1.2(5): cancel every pending-reply entry BEFORE the conversation
         // actors are torn down, so no entry (and no timeout write) outlives its
         // connection. Finalizing each conversation below clears its reply notifier
@@ -317,6 +351,38 @@ impl ConnectionProcess {
         self.state.pending_replies.cancel_all();
         for (_conversation_id, conversation) in std::mem::take(&mut self.state.conversations) {
             conversation.finalize();
+        }
+    }
+
+    fn ensure_participant_publication_registered(&mut self, pid: u64) -> Result<(), ServerError> {
+        if self.state.participant_publication_registered {
+            return Ok(());
+        }
+        let (Some(incarnation), Some(inbox), Some(service), Some(waker)) = (
+            self.state.connection_incarnation,
+            self.state.participant_publication.as_ref(),
+            self.runtime.participant_service(),
+            self.runtime.ready_waker(pid),
+        ) else {
+            return Ok(());
+        };
+        service
+            .publication_registry()
+            .register(incarnation, inbox, waker)
+            .map_err(participant_publication_error)?;
+        self.state.participant_publication_registered = true;
+        Ok(())
+    }
+
+    fn release_participant_publication(&mut self) {
+        if self.state.participant_publication_registered {
+            if let (Some(incarnation), Some(service)) = (
+                self.state.connection_incarnation,
+                self.runtime.participant_service(),
+            ) {
+                service.publication_registry().deregister(incarnation);
+            }
+            self.state.participant_publication_registered = false;
         }
     }
 
@@ -534,6 +600,10 @@ impl ConnectionProcess {
                 .subscriptions
                 .values()
                 .any(|subscription| subscription.is_overflowed() || subscription.has_pending());
+        let participant_ready = match self.state.participant_publication.as_ref() {
+            Some(inbox) => inbox.has_pending().map_err(participant_publication_error)?,
+            None => false,
+        };
         let reply_ready = self
             .state
             .pending_replies
@@ -545,7 +615,11 @@ impl ConnectionProcess {
                 .into_iter()
                 .filter_map(|id| self.state.conversations.get(&id))
                 .any(super::conversation::ConnectionConversation::has_pending_reply);
-        Ok(socket_ready || subscription_ready || reply_ready || self.runtime.has_control(pid))
+        Ok(socket_ready
+            || subscription_ready
+            || participant_ready
+            || reply_ready
+            || self.runtime.has_control(pid))
     }
 
     fn handle_control(&mut self, pid: u64, control: ConnectionControl) -> Option<NativeOutcome> {
@@ -793,6 +867,14 @@ fn process_buffer(
             }
             FrameAction::Close => return Ok(ProcessStatus::Close),
         }
+    }
+}
+
+fn participant_publication_error(
+    error: crate::server::participant::ParticipantPublicationError,
+) -> ServerError {
+    ServerError::ListenerAccept {
+        message: format!("participant publication registry failed: {error}"),
     }
 }
 

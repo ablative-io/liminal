@@ -345,6 +345,56 @@ impl ConversationOutbox {
         }
     }
 
+    /// Sorted participants that still own at least one durable obligation.
+    pub(super) fn live_recipients(&self) -> impl Iterator<Item = ParticipantId> + '_ {
+        self.next_live_obligations.keys().copied()
+    }
+
+    /// Selects the least live durable obligation strictly after `offered_through`
+    /// for one participant. Acked obligations have already been removed from each
+    /// live record, so this simultaneously enforces the durable ack frontier.
+    pub(super) fn delivery_after(
+        &self,
+        participant_id: ParticipantId,
+        offered_through: u64,
+    ) -> Option<ParticipantDelivery> {
+        self.records
+            .range((
+                std::ops::Bound::Excluded(offered_through),
+                std::ops::Bound::Unbounded,
+            ))
+            .find_map(|(_, record)| {
+                record
+                    .recipients
+                    .contains(&participant_id)
+                    .then(|| record.delivery.clone())
+            })
+    }
+
+    /// Durable cumulative ack cursor used when a new binding discards an old
+    /// connection's volatile offered progress.
+    pub(super) fn durable_ack_through(&self, participant_id: ParticipantId) -> u64 {
+        self.ack_frontiers
+            .get(&participant_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Whether this exact participant still owns the named marker obligation.
+    pub(super) fn is_marker_obligation(
+        &self,
+        participant_id: ParticipantId,
+        delivery_seq: u64,
+    ) -> bool {
+        self.records.get(&delivery_seq).is_some_and(|record| {
+            record.recipients.contains(&participant_id)
+                && matches!(
+                    record.delivery.record,
+                    ParticipantRecord::HistoryCompacted { .. }
+                )
+        })
+    }
+
     #[cfg(test)]
     pub(super) const fn next_extension_sequence(&self) -> u64 {
         self.next_extension_sequence

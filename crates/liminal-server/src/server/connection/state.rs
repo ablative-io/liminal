@@ -2,7 +2,7 @@
 //! connection handler ([`super::process`]), the frame-application logic
 //! ([`super::apply`]), and the delivery pump ([`super::delivery`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use liminal::channel::ConnectionInboxBudget;
@@ -10,8 +10,12 @@ use liminal::protocol::Frame;
 use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::conversation::ConnectionConversation;
+use super::participant_delivery::HeldParticipantHead;
 use super::services::ConnectionSubscription;
-use crate::server::participant::{ParticipantConnectionConversations, ParticipantSession};
+use crate::server::participant::{
+    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublicationInbox,
+    ParticipantSession,
+};
 
 /// State a connection process carries across scheduler slices: the resources it
 /// owns (subscriptions, conversations) plus the per-subscription delivery
@@ -40,6 +44,19 @@ pub(super) struct ConnectionProcessState {
     /// Durable incarnation allocated and flushed before this process was spawned.
     /// `None` means the supervisor had no complete participant service installed.
     pub(super) connection_incarnation: Option<ConnectionIncarnation>,
+    /// Strongly owned bounded/coalescing participant-ready inbox. The server-wide
+    /// registry holds only a weak handle to this exact value.
+    pub(super) participant_publication: Option<ParticipantPublicationInbox>,
+    /// Whether this process installed its incarnation/inbox pair in the shared
+    /// registry. Registration happens on the first slice after the host record
+    /// exists and deregistration is idempotent on every cleanup path.
+    pub(super) participant_publication_registered: bool,
+    /// Volatile per-conversation offered progress, scoped to the exact binding
+    /// epoch and advanced only after successful outbound enqueue.
+    pub(super) participant_offered: BTreeMap<u64, ParticipantOfferedProgress>,
+    /// At most one exact encoded participant head per semantic conversation,
+    /// bounded by the same signed connection-conversation limit as the inbox.
+    pub(super) held_participant_pushes: BTreeMap<u64, HeldParticipantHead>,
     /// Library subscriptions owned by this connection, keyed by subscription id.
     pub(super) subscriptions: HashMap<u64, ConnectionSubscription>,
     /// Supervised conversations owned by this connection, keyed by conversation id.

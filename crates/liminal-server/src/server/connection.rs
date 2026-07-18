@@ -13,6 +13,8 @@ mod incarnation_tests;
 pub mod notifier;
 #[path = "connection/outbound.rs"]
 mod outbound;
+#[path = "connection/participant_delivery.rs"]
+mod participant_delivery;
 #[cfg(test)]
 #[path = "connection/participant_runtime_tests.rs"]
 mod participant_runtime_tests;
@@ -47,5 +49,6 @@ pub use services::{
     PublishOutcome, build_connection_services,
 };
 pub use supervisor::{ConnectionHandle, ConnectionSupervisor, PushReplyAwaiter};
+pub(crate) use wake::ReadyWaker;
 pub use websocket::WebSocketListener;
 pub use worker_front_door::WorkerFrontDoorServices;

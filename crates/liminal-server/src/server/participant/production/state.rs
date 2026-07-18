@@ -16,8 +16,8 @@ use liminal_protocol::lifecycle::{
     ParticipantConversation, RetiredIdentity,
 };
 use liminal_protocol::wire::{
-    AttachAttemptToken, AttachBound, AttachSecret, DeliverySeq, DetachAttemptToken, EnrollBound,
-    Generation, ParticipantId, ReceiptExpiryReason, TransactionOrder,
+    AttachAttemptToken, AttachBound, AttachSecret, BindingEpoch, DeliverySeq, DetachAttemptToken,
+    EnrollBound, Generation, ParticipantId, ReceiptExpiryReason, TransactionOrder,
 };
 
 use super::facts::{Digest, FactsError};
@@ -131,6 +131,10 @@ pub(super) struct ConversationAuthority {
     /// Move-only durable delivery and recipient-obligation owner. It is absent
     /// only while cold restore is still validating the extension stream.
     pub(super) outbox: Option<ConversationOutbox>,
+    /// Volatile exact marker enqueue testimony, keyed by recipient and marker
+    /// sequence. Cold replay never restores this map; reattach starts without
+    /// old-binding offer testimony.
+    pub(super) offered_markers: BTreeMap<(ParticipantId, DeliverySeq), BindingEpoch>,
     /// Live participant slots keyed by permanent participant id.
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
     /// Permanent retired identity tombstones keyed by participant id.
@@ -228,6 +232,7 @@ impl ConversationAuthority {
             shell: None,
             frontier: None,
             outbox: None,
+            offered_markers: BTreeMap::new(),
             slots: BTreeMap::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),

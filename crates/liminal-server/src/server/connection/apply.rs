@@ -196,7 +196,7 @@ fn participant_frame_response(
                 state.participant_session,
                 ParticipantConnectionContext::new(connection_incarnation),
                 &mut state.participant_conversations,
-                service.handler(),
+                service,
             ) {
                 ParticipantDispatch::NotParticipant => FrameAction::NoResponse,
                 ParticipantDispatch::Respond(response) => FrameAction::Respond(response),

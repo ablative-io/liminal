@@ -38,7 +38,7 @@ use beamr::scheduler::Scheduler;
 /// a dead pid, is a no-op: the connection is already being torn down, so a lost
 /// wake for it is correct, not a defect (R5 — stale markers are discarded).
 #[derive(Clone)]
-pub(super) struct ReadyWaker {
+pub(crate) struct ReadyWaker {
     scheduler: Weak<Scheduler>,
     pid: u64,
     ready_atom: Atom,
@@ -58,7 +58,7 @@ impl ReadyWaker {
     /// Captures the connection scheduler's enqueue handle for `pid`. Called at
     /// notifier-install time on the connection's own slice, so the handle is the
     /// connection scheduler's, not the firing caller's ambient one (§1.2(2)).
-    pub(super) fn new(scheduler: &std::sync::Arc<Scheduler>, pid: u64, ready_atom: Atom) -> Self {
+    pub(crate) fn new(scheduler: &std::sync::Arc<Scheduler>, pid: u64, ready_atom: Atom) -> Self {
         Self {
             scheduler: std::sync::Arc::downgrade(scheduler),
             pid,
@@ -73,7 +73,7 @@ impl ReadyWaker {
     /// is already tearing down). Idempotent by construction: N fires coalesce to
     /// at most N mailbox atoms, all drained before one slice runs, so duplicates
     /// never double-apply work (R6).
-    pub(super) fn fire(&self) -> bool {
+    pub(crate) fn fire(&self) -> bool {
         let Some(scheduler) = self.scheduler.upgrade() else {
             return false;
         };

@@ -11,13 +11,17 @@ use liminal::durability::DurableStore;
 use liminal::protocol::Frame;
 use liminal_protocol::lifecycle::ConnectionConversationTracking;
 use liminal_protocol::wire::{
-    ClientRequest, CodecError, ConnectionIncarnation, ConversationId, ServerValue,
-    ValidatedFrameLimit,
+    BindingEpoch, ClientRequest, CodecError, ConnectionIncarnation, ConversationId, ParticipantId,
+    ServerValue, ValidatedFrameLimit,
 };
 
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
     normalize_configured_frame_limit,
+};
+use super::{
+    ParticipantOfferedProgress, ParticipantPublication, ParticipantPublicationInbox,
+    ParticipantPublicationRegistry,
 };
 
 /// Connection-local semantic-conversation dispatch map (contract R-D1: the
@@ -123,6 +127,55 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     ///
     /// Returns [`ParticipantSemanticError`] when no protocol value can be
     /// produced. The caller closes rather than fabricating a response.
+    ///
+    /// Production handlers override this with the signed
+    /// `max_semantic_conversations_per_connection`; semantic-only fixtures own
+    /// no publication conversations.
+    fn publication_conversation_limit(&self) -> u64 {
+        0
+    }
+
+    /// Resolves all live current bindings with pending durable obligations for
+    /// one conversation. Production overrides this; semantic-only fixtures have
+    /// no publication source.
+    fn ready_connection_incarnations(
+        &self,
+        _conversation_id: ConversationId,
+    ) -> Result<Vec<ConnectionIncarnation>, ParticipantSemanticError> {
+        Ok(Vec::new())
+    }
+
+    /// Selects the least durable recipient obligation for this incarnation,
+    /// restarting from durable ack when `offered` names an older binding.
+    fn next_publication(
+        &self,
+        _connection_incarnation: ConnectionIncarnation,
+        _conversation_id: ConversationId,
+        _offered: Option<ParticipantOfferedProgress>,
+    ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
+        Ok(None)
+    }
+
+    /// Checks that a held head still belongs to the exact current binding before
+    /// it is offered after writable readiness.
+    fn publication_binding_is_current(
+        &self,
+        _conversation_id: ConversationId,
+        _participant_id: ParticipantId,
+        _binding_epoch: BindingEpoch,
+    ) -> Result<bool, ParticipantSemanticError> {
+        Ok(false)
+    }
+
+    /// Records exact successful marker enqueue testimony. Non-marker offers are
+    /// ignored by production after validating their current binding.
+    fn record_publication_offer(
+        &self,
+        _publication: &ParticipantPublication,
+    ) -> Result<(), ParticipantSemanticError> {
+        Ok(())
+    }
+
     fn handle(
         &self,
         context: ParticipantConnectionContext,
@@ -151,6 +204,7 @@ pub struct InstalledParticipantService {
     handler: Arc<dyn ParticipantSemanticHandler>,
     durable_store: Arc<dyn DurableStore>,
     frame_limit: ValidatedFrameLimit,
+    publication_registry: Arc<ParticipantPublicationRegistry>,
 }
 
 impl InstalledParticipantService {
@@ -174,13 +228,8 @@ impl InstalledParticipantService {
             handler,
             durable_store,
             frame_limit: normalize_configured_frame_limit(configured_wf)?,
+            publication_registry: Arc::new(ParticipantPublicationRegistry::default()),
         })
-    }
-
-    /// Returns the installed semantic handler.
-    #[must_use]
-    pub(crate) fn handler(&self) -> &dyn ParticipantSemanticHandler {
-        self.handler.as_ref()
     }
 
     /// Clones the durable store used by the installed participant service.
@@ -194,6 +243,97 @@ impl InstalledParticipantService {
     #[must_use]
     pub(crate) const fn frame_limit(&self) -> ValidatedFrameLimit {
         self.frame_limit
+    }
+
+    /// Creates the strongly connection-owned ready inbox at process spawn.
+    #[must_use]
+    pub(crate) fn new_publication_inbox(&self) -> ParticipantPublicationInbox {
+        ParticipantPublicationInbox::new(self.handler.publication_conversation_limit())
+    }
+
+    /// Returns the shared weak publication registry.
+    #[must_use]
+    pub(crate) fn publication_registry(&self) -> &ParticipantPublicationRegistry {
+        &self.publication_registry
+    }
+
+    /// Selects one exact durable publication through the installed production
+    /// source.
+    pub(crate) fn next_publication(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        conversation_id: ConversationId,
+        offered: Option<ParticipantOfferedProgress>,
+    ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
+        self.handler
+            .next_publication(connection_incarnation, conversation_id, offered)
+    }
+
+    pub(crate) fn publication_binding_is_current(
+        &self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+    ) -> Result<bool, ParticipantSemanticError> {
+        self.handler
+            .publication_binding_is_current(conversation_id, participant_id, binding_epoch)
+    }
+
+    pub(crate) fn record_publication_offer(
+        &self,
+        publication: &ParticipantPublication,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.handler.record_publication_offer(publication)
+    }
+
+    fn notify_ready(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ParticipantSemanticError> {
+        for incarnation in self
+            .handler
+            .ready_connection_incarnations(conversation_id)?
+        {
+            self.publication_registry
+                .notify(incarnation, conversation_id)
+                .map_err(|error| ParticipantSemanticError::Internal {
+                    message: format!("participant publication wake failed: {error}"),
+                })?;
+        }
+        Ok(())
+    }
+}
+
+impl ParticipantSemanticHandler for InstalledParticipantService {
+    fn publication_conversation_limit(&self) -> u64 {
+        self.handler.publication_conversation_limit()
+    }
+
+    fn handle(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ClientRequest,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        let conversation_id = request_conversation_id(&request);
+        let value = self.handler.handle(context, conversations, request)?;
+        if let Some(conversation_id) = conversation_id {
+            self.notify_ready(conversation_id)?;
+        }
+        Ok(value)
+    }
+}
+
+const fn request_conversation_id(request: &ClientRequest) -> Option<ConversationId> {
+    match request {
+        ClientRequest::Enrollment(request) => Some(request.conversation_id),
+        ClientRequest::CredentialAttach(request) => Some(request.conversation_id),
+        ClientRequest::Detach(request) => Some(request.conversation_id),
+        ClientRequest::ParticipantAck(request) => Some(request.conversation_id),
+        ClientRequest::Leave(request) => Some(request.conversation_id),
+        ClientRequest::MarkerAck(request) => Some(request.conversation_id),
+        ClientRequest::RecordAdmission(request) => Some(request.conversation_id),
+        ClientRequest::ObserverRecovery(_) => None,
     }
 }
 

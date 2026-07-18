@@ -11,18 +11,21 @@
 //! exists, and refused probes of unknown conversation ids leave neither
 //! durable nor in-memory residue.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
-use liminal_protocol::lifecycle::{CapacityCounter, ObserverRecoveryAggregate};
-use liminal_protocol::wire::{ClientRequest, ConversationId, ServerValue};
+use liminal_protocol::lifecycle::{BindingState, CapacityCounter, ObserverRecoveryAggregate};
+use liminal_protocol::wire::{
+    BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, ParticipantId,
+    ParticipantRecord, ServerValue,
+};
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
-    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticError,
-    ParticipantSemanticHandler,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
+    ParticipantPublication, ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
 use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
@@ -357,6 +360,143 @@ impl ProductionParticipantHandler {
 }
 
 impl ParticipantSemanticHandler for ProductionParticipantHandler {
+    fn publication_conversation_limit(&self) -> u64 {
+        self.config.max_semantic_conversations_per_connection
+    }
+
+    fn ready_connection_incarnations(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<ConnectionIncarnation>, ParticipantSemanticError> {
+        let cell = self.cell(conversation_id)?;
+        let owner = cell
+            .lock()
+            .map_err(|_| publication_owner_poisoned(conversation_id))?;
+        let Some(authority) = owner.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let Some(outbox) = authority.outbox.as_ref() else {
+            return Err(publication_owner_missing(conversation_id));
+        };
+        let mut incarnations = BTreeSet::new();
+        for participant_id in outbox.live_recipients() {
+            let Some(slot) = authority.slots.get(&participant_id) else {
+                continue;
+            };
+            if let BindingState::Bound(active) = &slot.binding {
+                incarnations.insert(active.binding_epoch.connection_incarnation);
+            }
+        }
+        Ok(incarnations.into_iter().collect())
+    }
+
+    fn next_publication(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        conversation_id: ConversationId,
+        offered: Option<ParticipantOfferedProgress>,
+    ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
+        let cell = self.cell(conversation_id)?;
+        let owner = cell
+            .lock()
+            .map_err(|_| publication_owner_poisoned(conversation_id))?;
+        let Some(authority) = owner.as_ref() else {
+            return Ok(None);
+        };
+        let bound = authority.slots.iter().find_map(|(participant_id, slot)| {
+            let BindingState::Bound(active) = &slot.binding else {
+                return None;
+            };
+            (active.binding_epoch.connection_incarnation == connection_incarnation)
+                .then_some((*participant_id, active.binding_epoch))
+        });
+        let Some((participant_id, binding_epoch)) = bound else {
+            return Ok(None);
+        };
+        let Some(outbox) = authority.outbox.as_ref() else {
+            return Err(publication_owner_missing(conversation_id));
+        };
+        let offered_through = offered
+            .filter(|progress| progress.binding_epoch == binding_epoch)
+            .map_or_else(
+                || outbox.durable_ack_through(participant_id),
+                |progress| progress.through_seq,
+            );
+        Ok(outbox
+            .delivery_after(participant_id, offered_through)
+            .map(|delivery| ParticipantPublication {
+                participant_id,
+                binding_epoch,
+                delivery,
+            }))
+    }
+
+    fn publication_binding_is_current(
+        &self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+    ) -> Result<bool, ParticipantSemanticError> {
+        let cell = self.cell(conversation_id)?;
+        let owner = cell
+            .lock()
+            .map_err(|_| publication_owner_poisoned(conversation_id))?;
+        let Some(authority) = owner.as_ref() else {
+            return Ok(false);
+        };
+        Ok(authority.slots.get(&participant_id).is_some_and(|slot| {
+            matches!(
+                &slot.binding,
+                BindingState::Bound(active) if active.binding_epoch == binding_epoch
+            )
+        }))
+    }
+
+    fn record_publication_offer(
+        &self,
+        publication: &ParticipantPublication,
+    ) -> Result<(), ParticipantSemanticError> {
+        if !matches!(
+            publication.delivery.record,
+            ParticipantRecord::HistoryCompacted { .. }
+        ) {
+            return Ok(());
+        }
+        let conversation_id = publication.conversation_id();
+        let cell = self.cell(conversation_id)?;
+        let mut owner = cell
+            .lock()
+            .map_err(|_| publication_owner_poisoned(conversation_id))?;
+        let Some(authority) = owner.as_mut() else {
+            return Err(publication_owner_missing(conversation_id));
+        };
+        let current = authority
+            .slots
+            .get(&publication.participant_id)
+            .is_some_and(|slot| {
+                matches!(
+                    &slot.binding,
+                    BindingState::Bound(active)
+                        if active.binding_epoch == publication.binding_epoch
+                )
+            });
+        let obligation = authority.outbox.as_ref().is_some_and(|outbox| {
+            outbox.is_marker_obligation(publication.participant_id, publication.delivery_seq())
+        });
+        if !current || !obligation {
+            return Err(ParticipantSemanticError::Internal {
+                message: format!(
+                    "participant marker offer lost its exact current binding or durable obligation for conversation {conversation_id}"
+                ),
+            });
+        }
+        authority.offered_markers.insert(
+            (publication.participant_id, publication.delivery_seq()),
+            publication.binding_epoch,
+        );
+        Ok(())
+    }
+
     fn handle(
         &self,
         context: ParticipantConnectionContext,
@@ -465,6 +605,22 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                 self.apply_observer_recovery(conversations, &request)
             }
         }
+    }
+}
+
+fn publication_owner_poisoned(conversation_id: ConversationId) -> ParticipantSemanticError {
+    ParticipantSemanticError::Internal {
+        message: format!(
+            "participant conversation {conversation_id} owner lock is poisoned during publication"
+        ),
+    }
+}
+
+fn publication_owner_missing(conversation_id: ConversationId) -> ParticipantSemanticError {
+    ParticipantSemanticError::Internal {
+        message: format!(
+            "participant conversation {conversation_id} publication owner is unavailable"
+        ),
     }
 }
 
