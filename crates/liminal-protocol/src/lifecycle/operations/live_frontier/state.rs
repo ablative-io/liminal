@@ -10,6 +10,42 @@ pub(super) fn accounting_after_rows(
     accounting: ClosureAccounting,
     charges: &[RetainedRecordCharge],
 ) -> Option<ClosureAccounting> {
+    accounting_after_rows_with_state(
+        accounting,
+        charges,
+        accounting.state(),
+        accounting.marker_anchors(),
+        accounting.edge_sequence_claims(),
+        accounting.edge_order_position_claims(),
+        accounting.edge_k_remaining(),
+    )
+}
+
+pub(super) fn accounting_after_fenced_attach(
+    accounting: ClosureAccounting,
+    charges: &[RetainedRecordCharge],
+    next_state: crate::lifecycle::ClosureState,
+) -> Option<ClosureAccounting> {
+    accounting_after_rows_with_state(
+        accounting,
+        charges,
+        next_state,
+        accounting.marker_anchors().checked_sub(1)?,
+        0,
+        0,
+        crate::algebra::ResourceVector::default(),
+    )
+}
+
+fn accounting_after_rows_with_state(
+    accounting: ClosureAccounting,
+    charges: &[RetainedRecordCharge],
+    state: crate::lifecycle::ClosureState,
+    marker_anchors: u64,
+    edge_sequence_claims: u64,
+    edge_order_position_claims: u64,
+    edge_k_remaining: crate::algebra::ResourceVector,
+) -> Option<ClosureAccounting> {
     let baseline = charges
         .iter()
         .try_fold(accounting.baseline(), |current, charge| {
@@ -20,12 +56,12 @@ pub(super) fn accounting_after_rows(
             ))
         })?;
     ClosureAccounting::try_new(
-        accounting.state(),
+        state,
         accounting.marker_capacity_credits(),
-        accounting.marker_anchors(),
-        accounting.edge_sequence_claims(),
-        accounting.edge_order_position_claims(),
-        accounting.edge_k_remaining(),
+        marker_anchors,
+        edge_sequence_claims,
+        edge_order_position_claims,
+        edge_k_remaining,
         baseline,
         accounting.configured_cap(),
         accounting.episode_churn_used(),

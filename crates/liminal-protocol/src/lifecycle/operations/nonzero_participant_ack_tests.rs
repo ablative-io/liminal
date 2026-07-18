@@ -2,7 +2,7 @@
 
 use alloc::{vec, vec::Vec};
 
-use crate::algebra::WideResourceVector;
+use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{
     AckCommitted, AckGap, AckRegression, AttachSecret, BindingEpoch, BindingRequiredEnvelope,
     ConnectionIncarnation, Generation, ParticipantAck, ParticipantAckEnvelope,
@@ -11,10 +11,19 @@ use crate::wire::{
 
 use super::{
     super::{
-        ActiveBinding, BindingState, BoundParticipantCursor, ClosureDebt, CursorProgressFact,
-        CursorProgressKey, EnrollmentFingerprint, IdentityState, LiveMember, LiveMemberRestore,
-        NonzeroDebtCursorEpisode, PresentedIdentity,
+        ActiveBinding, BindingState, BoundParticipantCursor, ClosureAccounting, ClosureDebt,
+        ClosureState, CursorProgressFact, CursorProgressKey, EnrollmentFingerprint, IdentityState,
+        LiveMember, LiveMemberRestore, NonzeroDebtCursorEpisode, OrderClaims, OrderHigh,
+        OrderLedger, PresentedIdentity, RecoverySequenceReserve, SequenceClaims, SequenceLedger,
+        claim_frontier::{
+            BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore, FrontierBinding,
+            FrontierParticipant, MovableOrderClaim, MovableSequenceClaim,
+            OrderClaimFrontierRestore, OrderDirectOwner, SequenceClaimFrontierRestore,
+            SequenceDirectOwner, SequenceProductRangesRestore, TerminalProductRangeRestore,
+        },
     },
+    apply_nonzero_participant_ack_frontier,
+    live_frontier::LiveFrontierOwner,
     nonzero_participant_ack::{
         NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
         NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError,
@@ -150,6 +159,122 @@ fn commit_for(
         panic!("exact forward ack must produce an aggregate commit")
     };
     *commit
+}
+
+fn frontier_owner() -> LiveFrontierOwner {
+    let binding_epoch = epoch(1, 0);
+    let terminal = BindingTerminalOwner {
+        participant_index: P0,
+        binding_epoch,
+    };
+    let sequence = SequenceLedger::try_new(
+        H,
+        SequenceClaims::new(1, 1, 0, RecoverySequenceReserve::None),
+    )
+    .expect("ack frontier sequence ledger is valid");
+    let order = OrderLedger::try_new(
+        OrderHigh::Empty,
+        OrderClaims::new(1, 1, false, false).expect("ack order claims are valid"),
+    )
+    .expect("ack frontier order ledger is valid");
+    let frontiers = ClaimFrontiers::restore(
+        ClaimFrontiersRestore {
+            conversation_id: CONVERSATION_ID,
+            active_identities: vec![FrontierParticipant::new(
+                P0,
+                OBSERVER,
+                FrontierBinding::Bound(binding_epoch),
+            )],
+            identity_slot_limit: 1,
+            retained_floor: u128::from(H) + 1,
+            retained_record_limit: 0,
+            retained_records: vec![],
+            active_marker_anchors: vec![],
+            historical_marker_deliveries: vec![],
+            historical_causal_facts: vec![],
+            sequence: SequenceClaimFrontierRestore {
+                movable_claims: vec![
+                    MovableSequenceClaim {
+                        delivery_seq: 3,
+                        owner: SequenceDirectOwner::BindingTerminal(terminal),
+                    },
+                    MovableSequenceClaim {
+                        delivery_seq: 4,
+                        owner: SequenceDirectOwner::MembershipExit {
+                            participant_index: P0,
+                        },
+                    },
+                ],
+                immutable_candidates: vec![],
+                products: SequenceProductRangesRestore {
+                    live_times_terminal: vec![TerminalProductRangeRestore {
+                        start: 5,
+                        length: 1,
+                        terminal,
+                    }],
+                    ..SequenceProductRangesRestore::default()
+                },
+                recovery: None,
+            },
+            order: OrderClaimFrontierRestore {
+                movable_claims: vec![
+                    MovableOrderClaim {
+                        transaction_order: 0,
+                        owner: OrderDirectOwner::ActiveBindingTerminal(terminal),
+                    },
+                    MovableOrderClaim {
+                        transaction_order: 1,
+                        owner: OrderDirectOwner::MembershipExit {
+                            participant_index: P0,
+                        },
+                    },
+                ],
+                immutable_candidates: vec![],
+                recovery: None,
+            },
+            recovery_marker_delivery_seq: None,
+        },
+        sequence,
+        order,
+    )
+    .expect("ack frontier restores from the canonical cold shape");
+    let accounting = ClosureAccounting::try_new(
+        ClosureState::Clear,
+        0,
+        0,
+        0,
+        0,
+        ResourceVector::default(),
+        WideResourceVector::default(),
+        ResourceVector::new(16, 1024),
+        0,
+        2,
+    )
+    .expect("ack fixture accounting is valid");
+    LiveFrontierOwner::from_test_parts(frontiers, accounting, vec![], 0)
+}
+
+#[test]
+fn nonzero_debt_ack_moves_the_same_committed_cursor_through_live_frontier_ownership() {
+    let member = member(P0, OBSERVER);
+    let episode = episode();
+    let commit = commit_for(&member, epoch(1, 0), 1, &episode);
+    let transitioned = apply_nonzero_participant_ack_frontier(frontier_owner(), commit)
+        .expect("nonzero-debt ack must enter live frontier ownership");
+    assert_eq!(
+        transitioned
+            .owner()
+            .frontiers()
+            .active_identities()
+            .participants()[0]
+            .cursor(),
+        1
+    );
+    assert_eq!(
+        transitioned.owner().closure_accounting().state(),
+        ClosureState::Clear
+    );
+    assert!(transitioned.owner().retained_charges().is_empty());
 }
 
 #[test]

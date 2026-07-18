@@ -369,8 +369,9 @@ impl SequenceLedger {
     /// DCR pair exists, an arithmetic error if a checked addition fails, or
     /// [`SequenceAdmissionError::RecoverySequenceInvariantViolation`] if the
     /// exact reserved transfer did not preserve the ledger invariant.
-    #[cfg(test)]
-    pub(crate) fn apply_fenced_recovery(self) -> Result<Self, SequenceAdmissionError> {
+    pub(in crate::lifecycle) fn apply_fenced_recovery(
+        self,
+    ) -> Result<Self, SequenceAdmissionError> {
         if self.claims.recovery != RecoverySequenceReserve::DetachedCredentialRecovery {
             return Err(SequenceAdmissionError::RecoverySequenceReserveMissing);
         }

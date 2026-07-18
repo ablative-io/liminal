@@ -214,9 +214,10 @@ pub use operations::{
     RecordAdmissionPersistenceParts, RecordAdmissionPrestate, RecordAdmissionRefusal,
     RetainedRecordCharge, UnchangedRecordAdmission, apply_attach_frontier, apply_detach_frontier,
     apply_enrollment_frontier, apply_initial_enrollment, apply_marker_ack,
-    apply_marker_ack_frontier, apply_nonzero_participant_ack, apply_participant_ack,
-    apply_participant_ack_frontier, apply_record_admission, classify_record_admission_binding,
-    drain_next_marker, select_marker_proof,
+    apply_marker_ack_frontier, apply_nonzero_participant_ack,
+    apply_nonzero_participant_ack_frontier, apply_participant_ack, apply_participant_ack_frontier,
+    apply_record_admission, classify_record_admission_binding, drain_next_marker,
+    select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,

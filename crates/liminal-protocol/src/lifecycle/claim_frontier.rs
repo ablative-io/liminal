@@ -2205,6 +2205,203 @@ impl ClaimFrontiers {
         })
     }
 
+    /// Consumes the exact coupled DCR blocks into one fenced attach.
+    ///
+    /// This seam is lifecycle-private: its participant and rows are derived from
+    /// the sealed attach commit, never supplied by storage. Both recovery blocks,
+    /// the delivered marker, the detached epoch, and every reserved position are
+    /// checked before `RS`/`RO` are consumed and `RT`/`RA` become the recovered
+    /// binding's ordinary `T`/`A` claims.
+    pub(in crate::lifecycle) fn apply_live_fenced_attach(
+        self,
+        participant: FrontierParticipant,
+        prior_binding_epoch: BindingEpoch,
+        appended_records: &[RetainedCausalRecord],
+    ) -> Result<Self, Box<(Self, LiveFrontierTransitionError)>> {
+        let Some(current) = self
+            .active_identities
+            .participants()
+            .iter()
+            .find(|current| current.participant_index() == participant.participant_index())
+            .copied()
+        else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        let Some(sequence_recovery) = self.sequence.recovery else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+        };
+        let Some(order_recovery) = self.order.recovery else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+        };
+        if !Self::fenced_recovery_authority_matches(
+            current,
+            participant,
+            prior_binding_epoch,
+            sequence_recovery,
+            order_recovery,
+        ) {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        }
+        if !self.sequence.immutable_candidates.is_empty()
+            || !self.order.immutable_candidates.is_empty()
+        {
+            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+        }
+        if !Self::fenced_records_match(
+            participant,
+            sequence_recovery,
+            order_recovery,
+            appended_records,
+        ) {
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::RecordPosition,
+            )));
+        }
+        if !self.has_recovery_marker(participant) {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        }
+        if self.has_duplicate_appended_record(appended_records) {
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::RecordPosition,
+            )));
+        }
+        let Ok(sequence_ledger) = self.sequence.ledger.apply_fenced_recovery() else {
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::ResultingFrontier,
+            )));
+        };
+        let Ok(order_ledger) = self.order.ledger.apply_fenced_recovery() else {
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::ResultingFrontier,
+            )));
+        };
+        let mut active = self.active_identities.participants().to_vec();
+        let Some(current) = active
+            .iter_mut()
+            .find(|current| current.participant_index() == participant.participant_index())
+        else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        *current = participant;
+        let Ok(active) = ActiveIdentityRanks::try_new(
+            active,
+            sequence_ledger.high_watermark(),
+            self.identity_slot_limit,
+        ) else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        let Ok((sequence, order)) =
+            rebuild_unreserved_frontiers(&active, sequence_ledger, order_ledger)
+        else {
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::ResultingFrontier,
+            )));
+        };
+        let mut resulting = self;
+        resulting.active_identities = active;
+        resulting
+            .retained_records
+            .extend_from_slice(appended_records);
+        resulting
+            .retained_records
+            .sort_unstable_by_key(|record| record.delivery_seq);
+        resulting
+            .marker_records
+            .retain(|record| record.delivery_seq != participant.cursor());
+        resulting.sequence = sequence;
+        resulting.order = order;
+        Ok(resulting)
+    }
+
+    fn fenced_recovery_authority_matches(
+        current: FrontierParticipant,
+        participant: FrontierParticipant,
+        prior_binding_epoch: BindingEpoch,
+        sequence_recovery: RecoverySequenceBlock,
+        order_recovery: RecoveryOrderBlock,
+    ) -> bool {
+        let participant_matches = sequence_recovery.participant_index()
+            == participant.participant_index()
+            && order_recovery.participant_index() == participant.participant_index();
+        let marker_matches = sequence_recovery.marker_delivery_seq() == participant.cursor()
+            && order_recovery.marker_delivery_seq() == participant.cursor();
+        let prior_epoch_matches = sequence_recovery.recovered_binding_epoch()
+            == prior_binding_epoch
+            && order_recovery.recovered_binding_epoch() == prior_binding_epoch;
+        participant_matches
+            && marker_matches
+            && prior_epoch_matches
+            && current.binding() == FrontierBinding::Detached(prior_binding_epoch)
+            && current.cursor() <= participant.cursor()
+            && matches!(participant.binding(), FrontierBinding::Bound(_))
+    }
+
+    fn fenced_records_match(
+        participant: FrontierParticipant,
+        sequence_recovery: RecoverySequenceBlock,
+        order_recovery: RecoveryOrderBlock,
+        appended_records: &[RetainedCausalRecord],
+    ) -> bool {
+        let Some(attached) = appended_records.last().copied() else {
+            return false;
+        };
+        let FrontierBinding::Bound(recovered_binding_epoch) = participant.binding() else {
+            return false;
+        };
+        let attached_matches = attached.delivery_seq == sequence_recovery.recovery_attach_seq()
+            && attached.admission_order.transaction_order()
+                == order_recovery.recovery_operation_order()
+            && attached.kind
+                == (RetainedCausalRecordKind::AttachLifecycle {
+                    participant_index: participant.participant_index(),
+                    binding_epoch: recovered_binding_epoch,
+                });
+        if !attached_matches {
+            return false;
+        }
+        let prefix = &appended_records[..appended_records.len() - 1];
+        match (
+            sequence_recovery.terminal(),
+            order_recovery.active_binding(),
+            prefix,
+        ) {
+            (None, None, []) => true,
+            (Some(sequence_terminal), Some(order_terminal), [terminal]) => {
+                sequence_terminal.owner == order_terminal.owner
+                    && terminal.delivery_seq == sequence_terminal.delivery_seq
+                    && terminal.admission_order.transaction_order()
+                        == order_terminal.transaction_order
+                    && terminal.kind
+                        == RetainedCausalRecordKind::BindingTerminal(sequence_terminal.owner)
+            }
+            _ => false,
+        }
+    }
+
+    fn has_recovery_marker(&self, participant: FrontierParticipant) -> bool {
+        self.retained_records.iter().any(|record| {
+            record.delivery_seq == participant.cursor()
+                && matches!(
+                    record.kind,
+                    RetainedCausalRecordKind::CompactionMarker { participant_index, .. }
+                        if participant_index == participant.participant_index()
+                )
+        })
+    }
+
+    fn has_duplicate_appended_record(&self, appended_records: &[RetainedCausalRecord]) -> bool {
+        appended_records.iter().any(|row| {
+            self.retained_records
+                .iter()
+                .any(|retained| retained.delivery_seq == row.delivery_seq)
+        })
+    }
+
     /// Applies an acknowledgement's exact cursor/binding facts without exposing
     /// the participant vector as a server mutation API.
     pub(in crate::lifecycle) fn apply_live_identity(

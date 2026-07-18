@@ -9,8 +9,8 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use super::super::{
     AttachCommit, AttachTransition, ClaimFrontiers, ClosureAccounting, CommittedDetachTransition,
     FrontierBinding, FrontierParticipant, InitialEnrollmentFrontierCommit, MarkerAckCommit,
-    OrderLedger, ParticipantAckCommit, RetainedCausalRecord, RetainedCausalRecordKind,
-    SequenceLedger, claim_frontier::LiveFrontierTransitionError,
+    NonzeroParticipantAckCommit, OrderLedger, ParticipantAckCommit, RetainedCausalRecord,
+    RetainedCausalRecordKind, SequenceLedger, claim_frontier::LiveFrontierTransitionError,
 };
 use super::{InitialEnrollmentOperationCommit, RetainedRecordCharge};
 
@@ -20,12 +20,34 @@ use ledger::{
     detach_order, detach_sequence, detached_attach_order, detached_attach_sequence,
     enrollment_order, enrollment_sequence, superseding_attach_order, superseding_attach_sequence,
 };
-use state::{accounting_after_rows, retained_attached, retained_terminal};
+use state::{
+    accounting_after_fenced_attach, accounting_after_rows, retained_attached, retained_terminal,
+};
 
 /// Complete executable frontier, closure-accounting, and keyed-retention owner.
 ///
 /// The owner is intentionally move-only. It is the only live mutation input and
 /// never exposes a constructor from independent frontier/accounting components.
+/// Frontier, closure, retained charges, and participant history therefore cannot
+/// be cloned or recombined from different owners:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::LiveFrontierOwner;
+///
+/// fn clone_frontier(owner: &LiveFrontierOwner) -> LiveFrontierOwner {
+///     owner.clone()
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::LiveFrontierOwner;
+///
+/// fn splice(left: &mut LiveFrontierOwner, right: LiveFrontierOwner) {
+///     left.frontiers = right.frontiers;
+///     left.closure_accounting = right.closure_accounting;
+///     left.retained_charges = right.retained_charges;
+/// }
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct LiveFrontierOwner {
     frontiers: ClaimFrontiers,
@@ -58,6 +80,21 @@ impl LiveFrontierOwner {
                 retained_record_limit,
             },
         )
+    }
+
+    #[cfg(test)]
+    pub(in crate::lifecycle) const fn from_test_parts(
+        frontiers: ClaimFrontiers,
+        closure_accounting: ClosureAccounting,
+        retained_charges: Vec<RetainedRecordCharge>,
+        retained_record_limit: u64,
+    ) -> Self {
+        Self {
+            frontiers,
+            closure_accounting,
+            retained_charges,
+            retained_record_limit,
+        }
     }
 
     /// Borrows the coupled claim frontiers.
@@ -339,8 +376,20 @@ pub fn apply_attach_frontier<F, V>(
                 order,
             )
         }
-        AttachTransition::FencedRecovery { .. } => {
-            return failure(owner, operation, LiveFrontierError::Precedence);
+        AttachTransition::FencedRecovery {
+            prior_binding_epoch,
+            composed_terminal,
+            next_closure_state,
+        } => {
+            return apply_fenced_attach_frontier(
+                owner,
+                operation,
+                terminal_charge,
+                attached_charge,
+                prior_binding_epoch,
+                composed_terminal,
+                next_closure_state,
+            );
         }
     };
     transition(
@@ -438,6 +487,46 @@ pub fn apply_participant_ack_frontier(
     Ok(LiveFrontierCommit { operation, owner })
 }
 
+/// Applies a nonzero-debt participant acknowledgement cursor transition.
+///
+/// The episode and member remain owned by the sealed aggregate commit; this
+/// transition consumes the same exact acknowledged cursor into the coupled
+/// claim-frontier participant rank.
+///
+/// # Errors
+///
+/// Returns a failure retaining the unchanged owner and intact aggregate commit.
+pub fn apply_nonzero_participant_ack_frontier(
+    mut owner: LiveFrontierOwner,
+    operation: NonzeroParticipantAckCommit,
+) -> LiveFrontierResult<NonzeroParticipantAckCommit> {
+    let request = operation.outcome().request();
+    let Some(current) = owner
+        .frontiers
+        .active_identities()
+        .participants()
+        .iter()
+        .find(|participant| participant.participant_index() == request.participant_id)
+        .copied()
+    else {
+        return failure(owner, operation, LiveFrontierError::Authority);
+    };
+    let participant = FrontierParticipant::new(
+        request.participant_id,
+        request.through_seq,
+        current.binding(),
+    );
+    owner.frontiers = match owner.frontiers.apply_live_identity(participant) {
+        Ok(frontiers) => frontiers,
+        Err(frontier_failure) => {
+            let (frontiers, error) = *frontier_failure;
+            owner.frontiers = frontiers;
+            return failure(owner, operation, map_frontier_error(error));
+        }
+    };
+    Ok(LiveFrontierCommit { operation, owner })
+}
+
 /// Applies a zero-debt marker acknowledgement cursor transition.
 ///
 /// # Errors
@@ -486,6 +575,96 @@ pub fn apply_marker_ack_frontier(
             return failure(owner, operation, map_frontier_error(error));
         }
     };
+    Ok(LiveFrontierCommit { operation, owner })
+}
+
+fn apply_fenced_attach_frontier<F, V>(
+    owner: LiveFrontierOwner,
+    operation: AttachCommit<F, V>,
+    terminal_charge: Option<RetainedRecordCharge>,
+    attached_charge: RetainedRecordCharge,
+    prior_binding_epoch: crate::wire::BindingEpoch,
+    composed_terminal: Option<super::super::CommittedBindingTerminal>,
+    next_closure_state: super::super::ClosureState,
+) -> LiveFrontierResult<AttachCommit<F, V>> {
+    let attached = operation.attached;
+    let (rows, charges) = match (composed_terminal, terminal_charge) {
+        (None, None) => (vec![retained_attached(attached)], vec![attached_charge]),
+        (Some(terminal), Some(terminal_charge)) => (
+            vec![retained_terminal(terminal), retained_attached(attached)],
+            vec![terminal_charge, attached_charge],
+        ),
+        (None, Some(_)) | (Some(_), None) => {
+            return failure(owner, operation, LiveFrontierError::RetainedCharge);
+        }
+    };
+    let participant = FrontierParticipant::new(
+        attached.participant_id(),
+        operation.member.cursor(),
+        FrontierBinding::Bound(attached.binding_epoch()),
+    );
+    fenced_attach_transition(
+        owner,
+        operation,
+        participant,
+        prior_binding_epoch,
+        next_closure_state,
+        &rows,
+        charges,
+    )
+}
+
+fn fenced_attach_transition<T>(
+    mut owner: LiveFrontierOwner,
+    operation: T,
+    participant: FrontierParticipant,
+    prior_binding_epoch: crate::wire::BindingEpoch,
+    next_closure_state: super::super::ClosureState,
+    rows: &[RetainedCausalRecord],
+    charges: Vec<RetainedRecordCharge>,
+) -> LiveFrontierResult<T> {
+    if rows.len() != charges.len()
+        || rows.iter().zip(&charges).any(|(row, charge)| {
+            row.delivery_seq != charge.delivery_seq()
+                || row.admission_order != charge.admission_order()
+                || charge.encoded_charge().entries != 1
+        })
+    {
+        return failure(owner, operation, LiveFrontierError::RetainedCharge);
+    }
+    let resulting_len = owner
+        .frontiers
+        .retained_records()
+        .len()
+        .checked_add(rows.len());
+    if resulting_len
+        .and_then(|len| u64::try_from(len).ok())
+        .is_none_or(|len| len > owner.retained_record_limit)
+    {
+        return failure(owner, operation, LiveFrontierError::RetainedRecordLimit);
+    }
+    let Some(accounting) =
+        accounting_after_fenced_attach(owner.closure_accounting, &charges, next_closure_state)
+    else {
+        return failure(owner, operation, LiveFrontierError::ClosureAccounting);
+    };
+    owner.frontiers =
+        match owner
+            .frontiers
+            .apply_live_fenced_attach(participant, prior_binding_epoch, rows)
+        {
+            Ok(frontiers) => frontiers,
+            Err(frontier_failure) => {
+                let (frontiers, error) = *frontier_failure;
+                owner.frontiers = frontiers;
+                return failure(owner, operation, map_frontier_error(error));
+            }
+        };
+    owner.retained_charges.extend(charges);
+    owner
+        .retained_charges
+        .sort_unstable_by_key(|charge| charge.delivery_seq());
+    owner.closure_accounting = accounting;
     Ok(LiveFrontierCommit { operation, owner })
 }
 

@@ -34,7 +34,8 @@ pub use enrollment_operation::{
 pub use live_frontier::{
     AttachFrontierCharges, LiveFrontierCommit, LiveFrontierError, LiveFrontierFailure,
     LiveFrontierOwner, LiveFrontierResult, apply_attach_frontier, apply_detach_frontier,
-    apply_enrollment_frontier, apply_marker_ack_frontier, apply_participant_ack_frontier,
+    apply_enrollment_frontier, apply_marker_ack_frontier, apply_nonzero_participant_ack_frontier,
+    apply_participant_ack_frontier,
 };
 pub use marker_ack::{MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, apply_marker_ack};
 pub use marker_drain::{MarkerDrainCommit, MarkerDrainError, drain_next_marker};

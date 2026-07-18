@@ -271,8 +271,7 @@ impl OrderLedger {
     /// coupled recovery claims exist, or
     /// [`OrderAdmissionError::ActiveBindingClaimOverflow`] if `RA` cannot be
     /// transferred into `A`.
-    #[cfg(test)]
-    pub(crate) fn apply_fenced_recovery(self) -> Result<Self, OrderAdmissionError> {
+    pub(in crate::lifecycle) fn apply_fenced_recovery(self) -> Result<Self, OrderAdmissionError> {
         if !self.claims.recovery_operation || !self.claims.recovery_replacement_terminal {
             return Err(OrderAdmissionError::RecoveryOrderReserveMissing {
                 recovery_operation: self.claims.recovery_operation,

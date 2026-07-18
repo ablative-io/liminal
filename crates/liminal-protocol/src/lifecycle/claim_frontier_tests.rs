@@ -6,22 +6,24 @@ use crate::{
     algebra::{ResourceVector, WideResourceVector},
     outcome::{CandidatePhase, ClaimCounter, ParticipantStateCorruptReason},
     wire::{
-        AttachSecret, BindingEpoch, CloseCause, ConnectionIncarnation, EnrollmentRequest,
-        EnrollmentToken, Generation,
+        AttachAttemptToken, AttachSecret, BindingEpoch, CloseCause, ConnectionIncarnation,
+        CredentialAttachRequest, EnrollmentRequest, EnrollmentToken, Generation,
     },
 };
 
 use super::{
-    ActiveBinding, AdmissionOrder, AllocatedParticipantSlot, BindingSlotOccupancy, BindingState,
-    CapacityCounter, ClosureAccounting, ClosureDebt, ClosureState, ConnectionConversationTracking,
-    CursorFateSuccessor, EnrollmentCapacityCounters, EnrollmentFingerprint, EnrollmentTokenPhase,
-    Event, FreshParticipantCapacityCounter, InitialEnrollmentClosureInput,
-    InitialEnrollmentCommitValues, InitialEnrollmentFrontierError,
-    InitialEnrollmentOperationCommit, InitialEnrollmentOperationDecision,
-    InitialEnrollmentOperationInput, OrderClaims, OrderHigh, OrderLedger,
+    ActiveBinding, AdmissionOrder, AllocatedParticipantSlot, AttachCommitParameters,
+    AttachFrontierCharges, AttachSecretProof, AttachedRecordPosition, BindingSlotOccupancy,
+    BindingState, CapacityCounter, ClosureAccounting, ClosureDebt, ClosureState,
+    ConnectionConversationTracking, CursorFateSuccessor, DebtCompletion, DetachCell,
+    EnrollmentCapacityCounters, EnrollmentFingerprint, EnrollmentTokenPhase, Event,
+    FreshParticipantCapacityCounter, InitialEnrollmentClosureInput, InitialEnrollmentCommitValues,
+    InitialEnrollmentFrontierError, InitialEnrollmentOperationCommit,
+    InitialEnrollmentOperationDecision, InitialEnrollmentOperationInput, LiveFrontierOwner,
+    LiveMember, LiveMemberRestore, OrderClaims, OrderHigh, OrderLedger,
     ParticipantSlotAllocationError, ParticipantSlotAllocatorProof, PhysicalCompaction,
-    ReceiptDeadlines, RecoverySequenceReserve, SequenceClaims, SequenceLedger, StoredEdge,
-    apply_initial_enrollment,
+    ReceiptDeadlines, RecoverySequenceReserve, RetainedRecordCharge, SequenceClaims,
+    SequenceLedger, StoredEdge, apply_attach_frontier, apply_initial_enrollment,
     claim_frontier::{
         BindingTerminalOwner, ClaimFrontierCounter, ClaimFrontierInvalidReason, ClaimFrontiers,
         ClaimFrontiersRestore, ExitProductRangeRestore, FrontierBinding, FrontierParticipant,
@@ -35,6 +37,7 @@ use super::{
         SequenceDirectOwner, SequenceProductClass, SequenceProductRangesRestore,
         TerminalProductRangeRestore, TerminalProductSource, validate_numeric_union_for_test,
     },
+    commit_attach,
     edge::marker_delivery_for_test,
     storage::CommittedBindingTerminalRestore,
 };
@@ -1030,12 +1033,176 @@ fn exact_detached_dcr_is_the_only_postfate_recovery_authority() {
     let request = MarkerRecordRequest::delivered(0, 1, FrontierBinding::Detached(binding_epoch));
     let mut prevalidated = ClaimFrontiers::prevalidate(restore.clone(), sequence, order)
         .expect("post-fate frontier prevalidates before edge restore");
-    let _record = prevalidated
+    prevalidated
         .take_marker_record(request)
         .expect("exact retained DCR marker is selected once");
-    prevalidated
+    let frontiers = prevalidated
         .finish(Some(StoredEdge::DetachedCredentialRecovery(dcr)))
         .expect("exact detached DCR proves the post-fate recovery pair");
+
+    let recovered_epoch = epoch(2, 2);
+    let proof = dcr
+        .fenced_attach(
+            debt,
+            Event::fenced_recovery_committed(0, 1, binding_epoch, recovered_epoch, 3),
+            DebtCompletion::clear(),
+        )
+        .expect("exact DCR creates the fenced attach proof");
+    let previous_terminal = CommittedBindingTerminalRestore {
+        binding: ActiveBinding {
+            participant_id: 0,
+            conversation_id: CONVERSATION_ID,
+            binding_epoch,
+        },
+        cause: CloseCause::ConnectionLost,
+        transaction_order: 1,
+        delivery_seq: 2,
+    }
+    .restore()
+    .expect("prior binding fate terminal restores");
+    let attach_secret = AttachSecret::new([0x41; 32]);
+    let member = LiveMember::restore(LiveMemberRestore {
+        participant_id: 0,
+        conversation_id: CONVERSATION_ID,
+        generation: Generation::ONE,
+        attach_secret,
+        cursor: 0,
+        enrollment_fingerprint: EnrollmentFingerprint::new(vec![0x41]),
+        latest_terminal: Some(previous_terminal),
+    })
+    .expect("detached recovery member restores");
+    let verified = member
+        .verify_fenced_attach(
+            BindingState::Detached,
+            CredentialAttachRequest {
+                conversation_id: CONVERSATION_ID,
+                participant_id: 0,
+                capability_generation: Generation::ONE,
+                attach_secret,
+                attach_attempt_token: AttachAttemptToken::new([0x42; 16]),
+                accept_marker_delivery_seq: Some(1),
+            },
+            AttachSecretProof::Verified,
+            &proof,
+            None,
+            AttachCommitParameters {
+                binding: ActiveBinding {
+                    participant_id: 0,
+                    conversation_id: CONVERSATION_ID,
+                    binding_epoch: recovered_epoch,
+                },
+                attach_secret: AttachSecret::new([0x43; 32]),
+                attached_position: AttachedRecordPosition::new(2, 3),
+                receipt_expires_at: 100,
+                provenance_expires_at: 200,
+            },
+        )
+        .expect("exact fenced attach verifies");
+    let operation = commit_attach(verified, DetachCell::<[u8; 4]>::default())
+        .expect("verified fenced attach commits");
+    let attached = RetainedCausalRecord {
+        delivery_seq: 3,
+        admission_order: AdmissionOrder::new(2, CandidatePhase::AttachLifecycle, 0),
+        kind: RetainedCausalRecordKind::AttachLifecycle {
+            participant_index: 0,
+            binding_epoch: recovered_epoch,
+        },
+    };
+    let accounting = ClosureAccounting::try_new(
+        ClosureState::Owed {
+            debt,
+            edge: StoredEdge::DetachedCredentialRecovery(dcr),
+        },
+        1,
+        1,
+        2,
+        2,
+        ResourceVector::new(2, 8),
+        WideResourceVector::new(2, 8),
+        ResourceVector::new(16, 64),
+        1,
+        2,
+    )
+    .expect("DCR closure accounting is valid");
+    let retained_charges = restore
+        .retained_records
+        .iter()
+        .map(|row| {
+            RetainedRecordCharge::new(
+                row.delivery_seq,
+                row.admission_order,
+                ResourceVector::new(1, 4),
+            )
+        })
+        .collect();
+    let owner = LiveFrontierOwner::from_test_parts(frontiers, accounting, retained_charges, 3);
+    let committed = apply_attach_frontier(
+        owner,
+        operation,
+        AttachFrontierCharges::new(
+            None,
+            RetainedRecordCharge::new(
+                attached.delivery_seq,
+                attached.admission_order,
+                ResourceVector::new(1, 4),
+            ),
+        ),
+    )
+    .expect("production fenced attach transfers the DCR owner");
+    let (_, owner) = committed.into_parts();
+    let transitioned = owner.frontiers();
+    assert_eq!(
+        transitioned.active_identities().participants(),
+        &[FrontierParticipant::new(
+            0,
+            1,
+            FrontierBinding::Bound(recovered_epoch),
+        )]
+    );
+    assert_eq!(
+        transitioned.retained_records(),
+        &[
+            restore.retained_records[0],
+            restore.retained_records[1],
+            attached
+        ]
+    );
+    assert!(transitioned.retained_marker_records().is_empty());
+    assert!(transitioned.sequence().recovery().is_none());
+    assert!(transitioned.order().recovery().is_none());
+    assert_eq!(transitioned.sequence().ledger().high_watermark(), 3);
+    assert_eq!(
+        transitioned
+            .sequence()
+            .ledger()
+            .claims()
+            .binding_terminals(),
+        1
+    );
+    assert_eq!(
+        transitioned
+            .order()
+            .ledger()
+            .claims()
+            .active_binding_terminals(),
+        1
+    );
+    assert!(transitioned.cross_counter_valid_for_test());
+    let resulting_accounting = owner.closure_accounting();
+    assert_eq!(resulting_accounting.state(), ClosureState::Clear);
+    assert_eq!(resulting_accounting.marker_anchors(), 0);
+    assert_eq!(resulting_accounting.edge_sequence_claims(), 0);
+    assert_eq!(resulting_accounting.edge_order_position_claims(), 0);
+    assert_eq!(
+        resulting_accounting.edge_k_remaining(),
+        ResourceVector::default()
+    );
+    assert_eq!(
+        resulting_accounting.baseline(),
+        WideResourceVector::new(3, 12)
+    );
+    assert_eq!(owner.retained_charges().len(), 3);
+    assert_eq!(owner.retained_charges()[2].delivery_seq(), 3);
 
     let wrong_epoch = epoch(2, 2);
     let mut wrong = restore;
