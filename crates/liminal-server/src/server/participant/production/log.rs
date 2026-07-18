@@ -98,10 +98,11 @@ impl OperationLog {
             .await?;
         let mut decoded = Vec::with_capacity(entries.len());
         for entry in entries {
-            let stored: StoredEntry = serde_json::from_slice(&entry.payload)?;
-            if stored.schema_version != SCHEMA_VERSION {
-                return Err(OperationLogError::SchemaVersion(stored.schema_version));
+            let version: StoredEntryVersion = serde_json::from_slice(&entry.payload)?;
+            if version.schema_version != SCHEMA_VERSION {
+                return Err(OperationLogError::SchemaVersion(version.schema_version));
             }
+            let stored: StoredEntry = serde_json::from_slice(&entry.payload)?;
             decoded.push((entry.sequence, stored.operation));
         }
         Ok(decoded)
@@ -133,6 +134,11 @@ impl OperationLog {
         self.store.flush().await?;
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize)]
+struct StoredEntryVersion {
+    schema_version: u8,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

@@ -56,6 +56,8 @@ mod tests_config_d2;
 #[cfg(test)]
 mod tests_history;
 #[cfg(test)]
+mod tests_layer2;
+#[cfg(test)]
 mod tests_leave;
 #[cfg(test)]
 mod tests_log_v2;
