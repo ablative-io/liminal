@@ -19,12 +19,12 @@ use crate::{
 
 use super::{
     AttachedLifecycleRecord, BindingOrigin, BindingState, ClosureAccounting, ClosureState,
-    CommittedBindingTerminal, InitialEnrollmentClosureProjection, InitialEnrollmentOperationCommit,
-    LeaveCommitError, LiveMember, ObserverCheckedOperation, ObserverFloorDecision,
-    ObserverProjection, OrderClaims, OrderHigh, OrderLedger, PendingFinalization,
-    PreparedLeaveAuthority, RecoveryQuartetStatus, RecoverySequenceReserve,
-    RemainingClosureDecision, SequenceClaims, SequenceLedger, StoredEdge, check_observer_floor,
-    check_remaining_closure,
+    CommittedBindingTerminal, Event, InitialEnrollmentClosureProjection,
+    InitialEnrollmentOperationCommit, LeaveCommitError, LiveMember, MarkerDelivery,
+    ObserverCheckedOperation, ObserverFloorDecision, ObserverProjection, OrderClaims, OrderHigh,
+    OrderLedger, ParticipantCursorProgress, PendingFinalization, PreparedLeaveAuthority,
+    RecoveryQuartetStatus, RecoverySequenceReserve, RemainingClosureDecision, SequenceClaims,
+    SequenceLedger, StoredEdge, check_observer_floor, check_remaining_closure,
     operations::ordinary_record_projection::{
         OrdinaryFixedPointPlan, OrdinaryProjectionError, OrdinaryProjectionFacts,
         OrdinaryProjectionKernelDecision, OrdinaryRecordDrainFirst,
@@ -2180,6 +2180,54 @@ impl ClaimFrontiers {
     #[must_use]
     pub fn retained_marker_records(&self) -> &[RetainedCausalRecord] {
         &self.marker_records
+    }
+
+    /// Projects exact offered-marker cursor progress from one validated retained
+    /// marker and its current bound identity.
+    ///
+    /// Raw participant, epoch, and sequence inputs grant no authority: all must
+    /// match the coupled frontier's retained marker anchor and active binding.
+    /// The returned progress is derived only through sealed [`MarkerDelivery`]
+    /// authority and the exact delivered event.
+    #[must_use]
+    pub fn project_offered_marker_progress(
+        &self,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        marker_delivery_seq: DeliverySeq,
+        event: Event,
+    ) -> Option<ParticipantCursorProgress> {
+        let record = self
+            .marker_records
+            .iter()
+            .find(|record| record.delivery_seq == marker_delivery_seq)
+            .copied()?;
+        let RetainedCausalRecordKind::CompactionMarker {
+            participant_index,
+            provenance,
+        } = record.kind
+        else {
+            return None;
+        };
+        if participant_index != participant_id {
+            return None;
+        }
+        let participant = active_participant(&self.active_identities, participant_id)?;
+        let target_binding = FrontierBinding::Bound(binding_epoch);
+        if participant.binding != target_binding {
+            return None;
+        }
+        let authority = ValidatedMarkerRecord {
+            conversation_id: self.conversation_id,
+            record,
+            provenance,
+            target_binding,
+            occurrence: MarkerRecordOccurrence::Undelivered,
+            seal: MarkerAuthoritySeal::Validated,
+        };
+        MarkerDelivery::from_validated_record(&authority)
+            .delivered_progress(event)
+            .ok()
     }
 
     /// Borrows the validated sequence frontier.

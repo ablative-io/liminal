@@ -53,7 +53,7 @@ use crate::ServerError;
 #[path = "websocket/listener.rs"]
 mod listener;
 #[path = "websocket/outbound.rs"]
-mod outbound;
+pub(super) mod outbound;
 #[path = "websocket/process.rs"]
 mod process;
 #[path = "websocket/supervisor.rs"]

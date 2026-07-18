@@ -15,6 +15,8 @@ use liminal_protocol::lifecycle::{
     CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveFrontierOwner, LiveMember,
     ParticipantConversation, RetiredIdentity,
 };
+#[cfg(test)]
+use liminal_protocol::wire::ParticipantDelivery;
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachBound, AttachSecret, BindingEpoch, DeliverySeq, DetachAttemptToken,
     EnrollBound, Generation, ParticipantId, ReceiptExpiryReason, TransactionOrder,
@@ -23,6 +25,7 @@ use liminal_protocol::wire::{
 use super::facts::{Digest, FactsError};
 use super::log::{OperationLogError, StoredOperation};
 use super::outbox::{ConversationOutbox, ConversationOutboxError};
+use super::outbox_log::OutboxLogError;
 
 /// Exact committed credential-attach receipt with its own deadline pair.
 ///
@@ -135,6 +138,10 @@ pub(super) struct ConversationAuthority {
     /// sequence. Cold replay never restores this map; reattach starts without
     /// old-binding offer testimony.
     pub(super) offered_markers: BTreeMap<(ParticipantId, DeliverySeq), BindingEpoch>,
+    /// Last protocol-owned marker projection, exposed only to acceptance
+    /// fixtures that must stage the next leg's observer fact explicitly.
+    #[cfg(test)]
+    pub(super) last_marker_projection: Option<ParticipantDelivery>,
     /// Live participant slots keyed by permanent participant id.
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
     /// Permanent retired identity tombstones keyed by participant id.
@@ -162,6 +169,12 @@ pub(super) enum StateError {
     /// The Unit 2 extension stream or outbox owner refused durable bytes.
     #[error(transparent)]
     Outbox(#[from] ConversationOutboxError),
+    /// The canonical Unit 2 extension stream rejected a live append.
+    #[error(transparent)]
+    OutboxLog(#[from] OutboxLogError),
+    /// The synchronous durability bridge failed while awaiting a barrier.
+    #[error(transparent)]
+    Bridge(#[from] liminal::durability::bridge::BridgeError),
     /// A server-owned fact could not be minted.
     #[error(transparent)]
     Facts(#[from] FactsError),
@@ -233,6 +246,8 @@ impl ConversationAuthority {
             frontier: None,
             outbox: None,
             offered_markers: BTreeMap::new(),
+            #[cfg(test)]
+            last_marker_projection: None,
             slots: BTreeMap::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),

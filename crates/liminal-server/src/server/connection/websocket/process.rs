@@ -153,7 +153,7 @@ impl WebSocketConnectionProcess {
         let participant_publication = connection_incarnation.and_then(|_| {
             runtime
                 .participant_service()
-                .map(|service| service.new_publication_inbox())
+                .map(crate::server::participant::InstalledParticipantService::new_publication_inbox)
         });
         let state = ConnectionProcessState {
             connection_incarnation,

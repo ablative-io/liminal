@@ -15,9 +15,6 @@ use liminal_protocol::wire::{
 
 use crate::server::connection::ReadyWaker;
 
-/// Registry/inbox invariant failure. These are internal configuration or
-/// ownership faults, never transport pressure policy.
-
 /// Connection-local volatile offer cursor for one conversation and exact
 /// binding. A different binding epoch discards this progress and restarts from
 /// the durable recipient acknowledgement frontier.
@@ -47,8 +44,8 @@ impl ParticipantPublication {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ParticipantPublicationError {
+#[derive(Clone, Copy, Debug, thiserror::Error)]
+pub enum ParticipantPublicationError {
     /// A live incarnation was registered more than once.
     #[error("participant publication incarnation {incarnation:?} is already registered")]
     DuplicateRegistration {
@@ -78,7 +75,7 @@ struct ReadyConversations {
 /// projection and cannot become another owner. Readiness stores conversation
 /// ids, never payload copies, and coalesces duplicate ids.
 #[derive(Debug)]
-pub(crate) struct ParticipantPublicationInbox {
+pub struct ParticipantPublicationInbox {
     inner: Arc<Mutex<ReadyConversations>>,
 }
 
@@ -131,6 +128,7 @@ impl ParticipantPublicationInbox {
             }
             inbox.conversations.insert(conversation_id);
         }
+        drop(inbox);
         Ok(())
     }
 
@@ -151,7 +149,7 @@ struct ParticipantPublicationHandle {
 
 /// Server-wide incarnation-to-connection publication registry.
 #[derive(Debug, Default)]
-pub(crate) struct ParticipantPublicationRegistry {
+pub struct ParticipantPublicationRegistry {
     registrations: Mutex<BTreeMap<ConnectionIncarnation, ParticipantPublicationHandle>>,
 }
 
@@ -181,6 +179,7 @@ impl ParticipantPublicationRegistry {
                 waker,
             },
         );
+        drop(registrations);
         Ok(())
     }
 
@@ -209,7 +208,10 @@ impl ParticipantPublicationRegistry {
             let Some(handle) = registrations.get(&incarnation) else {
                 return Ok(false);
             };
-            (Weak::clone(&handle.inbox), handle.waker.clone())
+            let weak_inbox = Weak::clone(&handle.inbox);
+            let waker = handle.waker.clone();
+            drop(registrations);
+            (weak_inbox, waker)
         };
         let Some(inbox) = weak_inbox.upgrade() else {
             self.deregister(incarnation);
@@ -234,5 +236,59 @@ impl ParticipantPublicationRegistry {
             waker.fire();
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use liminal_protocol::wire::ConnectionIncarnation;
+
+    use super::{ParticipantPublicationInbox, ParticipantPublicationRegistry};
+    use crate::server::connection::ReadyWaker;
+
+    #[test]
+    fn parked_connection_wakes_on_outbox_and_no_polling_occurs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let incarnation = ConnectionIncarnation::new(12, 34);
+        let wake_count = Arc::new(AtomicU64::new(0));
+        let registry = ParticipantPublicationRegistry::default();
+        let inbox = ParticipantPublicationInbox::new(3);
+        registry.register(
+            incarnation,
+            &inbox,
+            ReadyWaker::for_test(Arc::clone(&wake_count)),
+        )?;
+
+        assert!(!inbox.has_pending()?);
+        assert!(registry.notify(incarnation, 7)?);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert!(inbox.has_pending()?);
+
+        // Duplicate and additional ready conversations coalesce behind the one
+        // empty-to-nonempty wake; no repeated probe or timer drives progress.
+        assert!(registry.notify(incarnation, 7)?);
+        assert!(registry.notify(incarnation, 8)?);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+        assert_eq!(inbox.take_ready()?, vec![7, 8]);
+        assert!(!inbox.has_pending()?);
+
+        // This notification models the execute-to-wait race: it lands after a
+        // drain but before the process final probe. The non-consuming probe sees
+        // it and the edge fires exactly one new READY.
+        assert!(registry.notify(incarnation, 9)?);
+        assert!(inbox.has_pending()?);
+        assert_eq!(wake_count.load(Ordering::SeqCst), 2);
+        assert_eq!(inbox.take_ready()?, vec![9]);
+        assert!(!inbox.has_pending()?);
+
+        let idle_count = wake_count.load(Ordering::SeqCst);
+        assert_eq!(wake_count.load(Ordering::SeqCst), idle_count);
+        registry.deregister(incarnation);
+        assert!(!registry.notify(incarnation, 10)?);
+        assert_eq!(wake_count.load(Ordering::SeqCst), idle_count);
+        Ok(())
     }
 }

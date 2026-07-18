@@ -158,7 +158,8 @@ pub fn gate_generic_frame(
 ///
 /// Returns the shared codec error if the typed value cannot be encoded.
 pub fn encode_server_value(value: ServerValue) -> Result<Frame, CodecError> {
-    encode_server_frame(ParticipantFrame::ServerValue(value))
+    let participant = ParticipantFrame::ServerValue(value);
+    encode_server_frame(&participant)
 }
 
 /// Encodes one crate-produced server push into the participant generic frame on
@@ -168,15 +169,16 @@ pub fn encode_server_value(value: ServerValue) -> Result<Frame, CodecError> {
 ///
 /// Returns the shared codec error if the typed push cannot be encoded.
 pub fn encode_server_push(push: ServerPush) -> Result<Frame, CodecError> {
-    encode_server_frame(ParticipantFrame::ServerPush(push))
+    let participant = ParticipantFrame::ServerPush(push);
+    encode_server_frame(&participant)
 }
 
 /// Applies the one canonical participant codec to either server-to-client arm,
 /// then preserves its already encoded participant payload in the generic frame.
-fn encode_server_frame(participant: ParticipantFrame) -> Result<Frame, CodecError> {
-    let needed = encoded_len(&participant)?;
+fn encode_server_frame(participant: &ParticipantFrame) -> Result<Frame, CodecError> {
+    let needed = encoded_len(participant)?;
     let mut complete = vec![0_u8; needed];
-    let written = encode(&participant, &mut complete)?;
+    let written = encode(participant, &mut complete)?;
     complete.truncate(written);
 
     let payload = complete

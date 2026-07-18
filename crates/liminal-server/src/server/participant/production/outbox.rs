@@ -125,7 +125,7 @@ impl ConversationOutbox {
         Ok(owner)
     }
 
-    fn apply_row(
+    pub(super) fn apply_row(
         &mut self,
         physical_sequence: u64,
         row: OutboxRow,
@@ -395,7 +395,6 @@ impl ConversationOutbox {
         })
     }
 
-    #[cfg(test)]
     pub(super) const fn next_extension_sequence(&self) -> u64 {
         self.next_extension_sequence
     }

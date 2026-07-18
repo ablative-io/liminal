@@ -138,6 +138,10 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     /// Resolves all live current bindings with pending durable obligations for
     /// one conversation. Production overrides this; semantic-only fixtures have
     /// no publication source.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic fault when durable readiness cannot be resolved.
     fn ready_connection_incarnations(
         &self,
         _conversation_id: ConversationId,
@@ -147,6 +151,10 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
 
     /// Selects the least durable recipient obligation for this incarnation,
     /// restarting from durable ack when `offered` names an older binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic fault when the durable obligation owner is unavailable.
     fn next_publication(
         &self,
         _connection_incarnation: ConnectionIncarnation,
@@ -158,6 +166,10 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
 
     /// Checks that a held head still belongs to the exact current binding before
     /// it is offered after writable readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic fault when current binding authority cannot be read.
     fn publication_binding_is_current(
         &self,
         _conversation_id: ConversationId,
@@ -169,6 +181,10 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
 
     /// Records exact successful marker enqueue testimony. Non-marker offers are
     /// ignored by production after validating their current binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic fault when exact offer testimony cannot be recorded.
     fn record_publication_offer(
         &self,
         _publication: &ParticipantPublication,
@@ -176,6 +192,13 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// Applies one decoded participant request to protocol-owned authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParticipantSemanticError`] when durable or protocol authority
+    /// cannot produce a truthful terminal value. The connection fails rather
+    /// than fabricating a response.
     fn handle(
         &self,
         context: ParticipantConnectionContext,

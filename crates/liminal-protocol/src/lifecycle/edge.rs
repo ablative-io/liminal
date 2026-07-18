@@ -2214,6 +2214,42 @@ impl PhysicalCompaction {
 }
 
 impl MarkerDelivery {
+    /// Consumes sealed marker-delivery authority and derives its exact cursor
+    /// progress witness after validating the delivered event.
+    ///
+    /// This debt-independent projection is for owners that persist the marker
+    /// successor separately from later closure-accounting evolution. Callers
+    /// cannot mint `MarkerDelivery`; only a validated marker drain or restore
+    /// can supply this authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged sealed delivery unless participant, epoch, and
+    /// marker sequence exactly match.
+    pub fn delivered_progress(self, event: Event) -> Result<ParticipantCursorProgress, Self> {
+        let EventKind::MarkerDelivered {
+            participant_id,
+            binding_epoch,
+            marker_delivery_seq,
+        } = event.0
+        else {
+            return Err(self);
+        };
+        if participant_id != self.participant_id
+            || binding_epoch != self.binding_epoch
+            || marker_delivery_seq != self.marker_delivery_seq
+        {
+            return Err(self);
+        }
+        Ok(ParticipantCursorProgress::Marker(CursorProgressMarker {
+            conversation_id: self.conversation_id,
+            participant_id,
+            binding_epoch,
+            through_seq: marker_delivery_seq,
+            marker_delivery_seq,
+        }))
+    }
+
     /// Consumes exact final-emitter delivery and derives marker-backed PCP.
     ///
     /// The PCP boundary is the delivered marker itself; callers cannot supply a
@@ -2225,31 +2261,10 @@ impl MarkerDelivery {
     /// exactly match this delivery witness.
     pub fn delivered(self, debt: ClosureDebt, event: Event) -> Result<ClosureState, ClosureState> {
         let original = owed(debt, StoredEdge::MarkerDelivery(self));
-        let EventKind::MarkerDelivered {
-            participant_id,
-            binding_epoch,
-            marker_delivery_seq,
-        } = event.0
-        else {
+        let Ok(progress) = self.delivered_progress(event) else {
             return Err(original);
         };
-        if participant_id != self.participant_id
-            || binding_epoch != self.binding_epoch
-            || marker_delivery_seq != self.marker_delivery_seq
-        {
-            return Err(original);
-        }
-        let progress = CursorProgressMarker {
-            conversation_id: self.conversation_id,
-            participant_id,
-            binding_epoch,
-            through_seq: marker_delivery_seq,
-            marker_delivery_seq,
-        };
-        Ok(owed(
-            debt,
-            StoredEdge::ParticipantCursorProgress(ParticipantCursorProgress::Marker(progress)),
-        ))
+        Ok(owed(debt, StoredEdge::ParticipantCursorProgress(progress)))
     }
 
     /// Applies a lower normal ack, projection, or compaction below the anchor,

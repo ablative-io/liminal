@@ -19,7 +19,9 @@ mod facts;
 mod frontier;
 mod handler;
 mod handler_observer;
+mod handler_semantic;
 mod log;
+mod marker_progress;
 mod observer;
 mod occupancy;
 mod ops_acks;
@@ -65,6 +67,10 @@ mod tests_layer2;
 mod tests_leave;
 #[cfg(test)]
 mod tests_log_v2;
+#[cfg(test)]
+mod tests_marker_ack;
+#[cfg(test)]
+mod tests_marker_ack_fixture;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_observer;

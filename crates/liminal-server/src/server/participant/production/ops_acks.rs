@@ -5,11 +5,12 @@
 //! connection-conversation capacity gate runs at its register position, and
 //! request-bound response authorities carry every reply.
 
+use liminal::durability::bridge::block_on;
+
 use liminal_protocol::lifecycle::{
-    BindingState, ClosureState, Event, MarkerAckDecision, MarkerProofState, ParticipantAckDecision,
-    ParticipantCursorProgress, PresentedIdentity, SemanticConnectionCapacityDecision, StoredEdge,
-    apply_marker_ack, apply_marker_ack_frontier, apply_participant_ack,
-    apply_participant_ack_frontier,
+    BindingState, MarkerAckCommit, MarkerAckDecision, MarkerProofState, ParticipantAckDecision,
+    PresentedIdentity, SemanticConnectionCapacityDecision, apply_marker_ack,
+    apply_marker_ack_frontier, apply_participant_ack, apply_participant_ack_frontier,
 };
 use liminal_protocol::wire::{
     BindingEpoch, MarkerAck, MarkerAckEnvelope, MarkerAckResponse, ParticipantAck,
@@ -19,7 +20,8 @@ use liminal_protocol::wire::{
 use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::Digest;
 use super::log::{StoredAck, StoredBindingEpoch, StoredOperation};
-use super::outbox_log::StoredMarkerAckCommitted;
+use super::marker_progress::{marker_delivery_progress, marker_replay_progress};
+use super::outbox_log::{OutboxLog, OutboxRow, StoredMarkerAckCommitted};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
@@ -185,15 +187,11 @@ impl ConversationAuthority {
     }
 
     /// Applies one marker acknowledgement over the zero-debt marker selector.
-    ///
-    /// This binding delivers no markers (no delivery pump exists for
-    /// participant records yet), so the durable marker facts are factually
-    /// empty: no expected marker, no delivery witness. The crate selects the
-    /// refusal; a committed marker ack is unreachable until delivery exists.
     pub(super) fn apply_marker_ack(
-        &self,
+        &mut self,
         request: &MarkerAck,
         operation_facts: &OperationFacts,
+        outbox_log: &OutboxLog,
     ) -> Result<ArmOutcome, StateError> {
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
@@ -214,7 +212,31 @@ impl ConversationAuthority {
             .slots
             .get(&request.participant_id)
             .map_or(0, |slot| slot.member.cursor());
-        let marker_state = MarkerProofState::new(cursor, false, None, receiving_epoch, None);
+        let offered = self
+            .offered_markers
+            .get(&(request.participant_id, request.marker_delivery_seq))
+            .filter(|binding_epoch| **binding_epoch == receiving_epoch)
+            .map(|binding_epoch| (request.marker_delivery_seq, *binding_epoch));
+        let (expected_marker, delivered_binding_epoch, progress) = match offered {
+            Some((delivery_seq, binding_epoch)) => (
+                Some(delivery_seq),
+                binding_epoch,
+                Some(marker_delivery_progress(
+                    self,
+                    request.participant_id,
+                    binding_epoch,
+                    delivery_seq,
+                )?),
+            ),
+            None => (None, receiving_epoch, None),
+        };
+        let marker_state = MarkerProofState::new(
+            cursor,
+            false,
+            expected_marker,
+            delivered_binding_epoch,
+            progress,
+        );
         match apply_marker_ack(identity, binding, receiving_epoch, request, &marker_state) {
             MarkerAckDecision::Respond(response) => {
                 // Same frozen-stage transcription as the normal-ack arm: the
@@ -241,10 +263,74 @@ impl ConversationAuthority {
                 }
                 Ok(ArmOutcome::respond(response.into_server_value()))
             }
-            MarkerAckDecision::Commit(_) => Err(StateError::invariant(
-                "marker ack committed although no marker was ever delivered",
-            )),
+            MarkerAckDecision::Commit(commit) => {
+                self.commit_marker_ack(request, operation_facts, outbox_log, commit)
+            }
         }
+    }
+
+    fn commit_marker_ack(
+        &mut self,
+        request: &MarkerAck,
+        operation_facts: &OperationFacts,
+        outbox_log: &OutboxLog,
+        commit: MarkerAckCommit,
+    ) -> Result<ArmOutcome, StateError> {
+        let capacity = match operation_facts.semantic_connection_capacity() {
+            SemanticConnectionCapacityDecision::Commit(value) => value,
+            SemanticConnectionCapacityDecision::Respond { limit } => {
+                return Ok(ArmOutcome::respond(
+                    MarkerAckResponse::connection_conversation_capacity_exceeded(
+                        marker_ack_envelope(request),
+                        limit,
+                    )
+                    .into_server_value(),
+                ));
+            }
+        };
+        let newly_tracked = capacity.newly_tracked();
+        let transitioned =
+            apply_marker_ack_frontier(self.take_frontier()?, commit).map_err(|failure| {
+                StateError::invariant(format!(
+                    "marker ack frontier transition failed: {:?}",
+                    failure.error()
+                ))
+            })?;
+        let (commit, frontier) = transitioned.into_parts();
+        let extension_sequence = self
+            .outbox
+            .as_ref()
+            .ok_or_else(|| StateError::invariant("marker ack outbox owner is absent"))?
+            .next_extension_sequence();
+        let stored = StoredMarkerAckCommitted {
+            request: commit.canonical_request(),
+            receiving_binding_epoch: commit.receiving_binding_epoch(),
+            offered_marker_delivery_seq: commit.offered_marker_delivery_seq(),
+            delivered_binding_epoch: commit.delivered_binding_epoch(),
+            from_cursor: commit.from_cursor(),
+            resulting_cursor: commit.resulting_cursor(),
+            base_log_head: self.next_log_sequence,
+            extension_sequence,
+        };
+        let row = OutboxRow::MarkerAckCommitted(stored);
+        block_on(outbox_log.append(&row, extension_sequence))??;
+        self.outbox
+            .as_mut()
+            .ok_or_else(|| StateError::invariant("marker ack outbox owner disappeared"))?
+            .apply_row(extension_sequence, row)?;
+        let slot = self.slots.get_mut(&request.participant_id).ok_or_else(|| {
+            StateError::invariant("committed marker ack lost its participant slot")
+        })?;
+        let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
+            StateError::invariant(format!("marker ack cursor commit rejected: {error:?}"))
+        })?;
+        self.install_frontier(frontier);
+        self.offered_markers
+            .remove(&(request.participant_id, request.marker_delivery_seq));
+        Ok(ArmOutcome {
+            value: MarkerAckResponse::marker_ack_committed(outcome).into_server_value(),
+            newly_tracked,
+        })
     }
 
     /// Replays one extension `MarkerAck` through the authoritative selector and
@@ -336,62 +422,6 @@ impl ConversationAuthority {
     }
 }
 
-fn marker_replay_progress(
-    authority: &ConversationAuthority,
-    row: &StoredMarkerAckCommitted,
-) -> Result<ParticipantCursorProgress, StateError> {
-    let closure = authority
-        .frontier
-        .as_ref()
-        .ok_or(StateError::FrontierUnavailable)?
-        .closure_accounting()
-        .state();
-    match closure {
-        ClosureState::Owed {
-            debt,
-            edge: StoredEdge::MarkerDelivery(delivery),
-        } => {
-            let delivered = delivery
-                .delivered(
-                    debt,
-                    Event::marker_delivered(
-                        row.request.participant_id,
-                        row.delivered_binding_epoch,
-                        row.offered_marker_delivery_seq,
-                    ),
-                )
-                .map_err(|_| {
-                    StateError::invariant(
-                        "stored MarkerAck witness does not match marker delivery authority",
-                    )
-                })?;
-            match delivered {
-                ClosureState::Owed {
-                    edge: StoredEdge::ParticipantCursorProgress(progress),
-                    ..
-                } if progress.marker_delivery_seq() == Some(row.offered_marker_delivery_seq) => {
-                    Ok(progress)
-                }
-                ClosureState::Clear | ClosureState::Owed { .. } => Err(StateError::invariant(
-                    "stored MarkerAck witness did not produce marker progress",
-                )),
-            }
-        }
-        ClosureState::Owed {
-            edge: StoredEdge::ParticipantCursorProgress(progress),
-            ..
-        } if progress.marker_delivery_seq() == Some(row.offered_marker_delivery_seq)
-            && progress.binding_epoch() == row.delivered_binding_epoch =>
-        {
-            Ok(progress)
-        }
-        ClosureState::Clear | ClosureState::Owed { .. } => Err(StateError::invariant(
-            "stored MarkerAck has no matching marker delivery authority",
-        )),
-    }
-}
-
-/// Builds the echo envelope of one cumulative acknowledgement.
 const fn participant_ack_envelope(request: &ParticipantAck) -> ParticipantAckEnvelope {
     ParticipantAckEnvelope {
         conversation_id: request.conversation_id,

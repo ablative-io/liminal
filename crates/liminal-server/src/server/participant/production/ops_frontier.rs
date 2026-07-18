@@ -178,6 +178,10 @@ impl ConversationAuthority {
         let (owner, _, projection) =
             LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
         validate_marker_projection(self.conversation_id, &projection)?;
+        #[cfg(test)]
+        {
+            self.last_marker_projection = Some(projection.delivery().clone());
+        }
         appender.append(
             &StoredOperation::MarkerDrained { row },
             self.next_log_sequence,

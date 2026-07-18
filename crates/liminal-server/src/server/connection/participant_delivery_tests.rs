@@ -11,8 +11,9 @@ use liminal_protocol::wire::{
 
 use super::{ParticipantPumpError, UNIT2_PUSH_SLICE_BUDGET, service_participant_publications};
 use crate::server::connection::delivery::DeliverySink;
-use crate::server::connection::outbound::OutboundError;
+use crate::server::connection::outbound::{OutboundError, OutboundWriter};
 use crate::server::connection::state::ConnectionProcessState;
+use crate::server::connection::websocket::outbound::WebSocketOutbound;
 use crate::server::participant::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
     ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
@@ -177,7 +178,10 @@ fn delivery(conversation_id: u64, delivery_seq: u64) -> ParticipantDelivery {
         delivery_seq,
         record: ParticipantRecord::OrdinaryRecord {
             sender_participant_id: 2,
-            payload: vec![conversation_id as u8, delivery_seq as u8],
+            payload: vec![
+                conversation_id.to_le_bytes()[0],
+                delivery_seq.to_le_bytes()[0],
+            ],
         },
     }
 }
@@ -227,6 +231,42 @@ fn decoded_deliveries(frames: &[Frame]) -> Result<Vec<ParticipantDelivery>, Stri
             }
         })
         .collect()
+}
+
+#[test]
+fn slow_recipient_holds_only_its_head() -> Result<(), Box<dyn std::error::Error>> {
+    let slow_source = Arc::new(FixtureSource::new([delivery(1, 1)]));
+    let fast_source = Arc::new(FixtureSource::new([delivery(2, 1)]));
+    let slow_service = service(Arc::clone(&slow_source))?;
+    let fast_service = service(Arc::clone(&fast_source))?;
+    let mut slow_state = state(&slow_service, &[1])?;
+    let mut fast_state = state(&fast_service, &[2])?;
+    let mut slow_sink = RecordingSink::new(4096);
+    let mut fast_sink = RecordingSink::new(4096);
+    slow_sink.fill_current_room();
+
+    assert_eq!(
+        service_participant_publications(&mut slow_state, &slow_service, &mut slow_sink, 1)?,
+        0
+    );
+    assert_eq!(slow_state.held_participant_pushes.len(), 1);
+    assert!(slow_source.offered().is_empty());
+
+    assert_eq!(
+        service_participant_publications(&mut fast_state, &fast_service, &mut fast_sink, 1)?,
+        1
+    );
+    assert_eq!(decoded_deliveries(&fast_sink.frames)?, vec![delivery(2, 1)]);
+    assert_eq!(fast_source.offered(), vec![(2, 1)]);
+    assert!(fast_state.held_participant_pushes.is_empty());
+
+    slow_sink.writable();
+    assert_eq!(
+        service_participant_publications(&mut slow_state, &slow_service, &mut slow_sink, 1)?,
+        1
+    );
+    assert_eq!(decoded_deliveries(&slow_sink.frames)?, vec![delivery(1, 1)]);
+    Ok(())
 }
 
 #[test]
@@ -298,14 +338,75 @@ fn push_slice_budget_and_round_robin_are_exact() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn tcp_and_websocket_publish_identical_participant_bytes() -> Result<(), Box<dyn std::error::Error>>
+{
+    let expected = delivery(41, 9);
+    let tcp_source = Arc::new(FixtureSource::new([expected.clone()]));
+    let ws_source = Arc::new(FixtureSource::new([expected.clone()]));
+    let tcp_service = service(tcp_source)?;
+    let ws_service = service(ws_source)?;
+    let mut tcp_state = state(&tcp_service, &[41])?;
+    let mut ws_state = state(&ws_service, &[41])?;
+    let mut tcp = OutboundWriter::new();
+    let mut websocket = WebSocketOutbound::new();
+
+    assert_eq!(
+        service_participant_publications(&mut tcp_state, &tcp_service, &mut tcp, 1)?,
+        1
+    );
+    assert_eq!(
+        service_participant_publications(&mut ws_state, &ws_service, &mut websocket, 1)?,
+        1
+    );
+    let tcp_bytes = tcp.take_bytes();
+    let mut websocket_messages = websocket.take_messages();
+    assert_eq!(websocket_messages.len(), 1);
+    let websocket_bytes = websocket_messages
+        .pop()
+        .ok_or("WebSocket participant message was absent")?;
+    assert_eq!(tcp_bytes, websocket_bytes);
+    let decoded = decode_participant(&tcp_bytes, ReceiverDirection::Client)
+        .map_err(|error| format!("{error:?}"))?;
+    assert_eq!(
+        decoded,
+        ParticipantFrame::ServerPush(ServerPush::ParticipantDelivery(expected))
+    );
+    Ok(())
+}
+
+#[test]
 fn oversize_is_config_corruption_not_pressure_policy() -> Result<(), Box<dyn std::error::Error>> {
+    let maximal = ParticipantDelivery {
+        conversation_id: 1,
+        delivery_seq: 1,
+        record: ParticipantRecord::OrdinaryRecord {
+            sender_participant_id: 2,
+            payload: vec![0; 65_433],
+        },
+    };
+    let tcp_service = service(Arc::new(FixtureSource::new([maximal.clone()])))?;
+    let ws_service = service(Arc::new(FixtureSource::new([maximal])))?;
+    let mut tcp_state = state(&tcp_service, &[1])?;
+    let mut ws_state = state(&ws_service, &[1])?;
+    let mut tcp = OutboundWriter::new();
+    let mut websocket = WebSocketOutbound::new();
+    assert_eq!(
+        service_participant_publications(&mut tcp_state, &tcp_service, &mut tcp, 1)?,
+        1
+    );
+    assert_eq!(
+        service_participant_publications(&mut ws_state, &ws_service, &mut websocket, 1)?,
+        1
+    );
+
     let source = Arc::new(FixtureSource::new([delivery(1, 1)]));
     let service = service(source)?;
     let mut state = state(&service, &[1])?;
     let mut sink = RecordingSink::new(8);
 
-    let error = service_participant_publications(&mut state, &service, &mut sink, 1)
-        .expect_err("an encoded participant frame cannot fit an eight-byte sink");
+    let Err(error) = service_participant_publications(&mut state, &service, &mut sink, 1) else {
+        return Err("an encoded participant frame fit an eight-byte sink".into());
+    };
     assert!(matches!(error, ParticipantPumpError::Oversize { .. }));
     assert!(state.held_participant_pushes.is_empty());
     assert!(state.participant_offered.is_empty());

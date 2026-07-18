@@ -38,10 +38,12 @@ use beamr::scheduler::Scheduler;
 /// a dead pid, is a no-op: the connection is already being torn down, so a lost
 /// wake for it is correct, not a defect (R5 — stale markers are discarded).
 #[derive(Clone)]
-pub(crate) struct ReadyWaker {
+pub struct ReadyWaker {
     scheduler: Weak<Scheduler>,
     pid: u64,
     ready_atom: Atom,
+    #[cfg(test)]
+    fire_probe: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 impl std::fmt::Debug for ReadyWaker {
@@ -63,6 +65,19 @@ impl ReadyWaker {
             scheduler: std::sync::Arc::downgrade(scheduler),
             pid,
             ready_atom,
+            #[cfg(test)]
+            fire_probe: None,
+        }
+    }
+
+    /// Creates an event-counting waker without a scheduler for readiness tests.
+    #[cfg(test)]
+    pub(crate) const fn for_test(probe: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+        Self {
+            scheduler: Weak::new(),
+            pid: 0,
+            ready_atom: Atom::OK,
+            fire_probe: Some(probe),
         }
     }
 
@@ -74,6 +89,11 @@ impl ReadyWaker {
     /// at most N mailbox atoms, all drained before one slice runs, so duplicates
     /// never double-apply work (R6).
     pub(crate) fn fire(&self) -> bool {
+        #[cfg(test)]
+        if let Some(probe) = &self.fire_probe {
+            probe.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return true;
+        }
         let Some(scheduler) = self.scheduler.upgrade() else {
             return false;
         };

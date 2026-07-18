@@ -11,21 +11,17 @@
 //! exists, and refused probes of unknown conversation ids leave neither
 //! durable nor in-memory residue.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
-use liminal_protocol::lifecycle::{BindingState, CapacityCounter, ObserverRecoveryAggregate};
-use liminal_protocol::wire::{
-    BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, ParticipantId,
-    ParticipantRecord, ServerValue,
-};
+use liminal_protocol::lifecycle::{CapacityCounter, ObserverRecoveryAggregate};
+use liminal_protocol::wire::ConversationId;
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
-    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
-    ParticipantPublication, ParticipantSemanticError, ParticipantSemanticHandler,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticError,
 };
 
 use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
@@ -51,7 +47,7 @@ pub struct ProductionParticipantHandler {
     /// Server-scope stage-8 occupancy ledger (identity slots, live receipts,
     /// provenance fingerprints), restored from every durable conversation at
     /// construction and kept exact by commit reservations and replay folds.
-    capacity: ServerCapacity,
+    pub(super) capacity: ServerCapacity,
     /// Durable registry of created conversations: one row appended before
     /// each conversation's genesis append, read at startup to enumerate
     /// every durable conversation for the capacity restore.
@@ -147,7 +143,7 @@ impl ProductionParticipantHandler {
     /// after the operation (a refused or failed probe of a never-committed
     /// conversation id) leaves no residue: its registry cell is evicted, so
     /// wire probes grow neither durable nor in-memory state.
-    fn with_conversation(
+    pub(super) fn with_conversation(
         &self,
         conversation_id: ConversationId,
         operation: impl FnOnce(
@@ -297,7 +293,7 @@ impl ProductionParticipantHandler {
             .map_or(usize::MAX, |conversations| conversations.len())
     }
 
-    fn operation_facts(
+    pub(super) fn operation_facts(
         &self,
         context: ParticipantConnectionContext,
         conversation_id: ConversationId,
@@ -336,291 +332,6 @@ impl ProductionParticipantHandler {
             connection_tracking: conversations.tracking(conversation_id),
             connection_capacity,
         })
-    }
-}
-
-impl ProductionParticipantHandler {
-    /// Runs one conversation-scoped operation arm and applies its
-    /// connection-tracking effect to the connection's dispatch map.
-    fn conversation_operation(
-        &self,
-        conversation_id: ConversationId,
-        conversations: &mut ParticipantConnectionConversations,
-        operation: impl FnOnce(
-            &mut ConversationAuthority,
-            &dyn DurableAppend,
-        ) -> Result<ArmOutcome, StateError>,
-    ) -> Result<ServerValue, ParticipantSemanticError> {
-        let outcome = self.with_conversation(conversation_id, operation)?;
-        if outcome.newly_tracked {
-            conversations.track(conversation_id);
-        }
-        Ok(outcome.value)
-    }
-}
-
-impl ParticipantSemanticHandler for ProductionParticipantHandler {
-    fn publication_conversation_limit(&self) -> u64 {
-        self.config.max_semantic_conversations_per_connection
-    }
-
-    fn ready_connection_incarnations(
-        &self,
-        conversation_id: ConversationId,
-    ) -> Result<Vec<ConnectionIncarnation>, ParticipantSemanticError> {
-        let cell = self.cell(conversation_id)?;
-        let owner = cell
-            .lock()
-            .map_err(|_| publication_owner_poisoned(conversation_id))?;
-        let Some(authority) = owner.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let Some(outbox) = authority.outbox.as_ref() else {
-            return Err(publication_owner_missing(conversation_id));
-        };
-        let mut incarnations = BTreeSet::new();
-        for participant_id in outbox.live_recipients() {
-            let Some(slot) = authority.slots.get(&participant_id) else {
-                continue;
-            };
-            if let BindingState::Bound(active) = &slot.binding {
-                incarnations.insert(active.binding_epoch.connection_incarnation);
-            }
-        }
-        Ok(incarnations.into_iter().collect())
-    }
-
-    fn next_publication(
-        &self,
-        connection_incarnation: ConnectionIncarnation,
-        conversation_id: ConversationId,
-        offered: Option<ParticipantOfferedProgress>,
-    ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
-        let cell = self.cell(conversation_id)?;
-        let owner = cell
-            .lock()
-            .map_err(|_| publication_owner_poisoned(conversation_id))?;
-        let Some(authority) = owner.as_ref() else {
-            return Ok(None);
-        };
-        let bound = authority.slots.iter().find_map(|(participant_id, slot)| {
-            let BindingState::Bound(active) = &slot.binding else {
-                return None;
-            };
-            (active.binding_epoch.connection_incarnation == connection_incarnation)
-                .then_some((*participant_id, active.binding_epoch))
-        });
-        let Some((participant_id, binding_epoch)) = bound else {
-            return Ok(None);
-        };
-        let Some(outbox) = authority.outbox.as_ref() else {
-            return Err(publication_owner_missing(conversation_id));
-        };
-        let offered_through = offered
-            .filter(|progress| progress.binding_epoch == binding_epoch)
-            .map_or_else(
-                || outbox.durable_ack_through(participant_id),
-                |progress| progress.through_seq,
-            );
-        Ok(outbox
-            .delivery_after(participant_id, offered_through)
-            .map(|delivery| ParticipantPublication {
-                participant_id,
-                binding_epoch,
-                delivery,
-            }))
-    }
-
-    fn publication_binding_is_current(
-        &self,
-        conversation_id: ConversationId,
-        participant_id: ParticipantId,
-        binding_epoch: BindingEpoch,
-    ) -> Result<bool, ParticipantSemanticError> {
-        let cell = self.cell(conversation_id)?;
-        let owner = cell
-            .lock()
-            .map_err(|_| publication_owner_poisoned(conversation_id))?;
-        let Some(authority) = owner.as_ref() else {
-            return Ok(false);
-        };
-        Ok(authority.slots.get(&participant_id).is_some_and(|slot| {
-            matches!(
-                &slot.binding,
-                BindingState::Bound(active) if active.binding_epoch == binding_epoch
-            )
-        }))
-    }
-
-    fn record_publication_offer(
-        &self,
-        publication: &ParticipantPublication,
-    ) -> Result<(), ParticipantSemanticError> {
-        if !matches!(
-            publication.delivery.record,
-            ParticipantRecord::HistoryCompacted { .. }
-        ) {
-            return Ok(());
-        }
-        let conversation_id = publication.conversation_id();
-        let cell = self.cell(conversation_id)?;
-        let mut owner = cell
-            .lock()
-            .map_err(|_| publication_owner_poisoned(conversation_id))?;
-        let Some(authority) = owner.as_mut() else {
-            return Err(publication_owner_missing(conversation_id));
-        };
-        let current = authority
-            .slots
-            .get(&publication.participant_id)
-            .is_some_and(|slot| {
-                matches!(
-                    &slot.binding,
-                    BindingState::Bound(active)
-                        if active.binding_epoch == publication.binding_epoch
-                )
-            });
-        let obligation = authority.outbox.as_ref().is_some_and(|outbox| {
-            outbox.is_marker_obligation(publication.participant_id, publication.delivery_seq())
-        });
-        if !current || !obligation {
-            return Err(ParticipantSemanticError::Internal {
-                message: format!(
-                    "participant marker offer lost its exact current binding or durable obligation for conversation {conversation_id}"
-                ),
-            });
-        }
-        authority.offered_markers.insert(
-            (publication.participant_id, publication.delivery_seq()),
-            publication.binding_epoch,
-        );
-        Ok(())
-    }
-
-    fn handle(
-        &self,
-        context: ParticipantConnectionContext,
-        conversations: &mut ParticipantConnectionConversations,
-        request: ClientRequest,
-    ) -> Result<ServerValue, ParticipantSemanticError> {
-        match request {
-            ClientRequest::Enrollment(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                let value = self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_enrollment(
-                            &request,
-                            &operation_facts,
-                            &self.capacity,
-                            &self.config,
-                            appender,
-                        )
-                    },
-                )?;
-                // Only a fresh commit registers observer tracking; refusals
-                // and replays leave the observer log untouched (an already
-                // enrolled conversation was registered at its own commit or
-                // by the replay-time repair).
-                if matches!(value, ServerValue::EnrollBound(_)) {
-                    self.ensure_observer_tracked(request.conversation_id)?;
-                }
-                Ok(value)
-            }
-            ClientRequest::CredentialAttach(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_credential_attach(
-                            &request,
-                            &operation_facts,
-                            &self.capacity,
-                            appender,
-                        )
-                    },
-                )
-            }
-            ClientRequest::Detach(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_detach(&request, &operation_facts, appender)
-                    },
-                )
-            }
-            ClientRequest::ParticipantAck(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| authority.apply_ack(&request, &operation_facts, appender),
-                )
-            }
-            ClientRequest::MarkerAck(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, _appender| authority.apply_marker_ack(&request, &operation_facts),
-                )
-            }
-            ClientRequest::Leave(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_leave(&request, &operation_facts, appender)
-                    },
-                )
-            }
-            ClientRequest::RecordAdmission(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_record_admission(
-                            &request,
-                            &operation_facts,
-                            &self.config,
-                            appender,
-                        )
-                    },
-                )
-            }
-            ClientRequest::ObserverRecovery(request) => {
-                self.apply_observer_recovery(conversations, &request)
-            }
-        }
-    }
-}
-
-fn publication_owner_poisoned(conversation_id: ConversationId) -> ParticipantSemanticError {
-    ParticipantSemanticError::Internal {
-        message: format!(
-            "participant conversation {conversation_id} owner lock is poisoned during publication"
-        ),
-    }
-}
-
-fn publication_owner_missing(conversation_id: ConversationId) -> ParticipantSemanticError {
-    ParticipantSemanticError::Internal {
-        message: format!(
-            "participant conversation {conversation_id} publication owner is unavailable"
-        ),
     }
 }
 

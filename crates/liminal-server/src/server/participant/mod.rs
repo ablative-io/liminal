@@ -25,7 +25,7 @@ mod detach_repository;
 mod dispatch;
 pub(super) mod incarnation_stream;
 mod production;
-mod publication;
+pub(crate) mod publication;
 mod transport;
 
 #[cfg(test)]

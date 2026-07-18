@@ -36,7 +36,7 @@ mod state;
 #[path = "connection/supervisor.rs"]
 mod supervisor;
 #[path = "connection/wake.rs"]
-mod wake;
+pub(crate) mod wake;
 #[path = "connection/websocket.rs"]
 mod websocket;
 #[path = "connection/worker_front_door.rs"]
