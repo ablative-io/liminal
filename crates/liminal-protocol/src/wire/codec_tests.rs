@@ -8,23 +8,15 @@ use super::codec::{
     encode, encoded_len, gate_inbound,
 };
 use super::{
-    AttachAttemptToken, AttachSecret, BindingEpoch, ClientRequest, ConnectionIncarnation,
-    CredentialAttachRequest, DecodeClass, DetachAttemptToken, DetachRequest, DetachedCause,
-    DiedCause, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest,
-    MarkerAck, ObserverRecoveryHandshake, ObserverRefusal, ParticipantAck, ParticipantDelivery,
-    ParticipantRecord, ParticipantTransportRejected, ProtocolVersion, RecordAdmission, ServerPush,
-    ServerValue, TransportRejectionReason,
+    AttachAttemptToken, AttachSecret, ClientRequest, CredentialAttachRequest, DecodeClass,
+    DetachAttemptToken, DetachRequest, EnrollmentRequest, EnrollmentToken, Generation,
+    LeaveAttemptToken, LeaveRequest, MarkerAck, ObserverRecoveryHandshake, ObserverRefusal,
+    ParticipantAck, ParticipantRecord, ParticipantTransportRejected, ProtocolVersion,
+    RecordAdmission, ServerValue, TransportRejectionReason,
 };
 
 fn generation(value: u64) -> Result<Generation, CodecError> {
     Generation::new(value).ok_or(CodecError::InvalidValue)
-}
-
-fn epoch(value: u64) -> Result<BindingEpoch, CodecError> {
-    Ok(BindingEpoch::new(
-        ConnectionIncarnation::new(value, value + 1),
-        generation(value + 1)?,
-    ))
 }
 
 fn request_frames() -> Result<Vec<ParticipantFrame>, CodecError> {
@@ -93,73 +85,6 @@ fn request_frames() -> Result<Vec<ParticipantFrame>, CodecError> {
     ])
 }
 
-fn delivery(record: ParticipantRecord, sequence: u64) -> ParticipantFrame {
-    ParticipantFrame::ServerPush(ServerPush::ParticipantDelivery(ParticipantDelivery {
-        conversation_id: 41,
-        delivery_seq: sequence,
-        record,
-    }))
-}
-
-fn push_frames() -> Result<Vec<ParticipantFrame>, CodecError> {
-    let binding = epoch(21)?;
-    Ok(vec![
-        ParticipantFrame::ServerPush(ServerPush::ObserverProgressed {
-            conversation_id: 22,
-            refused_epoch: 23,
-            observer_progress: 24,
-        }),
-        delivery(
-            ParticipantRecord::OrdinaryRecord {
-                sender_participant_id: 25,
-                payload: vec![1, 2, 3, 4],
-            },
-            26,
-        ),
-        delivery(
-            ParticipantRecord::Attached {
-                affected_participant_id: 27,
-                binding_epoch: binding,
-            },
-            28,
-        ),
-        delivery(
-            ParticipantRecord::Detached {
-                affected_participant_id: 29,
-                binding_epoch: binding,
-                cause: DetachedCause::Superseded,
-            },
-            30,
-        ),
-        delivery(
-            ParticipantRecord::Died {
-                affected_participant_id: 31,
-                binding_epoch: binding,
-                cause: DiedCause::UncleanServerRestart {
-                    prior_server_incarnation: 32,
-                },
-            },
-            33,
-        ),
-        delivery(
-            ParticipantRecord::Left {
-                affected_participant_id: 34,
-                ended_binding_epoch: Some(binding),
-            },
-            35,
-        ),
-        delivery(
-            ParticipantRecord::HistoryCompacted {
-                affected_participant_id: 36,
-                abandoned_after: 37,
-                abandoned_through: 38,
-                physical_floor_at_decision: 39,
-            },
-            40,
-        ),
-    ])
-}
-
 fn encoded(frame: &ParticipantFrame) -> Result<Vec<u8>, CodecError> {
     let mut bytes = vec![0; encoded_len(frame)?];
     let written = encode(frame, &mut bytes)?;
@@ -215,14 +140,8 @@ fn all_client_requests_round_trip() -> Result<(), CodecError> {
     Ok(())
 }
 
-#[test]
-fn all_push_record_kinds_round_trip() -> Result<(), CodecError> {
-    for frame in push_frames()? {
-        let bytes = encoded(&frame)?;
-        assert_eq!(decode(&bytes, ReceiverDirection::Client)?, frame);
-    }
-    Ok(())
-}
+#[path = "codec_server_push_acceptance_tests.rs"]
+mod server_push_acceptance_tests;
 
 #[test]
 fn fixed_request_and_delivery_sizes_match_the_contract() -> Result<(), CodecError> {
@@ -232,7 +151,7 @@ fn fixed_request_and_delivery_sizes_match_the_contract() -> Result<(), CodecErro
     assert_eq!(encoded_len(&requests[6])?, 60 + 3);
     assert_eq!(encoded_len(&requests[7])?, 16 + 8 + (2 * 16));
 
-    let ordinary = delivery(
+    let ordinary = server_push_acceptance_tests::delivery(
         ParticipantRecord::OrdinaryRecord {
             sender_participant_id: 1,
             payload: vec![0; 5],

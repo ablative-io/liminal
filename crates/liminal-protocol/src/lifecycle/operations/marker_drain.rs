@@ -49,6 +49,25 @@ pub enum MarkerDrainError {
 /// Construction remains private to [`drain_next_marker`]. The projection is
 /// inseparable from its [`MarkerDrainCommit`] until the commit is consumed, so
 /// storage cannot assemble a delivery from unrelated raw marker fields.
+///
+/// Raw fields cannot be assembled outside the protocol selector:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::MarkerDeliveryProjection;
+/// use liminal_protocol::wire::ParticipantDelivery;
+///
+/// fn fabricate(delivery: ParticipantDelivery) -> MarkerDeliveryProjection {
+///     MarkerDeliveryProjection { delivery }
+/// }
+/// ```
+///
+/// `Debug` output is not a parser or an alternate construction path:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::MarkerDeliveryProjection;
+///
+/// let _: MarkerDeliveryProjection = "MarkerDeliveryProjection { ... }".parse().unwrap();
+/// ```
 #[derive(Debug, PartialEq, Eq)]
 pub struct MarkerDeliveryProjection {
     delivery: ParticipantDelivery,

@@ -26,6 +26,8 @@ use super::{
     drain_next_marker as drain_next_marker_owned,
 };
 
+#[path = "marker_drain_acceptance_tests.rs"]
+mod marker_drain_acceptance_tests;
 fn drain_next_marker(
     frontiers: ClaimFrontiers,
     closure: ClosureState,
