@@ -14,6 +14,37 @@ fn newest_produced(
         .ok_or_else(|| "operation did not append a Produced source batch".into())
 }
 
+fn assert_system_marker_includes_live_target() -> Result<(), Box<dyn Error>> {
+    let marker = prepare_marker_fixture()?;
+    let marker_rows = extension_rows(
+        Arc::clone(&marker.store),
+        marker.marker_delivery.conversation_id,
+    )?;
+    let marker_record = marker_rows
+        .iter()
+        .find_map(|(_, row)| match row {
+            OutboxRow::Produced(batch)
+                if batch.source_kind() == ProducedSourceKind::MarkerDrained =>
+            {
+                batch.ordered_records().first()
+            }
+            _ => None,
+        })
+        .ok_or("system marker Produced row was absent")?;
+    assert_eq!(marker_record.sender(), None);
+    assert!(
+        marker_record
+            .recipients()
+            .contains(&marker.target_participant)
+    );
+    assert!(
+        marker_record
+            .recipients()
+            .windows(2)
+            .all(|pair| pair[0] < pair[1])
+    );
+    Ok(())
+}
 #[test]
 fn recipient_snapshot_is_postcommit_live_bound_minus_sender() -> Result<(), Box<dyn Error>> {
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
@@ -108,33 +139,5 @@ fn recipient_snapshot_is_postcommit_live_bound_minus_sender() -> Result<(), Box<
     let exact_after = extension_rows(Arc::clone(&store), conversation_id)?;
     assert_eq!(&exact_after[..exact_before.len()], exact_before.as_slice());
 
-    let marker = prepare_marker_fixture()?;
-    let marker_rows = extension_rows(
-        Arc::clone(&marker.store),
-        marker.marker_delivery.conversation_id,
-    )?;
-    let marker_record = marker_rows
-        .iter()
-        .find_map(|(_, row)| match row {
-            OutboxRow::Produced(batch)
-                if batch.source_kind() == ProducedSourceKind::MarkerDrained =>
-            {
-                batch.ordered_records().first()
-            }
-            _ => None,
-        })
-        .ok_or("system marker Produced row was absent")?;
-    assert_eq!(marker_record.sender(), None);
-    assert!(
-        marker_record
-            .recipients()
-            .contains(&marker.target_participant)
-    );
-    assert!(
-        marker_record
-            .recipients()
-            .windows(2)
-            .all(|pair| pair[0] < pair[1])
-    );
-    Ok(())
+    assert_system_marker_includes_live_target()
 }

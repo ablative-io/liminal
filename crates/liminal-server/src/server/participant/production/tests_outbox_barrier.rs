@@ -75,8 +75,22 @@ fn assert_blocked_before_publication(
     Ok(())
 }
 
-#[test]
-fn outbox_row_is_impossible_before_producing_flush() -> Result<(), Box<dyn Error>> {
+struct BarrierHarness {
+    inner: Arc<dyn DurableStore>,
+    barriers: Arc<OutboxBarrierStore>,
+    service: Arc<InstalledParticipantService>,
+    sender_incarnation: ConnectionIncarnation,
+    peer_incarnation: ConnectionIncarnation,
+    sender: u64,
+    inbox: crate::server::participant::ParticipantPublicationInbox,
+    wake_count: Arc<AtomicU64>,
+    base_key: String,
+    outbox_key: String,
+    base_before: usize,
+    outbox_before: usize,
+}
+
+fn prepare_barrier_harness() -> Result<BarrierHarness, Box<dyn Error>> {
     let inner: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
     let barriers = Arc::new(OutboxBarrierStore::new(Arc::clone(&inner)));
     let store: Arc<dyn DurableStore> = barriers.clone();
@@ -106,7 +120,6 @@ fn outbox_row_is_impossible_before_producing_flush() -> Result<(), Box<dyn Error
         }),
     )?;
     assert!(matches!(acked, ServerValue::AckCommitted(_)));
-
     let wake_count = Arc::new(AtomicU64::new(0));
     let inbox = service.new_publication_inbox();
     service.publication_registry().register(
@@ -119,7 +132,6 @@ fn outbox_row_is_impossible_before_producing_flush() -> Result<(), Box<dyn Error
             .next_publication(peer_incarnation, CONVERSATION, None)?
             .is_none()
     );
-
     let base_key = format!("{STREAM_PREFIX}{CONVERSATION}");
     let outbox_key = format!("{OUTBOX_STREAM_PREFIX}{CONVERSATION}");
     let base_before = stream_count(&inner, &base_key)?;
@@ -130,7 +142,38 @@ fn outbox_row_is_impossible_before_producing_flush() -> Result<(), Box<dyn Error
         OutboxBarrierKind::OutboxAppend,
         OutboxBarrierKind::OutboxFlush,
     ])?;
+    Ok(BarrierHarness {
+        inner,
+        barriers,
+        service,
+        sender_incarnation,
+        peer_incarnation,
+        sender,
+        inbox,
+        wake_count,
+        base_key,
+        outbox_key,
+        base_before,
+        outbox_before,
+    })
+}
 
+#[test]
+fn outbox_row_is_impossible_before_producing_flush() -> Result<(), Box<dyn Error>> {
+    let BarrierHarness {
+        inner,
+        barriers,
+        service,
+        sender_incarnation,
+        peer_incarnation,
+        sender,
+        inbox,
+        wake_count,
+        base_key,
+        outbox_key,
+        base_before,
+        outbox_before,
+    } = prepare_barrier_harness()?;
     let (responses, received_responses) = mpsc::channel();
     let operation_service = Arc::clone(&service);
     let operation = std::thread::spawn(move || {

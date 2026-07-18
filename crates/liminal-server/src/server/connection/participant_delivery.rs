@@ -42,27 +42,6 @@ pub(super) struct HeldObserverHead {
     needed: usize,
 }
 
-#[cfg(test)]
-pub(crate) fn assert_held_heads_are_move_only() {
-    macro_rules! assert_not_impl {
-        ($type:ty: $trait:path) => {
-            const _: fn() = || {
-                struct Probe<T: ?Sized>(core::marker::PhantomData<T>);
-                trait AmbiguousIfImplemented<A> {
-                    fn probe() {}
-                }
-                impl<T: ?Sized> AmbiguousIfImplemented<()> for Probe<T> {}
-                impl<T: ?Sized + $trait> AmbiguousIfImplemented<u8> for Probe<T> {}
-                let _ = <Probe<$type> as AmbiguousIfImplemented<_>>::probe;
-            };
-        };
-    }
-    assert_not_impl!(HeldParticipantHead: Clone);
-    assert_not_impl!(HeldParticipantHead: Copy);
-    assert_not_impl!(HeldObserverHead: Clone);
-    assert_not_impl!(HeldObserverHead: Copy);
-}
-
 /// Typed publication fault. Current-room pressure is not an error and never
 /// appears here; a complete frame larger than an empty sink is configuration or
 /// durable-schema corruption.

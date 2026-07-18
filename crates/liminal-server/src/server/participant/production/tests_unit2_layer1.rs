@@ -18,6 +18,9 @@ use super::tests::{dispatch, test_participant_config};
 use super::tests_marker_ack::{commit_exact_marker_ack, record_exact_marker_offer};
 use super::tests_marker_ack_fixture::prepare_marker_fixture;
 
+#[path = "tests_unit2_log_rows.rs"]
+mod log_rows;
+use log_rows::{base_rows, extension_rows};
 #[derive(Clone, Copy)]
 struct Member {
     connection: ConnectionIncarnation,
@@ -188,36 +191,6 @@ fn leave(
     Ok(())
 }
 
-fn base_rows(
-    store: Arc<dyn DurableStore>,
-    conversation_id: u64,
-) -> Result<Vec<(u64, StoredOperation)>, Box<dyn Error>> {
-    let log = OperationLog::new(store, conversation_id);
-    let mut rows = Vec::new();
-    let mut next = 0;
-    loop {
-        let page = block_on(log.read_page(next))??;
-        if page.is_empty() {
-            break;
-        }
-        next = page
-            .last()
-            .map(|(sequence, _)| sequence.saturating_add(1))
-            .ok_or("nonempty base page lost its tail")?;
-        rows.extend(page);
-    }
-    Ok(rows)
-}
-
-fn extension_rows(
-    store: Arc<dyn DurableStore>,
-    conversation_id: u64,
-) -> Result<Vec<(u64, OutboxRow)>, Box<dyn Error>> {
-    Ok(block_on(
-        OutboxLog::new(store, conversation_id).read_all(),
-    )??)
-}
-
 fn rows_by_source(rows: &[(u64, OutboxRow)]) -> BTreeMap<u64, Vec<&OutboxRow>> {
     let mut by_source = BTreeMap::new();
     for (_, row) in rows {
@@ -249,7 +222,7 @@ fn only_produced<'a>(
     Ok(batch)
 }
 
-fn assert_primary_mapping(
+fn assert_primary_membership_mapping(
     base: &[(u64, StoredOperation)],
     extension: &[(u64, OutboxRow)],
 ) -> Result<(), Box<dyn Error>> {
@@ -332,6 +305,27 @@ fn assert_primary_mapping(
                 }
                 seen.insert("attached");
             }
+            _ => {}
+        }
+    }
+    assert_eq!(
+        enrolled_count, 2,
+        "initial and subsequent enrollment both mapped"
+    );
+    assert_eq!(ordinary_attach, 1);
+    assert_eq!(superseding_attach, 1);
+    assert_eq!(seen, BTreeSet::from(["attached", "enrolled", "genesis"]));
+    Ok(())
+}
+
+fn assert_primary_delivery_mapping(
+    base: &[(u64, StoredOperation)],
+    extension: &[(u64, OutboxRow)],
+) -> Result<(), Box<dyn Error>> {
+    let by_source = rows_by_source(extension);
+    let mut seen = BTreeSet::new();
+    for (source, operation) in base {
+        match operation {
             StoredOperation::Detached {
                 request,
                 receiving_epoch,
@@ -368,7 +362,6 @@ fn assert_primary_mapping(
                 ));
                 seen.insert("zero_debt_ack");
             }
-            StoredOperation::MarkerDrained { .. } => {}
             StoredOperation::RecordAdmission { row } => {
                 let batch = only_produced(&by_source, *source)?;
                 assert_eq!(batch.source_kind(), ProducedSourceKind::RecordAdmission);
@@ -398,33 +391,28 @@ fn assert_primary_mapping(
                         affected_participant_id: row.request.participant_id,
                         ended_binding_epoch: row
                             .ended_binding_epoch
-                            .map(|epoch| epoch.to_epoch())
+                            .map(super::log::StoredBindingEpoch::to_epoch)
                             .transpose()?,
                     }
                 );
                 seen.insert("left");
             }
+            _ => {}
         }
     }
     assert_eq!(
-        enrolled_count, 2,
-        "initial and subsequent enrollment both mapped"
-    );
-    assert_eq!(ordinary_attach, 1);
-    assert_eq!(superseding_attach, 1);
-    assert_eq!(
         seen,
-        BTreeSet::from([
-            "attached",
-            "detached",
-            "enrolled",
-            "genesis",
-            "left",
-            "record_admission",
-            "zero_debt_ack",
-        ])
+        BTreeSet::from(["detached", "left", "record_admission", "zero_debt_ack"])
     );
     Ok(())
+}
+
+fn assert_primary_mapping(
+    base: &[(u64, StoredOperation)],
+    extension: &[(u64, OutboxRow)],
+) -> Result<(), Box<dyn Error>> {
+    assert_primary_membership_mapping(base, extension)?;
+    assert_primary_delivery_mapping(base, extension)
 }
 
 #[test]

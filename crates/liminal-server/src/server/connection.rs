@@ -45,7 +45,25 @@ mod worker_front_door;
 pub use conversation::{ConnectionConversation, ConversationResource};
 pub use notifier::ConnectionNotifier;
 #[cfg(test)]
-pub(crate) use participant_delivery::assert_held_heads_are_move_only;
+pub(crate) const fn assert_held_heads_are_move_only() {
+    macro_rules! assert_not_impl {
+        ($type:ty: $trait:path) => {
+            const _: fn() = || {
+                struct Probe<T: ?Sized>(core::marker::PhantomData<T>);
+                trait AmbiguousIfImplemented<A> {
+                    fn probe() {}
+                }
+                impl<T: ?Sized> AmbiguousIfImplemented<()> for Probe<T> {}
+                impl<T: ?Sized + $trait> AmbiguousIfImplemented<u8> for Probe<T> {}
+                let _ = <Probe<$type> as AmbiguousIfImplemented<_>>::probe;
+            };
+        };
+    }
+    assert_not_impl!(participant_delivery::HeldParticipantHead: Clone);
+    assert_not_impl!(participant_delivery::HeldParticipantHead: Copy);
+    assert_not_impl!(participant_delivery::HeldObserverHead: Clone);
+    assert_not_impl!(participant_delivery::HeldObserverHead: Copy);
+}
 pub use services::{
     ChannelCluster, ConnectionServices, ConnectionSubscription, LiminalConnectionServices,
     PublishOutcome, build_connection_services,
