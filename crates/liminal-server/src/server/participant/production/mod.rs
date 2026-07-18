@@ -95,6 +95,8 @@ mod tests_record_admission;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_residue;
+#[cfg(test)]
+mod tests_unit2_layer1;
 
 pub use facts::constant_time_eq;
 pub use handler::ProductionParticipantHandler;

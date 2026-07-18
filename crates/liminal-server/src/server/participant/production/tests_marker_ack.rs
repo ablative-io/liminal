@@ -31,7 +31,7 @@ fn dispatch_marker_ack(
     )
 }
 
-fn record_exact_marker_offer(fixture: &MarkerFixture) -> Result<(), Box<dyn Error>> {
+pub(super) fn record_exact_marker_offer(fixture: &MarkerFixture) -> Result<(), Box<dyn Error>> {
     let mut offered = None;
     let mut marker_publication = None;
     for _ in 0..8 {
@@ -115,7 +115,7 @@ fn assert_marker_refusals(fixture: &MarkerFixture) -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-fn commit_exact_marker_ack(
+pub(super) fn commit_exact_marker_ack(
     fixture: &MarkerFixture,
 ) -> Result<StoredMarkerAckCommitted, Box<dyn Error>> {
     let conversation_id = fixture.marker_delivery.conversation_id;
