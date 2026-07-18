@@ -199,6 +199,20 @@ fn commit_for(member: &LiveMember<Vec<u8>>) -> MarkerAckCommit {
 }
 
 #[test]
+fn marker_ack_commit_exposes_ruled_q3_persistence_census() {
+    let commit = commit_for(&member(CURRENT_CURSOR));
+    assert_eq!(commit.canonical_request(), request(3, MARKER_SEQ));
+    assert_eq!(commit.receiving_binding_epoch(), epoch(3, 9));
+    assert_eq!(commit.offered_marker_delivery_seq(), MARKER_SEQ);
+    assert_eq!(commit.delivered_binding_epoch(), epoch(3, 9));
+    assert_eq!(commit.from_cursor(), CURRENT_CURSOR);
+    assert_eq!(commit.resulting_cursor(), MARKER_SEQ);
+    let projection = commit.observer_progress_projection();
+    assert_eq!(projection.conversation_id(), CONVERSATION_ID);
+    assert_eq!(projection.new_observer_progress(), MARKER_SEQ);
+}
+
+#[test]
 fn shared_lookup_precedence_runs_before_marker_proof() {
     let stale_request = request(2, MARKER_SEQ);
     let retired = retired_identity();

@@ -42,6 +42,48 @@ impl MarkerAckCommit {
         ObserverProgressProjection::new(request.conversation_id, request.marker_delivery_seq)
     }
 
+    /// Returns the exact canonical request selected into this commit.
+    #[must_use]
+    pub fn canonical_request(&self) -> MarkerAck {
+        let request = self.outcome.request();
+        MarkerAck {
+            conversation_id: request.conversation_id,
+            participant_id: request.participant_id,
+            capability_generation: request.capability_generation,
+            marker_delivery_seq: request.marker_delivery_seq,
+        }
+    }
+
+    /// Returns the receiving binding epoch authorized by shared lookup.
+    #[must_use]
+    pub const fn receiving_binding_epoch(&self) -> BindingEpoch {
+        self.proof.proof_binding_epoch()
+    }
+
+    /// Returns the exact marker sequence proven offered to the binding.
+    #[must_use]
+    pub const fn offered_marker_delivery_seq(&self) -> DeliverySeq {
+        self.proof.expected_marker_delivery_seq()
+    }
+
+    /// Returns the binding epoch on which the marker was proven offered.
+    #[must_use]
+    pub const fn delivered_binding_epoch(&self) -> BindingEpoch {
+        self.proof.proof_binding_epoch()
+    }
+
+    /// Returns the durable cursor prestate checked by this transition.
+    #[must_use]
+    pub const fn from_cursor(&self) -> DeliverySeq {
+        self.cursor_update.from_cursor()
+    }
+
+    /// Returns the exact post-transition cursor for replay audit.
+    #[must_use]
+    pub const fn resulting_cursor(&self) -> DeliverySeq {
+        self.cursor_update.resulting_cursor()
+    }
+
     /// Borrows the exact delivered-marker authority retained by this commit.
     #[must_use]
     pub const fn proof(&self) -> &MarkerProofPermit {

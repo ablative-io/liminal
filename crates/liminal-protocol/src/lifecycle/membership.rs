@@ -131,6 +131,14 @@ impl LiveMemberCursorUpdate {
             resulting_cursor,
         }
     }
+
+    pub(super) const fn from_cursor(self) -> DeliverySeq {
+        self.from_cursor
+    }
+
+    pub(super) const fn resulting_cursor(self) -> DeliverySeq {
+        self.resulting_cursor
+    }
 }
 
 /// Rejection while applying an opaque cursor update to durable membership.
