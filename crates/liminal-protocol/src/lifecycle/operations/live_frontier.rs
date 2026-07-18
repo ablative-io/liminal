@@ -6,13 +6,19 @@
 
 use alloc::{boxed::Box, vec, vec::Vec};
 
+use crate::{algebra::ResourceVector, wire::RecordAdmission};
+
 use super::super::{
     AttachCommit, AttachTransition, ClaimFrontiers, ClosureAccounting, CommittedDetachTransition,
     FrontierBinding, FrontierParticipant, InitialEnrollmentFrontierCommit, MarkerAckCommit,
     NonzeroParticipantAckCommit, OrderLedger, ParticipantAckCommit, RetainedCausalRecord,
-    RetainedCausalRecordKind, SequenceLedger, claim_frontier::LiveFrontierTransitionError,
+    RetainedCausalRecordKind, SequenceLedger, StoredEdge,
+    claim_frontier::LiveFrontierTransitionError,
 };
-use super::{InitialEnrollmentOperationCommit, RetainedRecordCharge};
+use super::{
+    InitialEnrollmentOperationCommit, MarkerDrainCommit, RecordAdmissionPersistenceParts,
+    RetainedRecordCharge, UnchangedRecordAdmission,
+};
 
 mod ledger;
 mod state;
@@ -136,6 +142,61 @@ impl LiveFrontierOwner {
             self.closure_accounting,
             self.retained_charges,
             self.retained_record_limit,
+        )
+    }
+
+    /// Restores the exact owner returned by a non-committing admission and
+    /// recovers the same request for a same-lock retry.
+    #[must_use]
+    pub fn from_unchanged_record_admission<EF, V, LF>(
+        unchanged: UnchangedRecordAdmission<'_, EF, V, LF>,
+        retained_record_limit: u64,
+    ) -> (Self, RecordAdmission, ResourceVector) {
+        let (prestate, encoded_record_charge) = unchanged.into_parts();
+        let (request, frontiers, closure_accounting, retained_charges) =
+            prestate.into_live_owner_parts();
+        (
+            Self {
+                frontiers,
+                closure_accounting,
+                retained_charges,
+                retained_record_limit,
+            },
+            request,
+            encoded_record_charge,
+        )
+    }
+
+    /// Acquires the exact owner from the complete sealed successful
+    /// `RecordAdmission` persistence authority.
+    #[must_use]
+    pub fn from_record_admission_persistence(
+        persistence: RecordAdmissionPersistenceParts,
+        retained_record_limit: u64,
+    ) -> Self {
+        Self {
+            frontiers: persistence.frontiers,
+            closure_accounting: persistence.accounting,
+            retained_charges: persistence.retained_charges,
+            retained_record_limit,
+        }
+    }
+
+    /// Acquires the exact post-drain owner and durable marker successor.
+    #[must_use]
+    pub fn from_marker_drain(
+        commit: MarkerDrainCommit,
+        retained_record_limit: u64,
+    ) -> (Self, StoredEdge) {
+        let (frontiers, closure_accounting, retained_charges, successor) = commit.into_parts();
+        (
+            Self {
+                frontiers,
+                closure_accounting,
+                retained_charges,
+                retained_record_limit,
+            },
+            successor,
         )
     }
 }

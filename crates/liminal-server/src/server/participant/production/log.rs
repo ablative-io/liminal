@@ -15,18 +15,19 @@ use liminal::durability::{DurabilityError, DurableStore};
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, BindingEpoch, ConnectionIncarnation, CredentialAttachRequest,
     DeliverySeq, DetachAttemptToken, DetachRequest, EnrollmentRequest, EnrollmentToken, Generation,
-    ParticipantAck, ParticipantId, TransactionOrder,
+    LeaveRequest, ParticipantAck, ParticipantId, RecordAdmission, RecordAdmissionAttemptToken,
+    TransactionOrder,
 };
 use serde::{Deserialize, Serialize};
 
 use super::facts::Digest;
 
 /// Stream-key prefix for production participant conversation logs.
-const STREAM_PREFIX: &str = "liminal:participant-production:";
+pub(super) const STREAM_PREFIX: &str = "liminal:participant-production:";
 /// Durable page size used during replay reads.
 pub(super) const READ_BATCH_SIZE: usize = 64;
 /// Stored-entry schema version.
-const SCHEMA_VERSION: u8 = 1;
+pub(super) const SCHEMA_VERSION: u8 = 2;
 
 /// Failure to encode, decode, append, or read one durable log entry.
 #[derive(Debug, thiserror::Error)]
@@ -197,6 +198,129 @@ pub(super) enum StoredOperation {
         /// Contiguously available sequence fact at commit time.
         contiguously_available_through: DeliverySeq,
     },
+    /// One mandatory marker-drain poststate, durable before admission retry.
+    MarkerDrained {
+        /// Exact canonical marker row and resulting successor audit.
+        row: StoredMarkerDrain,
+    },
+    /// One atomically committed payload-bearing ordinary record.
+    RecordAdmission {
+        /// Exact request, allocation, charge, and resulting retention audit.
+        row: StoredRecordAdmission,
+    },
+    /// One authorized Leave commit and its exact tombstone replay facts.
+    Left {
+        /// Exact request, verifier, allocation, and binding-fate audit.
+        row: StoredLeave,
+    },
+}
+
+/// Scalar resource vector in the canonical v2 row schema.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredResourceVector {
+    pub(super) entries: u64,
+    pub(super) bytes: u64,
+}
+
+/// One keyed retained-row charge in the canonical v2 row schema.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredRetainedCharge {
+    pub(super) delivery_seq: DeliverySeq,
+    pub(super) transaction_order: TransactionOrder,
+    pub(super) candidate_phase: u8,
+    pub(super) participant_id: ParticipantId,
+    pub(super) charge: StoredResourceVector,
+}
+
+/// Durable marker drain written before the same-lock `RecordAdmission` retry.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredMarkerDrain {
+    pub(super) marker: Vec<u8>,
+    pub(super) retained_charge: StoredRetainedCharge,
+    pub(super) resulting_retained_charges: Vec<StoredRetainedCharge>,
+    pub(super) successor: Vec<u8>,
+}
+
+/// Durable payload-bearing `RecordAdmission` request.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredRecordAdmissionRequest {
+    pub(super) conversation_id: u64,
+    pub(super) participant_id: ParticipantId,
+    pub(super) capability_generation: u64,
+    pub(super) token: [u8; 16],
+    pub(super) payload: Vec<u8>,
+}
+
+impl From<&RecordAdmission> for StoredRecordAdmissionRequest {
+    fn from(request: &RecordAdmission) -> Self {
+        Self {
+            conversation_id: request.conversation_id,
+            participant_id: request.participant_id,
+            capability_generation: request.capability_generation.get(),
+            token: request.record_admission_attempt_token.into_bytes(),
+            payload: request.payload.clone(),
+        }
+    }
+}
+
+impl StoredRecordAdmissionRequest {
+    pub(super) fn into_request(self) -> Result<RecordAdmission, OperationLogError> {
+        Ok(RecordAdmission {
+            conversation_id: self.conversation_id,
+            participant_id: self.participant_id,
+            capability_generation: stored_generation(self.capability_generation)?,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new(self.token),
+            payload: self.payload,
+        })
+    }
+}
+
+/// Atomic ordinary-record poststate persisted in one append/flush transaction.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredRecordAdmission {
+    pub(super) request: StoredRecordAdmissionRequest,
+    pub(super) receiving_epoch: StoredBindingEpoch,
+    pub(super) transaction_order: TransactionOrder,
+    pub(super) delivery_seq: DeliverySeq,
+    pub(super) encoded_record_charge: StoredResourceVector,
+    pub(super) resulting_connection_count: u64,
+    pub(super) newly_tracked: bool,
+    pub(super) resulting_retained_charges: Vec<StoredRetainedCharge>,
+    pub(super) resulting_closure_accounting: Vec<u8>,
+}
+
+/// Durable payload-bearing Leave request.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredLeaveRequest {
+    pub(super) conversation_id: u64,
+    pub(super) participant_id: ParticipantId,
+    pub(super) capability_generation: u64,
+    pub(super) attach_secret: [u8; 32],
+    pub(super) token: [u8; 16],
+}
+
+impl From<&LeaveRequest> for StoredLeaveRequest {
+    fn from(request: &LeaveRequest) -> Self {
+        Self {
+            conversation_id: request.conversation_id,
+            participant_id: request.participant_id,
+            capability_generation: request.capability_generation.get(),
+            attach_secret: request.attach_secret.into_bytes(),
+            token: request.leave_attempt_token.into_bytes(),
+        }
+    }
+}
+
+/// Exact Leave tombstone inputs and causal allocation.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredLeave {
+    pub(super) request: StoredLeaveRequest,
+    pub(super) request_verifier: Digest,
+    pub(super) receiving_epoch: StoredBindingEpoch,
+    pub(super) left_transaction_order: TransactionOrder,
+    pub(super) left_delivery_seq: DeliverySeq,
+    pub(super) ended_binding_epoch: Option<StoredBindingEpoch>,
+    pub(super) prior_terminal_delivery_seq: Option<DeliverySeq>,
 }
 
 /// Stored enrollment request fields.
@@ -358,7 +482,7 @@ impl StoredAck {
 }
 
 /// Stored binding-epoch fields.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredBindingEpoch {
     pub(super) server_incarnation: u64,
     pub(super) connection_ordinal: u64,

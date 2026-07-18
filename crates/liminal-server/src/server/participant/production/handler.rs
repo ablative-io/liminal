@@ -425,8 +425,13 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                 self.conversation_operation(
                     request.conversation_id,
                     conversations,
-                    |authority, _appender| {
-                        authority.apply_record_admission(&request, &operation_facts)
+                    |authority, appender| {
+                        authority.apply_record_admission(
+                            &request,
+                            &operation_facts,
+                            &self.config,
+                            appender,
+                        )
                     },
                 )
             }

@@ -8,9 +8,11 @@
 use liminal_protocol::algebra::{ResourceVector, WideResourceVector};
 use liminal_protocol::lifecycle::{
     ClosureAccounting, ClosureState, InitialEnrollmentClosureInput, OrderClaims, OrderHigh,
-    OrderLedger, SequenceClaims, SequenceLedger,
+    OrderLedger, OrdinaryProjectionLimits, SequenceClaims, SequenceLedger,
 };
-use liminal_protocol::wire::{BindingEpoch, DeliverySeq, ParticipantId, TransactionOrder};
+use liminal_protocol::wire::{
+    BindingEpoch, DeliverySeq, ParticipantId, RecordAdmission, TransactionOrder,
+};
 use serde::Serialize;
 
 use crate::config::types::ParticipantConfig;
@@ -93,6 +95,44 @@ fn lifecycle_row_charge(row: &CanonicalLifecycleRow) -> Result<ResourceVector, S
     let bytes = u64::try_from(bytes.len())
         .map_err(|_| StateError::invariant("canonical lifecycle row length exceeds u64"))?;
     Ok(ResourceVector::new(1, bytes))
+}
+
+/// Exact fixed-width canonical retained-row charge for an ordinary record.
+///
+/// The v2 causal row uses a one-byte kind, four fixed-width u64 identities,
+/// the fixed 16-byte attempt token, an eight-byte payload length, and the
+/// opaque payload. Order/sequence are fixed width, so size admission does not
+/// depend on values allocated only after the size gate.
+pub(super) fn ordinary_record_charge(
+    request: &RecordAdmission,
+) -> Result<ResourceVector, StateError> {
+    const FIXED_BYTES: u64 = 1 + (4 * 8) + 16 + 8;
+    let payload = u64::try_from(request.payload.len())
+        .map_err(|_| StateError::invariant("ordinary record payload length exceeds u64"))?;
+    let bytes = FIXED_BYTES
+        .checked_add(payload)
+        .ok_or_else(|| StateError::invariant("ordinary record canonical length overflow"))?;
+    Ok(ResourceVector::new(1, bytes))
+}
+
+/// Signed ordinary projection vectors consumed by the total selector.
+pub(super) const fn ordinary_projection_limits(
+    config: &ParticipantConfig,
+) -> OrdinaryProjectionLimits {
+    OrdinaryProjectionLimits::new(
+        ResourceVector::new(
+            config.max_generated_marker_entries,
+            config.max_generated_marker_bytes,
+        ),
+        ResourceVector::new(
+            config.mandatory_transaction_bound_entries,
+            config.mandatory_transaction_bound_bytes,
+        ),
+        ResourceVector::new(
+            config.full_recovery_claim_entries,
+            config.full_recovery_claim_bytes,
+        ),
+    )
 }
 
 /// Builds the protocol's initial clear-conversation closure input exclusively

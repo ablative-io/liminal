@@ -132,6 +132,22 @@ impl<'a, EF, V, LF> RecordAdmissionPrestate<'a, EF, V, LF> {
         self.observer_progress
     }
 
+    pub(super) fn into_live_owner_parts(
+        self,
+    ) -> (
+        RecordAdmission,
+        ClaimFrontiers,
+        ClosureAccounting,
+        Vec<RetainedRecordCharge>,
+    ) {
+        (
+            self.request,
+            self.frontiers,
+            self.closure_accounting,
+            self.retained_charges,
+        )
+    }
+
     /// Borrows exact keyed durable charges for the retained suffix.
     #[must_use]
     pub fn retained_charges(&self) -> &[RetainedRecordCharge] {

@@ -14,8 +14,8 @@ use std::sync::Arc;
 use liminal::durability::{DurabilityError, DurableStore, StoredEntry};
 use liminal_protocol::wire::{
     ClientRequest, ConnectionConversationCapacityExceeded, ConnectionIncarnation,
-    EnrollmentRequest, EnrollmentToken, Generation, InvalidObserverEpoch,
-    ObserverRecoveryHandshake, ObserverRefusal, RecordAdmission, ServerValue,
+    EnrollmentRequest, EnrollmentToken, InvalidObserverEpoch, ObserverRecoveryHandshake,
+    ObserverRefusal, ServerValue,
 };
 
 use super::ProductionParticipantHandler;
@@ -175,26 +175,15 @@ fn capacity_check_counts_tracked_conversation_after_owner_discard() -> Result<()
     )?;
     assert!(matches!(enrolled, ServerValue::EnrollBound(_)));
 
-    // Discard the bound conversation's in-memory owner through a failing
-    // operation (an AUTHORIZED record admission fails closed by design until
-    // the claim-frontier acquisition lands).
-    let failed = dispatch_tracked(
-        &handler,
-        incarnation,
-        &mut conversations,
-        ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: bound_conversation,
-            participant_id: 0,
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token:
-                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
-            payload: vec![1, 2, 3],
-        }),
-    );
-    assert!(
-        failed.is_err(),
-        "record admission must fail closed: {failed:?}"
-    );
+    // Exercise the exact post-fault state directly: the handler's error path
+    // clears this same Option before the next touch. The connection map remains
+    // caller-owned and must continue to account for the committed conversation.
+    let cell = handler.cell(bound_conversation)?;
+    let mut owner = cell
+        .lock()
+        .map_err(|_| "test conversation owner lock poisoned")?;
+    *owner = None;
+    drop(owner);
 
     // The recovery batch names a FRESH conversation. The connection map
     // still tracks `bound_conversation`, so the configured limit of one is

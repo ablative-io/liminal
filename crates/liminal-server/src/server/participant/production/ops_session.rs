@@ -357,6 +357,11 @@ impl ConversationAuthority {
             } => {
                 self.replay_zero_debt_ack(request, receiving_epoch, contiguously_available_through)
             }
+            StoredOperation::RecordAdmission { row } => self.replay_record_admission(&row, config),
+            StoredOperation::MarkerDrained { row } => self.replay_marker_drain(&row),
+            StoredOperation::Left { .. } => Err(StateError::invariant(
+                "v2 Leave row reached replay before its transition handler",
+            )),
         }
     }
 }
