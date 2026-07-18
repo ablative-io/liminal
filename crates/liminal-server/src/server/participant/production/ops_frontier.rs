@@ -236,7 +236,6 @@ impl ConversationAuthority {
         ))
     }
 
-    /// Replays one v2 Left row through the same protocol-owned settled Leave
     /// Replays one mandatory v2 marker drain through the protocol-owned drain
     /// and verifies its canonical row, successor, and complete retained charges.
     pub(super) fn replay_marker_drain(
