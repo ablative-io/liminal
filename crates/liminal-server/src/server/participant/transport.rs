@@ -3,7 +3,8 @@ use liminal_protocol::wire::{
     AuthenticationState, ClientRequest, CodecError, FRAME_MAX, InboundGateContext,
     InboundGateError, NegotiatedParticipantCapability, PARTICIPANT_FRAME_TYPE,
     ParticipantCapabilityState, ParticipantFrame, ParticipantTransportRejected, ReceiverDirection,
-    ServerValue, TransportRejectionReason, ValidatedFrameLimit, encode, encoded_len, gate_inbound,
+    ServerPush, ServerValue, TransportRejectionReason, ValidatedFrameLimit, encode, encoded_len,
+    gate_inbound,
 };
 
 /// Reserved connection-capability bit for `participant-v1`.
@@ -157,7 +158,22 @@ pub fn gate_generic_frame(
 ///
 /// Returns the shared codec error if the typed value cannot be encoded.
 pub fn encode_server_value(value: ServerValue) -> Result<Frame, CodecError> {
-    let participant = ParticipantFrame::ServerValue(value);
+    encode_server_frame(ParticipantFrame::ServerValue(value))
+}
+
+/// Encodes one crate-produced server push into the participant generic frame on
+/// the protocol-owned generic stream zero.
+///
+/// # Errors
+///
+/// Returns the shared codec error if the typed push cannot be encoded.
+pub fn encode_server_push(push: ServerPush) -> Result<Frame, CodecError> {
+    encode_server_frame(ParticipantFrame::ServerPush(push))
+}
+
+/// Applies the one canonical participant codec to either server-to-client arm,
+/// then preserves its already encoded participant payload in the generic frame.
+fn encode_server_frame(participant: ParticipantFrame) -> Result<Frame, CodecError> {
     let needed = encoded_len(&participant)?;
     let mut complete = vec![0_u8; needed];
     let written = encode(&participant, &mut complete)?;

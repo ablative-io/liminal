@@ -1,13 +1,13 @@
 use liminal::protocol::{Frame, decode as decode_generic, encode as encode_generic, encoded_len};
 use liminal_protocol::wire::{
     ClientRequest, EnrollmentRequest, EnrollmentToken, FRAME_MAX, PARTICIPANT_FRAME_TYPE,
-    ParticipantFrame, ReceiverDirection, ServerValue, TransportRejectionReason, decode, encode,
-    encoded_len as participant_encoded_len,
+    ParticipantDelivery, ParticipantFrame, ParticipantRecord, ReceiverDirection, ServerPush,
+    ServerValue, TransportRejectionReason, decode, encode, encoded_len as participant_encoded_len,
 };
 
 use super::transport::{
-    ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
-    normalize_configured_frame_limit, preflight_generic_bytes,
+    ParticipantIngress, ParticipantSession, encode_server_push, encode_server_value,
+    gate_generic_frame, normalize_configured_frame_limit, preflight_generic_bytes,
 };
 
 fn encoded_enrollment() -> Result<Vec<u8>, String> {
@@ -118,6 +118,42 @@ fn crate_server_value_survives_generic_transport_round_trip() -> Result<(), Stri
         decoded,
         ParticipantFrame::ServerValue(ServerValue::ParticipantTransportRejected(_))
     ));
+    Ok(())
+}
+
+#[test]
+fn encode_server_push_is_byte_identical_to_direct_participant_encoding() -> Result<(), String> {
+    let push = ServerPush::ParticipantDelivery(ParticipantDelivery {
+        conversation_id: 41,
+        delivery_seq: 17,
+        record: ParticipantRecord::OrdinaryRecord {
+            sender_participant_id: 9,
+            payload: vec![1, 3, 3, 7],
+        },
+    });
+    let direct = ParticipantFrame::ServerPush(push.clone());
+    let direct_len = participant_encoded_len(&direct).map_err(|error| format!("{error:?}"))?;
+    let mut direct_bytes = vec![0; direct_len];
+    let written = encode(&direct, &mut direct_bytes).map_err(|error| format!("{error:?}"))?;
+    direct_bytes.truncate(written);
+
+    let generic = encode_server_push(push).map_err(|error| format!("{error:?}"))?;
+    assert!(matches!(
+        &generic,
+        Frame::Unknown {
+            type_id: PARTICIPANT_FRAME_TYPE,
+            flags: 0,
+            stream_id: 0,
+            ..
+        }
+    ));
+    let generic_len = encoded_len(&generic).map_err(|error| error.to_string())?;
+    let mut generic_bytes = vec![0; generic_len];
+    let written =
+        encode_generic(&generic, &mut generic_bytes).map_err(|error| error.to_string())?;
+    generic_bytes.truncate(written);
+
+    assert_eq!(generic_bytes, direct_bytes);
     Ok(())
 }
 
