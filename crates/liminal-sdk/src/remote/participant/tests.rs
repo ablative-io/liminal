@@ -98,7 +98,7 @@ fn record_committed(token: [u8; 16], delivery_seq: u64) -> TestResult<ServerValu
 }
 
 #[test]
-fn real_receive_routes_foreign_delayed_and_exact_d1_with_provenance() -> TestResult {
+fn sent_is_not_receipt_real_receive_releases_exact_d1_slot() -> TestResult {
     let record_request = RecordAdmission {
         conversation_id: CONVERSATION,
         participant_id: PARTICIPANT,
@@ -161,6 +161,10 @@ fn real_receive_routes_foreign_delayed_and_exact_d1_with_provenance() -> TestRes
     let operation =
         recorded(handle.record_operation(ClientRequest::RecordAdmission(record_request))?)?;
     sent(&handle.send_operation(operation)?)?;
+    assert!(matches!(
+        handle.record_operation(ClientRequest::RecordAdmission(successor_request.clone()))?,
+        RemoteOperationRecordOutcome::Refused { .. }
+    ));
     match handle.receive()? {
         RemoteParticipantInbound::Applied {
             value: ServerValue::RecordCommitted(_),
@@ -170,6 +174,8 @@ fn real_receive_routes_foreign_delayed_and_exact_d1_with_provenance() -> TestRes
         }
         _ => return Err(io::Error::other("exact D1 record response must apply").into()),
     }
+    // Only applying the exact-token terminal answer released the cardinality-one
+    // write-ahead slot; `Sent` above was never treated as receipt.
     let operation =
         recorded(handle.record_operation(ClientRequest::RecordAdmission(successor_request))?)?;
     sent(&handle.send_operation(operation)?)?;

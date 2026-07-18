@@ -1,0 +1,176 @@
+//! Real-socket record and Leave acceptance across a same-directory cold reopen.
+
+use std::error::Error;
+use std::path::Path;
+
+use liminal_protocol::wire::{
+    AttachAttemptToken, AttachSecret, ClientRequest, CredentialAttachRequest, DetachAttemptToken,
+    DetachRequest, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest,
+    RecordAdmission, RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
+};
+
+use super::e2e_tests::SocketFixture;
+
+struct ColdSocketState {
+    participant_id: u64,
+    attach_secret: AttachSecret,
+    last_record_seq: u64,
+}
+
+fn committed_record(
+    socket: &mut SocketFixture,
+    conversation_id: u64,
+    participant_id: u64,
+    generation: Generation,
+    token: u8,
+) -> Result<RecordCommitted, Box<dyn Error>> {
+    let value = socket.request(ClientRequest::RecordAdmission(RecordAdmission {
+        conversation_id,
+        participant_id,
+        capability_generation: generation,
+        record_admission_attempt_token: RecordAdmissionAttemptToken::new([token; 16]),
+        payload: vec![token, 1, 2, 3],
+    }))?;
+    let ServerValue::RecordCommitted(committed) = value else {
+        return Err(format!("record {token:#x} did not commit: {value:?}").into());
+    };
+    if committed.request().record_admission_attempt_token
+        != RecordAdmissionAttemptToken::new([token; 16])
+    {
+        return Err("record response did not echo its exact token".into());
+    }
+    Ok(committed)
+}
+
+fn write_two_records_then_stop(data_dir: &Path) -> Result<ColdSocketState, Box<dyn Error>> {
+    let mut socket = SocketFixture::start(data_dir)?;
+    let enrolled = socket.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: 501,
+        enrollment_token: EnrollmentToken::new([0x51; 16]),
+    }))?;
+    let ServerValue::EnrollBound(receipt) = enrolled else {
+        return Err(format!("cold-reopen enrollment did not bind: {enrolled:?}").into());
+    };
+    let first = committed_record(
+        &mut socket,
+        501,
+        receipt.participant_id(),
+        Generation::ONE,
+        0x52,
+    )?;
+    let second = committed_record(
+        &mut socket,
+        501,
+        receipt.participant_id(),
+        Generation::ONE,
+        0x53,
+    )?;
+    if second.delivery_seq() != first.delivery_seq().saturating_add(1) {
+        return Err("second real-socket record was not the next sequence".into());
+    }
+    let state = ColdSocketState {
+        participant_id: receipt.participant_id(),
+        attach_secret: receipt.attach_secret(),
+        last_record_seq: second.delivery_seq(),
+    };
+    socket.stop();
+    Ok(state)
+}
+
+fn commit_bound_leave_after_reopen(
+    socket: &mut SocketFixture,
+    state: &ColdSocketState,
+) -> Result<(), Box<dyn Error>> {
+    let attached = socket.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
+        conversation_id: 501,
+        participant_id: state.participant_id,
+        capability_generation: Generation::ONE,
+        attach_secret: state.attach_secret,
+        attach_attempt_token: AttachAttemptToken::new([0x54; 16]),
+        accept_marker_delivery_seq: None,
+    }))?;
+    let ServerValue::AttachBound(bound) = attached else {
+        return Err(format!("cold-reopen attach did not bind: {attached:?}").into());
+    };
+    let third = committed_record(
+        socket,
+        501,
+        state.participant_id,
+        bound.capability_generation(),
+        0x55,
+    )?;
+    if third.delivery_seq() <= state.last_record_seq {
+        return Err("cold-reopen record sequence restarted instead of following replay".into());
+    }
+    let leave = LeaveRequest {
+        conversation_id: 501,
+        participant_id: state.participant_id,
+        capability_generation: bound.capability_generation(),
+        attach_secret: bound.attach_secret(),
+        leave_attempt_token: LeaveAttemptToken::new([0x56; 16]),
+    };
+    let committed = socket.request(ClientRequest::Leave(leave.clone()))?;
+    let ServerValue::LeaveCommitted(committed) = committed else {
+        return Err(format!("cold-reopen bound Leave did not commit: {committed:?}").into());
+    };
+    let replayed = socket.request(ClientRequest::Leave(leave))?;
+    if replayed != ServerValue::LeaveCommitted(committed) {
+        return Err("bound Leave exact-token socket replay drifted".into());
+    }
+    Ok(())
+}
+
+fn commit_detached_leave_on_same_socket(socket: &mut SocketFixture) -> Result<(), Box<dyn Error>> {
+    let enrolled = socket.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: 502,
+        enrollment_token: EnrollmentToken::new([0x57; 16]),
+    }))?;
+    let ServerValue::EnrollBound(receipt) = enrolled else {
+        return Err(format!("detached-Leave enrollment did not bind: {enrolled:?}").into());
+    };
+    let detached = socket.request(ClientRequest::Detach(DetachRequest {
+        conversation_id: 502,
+        participant_id: receipt.participant_id(),
+        capability_generation: Generation::ONE,
+        detach_attempt_token: DetachAttemptToken::new([0x58; 16]),
+    }))?;
+    if !matches!(detached, ServerValue::DetachCommitted(_)) {
+        return Err(format!("socket detach did not commit: {detached:?}").into());
+    }
+    let leave = LeaveRequest {
+        conversation_id: 502,
+        participant_id: receipt.participant_id(),
+        capability_generation: Generation::ONE,
+        attach_secret: receipt.attach_secret(),
+        leave_attempt_token: LeaveAttemptToken::new([0x59; 16]),
+    };
+    let committed = socket.request(ClientRequest::Leave(leave.clone()))?;
+    let ServerValue::LeaveCommitted(committed) = committed else {
+        return Err(format!("socket detached Leave did not commit: {committed:?}").into());
+    };
+    if committed.ended_binding_epoch().is_some()
+        || committed.prior_terminal_delivery_seq().is_none()
+    {
+        return Err("detached Leave returned the wrong binding fate".into());
+    }
+    let replayed = socket.request(ClientRequest::Leave(leave))?;
+    if replayed != ServerValue::LeaveCommitted(committed) {
+        return Err("detached Leave exact-token socket replay drifted".into());
+    }
+    Ok(())
+}
+
+#[test]
+fn records_and_leave_survive_real_socket_cold_reopen() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let state = write_two_records_then_stop(&data_dir)?;
+
+    // Every first-server socket, process, service, handler, and store owner was
+    // synchronously stopped and dropped before opening this same directory.
+    let mut reopened = SocketFixture::start(&data_dir)?;
+    commit_bound_leave_after_reopen(&mut reopened, &state)?;
+    commit_detached_leave_on_same_socket(&mut reopened)?;
+    reopened.stop();
+    Ok(())
+}

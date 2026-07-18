@@ -35,6 +35,8 @@ mod registry;
 mod state;
 
 #[cfg(test)]
+mod e2e_cold_tests;
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod e2e_tests;
 #[cfg(test)]

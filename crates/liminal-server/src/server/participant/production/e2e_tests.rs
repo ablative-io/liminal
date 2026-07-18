@@ -1,20 +1,15 @@
 //! Full participant E2E over a real socket against a running server.
 //!
-//! Enroll → ack → records (the typed refusal surface live today) → detach →
+//! Enroll → ack → committed records → detach →
 //! attach → replay of the old detach token, asserting the terminalized cell
 //! carries the OLD committed epoch — every request and response wire-encoded
 //! end to end through the production connection supervisor and the installed
 //! production semantic handler.
-//!
-//! The mandated COMMITTED-records step remains blocked on the live
-//! claim-frontier acquisition (see the dated amendment in
-//! `docs/design/LP-GAP-CLOSURE-GOAL.md`); the records step here pins the
-//! typed lookup surface the reduced arm serves without tearing the
-//! connection down.
 
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,15 +20,15 @@ use liminal::protocol::{
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, CredentialAttachRequest, DetachAttemptToken, DetachRequest,
     DetachStaleAuthority, EnrollmentRequest, EnrollmentToken, Generation, PARTICIPANT_FRAME_TYPE,
-    ParticipantAck, ParticipantFrame, ReceiverDirection, ServerValue, StaleAuthority,
-    decode as decode_participant, encode as encode_participant,
-    encoded_len as participant_encoded_len,
+    ParticipantAck, ParticipantFrame, ReceiverDirection, RecordAdmission,
+    RecordAdmissionAttemptToken, ServerValue, StaleAuthority, decode as decode_participant,
+    encode as encode_participant, encoded_len as participant_encoded_len,
 };
 
 use crate::ServerError;
 use crate::server::connection::{
-    ConnectionConversation, ConnectionServices, ConnectionSubscription, ConnectionSupervisor,
-    PublishOutcome,
+    ConnectionConversation, ConnectionHandle, ConnectionServices, ConnectionSubscription,
+    ConnectionSupervisor, PublishOutcome,
 };
 use crate::server::participant::{InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT};
 
@@ -185,6 +180,75 @@ fn roundtrip(
     Ok(value)
 }
 
+pub(super) struct SocketFixture {
+    client: TcpStream,
+    inbound: Vec<u8>,
+    supervisor: ConnectionSupervisor,
+    connection: ConnectionHandle,
+}
+
+impl SocketFixture {
+    pub(super) fn start(data_dir: &Path) -> Result<Self, Box<dyn Error>> {
+        let store = open_disk_store_for_tests(data_dir)?;
+        let config = test_participant_config();
+        let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
+        let participant_service =
+            InstalledParticipantService::new(Arc::new(handler), store, config.wire_frame_limit)
+                .map_err(|error| format!("{error:?}"))?;
+        let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
+            participant_service,
+        });
+        let supervisor = ConnectionSupervisor::with_services(services)?;
+        let (mut client, server) = tcp_pair()?;
+        client.set_read_timeout(Some(Duration::from_secs(10)))?;
+        client.set_write_timeout(Some(Duration::from_secs(10)))?;
+        let connection = supervisor.spawn_connection(server)?;
+
+        client.write_all(&encode_frame(&Frame::Connect {
+            flags: 0,
+            min_version: ProtocolVersion::new(1, 0),
+            max_version: ProtocolVersion::new(1, 0),
+            auth_token: Vec::new(),
+        })?)?;
+        let mut inbound = Vec::new();
+        let ack = read_frame(&mut client, &mut inbound)?;
+        if !matches!(
+            ack,
+            Frame::ConnectAck { capabilities, .. }
+                if capabilities == PARTICIPANT_CAPABILITY_BIT
+        ) {
+            return Err(format!("participant capability was not advertised: {ack:?}").into());
+        }
+        Ok(Self {
+            client,
+            inbound,
+            supervisor,
+            connection,
+        })
+    }
+
+    pub(super) fn request(
+        &mut self,
+        request: ClientRequest,
+    ) -> Result<ServerValue, Box<dyn Error>> {
+        roundtrip(&mut self.client, &mut self.inbound, request)
+    }
+
+    pub(super) fn stop(self) {
+        let Self {
+            client,
+            inbound,
+            supervisor,
+            connection,
+        } = self;
+        drop(client);
+        drop(inbound);
+        supervisor.shutdown();
+        drop(connection);
+        drop(supervisor);
+    }
+}
+
 const CONVERSATION: u64 = 401;
 
 #[test]
@@ -261,26 +325,26 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
         "ack did not commit: {acked:?}"
     );
 
-    // Records over the same live socket: the arm's typed refusal surface.
-    // An unknown participant's record admission answers the exact
-    // ParticipantUnknown row and the connection stays open (a COMMITTED
-    // record is blocked on the claim-frontier acquisition — the reduced
-    // surface is recorded in the goal document's dated amendment).
-    let record_refused = roundtrip(
+    // An authorized payload-bearing record commits over the same live socket
+    // and echoes its exact D1 token without closing the connection.
+    let record_token = RecordAdmissionAttemptToken::new([0xA7; 16]);
+    let record = roundtrip(
         &mut client,
         &mut inbound,
-        ClientRequest::RecordAdmission(liminal_protocol::wire::RecordAdmission {
+        ClientRequest::RecordAdmission(RecordAdmission {
             conversation_id: CONVERSATION,
-            participant_id: participant + 7,
+            participant_id: participant,
             capability_generation: Generation::ONE,
-            record_admission_attempt_token:
-                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
+            record_admission_attempt_token: record_token,
             payload: vec![1, 2, 3],
         }),
     )?;
-    assert!(
-        matches!(record_refused, ServerValue::ParticipantUnknown(_)),
-        "unknown-participant record must answer ParticipantUnknown: {record_refused:?}"
+    let ServerValue::RecordCommitted(record) = record else {
+        return Err(format!("authorized socket record did not commit: {record:?}").into());
+    };
+    assert_eq!(
+        record.request().record_admission_attempt_token,
+        record_token
     );
 
     // Detach (the OLD epoch is committed into the cell here).
