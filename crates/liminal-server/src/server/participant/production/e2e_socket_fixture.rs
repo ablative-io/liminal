@@ -19,10 +19,11 @@ use tungstenite::Message;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::WebSocket;
 
-use crate::config::types::WebSocketConfig;
+use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig, WebSocketConfig};
 use crate::server::connection::{
     ConnectionHandle, ConnectionServices, ConnectionSupervisor, WebSocketListener,
 };
+use crate::server::listener::ServerListener;
 use crate::server::participant::{
     InstalledParticipantService, ObserverPublicationTarget, PARTICIPANT_CAPABILITY_BIT,
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
@@ -162,6 +163,12 @@ pub(in crate::server::participant::production) struct WebSocketPeer {
 pub(in crate::server::participant::production) struct WebSocketEndpoint {
     listener: WebSocketListener,
     pub(in crate::server::participant::production) peer: WebSocketPeer,
+}
+
+pub(in crate::server::participant::production) struct SdkSocketFixture {
+    listener: Option<ServerListener>,
+    supervisor: ConnectionSupervisor,
+    handler: Arc<ProductionParticipantHandler>,
 }
 
 impl SocketFixture {
@@ -462,6 +469,68 @@ impl WebSocketEndpoint {
         let Self { listener, peer } = self;
         drop(peer);
         listener.shutdown()?;
+        Ok(())
+    }
+}
+
+impl SdkSocketFixture {
+    pub(in crate::server::participant::production) fn start(
+        data_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
+        let store = open_disk_store_for_tests(data_dir)?;
+        let participant_config = test_participant_config();
+        let handler = Arc::new(ProductionParticipantHandler::new(
+            Arc::clone(&store),
+            participant_config,
+        )?);
+        let participant_service = InstalledParticipantService::new(
+            Arc::clone(&handler) as Arc<dyn ParticipantSemanticHandler>,
+            store,
+            participant_config.wire_frame_limit,
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
+            participant_service,
+        });
+        let supervisor = ConnectionSupervisor::with_services(services)?;
+        let config = ServerConfig {
+            listen_address: "127.0.0.1:0".parse()?,
+            health_listen_address: "127.0.0.1:0".parse()?,
+            drain_timeout_ms: 30_000,
+            channels: Vec::new(),
+            routing_rules: Vec::new(),
+            persistence_path: None,
+            cluster: None,
+            auth: None,
+            services: ServicesConfig::default(),
+            limits: LimitsConfig::default(),
+            websocket: None,
+            participant: None,
+        };
+        let listener = ServerListener::bind(&config, supervisor.clone())?;
+        Ok(Self {
+            listener: Some(listener),
+            supervisor,
+            handler,
+        })
+    }
+
+    pub(in crate::server::participant::production) fn address(
+        &self,
+    ) -> Result<std::net::SocketAddr, Box<dyn Error>> {
+        self.listener
+            .as_ref()
+            .map(ServerListener::local_addr)
+            .ok_or_else(|| "SDK socket listener has stopped".into())
+    }
+
+    pub(in crate::server::participant::production) fn stop(mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(listener) = self.listener.take() {
+            listener.shutdown()?;
+        }
+        self.supervisor.shutdown();
+        drop(self.supervisor);
+        drop(self.handler);
         Ok(())
     }
 }

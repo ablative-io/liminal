@@ -40,7 +40,10 @@ use super::tests::{
 
 #[path = "e2e_socket_fixture.rs"]
 mod socket_fixture;
-pub(super) use socket_fixture::SocketFixture;
+pub(super) use socket_fixture::{SdkSocketFixture, SocketFixture};
+
+#[path = "e2e_sdk_tests.rs"]
+mod e2e_sdk_tests;
 
 #[path = "tests_endpoint_ack.rs"]
 mod tests_endpoint_ack;
