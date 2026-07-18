@@ -2,9 +2,10 @@
 
 Base: `liminal` main at `2bf71c4` (F-0c Unit 1 landed).
 
-Round: r1 for independent pre-review and fold. All repository anchors in this
-revision were read against the bytes at `2bf71c4`; no anchor is inherited on
-trust from a pre-landing draft.
+Round: r3 pre-review fold. Its lineage is r1 draft, r2 seat fold, then this r3
+fold of the completed pre-review under the seat's rulings. All repository
+anchors in this revision were read against the bytes at `2bf71c4`; no anchor is
+inherited on trust from a pre-landing draft.
 
 ## Goal
 
@@ -38,10 +39,13 @@ The existing participant dispatch has distinct encoded response and fatal arms
 Unit 2 must preserve the exact Unit 1 request/response correlation path.
 
 The frame two-request snapshot rule is a non-contradiction boundary, not a
-surface this unit may restate: a first uncovering snapshot permits exactly one
-further request and a second consecutive uncovering answer is a visible terminal
-protocol violation (`frame@c6e3158:examples/frame-demo/PROTOCOL.md:69-79`). Push
-replay, duplicate delivery, reattach, and acknowledgement do not create an
+surface this unit changes. The cited object is not reachable from this worktree;
+the seat verified and vendored these exact bytes from
+`frame@c6e3158:examples/frame-demo/PROTOCOL.md:69-79, verified by the seat 2026-07-18`:
+
+    A `requestSnapshot` answer serves the newest available snapshot cut not yet served — for the liminal-backed feed this is the snapshot cache, so an answer may be the current generation's baseline, at or behind the frame that forced the resync. In that case the receiver asks exactly once more, and that answer must resolve to a strictly newer cut that covers or stales the trigger; the publisher's periodic generation baseline (every `SNAPSHOT_PERIOD`, ≈5 s at current cadence) bounds the wait. A second consecutive uncovering answer is a feed protocol violation and the receiver fails terminally and visibly.
+
+Push replay, duplicate delivery, reattach, and acknowledgement do not create an
 exception.
 
 ## 1. Pinned facts and exact missing boundary
@@ -190,25 +194,37 @@ consumer observes the value.
 
 1. **D3-1 durable outbox after commit.** A producing operation first crosses its
    existing append/flush barrier. Only after that succeeds may one durable
-   outbox production row be appended and flushed. No outbox row shares the
+   outbox source-batch row be appended and flushed. No outbox row shares the
    producing transaction, and no push is eligible for a socket before both
    barriers. An uncommitted operation is therefore unobservable as push.
 2. **D3-2 recipient snapshot.** The recipient set is the sorted set of permanent
    participant ids whose binding is live in the committed poststate, minus the
    producing sender. It is computed once under the same conversation lock and
-   persisted in the production row. Later attach/detach does not rewrite it.
-   A system-authored marker has no participant sender, so no member is
-   subtracted; its target can receive and acknowledge the marker.
+   persisted in each projected record in the source batch. Later attach/detach
+   does not rewrite it. A system-authored marker has no participant sender, so
+   no member is subtracted; its target can receive and acknowledge the marker.
 3. **D3-3 ordering.** The durable participant `delivery_seq` is the only order
    key. Every recipient observes one conversation in strictly increasing
-   sequence; a superseding attach's stored terminal precedes its attached row.
-   Cross-conversation order is intentionally unspecified.
-4. **D3-4 retention.** A production row remains live while any persisted
-   recipient obligation has `ack_through < delivery_seq`. A committed
+   sequence; a superseding attach's stored terminal is the first record and its
+   attached record is the second record of one source batch. Cross-conversation
+   order is intentionally unspecified.
+4. **D3-4 retention.** A projected record remains live while any persisted
+   recipient obligation has `ack_through < delivery_seq`; its enclosing source
+   batch remains as append-only audit. A committed
    `ParticipantAck.through_seq` discharges all that participant's obligations
    through the boundary. The payload becomes logically reclaimable only when
-   every recipient obligation is discharged. Socket offer/write changes none
-   of these facts.
+   every recipient obligation is discharged. Socket offer/write changes none of
+   these facts. **SEAT RULING — FLAGGED FOR WAFFLES/TOM RATIFICATION:** a
+   committed `Leave` also discharges all outstanding recipient obligations of
+   the leaving identity at the Leave commit. This is the seat's explicit D3-4
+   interpretation, not a silent contract change: Leave validates identity and
+   an empty immutable prefix but never catch-up
+   (`claim_frontier.rs:3495-3553`), then permanently removes the identity
+   (`claim_frontier.rs:2844-2853`); ids are never reused. Permanent retirement
+   makes the D3-6 replay purpose impossible forever, while append-only audit rows
+   remain. The discharge is an atomic effect of the Leave source batch in the
+   Unit 2 extension stream. Section 9 records both this ruled bound and the
+   rejected conservative bound for ratification.
 5. **D3-5 pump holdback.** Current outbound pressure holds back that recipient's
    exact next frame. It never cancels a delivery, sheds participant interest,
    emits a synthetic terminal answer, or tears down a connection merely because
@@ -227,29 +243,57 @@ consumer observes the value.
 
 ### 3.1 Separate post-commit stream
 
-Add one versioned outbox stream per conversation, owned by the production
-handler and keyed separately from the v2 operation stream. The first schema is
-`schema_version = 1`; it does not rename or reinterpret the Unit 1 v2 stream.
-Each `Produced` row contains:
+Add one versioned Unit 2 per-conversation extension stream, also called the
+outbox stream, owned by the production handler and keyed separately from the v2
+participant operation stream. The first schema is `schema_version = 1`; it does
+not rename, bump, or reinterpret the Unit 1 v2 stream. Its exhaustive row kinds
+are `Produced`, `AckAdvanced`, and `MarkerAckCommitted`.
 
-- producing v2 log sequence and operation-kind discriminator;
-- conversation `delivery_seq` and exact typed `ParticipantRecord` body;
-- sorted, duplicate-free recipient participant ids;
-- optional sender participant id used to prove the exclusion; and
-- canonical encoded-byte charge used by the signed derived bounds.
+`Produced` is a SOURCE BATCH with this shape:
 
-Each `AckAdvanced` row contains participant id and the exact durably committed
-`through_seq`. The outbox restore folds rows into one move-only
-`ConversationOutbox`: records keyed by sequence, per-recipient ack frontiers,
-per-recipient next-live obligation, and the next optimistic outbox sequence.
-Constructors remain private; restore validates source uniqueness, record/sequence
-agreement, recipient sorting, sender exclusion, monotone ack, and charge bytes.
-An exact duplicate source row after an uncertain append is idempotent only when
-all bytes agree; a conflicting duplicate is typed corruption.
+- `source_log_sequence` and `source_kind` identify exactly one committed v2
+  source;
+- `ordered_records` is a nonempty list of one or two projected records;
+- each projected record carries its own conversation `delivery_seq`, exact
+  typed `ParticipantRecord` body, sorted duplicate-free production-time
+  recipient snapshot, optional sender participant id proving exclusion, and
+  canonical encoded-byte charge used by the signed derived bounds.
 
-The participant operation stream remains the source of lifecycle truth. Outbox
-rows are delivery projections and may never be replayed back into
-`ClaimFrontiers` or `ClosureAccounting`.
+A superseding attach batch contains exactly two records, terminal then attached,
+in that order. Every other producing source contains exactly one. Source
+uniqueness and uncertain-append idempotency apply to the byte-identical whole
+batch, including record count and order; a batch differing in any record,
+recipient, sender, charge, or byte is typed corruption. This is one post-commit
+append even for the two-record supersession mapping.
+
+`AckAdvanced` identifies its committed v2 ack source and carries participant id
+and the exact durably committed `through_seq`. `MarkerAckCommitted` is the only
+frontier-affecting extension row. It carries the exact canonical `MarkerAck`
+request, receiving binding epoch, offered-marker delivery witness (marker
+`delivery_seq` and delivered binding epoch), and complete post-transition audit,
+plus ordering metadata `{ base_log_head, extension_sequence }`.
+`base_log_head` is recorded under the conversation lock at commit;
+`extension_sequence` must equal the physically assigned extension sequence, which
+orders ties at one base boundary.
+
+Cold restore stream-merges the two streams. It applies all extension rows at a
+recorded base boundary in physical extension-sequence order, then applies the
+next v2 base row. A base-backed `Produced` or `AckAdvanced` boundary is exactly
+`source_log_sequence + 1`; a marker-ack boundary comes from its stored
+`base_log_head`. Nonmonotone, impossible, malformed, unknown, or mixed-version
+boundaries refuse loudly before authority publication. Marker replay re-runs the
+same authoritative marker-ack selector with the stored witness, byte-checks
+every audit field, and only then applies its frontier transition. Among
+extension variants, ONLY explicitly typed `MarkerAckCommitted` may feed
+frontier state; `Produced` and `AckAdvanced` never do.
+
+Extension restore folds delivery rows into one move-only `ConversationOutbox`:
+records keyed by sequence, per-recipient ack frontiers, per-recipient next-live
+obligation, and the next optimistic extension sequence. Constructors remain
+private; restore validates whole-source uniqueness, record/sequence agreement,
+recipient sorting, sender exclusion, monotone ack, charge bytes, and Leave
+discharge. The v2 participant stream remains the primary lifecycle source; the
+extension stream adds only the explicitly ruled marker-ack transition.
 
 ### 3.2 Ordered two-barrier protocol
 
@@ -260,22 +304,27 @@ per-conversation lock:
 2. append/flush the existing v2 operation row;
 3. install its committed poststate sufficiently to take the D3 recipient
    snapshot, without releasing the conversation lock;
-4. build the typed record from the sealed/stored commit facts;
-5. append/flush one outbox `Produced` row; then
+4. build the complete typed source batch from the sealed/stored commit facts;
+5. append/flush one outbox `Produced` source-batch row; then
 6. publish the request's existing terminal response and wake eligible live
    recipient connections.
+
+For `Left`, step 5 also durably and atomically records the ruled discharge of all
+older obligations owned by the permanently retired identity; installation of
+that discharge follows the extension flush and precedes response publication.
 
 A push can therefore never race ahead of its answer's durable operation. The
 answer and push remain different values: the answer is correlated to the
 request; the push is fan-out work.
 
 There is an unavoidable crash window between barriers. Startup and every cold
-first touch SHALL replay v2 first, replay outbox second, and reconcile every
-committed delivery-bearing source in v2 log order. A missing projection is
-materialized by an ordinary post-commit outbox append/flush before the handler
-is published; an exact existing projection is accepted; a conflicting one
-fails loudly. Ack reconciliation follows the same rule from committed
-`ZeroDebtAck` rows. Reconciliation emits no socket work until it completes.
+first touch SHALL restore the v2 base and extension stream through the ordered
+merge above, then reconcile every committed delivery-bearing source in v2 log
+order. A missing projection is materialized as one complete source-batch
+append/flush before the handler is published; an exact existing whole batch is
+accepted; a conflicting batch fails loudly. Ack reconciliation follows the same
+rule from committed `ZeroDebtAck` rows. Reconciliation emits no socket or ack
+work until it completes.
 
 If barrier 1 commits and barrier 2 fails live, the operation is committed but
 push projection is pending repair. The handler returns a typed internal fault;
@@ -289,17 +338,20 @@ successfully appended operation.
 Add one exhaustive conversion beside the v2 replay fold, not ad-hoc conversions
 inside socket code:
 
-| v2 committed source | ordered outbox record(s) | sender used by D3-2 |
+| v2 committed source | ordered records in its `Produced` source batch | sender used by D3-2 |
 |---|---|---|
 | `Genesis` | none | none |
-| `Enrolled` | `Attached { affected_participant_id, origin_epoch }` at `attached_seq` | newly enrolled participant |
+| `Enrolled` | `Attached { affected_participant_id, binding_epoch }` at `attached_seq` | newly enrolled participant |
 | `Attached`, ordinary | `Attached` at `attached_seq` | attaching participant |
 | `Attached`, superseding | `Detached { old epoch, Superseded }` at `superseded_terminal_seq`, then `Attached` at `attached_seq` | attaching participant for both |
 | `Detached` | `Detached { affected participant, receiving epoch, CleanDeregister }` at `terminal_seq` | detaching participant |
 | `ZeroDebtAck` | none; append `AckAdvanced` after its v2 commit | none |
 | `MarkerDrained` | `HistoryCompacted` from the protocol-selected marker target/range at the marker sequence | none (system authored) |
 | `RecordAdmission` | `OrdinaryRecord { sender_participant_id, payload }` at stored `delivery_seq` | request participant |
-| `Left` | `Left { affected_participant_id, ended_binding_epoch }` at `left_delivery_seq` | leaving participant |
+| `Left` | `Left { affected_participant_id, ended_binding_epoch }` at `left_delivery_seq`; the batch also discharges the left identity's older obligations | leaving participant |
+
+`MarkerAckCommitted` (extension stream) maps to no push record. The exact wire
+field in `Attached` is `binding_epoch` (`wire/push.rs:74-80`).
 
 The mapping is exhaustive for `StoredOperation` at `2bf71c4`. The wire's
 `Died` body remains codec-covered, but no v2 `StoredOperation` at the pin
@@ -370,84 +422,139 @@ binding, and never returns a teardown instruction.
 Round-robin scheduling is by live connection then conversation; no conversation
 may consume a second item while another ready conversation on that connection
 has not received its first in the slice. Ordering is per conversation only.
-The numeric slice budget is gated by `WALL-CONFIG-SIGNOFF` below.
+`ObserverProgressed` and participant-delivery pushes consume the same signed
+slice counter; observer wakes never receive an additional budget. The numeric
+slice budget is gated by `WALL-CONFIG-SIGNOFF` below.
 
 ## 7. Ack retention, marker testimony, and replay
 
+Startup/first-touch outbox reconciliation completes before any ack is handled.
 After `ParticipantAck` crosses the existing v2 append/flush barrier, append and
-flush `AckAdvanced` before answering `AckCommitted`. Then install the same
+flush `AckAdvanced` before answering `AckCommitted`, then install the same
 boundary in the outbox owner. Refusal, no-op, regression, gap, append failure,
 or an ack for a non-recipient does not reclaim an obligation. Reclaim is logical
 in the append-only store: acknowledged rows cease to occupy the live outbox and
 capacity projection; historical source/ack rows remain replayable audit bytes
-because the landed `DurableStore` has append/read/flush but no truncate/delete
-contract (`crates/liminal/src/durability/store.rs:19-63`). This exactly implements
-"become reclaimable" without pretending physical deletion exists.
+because the landed `DurableStore` exposes independently keyed append/read/flush
+streams but no truncate/delete contract
+(`crates/liminal/src/durability/store.rs:20-57`). This implements "become
+reclaimable" without pretending physical deletion exists.
 
-`contiguously_available_through` for ack selection SHALL NOT remain the
-conversation-global `next_seq - 1` currently supplied at
-`production/ops_acks.rs:31-40`; it becomes a per-recipient bound. Gaps caused
-by sender exclusion or a recipient not being in an older snapshot are skipped
-as non-obligations by the outbox's ordered recipient index; they do not require
-fake delivery. The value remains a protocol input and is never inferred from a
-socket write alone. **[r2 FOLD — basis OPEN for pre-review, Q5]:** two
-candidate bases exist and pre-review must select one with a crash-cut argument
-before dispatch: (a) the recipient's unbroken VOLATILE OFFERED prefix (r1
-text) — conservative, but after a server restart a truthful ack for a
-pre-crash delivery is refused until replay re-offers, forcing duplicate
-delivery the client already attested; or (b) the recipient's unbroken DURABLE
-OBLIGATION prefix (committed outbox rows for that recipient) — the seat's
-lean: the client's cumulative ack IS the receipt testimony G1 names, the
-durable obligation proves the delivery exists, and no volatile state gates a
-truthful attestation, while sequences with no committed obligation still
-refuse. The selected basis lands here as an amendment; either way G1 holds —
-socket writes never feed the bound.
+**Q5 CLOSED — DURABLE-OBLIGATION PREFIX.**
+`contiguously_available_through` is the recipient's reconciled
+DURABLE-OBLIGATION prefix, never the conversation-global `next_seq - 1` now
+supplied at `production/ops_acks.rs:31-40` and never a volatile-offered cursor.
+The `ParticipantAck` itself is the receipt testimony. Volatile-offered is
+strictly worse: restart erases it, and an ack arriving on a new binding before
+replay would otherwise refuse truthful testimony until a duplicate offer. That
+is incompatible with the producing barrier's ground truth that "nothing is
+published until these bytes are durable" (`production/log.rs:113-114`). G1
+still holds: no encode, enqueue, write, or volatile cursor supplies receipt.
+
+The existing scalar selector is insufficient: it accepts any `through_seq <=
+min(bound, H')` and does not prove that the endpoint is an obligation
+(`cursor_facts.rs:535-579`). The build SHALL extend the authoritative protocol
+selector with sealed per-recipient availability testimony. The requested
+endpoint MUST exist in that recipient's committed obligation index. Internal
+sequence gaps caused by sender exclusion or absence from an older snapshot are
+skipped as non-obligations, but a request ENDING on a sequence with no committed
+obligation is `AckGap`. The build also updates the stale "offered to that exact
+epoch" contract documentation at `cursor_facts.rs:487-497` to describe durable
+per-recipient obligation testimony. Server code may not reimplement this
+endpoint rule.
+
+The D3-4 Leave ruling is applied at this same owner boundary: after the Leave
+source batch flushes, all older obligations of the permanently retired identity
+are discharged together, while source and audit rows remain. This interpretation
+remains visibly flagged for Waffles/Tom ratification; without it, section 9's
+rejected identity-cohort bound is the honest one.
 
 For MarkerAck, the outbox supplies the exact marker obligation, delivered
 binding epoch, and delivery witness required to construct `MarkerProofState`.
 Only a marker frame successfully enqueued on that exact binding creates volatile
 "offered" testimony; a socket write is still not receipt. The existing total
-`apply_marker_ack` selector remains authoritative. A committed marker ack must
-cross a durable v2 operation row and frontier transition just like participant
-ack; therefore Unit 2 adds a schema-versioned v2-log operation kind and bumps
-the participant log to v3 loudly. Existing v2 rows SHALL fail with
-`OperationLogError::SchemaVersion(2)`; no default or reinterpretation is legal.
-This migration is necessary because the landed bytes explicitly contain no
-committed MarkerAck row (`production/log.rs:150-222`) and the current handler
-cannot replay one (`production/ops_acks.rs:185-244`).
+`apply_marker_ack` selector remains authoritative. A commit appends and flushes
+one `MarkerAckCommitted` row to the Unit 2 extension stream, then installs the
+selector's frontier transition. The row carries the ruled Q3 body and the
+`{ base_log_head, extension_sequence }` merge metadata defined in section 3.1.
+Cold replay presents the stored witness to the same selector and checks the
+complete audit before installation.
 
-**Migration consequence:** because v3 is required for MarkerAck, all eight v2
-operation bodies are carried forward byte-for-byte as v3 variants plus the new
-`MarkerAckCommitted` body. A literal v2 row, a mixed v2/v3 stream, and a v2 row
-with fields that happen to resemble v3 all fail before authority publication.
-Tom/Annabel must see this schema diff before build dispatch.
+`MarkerAckCommitted` is not push-producing, so durable-outbox-after-commit is not
+implicated: its one extension append/flush IS the marker-ack commit barrier. The
+participant base log remains literal v2. Independently keyed durable streams and
+the separately versioned observer stream are landed precedent
+(`crates/liminal/src/durability/store.rs:20-57`;
+`production/observer.rs:19-55`). The r2 v3 necessity claim and ratification are
+reversed: absence of a MarkerAck variant in the v2 base enum proves only that the
+row needs a typed durable home, not that the base enum must change. The signature
+pack carries the Unit 2 extension schema and no participant-schema diff.
 
 ## 8. ObserverProgressed boundary
 
 This unit's durable D3 outbox is for `ParticipantDelivery`. The other wire
 variant, `ObserverProgressed`, is a refusal-arm wake, not a recipient record and
-has no `ParticipantAck` sequence. The protocol already exposes an atomic
-observer progress advance whose commit surrenders the exact fired arm
-(`crates/liminal-protocol/src/lifecycle/observer_recovery.rs:407-458`), and the
-observer log already has versioned `Track`, `Advance`, and `Arms` rows
-(`production/observer.rs:19-55,78-140`). Production at the pin never invokes a
-live `Advance`; only restore folds one (`production/observer.rs:144-178`).
+has no `ParticipantAck` sequence. The landed authority initializes
+`observer_progress` to zero (`production/state.rs:216-231`), production never
+assigns live progress, `decide_progress_advance` requires its caller to present
+the value (`observer_recovery.rs:247-281`), and only restore currently folds an
+`Advance` (`production/observer.rs:144-178`). Unit 2 SHALL close both the
+committed-source projection hole and the source-commit-to-Advance crash window.
 
-Unit 2 SHALL wire committed participant observer progress into that existing
-advance transaction and publish `ObserverProgressed` only from its exact fired
-arm, after the `ObserverRow::Advance` append/flush. It rides the same
-`encode_server_push` and connection READY publication seam but not the
-ParticipantAck outbox or recipient fan-out. Arm ownership remains the connection
-that installed the ObserverRecovery batch; a dead connection drops only the
-wake handle, while a reattached observer recovers by issuing the existing
-handshake. No socket handoff is promoted to observer receipt, and no semantic
-terminal response is displaced.
+Every source that can advance hard-observer progress is exhaustive here: a
+committed normal `ParticipantAck` (the v2 `ZeroDebtAck` arm and any shell
+`NonzeroDebtAck` source), committed `MarkerAckCommitted`, and each committed
+binding-ending fate — a superseding `Attached` terminal, `Detached`, `Left`, and
+a protocol-owned `BindingFate`/`Died` source. The protocol transition owning each
+source SHALL surrender a sealed, exact
+`{ conversation_id, new_observer_progress }` projection. The server neither
+invents a maximum/formula nor infers progress from record delivery. The shell's
+nonzero-debt ack and binding-fate source census is explicit at
+`operation_event.rs:493-570`.
 
-If durable connection ownership must be added to `ObserverRow::Arms`, bump the
-observer schema from v1 to v2 and reject v1 with the same typed version error.
-The build may avoid that schema change only if pre-review proves the existing
-protocol fired arm plus live registration is sufficient across every crash cut;
-it may not add a default target or broadcast the wake.
+For each advancing source, the source append/flush barrier completes first.
+While the observer owner remains exclusively serialized, production presents
+that exact projection to `decide_progress_advance`, appends/flushes
+`ObserverRow::Advance`, commits the protocol transaction, and only then may
+publish the fired `ObserverProgressed`. Startup and cold first touch replay every
+participant source, reconcile any missing `Advance`, and restore the observer
+aggregate before publishing conversation authority or admitting an observer
+handshake. An already equal-or-greater exact durable Advance satisfies
+reconciliation; disagreement or a nonmonotone source refuses loudly. Thus a
+crash after a participant source barrier but before its Advance is repaired
+before an observer can observe stale authority.
+
+**Q2 CLOSED — observer v1 stands; no durable arm target.** A persisted old
+connection incarnation would name no surviving socket. The existing handshake
+deterministically reports `progressed` whenever current progress exceeds the
+refused epoch (`observer_recovery.rs:691-707`), so recovery needs a live target,
+not a durable dead one. Under the observer-owner mutex, an accepted recovery
+batch appends/flushes `ObserverRow::Arms`, then installs or replaces the volatile
+`(conversation_id, refused_epoch) -> weak live connection` association before
+unlocking or answering the handshake. A dead connection makes the weak handle
+missing; it is never replaced by a default or broadcast target.
+
+The advance path shares that same non-cancellable owner critical section. After
+`ObserverRow::Advance` flushes, it commits the protocol transaction and transfers
+the exact fired payload to the associated live inbox before unlock. The payload
+rides `encode_server_push`, READY, and the shared signed push-slice budget, but
+not ParticipantAck fan-out. A dead or missing handle drops only that targeted
+wake; no other connection receives it, no socket handoff becomes receipt, and no
+semantic terminal response is displaced.
+
+The deciding crash cuts are:
+
+- before `Arms` flush, there is no arm;
+- after `Arms` flush but before volatile registration, a process crash destroys
+  the only target socket, and reattach either re-arms or observes progressed;
+- after `Advance` flush but before socket handoff, a process crash leaves durable
+  progress, so the next handshake observes progressed; and
+- reattach versus advance serializes under the observer owner: advance-first
+  yields a progressed response, while reattach-first installs the one live
+  target that receives the fired payload.
+
+No observer schema change is required or permitted for targeting; the observer
+stream remains v1.
 
 ## 9. Derived values requiring signoff
 
@@ -458,11 +565,21 @@ blocks dispatch.
 
 | named placeholder | recommended value | derivation | worst-case cost |
 |---|---:|---|---|
-| `UNIT2_PUSH_SLICE_BUDGET` | `32` | Reuse, after signoff, the existing subscription fairness scale `DELIVERY_SLICE_BUDGET = 32` (`connection/delivery.rs:37-40`) so adding participant work does not create a larger scheduler slice. | 32 participant frame encodes/enqueues per connection slice, in addition to any separately budgeted subscription work. |
-| `UNIT2_OUTBOX_RESTORE_BATCH_ROWS` | `64` | Reuse, after signoff, the participant log's durable read-page scale `READ_BATCH_SIZE = 64` (`production/log.rs:25-30`). | One batch holds 64 encoded outbox rows plus decode state; total restore remains streaming. |
-| `UNIT2_MAX_LIVE_RECIPIENT_OBLIGATIONS` | `checked(max_retained_record_rows × identity_slots)` | Every live retained participant record has at most every permanent conversation identity as a production-time recipient; both factors are already required signed participant inputs (`config/types.rs:475-483,509-516`). Reject arithmetic overflow. | Per conversation, at most the signed product of recipient index entries; payload is stored once per produced row, not once per recipient. |
-| `UNIT2_MAX_LIVE_OUTBOX_PAYLOAD_BYTES` | `checked(retained_capacity_bytes + fixed_outbox_overhead(max_retained_record_rows, identity_slots))` | Payload-bearing rows already count against signed retained bytes; add only canonical recipient/index framing measured by the new encoder. A checked fixture determines the exact fixed term before signoff. | Per conversation, the signed retained payload cap plus the measured metadata term; no hidden per-recipient payload copies. |
+| `UNIT2_PUSH_SLICE_BUDGET` | `32` | Reuse, after signoff, the existing subscription fairness scale `DELIVERY_SLICE_BUDGET = 32` (`connection/delivery.rs:37-40`) so adding participant work does not create a larger scheduler slice. Participant-delivery and observer pushes debit this same counter. | 32 total participant-frame encodes/enqueues per connection slice across both `ParticipantDelivery` and `ObserverProgressed`, in addition to separately budgeted subscription work. |
+| `UNIT2_OUTBOX_RESTORE_BATCH_ROWS` | `64` | Reuse, after signoff, the participant log's durable read-page scale `READ_BATCH_SIZE = 64` (`production/log.rs:25-30`). | One batch holds 64 encoded extension/outbox rows plus decode state; total restore remains streaming. |
+| `UNIT2_MAX_LIVE_RECIPIENT_OBLIGATIONS` | `checked(max_retained_record_rows × identity_slots)` | Every live retained participant record has at most every permanent conversation identity as a production-time recipient; both factors are already required signed participant inputs (`config/types.rs:475-483,509-516`). Leave atomically discharges the retired identity's cohort. Reject arithmetic overflow. | Per conversation, at most the signed product of recipient index entries; payload is stored once per projected record, not once per recipient. |
+| `UNIT2_MAX_LIVE_OUTBOX_PAYLOAD_BYTES` | `checked(retained_capacity_bytes + fixed_outbox_overhead(max_retained_record_rows, identity_slots))` | Payload-bearing rows already count against signed retained bytes; the ratification-flagged Leave discharge prevents retired identities from stranding successive full payload cohorts. Add only canonical recipient/index framing measured by the new encoder; a checked fixture determines the exact fixed term before signoff. | Per conversation, the signed retained payload cap plus the measured fixed metadata term; no hidden per-recipient payload copies. |
 | `UNIT2_MAX_HELD_HEADS_PER_CONNECTION` | `max_semantic_conversations_per_connection` | One held participant head per tracked conversation; the existing signed connection map already bounds that cardinality (`dispatch.rs:23-69`). | One encoded frame per tracked conversation, each additionally proven `<= wire_frame_limit`; no second unbounded connection queue. |
+
+**REJECTED conservative branch, preserved for Tom's eyes:** without the ruled
+D3-4 discharge, fill → retire-unacked → reclaim → refill can strand one full
+cohort per permanent identity because Leave requires no catch-up and ids are
+never reused. The honest bound would be
+`checked(identity_slots × retained_capacity_bytes + metadata_for(max_retained_record_rows × identity_slots))`.
+The seat instead rules discharge-on-Leave, yielding the table's
+`checked(retained_capacity_bytes + measured fixed metadata term)` shape. Waffles
+and Tom must ratify that interpretation and therefore the smaller signed shape;
+until then it remains a visible ratification gate, not a hidden assumption.
 
 The canonical encoder tests SHALL print the measured fixed outbox overhead and
 maximum encoded push for Tom/Annabel. If either invalidates a recommendation,
@@ -496,29 +613,33 @@ readiness markers, or socket readability.
 
 ### Layer 1 — producer mapping and two-barrier durability
 
-5. **`every_v3_delivery_source_maps_exhaustively_in_sequence_order`**: table-test
-   Genesis, initial/subsequent enrollment, ordinary/superseding attach, detach,
-   zero-debt ack, marker drain, RecordAdmission, Leave, and MarkerAck. Assert the
-   exact zero/one/two record mapping and supersession terminal-before-attached.
+5. **`every_v2_source_maps_to_one_exact_source_batch_or_none`**: table-test all
+   eight v2 kinds — Genesis, Enrolled, Attached, Detached, ZeroDebtAck,
+   MarkerDrained, RecordAdmission, and Left — plus extension MarkerAck. Assert
+   Genesis/acks produce no `Produced`, every delivery source produces exactly one
+   batch, supersession alone has two ordered records (terminal then attached),
+   every other batch has one, and MarkerAck produces no push batch. Check each
+   record's own sequence, typed body, and recipient snapshot.
 6. **`recipient_snapshot_is_postcommit_live_bound_minus_sender`**: with sender,
    two bound peers, one detached member, and one retired identity, commit each
    participant-authored source; persist exactly the two peers, sorted and
-   duplicate-free. Later detach/attach does not rewrite the row. A system marker
+   duplicate-free. Later detach/attach does not rewrite the batch. A system marker
    includes its live target.
 7. **`outbox_row_is_impossible_before_producing_flush`**: gate operation append
    and flush independently. Before producing flush there is no outbox append,
    wake, encoded push, or response. After it, gate the outbox append/flush; no
    push is eligible before outbox flush.
 8. **`postcommit_outbox_failure_is_repaired_not_rolled_back`**: inject barrier-2
-   append and flush failures. The v3 operation remains durable, no push is
-   published, and cold first touch derives one byte-identical missing outbox row
-   before authority publication. Exact retry receives the correlated Unit 1
-   terminal answer.
-9. **`uncertain_duplicate_outbox_append_is_idempotent_only_by_exact_bytes`**:
-   replay an exact source twice and get one logical row; alter recipient/body/
-   sequence and receive typed corruption.
+   append and flush failures. The v2 operation remains durable, no push is
+   published, and cold first touch derives one byte-identical missing source
+   batch before authority publication. Exact retry receives the correlated Unit
+   1 terminal answer.
+9. **`uncertain_duplicate_source_batch_is_idempotent_only_by_exact_bytes`**:
+   replay one exact whole batch twice and get one logical batch; alter record
+   count/order, any record's recipient/body/sequence, sender, or charge and
+   receive typed corruption.
 
-### Layer 2 — retention, replay, and migration
+### Layer 2 — retention, replay, and extension restore
 
 10. **`ack_through_reclaims_only_that_recipient_prefix`**: fan one payload to A,
     B, and C. A's ack through N releases only A's obligations through N; the
@@ -533,15 +654,22 @@ readiness markers, or socket readability.
     reconnect again before ack and observe duplicates in the same order.
 13. **`marker_ack_requires_exact_offered_binding_testimony`**: before offer,
     wrong marker, wrong binding epoch, and stale generation remain typed
-    refusals. Exact offered marker on the current binding commits, persists,
-    replays, and advances the protocol owner.
-14. **`participant_v2_and_mixed_streams_refuse_loudly_under_v3`**: literal v2,
-    missing-version, unsupported-version, and mixed v2/v3 participant streams
-    fail with the exact typed version/corruption result before owner/outbox/push
-    publication. All-v3 and empty streams restore.
-15. **`outbox_schema_version_refuses_before_projection`**: equivalent literal
-    old/unknown/mixed tests for the new outbox stream. No serde default fixture
-    may pass.
+    refusals. Exact offered marker on the current binding commits one
+    `MarkerAckCommitted` extension row, replays through the same selector and
+    stored audit, and advances the protocol owner without producing a push.
+14. **Extension/base replay trio:**
+    - **`literal_v2_base_streams_continue_to_restore`**: empty and literal v2
+      participant streams restore unchanged; no participant schema diff exists.
+    - **`malformed_unknown_and_mixed_unit2_extension_rows_refuse_before_publication`**:
+      malformed, unknown-kind, missing-version, unsupported-version, and mixed
+      Unit 2 extension rows refuse before authority, outbox, or push publication.
+    - **`marker_ack_and_base_row_interleavings_replay_exactly_and_totally`**:
+      place marker commits before, between, and tied at base boundaries; physical
+      extension sequence resolves ties, every audit is checked, and each merged
+      replay exactly matches live frontier/outbox state.
+15. **`extension_schema_version_refuses_before_projection`**: literal missing,
+    old, unknown, and mixed schema fixtures for the extension/outbox stream fail
+    before projection. No serde default fixture may pass.
 
 ### Layer 3 — scheduler, pressure, and transport parity
 
@@ -552,9 +680,10 @@ readiness markers, or socket readability.
 17. **`held_head_precedes_later_sequence_after_writable_ready`**: force holdback
     of N, add N+1, fire writable readiness, and observe N then N+1. Duplicate
     READY markers do not duplicate a volatile offer within one binding.
-18. **`push_slice_budget_and_round_robin_are_exact`**: with more work than the
-    signed budget, assert the exact per-slice cap and one-per-ready-conversation
-    first pass; readiness deterministically schedules the remainder.
+18. **`push_slice_budget_and_round_robin_are_exact`**: mix participant deliveries
+    and observer pushes beyond the signed budget; assert their shared exact
+    per-slice cap and one-per-ready-conversation first pass. Observer work gets no
+    second allowance; readiness deterministically schedules the remainder.
 19. **`tcp_and_websocket_publish_identical_participant_bytes`**: run the same
     outbox through both `DeliverySink` implementations and compare complete
     participant bytes and SDK-decoded values. Neither uses `Frame::Deliver` nor
@@ -584,11 +713,35 @@ readiness markers, or socket readability.
     mapped record shape, stop/join/drop every client, supervisor, service, and
     store owner, reopen the same disk, reattach normally, and receive each
     unacknowledged recipient obligation in order. Pair wire observations with
-    decoded v3/outbox rows.
-25. **`observer_progressed_fires_after_advance_flush`**: arm recovery on a real
-    connection, gate observer Advance append/flush, and prove the exact
-    `ObserverProgressed` is absent before flush and delivered once after; a dead
-    arm owner is not broadcast and reattach uses the normal recovery handshake.
+    decoded v2 base and extension/outbox rows.
+25. **`observer_progressed_fires_after_source_and_advance_flushes`**: arm recovery
+    on a real connection and gate the participant source and observer Advance
+    append/flush barriers independently. Source failure creates neither Advance
+    nor push. Source flush followed by Advance append/flush failure publishes no
+    push; stop/reopen then reconciles the missing Advance before authority or
+    handshake publication. Advance flush followed by a pre-handoff process cut
+    makes the reattached handshake report progressed. The live path delivers the
+    exact fired payload once; a dead arm owner is never broadcast, and
+    advance-first/reattach-first outcomes follow the observer-mutex ordering.
+26. **`restart_between_delivery_and_ack_accepts`**: offer a committed obligation,
+    restart and cold-reconcile the outbox before any duplicate offer, then submit
+    the truthful cumulative ack. Durable-obligation testimony accepts and
+    commits it although volatile-offered state is gone.
+27. **`ack_after_reattach_before_replay_accepts_after_reconciliation`**: offer an
+    obligation on epoch E, reattach at E+1, gate replay before the first offer on
+    E+1, and submit the ack. Completed first-touch reconciliation supplies the
+    durable obligation and the current binding authorizes acceptance.
+28. **`endpoint_with_no_committed_obligation_refuses`**: construct internal
+    non-obligation gaps and prove an ack may skip them only when it ends on a
+    committed recipient obligation; ending on a sender-excluded or
+    non-recipient sequence is exactly `AckGap`.
+29. **`leave_discharges_the_left_identitys_obligations_and_bounds_live_payload`**:
+    fill obligations to B; let B leave unacked; assert B's obligations discharge
+    at the Leave extension commit, live payload returns under the signed bound,
+    and append-only source/audit rows remain. Repeat fill → leave-unacked →
+    reclaim → refill across permanent identities and assert the measured maximum
+    never exceeds the ratified
+    `checked(retained_capacity_bytes + measured fixed metadata term)` shape.
 
 ### Regressions and full gates
 
@@ -618,12 +771,15 @@ mandatory.
 - **WALL-YG-560:** never merge, rebase, cherry-pick, or pull. Build and review
   from the named pin using ordinary commits only.
 - **WALL-NO-PUBLISH:** no publish and no tag; publication remains lead-gated.
-- **WALL-DURABLE-AFTER-COMMIT:** no outbox production row before or inside the
-  producing operation barrier; no push eligibility before the outbox flush.
+- **WALL-DURABLE-AFTER-COMMIT:** no outbox source batch before or inside the
+  producing operation barrier; no push eligibility before the extension flush.
 - **WALL-RECIPIENT-SNAPSHOT:** persist live bound recipients minus sender exactly
-  once under the conversation lock; never recompute the historical set at send.
+  once per projected record under the conversation lock; never recompute the
+  historical set at send.
 - **WALL-ACK-IS-RECEIPT:** offered/enqueued/written is never receipt. Only the
-  committed ParticipantAck frontier reclaims participant delivery.
+  committed ParticipantAck frontier proves receipt and reclaims by ack; the
+  ratification-flagged permanent-Leave rule separately discharges the retired
+  identity's forever-unreplayable obligations.
 - **WALL-HOLDBACK:** current outbound pressure holds a recipient's head. No
   overflow cancellation, participant shed, synthetic answer, or pressure-driven
   connection teardown.
@@ -639,10 +795,11 @@ mandatory.
 - **WALL-TYPED-REFUSAL:** protocol-legal ack/marker/capacity outcomes remain
   sealed typed responses. Schema/config/invariant faults fail loudly without a
   fabricated value.
-- **WALL-LOUD-MIGRATION:** participant v2→v3 and any observer v1→v2 change reject
-  old/mixed rows deterministically; outbox schema mismatches do likewise. No
-  default, alias, compatibility decoder, or new stream key used to hide old
-  participant rows.
+- **WALL-LOUD-MIGRATION:** Unit 2 extension/outbox schema mismatches and any
+  actual observer schema change reject old, unknown, malformed, or mixed rows
+  deterministically before publication. No default, alias, compatibility
+  decoder, or alternate stream key hides incompatible extension/observer rows;
+  the participant base stream remains v2.
 - **WALL-NO-PANIC:** no production `unwrap`, `expect`, or `panic`; no lint
   suppression, ignored test, silent fallback, sleep-based proof, polling loop,
   or periodically scanned producer. Pump and replay are request/readiness/event
@@ -652,15 +809,16 @@ mandatory.
 - **WALL-NO-DEFERRALS:** every normative item in this brief lands or the build
   stops with exact contradictory bytes/input. No TODO, compatibility shim, or
   narrowed acceptance claim substitutes for it.
-- **WALL-PRE-REVIEW:** before build dispatch, an independent reviewer checks
-  every anchor and universal claim against `2bf71c4`, checks the D3/G1/G2 crash
-  cuts, and records amendments in this file.
+- **WALL-PRE-REVIEW:** r3 folds the completed independent review of every anchor,
+  universal claim, and D3/G1/G2 crash cut against `2bf71c4`. Any later build
+  drift is rechecked and recorded here before dispatch.
 
 ## Out of scope
 
 - Any change to the frame two-request snapshot semantics.
-- A v2→v3 participant-log converter, dual decoder, silent migration, or physical
-  compactor not supported by the landed `DurableStore`; loud refusal and logical
+- Any participant base-log schema change, converter, dual decoder, or silent
+  migration; the participant stream remains literal v2. A physical compactor is
+  also outside the landed `DurableStore`; typed extension refusal and logical
   reclamation are in scope.
 - Subscription `Frame::Deliver` semantics, subscription credit/ack/resume,
   schema negotiation, or its shed policy. Participant push only reuses the
@@ -674,35 +832,42 @@ mandatory.
 
 ## Open questions for the fold
 
-These require an explicit seat ruling before dispatch; none changes a ruled D3
-clause:
+Only questions 1 and 4 remain open, both for signatures. Questions 2, 3, and 5
+are RULED and recorded here so build dispatch has one status ledger.
 
-1. **Config signatures:** Tom and Annabel must sign or veto every recommended
-   value/formula and its stated worst-case cost in section 9.
-2. **Observer schema:** pre-review must prove whether the existing live
-   connection registration plus protocol fired arm survives every relevant
-   crash cut. If not, the fold must select observer v2 with explicit durable arm
-   target; broadcast and default target are forbidden.
-3. **MarkerAck v3 row body — RULED at fold (r2):** `MarkerAckCommitted`
-   persists the same census discipline as the landed `RecordAdmission` v2 row
-   (`production/log.rs:250-296`): the exact canonical `MarkerAck` request, the
-   receiving binding epoch, the offered-marker delivery witness (the marker's
-   conversation `delivery_seq` plus the delivered binding epoch), and the
-   complete post-transition audit that cold replay byte-checks through the
-   same authoritative selector. No derived-only fields; replay re-runs the
-   selector and checks every stored audit, exactly as RecordAdmission replay
-   does at `production/ops_frontier.rs:287-385`. Representation is closed;
-   the build implements this shape.
-4. **Canonical outbox encoding:** sign the measured fixed metadata term after
-   the build prototype reports exact bytes for every record kind and maximum
-   recipient vector. No guessed byte constant may enter the implementation.
-   The checked-assertion rider (section 9) is the enforcement: measured bytes
-   printed for signoff, STOP on any invalidated recommendation.
-5. **Ack availability basis (r2, from the fold):** pre-review selects between
-   the volatile-offered-prefix and durable-obligation-prefix bases for
-   `contiguously_available_through` (section 7) with an explicit crash-cut
-   argument; the seat's lean is durable-obligation-prefix. The answer lands in
-   this file before build dispatch.
+1. **Config signatures — OPEN:** Tom and Annabel must sign or veto every
+   recommended value/formula and its stated worst-case cost in section 9.
+2. **Observer targeting — RULED (pre-review + seat):** observer v1 stands and no
+   durable arm target is added. A persisted connection incarnation cannot name a
+   surviving socket; the live weak association and serialized crash cuts in
+   section 8 are sufficient, and progressed handshakes recover durable Advance.
+3. **MarkerAck body/home — RULED, home updated by r3:** the r2 body stands.
+   `MarkerAckCommitted` persists the same census discipline as the landed
+   `RecordAdmission` v2 row (`production/log.rs:250-296`): exact canonical
+   request, receiving binding epoch, offered-marker delivery witness, and
+   complete post-transition audit, with no derived-only fields. R3 places it in
+   the schema-v1 Unit 2 extension stream with `{ base_log_head,
+   extension_sequence }`; replay re-runs the authoritative selector and checks
+   every audit (`production/ops_frontier.rs:287-385`). It does not alter the v2
+   participant base enum.
+4. **Canonical outbox encoding — OPEN:** Tom and Annabel sign the measured fixed
+   metadata term after the build prototype reports exact bytes for every record
+   kind and maximum recipient vector. No guessed byte constant may enter the
+   implementation. Section 9's checked-assertion rider prints measured bytes and
+   STOPS on any invalidated recommendation.
+5. **Ack availability basis — RULED (pre-review + seat concur):** the basis is
+   the reconciled durable-obligation prefix, with sealed endpoint-membership
+   testimony as section 7 specifies. Burden allocation is recorded: the
+   volatile-offered candidate had to preserve truthful receipt testimony across
+   restart and reattach-before-replay, and failed because its only fact is erased;
+   the durable candidate is grounded by the participant source barrier, while
+   the ParticipantAck itself supplies receipt testimony and a non-obligation
+   endpoint still returns `AckGap`.
+
+**D3-4 ratification flag (not an open semantic branch):** the seat rules that
+permanent Leave discharges the left identity's outstanding obligations. Waffles
+and Tom must ratify that interpretation and the corresponding section 9 bound;
+the rejected conservative formula remains printed there for the decision.
 
 ## Revision record
 
@@ -710,3 +875,4 @@ clause:
 |---|---|---|---|
 | r1 | 2026-07-18 | implementation specialist | First pinned Unit 2 build brief: ruled D3 durable post-commit outbox, recipient snapshot, ordered readiness-driven holdback pump, ParticipantAck retention/reclaim, reattach replay, marker testimony, transport/SDK integration, loud v3 migration, layered acceptance, signed derived values, and explicit walls/out-of-scope. |
 | r2 | 2026-07-18 | seat fold (Hermes Crumpet) | Fold pass on r1 with spot anchors re-verified at `2bf71c4` (ServerPush enum, MarkerAck factual-empty seam, eight-kind v2 census, signed config fields, `DELIVERY_SLICE_BUDGET`). Ruled Q3: `MarkerAckCommitted` row body fixed to the RecordAdmission census discipline. Ratified the participant v2→v3 loud migration as a D3-7 consequence (flagged for Tom/Annabel signoff). Opened Q5: `contiguously_available_through` basis (volatile-offered vs durable-obligation prefix) routed to pre-review with the seat's lean recorded; section 7 amended to carry both candidates. |
+| r3 | 2026-07-18 | implementation specialist, pre-review fold under seat rulings | Folded all five major findings and the note. Replaced one-record Produced with source batches; reversed r2's v3 ratification after the adversarial independent-stream check and placed the ruled MarkerAck body in the Unit 2 extension stream; closed Q2 on observer-v1 live targeting and Q5 on durable-obligation testimony; recorded the discharge-on-Leave seat ruling and flagged it for Waffles/Tom ratification with both bounds visible; vendored the seat-verified frame excerpt. |
