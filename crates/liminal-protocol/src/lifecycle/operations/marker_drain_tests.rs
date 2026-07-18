@@ -3,23 +3,71 @@
 use alloc::{vec, vec::Vec};
 
 use crate::{
-    algebra::WideResourceVector,
+    algebra::{ResourceVector, WideResourceVector},
     outcome::CandidatePhase,
     wire::{BindingEpoch, ConnectionIncarnation, Generation},
 };
 
 use super::super::{
-    AdmissionOrder, BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore, ClosureDebt,
-    ClosureState, FrontierBinding, FrontierParticipant, ImmutableOrderCandidateMajorRestore,
-    ImmutableSequenceCandidate, MarkerCandidateAuthority, MarkerProvenance, MarkerSequenceOwner,
-    MovableOrderClaim, MovableSequenceClaim, ObserverProjection, OrderClaimFrontierRestore,
-    OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, PhysicalCompaction,
-    RecoverySequenceReserve, RetainedCausalRecord, RetainedCausalRecordKind,
-    SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner, SequenceLedger,
-    SequenceProductRangesRestore, StoredEdge, TerminalProductRangeRestore,
+    AdmissionOrder, BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore, ClosureAccounting,
+    ClosureDebt, ClosureState, FrontierBinding, FrontierParticipant,
+    ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate, MarkerCandidateAuthority,
+    MarkerProvenance, MarkerSequenceOwner, MovableOrderClaim, MovableSequenceClaim,
+    ObserverProjection, OrderClaimFrontierRestore, OrderClaims, OrderDirectOwner, OrderHigh,
+    OrderLedger, PhysicalCompaction, RecoverySequenceReserve, RetainedCausalRecord,
+    RetainedCausalRecordKind, SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner,
+    SequenceLedger, SequenceProductRangesRestore, StoredEdge, TerminalProductRangeRestore,
     storage::{MarkerDeliveryRestore, StorageRestoreError},
 };
-use super::{MarkerDrainError, drain_next_marker};
+use super::{
+    MarkerDrainCommit, MarkerDrainError, RetainedRecordCharge,
+    drain_next_marker as drain_next_marker_owned,
+};
+
+fn drain_next_marker(
+    frontiers: ClaimFrontiers,
+    closure: ClosureState,
+) -> Result<MarkerDrainCommit, MarkerDrainError> {
+    let retained_charges = frontiers
+        .retained_records()
+        .iter()
+        .map(|record| {
+            RetainedRecordCharge::new(
+                record.delivery_seq,
+                record.admission_order,
+                ResourceVector::new(1, 1),
+            )
+        })
+        .collect();
+    let marker_charge = frontiers
+        .sequence()
+        .immutable_candidates()
+        .first()
+        .map_or_else(
+            || RetainedRecordCharge::new(0, marker_key(), ResourceVector::new(1, 1)),
+            |candidate| {
+                RetainedRecordCharge::new(
+                    candidate.delivery_seq(),
+                    candidate.admission_order(),
+                    ResourceVector::new(1, 1),
+                )
+            },
+        );
+    let accounting = ClosureAccounting::try_new(
+        closure,
+        1,
+        1,
+        0,
+        0,
+        ResourceVector::default(),
+        WideResourceVector::new(1, 1),
+        ResourceVector::new(100, 100),
+        0,
+        2,
+    )
+    .expect("marker drain accounting fixture is valid");
+    drain_next_marker_owned(frontiers, accounting, retained_charges, marker_charge)
+}
 
 const PARTICIPANT_ID: u64 = 0;
 const CONVERSATION_ID: u64 = 91;

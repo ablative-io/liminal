@@ -1512,6 +1512,12 @@ impl ValidatedMarkerRecord {
         self.record.delivery_seq
     }
 
+    /// Returns the immutable retained-row causal key.
+    #[must_use]
+    pub const fn admission_order(&self) -> super::AdmissionOrder {
+        self.record.admission_order
+    }
+
     /// Returns immutable marker provenance.
     #[must_use]
     pub const fn provenance(&self) -> MarkerProvenance {
@@ -1874,6 +1880,21 @@ fn allocate_leave_sequence_range(
     Ok(start)
 }
 
+/// Protocol-internal failure while deriving a live frontier from a typed lifecycle commit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::lifecycle) enum LiveFrontierTransitionError {
+    /// The typed commit names another conversation or participant history.
+    Authority,
+    /// An immutable candidate or recovery interval must be handled by its dedicated transition.
+    Precedence,
+    /// The commit's retained rows do not immediately follow the current durable high watermark.
+    RecordPosition,
+    /// Checked claim relocation exceeded the fixed-width sequence or order domain.
+    Exhausted,
+    /// Derived exact owners disagree with the protocol-produced aggregate ledgers.
+    ResultingFrontier,
+}
+
 impl ClaimFrontiers {
     /// Constructs the complete initial frontier directly from one admitted
     /// enrollment operation and its exact encoded `Attached` charge.
@@ -2113,6 +2134,98 @@ impl ClaimFrontiers {
     #[cfg(test)]
     pub(in crate::lifecycle) fn cross_counter_valid_for_test(&self) -> bool {
         validate_cross_counter(&self.sequence, &self.order).is_ok()
+    }
+
+    /// Applies one protocol-normalized live lifecycle transition.
+    ///
+    /// Only sibling lifecycle operations can call this seam. They derive the
+    /// identities, rows, and aggregate ledgers from sealed typed commits; no
+    /// storage or server caller can provide raw frontier components.
+    pub(in crate::lifecycle) fn apply_live_transition(
+        self,
+        active_identities: Vec<FrontierParticipant>,
+        appended_records: &[RetainedCausalRecord],
+        sequence_ledger: SequenceLedger,
+        order_ledger: OrderLedger,
+    ) -> Result<Self, Box<(Self, LiveFrontierTransitionError)>> {
+        if !self.sequence.immutable_candidates.is_empty()
+            || self.sequence.recovery.is_some()
+            || !self.order.immutable_candidates.is_empty()
+            || self.order.recovery.is_some()
+        {
+            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+        }
+        let Ok(active) = ActiveIdentityRanks::try_new(
+            active_identities,
+            sequence_ledger.high_watermark(),
+            self.identity_slot_limit,
+        ) else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        let first_sequence = self.sequence.ledger.high_watermark().checked_add(1);
+        if first_sequence.is_none_or(|first| {
+            appended_records.iter().enumerate().any(|(index, record)| {
+                u64::try_from(index)
+                    .ok()
+                    .and_then(|offset| first.checked_add(offset))
+                    != Some(record.delivery_seq)
+            })
+        }) || appended_records
+            .last()
+            .is_some_and(|record| record.delivery_seq != sequence_ledger.high_watermark())
+        {
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::RecordPosition,
+            )));
+        }
+        let (sequence, order) =
+            match rebuild_unreserved_frontiers(&active, sequence_ledger, order_ledger) {
+                Ok(frontiers) => frontiers,
+                Err(error) => return Err(Box::new((self, error))),
+            };
+        let Self {
+            conversation_id,
+            identity_slot_limit,
+            retained_floor,
+            mut retained_records,
+            marker_records,
+            ..
+        } = self;
+        retained_records.extend_from_slice(appended_records);
+        Ok(Self {
+            conversation_id,
+            active_identities: active,
+            identity_slot_limit,
+            retained_floor,
+            retained_records,
+            marker_records,
+            sequence,
+            order,
+        })
+    }
+
+    /// Applies an acknowledgement's exact cursor/binding facts without exposing
+    /// the participant vector as a server mutation API.
+    pub(in crate::lifecycle) fn apply_live_identity(
+        mut self,
+        participant: FrontierParticipant,
+    ) -> Result<Self, Box<(Self, LiveFrontierTransitionError)>> {
+        let Some(current) = self
+            .active_identities
+            .participants
+            .iter_mut()
+            .find(|current| current.participant_index == participant.participant_index)
+        else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        if participant.cursor < current.cursor
+            || participant.cursor > self.sequence.ledger.high_watermark()
+        {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        }
+        *current = participant;
+        Ok(self)
     }
 
     /// Consumes one complete validated frontier into the ordinary record fixed
@@ -2816,6 +2929,164 @@ impl ClaimFrontiers {
             frontiers: self,
         })
     }
+}
+
+fn rebuild_unreserved_frontiers(
+    active: &ActiveIdentityRanks,
+    sequence_ledger: SequenceLedger,
+    order_ledger: OrderLedger,
+) -> Result<(SequenceClaimFrontier, OrderClaimFrontier), LiveFrontierTransitionError> {
+    let terminal_owners: Vec<_> = active
+        .participants()
+        .iter()
+        .filter_map(|participant| match participant.binding() {
+            FrontierBinding::Bound(binding_epoch) => Some(BindingTerminalOwner {
+                participant_index: participant.participant_index(),
+                binding_epoch,
+            }),
+            FrontierBinding::Detached(_) => None,
+        })
+        .collect();
+    let live_count = active.len();
+    let terminal_count =
+        u64::try_from(terminal_owners.len()).map_err(|_| LiveFrontierTransitionError::Exhausted)?;
+    let sequence_claims = sequence_ledger.claims();
+    let order_claims = order_ledger.claims();
+    if sequence_claims.live_members() != live_count
+        || sequence_claims.binding_terminals() != terminal_count
+        || sequence_claims.markers() != 0
+        || sequence_claims.recovery() != RecoverySequenceReserve::None
+        || order_claims.active_binding_terminals() != terminal_count
+        || order_claims.membership_exits() != live_count
+        || order_claims.recovery_operation()
+        || order_claims.recovery_replacement_terminal()
+    {
+        return Err(LiveFrontierTransitionError::ResultingFrontier);
+    }
+
+    let sequence = rebuild_unreserved_sequence(active, &terminal_owners, sequence_ledger)?;
+    let order = rebuild_unreserved_order(active, &terminal_owners, order_ledger)?;
+    validate_cross_counter(&sequence, &order)
+        .map_err(|_| LiveFrontierTransitionError::ResultingFrontier)?;
+    Ok((sequence, order))
+}
+
+fn rebuild_unreserved_sequence(
+    active: &ActiveIdentityRanks,
+    terminal_owners: &[BindingTerminalOwner],
+    sequence_ledger: SequenceLedger,
+) -> Result<SequenceClaimFrontier, LiveFrontierTransitionError> {
+    let live_count = active.len();
+    let mut sequence_cursor = sequence_ledger
+        .high_watermark()
+        .checked_add(1)
+        .ok_or(LiveFrontierTransitionError::Exhausted)?;
+    let mut movable_sequence = Vec::new();
+    for terminal in terminal_owners {
+        movable_sequence.push(MovableSequenceClaim {
+            delivery_seq: take_live_sequence(&mut sequence_cursor, 1)?,
+            owner: SequenceDirectOwner::BindingTerminal(*terminal),
+        });
+    }
+    for participant in active.participants() {
+        movable_sequence.push(MovableSequenceClaim {
+            delivery_seq: take_live_sequence(&mut sequence_cursor, 1)?,
+            owner: SequenceDirectOwner::MembershipExit {
+                participant_index: participant.participant_index(),
+            },
+        });
+    }
+    let mut terminal_products = Vec::new();
+    for terminal in terminal_owners {
+        terminal_products.push(TerminalProductRange {
+            start: take_live_sequence(&mut sequence_cursor, live_count)?,
+            length: live_count,
+            terminal: *terminal,
+        });
+    }
+    let exit_product_length = live_count.saturating_sub(1);
+    let mut exit_products = Vec::new();
+    for participant in active.participants() {
+        exit_products.push(ExitProductRange {
+            start: take_live_sequence(&mut sequence_cursor, exit_product_length)?,
+            length: exit_product_length,
+            exit_participant: participant.participant_index(),
+        });
+    }
+    let sequence_end = u128::from(sequence_ledger.high_watermark())
+        .checked_add(sequence_ledger.required_reserve())
+        .and_then(|value| value.checked_add(1))
+        .ok_or(LiveFrontierTransitionError::Exhausted)?;
+    if u128::from(sequence_cursor) != sequence_end {
+        return Err(LiveFrontierTransitionError::ResultingFrontier);
+    }
+    Ok(SequenceClaimFrontier {
+        ledger: sequence_ledger,
+        movable_claims: movable_sequence,
+        immutable_candidates: Vec::new(),
+        products: SequenceProductRanges {
+            live_times_terminal: terminal_products,
+            live_times_replacement_terminal: None,
+            other_live_times_exit: exit_products,
+        },
+        recovery: None,
+    })
+}
+
+fn rebuild_unreserved_order(
+    active: &ActiveIdentityRanks,
+    terminal_owners: &[BindingTerminalOwner],
+    order_ledger: OrderLedger,
+) -> Result<OrderClaimFrontier, LiveFrontierTransitionError> {
+    let order_claims = order_ledger.claims();
+    let order_start = order_frontier_start(order_ledger.high());
+    let mut order_cursor =
+        u64::try_from(order_start).map_err(|_| LiveFrontierTransitionError::Exhausted)?;
+    let mut movable_order = Vec::new();
+    for terminal in terminal_owners.iter().copied() {
+        movable_order.push(MovableOrderClaim {
+            transaction_order: take_live_order(&mut order_cursor)?,
+            owner: OrderDirectOwner::ActiveBindingTerminal(terminal),
+        });
+    }
+    for participant in active.participants() {
+        movable_order.push(MovableOrderClaim {
+            transaction_order: take_live_order(&mut order_cursor)?,
+            owner: OrderDirectOwner::MembershipExit {
+                participant_index: participant.participant_index(),
+            },
+        });
+    }
+    if u128::from(order_cursor) != order_start + order_claims.total() {
+        return Err(LiveFrontierTransitionError::ResultingFrontier);
+    }
+    Ok(OrderClaimFrontier {
+        ledger: order_ledger,
+        movable_claims: movable_order,
+        immutable_candidates: Vec::new(),
+        recovery: None,
+    })
+}
+
+fn take_live_sequence(
+    cursor: &mut DeliverySeq,
+    length: u64,
+) -> Result<DeliverySeq, LiveFrontierTransitionError> {
+    let start = *cursor;
+    *cursor = cursor
+        .checked_add(length)
+        .ok_or(LiveFrontierTransitionError::Exhausted)?;
+    Ok(start)
+}
+
+fn take_live_order(
+    cursor: &mut TransactionOrder,
+) -> Result<TransactionOrder, LiveFrontierTransitionError> {
+    let value = *cursor;
+    *cursor = cursor
+        .checked_add(1)
+        .ok_or(LiveFrontierTransitionError::Exhausted)?;
+    Ok(value)
 }
 
 fn ordinary_unaccepted_marker_anchors(frontiers: &ClaimFrontiers) -> Vec<DeliverySeq> {

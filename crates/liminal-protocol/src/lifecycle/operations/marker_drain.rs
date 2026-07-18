@@ -6,10 +6,14 @@
 //! resulting frontiers, exact current closure state, planned marker successor,
 //! and retained-record state.
 
+use alloc::vec::Vec;
+
 use super::super::{
-    ClaimFrontiers, ClosureState, Event, MarkerDelivery, ObserverProjection, StoredEdge,
+    ClaimFrontiers, ClosureAccounting, ClosureState, Event, MarkerDelivery, ObserverProjection,
+    StoredEdge,
     claim_frontier::{MarkerDrainCoreError, ValidatedMarkerRecord},
 };
+use super::RetainedRecordCharge;
 
 /// Exact invariant fault selected by mandatory marker drain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +34,12 @@ pub enum MarkerDrainError {
     ResultingLedger,
     /// Frontier core returned candidate and retained-record authorities that disagree.
     AuthorityMismatch,
+    /// Canonical marker-row charge does not name the selected retained row.
+    MarkerChargeKey,
+    /// Every retained durable row has exactly one entry of charge.
+    MarkerEntryCharge,
+    /// The successor closure accounting failed validation.
+    ResultingAccounting,
 }
 
 /// Complete atomic marker-drain commit.
@@ -50,7 +60,8 @@ pub enum MarkerDrainError {
 #[derive(Debug, PartialEq, Eq)]
 pub struct MarkerDrainCommit {
     frontiers: ClaimFrontiers,
-    closure: ClosureState,
+    closure_accounting: ClosureAccounting,
+    retained_charges: Vec<RetainedRecordCharge>,
     marker_successor: StoredEdge,
     record: ValidatedMarkerRecord,
 }
@@ -65,7 +76,19 @@ impl MarkerDrainCommit {
     /// Returns the exact closure state after the append occurrence.
     #[must_use]
     pub const fn closure(&self) -> ClosureState {
-        self.closure
+        self.closure_accounting.state()
+    }
+
+    /// Returns the complete closure accounting after the append occurrence.
+    #[must_use]
+    pub const fn closure_accounting(&self) -> ClosureAccounting {
+        self.closure_accounting
+    }
+
+    /// Borrows exact keyed charges for the complete retained suffix.
+    #[must_use]
+    pub fn retained_charges(&self) -> &[RetainedRecordCharge] {
+        &self.retained_charges
     }
 
     /// Returns the exact marker edge selected once any strict OP/PC completes.
@@ -83,9 +106,21 @@ impl MarkerDrainCommit {
     /// executable validation token remains coupled to this commit and is
     /// deliberately consumed here rather than returned as a fourth value.
     #[must_use]
-    pub fn into_parts(self) -> (ClaimFrontiers, ClosureState, StoredEdge) {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ClaimFrontiers,
+        ClosureAccounting,
+        Vec<RetainedRecordCharge>,
+        StoredEdge,
+    ) {
         self.record.consume();
-        (self.frontiers, self.closure, self.marker_successor)
+        (
+            self.frontiers,
+            self.closure_accounting,
+            self.retained_charges,
+            self.marker_successor,
+        )
     }
 
     /// Extracts the occurrence token for crate-internal adversarial tests.
@@ -112,7 +147,9 @@ impl MarkerDrainCommit {
 /// sequence ledger.
 pub fn drain_next_marker(
     frontiers: ClaimFrontiers,
-    current_closure: ClosureState,
+    current_accounting: ClosureAccounting,
+    mut retained_charges: Vec<RetainedRecordCharge>,
+    marker_charge: RetainedRecordCharge,
 ) -> Result<MarkerDrainCommit, MarkerDrainError> {
     let core = frontiers.drain_next_marker_core().map_err(map_core_error)?;
     let (frontiers, candidate, record) = core.into_parts();
@@ -130,10 +167,44 @@ pub fn drain_next_marker(
     {
         return Err(MarkerDrainError::AuthorityMismatch);
     }
-    let closure = apply_marker_append(current_closure, candidate_sequence)?;
+    if marker_charge.delivery_seq() != record.delivery_seq()
+        || marker_charge.admission_order() != record.admission_order()
+    {
+        return Err(MarkerDrainError::MarkerChargeKey);
+    }
+    if marker_charge.encoded_charge().entries != 1 {
+        return Err(MarkerDrainError::MarkerEntryCharge);
+    }
+    let closure = apply_marker_append(current_accounting.state(), candidate_sequence)?;
+    let closure_accounting = ClosureAccounting::try_new(
+        closure,
+        current_accounting.marker_capacity_credits(),
+        current_accounting.marker_anchors(),
+        current_accounting.edge_sequence_claims(),
+        current_accounting.edge_order_position_claims(),
+        current_accounting.edge_k_remaining(),
+        current_accounting.baseline(),
+        current_accounting.configured_cap(),
+        current_accounting.episode_churn_used(),
+        current_accounting.episode_churn_limit(),
+    )
+    .map_err(|_| MarkerDrainError::ResultingAccounting)?;
+    retained_charges.push(marker_charge);
+    if retained_charges.len() != frontiers.retained_records().len()
+        || !retained_charges
+            .iter()
+            .zip(frontiers.retained_records())
+            .all(|(charge, retained)| {
+                charge.delivery_seq() == retained.delivery_seq
+                    && charge.admission_order() == retained.admission_order
+            })
+    {
+        return Err(MarkerDrainError::MarkerChargeKey);
+    }
     Ok(MarkerDrainCommit {
         frontiers,
-        closure,
+        closure_accounting,
+        retained_charges,
         marker_successor,
         record,
     })

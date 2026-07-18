@@ -1,17 +1,18 @@
 use std::vec;
 
 use liminal_protocol::{
+    algebra::{ResourceVector, WideResourceVector},
     lifecycle::{
         AdmissionOrder, BindingState, BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore,
-        ClosureState, ExitProductRangeRestore, FrontierBinding, FrontierParticipant,
-        ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate, LiveMember,
-        MarkerCandidateAuthority, MarkerDelivery, MarkerProvenance, MarkerSequenceOwner,
-        MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore, OrderClaims,
-        OrderDirectOwner, OrderHigh, OrderLedger, PendingFinalization, PrepareLeaveAuthorityError,
-        PreparedLeaveAuthority, RecoverySequenceReserve, RetainedCausalRecord,
-        RetainedCausalRecordKind, SequenceClaimFrontierRestore, SequenceClaims,
-        SequenceDirectOwner, SequenceLedger, SequenceProductRangesRestore, StoredEdge,
-        TerminalProductRangeRestore, drain_next_marker,
+        ClosureAccounting, ClosureState, ExitProductRangeRestore, FrontierBinding,
+        FrontierParticipant, ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate,
+        LiveMember, MarkerCandidateAuthority, MarkerDelivery, MarkerProvenance,
+        MarkerSequenceOwner, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore,
+        OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, PendingFinalization,
+        PrepareLeaveAuthorityError, PreparedLeaveAuthority, RecoverySequenceReserve,
+        RetainedCausalRecord, RetainedCausalRecordKind, RetainedRecordCharge,
+        SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner, SequenceLedger,
+        SequenceProductRangesRestore, StoredEdge, TerminalProductRangeRestore, drain_next_marker,
     },
     outcome::CandidatePhase,
     wire::{BindingEpoch, ConnectionIncarnation},
@@ -30,7 +31,42 @@ pub fn marker_delivery(
     )?;
     let frontiers = ClaimFrontiers::restore(frontier_restore, sequence_ledger, order_ledger)
         .map_err(|error| format!("planned marker frontier failed to restore: {error:?}"))?;
-    let commit = drain_next_marker(frontiers, ClosureState::Clear)
+    let retained_charges = frontiers
+        .retained_records()
+        .iter()
+        .map(|record| {
+            RetainedRecordCharge::new(
+                record.delivery_seq,
+                record.admission_order,
+                ResourceVector::new(1, 1),
+            )
+        })
+        .collect();
+    let candidate = frontiers
+        .sequence()
+        .immutable_candidates()
+        .first()
+        .copied()
+        .ok_or_else(|| "planned marker frontier had no candidate".to_owned())?;
+    let marker_charge = RetainedRecordCharge::new(
+        candidate.delivery_seq(),
+        candidate.admission_order(),
+        ResourceVector::new(1, 1),
+    );
+    let accounting = ClosureAccounting::try_new(
+        ClosureState::Clear,
+        1,
+        1,
+        0,
+        0,
+        ResourceVector::default(),
+        WideResourceVector::new(1, 1),
+        ResourceVector::new(100, 100),
+        0,
+        2,
+    )
+    .map_err(|error| format!("marker accounting fixture failed: {error:?}"))?;
+    let commit = drain_next_marker(frontiers, accounting, retained_charges, marker_charge)
         .map_err(|error| format!("planned marker failed to drain: {error:?}"))?;
     let successor = commit.marker_successor();
     let _persisted_parts = commit.into_parts();

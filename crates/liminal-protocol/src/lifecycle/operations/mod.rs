@@ -1,4 +1,5 @@
 mod enrollment_operation;
+mod live_frontier;
 mod marker_ack;
 mod marker_drain;
 mod marker_proof;
@@ -29,6 +30,11 @@ pub use enrollment_operation::{
     InitialEnrollmentOperationDecision, InitialEnrollmentOperationFault,
     InitialEnrollmentOperationInput, ReceiptDeadlineError, ReceiptDeadlines,
     apply_initial_enrollment,
+};
+pub use live_frontier::{
+    AttachFrontierCharges, LiveFrontierCommit, LiveFrontierError, LiveFrontierFailure,
+    LiveFrontierOwner, LiveFrontierResult, apply_attach_frontier, apply_detach_frontier,
+    apply_enrollment_frontier, apply_marker_ack_frontier, apply_participant_ack_frontier,
 };
 pub use marker_ack::{MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, apply_marker_ack};
 pub use marker_drain::{MarkerDrainCommit, MarkerDrainError, drain_next_marker};
