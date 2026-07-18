@@ -54,6 +54,8 @@ mod tests_capacity_attach;
 #[cfg(test)]
 mod tests_config_d2;
 #[cfg(test)]
+mod tests_history;
+#[cfg(test)]
 mod tests_leave;
 #[cfg(test)]
 mod tests_log_v2;
@@ -66,6 +68,8 @@ mod tests_receipts;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_receipts_enrollment;
+#[cfg(test)]
+mod tests_record_admission;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_residue;

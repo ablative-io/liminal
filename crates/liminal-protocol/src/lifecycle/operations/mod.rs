@@ -23,6 +23,8 @@ mod ordinary_record_projection_tests;
 #[cfg(test)]
 mod participant_ack_tests;
 #[cfg(test)]
+mod record_admission_selector_acceptance_tests;
+#[cfg(test)]
 mod record_admission_tests;
 
 pub use enrollment_operation::{

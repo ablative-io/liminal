@@ -284,7 +284,7 @@ impl ConversationAuthority {
             .next_order
             .max(row.left_transaction_order.saturating_add(1));
         self.next_seq = row.left_delivery_seq.saturating_add(1);
-        Ok(())
+        self.advance_log_head()
     }
 }
 

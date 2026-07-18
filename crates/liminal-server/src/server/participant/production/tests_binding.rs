@@ -478,7 +478,11 @@ fn semantic_conversations_beyond_connection_limit_refuse_with_exact_envelope()
 #[test]
 fn record_admission_lookup_rows_classify_typed_over_production_dispatch()
 -> Result<(), Box<dyn Error>> {
-    use liminal_protocol::wire::{DetachAttemptToken, DetachRequest, RecordAdmission};
+    use liminal_protocol::wire::{
+        CommonStaleAuthorityEnvelope, DetachAttemptToken, DetachRequest, NoBinding,
+        ParticipantReferenceEnvelope, ParticipantUnknown, RecordAdmission,
+        RecordAdmissionAttemptToken,
+    };
 
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
@@ -499,33 +503,61 @@ fn record_admission_lookup_rows_classify_typed_over_production_dispatch()
         return Err(format!("enrollment did not bind: {enrolled:?}").into());
     };
     let participant_id = receipt.participant_id();
-    let record = |participant: u64, generation: Generation| {
+    let record = |participant: u64, generation: Generation, token: u8| {
         ClientRequest::RecordAdmission(RecordAdmission {
             conversation_id,
             participant_id: participant,
             capability_generation: generation,
-            record_admission_attempt_token:
-                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([token; 16]),
             payload: vec![7, 7, 7],
         })
     };
 
     // Stage 4: unknown participant.
-    let unknown = dispatch(&handler, incarnation, record(55, Generation::ONE))?;
-    assert!(
-        matches!(unknown, ServerValue::ParticipantUnknown(_)),
-        "unknown participant must answer ParticipantUnknown: {unknown:?}"
+    let unknown = dispatch(&handler, incarnation, record(55, Generation::ONE, 0xA1))?;
+    let ServerValue::ParticipantUnknown(ParticipantUnknown {
+        request: ParticipantReferenceEnvelope::RecordAdmission(unknown_envelope),
+    }) = unknown
+    else {
+        return Err(
+            format!("unknown participant must answer ParticipantUnknown: {unknown:?}").into(),
+        );
+    };
+    assert_eq!(
+        unknown_envelope.record_admission_attempt_token,
+        RecordAdmissionAttemptToken::new([0xA1; 16])
     );
 
     // Stage 4: live identity, stale presented generation.
     let stale = dispatch(
         &handler,
         incarnation,
-        record(participant_id, generation(2)?),
+        record(participant_id, generation(2)?, 0xA2),
     )?;
-    assert!(
-        matches!(stale, ServerValue::StaleAuthority(_)),
-        "stale generation must answer StaleAuthority: {stale:?}"
+    let ServerValue::StaleAuthority(liminal_protocol::wire::StaleAuthority::Live {
+        request: CommonStaleAuthorityEnvelope::RecordAdmission(stale_envelope),
+        ..
+    }) = stale
+    else {
+        return Err(format!("stale generation must answer StaleAuthority: {stale:?}").into());
+    };
+    assert_eq!(
+        stale_envelope.record_admission_attempt_token,
+        RecordAdmissionAttemptToken::new([0xA2; 16])
+    );
+
+    // Authorized bound row: the exact token commits through the selector.
+    let committed = dispatch(
+        &handler,
+        incarnation,
+        record(participant_id, Generation::ONE, 0xA3),
+    )?;
+    let ServerValue::RecordCommitted(committed) = committed else {
+        return Err(format!("authorized record must commit: {committed:?}").into());
+    };
+    assert_eq!(
+        committed.request().record_admission_attempt_token,
+        RecordAdmissionAttemptToken::new([0xA3; 16])
     );
 
     // Stage 5: authorized identity without a current binding.
@@ -543,11 +575,17 @@ fn record_admission_lookup_rows_classify_typed_over_production_dispatch()
     let unbound = dispatch(
         &handler,
         incarnation,
-        record(participant_id, Generation::ONE),
+        record(participant_id, Generation::ONE, 0xA4),
     )?;
-    assert!(
-        matches!(unbound, ServerValue::NoBinding(_)),
-        "detached participant must answer NoBinding: {unbound:?}"
+    let ServerValue::NoBinding(NoBinding {
+        request: liminal_protocol::wire::BindingRequiredEnvelope::RecordAdmission(unbound_envelope),
+    }) = unbound
+    else {
+        return Err(format!("detached participant must answer NoBinding: {unbound:?}").into());
+    };
+    assert_eq!(
+        unbound_envelope.record_admission_attempt_token,
+        RecordAdmissionAttemptToken::new([0xA4; 16])
     );
     Ok(())
 }
