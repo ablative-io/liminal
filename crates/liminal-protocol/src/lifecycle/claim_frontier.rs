@@ -525,7 +525,7 @@ pub enum MarkerSequenceOwner {
 }
 
 /// Complete immutable marker candidate authority.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct MarkerCandidateAuthority {
     /// Exact assigned marker sequence.
     pub delivery_seq: DeliverySeq,
@@ -535,8 +535,29 @@ pub struct MarkerCandidateAuthority {
     pub target_binding: FrontierBinding,
     /// Immutable marker provenance.
     pub provenance: MarkerProvenance,
+    /// Last sequence acknowledged before this participant was overtaken.
+    pub abandoned_after: DeliverySeq,
+    /// Last pre-marker sequence abandoned by this marker decision.
+    pub abandoned_through: DeliverySeq,
+    /// Physical retained floor selected by this marker decision.
+    pub physical_floor_at_decision: DeliverySeq,
     /// Current sequence owner; an immutable candidate must own `M`.
     pub current_owner: MarkerSequenceOwner,
+}
+
+impl core::fmt::Debug for MarkerCandidateAuthority {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        // Keep the landed Unit 1 audit encoding byte-stable. Unit 2 consumes
+        // the added range through a typed projection, never by parsing Debug.
+        formatter
+            .debug_struct("MarkerCandidateAuthority")
+            .field("delivery_seq", &self.delivery_seq)
+            .field("admission_order", &self.admission_order)
+            .field("target_binding", &self.target_binding)
+            .field("provenance", &self.provenance)
+            .field("current_owner", &self.current_owner)
+            .finish()
+    }
 }
 
 /// Immutable assigned candidate above the current sequence high watermark.
@@ -1633,6 +1654,18 @@ impl ValidatedMarkerCandidate {
     pub(super) const fn provenance(&self) -> MarkerProvenance {
         self.candidate.provenance
     }
+
+    pub(super) const fn abandoned_after(&self) -> DeliverySeq {
+        self.candidate.abandoned_after
+    }
+
+    pub(super) const fn abandoned_through(&self) -> DeliverySeq {
+        self.candidate.abandoned_through
+    }
+
+    pub(super) const fn physical_floor_at_decision(&self) -> DeliverySeq {
+        self.candidate.physical_floor_at_decision
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2092,6 +2125,7 @@ impl ClaimFrontiers {
         validate_sequence_candidates(
             &active_identities,
             &restore.sequence.immutable_candidates,
+            restore.retained_floor,
             &retained_records,
             &historical_causal_authorities,
             sequence_ledger,
@@ -3907,6 +3941,7 @@ impl ClaimFrontiersPrevalidated {
         let sequence = restore_sequence_frontier(
             &self.active_identities,
             self.sequence_restore,
+            self.retained_floor,
             self.sequence_ledger,
             recovery_provenance,
             &self.retained_records,
@@ -4902,6 +4937,7 @@ fn order_segments(
 fn restore_sequence_frontier(
     active: &ActiveIdentityRanks,
     restore: SequenceClaimFrontierRestore,
+    retained_floor: u128,
     ledger: SequenceLedger,
     recovery_provenance: Option<RecoveryClaimProvenance>,
     retained_records: &[RetainedCausalRecord],
@@ -4927,6 +4963,7 @@ fn restore_sequence_frontier(
     validate_sequence_candidates(
         active,
         &restore.immutable_candidates,
+        retained_floor,
         retained_records,
         historical_causal_authorities,
         ledger,
@@ -5355,6 +5392,7 @@ fn validate_sequence_recovery(
 fn validate_sequence_candidates(
     active: &ActiveIdentityRanks,
     candidates: &[ImmutableSequenceCandidate],
+    retained_floor: u128,
     retained_records: &[RetainedCausalRecord],
     historical_causal_authorities: &[HistoricalCausalAuthority],
     ledger: SequenceLedger,
@@ -5400,6 +5438,12 @@ fn validate_sequence_candidates(
                 if order.candidate_phase() != CandidatePhase::CompactionMarker
                     || marker.current_owner != MarkerSequenceOwner::Marker
                     || marker.target_binding != participant.binding
+                    || marker.abandoned_after != participant.cursor
+                    || marker.abandoned_after > marker.abandoned_through
+                    || u128::from(marker.physical_floor_at_decision) != retained_floor
+                    || u128::from(marker.physical_floor_at_decision)
+                        > u128::from(marker.abandoned_through) + 1
+                    || marker.abandoned_through >= marker.delivery_seq
                     || !marker_provenance_targets(marker.provenance, order.participant_index())
                     || !marker_has_causal_authority(
                         *marker,

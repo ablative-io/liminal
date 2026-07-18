@@ -5,7 +5,9 @@ use alloc::{vec, vec::Vec};
 use crate::{
     algebra::{ResourceVector, WideResourceVector},
     outcome::CandidatePhase,
-    wire::{BindingEpoch, ConnectionIncarnation, Generation},
+    wire::{
+        BindingEpoch, ConnectionIncarnation, Generation, ParticipantDelivery, ParticipantRecord,
+    },
 };
 
 use super::super::{
@@ -95,6 +97,9 @@ fn marker_candidates(
                     admission_order: marker_key(),
                     target_binding,
                     provenance: MarkerProvenance::NonProductM,
+                    abandoned_after: 0,
+                    abandoned_through: 1,
+                    physical_floor_at_decision: 1,
                     current_owner: MarkerSequenceOwner::Marker,
                 },
             )],
@@ -264,6 +269,19 @@ fn drain_consumes_next_marker_and_returns_one_atomic_authority_commit() -> Resul
     assert_eq!(delivery.participant_id(), PARTICIPANT_ID);
     assert_eq!(delivery.binding_epoch(), epoch());
     assert_eq!(delivery.marker_delivery_seq(), 2);
+    assert_eq!(
+        commit.delivery_projection().delivery(),
+        &ParticipantDelivery {
+            conversation_id: CONVERSATION_ID,
+            delivery_seq: 2,
+            record: ParticipantRecord::HistoryCompacted {
+                affected_participant_id: PARTICIPANT_ID,
+                abandoned_after: 0,
+                abandoned_through: 1,
+                physical_floor_at_decision: 1,
+            },
+        }
+    );
     assert_eq!(commit.closure(), ClosureState::Clear);
     assert_eq!(commit.frontiers().conversation_id(), CONVERSATION_ID);
     assert_eq!(commit.frontiers().retained_marker_records().len(), 1);

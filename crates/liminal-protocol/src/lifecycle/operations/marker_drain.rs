@@ -8,6 +8,8 @@
 
 use alloc::vec::Vec;
 
+use crate::wire::{ParticipantDelivery, ParticipantRecord};
+
 use super::super::{
     ClaimFrontiers, ClosureAccounting, ClosureState, Event, MarkerDelivery, ObserverProjection,
     StoredEdge,
@@ -42,6 +44,30 @@ pub enum MarkerDrainError {
     ResultingAccounting,
 }
 
+/// Move-only typed wire projection of one protocol-selected compaction marker.
+///
+/// Construction remains private to [`drain_next_marker`]. The projection is
+/// inseparable from its [`MarkerDrainCommit`] until the commit is consumed, so
+/// storage cannot assemble a delivery from unrelated raw marker fields.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MarkerDeliveryProjection {
+    delivery: ParticipantDelivery,
+}
+
+impl MarkerDeliveryProjection {
+    /// Borrows the exact typed participant delivery selected by marker drain.
+    #[must_use]
+    pub const fn delivery(&self) -> &ParticipantDelivery {
+        &self.delivery
+    }
+
+    /// Consumes the projection into the wire delivery owned by outbox production.
+    #[must_use]
+    pub fn into_delivery(self) -> ParticipantDelivery {
+        self.delivery
+    }
+}
+
 /// Complete atomic marker-drain commit.
 ///
 /// No field can be supplied independently: the claim-frontier transition,
@@ -63,6 +89,7 @@ pub struct MarkerDrainCommit {
     closure_accounting: ClosureAccounting,
     retained_charges: Vec<RetainedRecordCharge>,
     marker_successor: StoredEdge,
+    delivery_projection: MarkerDeliveryProjection,
     record: ValidatedMarkerRecord,
 }
 
@@ -100,6 +127,12 @@ impl MarkerDrainCommit {
         self.marker_successor
     }
 
+    /// Borrows the typed `HistoryCompacted` projection coupled to this commit.
+    #[must_use]
+    pub const fn delivery_projection(&self) -> &MarkerDeliveryProjection {
+        &self.delivery_projection
+    }
+
     /// Consumes the opaque transaction into its persistable protocol values.
     ///
     /// The retained marker is already present in the returned frontiers. Its
@@ -113,6 +146,7 @@ impl MarkerDrainCommit {
         ClosureAccounting,
         Vec<RetainedRecordCharge>,
         StoredEdge,
+        MarkerDeliveryProjection,
     ) {
         self.record.consume();
         (
@@ -120,6 +154,7 @@ impl MarkerDrainCommit {
             self.closure_accounting,
             self.retained_charges,
             self.marker_successor,
+            self.delivery_projection,
         )
     }
 
@@ -158,6 +193,18 @@ pub fn drain_next_marker(
     let candidate_sequence = candidate.delivery_seq();
     let candidate_target = candidate.target_binding();
     let candidate_provenance = candidate.provenance();
+    let delivery_projection = MarkerDeliveryProjection {
+        delivery: ParticipantDelivery {
+            conversation_id: candidate_conversation_id,
+            delivery_seq: candidate_sequence,
+            record: ParticipantRecord::HistoryCompacted {
+                affected_participant_id: candidate_participant,
+                abandoned_after: candidate.abandoned_after(),
+                abandoned_through: candidate.abandoned_through(),
+                physical_floor_at_decision: candidate.physical_floor_at_decision(),
+            },
+        },
+    };
     let marker_successor = MarkerDelivery::successor_from_validated_candidate(candidate);
     if record.conversation_id() != candidate_conversation_id
         || record.participant_id() != candidate_participant
@@ -206,6 +253,7 @@ pub fn drain_next_marker(
         closure_accounting,
         retained_charges,
         marker_successor,
+        delivery_projection,
         record,
     })
 }

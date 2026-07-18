@@ -776,10 +776,17 @@ pub(in crate::lifecycle) fn project_ordinary_fixed_point(
         caller_order,
         facts.encoded_record_charge,
     );
+    let physical_floor_at_decision =
+        DeliverySeq::try_from(floor.resulting_floor).map_err(|_| {
+            OrdinaryProjectionError::ArithmeticOverflow {
+                dimension: ResourceDimension::Entries,
+            }
+        })?;
     let marker_candidates = positioned_markers(
         &search.marker_participants,
         order.major(),
         candidate_high_watermark,
+        physical_floor_at_decision,
     )?;
     let (retained_records, retained_charges) =
         resulting_retained_rows(facts, floor.resulting_floor, caller_record, caller_charge);
@@ -1221,6 +1228,7 @@ fn positioned_markers(
     marker_participants: &[FrontierParticipant],
     caller_major: u64,
     caller_sequence: DeliverySeq,
+    physical_floor_at_decision: DeliverySeq,
 ) -> Result<Vec<MarkerCandidateAuthority>, OrdinaryProjectionError> {
     let mut markers = Vec::with_capacity(marker_participants.len());
     for (index, participant) in marker_participants.iter().enumerate() {
@@ -1247,6 +1255,9 @@ fn positioned_markers(
             ),
             target_binding: participant.binding(),
             provenance: MarkerProvenance::NonProductM,
+            abandoned_after: participant.cursor(),
+            abandoned_through: caller_sequence,
+            physical_floor_at_decision,
             current_owner: MarkerSequenceOwner::Marker,
         });
     }

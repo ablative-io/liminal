@@ -41,7 +41,9 @@ pub use live_frontier::{
     commit_pending_leave_frontier, commit_settled_leave_frontier,
 };
 pub use marker_ack::{MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, apply_marker_ack};
-pub use marker_drain::{MarkerDrainCommit, MarkerDrainError, drain_next_marker};
+pub use marker_drain::{
+    MarkerDeliveryProjection, MarkerDrainCommit, MarkerDrainError, drain_next_marker,
+};
 pub use marker_proof::{
     MarkerProofDecision, MarkerProofInput, MarkerProofPermit, MarkerProofState, select_marker_proof,
 };

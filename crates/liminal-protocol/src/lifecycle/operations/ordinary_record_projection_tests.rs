@@ -938,6 +938,9 @@ fn mandatory_candidate_wins_before_optional_projection_or_counter_planning() {
         admission_order: AdmissionOrder::new(80, CandidatePhase::CompactionMarker, 0),
         target_binding: FrontierBinding::Bound(epoch(7)),
         provenance: MarkerProvenance::NonProductM,
+        abandoned_after: 88,
+        abandoned_through: 94,
+        physical_floor_at_decision: 89,
         current_owner: MarkerSequenceOwner::Marker,
     };
     fixture.immutable_candidates = vec![ImmutableSequenceCandidate::Marker(candidate)];

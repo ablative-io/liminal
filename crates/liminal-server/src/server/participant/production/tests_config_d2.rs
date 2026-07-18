@@ -87,6 +87,9 @@ fn canonical_v2_marker_attached_and_recovery_rows_fit_signed_caps() -> Result<()
                 ),
                 target_binding,
                 provenance,
+                abandoned_after: u64::MAX - 2,
+                abandoned_through: u64::MAX - 1,
+                physical_floor_at_decision: u64::MAX - 1,
                 current_owner: MarkerSequenceOwner::Marker,
             });
             let size = u64::try_from(canonical_marker_bytes(candidate)?.len())?;

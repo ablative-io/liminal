@@ -19,8 +19,8 @@ use super::super::{
     commit_pending_leave,
 };
 use super::{
-    InitialEnrollmentOperationCommit, MarkerDrainCommit, RecordAdmissionPersistenceParts,
-    RetainedRecordCharge, UnchangedRecordAdmission,
+    InitialEnrollmentOperationCommit, MarkerDeliveryProjection, MarkerDrainCommit,
+    RecordAdmissionPersistenceParts, RetainedRecordCharge, UnchangedRecordAdmission,
 };
 
 mod ledger;
@@ -190,8 +190,9 @@ impl LiveFrontierOwner {
     pub fn from_marker_drain(
         commit: MarkerDrainCommit,
         retained_record_limit: u64,
-    ) -> (Self, StoredEdge) {
-        let (frontiers, closure_accounting, retained_charges, successor) = commit.into_parts();
+    ) -> (Self, StoredEdge, MarkerDeliveryProjection) {
+        let (frontiers, closure_accounting, retained_charges, successor, projection) =
+            commit.into_parts();
         (
             Self {
                 frontiers,
@@ -200,6 +201,7 @@ impl LiveFrontierOwner {
                 retained_record_limit,
             },
             successor,
+            projection,
         )
     }
 }

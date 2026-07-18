@@ -9,8 +9,8 @@
 use liminal_protocol::algebra::ResourceVector;
 use liminal_protocol::lifecycle::{
     BindingState, CapacityCounter, ConnectionConversationTracking, ImmutableSequenceCandidate,
-    LiveFrontierOwner, PresentedIdentity, RecordAdmissionDecision, RecordAdmissionPrestate,
-    RetainedRecordCharge, SemanticConnectionCapacityDecision,
+    LiveFrontierOwner, MarkerDeliveryProjection, PresentedIdentity, RecordAdmissionDecision,
+    RecordAdmissionPrestate, RetainedRecordCharge, SemanticConnectionCapacityDecision,
     apply_record_admission as select_record_admission, classify_record_admission_binding,
     drain_next_marker,
 };
@@ -173,7 +173,9 @@ impl ConversationAuthority {
                 .collect(),
             successor: format!("{:?}", commit.marker_successor()).into_bytes(),
         };
-        let (owner, _) = LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
+        let (owner, _, projection) =
+            LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
+        validate_marker_projection(self.conversation_id, &projection)?;
         appender.append(
             &StoredOperation::MarkerDrained { row },
             self.next_log_sequence,
@@ -279,7 +281,9 @@ impl ConversationAuthority {
                 "durable marker drain poststate audit drifted",
             ));
         }
-        let (owner, _) = LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
+        let (owner, _, projection) =
+            LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
+        validate_marker_projection(self.conversation_id, &projection)?;
         self.install_frontier(owner);
         self.advance_log_head()
     }
@@ -383,6 +387,18 @@ impl ConversationAuthority {
         self.next_seq = self.next_seq.max(sequence.saturating_add(1));
         self.advance_log_head()
     }
+}
+
+fn validate_marker_projection(
+    conversation_id: u64,
+    projection: &MarkerDeliveryProjection,
+) -> Result<(), StateError> {
+    if projection.delivery().conversation_id != conversation_id {
+        return Err(StateError::invariant(
+            "protocol marker projection belongs to another conversation",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn canonical_marker_bytes(
