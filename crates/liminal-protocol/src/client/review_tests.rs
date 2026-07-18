@@ -369,7 +369,7 @@ fn d1_sequential_record_a_response_after_b_is_refused_by_exact_token() -> TestRe
     };
     assert_eq!(
         refusal.reason(),
-        ClientInboundRefusalReason::DelayedResponse
+        ClientInboundRefusalReason::AmbiguousResponse
     );
     let (aggregate, _, correlation) = refusal.into_parts();
     assert!(aggregate.expected.is_some());

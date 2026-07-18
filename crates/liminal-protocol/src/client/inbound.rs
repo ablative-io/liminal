@@ -217,9 +217,16 @@ fn decide_inbound_inner(
                     crate::wire::ClientRequest::ObserverRecovery(_)
                 )
             );
-        let reason = if same_request_class && correlation::same_identity(&value, &expected.request)
-        {
-            ClientInboundRefusalReason::DelayedResponse
+        let same_identity = correlation::same_identity(&value, &expected.request);
+        let reason = if same_request_class && same_identity {
+            if matches!(
+                expected.request,
+                crate::wire::ClientRequest::RecordAdmission(_)
+            ) {
+                ClientInboundRefusalReason::AmbiguousResponse
+            } else {
+                ClientInboundRefusalReason::DelayedResponse
+            }
         } else {
             ClientInboundRefusalReason::ForeignResponse
         };
