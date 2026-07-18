@@ -61,16 +61,38 @@ before its durability and replay prerequisites are green.
 facts.** `ClaimFrontiers` is the non-`Clone` executable authority over validated
 identity ranks, retained rows, and coupled sequence/order frontiers
 (`crates/liminal-protocol/src/lifecycle/claim_frontier.rs:1302-1313`). Today its
-public acquisition surface is initial enrollment and full restore
-(`claim_frontier.rs:1877-1943`); ordinary-record projection consumes the whole
-authority (`claim_frontier.rs:2118-2136`), while Leave preparation consumes the
-same authority (`claim_frontier.rs:2326-2404`). The build SHALL add
-protocol-owned consuming transition surfaces for subsequent enrollment,
-credential attach, detach, participant acknowledgement, and marker
-acknowledgement. Each surface accepts the existing opaque typed operation
-commit plus the one current frontier/closure/retention owner and returns either
-that complete unchanged owner or one complete poststate owner. It SHALL NOT
-accept caller-selected raw claims, row lists, cursor positions, or ledgers.
+public consuming surface is: initial enrollment and full restore
+(`claim_frontier.rs:1877-1943`); ordinary-record projection, which consumes the
+whole authority (`claim_frontier.rs:2118-2136`); Leave preparation, which
+consumes the same authority (`claim_frontier.rs:2326-2404`); the public marker
+drain `drain_next_marker(ClaimFrontiers, ClosureState) -> MarkerDrainCommit`
+(`lifecycle/operations/marker_drain.rs:98-116`, re-exported at
+`operations/mod.rs:33-35`); and the total `apply_record_admission` wrapper,
+whose prestate owns the authority (re-exported at `operations/mod.rs:51-55`).
+The five additions below are the MISSING lifecycle-transition families beside
+that existing surface — the list above is the complete existing consuming
+surface, not a claim that nothing else touches `ClaimFrontiers`. [r2]
+
+The build SHALL add protocol-owned consuming transition surfaces for subsequent
+enrollment, credential attach, detach, participant acknowledgement, and marker
+acknowledgement. Each surface accepts one typed transition input coupling: the
+existing opaque typed operation commit; the one current
+frontier/closure/retention owner; and — for every transition that mints a
+newly retained durable row — the exact server-computed canonical keyed
+charge(s) for that row. The charge is a required separate input by protocol
+design, not a convenience: payload bytes and storage framing belong to the
+server durability schema (`ordinary_record_projection.rs:32-56` — 
+`RetainedRecordCharge::new` requires an externally computed `ResourceVector`),
+the row-producing commits carry no charge (`EnrollmentCommit` at
+`lifecycle/enrollment.rs:292-302`; `AttachCommit` at `lifecycle/attach.rs:100-115`;
+`CommittedDetachTransition` at `lifecycle/detach.rs:271-279`), and the existing
+initial-frontier API already takes `attached_charge` separately
+(`claim_frontier.rs:1888-1898`). Commit-plus-owner is therefore NOT the
+complete input set; describing it as such was an r1 defect. [r2] Each surface
+returns either that complete unchanged owner or one complete poststate owner.
+It SHALL NOT accept caller-selected raw claims, row lists, cursor positions,
+or ledgers; the keyed charge input names its exact row key and is validated
+one-for-one, never a substitute for protocol-derived facts.
 
 This choice keeps lifecycle rules in `liminal-protocol`. Making the server
 manufacture `ClaimFrontiersRestore` after every live event would duplicate the
@@ -136,11 +158,27 @@ D1 is ruled. Add this concrete wire form:
    position. The exact sites are `wire/codec.rs:462-506` and
    `wire/codec.rs:523-588`. In response encoding/decoding, add the token to
    `put_record_admission` and `take_record_admission`; every nested
-   RecordAdmission-capable envelope already routes through those shared helpers
-   (`wire/server_codec.rs:383-492,1260-1348`). Update all request/envelope
-   constructors, including protocol lookup (`lifecycle/lookup.rs:1033-1053`),
-   the total selector, production envelope construction, codec fixtures, and
-   golden lengths. There is no optional token and no payload/hash echo.
+   RecordAdmission-capable envelope routes through those shared helpers —
+   the helpers sit at `wire/server_codec.rs:383-492,1260-1348` and their
+   nested/specialized call sites are `:1375-1377` (participant reference),
+   `:1402-1404` (binding required), `:1424-1426` (order allocating),
+   `:1445-1447` (closure checked), `:1463-1465` (sequence allocating),
+   `:2042-2045` (stale authority), and `:2294+` (observer backpressure);
+   pre-review independently searched for a bypass and found none. [r2] Update
+   all request/envelope constructors, including protocol lookup
+   (`lifecycle/lookup.rs:1033-1053`), the total selector, production envelope
+   construction, codec fixtures, and golden lengths. There is no optional
+   token and no payload/hash echo.
+   **Legacy-byte honesty [r2]:** the staged in-place layout is NOT
+   byte-disjoint from the r1-claimed universal rejection. The old request
+   suffix is `u32 payload_len || payload` (`wire/codec.rs:501-506`) and the
+   token macro accepts every `[u8;16]` (`wire/primitives.rs:106-130`), so an
+   old request whose 16-byte payload ends in four zero bytes decodes under the
+   new schema as a valid token plus empty payload. No legacy decoder, dual
+   schema, or compatibility shim is supported — but the brief does NOT claim
+   every tokenless body fails decode, and no acceptance criterion may rest on
+   that false universal. This is acceptable because the surface is
+   staged-unpublished: no deployed peer has ever emitted the old body.
 6. Change the client key from
    `Record(conversation, participant, generation, local_authorization)` to
    `Record(conversation, participant, generation,
@@ -149,7 +187,13 @@ D1 is ruled. Add this concrete wire form:
    (`crates/liminal-protocol/src/client/correlation.rs:10-73`). Remove the
    RecordAdmission hard-false in `matches_request`; extract the wire token from
    every nested `RecordAdmissionEnvelope` instead of the current synthetic zero
-   (`client/correlation.rs:91-101,365-480`). The process-local sealed
+   (`client/correlation.rs:91-101,365-480`). ALSO in scope [r2]:
+   `response_key` currently rewrites every extracted `RequestKey::Record(..., _)`
+   to `ambiguous_authorization` (`client/correlation.rs:159-245`, rewrite at
+   `:236-242`) — delete that Record-specific rewrite (the sealed local
+   authority is independently enforced by `decide_correlated_inbound` before
+   wire matching), while retaining ObserverRecovery's local-authorization
+   handling unchanged. The process-local sealed
    `ClientResponseCorrelation` remains a required authority; the wire token is
    an additional necessary equality, not a replacement for that authority.
 7. Replace the unconditional RecordAdmission `AmbiguousResponse` branch at
@@ -171,14 +215,22 @@ the echoed wire token prove different facts; acceptance requires both.
 request bytes to the shared wire decoder
 (`crates/liminal-protocol/src/client/resume_decode.rs:102-129`), so its canonical
 fixtures must absorb the new field. RecordAdmission is no longer tokenless:
-remove it from the `TokenlessAfterCrash` abandonment classification in restore
-and from the permitted abandonment decoder; only ObserverRecovery remains in
-that class (`client/resume.rs:129-203` and
-`client/resume_decode.rs:262-307`). An issued restored RecordAdmission keeps its
-expected operation and receives the existing lost-correlation testimony; this
-unit does not remint an already-issued send. Old canonical nested request bytes
-without the required token fail decode; no dual decoder or compatibility shim
-is added.
+remove it from EVERY production tokenless classification, of which there are
+FIVE, not two [r2]: the `TokenlessAfterCrash` abandonment classification in
+restore (`client/resume.rs:129-203`, exact match `:178-183`); the
+lost-testimony coupling gate (`client/resume.rs:371-380` — without this edit
+the FIRST restore of an issued RecordAdmission mints
+`IssuedOperationCorrelation` testimony at `:195-204`, and the SECOND restore
+of that persisted state rejects it as `LostAuthorityTestimonyMismatch`); the
+pending-abandonment conflict match (`client/resume.rs:398-404`); the permitted
+abandonment decoder (`client/resume_decode.rs:262-307`, exact match
+`:279-295`); and the record-gate abandonment refusal
+(`client/barrier.rs:475-485`). Only ObserverRecovery remains in each class.
+An issued restored RecordAdmission keeps its expected operation and receives
+the existing lost-correlation testimony; this unit does not remint an
+already-issued send. No dual decoder or compatibility shim is added; the
+legacy-byte honesty note in item 5 governs what old bytes may still decode
+as. [r2]
 
 This is absorbed by the staged, unpublished `0.2.0` protocol surface. Keep the
 existing request/response discriminants and replace their staged body schema in
@@ -261,10 +313,24 @@ flush, and no second append carries part of the same commit.
 - `Fault` returns a semantic error, fabricates no value, and leaves durable
   state authoritative.
 
-The marker drain itself is an opaque atomic frontier/closure/successor commit
-and exposes only a consuming decomposition
-(`lifecycle/operations/marker_drain.rs:35-89,98-140`). Unit 1 persists the
-resulting pending marker work; Unit 2 owns socket push production.
+The marker drain today is an opaque atomic frontier/closure/successor commit
+whose consuming decomposition returns ONLY
+`(ClaimFrontiers, ClosureState, StoredEdge)`
+(`lifecycle/operations/marker_drain.rs:50-89`, entry `:98-140`). **That
+decomposition is INSUFFICIENT for the same-lock retry as it stands [r2]:** the
+retry's `RecordAdmissionPrestate` requires complete `ClosureAccounting` and
+keyed `retained_charges` (`record_admission.rs:43-56,63-90`),
+`ClosureAccounting` has private fields with read-only accessors
+(`closure_accounting.rs:150-207`), and no existing producer applies a
+marker-drain accounting/charge transition — rebuilding it server-side through
+`try_new` would be exactly the raw-fact reassembly Slice 1 forbids. The build
+SHALL therefore extend or compose the marker-drain seam in `liminal-protocol`
+so that draining consumes the current `ClosureAccounting`, the current keyed
+retained charges, and the exact server-computed canonical marker-row charge,
+and returns the COMPLETE updated frontier/closure-accounting/retention owner
+that the retry consumes directly. `DrainFirst` retries only with that
+protocol-produced complete owner. Unit 1 persists the resulting pending marker
+work; Unit 2 owns socket push production.
 
 Change the RecordAdmission and Leave closures to pass `appender`, not the
 current `_appender` (`production/handler.rs:408-426`). Add a migration test that
@@ -400,11 +466,21 @@ Add one named test module covering all of the following:
    refused for missing response authority.
 4. Each of the eleven legal `RecordAdmissionResponse` outcomes round-trips
    through the client-direction server-value codec with the exact token.
-5. A legacy tokenless RecordAdmission request or response body fails canonical
-   decode; it is never treated as the current correlated form.
+5. The named checked-in legacy fixtures (the r1 canonical RecordAdmission
+   request/response bodies) fail canonical decode under the staged schema.
+   [narrowed r2] This is a fixture assertion, not a universal: per the Slice 2
+   legacy-byte honesty note, old arbitrary-payload bytes are not guaranteed
+   byte-disjoint from the staged layout, and no criterion rests on that.
 6. LPCR expected-operation round-trip retains the token. Restore no longer
    emits `TokenlessAfterCrash` abandonment for RecordAdmission, while
    ObserverRecovery still does.
+7. Two-cycle resume soak [r2]: restore an issued RecordAdmission with lost
+   testimony, persist the resulting state, restore AGAIN — the second restore
+   succeeds with the expected operation and testimony intact (this is the
+   exact `LostAuthorityTestimonyMismatch` path the five-site removal exists
+   to fix), and the record gate at `barrier.rs:475-485` admits a fresh
+   RecordAdmission when only a restored abandonment for ObserverRecovery is
+   absent.
 
 The positive half flips the deliberate refusal at
 `crates/liminal-protocol/src/client/inbound.rs:214-223`; the negative half
@@ -461,7 +537,15 @@ The following are required:
 Build from the loopback socket, participant codec, and production service setup
 at
 `crates/liminal-server/src/server/participant/production/e2e_tests.rs:113-229`.
-Replace the current records-blocked leg
+**Harness note [r2]:** the current socket fixture constructs store, handler,
+service, supervisor, and connection inline (`e2e_tests.rs:195-211`) and only
+drops the client and shuts the supervisor at the end (`:367-369`) — it has NO
+cold-reopen capability. Step 6 below therefore requires extending the socket
+harness with a start/stop/join/drop/reopen helper that deterministically stops
+and drops the first client, connection handle, supervisor, services, and every
+store `Arc` owner before the second disk open, borrowing the scoped
+disk-reopen pattern already proven in the non-socket harness
+(`production/tests.rs:143-153`). Replace the current records-blocked leg
 (`e2e_tests.rs:264-282`) with an authorized request. The test SHALL:
 
 1. enroll and bind over a real socket;
@@ -522,11 +606,24 @@ The wire touch makes both wasm/no-default legs mandatory.
   apply; mismatched/uncorrelated answers remain refused and retain the slot.
 - **WALL-ATOMIC-RECORD:** all `RecordAdmissionPersistenceParts` cross one
   append/flush boundary. No response or poststate is published before it.
+  Honesty note [r2]: the durable store exposes append and flush as separate
+  calls, so a flush error leaves the commit outcome UNCERTAIN — acceptance
+  tests assert that no partial row or in-memory poststate is observable after
+  an injected failure, and must NOT assume a successfully appended full row
+  was rolled back.
 - **WALL-LOG-V2:** v1 five-kind logs VERSION LOUDLY and fail; no silent
   reinterpretation, new stream key, serde default, or compatibility fallback.
-- **WALL-MOVE-ONLY:** no `Clone`/`Copy` added to frontier, closure edge,
-  retained-row authority, persistence parts, or commit wrappers. No raw-fact
-  server transition path.
+- **WALL-MOVE-ONLY [narrowed r2]:** no `Clone`/`Copy` on the executable linear
+  authorities: `ClaimFrontiers`, `ValidatedMarkerCandidate`/`ValidatedMarkerRecord`,
+  `MarkerDrainCommit`, `RecordAdmissionCommit`/`RecordAdmissionPersistenceParts`,
+  `LeaveCommit`, the initial-enrollment frontier commit, and EVERY owner,
+  transition-input, and persistence wrapper this unit adds. Existing copyable
+  value snapshots (`StoredEdge`, `ClosureState`, `ClosureAccounting` —
+  `edge.rs:662-683`, `closure_accounting.rs:44-60`) and existing low-level
+  operation commits (`EnrollmentCommit`, `AttachCommit`, `ParticipantAckCommit`,
+  `MarkerAckCommit`, `CommittedDetachTransition`) already derive `Clone`/`Copy`
+  at base and are exempt; the r1 universal form was false at the pin. No
+  raw-fact server transition path.
 - **WALL-CONFIG-SIGNOFF:** no invented defaults or placeholder values. Tom and
   Annabel sign every D2 field before the config/integrated build dispatch.
 - **WALL-TYPED-REFUSAL:** all legal capacity/size/observer/closure/exhaustion
@@ -591,3 +688,4 @@ is part of this unit.
 | revision | date | author | record |
 |---|---|---|---|
 | r1 | 2026-07-18 | Hermes Crumpet fold; Sol draft | Initial ruled build brief for F-0c Unit 1: live frontier transitions, explicit RecordAdmission token correlation, loud v2 log migration, signed D2 inputs, and Leave riding the shared acquisition. |
+| r2 | 2026-07-18 | Hermes Crumpet fold (amendment text); Sol pre-review 752f8977 findings, all byte-confirmed at the fold seat | Pre-review NOT_READY closed by amendment: (M1) legacy-byte universal rejection withdrawn — staged layout is not byte-disjoint, fixture-narrowed test 5 plus honesty note; (M2) resume tokenless removal widened from two to five production sites plus two-cycle soak test; (M3) Slice 1 transition inputs gain the required server-computed canonical keyed row charges — commit-plus-owner was not the complete input set; (M4) marker-drain seam must be extended/composed to return the complete accounting/retention owner for the same-lock retry; (M5) WALL-MOVE-ONLY narrowed to the explicit linear-authority list, base-copyable types exempted. Minors: nested codec call-site list expanded; correlation.rs:159-245 ambiguous_authorization rewrite deletion added to D1 sites; Layer 3 harness start/stop/join/drop/reopen extension stated; WALL-ATOMIC flush-uncertainty honesty note. |
