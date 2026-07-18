@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::RawFd;
 #[cfg(test)]
@@ -483,6 +485,25 @@ impl ConnectionSupervisor {
     #[cfg(test)]
     pub(crate) fn observe_settled_park(&self, pid: u64) -> Receiver<u64> {
         self.inner.runtime.observe_settled_park(pid)
+    }
+
+    /// Queues an explicit outbound capacity for the next TCP process constructed.
+    #[cfg(test)]
+    pub(crate) fn queue_next_outbound_capacity(&self, capacity: usize) {
+        self.inner.runtime.queue_next_outbound_capacity(capacity);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_participant_holdback_pause(&self, pid: u64) -> Receiver<()> {
+        self.inner.runtime.install_participant_holdback_pause(pid)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resume_test_process(&self, pid: u64) -> bool {
+        self.inner.runtime.ready_waker(pid).is_some_and(|waker| {
+            waker.fire();
+            true
+        })
     }
 
     /// Reserved push reply slots outstanding (test observability for the public
@@ -1164,6 +1185,11 @@ pub(super) struct ConnectionRuntime {
     /// Most recent slice count whose real final probe selected `Wait`.
     #[cfg(test)]
     park_counts: Mutex<HashMap<u64, u64>>,
+    /// Explicit capacities consumed in TCP process construction order.
+    #[cfg(test)]
+    next_outbound_capacities: Mutex<VecDeque<usize>>,
+    #[cfg(test)]
+    participant_holdback_pauses: Mutex<HashMap<u64, Sender<()>>>,
     /// Deterministic test gate placed after arm and before the final probe.
     #[cfg(test)]
     pre_wait_barrier: Mutex<Option<PreWaitBarrier>>,
@@ -1238,6 +1264,10 @@ impl ConnectionRuntime {
             park_observers: Mutex::new(HashMap::new()),
             #[cfg(test)]
             park_counts: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            next_outbound_capacities: Mutex::new(VecDeque::new()),
+            #[cfg(test)]
+            participant_holdback_pauses: Mutex::new(HashMap::new()),
             #[cfg(test)]
             pre_wait_barrier: Mutex::new(None),
             #[cfg(test)]
@@ -1394,6 +1424,42 @@ impl ConnectionRuntime {
         {
             let _ = observer.send(count);
         }
+    }
+
+    #[cfg(test)]
+    fn queue_next_outbound_capacity(&self, capacity: usize) {
+        if let Ok(mut capacities) = self.next_outbound_capacities.lock() {
+            capacities.push_back(capacity);
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn take_next_outbound_capacity(&self) -> Option<usize> {
+        self.next_outbound_capacities
+            .lock()
+            .ok()
+            .and_then(|mut capacities| capacities.pop_front())
+    }
+
+    #[cfg(test)]
+    fn install_participant_holdback_pause(&self, pid: u64) -> Receiver<()> {
+        let (sender, receiver) = channel();
+        if let Ok(mut pauses) = self.participant_holdback_pauses.lock() {
+            pauses.insert(pid, sender);
+        }
+        receiver
+    }
+
+    #[cfg(test)]
+    pub(super) fn pause_participant_holdback(&self, pid: u64) -> bool {
+        self.participant_holdback_pauses
+            .lock()
+            .ok()
+            .and_then(|mut pauses| pauses.remove(&pid))
+            .is_some_and(|sender| {
+                let _ = sender.send(());
+                true
+            })
     }
 
     /// R7: slices serviced by connection `pid` since spawn (test instrument).

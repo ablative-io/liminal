@@ -115,13 +115,19 @@ impl ConnectionProcess {
             pending_replies,
             ..ConnectionProcessState::default()
         };
+        #[cfg(test)]
+        let outbound = runtime
+            .take_next_outbound_capacity()
+            .map_or_else(OutboundWriter::new, OutboundWriter::with_capacity);
+        #[cfg(not(test))]
+        let outbound = OutboundWriter::new();
         Self {
             runtime,
             peer_addr,
             stream,
             buffer: Vec::new(),
             state,
-            outbound: OutboundWriter::new(),
+            outbound,
             readiness_token: None,
         }
     }
@@ -169,12 +175,15 @@ impl ConnectionProcess {
             return NativeOutcome::Stop(ExitReason::Error);
         }
         if let Some(service) = self.runtime.participant_service() {
-            if let Err(error) = service_participant_publications(
+            #[cfg(test)]
+            let held_before = self.state.held_participant_pushes.len();
+            let publication_result = service_participant_publications(
                 &mut self.state,
                 service,
                 &mut self.outbound,
                 UNIT2_PUSH_SLICE_BUDGET,
-            ) {
+            );
+            if let Err(error) = publication_result {
                 tracing::error!(
                     connection_pid = pid,
                     %error,
@@ -184,6 +193,12 @@ impl ConnectionProcess {
                 self.runtime
                     .mark_crashed(pid, ExitReason::Error, self.peer_addr);
                 return NativeOutcome::Stop(ExitReason::Error);
+            }
+            #[cfg(test)]
+            if self.state.held_participant_pushes.len() > held_before {
+                if self.runtime.pause_participant_holdback(pid) {
+                    return NativeOutcome::Wait;
+                }
             }
         }
         // Pump subscriptions into the outbound buffer. An overflow (or an encode

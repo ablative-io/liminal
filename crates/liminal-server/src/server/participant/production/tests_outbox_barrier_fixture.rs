@@ -20,6 +20,7 @@ pub(super) enum OutboxBarrierKind {
 #[derive(Debug, Default)]
 struct BarrierState {
     gates: VecDeque<OutboxBarrierKind>,
+    fail_next: Option<OutboxBarrierKind>,
     reached: Option<OutboxBarrierKind>,
     released: bool,
     pending_flush: Option<OutboxBarrierKind>,
@@ -54,6 +55,13 @@ impl OutboxBarrierStore {
         Ok(())
     }
 
+    pub(super) fn fail_next(&self, kind: OutboxBarrierKind) -> Result<(), Box<dyn Error>> {
+        let mut state = self.state.lock().map_err(|_| "outbox barrier poisoned")?;
+        state.fail_next = Some(kind);
+        drop(state);
+        Ok(())
+    }
+
     pub(super) fn wait_for(&self, expected: OutboxBarrierKind) -> Result<(), Box<dyn Error>> {
         let mut state = self.state.lock().map_err(|_| "outbox barrier poisoned")?;
         while state.reached != Some(expected) {
@@ -83,6 +91,10 @@ impl OutboxBarrierStore {
 
     fn cross(&self, kind: OutboxBarrierKind) -> Result<(), DurabilityError> {
         let mut state = self.state.lock().map_err(|_| barrier_fault())?;
+        if state.fail_next == Some(kind) {
+            state.fail_next = None;
+            return Err(barrier_fault());
+        }
         if state.gates.front().copied() == Some(kind) {
             state.reached = Some(kind);
             state.released = false;

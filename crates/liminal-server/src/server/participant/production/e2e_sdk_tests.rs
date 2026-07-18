@@ -4,11 +4,13 @@
 
 use std::error::Error;
 use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
 
 use liminal_protocol::wire::{
-    AttachAttemptToken, ClientRequest, CredentialAttachRequest, EnrollmentRequest, EnrollmentToken,
-    Generation, ParticipantAck, ParticipantDelivery, ParticipantRecord, RecordAdmission,
-    RecordAdmissionAttemptToken, ServerPush, ServerValue,
+    AttachAttemptToken, ClientRequest, CredentialAttachRequest, EnrollBound, EnrollmentRequest,
+    EnrollmentToken, Generation, ParticipantAck, ParticipantDelivery, ParticipantRecord,
+    RecordAdmission, RecordAdmissionAttemptToken, ServerPush, ServerValue,
 };
 use liminal_sdk::{
     ConnectionPoolConfig, ParticipantResumeStore, RemoteConfig, RemoteOperationRecordOutcome,
@@ -19,6 +21,7 @@ use liminal_sdk::{
 use super::SdkSocketFixture;
 
 const G1_CONVERSATION: u64 = 0x22_01;
+const G2_CONVERSATION: u64 = 0x23_01;
 
 #[derive(Debug, Default)]
 struct MemoryResumeStore {
@@ -126,6 +129,33 @@ fn assert_no_sdk_push(participant: &SdkParticipant) -> Result<(), Box<dyn Error>
         .into()),
         Ok(other) => Err(format!("unexpected SDK inbound while proving no push: {other:?}").into()),
         Err(error) => Err(format!("unexpected SDK receive failure: {error}").into()),
+    }
+}
+
+fn record_write_ahead(
+    participant: &SdkParticipant,
+    request: ClientRequest,
+) -> Result<liminal_sdk::RemoteParticipantOperation, Box<dyn Error>> {
+    match participant.record_operation(request)? {
+        RemoteOperationRecordOutcome::Recorded(operation) => Ok(operation),
+        RemoteOperationRecordOutcome::Continuous(_) => {
+            Err("record admission bypassed the SDK write-ahead slot".into())
+        }
+        RemoteOperationRecordOutcome::Refused { request, reason } => {
+            Err(format!("SDK write-ahead refused {request:?}: {reason:?}").into())
+        }
+    }
+}
+
+fn expect_sent(
+    participant: &SdkParticipant,
+    operation: liminal_sdk::RemoteParticipantOperation,
+) -> Result<(), Box<dyn Error>> {
+    match participant.send_operation(operation)? {
+        RemoteParticipantSendOutcome::Sent { .. } => Ok(()),
+        RemoteParticipantSendOutcome::TransportLost { error, .. } => {
+            Err(format!("SDK transport lost before the operation was sent: {error}").into())
+        }
     }
 }
 
@@ -290,5 +320,258 @@ fn serverpush_sent_is_not_receipt_real_socket() -> Result<(), Box<dyn Error>> {
     drop(peer_two);
     drop(sender);
     server.stop()?;
+    Ok(())
+}
+
+fn enroll_g2_pair(
+    server: &SdkSocketFixture,
+) -> Result<(SdkParticipant, Arc<SdkParticipant>, u64, EnrollBound), Box<dyn Error>> {
+    let address = server.address()?;
+    let sender = connect_participant(address, G2_CONVERSATION)?;
+    let sender_value = expect_applied(exchange(
+        &sender,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: G2_CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0x41; 16]),
+        }),
+    )?)?;
+    let ServerValue::EnrollBound(sender_bound) = sender_value else {
+        return Err(format!("G2 sender enrollment did not bind: {sender_value:?}").into());
+    };
+
+    let peer = Arc::new(connect_participant(address, G2_CONVERSATION)?);
+    let peer_value = expect_applied(exchange(
+        &peer,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: G2_CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0x42; 16]),
+        }),
+    )?)?;
+    let ServerValue::EnrollBound(peer_bound) = peer_value else {
+        return Err(format!("G2 peer enrollment did not bind: {peer_value:?}").into());
+    };
+    let (peer_attach, _, _) = expect_push(&sender)?;
+    assert!(matches!(
+        peer_attach,
+        ServerPush::ParticipantDelivery(ParticipantDelivery {
+            conversation_id: G2_CONVERSATION,
+            delivery_seq: 2,
+            record: ParticipantRecord::Attached { affected_participant_id, .. },
+        }) if affected_participant_id == peer_bound.participant_id()
+    ));
+
+    let sender_ack = expect_applied(exchange(
+        &sender,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id: G2_CONVERSATION,
+            participant_id: sender_bound.participant_id(),
+            capability_generation: Generation::ONE,
+            through_seq: 2,
+        }),
+    )?)?;
+    assert!(matches!(sender_ack, ServerValue::AckCommitted(_)));
+    Ok((sender, peer, sender_bound.participant_id(), peer_bound))
+}
+
+fn assert_g2_fault_arm_is_typed() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let server = SdkSocketFixture::start_gated(&home.path().join("g2-fault"))?;
+    let (sender, peer, sender_id, _) = enroll_g2_pair(&server)?;
+    server.fail_next_outbox_append()?;
+
+    let fault_token = RecordAdmissionAttemptToken::new([0xF3; 16]);
+    let operation = record_write_ahead(
+        &sender,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: G2_CONVERSATION,
+            participant_id: sender_id,
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: fault_token,
+            payload: vec![0xFA, 0x00, 0x17],
+        }),
+    )?;
+    expect_sent(&sender, operation)?;
+    assert!(
+        matches!(sender.receive(), Err(RemoteParticipantError::Transport(_))),
+        "the producer fault arm must terminate with a typed SDK transport outcome, not hang or fabricate a semantic value"
+    );
+
+    drop(peer);
+    drop(sender);
+    server.stop()?;
+    Ok(())
+}
+
+#[test]
+fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let server = SdkSocketFixture::start_gated(&home.path().join("g2"))?;
+    let (sender, peer, sender_id, peer_bound) = enroll_g2_pair(&server)?;
+
+    // Commit one unacknowledged obligation while the peer has no live socket.
+    // Its next credential attach must replay this exact frame.
+    drop(peer);
+    let priming_token = RecordAdmissionAttemptToken::new([0x50; 16]);
+    let priming_payload = vec![0xA5; 400];
+    let priming = expect_applied(exchange(
+        &sender,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: G2_CONVERSATION,
+            participant_id: sender_id,
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: priming_token,
+            payload: priming_payload.clone(),
+        }),
+    )?)?;
+    let ServerValue::RecordCommitted(priming) = priming else {
+        return Err(format!("G2 priming record did not commit: {priming:?}").into());
+    };
+
+    // AttachBound and the 400-byte replay each fit this real TCP sink, but not
+    // together. The pause fires only after the production pump retains replay.
+    server.queue_next_outbound_capacity(480);
+    let before = server.active_connection_pids();
+    let held_peer = connect_participant(server.address()?, G2_CONVERSATION)?;
+    let held_pid = server
+        .active_connection_pids()
+        .into_iter()
+        .find(|pid| !before.contains(pid))
+        .ok_or("G2 reattached peer process was not registered")?;
+    let holdback = server.install_participant_holdback_pause(held_pid);
+    send_operation(
+        &held_peer,
+        ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id: G2_CONVERSATION,
+            participant_id: peer_bound.participant_id(),
+            capability_generation: Generation::ONE,
+            attach_secret: peer_bound.attach_secret(),
+            attach_attempt_token: AttachAttemptToken::new([0x43; 16]),
+            accept_marker_delivery_seq: None,
+        }),
+    )?;
+    holdback
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|error| format!("G2 peer never engaged holdback: {error}"))?;
+
+    // Superseding attach generates two independent pushes for the sender. Drain
+    // them before asserting that record responses never enter Push correlation.
+    let _ = expect_push(&sender)?;
+    let _ = expect_push(&sender)?;
+
+    let first_token = RecordAdmissionAttemptToken::new([0x51; 16]);
+    let first_payload = vec![0x00, 0xFF, 0x51, 0x00];
+    let first_operation = record_write_ahead(
+        &sender,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: G2_CONVERSATION,
+            participant_id: sender_id,
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: first_token,
+            payload: first_payload.clone(),
+        }),
+    )?;
+    expect_sent(&sender, first_operation)?;
+    let first_inbound = sender.receive()?;
+    let RemoteParticipantInbound::Applied {
+        value: ServerValue::RecordCommitted(first_committed),
+        ..
+    } = first_inbound
+    else {
+        return Err(format!(
+            "record N did not deliver its correlated terminal answer while peer holdback was engaged: {first_inbound:?}"
+        )
+        .into());
+    };
+    assert_eq!(
+        first_committed.request().record_admission_attempt_token,
+        first_token
+    );
+
+    // Receiving the exact-token terminal answer releases the SDK's one
+    // write-ahead slot. A fresh token must therefore be recordable, sent, and
+    // committed on this same connection while the unrelated peer remains held.
+    let second_token = RecordAdmissionAttemptToken::new([0x52; 16]);
+    let second_payload = vec![0x00, 0xFF, 0x52, 0x00];
+    let second_operation = record_write_ahead(
+        &sender,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: G2_CONVERSATION,
+            participant_id: sender_id,
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: second_token,
+            payload: second_payload.clone(),
+        }),
+    )?;
+    expect_sent(&sender, second_operation)?;
+    let second_inbound = sender.receive()?;
+    let RemoteParticipantInbound::Applied {
+        value: ServerValue::RecordCommitted(second_committed),
+        ..
+    } = second_inbound
+    else {
+        return Err(format!(
+            "fresh token response was displaced by independent push work: {second_inbound:?}"
+        )
+        .into());
+    };
+    assert_eq!(
+        second_committed.request().record_admission_attempt_token,
+        second_token
+    );
+    assert_eq!(
+        second_committed.delivery_seq(),
+        first_committed.delivery_seq() + 1
+    );
+
+    // Resume only after both correlated answers have applied. AttachBound is
+    // still the response-correlated value; all records are independent Push arms.
+    assert!(server.resume_process(held_pid));
+    let attached = expect_applied(held_peer.receive()?)?;
+    assert!(matches!(attached, ServerValue::AttachBound(_)));
+    let (priming_push, _, _) = expect_push(&held_peer)?;
+    let (first_push, _, _) = expect_push(&held_peer)?;
+    let (second_push, _, _) = expect_push(&held_peer)?;
+    assert_eq!(
+        priming_push,
+        ServerPush::ParticipantDelivery(ParticipantDelivery {
+            conversation_id: G2_CONVERSATION,
+            delivery_seq: priming.delivery_seq(),
+            record: ParticipantRecord::OrdinaryRecord {
+                sender_participant_id: sender_id,
+                payload: priming_payload,
+            },
+        })
+    );
+    assert_eq!(
+        first_push,
+        ServerPush::ParticipantDelivery(ParticipantDelivery {
+            conversation_id: G2_CONVERSATION,
+            delivery_seq: first_committed.delivery_seq(),
+            record: ParticipantRecord::OrdinaryRecord {
+                sender_participant_id: sender_id,
+                payload: first_payload,
+            },
+        })
+    );
+    assert_eq!(
+        second_push,
+        ServerPush::ParticipantDelivery(ParticipantDelivery {
+            conversation_id: G2_CONVERSATION,
+            delivery_seq: second_committed.delivery_seq(),
+            record: ParticipantRecord::OrdinaryRecord {
+                sender_participant_id: sender_id,
+                payload: second_payload,
+            },
+        })
+    );
+
+    drop(held_peer);
+    drop(sender);
+    server.stop()?;
+
+    // A post-commit producer fault is not allowed to become an unbounded silent
+    // wait or a fabricated protocol value. The real socket closes and the SDK
+    // reports its closed typed transport arm.
+    assert_g2_fault_arm_is_typed()?;
     Ok(())
 }

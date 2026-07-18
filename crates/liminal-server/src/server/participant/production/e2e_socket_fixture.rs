@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
 
+use liminal::durability::DurableStore;
 use liminal::protocol::{Frame, ProtocolVersion};
 use liminal_protocol::wire::{
     BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, ObserverRecoveryHandshake,
@@ -32,6 +33,7 @@ use crate::server::participant::{
 
 use super::super::ProductionParticipantHandler;
 use super::super::tests::{open_disk_store_for_tests, test_participant_config};
+use super::super::tests_outbox_barrier_fixture::{OutboxBarrierKind, OutboxBarrierStore};
 use super::{
     ParticipantOnlyServices, encode_frame, encode_request, read_frame, roundtrip, tcp_pair,
 };
@@ -169,6 +171,7 @@ pub(in crate::server::participant::production) struct SdkSocketFixture {
     listener: Option<ServerListener>,
     supervisor: ConnectionSupervisor,
     handler: Arc<ProductionParticipantHandler>,
+    barriers: Option<Arc<OutboxBarrierStore>>,
 }
 
 impl SocketFixture {
@@ -477,7 +480,23 @@ impl SdkSocketFixture {
     pub(in crate::server::participant::production) fn start(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
-        let store = open_disk_store_for_tests(data_dir)?;
+        Self::start_inner(data_dir, false)
+    }
+
+    pub(in crate::server::participant::production) fn start_gated(
+        data_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(data_dir, true)
+    }
+
+    fn start_inner(data_dir: &Path, gated: bool) -> Result<Self, Box<dyn Error>> {
+        let inner = open_disk_store_for_tests(data_dir)?;
+        let (store, barriers): (Arc<dyn DurableStore>, Option<Arc<OutboxBarrierStore>>) = if gated {
+            let barriers = Arc::new(OutboxBarrierStore::new(inner));
+            (barriers.clone(), Some(barriers))
+        } else {
+            (inner, None)
+        };
         let participant_config = test_participant_config();
         let handler = Arc::new(ProductionParticipantHandler::new(
             Arc::clone(&store),
@@ -512,6 +531,7 @@ impl SdkSocketFixture {
             listener: Some(listener),
             supervisor,
             handler,
+            barriers,
         })
     }
 
@@ -524,6 +544,37 @@ impl SdkSocketFixture {
             .ok_or_else(|| "SDK socket listener has stopped".into())
     }
 
+    pub(in crate::server::participant::production) fn active_connection_pids(&self) -> Vec<u64> {
+        self.supervisor.active_connection_pids()
+    }
+
+    pub(in crate::server::participant::production) fn queue_next_outbound_capacity(
+        &self,
+        capacity: usize,
+    ) {
+        self.supervisor.queue_next_outbound_capacity(capacity);
+    }
+
+    pub(in crate::server::participant::production) fn install_participant_holdback_pause(
+        &self,
+        pid: u64,
+    ) -> Receiver<()> {
+        self.supervisor.install_participant_holdback_pause(pid)
+    }
+
+    pub(in crate::server::participant::production) fn resume_process(&self, pid: u64) -> bool {
+        self.supervisor.resume_test_process(pid)
+    }
+
+    pub(in crate::server::participant::production) fn fail_next_outbox_append(
+        &self,
+    ) -> Result<(), Box<dyn Error>> {
+        self.barriers
+            .as_ref()
+            .ok_or("SDK socket fixture has no durability gates")?
+            .fail_next(OutboxBarrierKind::OutboxAppend)
+    }
+
     pub(in crate::server::participant::production) fn stop(mut self) -> Result<(), Box<dyn Error>> {
         if let Some(listener) = self.listener.take() {
             listener.shutdown()?;
@@ -531,6 +582,7 @@ impl SdkSocketFixture {
         self.supervisor.shutdown();
         drop(self.supervisor);
         drop(self.handler);
+        drop(self.barriers);
         Ok(())
     }
 }
