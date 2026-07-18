@@ -84,6 +84,19 @@ fn enroll(
     Ok(sent(&handle.send_operation(operation)?)?)
 }
 
+fn record_committed(token: [u8; 16], delivery_seq: u64) -> TestResult<ServerValue> {
+    Ok(ServerValue::RecordCommitted(RecordCommitted::new(
+        RecordAdmissionEnvelope {
+            conversation_id: CONVERSATION,
+            participant_id: PARTICIPANT,
+            capability_generation: generation(1)?,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new(token),
+        },
+        delivery_seq,
+    )))
+}
+
 #[test]
 fn real_receive_routes_foreign_delayed_and_exact_d1_with_provenance() -> TestResult {
     let record_request = RecordAdmission {
@@ -95,22 +108,23 @@ fn real_receive_routes_foreign_delayed_and_exact_d1_with_provenance() -> TestRes
         ),
         payload: vec![9],
     };
+    let successor_request = RecordAdmission {
+        conversation_id: CONVERSATION,
+        participant_id: PARTICIPANT,
+        capability_generation: generation(1)?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xB8; 16],
+        ),
+        payload: vec![10],
+    };
     let loopback = Loopback::spawn(vec![vec![
         Action::Respond(vec![
             enroll_bound(99, [1; 16])?,
             enroll_bound(CONVERSATION, [9; 16])?,
             enroll_bound(CONVERSATION, [1; 16])?,
         ]),
-        Action::Respond(vec![ServerValue::RecordCommitted(RecordCommitted::new(
-            RecordAdmissionEnvelope {
-                conversation_id: CONVERSATION,
-                participant_id: PARTICIPANT,
-                capability_generation: generation(1)?,
-                record_admission_attempt_token:
-                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
-            },
-            10,
-        ))]),
+        Action::Respond(vec![record_committed([0xA7; 16], 10)?]),
+        Action::Respond(vec![record_committed([0xB8; 16], 11)?]),
     ]])?;
     let config = loopback.connected_config()?;
     let store = MemoryStore::default();
@@ -156,6 +170,16 @@ fn real_receive_routes_foreign_delayed_and_exact_d1_with_provenance() -> TestRes
         }
         _ => return Err(io::Error::other("exact D1 record response must apply").into()),
     }
+    let operation =
+        recorded(handle.record_operation(ClientRequest::RecordAdmission(successor_request))?)?;
+    sent(&handle.send_operation(operation)?)?;
+    assert!(matches!(
+        handle.receive()?,
+        RemoteParticipantInbound::Applied {
+            value: ServerValue::RecordCommitted(_),
+            ..
+        }
+    ));
     let canonical = observed_store.bytes()?;
     liminal_protocol::client::ClientResumeRecord::decode_canonical(&canonical)
         .map_err(|error| io::Error::other(format!("stored LPCR did not decode: {error:?}")))?;
