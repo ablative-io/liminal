@@ -2,9 +2,10 @@
 
 Base: `liminal` main at `2bf71c4` (F-0c Unit 1 landed).
 
-Round: r3 pre-review fold. Its lineage is r1 draft, r2 seat fold, then this r3
-fold of the completed pre-review under the seat's rulings. All repository
-anchors in this revision were read against the bytes at `2bf71c4`; no anchor is
+Round: r5 re-review closure fold. Lineage: r1 draft, r2 seat fold, r3 fold of
+the completed pre-review under the seat's rulings, r4 ratifier's crash-cut
+check, r5 closure of the re-review's surviving finding. All repository anchors
+in this revision were read against the bytes at `2bf71c4`; no anchor is
 inherited on trust from a pre-landing draft.
 
 ## Goal
@@ -648,10 +649,15 @@ readiness markers, or socket readability.
 11. **`socket_offer_and_write_never_reclaim`**: encode, enqueue, partial-write,
     complete-write, peer-close, and reconnect without ack; every durable
     obligation remains and is replayed. This is the named G1 oracle.
-12. **`reattach_replays_unacked_in_order_after_acked_frontier`**: ack through N,
-    detach, commit N+1..N+3 while detached/eligible from their frozen snapshots,
-    reattach, and observe only live recipient obligations in ascending sequence;
-    reconnect again before ack and observe duplicates in the same order.
+12. **`reattach_replays_unacked_in_order_after_acked_frontier`** [r5 — corrected
+    to conform to D3-2]: ack through N, then commit N+1..N+3 while the
+    recipient is STILL BOUND and therefore included in each persisted recipient
+    snapshot, detach before offer/ack, reattach, and observe exactly those live
+    recipient obligations in ascending sequence; reconnect again before ack and
+    observe duplicates in the same order. Complementary half: records committed
+    AFTER the detach create no obligation for the detached identity (production
+    binding occupancy recognizes only `BindingState::Bound`,
+    `production/state.rs:293-309`) and do not appear after reattach.
 13. **`marker_ack_requires_exact_offered_binding_testimony`**: before offer,
     wrong marker, wrong binding epoch, and stale generation remain typed
     refusals. Exact offered marker on the current binding commits one
@@ -752,7 +758,10 @@ readiness markers, or socket readability.
     (b): crash BETWEEN the v2 Left flush and the extension append; cold first
     touch reconciles the missing Leave source batch per section 3.2 and the
     discharge holds with byte-identical results to cut (a). In both cuts a
-    second restore is idempotent and no discharged obligation reappears.
+    second restore is idempotent — asserted concretely: the extension stream's
+    row count and head are unchanged by the second restore (whole-source
+    uniqueness accepts the exact existing batch rather than appending another)
+    and no discharged obligation reappears.
 
 ### Regressions and full gates
 
@@ -888,3 +897,4 @@ the rejected conservative formula remains printed there for the decision.
 | r2 | 2026-07-18 | seat fold (Hermes Crumpet) | Fold pass on r1 with spot anchors re-verified at `2bf71c4` (ServerPush enum, MarkerAck factual-empty seam, eight-kind v2 census, signed config fields, `DELIVERY_SLICE_BUDGET`). Ruled Q3: `MarkerAckCommitted` row body fixed to the RecordAdmission census discipline. Ratified the participant v2→v3 loud migration as a D3-7 consequence (flagged for Tom/Annabel signoff). Opened Q5: `contiguously_available_through` basis (volatile-offered vs durable-obligation prefix) routed to pre-review with the seat's lean recorded; section 7 amended to carry both candidates. |
 | r3 | 2026-07-18 | implementation specialist, pre-review fold under seat rulings | Folded all five major findings and the note. Replaced one-record Produced with source batches; reversed r2's v3 ratification after the adversarial independent-stream check and placed the ruled MarkerAck body in the Unit 2 extension stream; closed Q2 on observer-v1 live targeting and Q5 on durable-obligation testimony; recorded the discharge-on-Leave seat ruling and flagged it for Waffles/Tom ratification with both bounds visible; vendored the seat-verified frame excerpt. |
 | r4 | 2026-07-18 | seat fold (Hermes Crumpet) | Added test 30, the ratifier's check on the discharge-on-Leave ruling (Waffles, on ratifying at his seat): the Leave commit-boundary crash cut in both forms — crash after both flushes, and crash between the v2 Left flush and the extension append with reconciliation repair — proving the discharge replays deterministically from the Left row, idempotent across a second restore. |
+| r5 | 2026-07-18 | seat fold (Hermes Crumpet) | Re-review closure. The resumed lens confirmed five of six majors and the note closed, and caught the sixth surviving verbatim — a seat dispatch omission in the r3 amendment list, disclosed as such: test 12 still committed records to a detached recipient, contradicting D3-2. Corrected: records commit while bound and snapshot-included, detach precedes offer/ack, plus the complementary no-obligation-after-detach half. Also folded the lens's two mechanical items: header round label advanced, and test 30's idempotency made concrete (unchanged extension row count/head on second restore). |
