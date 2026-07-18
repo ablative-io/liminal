@@ -232,6 +232,9 @@ fn supervisor_allocation_reaches_real_process_handler_as_exact_context()
         conversation_id: 70,
         participant_id: 2,
         capability_generation: Generation::new(3).ok_or("fixture generation was zero")?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
         payload: vec![1, 2, 3],
     });
     client.write_all(&encode_request(request.clone())?)?;

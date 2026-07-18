@@ -504,6 +504,8 @@ fn record_admission_lookup_rows_classify_typed_over_production_dispatch()
             conversation_id,
             participant_id: participant,
             capability_generation: generation,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             payload: vec![7, 7, 7],
         })
     };

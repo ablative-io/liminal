@@ -5,7 +5,7 @@ use std::thread;
 use liminal_protocol::wire::{
     AuthorityStateTag, BindingStateTag, ClientDiscriminant, ClientRequest, DetachAttemptToken,
     DetachCommitted, DetachInProgress, DetachRequest, LeaveAttemptToken, LeaveCommitted,
-    ProtocolVersion, RecordAdmission, ServerDiscriminant, ServerValue, decode_server_value_body,
+    ProtocolVersion, ServerDiscriminant, ServerValue, decode_server_value_body,
 };
 
 use super::support::{Action, Loopback, MemoryStore, PausedReconnectLoopback};
@@ -97,12 +97,10 @@ fn issued_tokenless_restore_reports_durable_abandonment() -> TestResult {
     let observed = store.clone();
     let handle = RemoteParticipantHandle::new(&config, store)?;
     enroll_and_receive(&handle)?;
-    let request = ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: CONVERSATION,
-        participant_id: PARTICIPANT,
-        capability_generation: generation(1)?,
-        payload: vec![7],
-    });
+    let request =
+        ClientRequest::ObserverRecovery(liminal_protocol::wire::ObserverRecoveryHandshake {
+            observer_refusals: vec![],
+        });
     let operation = recorded(handle.record_operation(request.clone())?)?;
     sent(&handle.send_operation(operation)?)?;
     let canonical = observed.bytes()?;

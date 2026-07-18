@@ -85,11 +85,14 @@ fn enroll(
 }
 
 #[test]
-fn real_receive_routes_foreign_delayed_exact_and_ambiguous_with_provenance() -> TestResult {
+fn real_receive_routes_foreign_delayed_and_exact_d1_with_provenance() -> TestResult {
     let record_request = RecordAdmission {
         conversation_id: CONVERSATION,
         participant_id: PARTICIPANT,
         capability_generation: generation(1)?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
         payload: vec![9],
     };
     let loopback = Loopback::spawn(vec![vec![
@@ -103,6 +106,8 @@ fn real_receive_routes_foreign_delayed_exact_and_ambiguous_with_provenance() -> 
                 conversation_id: CONVERSATION,
                 participant_id: PARTICIPANT,
                 capability_generation: generation(1)?,
+                record_admission_attempt_token:
+                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             },
             10,
         ))]),
@@ -143,13 +148,13 @@ fn real_receive_routes_foreign_delayed_exact_and_ambiguous_with_provenance() -> 
         recorded(handle.record_operation(ClientRequest::RecordAdmission(record_request))?)?;
     sent(&handle.send_operation(operation)?)?;
     match handle.receive()? {
-        RemoteParticipantInbound::Refused {
-            reason, provenance, ..
+        RemoteParticipantInbound::Applied {
+            value: ServerValue::RecordCommitted(_),
+            provenance,
         } => {
-            assert_eq!(reason, ClientInboundRefusalReason::AmbiguousResponse);
             assert_eq!(provenance.connection_id(), 1);
         }
-        _ => return Err(io::Error::other("record response must remain ambiguous").into()),
+        _ => return Err(io::Error::other("exact D1 record response must apply").into()),
     }
     let canonical = observed_store.bytes()?;
     liminal_protocol::client::ClientResumeRecord::decode_canonical(&canonical)
@@ -388,12 +393,10 @@ fn tokenless_restore_surfaces_durable_abandonment_for_rerecord() -> TestResult {
         handle.receive()?,
         RemoteParticipantInbound::Applied { .. }
     ));
-    let request = ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: CONVERSATION,
-        participant_id: PARTICIPANT,
-        capability_generation: generation(1)?,
-        payload: vec![5],
-    });
+    let request =
+        ClientRequest::ObserverRecovery(liminal_protocol::wire::ObserverRecoveryHandshake {
+            observer_refusals: vec![],
+        });
     {
         let operation = recorded(handle.record_operation(request.clone())?)?;
         core::hint::black_box(&operation);

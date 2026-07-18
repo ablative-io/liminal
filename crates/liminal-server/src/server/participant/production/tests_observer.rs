@@ -186,6 +186,8 @@ fn capacity_check_counts_tracked_conversation_after_owner_discard() -> Result<()
             conversation_id: bound_conversation,
             participant_id: 0,
             capability_generation: Generation::ONE,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             payload: vec![1, 2, 3],
         }),
     );

@@ -77,6 +77,8 @@ impl ParticipantSemanticHandler for RecordingHandler {
                 conversation_id: 99,
                 participant_id: 1,
                 capability_generation: Generation::ONE,
+                record_admission_attempt_token:
+                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
                 payload: Vec::new(),
             }),
         );
@@ -119,6 +121,9 @@ fn decoded_request_reaches_handler_and_crate_value_is_framed() -> Result<(), Str
         participant_id: 2,
         capability_generation: Generation::new(3)
             .ok_or_else(|| "fixture generation was zero".to_owned())?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
         payload: vec![1, 2, 3],
     });
     let generic = participant_generic(request.clone())?;
@@ -188,6 +193,9 @@ fn semantic_failure_is_fatal_and_has_no_wire_value() -> Result<(), String> {
         conversation_id: 72,
         participant_id: 0,
         capability_generation: Generation::ONE,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
         payload: vec![],
     }))?;
     let handler = RecordingHandler::failing();
@@ -278,6 +286,8 @@ fn every_registered_client_request_reaches_the_same_semantic_seam() -> Result<()
             conversation_id: 15,
             participant_id: 16,
             capability_generation: generation,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             payload: vec![0xAA, 0xBB, 0xCC],
         }),
         ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {

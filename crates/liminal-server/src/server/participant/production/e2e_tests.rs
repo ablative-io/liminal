@@ -273,6 +273,8 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
             conversation_id: CONVERSATION,
             participant_id: participant + 7,
             capability_generation: Generation::ONE,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             payload: vec![1, 2, 3],
         }),
     )?;

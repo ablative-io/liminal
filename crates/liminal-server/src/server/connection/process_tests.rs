@@ -264,6 +264,9 @@ fn participant_record_admission() -> Result<(ClientRequest, Frame), String> {
         participant_id: 2,
         capability_generation: Generation::new(3)
             .ok_or_else(|| "participant process test generation was zero".to_owned())?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
         payload: vec![1, 2, 3],
     });
     let participant = ParticipantFrame::ClientRequest(request.clone());
