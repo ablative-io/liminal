@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use liminal_protocol::lifecycle::{
     BindingState, ConversationDecision, ConversationGenesis, ConversationRefusalReason,
-    CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveMember,
+    CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveFrontierOwner, LiveMember,
     ParticipantConversation,
 };
 use liminal_protocol::wire::{
@@ -123,6 +123,10 @@ pub(super) struct ConversationAuthority {
     /// Shell aggregate; `Some` from genesis onward. Temporarily taken while a
     /// pending aggregate barrier owns it.
     pub(super) shell: Option<ParticipantConversation>,
+    /// Move-only executable frontier/closure/retention authority. Absent only
+    /// before the first enrollment has durably committed, or while a
+    /// consuming protocol transition owns it.
+    pub(super) frontier: Option<LiveFrontierOwner>,
     /// Live participant slots keyed by permanent participant id.
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
     /// Permanent enrollment-token index.
@@ -157,6 +161,9 @@ pub(super) enum StateError {
     /// The shell was unavailable (a pending barrier owns it).
     #[error("conversation shell authority is unavailable")]
     ShellUnavailable,
+    /// The executable frontier was unavailable or absent after enrollment.
+    #[error("conversation executable frontier authority is unavailable")]
+    FrontierUnavailable,
     /// A replayed decision minted different canonical bytes than stored.
     #[error("replayed event bytes diverge from durable event bytes at log sequence {sequence}")]
     ReplayedEventDrift {
@@ -210,6 +217,7 @@ impl ConversationAuthority {
         Self {
             conversation_id,
             shell: None,
+            frontier: None,
             slots: BTreeMap::new(),
             tokens: BTreeMap::new(),
             next_order: 0,
@@ -228,6 +236,16 @@ impl ConversationAuthority {
     /// Takes the shell for a consuming protocol decision.
     pub(super) fn take_shell(&mut self) -> Result<ParticipantConversation, StateError> {
         self.shell.take().ok_or(StateError::ShellUnavailable)
+    }
+
+    /// Takes the complete executable frontier for one consuming transition.
+    pub(super) fn take_frontier(&mut self) -> Result<LiveFrontierOwner, StateError> {
+        self.frontier.take().ok_or(StateError::FrontierUnavailable)
+    }
+
+    /// Installs the complete protocol-produced post-transition frontier.
+    pub(super) fn install_frontier(&mut self, frontier: LiveFrontierOwner) {
+        self.frontier = Some(frontier);
     }
 
     /// Allocates the next transaction order and delivery sequence pair.

@@ -14,11 +14,12 @@
 //! same crash-consistency model the aggregate barrier is built for.
 
 use liminal_protocol::lifecycle::{
-    AggregateOperationDecision, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition,
-    BindingSlotDecision, BindingState, ClosureState, CommittedBindingTerminalPosition,
-    CredentialAttachLiveReceipt, CredentialAttachLookupResult, PresentedIdentity,
-    SemanticConnectionCapacityDecision, commit_attach, decide_attached_operation,
-    lookup_credential_attach, select_credential_attach_binding_slot,
+    AggregateOperationDecision, AttachCommit, AttachCommitParameters, AttachFrontierCharges,
+    AttachSecretProof, AttachTransition, AttachedRecordPosition, BindingSlotDecision, BindingState,
+    ClosureState, CommittedBindingTerminalPosition, CredentialAttachLiveReceipt,
+    CredentialAttachLookupResult, LiveFrontierOwner, PresentedIdentity, RetainedRecordCharge,
+    SemanticConnectionCapacityDecision, apply_attach_frontier, commit_attach,
+    decide_attached_operation, lookup_credential_attach, select_credential_attach_binding_slot,
 };
 use liminal_protocol::wire::{
     AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, CredentialAttachRequest,
@@ -28,6 +29,7 @@ use liminal_protocol::wire::{
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::capacity::ServerCapacity;
 use super::facts::{self, Digest};
+use super::frontier;
 use super::log::{StoredAttachAllocation, StoredAttachRequest, StoredOperation};
 use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
@@ -238,6 +240,8 @@ impl ConversationAuthority {
         let committed = commit_attach(verified, slot.cell).map_err(|error| {
             StateError::invariant(format!("protocol attach transition failed: {error:?}"))
         })?;
+        let (committed, frontier_owner) =
+            transition_attach_frontier(self.take_frontier()?, committed, request, allocation)?;
         let shell = self.take_shell()?;
         let barrier = match decide_attached_operation(shell, committed) {
             AggregateOperationDecision::Commit(barrier) => barrier,
@@ -256,6 +260,7 @@ impl ConversationAuthority {
         let (shell, committed) =
             commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
         self.shell = Some(shell);
+        self.install_frontier(frontier_owner);
         self.advance_log_head()?;
         let outcome = committed.outcome.clone();
         slot.member = committed.member;
@@ -310,6 +315,61 @@ impl ConversationAuthority {
         self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
         Ok(outcome)
     }
+}
+
+fn transition_attach_frontier(
+    owner: LiveFrontierOwner,
+    committed: AttachCommit<Digest, Digest>,
+    request: &CredentialAttachRequest,
+    allocation: &StoredAttachAllocation,
+) -> Result<(AttachCommit<Digest, Digest>, LiveFrontierOwner), StateError> {
+    let attached_encoded = frontier::credential_attached_charge(
+        request.conversation_id,
+        request.participant_id,
+        allocation,
+    )?;
+    let attached_charge = RetainedRecordCharge::new(
+        committed.attached.delivery_seq(),
+        committed.attached.admission_order(),
+        attached_encoded,
+    );
+    let terminal = match committed.transition {
+        AttachTransition::Detached => None,
+        AttachTransition::Superseded { terminal } => Some(terminal.into()),
+        AttachTransition::FencedRecovery {
+            composed_terminal, ..
+        } => composed_terminal,
+    };
+    let terminal_charge = terminal
+        .map(|terminal| {
+            frontier::terminal_charge(
+                terminal.conversation_id(),
+                terminal.participant_id(),
+                terminal.binding_epoch(),
+                terminal.admission_order().transaction_order(),
+                terminal.delivery_seq(),
+            )
+            .map(|encoded| {
+                RetainedRecordCharge::new(
+                    terminal.delivery_seq(),
+                    terminal.admission_order(),
+                    encoded,
+                )
+            })
+        })
+        .transpose()?;
+    apply_attach_frontier(
+        owner,
+        committed,
+        AttachFrontierCharges::new(terminal_charge, attached_charge),
+    )
+    .map_err(|failure| {
+        StateError::invariant(format!(
+            "attach frontier transition failed: {:?}",
+            failure.error()
+        ))
+    })
+    .map(liminal_protocol::lifecycle::LiveFrontierCommit::into_parts)
 }
 
 /// Builds the echo envelope of one credential-attach request.

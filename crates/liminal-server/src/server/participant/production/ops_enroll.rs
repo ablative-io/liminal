@@ -13,9 +13,14 @@
 
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AllocatedParticipantSlot, AttachedRecordPosition,
-    BindingSlotDecision, DetachCell, EnrollmentCommitParameters, EnrollmentFingerprint,
-    EnrollmentLiveReceipt, EnrollmentLookupResult, EnrollmentProvenance, EnrollmentTokenPhase,
-    ParticipantSlotAllocatorProof, ResolvedIdentity, SemanticConnectionCapacityDecision,
+    BindingSlotDecision, BindingState, CapacityCounter, ClaimFrontiers,
+    ConnectionConversationTracking, DetachCell, EnrollmentCapacityCounters, EnrollmentCommit,
+    EnrollmentCommitParameters, EnrollmentFingerprint, EnrollmentLiveReceipt,
+    EnrollmentLookupResult, EnrollmentProvenance, EnrollmentTokenPhase,
+    FreshParticipantCapacityCounter, InitialEnrollmentCommitValues,
+    InitialEnrollmentOperationDecision, InitialEnrollmentOperationInput, LiveFrontierOwner,
+    ParticipantSlotAllocatorProof, ResolvedIdentity, RetainedRecordCharge,
+    SemanticConnectionCapacityDecision, apply_enrollment_frontier, apply_initial_enrollment,
     commit_enrollment, decide_enrolled_operation, lookup_enrollment,
     select_enrollment_binding_slot,
 };
@@ -25,9 +30,12 @@ use liminal_protocol::wire::{
     ServerValue,
 };
 
+use crate::config::types::ParticipantConfig;
+
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::capacity::{ServerCapacity, Stage8Outcome};
 use super::facts::{self, Digest};
+use super::frontier;
 use super::log::{StoredEnrollmentAllocation, StoredEnrollmentRequest, StoredOperation};
 use super::state::{ConversationAuthority, DurableAppend, Slot, StateError};
 
@@ -66,6 +74,7 @@ impl ConversationAuthority {
         request: &EnrollmentRequest,
         operation_facts: &OperationFacts,
         server_capacity: &ServerCapacity,
+        config: &ParticipantConfig,
         appender: &dyn DurableAppend,
     ) -> Result<ArmOutcome, StateError> {
         let token_bytes = request.enrollment_token.into_bytes();
@@ -108,12 +117,12 @@ impl ConversationAuthority {
         // concurrent enrollments on other conversations unable to admit past
         // a server scope.
         let deadlines = operation_facts.deadlines()?;
-        let reservation =
+        let (reservation, enrollment_capacity) =
             match self.enrollment_stage8(request, operation_facts, server_capacity, &deadlines)? {
                 Stage8Outcome::Refused(response) => {
                     return Ok(ArmOutcome::respond(response.into_server_value()));
                 }
-                Stage8Outcome::Reserved(reservation) => reservation,
+                Stage8Outcome::Reserved(reservation, capacity) => (reservation, capacity),
             };
 
         // The one conversation-creating arm: genesis is durable exactly when
@@ -132,7 +141,35 @@ impl ConversationAuthority {
             provenance_expires_at: deadlines.provenance_expires_at().into(),
             enrollment_fingerprint: facts::enrollment_fingerprint(request.enrollment_token),
         };
-        let outcome = self.enroll_commit(request, &allocation, CommitMode::Live(appender))?;
+        let outcome = if self.frontier.is_none() {
+            match self.initial_enrollment_operation(
+                request,
+                &allocation,
+                operation_facts.connection_tracking,
+                operation_facts.connection_capacity,
+                enrollment_capacity,
+                config,
+            )? {
+                InitialEnrollmentOperationDecision::Respond(response) => {
+                    return Ok(ArmOutcome::respond(response.into_server_value()));
+                }
+                InitialEnrollmentOperationDecision::Fault(fault) => {
+                    return Err(StateError::invariant(format!(
+                        "initial enrollment selector fault: {fault:?}"
+                    )));
+                }
+                InitialEnrollmentOperationDecision::Commit(operation) => self
+                    .commit_initial_enrollment(
+                        *operation,
+                        request,
+                        &allocation,
+                        config,
+                        CommitMode::Live(appender),
+                    )?,
+            }
+        } else {
+            self.enroll_commit(request, &allocation, CommitMode::Live(appender))?
+        };
         // The durable append succeeded: the stage-8 reservation becomes
         // permanent (enrollment retires no earlier receipt).
         reservation.confirm(&[]);
@@ -142,6 +179,87 @@ impl ConversationAuthority {
         ))
     }
 
+    fn initial_enrollment_operation(
+        &self,
+        request: &EnrollmentRequest,
+        allocation: &StoredEnrollmentAllocation,
+        connection_tracking: ConnectionConversationTracking,
+        connection_capacity: CapacityCounter,
+        enrollment_capacity: EnrollmentCapacityCounters,
+        config: &ParticipantConfig,
+    ) -> Result<InitialEnrollmentOperationDecision<Digest>, StateError> {
+        let attached_charge = frontier::attached_charge(request.conversation_id, allocation)?;
+        let closure = frontier::initial_closure_input(config, allocation, attached_charge)?;
+        let deadlines = liminal_protocol::lifecycle::ReceiptDeadlines::try_from_absolute(
+            allocation.receipt_expires_at.get(),
+            allocation.provenance_expires_at.get(),
+        )
+        .map_err(|error| {
+            StateError::invariant(format!(
+                "stored enrollment deadlines are invalid: {error:?}"
+            ))
+        })?;
+        let binding = BindingState::Detached;
+        let input: InitialEnrollmentOperationInput<'_, Digest, Digest, Digest> =
+            InitialEnrollmentOperationInput::new(
+                request,
+                EnrollmentTokenPhase::Unmapped,
+                &binding,
+                connection_tracking,
+                connection_capacity,
+                self.binding_slot_occupancy(
+                    allocation.origin_epoch.to_epoch()?.connection_incarnation,
+                ),
+                enrollment_capacity,
+                closure,
+            );
+        Ok(apply_initial_enrollment(
+            &input,
+            || {
+                InitialEnrollmentCommitValues::new(
+                    AttachSecret::new(allocation.attach_secret),
+                    deadlines,
+                    EnrollmentFingerprint::new(allocation.enrollment_fingerprint),
+                )
+            },
+            || {
+                AllocatedParticipantSlot::from_allocator(ServerSlotProof {
+                    conversation_id: request.conversation_id,
+                    participant_id: allocation.participant_id,
+                    identity_limit: allocation.identity_limit,
+                })
+            },
+        ))
+    }
+
+    fn commit_initial_enrollment(
+        &mut self,
+        operation: liminal_protocol::lifecycle::InitialEnrollmentOperationCommit<Digest>,
+        request: &EnrollmentRequest,
+        allocation: &StoredEnrollmentAllocation,
+        config: &ParticipantConfig,
+        mode: CommitMode<'_>,
+    ) -> Result<EnrollBound, StateError> {
+        let attached_charge = frontier::attached_charge(request.conversation_id, allocation)?;
+        let initial = ClaimFrontiers::from_initial_enrollment(operation, attached_charge).map_err(
+            |failure| {
+                StateError::invariant(format!(
+                    "initial frontier acquisition failed: {:?}",
+                    failure.error()
+                ))
+            },
+        )?;
+        let (operation, owner) =
+            LiveFrontierOwner::from_initial_enrollment(initial, config.max_retained_record_rows);
+        self.publish_enrollment(
+            operation.into_enrollment(),
+            owner,
+            request,
+            allocation,
+            mode,
+        )
+    }
+
     /// Replays one committed enrollment entry from its stored inputs.
     pub(super) fn replay_enrolled(
         &mut self,
@@ -149,16 +267,31 @@ impl ConversationAuthority {
         allocation: &StoredEnrollmentAllocation,
         stored_event: &[u8],
         sequence: u64,
+        config: &ParticipantConfig,
     ) -> Result<(), StateError> {
         let request = request.to_request();
-        self.enroll_commit(
-            &request,
-            allocation,
-            CommitMode::Replay {
-                stored_event,
-                sequence,
-            },
-        )?;
+        let mode = CommitMode::Replay {
+            stored_event,
+            sequence,
+        };
+        if self.frontier.is_none() {
+            let decision = self.initial_enrollment_operation(
+                &request,
+                allocation,
+                ConnectionConversationTracking::Untracked,
+                replay_counter(config.max_semantic_conversations_per_connection)?,
+                replay_enrollment_capacity(config)?,
+                config,
+            )?;
+            let InitialEnrollmentOperationDecision::Commit(operation) = decision else {
+                return Err(StateError::invariant(
+                    "durable initial enrollment was refused during protocol replay",
+                ));
+            };
+            self.commit_initial_enrollment(*operation, &request, allocation, config, mode)?;
+        } else {
+            self.enroll_commit(&request, allocation, mode)?;
+        }
         Ok(())
     }
 
@@ -197,6 +330,31 @@ impl ConversationAuthority {
         .map_err(|error| {
             StateError::invariant(format!("protocol enrollment transition failed: {error:?}"))
         })?;
+        let encoded_charge = frontier::attached_charge(request.conversation_id, allocation)?;
+        let charge = RetainedRecordCharge::new(
+            committed.attached.delivery_seq(),
+            committed.attached.admission_order(),
+            encoded_charge,
+        );
+        let transitioned = apply_enrollment_frontier(self.take_frontier()?, committed, charge)
+            .map_err(|failure| {
+                StateError::invariant(format!(
+                    "subsequent enrollment frontier transition failed: {:?}",
+                    failure.error()
+                ))
+            })?;
+        let (committed, owner) = transitioned.into_parts();
+        self.publish_enrollment(committed, owner, request, allocation, mode)
+    }
+
+    fn publish_enrollment(
+        &mut self,
+        committed: EnrollmentCommit<Digest>,
+        owner: LiveFrontierOwner,
+        request: &EnrollmentRequest,
+        allocation: &StoredEnrollmentAllocation,
+        mode: CommitMode<'_>,
+    ) -> Result<EnrollBound, StateError> {
         let shell = self.take_shell()?;
         let barrier = match decide_enrolled_operation(shell, committed) {
             AggregateOperationDecision::Commit(barrier) => barrier,
@@ -213,9 +371,10 @@ impl ConversationAuthority {
         };
         let (shell, committed) =
             commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
-        self.shell = Some(shell);
-        self.advance_log_head()?;
         let outcome = committed.outcome.clone();
+        self.shell = Some(shell);
+        self.install_frontier(owner);
+        self.advance_log_head()?;
         self.slots.insert(
             allocation.participant_id,
             Slot {
@@ -247,6 +406,36 @@ impl ConversationAuthority {
         self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
         Ok(outcome)
     }
+}
+
+fn replay_counter(limit: u64) -> Result<CapacityCounter, StateError> {
+    CapacityCounter::try_new(limit, 0).map_err(|error| {
+        StateError::invariant(format!(
+            "validated replay capacity limit is invalid: {error:?}"
+        ))
+    })
+}
+
+fn replay_fresh_counter(limit: u64) -> Result<FreshParticipantCapacityCounter, StateError> {
+    FreshParticipantCapacityCounter::try_new(limit, 0).map_err(|error| {
+        StateError::invariant(format!(
+            "validated fresh-participant replay capacity is invalid: {error:?}"
+        ))
+    })
+}
+
+fn replay_enrollment_capacity(
+    config: &ParticipantConfig,
+) -> Result<EnrollmentCapacityCounters, StateError> {
+    Ok(EnrollmentCapacityCounters::new(
+        replay_counter(config.max_retired_identity_slots_server)?,
+        replay_counter(config.identity_slots)?,
+        replay_counter(config.max_live_attach_receipts_server)?,
+        replay_fresh_counter(config.max_live_attach_receipts_per_participant)?,
+        replay_counter(config.max_receipt_provenance_server)?,
+        replay_counter(config.max_receipt_provenance_per_conversation)?,
+        replay_fresh_counter(config.max_receipt_provenance_per_participant)?,
+    ))
 }
 
 /// Builds the enrollment replay/known response for a mapped token.

@@ -428,14 +428,8 @@ const fn default_max_subscription_inbox_depth() -> usize {
 /// values during the same accumulated validation pass as the rest of the
 /// config. All values are deployment-owner decisions (no assumed defaults).
 ///
-/// Every field here is consumed by the live production handler. The
-/// record-admission and leave-closure parameters (record/marker/mandatory/
-/// recovery charges) are deliberately absent until the claim-frontier
-/// acquisition lands: required-but-inert config would force deployment owners
-/// to author numbers that gate nothing today and silently become live limits
-/// later. They are reintroduced together with their real consumers and
-/// complete validation in the same commit (`deny_unknown_fields` makes a
-/// premature key a typed startup error, never a silent no-op).
+/// Every field here is consumed by the live production handler. Frontier and
+/// retention limits are required inputs; there are no deployment defaults.
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParticipantConfig {
@@ -496,6 +490,30 @@ pub struct ParticipantConfig {
     /// preflight (register row 5642), over one shared per-connection
     /// dispatch map.
     pub max_semantic_conversations_per_connection: u64,
+    /// Maximum canonical entries in one ordinary retained-record row.
+    pub max_ordinary_record_entries: u64,
+    /// Maximum canonical bytes in one ordinary retained-record row.
+    pub max_ordinary_record_bytes: u64,
+    /// Maximum canonical entries in one generated marker row.
+    pub max_generated_marker_entries: u64,
+    /// Maximum canonical bytes in one generated marker row.
+    pub max_generated_marker_bytes: u64,
+    /// Entry component of the mandatory transaction envelope `Q`.
+    pub mandatory_transaction_bound_entries: u64,
+    /// Byte component of the mandatory transaction envelope `Q`.
+    pub mandatory_transaction_bound_bytes: u64,
+    /// Entry component of the full recovery claim `K`.
+    pub full_recovery_claim_entries: u64,
+    /// Byte component of the full recovery claim `K`.
+    pub full_recovery_claim_bytes: u64,
+    /// Total retained durable entry capacity per conversation.
+    pub retained_capacity_entries: u64,
+    /// Total retained canonical-byte capacity per conversation.
+    pub retained_capacity_bytes: u64,
+    /// Maximum retained causal-record rows restored for one conversation.
+    pub max_retained_record_rows: u64,
+    /// Maximum closure churn cycles in one episode.
+    pub closure_episode_churn_limit: u64,
 }
 
 impl ParticipantConfig {
@@ -508,7 +526,7 @@ impl ParticipantConfig {
         // The receipt/identity block follows the contract's frozen nine-field
         // validation order: both TTLs, the five receipt/provenance caps, the
         // server identity limit, then the conversation identity limit.
-        let nonzero: [(&str, u64); 12] = [
+        let nonzero: [(&str, u64); 23] = [
             ("wire_frame_limit", self.wire_frame_limit),
             ("attach_receipt_ttl_ms", self.attach_receipt_ttl_ms),
             ("receipt_provenance_ttl_ms", self.receipt_provenance_ttl_ms),
@@ -545,6 +563,35 @@ impl ParticipantConfig {
                 "max_semantic_conversations_per_connection",
                 self.max_semantic_conversations_per_connection,
             ),
+            (
+                "max_ordinary_record_entries",
+                self.max_ordinary_record_entries,
+            ),
+            ("max_ordinary_record_bytes", self.max_ordinary_record_bytes),
+            (
+                "max_generated_marker_entries",
+                self.max_generated_marker_entries,
+            ),
+            (
+                "max_generated_marker_bytes",
+                self.max_generated_marker_bytes,
+            ),
+            (
+                "mandatory_transaction_bound_entries",
+                self.mandatory_transaction_bound_entries,
+            ),
+            (
+                "mandatory_transaction_bound_bytes",
+                self.mandatory_transaction_bound_bytes,
+            ),
+            (
+                "full_recovery_claim_entries",
+                self.full_recovery_claim_entries,
+            ),
+            ("full_recovery_claim_bytes", self.full_recovery_claim_bytes),
+            ("retained_capacity_entries", self.retained_capacity_entries),
+            ("retained_capacity_bytes", self.retained_capacity_bytes),
+            ("max_retained_record_rows", self.max_retained_record_rows),
         ];
         for (field, value) in nonzero {
             if value == 0 {
@@ -556,6 +603,25 @@ impl ParticipantConfig {
                 "participant.receipt_provenance_ttl_ms: must be at least \
                  attach_receipt_ttl_ms (provenance cannot expire before the receipt it explains)"
                     .to_owned(),
+            );
+        }
+        if self.full_recovery_claim_entries != self.mandatory_transaction_bound_entries {
+            errors.push(
+                "participant.full_recovery_claim_entries: must equal \
+                 mandatory_transaction_bound_entries"
+                    .to_owned(),
+            );
+        }
+        if self.full_recovery_claim_bytes != self.mandatory_transaction_bound_bytes {
+            errors.push(
+                "participant.full_recovery_claim_bytes: must equal \
+                 mandatory_transaction_bound_bytes"
+                    .to_owned(),
+            );
+        }
+        if !(2..=u64::from(u32::MAX)).contains(&self.closure_episode_churn_limit) {
+            errors.push(
+                "participant.closure_episode_churn_limit: must be in 2..=u32::MAX".to_owned(),
             );
         }
     }

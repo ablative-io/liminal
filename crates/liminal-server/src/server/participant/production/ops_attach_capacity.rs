@@ -90,7 +90,7 @@ impl ConversationAuthority {
             // The crate selector owns the in-model full/not-full precedence;
             // its Commit value is carried forward as the ledger reservation.
             match select_credential_attach_capacity(request, counters) {
-                CredentialAttachCapacityDecision::Commit(_) => Ok(Stage8Choice::Admit),
+                CredentialAttachCapacityDecision::Commit(_) => Ok(Stage8Choice::Admit(())),
                 CredentialAttachCapacityDecision::Respond(response) => {
                     Ok(Stage8Choice::Refuse(response))
                 }
@@ -98,7 +98,7 @@ impl ConversationAuthority {
         })?;
         Ok(match outcome {
             Stage8Outcome::Refused(response) => AttachStage8::Refused(response),
-            Stage8Outcome::Reserved(reservation) => AttachStage8::Reserved {
+            Stage8Outcome::Reserved(reservation, ()) => AttachStage8::Reserved {
                 reservation,
                 retire,
             },

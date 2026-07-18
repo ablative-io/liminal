@@ -10,12 +10,16 @@
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, CommittedBindingTerminalPosition, DetachCell, DetachLookupContext,
     DetachLookupResult, DetachTokenResolution, PresentedIdentity, ResolvedIdentity,
-    SemanticConnectionCapacityDecision, commit_detach, decide_detached_operation, lookup_detach,
+    RetainedRecordCharge, SemanticConnectionCapacityDecision, apply_detach_frontier, commit_detach,
+    decide_detached_operation, lookup_detach,
 };
 use liminal_protocol::wire::{BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse};
 
+use crate::config::types::ParticipantConfig;
+
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
+use super::frontier;
 use super::log::{OperationLog, StoredBindingEpoch, StoredDetachRequest, StoredOperation};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
@@ -195,6 +199,27 @@ impl ConversationAuthority {
         .map_err(|error| {
             StateError::invariant(format!("protocol detach transition failed: {error:?}"))
         })?;
+        let terminal = committed.terminal();
+        let encoded_charge = frontier::terminal_charge(
+            terminal.conversation_id(),
+            terminal.participant_id(),
+            terminal.binding_epoch(),
+            terminal.admission_order().transaction_order(),
+            terminal.delivery_seq(),
+        )?;
+        let charge = RetainedRecordCharge::new(
+            terminal.delivery_seq(),
+            terminal.admission_order(),
+            encoded_charge,
+        );
+        let transitioned = apply_detach_frontier(self.take_frontier()?, committed, charge)
+            .map_err(|failure| {
+                StateError::invariant(format!(
+                    "detach frontier transition failed: {:?}",
+                    failure.error()
+                ))
+            })?;
+        let (committed, frontier_owner) = transitioned.into_parts();
         let shell = self.take_shell()?;
         let barrier = match decide_detached_operation(shell, committed) {
             Ok(AggregateOperationDecision::Commit(barrier)) => barrier,
@@ -221,6 +246,7 @@ impl ConversationAuthority {
         let (shell, committed) =
             commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
         self.shell = Some(shell);
+        self.install_frontier(frontier_owner);
         self.advance_log_head()?;
         let (member, _terminal, binding_state, cell, outcome) = committed.into_parts();
         slot.member = member;
@@ -237,6 +263,7 @@ impl ConversationAuthority {
     pub(super) async fn replay(
         conversation_id: u64,
         log: &OperationLog,
+        config: &ParticipantConfig,
     ) -> Result<Self, StateError> {
         let mut authority = Self::empty(conversation_id);
         let mut sequence = 0_u64;
@@ -253,7 +280,7 @@ impl ConversationAuthority {
                         actual: stored_sequence,
                     }));
                 }
-                authority.replay_operation(operation, stored_sequence)?;
+                authority.replay_operation(operation, stored_sequence, config)?;
                 sequence = sequence
                     .checked_add(1)
                     .ok_or(StateError::AllocationExhausted {
@@ -264,6 +291,17 @@ impl ConversationAuthority {
                 break;
             }
         }
+        if authority.tokens.is_empty() {
+            if authority.frontier.is_some() {
+                return Err(StateError::invariant(
+                    "durably empty conversation rebuilt an executable frontier",
+                ));
+            }
+        } else if authority.frontier.is_none() {
+            return Err(StateError::invariant(
+                "enrolled conversation replay completed without executable frontier ownership",
+            ));
+        }
         Ok(authority)
     }
 
@@ -272,6 +310,7 @@ impl ConversationAuthority {
         &mut self,
         operation: StoredOperation,
         sequence: u64,
+        config: &ParticipantConfig,
     ) -> Result<(), StateError> {
         match operation {
             StoredOperation::Genesis { event } => self.replay_genesis(&event),
@@ -279,7 +318,7 @@ impl ConversationAuthority {
                 request,
                 allocation,
                 event,
-            } => self.replay_enrolled(request, &allocation, &event, sequence),
+            } => self.replay_enrolled(request, &allocation, &event, sequence, config),
             StoredOperation::Attached {
                 request,
                 secret_verified,

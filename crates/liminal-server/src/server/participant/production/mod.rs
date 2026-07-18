@@ -16,6 +16,7 @@
 mod barrier;
 mod capacity;
 mod facts;
+mod frontier;
 mod handler;
 mod handler_observer;
 mod log;

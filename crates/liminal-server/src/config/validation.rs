@@ -1060,6 +1060,18 @@ mod tests {
             identity_slots: 4,
             observer_recovery_max_entries: 64,
             max_semantic_conversations_per_connection: 32,
+            max_ordinary_record_entries: 1,
+            max_ordinary_record_bytes: 131_072,
+            max_generated_marker_entries: 1,
+            max_generated_marker_bytes: 4_096,
+            mandatory_transaction_bound_entries: 4,
+            mandatory_transaction_bound_bytes: 16_384,
+            full_recovery_claim_entries: 4,
+            full_recovery_claim_bytes: 16_384,
+            retained_capacity_entries: 2_048,
+            retained_capacity_bytes: 16_777_216,
+            max_retained_record_rows: 1_024,
+            closure_episode_churn_limit: 1_024,
         }
     }
 

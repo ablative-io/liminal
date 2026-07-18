@@ -8,6 +8,7 @@
 use liminal_protocol::lifecycle::{
     BindingState, MarkerAckDecision, MarkerProofState, ParticipantAckDecision, PresentedIdentity,
     SemanticConnectionCapacityDecision, apply_marker_ack, apply_participant_ack,
+    apply_participant_ack_frontier,
 };
 use liminal_protocol::wire::{
     BindingEpoch, MarkerAck, MarkerAckEnvelope, MarkerAckResponse, ParticipantAck,
@@ -130,6 +131,14 @@ impl ConversationAuthority {
                 Ok(ArmOutcome::respond(response.into_server_value()))
             }
             ParticipantAckDecision::Commit(commit) => {
+                let transitioned = apply_participant_ack_frontier(self.take_frontier()?, commit)
+                    .map_err(|failure| {
+                        StateError::invariant(format!(
+                            "participant ack frontier transition failed: {:?}",
+                            failure.error()
+                        ))
+                    })?;
+                let (commit, frontier_owner) = transitioned.into_parts();
                 let mut newly_tracked = false;
                 if let Some((operation_facts, appender)) = live {
                     // Stage 6 precedes the stage-13 commit: an untracked
@@ -164,6 +173,7 @@ impl ConversationAuthority {
                 let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
                     StateError::invariant(format!("ack cursor commit rejected: {error:?}"))
                 })?;
+                self.install_frontier(frontier_owner);
                 Ok(ArmOutcome {
                     value: ParticipantAckResponse::ack_committed(outcome).into_server_value(),
                     newly_tracked,

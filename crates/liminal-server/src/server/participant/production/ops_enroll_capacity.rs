@@ -30,7 +30,8 @@ impl ConversationAuthority {
         operation_facts: &OperationFacts,
         server_capacity: &'cap ServerCapacity,
         deadlines: &ReceiptDeadlines,
-    ) -> Result<Stage8Outcome<'cap, EnrollmentResponse>, StateError> {
+    ) -> Result<Stage8Outcome<'cap, EnrollmentResponse, EnrollmentCapacityCounters>, StateError>
+    {
         let now = u128::from(operation_facts.now_ms);
         // Request-time expiry of this conversation's retained fingerprints
         // before their occupancy is counted.
@@ -72,7 +73,7 @@ impl ConversationAuthority {
             // The crate selector owns the in-model full/not-full precedence;
             // its Commit value is carried forward as the ledger reservation.
             match select_enrollment_capacity(request, counters) {
-                EnrollmentCapacityDecision::Commit(_) => Ok(Stage8Choice::Admit),
+                EnrollmentCapacityDecision::Commit(_) => Ok(Stage8Choice::Admit(counters)),
                 EnrollmentCapacityDecision::Respond(response) => Ok(Stage8Choice::Refuse(response)),
             }
         })

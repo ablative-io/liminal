@@ -112,6 +112,33 @@ impl ReceiptDeadlines {
         })
     }
 
+    /// Validates an absolute durable receipt/provenance deadline pair.
+    ///
+    /// Storage persists the checked results rather than the clock reading that
+    /// derived them, so replay recovers the same typed pair without inventing a
+    /// synthetic clock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReceiptDeadlineError::ZeroAbsoluteReceiptDeadline`] for a zero
+    /// receipt deadline or [`ReceiptDeadlineError::AbsoluteProvenanceBeforeReceipt`]
+    /// when provenance precedes it.
+    pub const fn try_from_absolute(
+        receipt_expires_at: u128,
+        provenance_expires_at: u128,
+    ) -> Result<Self, ReceiptDeadlineError> {
+        if receipt_expires_at == 0 {
+            return Err(ReceiptDeadlineError::ZeroAbsoluteReceiptDeadline);
+        }
+        if provenance_expires_at < receipt_expires_at {
+            return Err(ReceiptDeadlineError::AbsoluteProvenanceBeforeReceipt);
+        }
+        Ok(Self {
+            receipt_expires_at,
+            provenance_expires_at,
+        })
+    }
+
     /// Returns the checked monotonic receipt deadline.
     #[must_use]
     pub const fn receipt_expires_at(self) -> u128 {
@@ -139,6 +166,10 @@ pub enum ReceiptDeadlineError {
         /// Validated nonzero but insufficient provenance TTL.
         receipt_provenance_ttl_ms: u64,
     },
+    /// A durable absolute receipt deadline was zero.
+    ZeroAbsoluteReceiptDeadline,
+    /// A durable absolute provenance deadline preceded its receipt deadline.
+    AbsoluteProvenanceBeforeReceipt,
 }
 
 /// Values minted or deadline-derived only after every admission gate passes.
@@ -228,6 +259,17 @@ impl<F> InitialEnrollmentOperationCommit<F> {
     #[must_use]
     pub const fn closure_projection(&self) -> &InitialEnrollmentClosureProjection {
         &self.closure_projection
+    }
+
+    /// Consumes the atomic operation after its frontier owner has been acquired,
+    /// returning the exact enrollment commit for the conversation event layer.
+    ///
+    /// The remaining permits are deliberately consumed with this value: they
+    /// have already been incorporated into the protocol-produced frontier and
+    /// cannot be reused to authorize another transition.
+    #[must_use]
+    pub fn into_enrollment(self) -> EnrollmentCommit<F> {
+        self.enrollment
     }
 }
 

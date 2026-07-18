@@ -158,17 +158,17 @@ pub(super) struct ReservationEffects {
 
 /// The arm-level stage-8 verdict produced inside the ledger's critical
 /// section (the crate selector's decision translated onto this operation).
-pub(super) enum Stage8Choice<R> {
-    /// Every scope admits; reserve and continue toward commit.
-    Admit,
+pub(super) enum Stage8Choice<R, A = ()> {
+    /// Every scope admits; reserve and carry the exact admitted protocol facts.
+    Admit(A),
     /// Exact first-full-scope refusal, bound to the requesting operation.
     Refuse(R),
 }
 
 /// Result of one atomic check-and-reserve stage-8 pass.
-pub(super) enum Stage8Outcome<'a, R> {
+pub(super) enum Stage8Outcome<'a, R, A = ()> {
     /// Reserved; the guard rolls back unless confirmed after the append.
-    Reserved(CapacityReservation<'a>),
+    Reserved(CapacityReservation<'a>, A),
     /// Typed refusal response; nothing was reserved.
     Refused(R),
 }
@@ -259,18 +259,18 @@ impl ServerCapacity {
     ///
     /// Propagates the decision's [`StateError`] (invalid validated
     /// configuration or a counting-domain violation) without reserving.
-    pub(super) fn admit<R>(
+    pub(super) fn admit<R, A>(
         &self,
         now: u128,
         effects: ReservationEffects,
-        decide: impl FnOnce(ServerOccupancy) -> Result<Stage8Choice<R>, StateError>,
-    ) -> Result<Stage8Outcome<'_, R>, StateError> {
+        decide: impl FnOnce(ServerOccupancy) -> Result<Stage8Choice<R, A>, StateError>,
+    ) -> Result<Stage8Outcome<'_, R, A>, StateError> {
         let mut ledger = self.ledger();
         ledger.prune(now);
         let occupancy = ledger.occupancy()?;
         match decide(occupancy)? {
             Stage8Choice::Refuse(response) => Ok(Stage8Outcome::Refused(response)),
-            Stage8Choice::Admit => {
+            Stage8Choice::Admit(admitted) => {
                 if effects.identity_reserved {
                     let total = ledger.identity_total.checked_add(1).ok_or_else(|| {
                         StateError::invariant("server identity reservation overflows u64")
@@ -293,10 +293,13 @@ impl ServerCapacity {
                     ledger.insert(*entry);
                 }
                 drop(ledger);
-                Ok(Stage8Outcome::Reserved(CapacityReservation {
-                    capacity: self,
-                    effects: Some(effects),
-                }))
+                Ok(Stage8Outcome::Reserved(
+                    CapacityReservation {
+                        capacity: self,
+                        effects: Some(effects),
+                    },
+                    admitted,
+                ))
             }
         }
     }

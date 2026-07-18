@@ -206,9 +206,13 @@ impl ProductionParticipantHandler {
         conversation_id: ConversationId,
         log: &OperationLog,
     ) -> Result<ConversationAuthority, ParticipantSemanticError> {
-        let mut replayed = block_on(ConversationAuthority::replay(conversation_id, log))
-            .map_err(|error| bridge_error(&error))?
-            .map_err(|error| state_error(&error))?;
+        let mut replayed = block_on(ConversationAuthority::replay(
+            conversation_id,
+            log,
+            &self.config,
+        ))
+        .map_err(|error| bridge_error(&error))?
+        .map_err(|error| state_error(&error))?;
         if !replayed.tokens.is_empty() {
             self.ensure_observer_tracked(conversation_id)?;
         }
@@ -347,6 +351,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                             &request,
                             &operation_facts,
                             &self.capacity,
+                            &self.config,
                             appender,
                         )
                     },
