@@ -149,6 +149,9 @@ fn resume_round_trips_every_expected_operation_and_continuous_ack() -> TestResul
             conversation_id: 1,
             participant_id: 2,
             capability_generation: generation,
+            record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new(
+                [0xA7; 16],
+            ),
             payload: vec![8, 9],
         }),
         ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
@@ -210,10 +213,7 @@ fn assert_expected_restore(
     original: &ClientParticipantAggregate,
     operation: &ClientRequest,
 ) -> TestResult {
-    if matches!(
-        operation,
-        ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
-    ) {
+    if matches!(operation, ClientRequest::ObserverRecovery(_)) {
         assert!(restored.expected.is_none());
         let abandonment = restored
             .take_restored_operation_abandonment()

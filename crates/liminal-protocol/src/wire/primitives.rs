@@ -152,6 +152,11 @@ fixed_credential!(
     16
 );
 fixed_credential!(
+    /// Single-purpose ordinary record-admission attempt token.
+    RecordAdmissionAttemptToken,
+    16
+);
+fixed_credential!(
     /// Participant attach secret.
     AttachSecret,
     32

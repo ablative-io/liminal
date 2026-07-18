@@ -325,11 +325,12 @@ fn m6_binding_state_gates_outbound_and_inbound() -> TestResult {
 }
 
 #[test]
-fn m7_sequential_record_a_response_after_b_is_ambiguous() -> TestResult {
+fn d1_sequential_record_a_response_after_b_is_refused_by_exact_token() -> TestResult {
     let request_a = ClientRequest::RecordAdmission(RecordAdmission {
         conversation_id: 41,
         participant_id: 42,
         capability_generation: generation(7)?,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
         payload: vec![2],
     });
     let (aggregate, operation_a) = committed_operation(bound(7)?, request_a)?.into_parts();
@@ -345,6 +346,7 @@ fn m7_sequential_record_a_response_after_b_is_ambiguous() -> TestResult {
         conversation_id: 41,
         participant_id: 42,
         capability_generation: generation(7)?,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xB8; 16]),
         payload: vec![3],
     });
     let (aggregate, operation_b) = committed_operation(aggregate, request_b)?.into_parts();
@@ -354,18 +356,24 @@ fn m7_sequential_record_a_response_after_b_is_ambiguous() -> TestResult {
             conversation_id: 41,
             participant_id: 42,
             capability_generation: generation(7)?,
+            record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new(
+                [0xA7; 16],
+            ),
         },
         8,
     ));
     let ClientCorrelatedInboundDecision::Refused(refusal) =
         decide_correlated_inbound(aggregate, response_a, correlation_b)
     else {
-        return Err("caller-paired correlation must not prove response provenance");
+        return Err("A token must not satisfy B correlation");
     };
     assert_eq!(
         refusal.reason(),
-        ClientInboundRefusalReason::AmbiguousResponse
+        ClientInboundRefusalReason::DelayedResponse
     );
+    let (aggregate, _, correlation) = refusal.into_parts();
+    assert!(aggregate.expected.is_some());
+    let _ = correlation;
     Ok(())
 }
 

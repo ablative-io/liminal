@@ -21,7 +21,6 @@ use super::*;
 use crate::wire::{
     AttachSecret, BindingEpoch, ClientRequest, ConnectionIncarnation, DetachAttemptToken,
     DetachRequest, EnrollmentRequest, EnrollmentResponse, EnrollmentToken, Generation,
-    RecordAdmission,
 };
 use alloc::vec;
 
@@ -29,6 +28,12 @@ type TestResult<T = ()> = Result<T, &'static str>;
 
 fn generation(value: u64) -> TestResult<Generation> {
     Generation::new(value).ok_or("generation must be nonzero")
+}
+
+fn tokenless_request() -> ClientRequest {
+    ClientRequest::ObserverRecovery(crate::wire::ObserverRecoveryHandshake {
+        observer_refusals: vec![],
+    })
 }
 
 fn epoch(value: u64) -> TestResult<BindingEpoch> {
@@ -95,12 +100,7 @@ fn same_envelope_re_record_over_terminal_replay_refuses() -> TestResult {
 #[test]
 fn tokenless_abandonment_survives_encode_without_take() -> TestResult {
     let mut aggregate = bound()?;
-    let request = ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: 161,
-        participant_id: 162,
-        capability_generation: generation(7)?,
-        payload: vec![9],
-    });
+    let request = tokenless_request();
     aggregate.expected = Some(ExpectedOperationState {
         request: request.clone(),
         issued: true,
@@ -430,22 +430,12 @@ fn restore_refuses_testimony_and_abandonment_coupling_mismatches() -> TestResult
 fn restore_refuses_abandonment_beside_tokenless_expected() -> TestResult {
     let mut conflicted = bound()?;
     conflicted.restored_abandonment = Some(RestoredExpectedOperationAbandonment {
-        request: ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: 161,
-            participant_id: 162,
-            capability_generation: generation(7)?,
-            payload: vec![3],
-        }),
+        request: tokenless_request(),
         reason: RestoredExpectedOperationAbandonmentReason::TokenlessAfterCrash,
         was_issued: true,
     });
     conflicted.expected = Some(ExpectedOperationState {
-        request: ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: 161,
-            participant_id: 162,
-            capability_generation: generation(7)?,
-            payload: vec![4],
-        }),
+        request: tokenless_request(),
         issued: false,
         authorization: 1,
         lost: None,
@@ -580,12 +570,7 @@ fn pending_reconnect_testimony_gates_redemption_and_attempt_fate() -> TestResult
 #[test]
 fn pending_abandonment_gates_tokenless_admission_only() -> TestResult {
     let mut aggregate = bound()?;
-    let request = ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: 161,
-        participant_id: 162,
-        capability_generation: generation(7)?,
-        payload: vec![5],
-    });
+    let request = tokenless_request();
     aggregate.expected = Some(ExpectedOperationState {
         request: request.clone(),
         issued: true,
@@ -621,15 +606,9 @@ fn pending_abandonment_gates_tokenless_admission_only() -> TestResult {
 
 #[test]
 fn unissued_tokenless_abandonment_take_releases_nothing() -> TestResult {
-    let ClientOperationRecordDecision::Pending(pending) = record_operation(
-        bound()?,
-        ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: 161,
-            participant_id: 162,
-            capability_generation: generation(7)?,
-            payload: vec![6],
-        }),
-    ) else {
+    let ClientOperationRecordDecision::Pending(pending) =
+        record_operation(bound()?, tokenless_request())
+    else {
         return Err("record admission must enter the durability barrier");
     };
     let commit = pending.commit();

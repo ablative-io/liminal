@@ -66,6 +66,7 @@ fn record(generation: Generation) -> e::RecordAdmissionEnvelope {
         conversation_id: 10,
         participant_id: 20,
         capability_generation: generation,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     }
 }
 
@@ -560,7 +561,7 @@ fn decoder_rejects_impossible_duplicate_success_fields() -> Result<(), CodecErro
     let record = r::ServerValue::RecordCommitted(r::RecordCommitted::new(record(seven), 40));
     let (_, mut record_body) =
         server_codec::encode_server_value_body(&record, ProtocolVersion::V1)?;
-    overwrite_u64(&mut record_body, 26, 21)?;
+    overwrite_u64(&mut record_body, 42, 21)?;
     assert_decode_class(
         t::ServerDiscriminant::RecordCommitted,
         &record_body,

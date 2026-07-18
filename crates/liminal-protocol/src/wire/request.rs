@@ -3,7 +3,7 @@ use alloc::vec::Vec;
 use super::{
     AttachAttemptToken, AttachSecret, ClientDiscriminant, ConversationId, DeliverySeq,
     DetachAttemptToken, EnrollmentToken, Generation, LeaveAttemptToken, ObserverEpoch,
-    ParticipantId,
+    ParticipantId, RecordAdmissionAttemptToken,
 };
 
 /// Enrollment request body (`0x0001`).
@@ -95,6 +95,8 @@ pub struct RecordAdmission {
     pub participant_id: ParticipantId,
     /// Presented nonzero credential generation.
     pub capability_generation: Generation,
+    /// Client-selected identity of this record-admission request attempt.
+    pub record_admission_attempt_token: RecordAdmissionAttemptToken,
     /// Opaque application payload; it is never echoed in a response envelope.
     pub payload: Vec<u8>,
 }

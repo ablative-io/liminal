@@ -79,6 +79,7 @@ fn request() -> RecordAdmissionEnvelope {
         conversation_id: CONVERSATION,
         participant_id: 0,
         capability_generation: Generation::ONE,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     }
 }
 

@@ -23,7 +23,12 @@ enum RequestKey {
     Ack(u64, u64, Generation, u64),
     Leave(u64, u64, Generation, crate::wire::LeaveAttemptToken),
     MarkerAck(u64, u64, Generation, u64),
-    Record(u64, u64, Generation, u64),
+    Record(
+        u64,
+        u64,
+        Generation,
+        crate::wire::RecordAdmissionAttemptToken,
+    ),
 }
 
 impl RequestKey {
@@ -67,7 +72,7 @@ impl RequestKey {
                 value.conversation_id,
                 value.participant_id,
                 value.capability_generation,
-                authorization,
+                value.record_admission_attempt_token,
             ),
             ClientRequest::ObserverRecovery(_) => Self::ObserverRecovery(authorization),
         }
@@ -89,13 +94,8 @@ impl RequestKey {
 }
 
 /// Matches only response identity carried by the wire itself.
-///
-/// `RecordAdmission` deliberately has no echoed payload/token and therefore
-/// never matches here. A future SDK integration may supply a sealed transport
-/// context, but no caller-pairable value is accepted as provenance in this leg.
 pub(super) fn matches_request(value: &ServerValue, request: &ClientRequest) -> bool {
     match request {
-        ClientRequest::RecordAdmission(_) => false,
         ClientRequest::ObserverRecovery(expected) => observer_response_matches(value, expected),
         _ => response_key(value, 0) == RequestKey::from_request(request, 0),
     }
@@ -234,12 +234,6 @@ fn response_key(value: &ServerValue, ambiguous_authorization: u64) -> RequestKey
         | ServerValue::InvalidObserverEpochList(_) => RequestKey::ObserverRecovery(0),
     };
     match key {
-        RequestKey::Record(conversation, participant, generation, _) => RequestKey::Record(
-            conversation,
-            participant,
-            generation,
-            ambiguous_authorization,
-        ),
         RequestKey::ObserverRecovery(_) => RequestKey::ObserverRecovery(ambiguous_authorization),
         other => other,
     }
@@ -367,7 +361,7 @@ const fn record(value: &RecordAdmissionEnvelope) -> RequestKey {
         value.conversation_id,
         value.participant_id,
         value.capability_generation,
-        0,
+        value.record_admission_attempt_token,
     )
 }
 

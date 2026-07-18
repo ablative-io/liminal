@@ -6,8 +6,8 @@ use super::{
     DetachRequest, DetachedCause, DiedCause, EnrollmentRequest, EnrollmentToken, Generation,
     LeaveAttemptToken, LeaveRequest, MarkerAck, ObserverRecoveryHandshake, ObserverRefusal,
     ParticipantAck, ParticipantDelivery, ParticipantRecord, ParticipantTransportRejected,
-    ProtocolVersion, PushDiscriminant, RecordAdmission, RecordKind, ServerDiscriminant, ServerPush,
-    ServerValue, TransportRejectionReason,
+    ProtocolVersion, PushDiscriminant, RecordAdmission, RecordAdmissionAttemptToken, RecordKind,
+    ServerDiscriminant, ServerPush, ServerValue, TransportRejectionReason,
 };
 
 /// Stable generic frame type assigned to participant traffic.
@@ -502,6 +502,7 @@ fn encode_client_request<S: Sink>(value: &ClientRequest, sink: &mut S) -> Result
             sink.put_u64(value.conversation_id)?;
             sink.put_u64(value.participant_id)?;
             put_generation(sink, value.capability_generation)?;
+            sink.put_fixed(value.record_admission_attempt_token.as_bytes())?;
             sink.put_bytes(&value.payload)
         }
         ClientRequest::ObserverRecovery(value) => {
@@ -569,6 +570,7 @@ fn decode_client_request(
             conversation_id: reader.take_u64()?,
             participant_id: reader.take_u64()?,
             capability_generation: reader.take_generation()?,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new(reader.take_fixed()?),
             payload: reader.take_bytes()?,
         }),
         ClientDiscriminant::ObserverRecoveryHandshake => {

@@ -106,6 +106,9 @@ fn active_replay_requires_exact_expected_detach_full_matrix() -> TestResult {
                     conversation_id: 141,
                     participant_id: 142,
                     capability_generation: generation(7)?,
+                    record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new(
+                        [0xA7; 16],
+                    ),
                     payload: vec![1],
                 }),
                 issued: matches!(status, DetachReplayStatus::InFlight),
@@ -201,11 +204,8 @@ fn inbound_wrong_secret_refuses_with_authority_retained() -> TestResult {
 fn tokenless_restore_is_typed_abandoned_and_never_released() -> TestResult {
     for issued in [false, true] {
         let mut aggregate = bound()?;
-        let request = ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: 141,
-            participant_id: 142,
-            capability_generation: generation(7)?,
-            payload: vec![2],
+        let request = ClientRequest::ObserverRecovery(crate::wire::ObserverRecoveryHandshake {
+            observer_refusals: vec![],
         });
         aggregate.expected = Some(ExpectedOperationState {
             request: request.clone(),

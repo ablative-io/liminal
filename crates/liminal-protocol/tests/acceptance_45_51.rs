@@ -402,6 +402,8 @@ fn acceptance_case_45_uniform_marker_episode_and_per_participant_occurrences() {
             conversation_id: MINIMUM_CONVERSATION,
             participant_id: P0,
             capability_generation: Generation::ONE,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
         },
         dimension: ResourceDimension::Entries,
         encoded_record_charge: uniform(1),
@@ -1143,6 +1145,8 @@ fn acceptance_case_47_canonical_sequence_budgets_and_gap_free_boundary_histories
                 conversation_id,
                 participant_id: P0,
                 capability_generation: generation(generation_value),
+                record_admission_attempt_token:
+                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             }),
             sequence_budget: budget,
         };
@@ -2493,6 +2497,8 @@ fn acceptance_case_51_detached_attach_exhaustion_and_cursor_only_recovery_fence(
                 conversation_id: CONVERSATION,
                 participant_id: P0,
                 capability_generation: generation(6),
+                record_admission_attempt_token:
+                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             }),
         },
     ] {

@@ -278,10 +278,7 @@ fn decode_abandonment(
             let bytes = reader.blob()?;
             match decode(bytes, ReceiverDirection::Server) {
                 Ok(ParticipantFrame::ClientRequest(request))
-                    if matches!(
-                        request,
-                        ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
-                    ) =>
+                    if matches!(request, ClientRequest::ObserverRecovery(_)) =>
                 {
                     Ok(Some(RestoredExpectedOperationAbandonment {
                         request,

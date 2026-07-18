@@ -104,6 +104,9 @@ impl OperationKind {
                 conversation_id: 111,
                 participant_id: 112,
                 capability_generation: generation(7)?,
+                record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new(
+                    [0xA7; 16],
+                ),
                 payload: alloc::vec![1, 2],
             })),
             Self::Observer => Ok(ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
@@ -116,7 +119,7 @@ impl OperationKind {
     }
 
     const fn tokenless(self) -> bool {
-        matches!(self, Self::Record | Self::Observer)
+        matches!(self, Self::Observer)
     }
 }
 
@@ -527,24 +530,19 @@ impl Harness {
                         conversation_id: 111,
                         participant_id: 112,
                         capability_generation: generation(7)?,
+                        record_admission_attempt_token:
+                            crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
                     },
                     1,
                 ));
-                let ClientCorrelatedInboundDecision::Refused(refusal) =
+                let ClientCorrelatedInboundDecision::Applied(applied) =
                     decide_correlated_inbound(aggregate, value, correlation)
                 else {
-                    return Err("tokenless record outcome must stay ambiguous");
+                    return Err("exact record attempt token must consume authority");
                 };
-                assert_eq!(
-                    refusal.reason(),
-                    ClientInboundRefusalReason::AmbiguousResponse
-                );
-                let (aggregate, _, correlation) = refusal.into_parts();
-                self.root = Root::Aggregate(aggregate);
-                self.live = LiveAuthority::Correlation(correlation);
-                self.refresh_pending();
-                self.assert_conservation();
-                return Ok(StepOutcome::Refused);
+                self.root = Root::Aggregate(applied.into_parts().0);
+                self.live = LiveAuthority::None;
+                self.consumed += 1;
             }
         }
         self.refresh_pending();
@@ -736,7 +734,7 @@ fn exhaustive_small_scope_send_authority_conservation() -> TestResult {
     // correctness evidence.
     assert_eq!(
         (stats.visited, stats.refused, stats.unattemptable),
-        (610, 1041, 1748),
+        (631, 1087, 1747),
         "bounded interleaving space changed"
     );
     Ok(())

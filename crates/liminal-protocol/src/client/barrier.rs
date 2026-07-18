@@ -473,10 +473,7 @@ pub fn record_operation(
         });
     }
     if aggregate.restored_abandonment.is_some()
-        && matches!(
-            request,
-            ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
-        )
+        && matches!(request, ClientRequest::ObserverRecovery(_))
     {
         return ClientOperationRecordDecision::Refused(ClientOperationRecordRefusal {
             aggregate,

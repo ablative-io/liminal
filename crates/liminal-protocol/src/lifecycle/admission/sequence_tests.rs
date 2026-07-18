@@ -36,6 +36,7 @@ fn record(conversation_id: u64) -> SequenceAllocatingEnvelope {
         conversation_id,
         participant_id: 0,
         capability_generation: generation(1),
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     })
 }
 

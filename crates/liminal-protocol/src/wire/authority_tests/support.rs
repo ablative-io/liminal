@@ -95,6 +95,7 @@ pub(super) fn record_envelope() -> RecordAdmissionEnvelope {
         conversation_id: 7,
         participant_id: 3,
         capability_generation: generation(2),
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     }
 }
 

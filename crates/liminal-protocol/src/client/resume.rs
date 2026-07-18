@@ -136,8 +136,8 @@ pub enum ClientResumeRestoreError {
 /// not prevent storage-owner double restore. Issuance flags are nevertheless
 /// preserved for token-bearing operations, so a record that testifies an
 /// authority was already issued never silently re-mints it. Tokenless
-/// `RecordAdmission` and `ObserverRecovery` are the deliberate exception: both
-/// resolve to typed abandonment on every restore because replay cannot be made
+/// `ObserverRecovery` is the deliberate exception and resolves to typed abandonment
+/// on every restore because replay cannot be made
 /// at-most-once without an outbound attempt token.
 #[derive(Debug, PartialEq, Eq)]
 pub struct ClientResumeRecord {
@@ -175,12 +175,9 @@ impl ClientResumeRecord {
             decode_facts(&self.canonical).map_err(ClientResumeRestoreError::CorruptRecord)?;
         validate_facts(&facts)?;
         let mut expected = facts.expected;
-        let tokenless = expected.as_ref().is_some_and(|expected| {
-            matches!(
-                expected.request,
-                ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
-            )
-        });
+        let tokenless = expected
+            .as_ref()
+            .is_some_and(|expected| matches!(expected.request, ClientRequest::ObserverRecovery(_)));
         let restored_abandonment = if tokenless {
             expected
                 .take()
@@ -368,10 +365,7 @@ fn validate_testimony_coupling(facts: &DecodedFacts) -> Result<(), ClientResumeR
     if let Some(expected) = facts.expected.as_ref()
         && let Some(testimony) = expected.lost.as_ref()
     {
-        let tokenless = matches!(
-            expected.request,
-            ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
-        );
+        let tokenless = matches!(expected.request, ClientRequest::ObserverRecovery(_));
         let expected_kind = if matches!(expected.request, ClientRequest::Detach(_)) {
             LostAuthorityKind::DetachTransportAttempt
         } else {
@@ -396,12 +390,10 @@ fn validate_testimony_coupling(facts: &DecodedFacts) -> Result<(), ClientResumeR
         }
     }
     if facts.abandonment.is_some()
-        && facts.expected.as_ref().is_some_and(|expected| {
-            matches!(
-                expected.request,
-                ClientRequest::RecordAdmission(_) | ClientRequest::ObserverRecovery(_)
-            )
-        })
+        && facts
+            .expected
+            .as_ref()
+            .is_some_and(|expected| matches!(expected.request, ClientRequest::ObserverRecovery(_)))
     {
         return Err(ClientResumeRestoreError::PendingAbandonmentConflict);
     }

@@ -71,6 +71,9 @@ fn request_frames() -> Result<Vec<ParticipantFrame>, CodecError> {
             conversation_id: 15,
             participant_id: 16,
             capability_generation: generation,
+            record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new(
+                [0xA7; 16],
+            ),
             payload: vec![0xAA, 0xBB, 0xCC],
         })),
         ParticipantFrame::ClientRequest(ClientRequest::ObserverRecovery(
@@ -226,7 +229,7 @@ fn fixed_request_and_delivery_sizes_match_the_contract() -> Result<(), CodecErro
     let requests = request_frames()?;
     assert_eq!(encoded_len(&requests[0])?, 40);
     assert_eq!(encoded_len(&requests[1])?, 97);
-    assert_eq!(encoded_len(&requests[6])?, 44 + 3);
+    assert_eq!(encoded_len(&requests[6])?, 60 + 3);
     assert_eq!(encoded_len(&requests[7])?, 16 + 8 + (2 * 16));
 
     let ordinary = delivery(

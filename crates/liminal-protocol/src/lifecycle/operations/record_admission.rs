@@ -927,5 +927,6 @@ const fn record_envelope(request: &RecordAdmission) -> RecordAdmissionEnvelope {
         conversation_id: request.conversation_id,
         participant_id: request.participant_id,
         capability_generation: request.capability_generation,
+        record_admission_attempt_token: request.record_admission_attempt_token,
     }
 }

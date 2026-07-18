@@ -1,6 +1,6 @@
 use super::{
     AttachAttemptToken, ClientDiscriminant, ConversationId, DeliverySeq, DetachAttemptToken,
-    EnrollmentToken, Generation, LeaveAttemptToken, ParticipantId,
+    EnrollmentToken, Generation, LeaveAttemptToken, ParticipantId, RecordAdmissionAttemptToken,
 };
 
 /// Enrollment response common envelope.
@@ -88,6 +88,8 @@ pub struct RecordAdmissionEnvelope {
     pub participant_id: ParticipantId,
     /// Presented generation.
     pub capability_generation: Generation,
+    /// Client-selected request-attempt identity echoed by every terminal response.
+    pub record_admission_attempt_token: RecordAdmissionAttemptToken,
 }
 
 /// Exact operation-specific response envelope for requests `0x0001..=0x0007`.

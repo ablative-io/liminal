@@ -36,6 +36,7 @@ fn record_request() -> OrderAllocatingEnvelope {
         conversation_id: 43,
         participant_id: 3,
         capability_generation: generation(7),
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     })
 }
 

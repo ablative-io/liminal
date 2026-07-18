@@ -188,6 +188,8 @@ fn acceptance_03_failed_admissions_do_not_consume_sequence() {
                 conversation_id: 103,
                 participant_id: 7,
                 capability_generation: Generation::ONE,
+                record_admission_attempt_token:
+                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             },
             *sequence,
         );
@@ -858,6 +860,8 @@ fn acceptance_10_member_replay_detach_reattach_leave_and_floor() {
             conversation_id: 110,
             participant_id: 10,
             capability_generation: Generation::ONE,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
         }),
         retired_generation: Generation::ONE,
     };
@@ -1507,6 +1511,8 @@ fn acceptance_19_backpressure_wakes_once_but_acks_never_park() {
                 conversation_id: 119,
                 participant_id: 19,
                 capability_generation: Generation::ONE,
+                record_admission_attempt_token:
+                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             },
             state,
         },

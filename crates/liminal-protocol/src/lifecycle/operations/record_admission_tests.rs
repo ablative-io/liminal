@@ -64,6 +64,7 @@ fn request(envelope: &RecordAdmissionEnvelope, payload: &[u8]) -> RecordAdmissio
         conversation_id: envelope.conversation_id,
         participant_id: envelope.participant_id,
         capability_generation: envelope.capability_generation,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
         payload: payload.to_vec(),
     }
 }
@@ -556,6 +557,7 @@ fn case_31_sequence_exhaustion_returns_exact_budget_and_unchanged_replay() {
         conversation_id,
         participant_id: 0,
         capability_generation: generation,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     };
     let accounting = clear_accounting(WideResourceVector::new(3, 300), ResourceVector::new(7, 700));
     let limits = OrdinaryProjectionLimits::new(
@@ -645,6 +647,7 @@ fn case_32_size_dimensions_preserve_state_and_lookup_precedes_size() {
         conversation_id,
         participant_id: 0,
         capability_generation: generation,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     };
     let accounting = clear_accounting(
         WideResourceVector::new(2, 200),
@@ -804,6 +807,7 @@ fn untracked_semantic_conversation_refusal_carries_exact_envelope_and_limit() {
         conversation_id,
         participant_id: 0,
         capability_generation: generation,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     };
     let accounting = clear_accounting(
         WideResourceVector::new(2, 200),
@@ -1011,6 +1015,7 @@ fn classify_record_admission_binding_covers_the_lookup_rows_and_only_those() {
         conversation_id,
         participant_id: 0,
         capability_generation: generation,
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
     };
     let admission = request(&envelope, &[1, 2, 3]);
 
@@ -1030,6 +1035,7 @@ fn classify_record_admission_binding_covers_the_lookup_rows_and_only_those() {
     // Live identity with a stale presented generation: StaleAuthority (stage 4).
     let stale_request = RecordAdmission {
         capability_generation: Generation::new(3).expect("three is nonzero"),
+        record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
         ..admission.clone()
     };
     let stale = classify_record_admission_binding(

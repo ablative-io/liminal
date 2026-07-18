@@ -12,8 +12,8 @@ use crate::algebra::{ResourceDimension, ResourceVector, WideResourceVector};
 use super::codec::CodecError;
 use super::{
     AttachAttemptToken, AttachSecret, BindingEpoch, ConnectionIncarnation, DetachAttemptToken,
-    EnrollmentToken, Generation, LeaveAttemptToken, ProtocolVersion, closure as c, envelope as e,
-    response as r, tags as t,
+    EnrollmentToken, Generation, LeaveAttemptToken, ProtocolVersion, RecordAdmissionAttemptToken,
+    closure as c, envelope as e, response as r, tags as t,
 };
 
 const TOKEN_LEN: usize = 16;
@@ -425,6 +425,7 @@ fn put_record_admission(value: &e::RecordAdmissionEnvelope, encoder: &mut Encode
     encoder.put_u64(value.conversation_id);
     encoder.put_u64(value.participant_id);
     encoder.put_generation(value.capability_generation);
+    encoder.put_fixed(value.record_admission_attempt_token.as_bytes());
 }
 
 fn put_response_envelope(value: &e::ResponseEnvelope, encoder: &mut Encoder) {
@@ -1319,6 +1320,9 @@ fn take_record_admission(
         conversation_id: decoder.take_u64()?,
         participant_id: decoder.take_u64()?,
         capability_generation: decoder.take_generation()?,
+        record_admission_attempt_token: RecordAdmissionAttemptToken::new(
+            decoder.take_fixed::<TOKEN_LEN>()?,
+        ),
     })
 }
 

@@ -115,12 +115,6 @@ pub fn decide_inbound(
 }
 
 /// Attempts correlation while retaining the process-local handle on refusal.
-///
-/// A caller-paired handle is not provenance: `RecordAdmission` remains
-/// [`ClientInboundRefusalReason::AmbiguousResponse`] even through this function.
-/// `ObserverRecovery` instead uses identity echoed in the wire response. A future
-/// SDK leg may upgrade this seam with sealed transport context unavailable to
-/// ordinary callers.
 #[must_use]
 pub fn decide_correlated_inbound(
     aggregate: ClientParticipantAggregate,
@@ -208,18 +202,6 @@ fn decide_inbound_inner(
             aggregate,
             value,
             ClientInboundRefusalReason::ForeignResponse,
-        );
-    }
-
-    if matches!(
-        expected.request,
-        crate::wire::ClientRequest::RecordAdmission(_)
-    ) && value.originating_request() == Some(crate::wire::ClientDiscriminant::RecordAdmission)
-    {
-        return inbound_refusal(
-            aggregate,
-            value,
-            ClientInboundRefusalReason::AmbiguousResponse,
         );
     }
 

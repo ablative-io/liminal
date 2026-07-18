@@ -593,6 +593,8 @@ fn case_31_sequence_exhaustion_is_atomic_in_both_arms() -> TestResult {
                 conversation_id: 31_002,
                 participant_id: 0,
                 capability_generation: generation((u64::MAX - 5) / 2)?,
+                record_admission_attempt_token:
+                    liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             }),
             sequence_budget: ordinary_budget,
         }));
@@ -690,6 +692,9 @@ fn case_32_sdk_parking_and_static_record_size_boundaries() -> TestResult {
         conversation_id: 32_004,
         participant_id: 32,
         capability_generation: generation(7)?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
     };
     let bytes_failure = ServerValue::RecordTooLarge(RecordTooLarge {
         request: envelope.clone(),
@@ -1278,6 +1283,8 @@ fn case_39_total_unknown_stale_unbound_and_retired_precedence() -> TestResult {
             conversation_id: 39,
             participant_id: 39,
             capability_generation: seven,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
             payload: vec![0; 3],
         }),
     ];
@@ -1340,6 +1347,8 @@ fn case_39_total_unknown_stale_unbound_and_retired_precedence() -> TestResult {
             conversation_id: 39,
             participant_id: 39,
             capability_generation: seven,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xA7; 16]),
         },
         11,
     );
@@ -1355,6 +1364,9 @@ fn case_40_parking_renegotiation_selects_first_incompatible_dimension() -> TestR
         conversation_id: 40_001,
         participant_id: 40,
         capability_generation: generation(7)?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
         payload: vec![0; 54],
     });
     let (_, request_bytes) = client_round_trip(record)?;
@@ -1712,6 +1724,9 @@ fn case_43_reachable_park_and_transaction_order_exhaustion() -> TestResult {
         conversation_id: 43_002,
         participant_id: 3,
         capability_generation: generation(1)?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            [0xA7; 16],
+        ),
     };
     let order = ConversationOrderExhausted::new(
         OrderAllocatingEnvelope::RecordAdmission(request),

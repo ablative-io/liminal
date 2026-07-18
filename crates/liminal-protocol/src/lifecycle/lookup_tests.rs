@@ -888,6 +888,9 @@ fn binding_requests(generation_value: u64) -> [ParticipantBindingRequest; 3] {
             conversation_id: 11,
             participant_id: 7,
             capability_generation: generation(generation_value),
+            record_admission_attempt_token: crate::wire::RecordAdmissionAttemptToken::new(
+                [0xA7; 16],
+            ),
             payload: alloc::vec![1, 2, 3],
         }),
     ]
