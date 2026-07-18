@@ -15,9 +15,9 @@ use crate::server::connection::outbound::{OutboundError, OutboundWriter};
 use crate::server::connection::state::ConnectionProcessState;
 use crate::server::connection::websocket::outbound::WebSocketOutbound;
 use crate::server::participant::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
-    ParticipantSemanticHandler,
+    InstalledParticipantService, ObserverPublication, ParticipantConnectionContext,
+    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublication,
+    ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
 const INCARNATION: ConnectionIncarnation = ConnectionIncarnation {
@@ -214,21 +214,24 @@ fn state(
     })
 }
 
+fn decode_push(frame: &Frame) -> Result<ServerPush, String> {
+    let mut bytes = vec![0; encoded_len(frame).map_err(|error| error.to_string())?];
+    let written = encode_generic(frame, &mut bytes).map_err(|error| error.to_string())?;
+    bytes.truncate(written);
+    match decode_participant(&bytes, ReceiverDirection::Client)
+        .map_err(|error| format!("{error:?}"))?
+    {
+        ParticipantFrame::ServerPush(push) => Ok(push),
+        other => Err(format!("expected participant ServerPush, got {other:?}")),
+    }
+}
+
 fn decoded_deliveries(frames: &[Frame]) -> Result<Vec<ParticipantDelivery>, String> {
     frames
         .iter()
-        .map(|frame| {
-            let mut bytes = vec![0; encoded_len(frame).map_err(|error| error.to_string())?];
-            let written = encode_generic(frame, &mut bytes).map_err(|error| error.to_string())?;
-            bytes.truncate(written);
-            match decode_participant(&bytes, ReceiverDirection::Client)
-                .map_err(|error| format!("{error:?}"))?
-            {
-                ParticipantFrame::ServerPush(ServerPush::ParticipantDelivery(delivery)) => {
-                    Ok(delivery)
-                }
-                other => Err(format!("expected participant ServerPush, got {other:?}")),
-            }
+        .map(|frame| match decode_push(frame)? {
+            ServerPush::ParticipantDelivery(delivery) => Ok(delivery),
+            other => Err(format!("expected participant delivery, got {other:?}")),
         })
         .collect()
 }
@@ -316,24 +319,62 @@ fn push_slice_budget_and_round_robin_are_exact() -> Result<(), Box<dyn std::erro
     let service = service(source)?;
     let mut state = state(&service, &[1, 2])?;
     let mut sink = RecordingSink::new(1_000_000);
+    state
+        .participant_publication
+        .as_ref()
+        .ok_or("missing publication inbox")?
+        .requeue_observers((3..=6).map(|conversation_id| ObserverPublication {
+            conversation_id,
+            refused_epoch: 10 + conversation_id,
+            observer_progress: 20 + conversation_id,
+        }))?;
 
     assert_eq!(
         service_participant_publications(&mut state, &service, &mut sink, UNIT2_PUSH_SLICE_BUDGET,)?,
         UNIT2_PUSH_SLICE_BUDGET
     );
-    let first = decoded_deliveries(&sink.frames)?;
+    let first = sink
+        .frames
+        .iter()
+        .map(decode_push)
+        .collect::<Result<Vec<_>, _>>()?;
     assert_eq!(
         first
             .iter()
-            .take(4)
-            .map(|delivery| (delivery.conversation_id, delivery.delivery_seq))
+            .take(6)
+            .map(|push| match push {
+                ServerPush::ParticipantDelivery(delivery) => {
+                    (delivery.conversation_id, delivery.delivery_seq)
+                }
+                ServerPush::ObserverProgressed {
+                    conversation_id,
+                    refused_epoch: _,
+                    observer_progress: _,
+                } => (*conversation_id, 0),
+            })
             .collect::<Vec<_>>(),
-        vec![(1, 1), (2, 1), (1, 2), (2, 2)]
+        vec![(1, 1), (2, 1), (3, 0), (4, 0), (5, 0), (6, 0)]
+    );
+    assert_eq!(
+        first
+            .iter()
+            .filter(|push| matches!(push, ServerPush::ObserverProgressed { .. }))
+            .count(),
+        4,
+        "observer wakes debit the same exact 32-push slice"
+    );
+    assert_eq!(
+        first
+            .iter()
+            .filter(|push| matches!(push, ServerPush::ParticipantDelivery(_)))
+            .count(),
+        UNIT2_PUSH_SLICE_BUDGET - 4
     );
     assert_eq!(
         service_participant_publications(&mut state, &service, &mut sink, UNIT2_PUSH_SLICE_BUDGET,)?,
-        8
+        12
     );
+    assert_eq!(sink.frames.len(), 44);
     Ok(())
 }
 

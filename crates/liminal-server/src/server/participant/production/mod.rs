@@ -75,6 +75,10 @@ mod tests_marker_ack_fixture;
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_observer;
 #[cfg(test)]
+mod tests_observer_wake;
+#[cfg(test)]
+mod tests_observer_wake_fixture;
+#[cfg(test)]
 mod tests_outbox_log;
 #[cfg(test)]
 mod tests_outbox_owner;
