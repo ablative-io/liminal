@@ -9,7 +9,6 @@
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,13 +26,17 @@ use liminal_protocol::wire::{
 
 use crate::ServerError;
 use crate::server::connection::{
-    ConnectionConversation, ConnectionHandle, ConnectionServices, ConnectionSubscription,
-    ConnectionSupervisor, PublishOutcome,
+    ConnectionConversation, ConnectionServices, ConnectionSubscription, ConnectionSupervisor,
+    PublishOutcome,
 };
 use crate::server::participant::{InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT};
 
 use super::ProductionParticipantHandler;
 use super::tests::{open_disk_store_for_tests, test_participant_config};
+
+#[path = "e2e_socket_fixture.rs"]
+mod socket_fixture;
+pub(super) use socket_fixture::SocketFixture;
 
 /// Connection services carrying ONLY the production participant service.
 #[derive(Debug)]
@@ -178,75 +181,6 @@ fn roundtrip(
         return Err("participant response did not decode as a server value".into());
     };
     Ok(value)
-}
-
-pub(super) struct SocketFixture {
-    client: TcpStream,
-    inbound: Vec<u8>,
-    supervisor: ConnectionSupervisor,
-    connection: ConnectionHandle,
-}
-
-impl SocketFixture {
-    pub(super) fn start(data_dir: &Path) -> Result<Self, Box<dyn Error>> {
-        let store = open_disk_store_for_tests(data_dir)?;
-        let config = test_participant_config();
-        let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
-        let participant_service =
-            InstalledParticipantService::new(Arc::new(handler), store, config.wire_frame_limit)
-                .map_err(|error| format!("{error:?}"))?;
-        let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
-            participant_service,
-        });
-        let supervisor = ConnectionSupervisor::with_services(services)?;
-        let (mut client, server) = tcp_pair()?;
-        client.set_read_timeout(Some(Duration::from_secs(10)))?;
-        client.set_write_timeout(Some(Duration::from_secs(10)))?;
-        let connection = supervisor.spawn_connection(server)?;
-
-        client.write_all(&encode_frame(&Frame::Connect {
-            flags: 0,
-            min_version: ProtocolVersion::new(1, 0),
-            max_version: ProtocolVersion::new(1, 0),
-            auth_token: Vec::new(),
-        })?)?;
-        let mut inbound = Vec::new();
-        let ack = read_frame(&mut client, &mut inbound)?;
-        if !matches!(
-            ack,
-            Frame::ConnectAck { capabilities, .. }
-                if capabilities == PARTICIPANT_CAPABILITY_BIT
-        ) {
-            return Err(format!("participant capability was not advertised: {ack:?}").into());
-        }
-        Ok(Self {
-            client,
-            inbound,
-            supervisor,
-            connection,
-        })
-    }
-
-    pub(super) fn request(
-        &mut self,
-        request: ClientRequest,
-    ) -> Result<ServerValue, Box<dyn Error>> {
-        roundtrip(&mut self.client, &mut self.inbound, request)
-    }
-
-    pub(super) fn stop(self) {
-        let Self {
-            client,
-            inbound,
-            supervisor,
-            connection,
-        } = self;
-        drop(client);
-        drop(inbound);
-        supervisor.shutdown();
-        drop(connection);
-        drop(supervisor);
-    }
 }
 
 const CONVERSATION: u64 = 401;

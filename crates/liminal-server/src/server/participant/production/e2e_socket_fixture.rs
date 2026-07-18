@@ -1,0 +1,326 @@
+//! Reusable real-socket participant server fixture and deterministic replay gate.
+
+use std::error::Error;
+use std::io::Write;
+use std::net::TcpStream;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
+
+use liminal::protocol::{Frame, ProtocolVersion};
+use liminal_protocol::wire::{
+    BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, ObserverRecoveryHandshake,
+    ParticipantFrame, ParticipantId, ReceiverDirection, ServerPush, ServerValue,
+    decode as decode_participant,
+};
+
+use crate::server::connection::{ConnectionHandle, ConnectionServices, ConnectionSupervisor};
+use crate::server::participant::{
+    InstalledParticipantService, ObserverPublicationTarget, PARTICIPANT_CAPABILITY_BIT,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
+    ParticipantPublication, ParticipantSemanticError, ParticipantSemanticHandler,
+};
+
+use super::super::ProductionParticipantHandler;
+use super::super::tests::{open_disk_store_for_tests, test_participant_config};
+use super::{ParticipantOnlyServices, encode_frame, read_frame, roundtrip, tcp_pair};
+
+#[derive(Debug)]
+struct PublicationGate {
+    open: AtomicBool,
+    blocked_scans: AtomicU64,
+}
+
+impl PublicationGate {
+    const fn closed() -> Self {
+        Self {
+            open: AtomicBool::new(false),
+            blocked_scans: AtomicU64::new(0),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ReplayGatedHandler {
+    inner: Arc<ProductionParticipantHandler>,
+    gate: Arc<PublicationGate>,
+}
+
+impl ParticipantSemanticHandler for ReplayGatedHandler {
+    fn publication_conversation_limit(&self) -> u64 {
+        self.inner.publication_conversation_limit()
+    }
+
+    fn ready_connection_incarnations(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<Vec<ConnectionIncarnation>, ParticipantSemanticError> {
+        self.inner.ready_connection_incarnations(conversation_id)
+    }
+
+    fn next_publication(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        conversation_id: ConversationId,
+        offered: Option<ParticipantOfferedProgress>,
+    ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
+        if !self.gate.open.load(Ordering::SeqCst) {
+            self.gate.blocked_scans.fetch_add(1, Ordering::SeqCst);
+            return Ok(None);
+        }
+        self.inner
+            .next_publication(connection_incarnation, conversation_id, offered)
+    }
+
+    fn publication_binding_is_current(
+        &self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+    ) -> Result<bool, ParticipantSemanticError> {
+        self.inner
+            .publication_binding_is_current(conversation_id, participant_id, binding_epoch)
+    }
+
+    fn record_publication_offer(
+        &self,
+        publication: &ParticipantPublication,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.inner.record_publication_offer(publication)
+    }
+
+    fn handle_observer_recovery(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ObserverRecoveryHandshake,
+        target: Option<ObserverPublicationTarget>,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        self.inner
+            .handle_observer_recovery(context, conversations, request, target)
+    }
+
+    fn handle(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ClientRequest,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        self.inner.handle(context, conversations, request)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::server::participant::production) struct ParticipantOwnerFacts {
+    pub(in crate::server::participant::production) frontier_cursor: u64,
+    pub(in crate::server::participant::production) outbox_ack_through: u64,
+    pub(in crate::server::participant::production) next_live_obligation: Option<u64>,
+    pub(in crate::server::participant::production) live_record_count: usize,
+    pub(in crate::server::participant::production) charged_bytes: u64,
+}
+
+pub(in crate::server::participant::production) struct SocketFixture {
+    client: TcpStream,
+    inbound: Vec<u8>,
+    handler: Arc<ProductionParticipantHandler>,
+    publication_gate: Option<Arc<PublicationGate>>,
+    supervisor: ConnectionSupervisor,
+    connection: ConnectionHandle,
+}
+
+pub(in crate::server::participant::production) struct SocketPeer {
+    client: TcpStream,
+    inbound: Vec<u8>,
+    connection: ConnectionHandle,
+}
+
+impl SocketFixture {
+    pub(in crate::server::participant::production) fn start(
+        data_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(data_dir, None)
+    }
+
+    pub(in crate::server::participant::production) fn start_replay_gated(
+        data_dir: &Path,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(data_dir, Some(Arc::new(PublicationGate::closed())))
+    }
+
+    fn start_inner(
+        data_dir: &Path,
+        publication_gate: Option<Arc<PublicationGate>>,
+    ) -> Result<Self, Box<dyn Error>> {
+        let store = open_disk_store_for_tests(data_dir)?;
+        let config = test_participant_config();
+        let handler = Arc::new(ProductionParticipantHandler::new(
+            Arc::clone(&store),
+            config,
+        )?);
+        let semantic_handler: Arc<dyn ParticipantSemanticHandler> =
+            publication_gate.as_ref().map_or_else(
+                || Arc::clone(&handler) as Arc<dyn ParticipantSemanticHandler>,
+                |gate| {
+                    Arc::new(ReplayGatedHandler {
+                        inner: Arc::clone(&handler),
+                        gate: Arc::clone(gate),
+                    })
+                },
+            );
+        let participant_service =
+            InstalledParticipantService::new(semantic_handler, store, config.wire_frame_limit)
+                .map_err(|error| format!("{error:?}"))?;
+        let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
+            participant_service,
+        });
+        let supervisor = ConnectionSupervisor::with_services(services)?;
+        let (client, inbound, connection) = connect_socket(&supervisor)?;
+        Ok(Self {
+            client,
+            inbound,
+            handler,
+            publication_gate,
+            supervisor,
+            connection,
+        })
+    }
+
+    pub(in crate::server::participant::production) fn request(
+        &mut self,
+        request: ClientRequest,
+    ) -> Result<ServerValue, Box<dyn Error>> {
+        roundtrip(&mut self.client, &mut self.inbound, request)
+    }
+
+    pub(in crate::server::participant::production) fn spawn_peer(
+        &self,
+    ) -> Result<SocketPeer, Box<dyn Error>> {
+        let (client, inbound, connection) = connect_socket(&self.supervisor)?;
+        Ok(SocketPeer {
+            client,
+            inbound,
+            connection,
+        })
+    }
+
+    pub(in crate::server::participant::production) fn read_push(
+        &mut self,
+    ) -> Result<ServerPush, Box<dyn Error>> {
+        let frame = read_frame(&mut self.client, &mut self.inbound)?;
+        let bytes = encode_frame(&frame)?;
+        let decoded = decode_participant(&bytes, ReceiverDirection::Client)
+            .map_err(|error| format!("{error:?}"))?;
+        let ParticipantFrame::ServerPush(push) = decoded else {
+            return Err(format!("expected participant push, got {decoded:?}").into());
+        };
+        Ok(push)
+    }
+
+    pub(in crate::server::participant::production) fn participant_owner_facts(
+        &self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+    ) -> Result<ParticipantOwnerFacts, Box<dyn Error>> {
+        let cell = self.handler.cell(conversation_id)?;
+        let owner = cell
+            .lock()
+            .map_err(|_| "conversation authority lock was poisoned")?;
+        let authority = owner
+            .as_ref()
+            .ok_or("conversation authority was not restored")?;
+        let frontier = authority
+            .frontier
+            .as_ref()
+            .ok_or("conversation frontier owner was absent")?;
+        let frontier_cursor = frontier
+            .frontiers()
+            .active_identities()
+            .participants()
+            .iter()
+            .find(|participant| participant.participant_index() == participant_id)
+            .map(|participant| participant.cursor())
+            .ok_or("participant was absent from the live frontier")?;
+        let outbox = authority
+            .outbox
+            .as_ref()
+            .ok_or("conversation outbox owner was absent")?;
+        let facts = ParticipantOwnerFacts {
+            frontier_cursor,
+            outbox_ack_through: outbox.ack_through(participant_id),
+            next_live_obligation: outbox.next_live(participant_id),
+            live_record_count: outbox.live_record_count(),
+            charged_bytes: outbox.charged_bytes(),
+        };
+        drop(owner);
+        Ok(facts)
+    }
+
+    pub(in crate::server::participant::production) fn blocked_publication_scans(
+        &self,
+    ) -> Result<u64, Box<dyn Error>> {
+        self.publication_gate
+            .as_ref()
+            .map(|gate| gate.blocked_scans.load(Ordering::SeqCst))
+            .ok_or_else(|| "socket fixture has no publication gate".into())
+    }
+
+    pub(in crate::server::participant::production) fn stop(self) {
+        let Self {
+            client,
+            inbound,
+            handler,
+            publication_gate,
+            supervisor,
+            connection,
+        } = self;
+        drop(client);
+        drop(inbound);
+        supervisor.shutdown();
+        drop(connection);
+        drop(supervisor);
+        drop(handler);
+        drop(publication_gate);
+    }
+}
+
+impl SocketPeer {
+    pub(in crate::server::participant::production) fn request(
+        &mut self,
+        request: ClientRequest,
+    ) -> Result<ServerValue, Box<dyn Error>> {
+        roundtrip(&mut self.client, &mut self.inbound, request)
+    }
+}
+
+fn connect_socket(
+    supervisor: &ConnectionSupervisor,
+) -> Result<(TcpStream, Vec<u8>, ConnectionHandle), Box<dyn Error>> {
+    let (mut client, server) = tcp_pair()?;
+    client.set_read_timeout(Some(Duration::from_secs(10)))?;
+    client.set_write_timeout(Some(Duration::from_secs(10)))?;
+    let connection = supervisor.spawn_connection(server)?;
+
+    client.write_all(&encode_frame(&Frame::Connect {
+        flags: 0,
+        min_version: ProtocolVersion::new(1, 0),
+        max_version: ProtocolVersion::new(1, 0),
+        auth_token: Vec::new(),
+    })?)?;
+    let mut inbound = Vec::new();
+    let ack = read_frame(&mut client, &mut inbound)?;
+    if !matches!(
+        ack,
+        Frame::ConnectAck { capabilities, .. }
+            if capabilities == PARTICIPANT_CAPABILITY_BIT
+    ) {
+        return Err(format!("participant capability was not advertised: {ack:?}").into());
+    }
+    Ok((client, inbound, connection))
+}
+
+impl Drop for SocketPeer {
+    fn drop(&mut self) {
+        let _ = &self.connection;
+    }
+}

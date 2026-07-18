@@ -6,7 +6,8 @@ use std::path::Path;
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, ClientRequest, CredentialAttachRequest, DetachAttemptToken,
     DetachRequest, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest,
-    RecordAdmission, RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
+    ParticipantAck, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
+    RecordCommitted, ServerPush, ServerValue,
 };
 
 use super::e2e_tests::SocketFixture;
@@ -165,6 +166,136 @@ fn commit_detached_leave_on_same_socket(socket: &mut SocketFixture) -> Result<()
     if replayed != ServerValue::LeaveCommitted(committed) {
         return Err("detached Leave exact-token socket replay drifted".into());
     }
+    Ok(())
+}
+
+#[test]
+fn restart_between_delivery_and_ack_accepts() -> Result<(), Box<dyn Error>> {
+    const CONVERSATION: u64 = 526;
+    const PAYLOAD: &[u8] = &[0x26, 0x00, 0xFF, 0xA5];
+
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let mut first_server = SocketFixture::start(&data_dir)?;
+    let mut sender_socket = first_server.spawn_peer()?;
+    let enrolled = first_server.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0x26; 16]),
+    }))?;
+    let ServerValue::EnrollBound(recipient) = enrolled else {
+        return Err(format!("recipient enrollment did not bind: {enrolled:?}").into());
+    };
+    let sender_enrolled = sender_socket.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0xA6; 16]),
+    }))?;
+    let ServerValue::EnrollBound(sender) = sender_enrolled else {
+        return Err(format!("sender enrollment did not bind: {sender_enrolled:?}").into());
+    };
+    let ServerPush::ParticipantDelivery(attached_delivery) = first_server.read_push()? else {
+        return Err("the recipient's initial obligation was not a participant delivery".into());
+    };
+    assert_eq!(attached_delivery.conversation_id, CONVERSATION);
+    assert_eq!(attached_delivery.delivery_seq, 2);
+
+    let initial_ack = ParticipantAck {
+        conversation_id: CONVERSATION,
+        participant_id: recipient.participant_id(),
+        capability_generation: Generation::ONE,
+        through_seq: attached_delivery.delivery_seq,
+    };
+    assert!(matches!(
+        first_server.request(ClientRequest::ParticipantAck(initial_ack))?,
+        ServerValue::AckCommitted(_)
+    ));
+
+    let committed = sender_socket.request(ClientRequest::RecordAdmission(RecordAdmission {
+        conversation_id: CONVERSATION,
+        participant_id: sender.participant_id(),
+        capability_generation: Generation::ONE,
+        record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xC6; 16]),
+        payload: PAYLOAD.to_vec(),
+    }))?;
+    let ServerValue::RecordCommitted(committed) = committed else {
+        return Err(format!("sentinel record did not commit: {committed:?}").into());
+    };
+    let delivered_seq = committed.delivery_seq();
+    let ServerPush::ParticipantDelivery(delivered) = first_server.read_push()? else {
+        return Err("the committed obligation was not delivered as participant push".into());
+    };
+    assert_eq!(delivered.delivery_seq, delivered_seq);
+    assert_eq!(
+        delivered.record,
+        ParticipantRecord::OrdinaryRecord {
+            sender_participant_id: sender.participant_id(),
+            payload: PAYLOAD.to_vec(),
+        }
+    );
+    let offered_facts =
+        first_server.participant_owner_facts(CONVERSATION, recipient.participant_id())?;
+    assert_eq!(offered_facts.frontier_cursor, 2);
+    assert_eq!(offered_facts.outbox_ack_through, 2);
+    assert_eq!(offered_facts.next_live_obligation, Some(delivered_seq));
+    assert_eq!(offered_facts.live_record_count, 1);
+    assert!(offered_facts.charged_bytes > 0);
+    let recipient_id = recipient.participant_id();
+    let attach_secret = recipient.attach_secret();
+
+    // `stop` drops the client, synchronously shuts down and joins the
+    // supervisor, then drops the connection, handler, service, and disk-store
+    // owners before this same directory is reopened.
+    drop(sender_socket);
+    first_server.stop();
+
+    let mut reopened = SocketFixture::start_replay_gated(&data_dir)?;
+    let attached = reopened.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
+        conversation_id: CONVERSATION,
+        participant_id: recipient_id,
+        capability_generation: Generation::ONE,
+        attach_secret,
+        attach_attempt_token: AttachAttemptToken::new([0xD6; 16]),
+        accept_marker_delivery_seq: None,
+    }))?;
+    let ServerValue::AttachBound(attached) = attached else {
+        return Err(format!("post-restart recipient attach did not bind: {attached:?}").into());
+    };
+    assert!(
+        reopened.blocked_publication_scans()? > 0,
+        "the deterministic gate did not intercept replay before a duplicate offer"
+    );
+
+    let before_ack = reopened.participant_owner_facts(CONVERSATION, recipient_id)?;
+    assert_eq!(before_ack.frontier_cursor, 2);
+    assert_eq!(before_ack.outbox_ack_through, 2);
+    assert_eq!(before_ack.next_live_obligation, Some(delivered_seq));
+    let truthful_ack = ParticipantAck {
+        conversation_id: CONVERSATION,
+        participant_id: recipient_id,
+        capability_generation: attached.capability_generation(),
+        through_seq: delivered_seq,
+    };
+    let outcome = reopened.request(ClientRequest::ParticipantAck(truthful_ack))?;
+    let ServerValue::AckCommitted(committed_ack) = outcome else {
+        return Err(format!("reconciled durable obligation ack was refused: {outcome:?}").into());
+    };
+    assert_eq!(committed_ack.request().conversation_id, CONVERSATION);
+    assert_eq!(committed_ack.request().participant_id, recipient_id);
+    assert_eq!(
+        committed_ack.request().capability_generation,
+        attached.capability_generation()
+    );
+    assert_eq!(committed_ack.request().through_seq, delivered_seq);
+
+    let after_ack = reopened.participant_owner_facts(CONVERSATION, recipient_id)?;
+    assert_eq!(after_ack.frontier_cursor, delivered_seq);
+    assert_eq!(after_ack.outbox_ack_through, delivered_seq);
+    assert_eq!(after_ack.next_live_obligation, None);
+    assert_eq!(
+        after_ack.live_record_count + 1,
+        before_ack.live_record_count
+    );
+    assert!(after_ack.charged_bytes < before_ack.charged_bytes);
+    reopened.stop();
     Ok(())
 }
 
