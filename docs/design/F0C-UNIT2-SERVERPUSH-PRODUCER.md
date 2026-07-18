@@ -384,13 +384,24 @@ because the landed `DurableStore` has append/read/flush but no truncate/delete
 contract (`crates/liminal/src/durability/store.rs:19-63`). This exactly implements
 "become reclaimable" without pretending physical deletion exists.
 
-`contiguously_available_through` for ack selection SHALL be the greatest
-conversation sequence for which this recipient has an unbroken offered prefix,
-not the conversation-global `next_seq - 1` currently supplied at
-`production/ops_acks.rs:31-40`. Gaps caused by sender exclusion or a recipient
-not being in an older snapshot are skipped as non-obligations by the outbox's
-ordered recipient index; they do not require fake delivery. The value remains a
-protocol input and is never inferred from a socket write alone.
+`contiguously_available_through` for ack selection SHALL NOT remain the
+conversation-global `next_seq - 1` currently supplied at
+`production/ops_acks.rs:31-40`; it becomes a per-recipient bound. Gaps caused
+by sender exclusion or a recipient not being in an older snapshot are skipped
+as non-obligations by the outbox's ordered recipient index; they do not require
+fake delivery. The value remains a protocol input and is never inferred from a
+socket write alone. **[r2 FOLD — basis OPEN for pre-review, Q5]:** two
+candidate bases exist and pre-review must select one with a crash-cut argument
+before dispatch: (a) the recipient's unbroken VOLATILE OFFERED prefix (r1
+text) — conservative, but after a server restart a truthful ack for a
+pre-crash delivery is refused until replay re-offers, forcing duplicate
+delivery the client already attested; or (b) the recipient's unbroken DURABLE
+OBLIGATION prefix (committed outbox rows for that recipient) — the seat's
+lean: the client's cumulative ack IS the receipt testimony G1 names, the
+durable obligation proves the delivery exists, and no volatile state gates a
+truthful attestation, while sequences with no committed obligation still
+refuse. The selected basis lands here as an amendment; either way G1 holds —
+socket writes never feed the bound.
 
 For MarkerAck, the outbox supplies the exact marker obligation, delivered
 binding epoch, and delivery witness required to construct `MarkerProofState`.
@@ -672,16 +683,30 @@ clause:
    connection registration plus protocol fired arm survives every relevant
    crash cut. If not, the fold must select observer v2 with explicit durable arm
    target; broadcast and default target are forbidden.
-3. **MarkerAck v3 row body:** choose the minimal canonical stored testimony
-   (request, receiving epoch, offered marker/binding witness, protocol commit
-   audit) after the protocol seam exposes its persistence parts. The ruling is
-   about representation only; loud v3 migration and exact replay are fixed.
+3. **MarkerAck v3 row body — RULED at fold (r2):** `MarkerAckCommitted`
+   persists the same census discipline as the landed `RecordAdmission` v2 row
+   (`production/log.rs:250-296`): the exact canonical `MarkerAck` request, the
+   receiving binding epoch, the offered-marker delivery witness (the marker's
+   conversation `delivery_seq` plus the delivered binding epoch), and the
+   complete post-transition audit that cold replay byte-checks through the
+   same authoritative selector. No derived-only fields; replay re-runs the
+   selector and checks every stored audit, exactly as RecordAdmission replay
+   does at `production/ops_frontier.rs:287-385`. Representation is closed;
+   the build implements this shape.
 4. **Canonical outbox encoding:** sign the measured fixed metadata term after
    the build prototype reports exact bytes for every record kind and maximum
    recipient vector. No guessed byte constant may enter the implementation.
+   The checked-assertion rider (section 9) is the enforcement: measured bytes
+   printed for signoff, STOP on any invalidated recommendation.
+5. **Ack availability basis (r2, from the fold):** pre-review selects between
+   the volatile-offered-prefix and durable-obligation-prefix bases for
+   `contiguously_available_through` (section 7) with an explicit crash-cut
+   argument; the seat's lean is durable-obligation-prefix. The answer lands in
+   this file before build dispatch.
 
 ## Revision record
 
 | revision | date | author | record |
 |---|---|---|---|
 | r1 | 2026-07-18 | implementation specialist | First pinned Unit 2 build brief: ruled D3 durable post-commit outbox, recipient snapshot, ordered readiness-driven holdback pump, ParticipantAck retention/reclaim, reattach replay, marker testimony, transport/SDK integration, loud v3 migration, layered acceptance, signed derived values, and explicit walls/out-of-scope. |
+| r2 | 2026-07-18 | seat fold (Hermes Crumpet) | Fold pass on r1 with spot anchors re-verified at `2bf71c4` (ServerPush enum, MarkerAck factual-empty seam, eight-kind v2 census, signed config fields, `DELIVERY_SLICE_BUDGET`). Ruled Q3: `MarkerAckCommitted` row body fixed to the RecordAdmission census discipline. Ratified the participant v2→v3 loud migration as a D3-7 consequence (flagged for Tom/Annabel signoff). Opened Q5: `contiguously_available_through` basis (volatile-offered vs durable-obligation prefix) routed to pre-review with the seat's lean recorded; section 7 amended to carry both candidates. |
