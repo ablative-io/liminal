@@ -49,6 +49,8 @@ mod tests_capacity;
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_capacity_attach;
 #[cfg(test)]
+mod tests_config_d2;
+#[cfg(test)]
 mod tests_log_v2;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]

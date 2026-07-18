@@ -487,7 +487,9 @@ impl ConversationAuthority {
     }
 }
 
-fn canonical_marker_bytes(candidate: ImmutableSequenceCandidate) -> Result<Vec<u8>, StateError> {
+pub(super) fn canonical_marker_bytes(
+    candidate: ImmutableSequenceCandidate,
+) -> Result<Vec<u8>, StateError> {
     match candidate {
         ImmutableSequenceCandidate::Marker(marker) => Ok(format!("{marker:?}").into_bytes()),
         ImmutableSequenceCandidate::BindingTerminal { .. } => Err(StateError::invariant(

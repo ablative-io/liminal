@@ -44,6 +44,56 @@ enum CanonicalLifecycleRow {
     },
 }
 
+/// Canonical payloads for the coupled fenced-recovery sequence rows.
+#[cfg(test)]
+#[derive(Serialize)]
+#[serde(rename_all = "snake_case", tag = "row")]
+enum CanonicalRecoveryRow {
+    RecoverySequence {
+        conversation_id: u64,
+        participant_id: ParticipantId,
+        binding_epoch: StoredBindingEpoch,
+        delivery_seq: DeliverySeq,
+    },
+    RecoveryTerminal {
+        conversation_id: u64,
+        participant_id: ParticipantId,
+        binding_epoch: StoredBindingEpoch,
+        transaction_order: TransactionOrder,
+        delivery_seq: DeliverySeq,
+    },
+}
+
+/// Returns measured canonical v2 sizes of the coupled RS/RT recovery rows.
+#[cfg(test)]
+pub(super) fn recovery_row_sizes(
+    conversation_id: u64,
+    participant_id: ParticipantId,
+    binding_epoch: BindingEpoch,
+) -> Result<(u64, u64), StateError> {
+    let sequence = CanonicalRecoveryRow::RecoverySequence {
+        conversation_id,
+        participant_id,
+        binding_epoch: binding_epoch.into(),
+        delivery_seq: u64::MAX,
+    };
+    let terminal = CanonicalRecoveryRow::RecoveryTerminal {
+        conversation_id,
+        participant_id,
+        binding_epoch: binding_epoch.into(),
+        transaction_order: u64::MAX,
+        delivery_seq: u64::MAX,
+    };
+    Ok((canonical_size(&sequence)?, canonical_size(&terminal)?))
+}
+
+#[cfg(test)]
+fn canonical_size(row: &impl Serialize) -> Result<u64, StateError> {
+    let bytes = serde_json::to_vec(row).map_err(super::log::OperationLogError::from)?;
+    u64::try_from(bytes.len())
+        .map_err(|_| StateError::invariant("canonical v2 row length exceeds u64"))
+}
+
 /// Returns the exact canonical charge of an `Attached` retained row.
 pub(super) fn attached_charge(
     conversation_id: u64,

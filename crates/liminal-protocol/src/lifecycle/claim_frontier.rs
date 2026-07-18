@@ -233,6 +233,20 @@ pub enum TerminalProductSource {
     },
 }
 
+impl TerminalProductSource {
+    /// Names the prospective replacement terminal produced by recovery.
+    #[must_use]
+    pub const fn recovery_replacement(
+        participant_index: ParticipantId,
+        binding_epoch: BindingEpoch,
+    ) -> Self {
+        Self::RecoveryReplacement {
+            participant_index,
+            binding_epoch,
+        }
+    }
+}
+
 /// Immutable origin of one planned or appended marker value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MarkerProvenance {
@@ -252,6 +266,32 @@ pub enum MarkerProvenance {
         /// Remaining participant the possible marker protects.
         remaining_participant: ParticipantId,
     },
+}
+
+impl MarkerProvenance {
+    /// Names one conditional terminal-product marker provenance.
+    #[must_use]
+    pub const fn terminal_product(
+        terminal: TerminalProductSource,
+        affected_participant: ParticipantId,
+    ) -> Self {
+        Self::TerminalProduct {
+            terminal,
+            affected_participant,
+        }
+    }
+
+    /// Names one conditional membership-exit-product marker provenance.
+    #[must_use]
+    pub const fn exit_product(
+        exit_participant: ParticipantId,
+        remaining_participant: ParticipantId,
+    ) -> Self {
+        Self::ExitProduct {
+            exit_participant,
+            remaining_participant,
+        }
+    }
 }
 
 /// Exact typed body class for one retained causal record.
