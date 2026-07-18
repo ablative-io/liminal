@@ -4,7 +4,7 @@
 //! delivery. Participant sequence, durable recipient selection, holdback, and
 //! acknowledgement ownership remain independent of `Frame::Deliver`.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use liminal::protocol::{Frame, encoded_len};
 use liminal_protocol::wire::{CodecError, ConversationId, ServerPush};
@@ -13,8 +13,9 @@ use super::delivery::DeliverySink;
 use super::outbound::OutboundError;
 use super::state::ConnectionProcessState;
 use crate::server::participant::{
-    InstalledParticipantService, ParticipantOfferedProgress, ParticipantPublication,
-    ParticipantPublicationError, ParticipantSemanticError, encode_server_push,
+    InstalledParticipantService, ObserverPublication, ParticipantOfferedProgress,
+    ParticipantPublication, ParticipantPublicationError, ParticipantSemanticError,
+    encode_server_push,
 };
 
 /// Signed participant/observer push budget for one connection scheduler slice.
@@ -27,6 +28,16 @@ pub(super) const UNIT2_PUSH_SLICE_BUDGET: usize = 32;
 #[derive(Debug)]
 pub(super) struct HeldParticipantHead {
     publication: ParticipantPublication,
+    frame: Frame,
+    needed: usize,
+}
+
+/// Exact encoded observer wake retained under current-room pressure.
+///
+/// Like participant heads, this is connection-owned and move-only.
+#[derive(Debug)]
+pub(super) struct HeldObserverHead {
+    publication: ObserverPublication,
     frame: Frame,
     needed: usize,
 }
@@ -53,6 +64,14 @@ pub(super) enum ParticipantPumpError {
         needed: usize,
         capacity: usize,
     },
+    #[error(
+        "observer push frame for conversation {conversation_id} is {needed} bytes, exceeding empty sink capacity {capacity}"
+    )]
+    ObserverOversize {
+        conversation_id: ConversationId,
+        needed: usize,
+        capacity: usize,
+    },
     #[error("participant publication inbox disappeared during its owning connection slice")]
     MissingInbox,
 }
@@ -64,19 +83,34 @@ enum ConversationOutcome {
     Held,
 }
 
-/// Runs the connection's fair participant publication slice.
+#[derive(Debug)]
+enum ObserverWork {
+    Pending(ObserverPublication),
+    Held,
+}
+
+#[derive(Debug)]
+struct ConversationWork {
+    conversation_id: ConversationId,
+    observer: Option<ObserverWork>,
+    participant: bool,
+}
+
+/// Runs the connection's fair participant-and-observer publication slice.
 ///
-/// Ready conversations are sorted and de-duplicated by the inbox. Each gets at
-/// most one offer before any still-ready conversation gets a second. Held heads
-/// enter the same queue but are always resumed before selecting a later durable
-/// sequence for their conversation.
+/// Ready conversations are sorted and de-duplicated across both push classes.
+/// Each gets at most one push before any still-ready conversation gets a second.
+/// Within one conversation an observer wake is serviced before participant work
+/// so a refusal wake cannot starve behind durable replay; an existing participant
+/// head still precedes every later participant sequence. Both classes debit the
+/// same `remaining` counter and observer work receives no second allowance.
 pub(super) fn service_participant_publications<Sink: DeliverySink>(
     state: &mut ConnectionProcessState,
     service: &InstalledParticipantService,
     sink: &mut Sink,
     budget: usize,
 ) -> Result<usize, ParticipantPumpError> {
-    let ready_conversations = match state.participant_publication.as_ref() {
+    let ready_batch = match state.participant_publication.as_ref() {
         Some(inbox) => inbox.take_ready()?,
         None => return Ok(0),
     };
@@ -84,39 +118,144 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
         return Ok(0);
     };
 
-    let mut ready: BTreeSet<_> = ready_conversations.into_iter().collect();
-    ready.extend(state.held_participant_pushes.keys().copied());
-    let mut queue: VecDeque<_> = ready.into_iter().collect();
+    let mut participant_ready: BTreeSet<_> = ready_batch.conversations.into_iter().collect();
+    participant_ready.extend(state.held_participant_pushes.keys().copied());
+
+    // A newly fired wake is the latest durable progress for its conversation,
+    // so it replaces an older held wake before either can be handed off.
+    let mut pending_observers: BTreeMap<_, _> = ready_batch
+        .observer_progressed
+        .into_iter()
+        .map(|publication| (publication.conversation_id, publication))
+        .collect();
+    for conversation_id in pending_observers.keys() {
+        state.held_observer_pushes.remove(conversation_id);
+    }
+
+    let mut ready = participant_ready.clone();
+    ready.extend(pending_observers.keys().copied());
+    ready.extend(state.held_observer_pushes.keys().copied());
+    let mut queue: VecDeque<_> = ready
+        .into_iter()
+        .map(|conversation_id| ConversationWork {
+            conversation_id,
+            observer: pending_observers
+                .remove(&conversation_id)
+                .map(ObserverWork::Pending)
+                .or_else(|| {
+                    state
+                        .held_observer_pushes
+                        .contains_key(&conversation_id)
+                        .then_some(ObserverWork::Held)
+                }),
+            participant: participant_ready.contains(&conversation_id),
+        })
+        .collect();
     let mut remaining = budget;
     let mut enqueued = 0;
+    let mut deferred_participants = BTreeSet::new();
 
     while remaining > 0 {
-        let Some(conversation_id) = queue.pop_front() else {
+        let Some(mut work) = queue.pop_front() else {
             break;
         };
+        if let Some(observer) = work.observer.take() {
+            match service_one_observer(state, sink, work.conversation_id, observer)? {
+                ConversationOutcome::Enqueued => {
+                    remaining -= 1;
+                    enqueued += 1;
+                    if work.participant {
+                        queue.push_back(work);
+                    }
+                }
+                ConversationOutcome::Held => {
+                    if work.participant {
+                        deferred_participants.insert(work.conversation_id);
+                    }
+                }
+                ConversationOutcome::Done => {}
+            }
+            continue;
+        }
+        if !work.participant {
+            continue;
+        }
         match service_one_conversation(
             state,
             service,
             sink,
             connection_incarnation,
-            conversation_id,
+            work.conversation_id,
         )? {
             ConversationOutcome::Done | ConversationOutcome::Held => {}
             ConversationOutcome::Enqueued => {
-                queue.push_back(conversation_id);
+                queue.push_back(work);
                 remaining -= 1;
                 enqueued += 1;
             }
         }
     }
 
-    if !queue.is_empty() {
+    if !queue.is_empty() || !deferred_participants.is_empty() {
         let Some(inbox) = state.participant_publication.as_ref() else {
             return Err(ParticipantPumpError::MissingInbox);
         };
-        inbox.requeue(queue)?;
+        let mut conversations = deferred_participants;
+        let mut observers = Vec::new();
+        for work in queue {
+            if work.participant {
+                conversations.insert(work.conversation_id);
+            }
+            if let Some(ObserverWork::Pending(publication)) = work.observer {
+                observers.push(publication);
+            }
+        }
+        inbox.requeue(conversations)?;
+        inbox.requeue_observers(observers)?;
     }
     Ok(enqueued)
+}
+
+fn service_one_observer<Sink: DeliverySink>(
+    state: &mut ConnectionProcessState,
+    sink: &mut Sink,
+    conversation_id: ConversationId,
+    work: ObserverWork,
+) -> Result<ConversationOutcome, ParticipantPumpError> {
+    let (publication, frame, needed) = match work {
+        ObserverWork::Pending(publication) => {
+            let frame = encode_server_push(publication.into_server_push())
+                .map_err(ParticipantPumpError::ParticipantCodec)?;
+            let needed = encoded_len(&frame).map_err(OutboundError::Encode)?;
+            (publication, frame, needed)
+        }
+        ObserverWork::Held => {
+            let Some(held) = state.held_observer_pushes.remove(&conversation_id) else {
+                return Ok(ConversationOutcome::Done);
+            };
+            (held.publication, held.frame, held.needed)
+        }
+    };
+    if needed > sink.capacity() {
+        return Err(ParticipantPumpError::ObserverOversize {
+            conversation_id,
+            needed,
+            capacity: sink.capacity(),
+        });
+    }
+    if !sink.has_room(needed) {
+        state.held_observer_pushes.insert(
+            conversation_id,
+            HeldObserverHead {
+                publication,
+                frame,
+                needed,
+            },
+        );
+        return Ok(ConversationOutcome::Held);
+    }
+    sink.enqueue_frame(&frame)?;
+    Ok(ConversationOutcome::Enqueued)
 }
 
 fn service_one_conversation<Sink: DeliverySink>(
@@ -185,10 +324,11 @@ fn service_one_conversation<Sink: DeliverySink>(
     Ok(ConversationOutcome::Enqueued)
 }
 
-/// Whether an exact participant head waits for current outbound room.
+/// Whether an exact participant or observer head waits for current outbound
+/// room.
 #[must_use]
 pub(super) fn has_held_participant_head(state: &ConnectionProcessState) -> bool {
-    !state.held_participant_pushes.is_empty()
+    !state.held_participant_pushes.is_empty() || !state.held_observer_pushes.is_empty()
 }
 
 #[cfg(test)]

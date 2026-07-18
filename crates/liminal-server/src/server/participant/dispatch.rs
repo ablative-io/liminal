@@ -11,8 +11,8 @@ use liminal::durability::DurableStore;
 use liminal::protocol::Frame;
 use liminal_protocol::lifecycle::ConnectionConversationTracking;
 use liminal_protocol::wire::{
-    BindingEpoch, ClientRequest, CodecError, ConnectionIncarnation, ConversationId, ParticipantId,
-    ServerValue, ValidatedFrameLimit,
+    BindingEpoch, ClientRequest, CodecError, ConnectionIncarnation, ConversationId,
+    ObserverRecoveryHandshake, ParticipantId, ServerValue, ValidatedFrameLimit,
 };
 
 use super::transport::{
@@ -20,8 +20,8 @@ use super::transport::{
     normalize_configured_frame_limit,
 };
 use super::{
-    ParticipantOfferedProgress, ParticipantPublication, ParticipantPublicationInbox,
-    ParticipantPublicationRegistry,
+    ObserverPublicationTarget, ParticipantOfferedProgress, ParticipantPublication,
+    ParticipantPublicationInbox, ParticipantPublicationRegistry,
 };
 
 /// Connection-local semantic-conversation dispatch map (contract R-D1: the
@@ -192,6 +192,29 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// Applies observer recovery with the weak exact-live-connection target
+    /// captured by the installed service. Semantic-only handlers delegate to
+    /// their ordinary request path and do not own observer publication.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParticipantSemanticError`] under the same contract as
+    /// [`Self::handle`].
+    fn handle_observer_recovery(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ObserverRecoveryHandshake,
+        target: Option<ObserverPublicationTarget>,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        drop(target);
+        self.handle(
+            context,
+            conversations,
+            ClientRequest::ObserverRecovery(request),
+        )
+    }
+
     /// Applies one decoded participant request to protocol-owned authority.
     ///
     /// # Errors
@@ -338,6 +361,17 @@ impl ParticipantSemanticHandler for InstalledParticipantService {
         conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
+        if let ClientRequest::ObserverRecovery(request) = request {
+            let target = self
+                .publication_registry
+                .observer_target(context.connection_incarnation())
+                .map_err(|error| ParticipantSemanticError::Internal {
+                    message: format!("observer publication target failed: {error}"),
+                })?;
+            return self
+                .handler
+                .handle_observer_recovery(context, conversations, request, target);
+        }
         let conversation_id = request_conversation_id(&request);
         let value = self.handler.handle(context, conversations, request)?;
         if let Some(conversation_id) = conversation_id {

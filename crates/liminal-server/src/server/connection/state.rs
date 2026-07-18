@@ -10,7 +10,7 @@ use liminal::protocol::Frame;
 use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::conversation::ConnectionConversation;
-use super::participant_delivery::HeldParticipantHead;
+use super::participant_delivery::{HeldObserverHead, HeldParticipantHead};
 use super::services::ConnectionSubscription;
 use crate::server::participant::{
     ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublicationInbox,
@@ -57,6 +57,10 @@ pub(super) struct ConnectionProcessState {
     /// At most one exact encoded participant head per semantic conversation,
     /// bounded by the same signed connection-conversation limit as the inbox.
     pub(super) held_participant_pushes: BTreeMap<u64, HeldParticipantHead>,
+    /// At most one exact encoded observer wake per semantic conversation. A
+    /// later fired payload replaces it before service because only the latest
+    /// durable progress matters to recovery.
+    pub(super) held_observer_pushes: BTreeMap<u64, HeldObserverHead>,
     /// Library subscriptions owned by this connection, keyed by subscription id.
     pub(super) subscriptions: HashMap<u64, ConnectionSubscription>,
     /// Supervised conversations owned by this connection, keyed by conversation id.

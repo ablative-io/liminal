@@ -11,7 +11,7 @@
 //! exists, and refused probes of unknown conversation ids leave neither
 //! durable nor in-memory residue.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use liminal::durability::DurableStore;
@@ -21,7 +21,8 @@ use liminal_protocol::wire::ConversationId;
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
-    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticError,
+    ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantSemanticError,
 };
 
 use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
@@ -31,6 +32,24 @@ use super::log::{OperationLog, OperationLogError, StoredOperation};
 use super::outbox_log::{OutboxLog, OutboxLogError};
 use super::registry::ConversationRegistry;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
+
+#[derive(Debug)]
+pub(super) struct ObserverArmTarget {
+    pub(super) refused_epoch: u64,
+    pub(super) connection_incarnation: liminal_protocol::wire::ConnectionIncarnation,
+    pub(super) target: ObserverPublicationTarget,
+}
+
+/// One exclusively serialized observer owner: durable protocol aggregate/head
+/// plus volatile weak live targets for its installed arms. Restoring durable
+/// arms intentionally starts with an empty target map because no socket
+/// survives a process restart.
+#[derive(Debug)]
+pub(super) struct ObserverOwner {
+    pub(super) aggregate: ObserverRecoveryAggregate,
+    pub(super) head: u64,
+    pub(super) arm_targets: BTreeMap<ConversationId, ObserverArmTarget>,
+}
 
 /// Production semantic handler backed by the shared durable store.
 ///
@@ -43,7 +62,7 @@ pub struct ProductionParticipantHandler {
     conversations: Mutex<HashMap<ConversationId, Arc<Mutex<Option<ConversationAuthority>>>>>,
     /// Server-wide observer-recovery aggregate paired with its durable row
     /// head (`None` until first restored).
-    pub(super) observer: Mutex<Option<(ObserverRecoveryAggregate, u64)>>,
+    pub(super) observer: Mutex<Option<ObserverOwner>>,
     /// Server-scope stage-8 occupancy ledger (identity slots, live receipts,
     /// provenance fingerprints), restored from every durable conversation at
     /// construction and kept exact by commit reservations and replay folds.

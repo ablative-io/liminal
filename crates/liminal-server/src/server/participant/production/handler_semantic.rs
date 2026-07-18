@@ -6,12 +6,13 @@ use std::sync::Arc;
 use liminal_protocol::lifecycle::BindingState;
 use liminal_protocol::wire::{
     BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, EnrollmentRequest,
-    ParticipantId, ParticipantRecord, ServerValue,
+    ObserverRecoveryHandshake, ParticipantId, ParticipantRecord, ServerValue,
 };
 
 use crate::server::participant::{
-    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
-    ParticipantPublication, ParticipantSemanticError, ParticipantSemanticHandler,
+    ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
+    ParticipantSemanticHandler,
 };
 
 use super::barrier::ArmOutcome;
@@ -213,6 +214,16 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         Ok(())
     }
 
+    fn handle_observer_recovery(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ObserverRecoveryHandshake,
+        target: Option<ObserverPublicationTarget>,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        self.apply_observer_recovery(context, conversations, &request, target)
+    }
+
     fn handle(
         &self,
         context: ParticipantConnectionContext,
@@ -299,7 +310,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                 )
             }
             ClientRequest::ObserverRecovery(request) => {
-                self.apply_observer_recovery(conversations, &request)
+                self.apply_observer_recovery(context, conversations, &request, None)
             }
         }
     }

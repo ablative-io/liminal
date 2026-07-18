@@ -5,6 +5,7 @@
 //! crash-window repair pre-pass all operate on the handler's server-wide
 //! observer aggregate and its durable row log.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use liminal::durability::bridge::block_on;
@@ -16,9 +17,15 @@ use liminal_protocol::wire::{
     ConversationId, ObserverRecoveryHandshake, ObserverRecoveryResponse, ServerValue,
 };
 
-use crate::server::participant::{ParticipantConnectionConversations, ParticipantSemanticError};
+use crate::server::participant::{
+    ObserverPublication, ObserverPublicationTarget, ParticipantConnectionContext,
+    ParticipantConnectionConversations, ParticipantSemanticError,
+};
 
-use super::handler::{ProductionParticipantHandler, bridge_error, log_error, state_error};
+use super::handler::{
+    ObserverArmTarget, ObserverOwner, ProductionParticipantHandler, bridge_error, log_error,
+    state_error,
+};
 use super::log::OperationLog;
 use super::observer::{ObserverLog, ObserverRow};
 use super::state::StateError;
@@ -31,8 +38,10 @@ impl ProductionParticipantHandler {
     /// before installation — a crash leaves the complete plan or none.
     pub(super) fn apply_observer_recovery(
         &self,
+        context: ParticipantConnectionContext,
         conversations: &mut ParticipantConnectionConversations,
         request: &ObserverRecoveryHandshake,
+        target: Option<ObserverPublicationTarget>,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         // Crash-window repair pre-pass: every named conversation's observer
         // registration is made derivable from its own durable conversation
@@ -58,9 +67,17 @@ impl ProductionParticipantHandler {
             let restored = block_on(observer_log.restore())
                 .map_err(|error| bridge_error(&error))?
                 .map_err(|error| log_error(&error))?;
-            *owner = Some((restored.aggregate, restored.next_sequence));
+            *owner = Some(ObserverOwner {
+                aggregate: restored.aggregate,
+                head: restored.next_sequence,
+                arm_targets: BTreeMap::new(),
+            });
         }
-        let (aggregate, head) = owner
+        let ObserverOwner {
+            aggregate,
+            head,
+            mut arm_targets,
+        } = owner
             .take()
             .ok_or_else(|| ParticipantSemanticError::Internal {
                 message: "observer recovery aggregate is absent".to_owned(),
@@ -75,7 +92,11 @@ impl ProductionParticipantHandler {
                 aggregate,
                 response,
             } => {
-                *owner = Some((aggregate, head));
+                *owner = Some(ObserverOwner {
+                    aggregate,
+                    head,
+                    arm_targets,
+                });
                 Ok(response.into_server_value())
             }
             ObserverRecoveryTransactionDecision::Commit(transaction) => {
@@ -89,13 +110,34 @@ impl ProductionParticipantHandler {
                 {
                     Ok(()) => {
                         let (aggregate, outcome) = transaction.commit();
-                        *owner = Some((aggregate, head.saturating_add(1)));
+                        let next_head = head.checked_add(1).ok_or_else(|| {
+                            ParticipantSemanticError::Internal {
+                                message: "observer durable row sequence exhausted".to_owned(),
+                            }
+                        })?;
                         // Every armed refusal-only recipient occupies one
                         // connection-conversation slot (the batch preflight
                         // already admitted them against the signed bound).
-                        for (conversation_id, _) in arms {
-                            conversations.track(conversation_id);
+                        for (conversation_id, refused_epoch) in &arms {
+                            conversations.track(*conversation_id);
+                            if let Some(target) = target.as_ref() {
+                                arm_targets.insert(
+                                    *conversation_id,
+                                    ObserverArmTarget {
+                                        refused_epoch: *refused_epoch,
+                                        connection_incarnation: context.connection_incarnation(),
+                                        target: target.clone(),
+                                    },
+                                );
+                            } else {
+                                arm_targets.remove(conversation_id);
+                            }
                         }
+                        *owner = Some(ObserverOwner {
+                            aggregate,
+                            head: next_head,
+                            arm_targets,
+                        });
                         Ok(ObserverRecoveryResponse::accepted(outcome).into_server_value())
                     }
                     Err(error) => {
@@ -128,9 +170,17 @@ impl ProductionParticipantHandler {
             let restored = block_on(observer_log.restore())
                 .map_err(|error| bridge_error(&error))?
                 .map_err(|error| log_error(&error))?;
-            *owner = Some((restored.aggregate, restored.next_sequence));
+            *owner = Some(ObserverOwner {
+                aggregate: restored.aggregate,
+                head: restored.next_sequence,
+                arm_targets: BTreeMap::new(),
+            });
         }
-        let (aggregate, head) = owner
+        let ObserverOwner {
+            aggregate,
+            head,
+            arm_targets,
+        } = owner
             .take()
             .ok_or_else(|| ParticipantSemanticError::Internal {
                 message: "observer recovery aggregate is absent".to_owned(),
@@ -138,7 +188,11 @@ impl ProductionParticipantHandler {
         let result = match aggregate.decide_track(conversation_id, 0) {
             ObserverProgressTrackDecision::Refuse { aggregate, .. } => {
                 // Already tracked — the registration is durable.
-                *owner = Some((aggregate, head));
+                *owner = Some(ObserverOwner {
+                    aggregate,
+                    head,
+                    arm_targets,
+                });
                 Ok(())
             }
             ObserverProgressTrackDecision::Commit(transaction) => {
@@ -152,7 +206,11 @@ impl ProductionParticipantHandler {
                 .map_err(|error| bridge_error(&error))?
                 {
                     Ok(()) => {
-                        *owner = Some((transaction.commit(), head.saturating_add(1)));
+                        *owner = Some(ObserverOwner {
+                            aggregate: transaction.commit(),
+                            head: head.saturating_add(1),
+                            arm_targets,
+                        });
                         Ok(())
                     }
                     Err(error) => Err(state_error(&StateError::Log(error))),
@@ -190,7 +248,11 @@ impl ProductionParticipantHandler {
             let restored = block_on(observer_log.restore())
                 .map_err(|error| bridge_error(&error))?
                 .map_err(|error| log_error(&error))?;
-            *owner = Some((restored.aggregate, restored.next_sequence));
+            *owner = Some(ObserverOwner {
+                aggregate: restored.aggregate,
+                head: restored.next_sequence,
+                arm_targets: BTreeMap::new(),
+            });
         }
         for projection in projections {
             if projection.conversation_id() != conversation_id {
@@ -201,12 +263,15 @@ impl ProductionParticipantHandler {
                     ),
                 });
             }
-            let (aggregate, head) =
-                owner
-                    .take()
-                    .ok_or_else(|| ParticipantSemanticError::Internal {
-                        message: "observer recovery aggregate is absent".to_owned(),
-                    })?;
+            let ObserverOwner {
+                aggregate,
+                head,
+                mut arm_targets,
+            } = owner
+                .take()
+                .ok_or_else(|| ParticipantSemanticError::Internal {
+                    message: "observer recovery aggregate is absent".to_owned(),
+                })?;
             let presented = projection.new_observer_progress();
             let current = aggregate
                 .observer_progress(conversation_id)
@@ -216,7 +281,11 @@ impl ProductionParticipantHandler {
                     ),
                 })?;
             if current >= presented {
-                *owner = Some((aggregate, head));
+                *owner = Some(ObserverOwner {
+                    aggregate,
+                    head,
+                    arm_targets,
+                });
                 continue;
             }
             let ObserverProgressAdvanceDecision::Commit(transaction) =
@@ -243,11 +312,52 @@ impl ProductionParticipantHandler {
                             .ok_or_else(|| ParticipantSemanticError::Internal {
                                 message: "observer durable row sequence exhausted".to_owned(),
                             })?;
-                    let (aggregate, _fired) = transaction.commit();
-                    *owner = Some((aggregate, next_head));
+                    let (aggregate, fired) = transaction.commit();
+                    let publication_result = if let Some(fired) = fired {
+                        match arm_targets.remove(&fired.conversation_id()) {
+                            Some(association)
+                                if association.refused_epoch == fired.refused_epoch() =>
+                            {
+                                association
+                                    .target
+                                    .publish(ObserverPublication {
+                                        conversation_id: fired.conversation_id(),
+                                        refused_epoch: fired.refused_epoch(),
+                                        observer_progress: presented,
+                                    })
+                                    .map(|_| ())
+                                    .map_err(|error| ParticipantSemanticError::Internal {
+                                        message: format!(
+                                            "observer progressed publication failed: {error}"
+                                        ),
+                                    })
+                            }
+                            Some(association) => Err(ParticipantSemanticError::Internal {
+                                message: format!(
+                                    "observer arm target epoch {} on incarnation {:?} disagrees with fired epoch {} for conversation {conversation_id}",
+                                    association.refused_epoch,
+                                    association.connection_incarnation,
+                                    fired.refused_epoch()
+                                ),
+                            }),
+                            None => Ok(()),
+                        }
+                    } else {
+                        Ok(())
+                    };
+                    *owner = Some(ObserverOwner {
+                        aggregate,
+                        head: next_head,
+                        arm_targets,
+                    });
+                    publication_result?;
                 }
                 Err(error) => {
-                    *owner = Some((transaction.abort(), head));
+                    *owner = Some(ObserverOwner {
+                        aggregate: transaction.abort(),
+                        head,
+                        arm_targets,
+                    });
                     return Err(state_error(&StateError::Log(error)));
                 }
             }

@@ -53,9 +53,12 @@ pub use dispatch::{
     ParticipantSemanticHandler, dispatch_generic_frame,
 };
 pub(crate) use production::{ProductionParticipantHandler, constant_time_eq};
-pub use publication::{ParticipantOfferedProgress, ParticipantPublication};
 pub(crate) use publication::{
-    ParticipantPublicationError, ParticipantPublicationInbox, ParticipantPublicationRegistry,
+    ObserverPublication, ParticipantPublicationError, ParticipantPublicationInbox,
+    ParticipantPublicationRegistry,
+};
+pub use publication::{
+    ObserverPublicationTarget, ParticipantOfferedProgress, ParticipantPublication,
 };
 pub use transport::{
     PARTICIPANT_CAPABILITY_BIT, ParticipantIngress, ParticipantSession, encode_server_push,
