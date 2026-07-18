@@ -29,6 +29,8 @@ use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
 use super::capacity::ServerCapacity;
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
+use super::outbox::ConversationOutbox;
+use super::outbox_log::{OutboxLog, OutboxLogError};
 use super::registry::ConversationRegistry;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
@@ -213,6 +215,13 @@ impl ProductionParticipantHandler {
         ))
         .map_err(|error| bridge_error(&error))?
         .map_err(|error| state_error(&error))?;
+        let outbox_log = OutboxLog::new(Arc::clone(&self.store), conversation_id);
+        let extension_rows = block_on(outbox_log.read_all())
+            .map_err(|error| bridge_error(&error))?
+            .map_err(|error| outbox_log_error(&error))?;
+        let outbox = ConversationOutbox::restore(conversation_id, extension_rows)
+            .map_err(|error| state_error(&StateError::Outbox(error)))?;
+        replayed.outbox = Some(outbox);
         if !replayed.tokens.is_empty() {
             self.ensure_observer_tracked(conversation_id)?;
         }
@@ -477,6 +486,12 @@ pub(super) fn state_error(error: &StateError) -> ParticipantSemanticError {
 pub(super) fn log_error(error: &OperationLogError) -> ParticipantSemanticError {
     ParticipantSemanticError::Internal {
         message: format!("participant production log failed: {error}"),
+    }
+}
+
+pub(super) fn outbox_log_error(error: &OutboxLogError) -> ParticipantSemanticError {
+    ParticipantSemanticError::Internal {
+        message: format!("participant Unit 2 extension log failed: {error}"),
     }
 }
 

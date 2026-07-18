@@ -22,6 +22,7 @@ use liminal_protocol::wire::{
 
 use super::facts::{Digest, FactsError};
 use super::log::{OperationLogError, StoredOperation};
+use super::outbox::{ConversationOutbox, ConversationOutboxError};
 
 /// Exact committed credential-attach receipt with its own deadline pair.
 ///
@@ -127,6 +128,9 @@ pub(super) struct ConversationAuthority {
     /// before the first enrollment has durably committed, or while a
     /// consuming protocol transition owns it.
     pub(super) frontier: Option<LiveFrontierOwner>,
+    /// Move-only durable delivery and recipient-obligation owner. It is absent
+    /// only while cold restore is still validating the extension stream.
+    pub(super) outbox: Option<ConversationOutbox>,
     /// Live participant slots keyed by permanent participant id.
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
     /// Permanent retired identity tombstones keyed by participant id.
@@ -151,6 +155,9 @@ pub(super) enum StateError {
     /// The durable log rejected a read or append.
     #[error(transparent)]
     Log(#[from] OperationLogError),
+    /// The Unit 2 extension stream or outbox owner refused durable bytes.
+    #[error(transparent)]
+    Outbox(#[from] ConversationOutboxError),
     /// A server-owned fact could not be minted.
     #[error(transparent)]
     Facts(#[from] FactsError),
@@ -220,6 +227,7 @@ impl ConversationAuthority {
             conversation_id,
             shell: None,
             frontier: None,
+            outbox: None,
             slots: BTreeMap::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),

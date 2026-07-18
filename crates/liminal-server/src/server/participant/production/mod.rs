@@ -31,6 +31,7 @@ mod ops_enroll_capacity;
 mod ops_frontier;
 mod ops_leave;
 mod ops_session;
+mod outbox;
 mod outbox_log;
 mod registry;
 mod state;
@@ -67,6 +68,8 @@ mod tests_log_v2;
 mod tests_observer;
 #[cfg(test)]
 mod tests_outbox_log;
+#[cfg(test)]
+mod tests_outbox_owner;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_receipts;
