@@ -121,23 +121,21 @@ fn cumulative_ack_reclaims_only_the_recipient_prefix() -> Result<(), Box<dyn Err
     assert_eq!(owner.next_live(RECIPIENT + 1), Some(1));
     assert_eq!(owner.live_record_count(), 1);
     assert!(owner.charged_bytes() > 0);
-    let testimony = owner.recipient_ack_obligations(RECIPIENT + 1)?;
-    assert!(format!("{testimony:?}").contains("delivery_sequences: [1]"));
     Ok(())
 }
 
 #[test]
-fn ack_gap_and_regression_refuse_loudly() -> Result<(), Box<dyn Error>> {
+fn literal_v2_nonobligation_ack_restores_while_regression_refuses() -> Result<(), Box<dyn Error>> {
     let produced = ordinary(0, 1, vec![RECIPIENT])?;
-    let gap = OutboxRow::AckAdvanced {
+    let historical = OutboxRow::AckAdvanced {
         source_log_sequence: 1,
         participant_id: RECIPIENT,
         through_seq: 2,
     };
-    assert!(matches!(
-        ConversationOutbox::restore(CONVERSATION, vec![(0, produced.clone()), (1, gap)]),
-        Err(ConversationOutboxError::AckGap { through_seq: 2, .. })
-    ));
+    let historical_owner =
+        ConversationOutbox::restore(CONVERSATION, vec![(0, produced.clone()), (1, historical)])?;
+    assert_eq!(historical_owner.ack_through(RECIPIENT), 2);
+    assert_eq!(historical_owner.live_record_count(), 0);
 
     let ack = OutboxRow::AckAdvanced {
         source_log_sequence: 1,

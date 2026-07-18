@@ -31,7 +31,7 @@ pub(super) fn validate_batch_shape(batch: &ProducedBatch) -> Result<(), Conversa
 
 fn body_and_sender_match(kind: ProducedSourceKind, records: &[ProjectedRecord]) -> bool {
     match (kind, records) {
-        (ProducedSourceKind::Enrolled, [record]) | (ProducedSourceKind::Attached, [record]) => {
+        (ProducedSourceKind::Enrolled | ProducedSourceKind::Attached, [record]) => {
             match record.body() {
                 ParticipantRecord::Attached {
                     affected_participant_id,

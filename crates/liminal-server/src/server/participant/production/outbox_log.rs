@@ -193,7 +193,7 @@ impl ProducedBatch {
         &self.ordered_records
     }
 
-    pub(super) fn new(
+    pub(super) const fn new(
         source_log_sequence: u64,
         source_kind: ProducedSourceKind,
         ordered_records: Vec<ProjectedRecord>,
@@ -206,7 +206,7 @@ impl ProducedBatch {
     }
 }
 
-/// Complete persistence census for one committed MarkerAck.
+/// Complete persistence census for one committed `MarkerAck`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct StoredMarkerAckCommitted {
     pub(super) request: MarkerAck,
@@ -236,7 +236,7 @@ pub(super) enum OutboxRow {
 
 impl OutboxRow {
     /// Returns the row's merge boundary in the literal v2 stream.
-    pub(super) fn base_log_head(&self) -> Option<u64> {
+    pub(super) const fn base_log_head(&self) -> Option<u64> {
         match self {
             Self::Produced(batch) => batch.source_log_sequence.checked_add(1),
             Self::AckAdvanced {

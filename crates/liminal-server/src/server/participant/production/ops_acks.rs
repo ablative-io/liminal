@@ -6,8 +6,9 @@
 //! request-bound response authorities carry every reply.
 
 use liminal_protocol::lifecycle::{
-    BindingState, MarkerAckDecision, MarkerProofState, ParticipantAckDecision, PresentedIdentity,
-    SemanticConnectionCapacityDecision, apply_marker_ack, apply_participant_ack,
+    BindingState, ClosureState, Event, MarkerAckDecision, MarkerProofState, ParticipantAckDecision,
+    ParticipantCursorProgress, PresentedIdentity, SemanticConnectionCapacityDecision, StoredEdge,
+    apply_marker_ack, apply_marker_ack_frontier, apply_participant_ack,
     apply_participant_ack_frontier,
 };
 use liminal_protocol::wire::{
@@ -18,6 +19,7 @@ use liminal_protocol::wire::{
 use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::Digest;
 use super::log::{StoredAck, StoredBindingEpoch, StoredOperation};
+use super::outbox_log::StoredMarkerAckCommitted;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
@@ -243,6 +245,149 @@ impl ConversationAuthority {
                 "marker ack committed although no marker was ever delivered",
             )),
         }
+    }
+
+    /// Replays one extension `MarkerAck` through the authoritative selector and
+    /// checks the complete stored commit census before installing any state.
+    pub(super) fn replay_marker_ack_extension(
+        &mut self,
+        row: &StoredMarkerAckCommitted,
+    ) -> Result<(), StateError> {
+        if row.request.conversation_id != self.conversation_id
+            || row.offered_marker_delivery_seq != row.request.marker_delivery_seq
+            || row.receiving_binding_epoch != row.delivered_binding_epoch
+        {
+            return Err(StateError::invariant(
+                "stored MarkerAck request and delivery witness disagree",
+            ));
+        }
+        let progress = marker_replay_progress(self, row)?;
+        let identity = self
+            .slots
+            .get(&row.request.participant_id)
+            .map_or(PresentedIdentity::Absent, |slot| {
+                PresentedIdentity::<Digest, Digest, Digest>::Live(&slot.member)
+            });
+        let detached = BindingState::Detached;
+        let binding = self
+            .slots
+            .get(&row.request.participant_id)
+            .map_or(&detached, |slot| &slot.binding);
+        let cursor = self
+            .slots
+            .get(&row.request.participant_id)
+            .map_or(0, |slot| slot.member.cursor());
+        let marker_state = MarkerProofState::new(
+            cursor,
+            false,
+            Some(row.offered_marker_delivery_seq),
+            row.delivered_binding_epoch,
+            Some(progress),
+        );
+        let MarkerAckDecision::Commit(commit) = apply_marker_ack(
+            identity,
+            binding,
+            row.receiving_binding_epoch,
+            &row.request,
+            &marker_state,
+        ) else {
+            return Err(StateError::invariant(
+                "stored MarkerAck replayed to a non-commit decision",
+            ));
+        };
+        if commit.canonical_request() != row.request
+            || commit.receiving_binding_epoch() != row.receiving_binding_epoch
+            || commit.offered_marker_delivery_seq() != row.offered_marker_delivery_seq
+            || commit.delivered_binding_epoch() != row.delivered_binding_epoch
+            || commit.from_cursor() != row.from_cursor
+            || commit.resulting_cursor() != row.resulting_cursor
+        {
+            return Err(StateError::invariant(
+                "stored MarkerAck post-transition audit drifted",
+            ));
+        }
+        let transitioned =
+            apply_marker_ack_frontier(self.take_frontier()?, commit).map_err(|failure| {
+                StateError::invariant(format!(
+                    "stored MarkerAck frontier transition failed: {:?}",
+                    failure.error()
+                ))
+            })?;
+        let (commit, frontier) = transitioned.into_parts();
+        let slot = self
+            .slots
+            .get_mut(&row.request.participant_id)
+            .ok_or_else(|| StateError::invariant("stored MarkerAck participant is absent"))?;
+        let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
+            StateError::invariant(format!("stored MarkerAck cursor commit failed: {error:?}"))
+        })?;
+        let request = outcome.request();
+        if request.conversation_id != row.request.conversation_id
+            || request.participant_id != row.request.participant_id
+            || request.capability_generation != row.request.capability_generation
+            || request.marker_delivery_seq != row.request.marker_delivery_seq
+        {
+            return Err(StateError::invariant(
+                "stored MarkerAck outcome request drifted",
+            ));
+        }
+        self.install_frontier(frontier);
+        Ok(())
+    }
+}
+
+fn marker_replay_progress(
+    authority: &ConversationAuthority,
+    row: &StoredMarkerAckCommitted,
+) -> Result<ParticipantCursorProgress, StateError> {
+    let closure = authority
+        .frontier
+        .as_ref()
+        .ok_or(StateError::FrontierUnavailable)?
+        .closure_accounting()
+        .state();
+    match closure {
+        ClosureState::Owed {
+            debt,
+            edge: StoredEdge::MarkerDelivery(delivery),
+        } => {
+            let delivered = delivery
+                .delivered(
+                    debt,
+                    Event::marker_delivered(
+                        row.request.participant_id,
+                        row.delivered_binding_epoch,
+                        row.offered_marker_delivery_seq,
+                    ),
+                )
+                .map_err(|_| {
+                    StateError::invariant(
+                        "stored MarkerAck witness does not match marker delivery authority",
+                    )
+                })?;
+            match delivered {
+                ClosureState::Owed {
+                    edge: StoredEdge::ParticipantCursorProgress(progress),
+                    ..
+                } if progress.marker_delivery_seq() == Some(row.offered_marker_delivery_seq) => {
+                    Ok(progress)
+                }
+                ClosureState::Clear | ClosureState::Owed { .. } => Err(StateError::invariant(
+                    "stored MarkerAck witness did not produce marker progress",
+                )),
+            }
+        }
+        ClosureState::Owed {
+            edge: StoredEdge::ParticipantCursorProgress(progress),
+            ..
+        } if progress.marker_delivery_seq() == Some(row.offered_marker_delivery_seq)
+            && progress.binding_epoch() == row.delivered_binding_epoch =>
+        {
+            Ok(progress)
+        }
+        ClosureState::Clear | ClosureState::Owed { .. } => Err(StateError::invariant(
+            "stored MarkerAck has no matching marker delivery authority",
+        )),
     }
 }
 

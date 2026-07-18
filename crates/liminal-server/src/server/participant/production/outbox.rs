@@ -4,7 +4,6 @@ mod validation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use liminal_protocol::lifecycle::RecipientAckObligations;
 use liminal_protocol::wire::{ParticipantDelivery, ParticipantId, ParticipantRecord};
 
 use super::outbox_log::{
@@ -73,18 +72,9 @@ pub(super) enum ConversationOutboxError {
         current: u64,
         through_seq: u64,
     },
-    /// An ack ended on no committed obligation for that recipient.
-    #[error("Unit 2 ack for participant {participant_id} ends on non-obligation {through_seq}")]
-    AckGap {
-        participant_id: ParticipantId,
-        through_seq: u64,
-    },
     /// Checked live charge arithmetic overflowed.
     #[error("Unit 2 live outbox charge overflowed")]
     ChargeOverflow,
-    /// Protocol obligation testimony rejected owner state.
-    #[error("Unit 2 recipient obligation testimony drifted: {message}")]
-    ObligationTestimony { message: String },
 }
 
 #[derive(Debug)]
@@ -155,7 +145,7 @@ impl ConversationOutbox {
             }
         }
         match row {
-            OutboxRow::Produced(batch) => self.apply_produced(batch)?,
+            OutboxRow::Produced(batch) => self.apply_produced(&batch)?,
             OutboxRow::AckAdvanced {
                 source_log_sequence,
                 participant_id,
@@ -172,8 +162,8 @@ impl ConversationOutbox {
         Ok(())
     }
 
-    fn apply_produced(&mut self, batch: ProducedBatch) -> Result<(), ConversationOutboxError> {
-        validate_batch_shape(&batch)?;
+    fn apply_produced(&mut self, batch: &ProducedBatch) -> Result<(), ConversationOutboxError> {
+        validate_batch_shape(batch)?;
         let source_sequence = batch.source_log_sequence();
         let canonical = encode_row(&OutboxRow::Produced(batch.clone()))?;
         if let Some(existing) = self.source_batches.get(&source_sequence) {
@@ -292,16 +282,6 @@ impl ConversationOutbox {
                 through_seq,
             });
         }
-        let endpoint_exists = self
-            .all_obligations
-            .get(&participant_id)
-            .is_some_and(|sequences| sequences.contains(&through_seq));
-        if !endpoint_exists {
-            return Err(ConversationOutboxError::AckGap {
-                participant_id,
-                through_seq,
-            });
-        }
         self.ack_sources
             .insert(source_sequence, (participant_id, through_seq));
         self.ack_frontiers.insert(participant_id, through_seq);
@@ -363,33 +343,6 @@ impl ConversationOutbox {
                     .or_insert(*sequence);
             }
         }
-    }
-
-    /// Supplies sealed durable-obligation testimony to the protocol selector.
-    pub(super) fn recipient_ack_obligations(
-        &self,
-        participant_id: ParticipantId,
-    ) -> Result<RecipientAckObligations, ConversationOutboxError> {
-        let acknowledged_through = self
-            .ack_frontiers
-            .get(&participant_id)
-            .copied()
-            .unwrap_or(0);
-        let live = self
-            .all_obligations
-            .get(&participant_id)
-            .into_iter()
-            .flat_map(|sequences| sequences.iter().copied())
-            .filter(|sequence| *sequence > acknowledged_through)
-            .filter(|sequence| {
-                !self.retired.contains(&participant_id) && self.records.contains_key(sequence)
-            })
-            .collect();
-        RecipientAckObligations::try_new(participant_id, acknowledged_through, live).map_err(
-            |error| ConversationOutboxError::ObligationTestimony {
-                message: format!("{error:?}"),
-            },
-        )
     }
 
     #[cfg(test)]

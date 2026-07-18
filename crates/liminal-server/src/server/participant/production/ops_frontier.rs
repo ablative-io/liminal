@@ -14,7 +14,9 @@ use liminal_protocol::lifecycle::{
     apply_record_admission as select_record_admission, classify_record_admission_binding,
     drain_next_marker,
 };
-use liminal_protocol::wire::{BindingEpoch, RecordAdmission, RecordAdmissionResponse};
+use liminal_protocol::wire::{
+    BindingEpoch, ParticipantDelivery, RecordAdmission, RecordAdmissionResponse,
+};
 
 use crate::config::types::ParticipantConfig;
 
@@ -240,7 +242,7 @@ impl ConversationAuthority {
     pub(super) fn replay_marker_drain(
         &mut self,
         row: &StoredMarkerDrain,
-    ) -> Result<(), StateError> {
+    ) -> Result<ParticipantDelivery, StateError> {
         let owner = self.take_frontier()?;
         let retained_record_limit = owner.retained_record_limit();
         let candidate = owner
@@ -285,7 +287,8 @@ impl ConversationAuthority {
             LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
         validate_marker_projection(self.conversation_id, &projection)?;
         self.install_frontier(owner);
-        self.advance_log_head()
+        self.advance_log_head()?;
+        Ok(projection.into_delivery())
     }
 
     /// Replays one committed v2 `RecordAdmission` through the same total selector

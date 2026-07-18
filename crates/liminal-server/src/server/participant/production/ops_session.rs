@@ -13,7 +13,9 @@ use liminal_protocol::lifecycle::{
     RetainedRecordCharge, SemanticConnectionCapacityDecision, apply_detach_frontier, commit_detach,
     decide_detached_operation, lookup_detach,
 };
-use liminal_protocol::wire::{BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse};
+use liminal_protocol::wire::{
+    BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse, ParticipantDelivery,
+};
 
 use crate::config::types::ParticipantConfig;
 
@@ -21,6 +23,9 @@ use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barr
 use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{OperationLog, StoredBindingEpoch, StoredDetachRequest, StoredOperation};
+use super::outbox_log::{OutboxLog, OutboxRow};
+use super::outbox_projection::{capture_projection_prestate, project_committed_source};
+use super::outbox_replay::ExtensionMerge;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
@@ -263,9 +268,13 @@ impl ConversationAuthority {
     pub(super) async fn replay(
         conversation_id: u64,
         log: &OperationLog,
+        outbox_log: &OutboxLog,
+        extension_rows: Vec<(u64, OutboxRow)>,
         config: &ParticipantConfig,
     ) -> Result<Self, StateError> {
         let mut authority = Self::empty(conversation_id);
+        let mut merge = ExtensionMerge::new(outbox_log, extension_rows)?;
+        merge.apply_boundary(&mut authority, 0, None).await?;
         let mut sequence = 0_u64;
         loop {
             let page = log.read_page(sequence).await?;
@@ -280,12 +289,24 @@ impl ConversationAuthority {
                         actual: stored_sequence,
                     }));
                 }
-                authority.replay_operation(operation, stored_sequence, config)?;
+                let operation_for_projection = operation.clone();
+                let mut facts = capture_projection_prestate(&authority, &operation_for_projection);
+                facts.marker_delivery =
+                    authority.replay_operation(operation, stored_sequence, config)?;
+                let expected = project_committed_source(
+                    &authority,
+                    stored_sequence,
+                    &operation_for_projection,
+                    facts,
+                )?;
                 sequence = sequence
                     .checked_add(1)
                     .ok_or(StateError::AllocationExhausted {
                         domain: "log sequence",
                     })?;
+                merge
+                    .apply_boundary(&mut authority, sequence, expected.as_ref())
+                    .await?;
             }
             if page_len < super::log::READ_BATCH_SIZE {
                 break;
@@ -302,6 +323,7 @@ impl ConversationAuthority {
                 "enrolled conversation replay completed without executable frontier ownership",
             ));
         }
+        merge.finish(&mut authority, sequence)?;
         Ok(authority)
     }
 
@@ -311,14 +333,16 @@ impl ConversationAuthority {
         operation: StoredOperation,
         sequence: u64,
         config: &ParticipantConfig,
-    ) -> Result<(), StateError> {
+    ) -> Result<Option<ParticipantDelivery>, StateError> {
         match operation {
-            StoredOperation::Genesis { event } => self.replay_genesis(&event),
+            StoredOperation::Genesis { event } => self.replay_genesis(&event).map(|()| None),
             StoredOperation::Enrolled {
                 request,
                 allocation,
                 event,
-            } => self.replay_enrolled(request, &allocation, &event, sequence, config),
+            } => self
+                .replay_enrolled(request, &allocation, &event, sequence, config)
+                .map(|()| None),
             StoredOperation::Attached {
                 request,
                 secret_verified,
@@ -331,6 +355,7 @@ impl ConversationAuthority {
                     ));
                 }
                 self.replay_attached(request, &allocation, &event, sequence)
+                    .map(|()| None)
             }
             StoredOperation::Detached {
                 request,
@@ -339,27 +364,31 @@ impl ConversationAuthority {
                 terminal_order,
                 terminal_seq,
                 event,
-            } => self.replay_detached(
-                DetachReplayInputs {
-                    request,
-                    verifier,
-                    receiving_epoch,
-                    terminal_order,
-                    terminal_seq,
-                },
-                &event,
-                sequence,
-            ),
+            } => self
+                .replay_detached(
+                    DetachReplayInputs {
+                        request,
+                        verifier,
+                        receiving_epoch,
+                        terminal_order,
+                        terminal_seq,
+                    },
+                    &event,
+                    sequence,
+                )
+                .map(|()| None),
             StoredOperation::ZeroDebtAck {
                 request,
                 receiving_epoch,
                 contiguously_available_through,
-            } => {
-                self.replay_zero_debt_ack(request, receiving_epoch, contiguously_available_through)
+            } => self
+                .replay_zero_debt_ack(request, receiving_epoch, contiguously_available_through)
+                .map(|()| None),
+            StoredOperation::RecordAdmission { row } => {
+                self.replay_record_admission(&row, config).map(|()| None)
             }
-            StoredOperation::RecordAdmission { row } => self.replay_record_admission(&row, config),
-            StoredOperation::MarkerDrained { row } => self.replay_marker_drain(&row),
-            StoredOperation::Left { row } => self.replay_leave(&row),
+            StoredOperation::MarkerDrained { row } => self.replay_marker_drain(&row).map(Some),
+            StoredOperation::Left { row } => self.replay_leave(&row).map(|()| None),
         }
     }
 }

@@ -33,6 +33,8 @@ mod ops_leave;
 mod ops_session;
 mod outbox;
 mod outbox_log;
+mod outbox_projection;
+mod outbox_replay;
 mod registry;
 mod state;
 
@@ -70,6 +72,8 @@ mod tests_observer;
 mod tests_outbox_log;
 #[cfg(test)]
 mod tests_outbox_owner;
+#[cfg(test)]
+mod tests_outbox_replay;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_receipts;

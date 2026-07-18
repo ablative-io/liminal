@@ -103,7 +103,7 @@ impl<'a> Decoder<'a> {
         self.take(field, length)
     }
 
-    pub(super) fn finish(self) -> Result<(), OutboxLogError> {
+    pub(super) const fn finish(self) -> Result<(), OutboxLogError> {
         let remaining = self.input.len().saturating_sub(self.offset);
         if remaining == 0 {
             Ok(())

@@ -337,7 +337,7 @@ const fn source_kind_tag(kind: ProducedSourceKind) -> u8 {
     }
 }
 
-fn decode_source_kind(value: u8) -> Result<ProducedSourceKind, OutboxLogError> {
+const fn decode_source_kind(value: u8) -> Result<ProducedSourceKind, OutboxLogError> {
     match value {
         0 => Ok(ProducedSourceKind::Enrolled),
         1 => Ok(ProducedSourceKind::Attached),

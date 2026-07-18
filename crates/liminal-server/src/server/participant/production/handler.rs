@@ -29,7 +29,6 @@ use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
 use super::capacity::ServerCapacity;
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
-use super::outbox::ConversationOutbox;
 use super::outbox_log::{OutboxLog, OutboxLogError};
 use super::registry::ConversationRegistry;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
@@ -176,7 +175,24 @@ impl ProductionParticipantHandler {
             registry: &self.registry,
             conversation_id,
         };
+        let starting_log_sequence = authority.next_log_sequence;
         let (result, durably_empty) = match operation(authority, &appender) {
+            Ok(value) if authority.next_log_sequence > starting_log_sequence => {
+                // The v2 source barrier crossed. Reconcile its exact Unit 2
+                // projection under this same conversation lock before the
+                // caller can publish the correlated terminal response.
+                match self.replay_and_repair(conversation_id, &log) {
+                    Ok(reconciled) => {
+                        let durably_empty = reconciled.next_log_sequence == 0;
+                        *owner = Some(reconciled);
+                        (Ok(value), durably_empty)
+                    }
+                    Err(error) => {
+                        *owner = None;
+                        (Err(error), false)
+                    }
+                }
+            }
             Ok(value) => {
                 let durably_empty = authority.next_log_sequence == 0;
                 (Ok(value), durably_empty)
@@ -208,20 +224,19 @@ impl ProductionParticipantHandler {
         conversation_id: ConversationId,
         log: &OperationLog,
     ) -> Result<ConversationAuthority, ParticipantSemanticError> {
-        let mut replayed = block_on(ConversationAuthority::replay(
-            conversation_id,
-            log,
-            &self.config,
-        ))
-        .map_err(|error| bridge_error(&error))?
-        .map_err(|error| state_error(&error))?;
         let outbox_log = OutboxLog::new(Arc::clone(&self.store), conversation_id);
         let extension_rows = block_on(outbox_log.read_all())
             .map_err(|error| bridge_error(&error))?
             .map_err(|error| outbox_log_error(&error))?;
-        let outbox = ConversationOutbox::restore(conversation_id, extension_rows)
-            .map_err(|error| state_error(&StateError::Outbox(error)))?;
-        replayed.outbox = Some(outbox);
+        let mut replayed = block_on(ConversationAuthority::replay(
+            conversation_id,
+            log,
+            &outbox_log,
+            extension_rows,
+            &self.config,
+        ))
+        .map_err(|error| bridge_error(&error))?
+        .map_err(|error| state_error(&error))?;
         if !replayed.tokens.is_empty() {
             self.ensure_observer_tracked(conversation_id)?;
         }
