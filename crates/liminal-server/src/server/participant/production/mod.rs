@@ -60,6 +60,8 @@ mod tests_capacity_attach;
 #[cfg(test)]
 mod tests_config_d2;
 #[cfg(test)]
+mod tests_delivery_acceptance;
+#[cfg(test)]
 mod tests_history;
 #[cfg(test)]
 mod tests_layer2;
