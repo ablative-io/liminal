@@ -478,9 +478,12 @@ Add one named test module covering all of the following:
    testimony, persist the resulting state, restore AGAIN — the second restore
    succeeds with the expected operation and testimony intact (this is the
    exact `LostAuthorityTestimonyMismatch` path the five-site removal exists
-   to fix), and the record gate at `barrier.rs:475-485` admits a fresh
-   RecordAdmission when only a restored abandonment for ObserverRecovery is
-   absent.
+   to fix). The barrier half runs with a restored ObserverRecovery abandonment
+   PRESENT [r3 — "absent" was a coverage defect: with no abandonment stored,
+   the pre-r2 gate at `barrier.rs:475-485` already admits and the test would
+   never exercise the fifth removal site]: while that abandonment remains
+   stored, a fresh RecordAdmission is admitted, and a separate assertion keeps
+   a fresh ObserverRecovery refused by that same stored abandonment.
 
 The positive half flips the deliberate refusal at
 `crates/liminal-protocol/src/client/inbound.rs:214-223`; the negative half
@@ -545,7 +548,8 @@ harness with a start/stop/join/drop/reopen helper that deterministically stops
 and drops the first client, connection handle, supervisor, services, and every
 store `Arc` owner before the second disk open, borrowing the scoped
 disk-reopen pattern already proven in the non-socket harness
-(`production/tests.rs:143-153`). Replace the current records-blocked leg
+(`production/tests.rs:143-210` — first scoped open `:151-153`, scope close
+`:205`, same-directory second open and rebuilt handler `:207-210`) [r3]. Replace the current records-blocked leg
 (`e2e_tests.rs:264-282`) with an authorized request. The test SHALL:
 
 1. enroll and bind over a real socket;
@@ -688,4 +692,5 @@ is part of this unit.
 | revision | date | author | record |
 |---|---|---|---|
 | r1 | 2026-07-18 | Hermes Crumpet fold; Sol draft | Initial ruled build brief for F-0c Unit 1: live frontier transitions, explicit RecordAdmission token correlation, loud v2 log migration, signed D2 inputs, and Leave riding the shared acquisition. |
+| r3 | 2026-07-18 | Hermes Crumpet fold | Confirmation round (same Sol session vs dc3df6d) verdict READY with two non-blocking comments, both folded: acceptance item 7's barrier half corrected from abandonment-absent to abandonment-PRESENT (absent never exercised the fifth removal site); cold-reopen precedent citation expanded to `production/tests.rs:143-210` with the second-open lines named. All eight r1 findings confirmed CLOSED at the bytes; no new false universal found. |
 | r2 | 2026-07-18 | Hermes Crumpet fold (amendment text); Sol pre-review 752f8977 findings, all byte-confirmed at the fold seat | Pre-review NOT_READY closed by amendment: (M1) legacy-byte universal rejection withdrawn — staged layout is not byte-disjoint, fixture-narrowed test 5 plus honesty note; (M2) resume tokenless removal widened from two to five production sites plus two-cycle soak test; (M3) Slice 1 transition inputs gain the required server-computed canonical keyed row charges — commit-plus-owner was not the complete input set; (M4) marker-drain seam must be extended/composed to return the complete accounting/retention owner for the same-lock retry; (M5) WALL-MOVE-ONLY narrowed to the explicit linear-authority list, base-copyable types exempted. Minors: nested codec call-site list expanded; correlation.rs:159-245 ambiguous_authorization rewrite deletion added to D1 sites; Layer 3 harness start/stop/join/drop/reopen extension stated; WALL-ATOMIC flush-uncertainty honesty note. |
