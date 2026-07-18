@@ -197,8 +197,7 @@ fn observer_advance_rows(store: &Arc<dyn DurableStore>) -> Result<usize, Box<dyn
         .count())
 }
 
-#[test]
-fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Box<dyn Error>> {
+fn gated_barriers_and_advance_first() -> Result<(), Box<dyn Error>> {
     // Gate both ordered barriers in one real acknowledgement. Neither the
     // source append nor the uncommitted Advance append can publish; releasing
     // the Advance flush transfers exactly one payload and one READY edge.
@@ -263,6 +262,12 @@ fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Bo
         Some(progress),
     )?;
     assert!(!advance_first_inbox.has_pending()?);
+    Ok(())
+}
+
+fn reattach_first_and_dead_target() -> Result<(), Box<dyn Error>> {
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let service = Arc::new(installed(store)?);
 
     // Reattach-first: the second accepted handshake replaces the old weak arm
     // owner under the observer mutex, and only that exact target receives the
@@ -338,7 +343,10 @@ fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Bo
     ));
     assert!(!bystander.has_pending()?);
     assert_progressed(&service, bystander_incarnation, dead_conversation, None)?;
+    Ok(())
+}
 
+fn flush_fault_reopen_cuts() -> Result<(), Box<dyn Error>> {
     // Both flush-fault cuts publish nothing live. Dropping every live owner and
     // reopening the disk repairs/accepts the committed source and makes the
     // normal recovery handshake report progressed before any target is armed.
@@ -396,7 +404,10 @@ fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Bo
         assert_progressed(&reopened, reattach_incarnation, fault_conversation, None)?;
         assert!(!reattach_inbox.has_pending()?);
     }
+    Ok(())
+}
 
+fn pre_handoff_process_cut() -> Result<(), Box<dyn Error>> {
     // Successful Advance flush followed by a process cut before pump handoff:
     // the queued weak target dies, while cold reopen retains durable progress.
     let home = tempfile::tempdir()?;
@@ -437,4 +448,12 @@ fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Bo
     assert_progressed(&reopened, cut_reattach, cut_conversation, None)?;
     assert!(!cut_reattach_inbox.has_pending()?);
     Ok(())
+}
+
+#[test]
+fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Box<dyn Error>> {
+    gated_barriers_and_advance_first()?;
+    reattach_first_and_dead_target()?;
+    flush_fault_reopen_cuts()?;
+    pre_handoff_process_cut()
 }

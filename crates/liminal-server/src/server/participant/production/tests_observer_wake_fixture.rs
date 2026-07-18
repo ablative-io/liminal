@@ -49,6 +49,7 @@ impl ObserverBarrierStore {
         state.gates = gates.into_iter().collect();
         state.reached = None;
         state.released = false;
+        drop(state);
         Ok(())
     }
 
@@ -60,6 +61,7 @@ impl ObserverBarrierStore {
                 .wait(state)
                 .map_err(|_| "barrier state poisoned while waiting")?;
         }
+        drop(state);
         Ok(())
     }
 
@@ -73,6 +75,7 @@ impl ObserverBarrierStore {
             .into());
         }
         state.released = true;
+        drop(state);
         self.changed.notify_all();
         Ok(())
     }
@@ -80,7 +83,33 @@ impl ObserverBarrierStore {
     pub(super) fn fail_next(&self, kind: BarrierKind) -> Result<(), Box<dyn Error>> {
         let mut state = self.state.lock().map_err(|_| "barrier state poisoned")?;
         state.fail_next = Some(kind);
+        drop(state);
         Ok(())
+    }
+
+    fn cross_flush_barrier(&self) -> Result<bool, DurabilityError> {
+        let mut state = self.state.lock().map_err(|_| barrier_fault())?;
+        let pending = state.pending.take();
+        let fail = if state.fail_next == pending && pending.is_some() {
+            state.fail_next = None;
+            true
+        } else {
+            if state.gates.front().copied() == pending && pending.is_some() {
+                state.reached = pending;
+                state.released = false;
+                self.changed.notify_all();
+                while !state.released {
+                    state = self.changed.wait(state).map_err(|_| barrier_fault())?;
+                }
+                state.reached = None;
+                state.released = false;
+                state.gates.pop_front();
+                self.changed.notify_all();
+            }
+            false
+        };
+        drop(state);
+        Ok(fail)
     }
 }
 
@@ -132,29 +161,7 @@ impl DurableStore for ObserverBarrierStore {
     }
 
     async fn flush(&self) -> Result<(), DurabilityError> {
-        let fail = {
-            let mut state = self.state.lock().map_err(|_| barrier_fault())?;
-            let pending = state.pending.take();
-            if state.fail_next == pending && pending.is_some() {
-                state.fail_next = None;
-                true
-            } else {
-                if state.gates.front().copied() == pending && pending.is_some() {
-                    state.reached = pending;
-                    state.released = false;
-                    self.changed.notify_all();
-                    while !state.released {
-                        state = self.changed.wait(state).map_err(|_| barrier_fault())?;
-                    }
-                    state.reached = None;
-                    state.released = false;
-                    state.gates.pop_front();
-                    self.changed.notify_all();
-                }
-                false
-            }
-        };
-        if fail {
+        if self.cross_flush_barrier()? {
             return Err(barrier_fault());
         }
         self.inner.flush().await

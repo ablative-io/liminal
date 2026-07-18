@@ -50,7 +50,7 @@ impl ParticipantPublication {
 /// record, and deliberately carries no participant recipient or delivery
 /// sequence.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ObserverPublication {
+pub struct ObserverPublication {
     pub(crate) conversation_id: ConversationId,
     pub(crate) refused_epoch: u64,
     pub(crate) observer_progress: u64,
@@ -67,9 +67,10 @@ impl ObserverPublication {
     }
 }
 
-/// Weak exact-live-connection target captured when an observer arm is
-/// installed. Cloning this value clones only weak/non-owning publication
-/// capability; it cannot keep the connection process or inbox alive.
+/// Weak exact-live-connection target captured when an observer arm is installed.
+///
+/// Cloning this value clones only weak/non-owning publication capability; it
+/// cannot keep the connection process or inbox alive.
 #[derive(Clone, Debug)]
 pub struct ObserverPublicationTarget {
     inbox: Weak<Mutex<ReadyPublications>>,
@@ -150,7 +151,7 @@ impl ReadyPublications {
 /// slice. The pump merges these collections by conversation before applying the
 /// single signed budget.
 #[derive(Debug)]
-pub(crate) struct ReadyPublicationBatch {
+pub struct ReadyPublicationBatch {
     pub(crate) conversations: Vec<ConversationId>,
     pub(crate) observer_progressed: Vec<ObserverPublication>,
 }

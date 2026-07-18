@@ -231,7 +231,9 @@ fn decoded_deliveries(frames: &[Frame]) -> Result<Vec<ParticipantDelivery>, Stri
         .iter()
         .map(|frame| match decode_push(frame)? {
             ServerPush::ParticipantDelivery(delivery) => Ok(delivery),
-            other => Err(format!("expected participant delivery, got {other:?}")),
+            other @ ServerPush::ObserverProgressed { .. } => {
+                Err(format!("expected participant delivery, got {other:?}"))
+            }
         })
         .collect()
 }

@@ -221,7 +221,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         request: ObserverRecoveryHandshake,
         target: Option<ObserverPublicationTarget>,
     ) -> Result<ServerValue, ParticipantSemanticError> {
-        self.apply_observer_recovery(context, conversations, &request, target)
+        self.apply_observer_recovery(context, conversations, &request, target.as_ref())
     }
 
     fn handle(

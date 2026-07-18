@@ -160,7 +160,7 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
             break;
         };
         if let Some(observer) = work.observer.take() {
-            match service_one_observer(state, sink, work.conversation_id, observer)? {
+            match service_one_observer(state, sink, work.conversation_id, &observer)? {
                 ConversationOutcome::Enqueued => {
                     remaining -= 1;
                     enqueued += 1;
@@ -220,10 +220,11 @@ fn service_one_observer<Sink: DeliverySink>(
     state: &mut ConnectionProcessState,
     sink: &mut Sink,
     conversation_id: ConversationId,
-    work: ObserverWork,
+    work: &ObserverWork,
 ) -> Result<ConversationOutcome, ParticipantPumpError> {
     let (publication, frame, needed) = match work {
         ObserverWork::Pending(publication) => {
+            let publication = *publication;
             let frame = encode_server_push(publication.into_server_push())
                 .map_err(ParticipantPumpError::ParticipantCodec)?;
             let needed = encoded_len(&frame).map_err(OutboundError::Encode)?;

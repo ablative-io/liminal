@@ -11,7 +11,7 @@ use std::sync::Arc;
 use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::{
     ObserverProgressAdvanceDecision, ObserverProgressProjection, ObserverProgressTrackDecision,
-    ObserverRecoveryTransactionDecision,
+    ObserverRecoveryArm, ObserverRecoveryTransactionDecision,
 };
 use liminal_protocol::wire::{
     ConversationId, ObserverRecoveryHandshake, ObserverRecoveryResponse, ServerValue,
@@ -41,7 +41,7 @@ impl ProductionParticipantHandler {
         context: ParticipantConnectionContext,
         conversations: &mut ParticipantConnectionConversations,
         request: &ObserverRecoveryHandshake,
-        target: Option<ObserverPublicationTarget>,
+        target: Option<&ObserverPublicationTarget>,
     ) -> Result<ServerValue, ParticipantSemanticError> {
         // Crash-window repair pre-pass: every named conversation's observer
         // registration is made derivable from its own durable conversation
@@ -126,7 +126,7 @@ impl ProductionParticipantHandler {
                                     ObserverArmTarget {
                                         refused_epoch: *refused_epoch,
                                         connection_incarnation: context.connection_incarnation(),
-                                        target: target.clone(),
+                                        target: (*target).clone(),
                                     },
                                 );
                             } else {
@@ -313,38 +313,8 @@ impl ProductionParticipantHandler {
                                 message: "observer durable row sequence exhausted".to_owned(),
                             })?;
                     let (aggregate, fired) = transaction.commit();
-                    let publication_result = if let Some(fired) = fired {
-                        match arm_targets.remove(&fired.conversation_id()) {
-                            Some(association)
-                                if association.refused_epoch == fired.refused_epoch() =>
-                            {
-                                association
-                                    .target
-                                    .publish(ObserverPublication {
-                                        conversation_id: fired.conversation_id(),
-                                        refused_epoch: fired.refused_epoch(),
-                                        observer_progress: presented,
-                                    })
-                                    .map(|_| ())
-                                    .map_err(|error| ParticipantSemanticError::Internal {
-                                        message: format!(
-                                            "observer progressed publication failed: {error}"
-                                        ),
-                                    })
-                            }
-                            Some(association) => Err(ParticipantSemanticError::Internal {
-                                message: format!(
-                                    "observer arm target epoch {} on incarnation {:?} disagrees with fired epoch {} for conversation {conversation_id}",
-                                    association.refused_epoch,
-                                    association.connection_incarnation,
-                                    fired.refused_epoch()
-                                ),
-                            }),
-                            None => Ok(()),
-                        }
-                    } else {
-                        Ok(())
-                    };
+                    let publication_result =
+                        publish_fired_observer(&mut arm_targets, fired, presented, conversation_id);
                     *owner = Some(ObserverOwner {
                         aggregate,
                         head: next_head,
@@ -404,4 +374,36 @@ impl ProductionParticipantHandler {
         }
         Ok(())
     }
+}
+
+fn publish_fired_observer(
+    arm_targets: &mut BTreeMap<ConversationId, ObserverArmTarget>,
+    fired: Option<ObserverRecoveryArm>,
+    observer_progress: u64,
+    conversation_id: ConversationId,
+) -> Result<(), ParticipantSemanticError> {
+    fired.map_or(Ok(()), |fired| {
+        match arm_targets.remove(&fired.conversation_id()) {
+            Some(association) if association.refused_epoch == fired.refused_epoch() => association
+                .target
+                .publish(ObserverPublication {
+                    conversation_id: fired.conversation_id(),
+                    refused_epoch: fired.refused_epoch(),
+                    observer_progress,
+                })
+                .map(|_| ())
+                .map_err(|error| ParticipantSemanticError::Internal {
+                    message: format!("observer progressed publication failed: {error}"),
+                }),
+            Some(association) => Err(ParticipantSemanticError::Internal {
+                message: format!(
+                    "observer arm target epoch {} on incarnation {:?} disagrees with fired epoch {} for conversation {conversation_id}",
+                    association.refused_epoch,
+                    association.connection_incarnation,
+                    fired.refused_epoch()
+                ),
+            }),
+            None => Ok(()),
+        }
+    })
 }
