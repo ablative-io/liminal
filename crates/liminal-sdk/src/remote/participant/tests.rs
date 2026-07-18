@@ -97,6 +97,32 @@ fn record_committed(token: [u8; 16], delivery_seq: u64) -> TestResult<ServerValu
     )))
 }
 
+fn assert_d1_mismatch_retains_slot(
+    handle: &RemoteParticipantHandle<MemoryStore>,
+    successor_request: &RecordAdmission,
+) -> TestResult {
+    match handle.receive()? {
+        RemoteParticipantInbound::Refused {
+            reason,
+            value: ServerValue::RecordCommitted(_),
+            ..
+        } => assert_eq!(reason, ClientInboundRefusalReason::AmbiguousResponse),
+        _ => return Err(io::Error::other("different D1 token must be refused").into()),
+    }
+    assert!(matches!(
+        handle.record_operation(ClientRequest::RecordAdmission(successor_request.clone()))?,
+        RemoteOperationRecordOutcome::Refused { .. }
+    ));
+    match handle.receive()? {
+        RemoteParticipantInbound::Applied {
+            value: ServerValue::RecordCommitted(_),
+            provenance,
+        } => assert_eq!(provenance.connection_id(), 1),
+        _ => return Err(io::Error::other("exact D1 record response must apply").into()),
+    }
+    Ok(())
+}
+
 #[test]
 fn sent_is_not_receipt_real_receive_releases_exact_d1_slot() -> TestResult {
     let record_request = RecordAdmission {
@@ -123,7 +149,10 @@ fn sent_is_not_receipt_real_receive_releases_exact_d1_slot() -> TestResult {
             enroll_bound(CONVERSATION, [9; 16])?,
             enroll_bound(CONVERSATION, [1; 16])?,
         ]),
-        Action::Respond(vec![record_committed([0xA7; 16], 10)?]),
+        Action::Respond(vec![
+            record_committed([0xC9; 16], 10)?,
+            record_committed([0xA7; 16], 10)?,
+        ]),
         Action::Respond(vec![record_committed([0xB8; 16], 11)?]),
     ]])?;
     let config = loopback.connected_config()?;
@@ -165,15 +194,7 @@ fn sent_is_not_receipt_real_receive_releases_exact_d1_slot() -> TestResult {
         handle.record_operation(ClientRequest::RecordAdmission(successor_request.clone()))?,
         RemoteOperationRecordOutcome::Refused { .. }
     ));
-    match handle.receive()? {
-        RemoteParticipantInbound::Applied {
-            value: ServerValue::RecordCommitted(_),
-            provenance,
-        } => {
-            assert_eq!(provenance.connection_id(), 1);
-        }
-        _ => return Err(io::Error::other("exact D1 record response must apply").into()),
-    }
+    assert_d1_mismatch_retains_slot(&handle, &successor_request)?;
     // Only applying the exact-token terminal answer released the cardinality-one
     // write-ahead slot; `Sent` above was never treated as receipt.
     let operation =
