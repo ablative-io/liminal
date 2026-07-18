@@ -12,10 +12,10 @@ use super::super::{
     AttachCommit, AttachTransition, BindingState, ClaimFrontiers, ClosureAccounting,
     CommittedDetachTransition, DetachCell, FrontierBinding, FrontierParticipant, IdentityState,
     InitialEnrollmentFrontierCommit, LeaveCommitError, LeaveCommitParameters, LiveMember,
-    MarkerAckCommit, NonzeroParticipantAckCommit, OrderLedger, ParticipantAckCommit,
-    PendingFinalization, PendingLeaveCommitParameters, PrepareLeaveAuthorityError,
-    RetainedCausalRecord, RetainedCausalRecordKind, SequenceLedger, StoredEdge,
-    VerifiedLeaveRequest, claim_frontier::LiveFrontierTransitionError, commit_leave,
+    MarkerAckCommit, NonzeroParticipantAckCommit, ObserverProgressProjection, OrderLedger,
+    ParticipantAckCommit, PendingFinalization, PendingLeaveCommitParameters,
+    PrepareLeaveAuthorityError, RetainedCausalRecord, RetainedCausalRecordKind, SequenceLedger,
+    StoredEdge, VerifiedLeaveRequest, claim_frontier::LiveFrontierTransitionError, commit_leave,
     commit_pending_leave,
 };
 use super::{
@@ -214,6 +214,19 @@ pub struct LiveLeaveCommit<EF, V, LF> {
 }
 
 impl<EF, V, LF> LiveLeaveCommit<EF, V, LF> {
+    /// Projects permanent Leave's exact protocol-committed `Left` sequence.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> Option<ObserverProgressProjection> {
+        let IdentityState::Retired(retired) = &self.identity else {
+            return None;
+        };
+        let committed = retired.committed_result();
+        Some(ObserverProgressProjection::new(
+            committed.conversation_id(),
+            committed.left_delivery_seq(),
+        ))
+    }
+
     /// Consumes the atomic result into its inseparable tombstone and owner.
     #[must_use]
     pub fn into_parts(self) -> (IdentityState<EF, V, LF>, LiveFrontierOwner) {

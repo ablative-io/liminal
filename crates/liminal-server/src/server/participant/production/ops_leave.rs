@@ -7,10 +7,10 @@
 use liminal_protocol::lifecycle::{
     AttachSecretProof, BindingState, ConnectionConversationCapacityCommit, DetachCell,
     IdentityState, LeaveFingerprint, LeaveLookupResult, LeaveSecretProof, LiveFrontierOwner,
-    LiveLeaveCommit, LiveMember, PendingFinalization, PendingLeaveCommitParameters,
-    PresentedIdentity, RetainedRecordCharge, RetiredIdentity, SemanticConnectionCapacityDecision,
-    VerifiedLeaveRequest, commit_pending_leave_frontier, commit_settled_leave_frontier,
-    lookup_leave,
+    LiveLeaveCommit, LiveMember, ObserverProgressProjection, PendingFinalization,
+    PendingLeaveCommitParameters, PresentedIdentity, RetainedRecordCharge, RetiredIdentity,
+    SemanticConnectionCapacityDecision, VerifiedLeaveRequest, commit_pending_leave_frontier,
+    commit_settled_leave_frontier, lookup_leave,
 };
 use liminal_protocol::wire::{BindingEpoch, LeaveEnvelope, LeaveRequest, LeaveResponse};
 
@@ -35,6 +35,7 @@ struct LeaveTransitionInput {
 struct PreparedLeaveCommit {
     owner: LiveFrontierOwner,
     tombstone: RetiredIdentity<Digest, Digest, Digest>,
+    observer_projection: ObserverProgressProjection,
     left_order: u64,
     left_seq: u64,
 }
@@ -193,6 +194,7 @@ impl ConversationAuthority {
         self.install_frontier(prepared.owner);
         self.retired
             .insert(request.participant_id, prepared.tombstone);
+        self.record_observer_progress_projection(prepared.observer_projection);
         self.next_order = self.next_order.max(prepared.left_order.saturating_add(1));
         self.next_seq = prepared.left_seq.saturating_add(1);
         self.advance_log_head()?;
@@ -279,6 +281,7 @@ impl ConversationAuthority {
         self.install_frontier(prepared.owner);
         self.retired
             .insert(request.participant_id, prepared.tombstone);
+        self.record_observer_progress_projection(prepared.observer_projection);
         self.next_order = self
             .next_order
             .max(row.left_transaction_order.saturating_add(1));
@@ -393,6 +396,9 @@ fn finish_leave_transition(
     left_order: u64,
     left_seq: u64,
 ) -> Result<PreparedLeaveCommit, StateError> {
+    let observer_projection = commit
+        .observer_progress_projection()
+        .ok_or_else(|| StateError::invariant("Leave commit did not retire its identity"))?;
     let (identity, owner) = commit.into_parts();
     let IdentityState::Retired(tombstone) = identity else {
         return Err(StateError::invariant("Leave retained a live identity"));
@@ -400,6 +406,7 @@ fn finish_leave_transition(
     Ok(PreparedLeaveCommit {
         owner,
         tombstone,
+        observer_projection,
         left_order,
         left_seq,
     })

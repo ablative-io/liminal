@@ -236,8 +236,16 @@ impl ProductionParticipantHandler {
         ))
         .map_err(|error| bridge_error(&error))?
         .map_err(|error| state_error(&error))?;
+        let observer_projections = replayed.take_observer_progress_projections();
         if !replayed.tokens.is_empty() {
             self.ensure_observer_tracked(conversation_id)?;
+            self.reconcile_observer_progress(conversation_id, observer_projections)?;
+        } else if !observer_projections.is_empty() {
+            return Err(ParticipantSemanticError::Internal {
+                message: format!(
+                    "unenrolled conversation {conversation_id} projected observer progress"
+                ),
+            });
         }
         // Request-time expiry over the replayed state (replay rebuilds every
         // retired rotation's fingerprint; the ones past their deadlines are

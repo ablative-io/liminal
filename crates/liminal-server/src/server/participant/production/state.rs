@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use liminal_protocol::lifecycle::{
     BindingState, ConversationDecision, ConversationGenesis, ConversationRefusalReason,
     CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveFrontierOwner, LiveMember,
-    ParticipantConversation, RetiredIdentity,
+    ObserverProgressProjection, ParticipantConversation, RetiredIdentity,
 };
 #[cfg(test)]
 use liminal_protocol::wire::ParticipantDelivery;
@@ -156,6 +156,10 @@ pub(super) struct ConversationAuthority {
     pub(super) next_participant: ParticipantId,
     /// Optimistic durable log head.
     pub(super) next_log_sequence: u64,
+    /// Exact move-only projections surrendered by replayed protocol sources.
+    /// The handler drains these only into the serialized observer owner after
+    /// the participant source barrier has crossed.
+    observer_progress_projections: Vec<ObserverProgressProjection>,
     /// Durable hard-observer progress for this conversation.
     pub(super) observer_progress: DeliverySeq,
 }
@@ -255,8 +259,25 @@ impl ConversationAuthority {
             next_seq: 1,
             next_participant: 0,
             next_log_sequence: 0,
+            observer_progress_projections: Vec::new(),
             observer_progress: 0,
         }
+    }
+
+    /// Records one sealed protocol source projection for the observer barrier.
+    pub(super) fn record_observer_progress_projection(
+        &mut self,
+        projection: ObserverProgressProjection,
+    ) {
+        if projection.new_observer_progress() > self.observer_progress {
+            self.observer_progress = projection.new_observer_progress();
+        }
+        self.observer_progress_projections.push(projection);
+    }
+
+    /// Surrenders every source projection in participant-log order.
+    pub(super) fn take_observer_progress_projections(&mut self) -> Vec<ObserverProgressProjection> {
+        std::mem::take(&mut self.observer_progress_projections)
     }
 
     /// Greatest delivery sequence contiguously admitted by this conversation.

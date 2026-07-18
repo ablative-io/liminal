@@ -204,6 +204,7 @@ impl ConversationAuthority {
         .map_err(|error| {
             StateError::invariant(format!("protocol detach transition failed: {error:?}"))
         })?;
+        let observer_projection = committed.observer_progress_projection();
         let terminal = committed.terminal();
         let encoded_charge = frontier::terminal_charge(
             terminal.conversation_id(),
@@ -259,6 +260,7 @@ impl ConversationAuthority {
         slot.cell = DetachCell::Committed(cell);
         slot.exact_detach_token = Some(request.detach_attempt_token);
         self.slots.insert(participant_id, slot);
+        self.record_observer_progress_projection(observer_projection);
         self.next_order = self.next_order.max(terminal_order.saturating_add(1));
         self.next_seq = self.next_seq.max(terminal_seq.saturating_add(1));
         Ok(outcome)

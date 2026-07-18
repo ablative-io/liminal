@@ -9,7 +9,8 @@ use std::sync::Arc;
 
 use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::{
-    ObserverProgressTrackDecision, ObserverRecoveryTransactionDecision,
+    ObserverProgressAdvanceDecision, ObserverProgressProjection, ObserverProgressTrackDecision,
+    ObserverRecoveryTransactionDecision,
 };
 use liminal_protocol::wire::{
     ConversationId, ObserverRecoveryHandshake, ObserverRecoveryResponse, ServerValue,
@@ -160,6 +161,99 @@ impl ProductionParticipantHandler {
         };
         drop(owner);
         result
+    }
+
+    /// Reconciles protocol-produced source projections into durable observer
+    /// advances while the observer aggregate remains exclusively serialized.
+    ///
+    /// The projections arrive in participant replay order after their source
+    /// append/flush barriers. An equal-or-greater durable value proves an
+    /// earlier live append already closed the crash window; a lower value is
+    /// advanced through the aggregate's consuming transaction and only
+    /// committed after the `Advance` row flushes.
+    pub(super) fn reconcile_observer_progress(
+        &self,
+        conversation_id: ConversationId,
+        projections: Vec<ObserverProgressProjection>,
+    ) -> Result<(), ParticipantSemanticError> {
+        if projections.is_empty() {
+            return Ok(());
+        }
+        let observer_log = ObserverLog::new(Arc::clone(&self.store));
+        let mut owner = self
+            .observer
+            .lock()
+            .map_err(|_| ParticipantSemanticError::Internal {
+                message: "observer recovery aggregate lock is poisoned".to_owned(),
+            })?;
+        if owner.is_none() {
+            let restored = block_on(observer_log.restore())
+                .map_err(|error| bridge_error(&error))?
+                .map_err(|error| log_error(&error))?;
+            *owner = Some((restored.aggregate, restored.next_sequence));
+        }
+        for projection in projections {
+            if projection.conversation_id() != conversation_id {
+                return Err(ParticipantSemanticError::Internal {
+                    message: format!(
+                        "observer projection conversation {} disagrees with source {conversation_id}",
+                        projection.conversation_id()
+                    ),
+                });
+            }
+            let (aggregate, head) =
+                owner
+                    .take()
+                    .ok_or_else(|| ParticipantSemanticError::Internal {
+                        message: "observer recovery aggregate is absent".to_owned(),
+                    })?;
+            let presented = projection.new_observer_progress();
+            let current = aggregate
+                .observer_progress(conversation_id)
+                .ok_or_else(|| ParticipantSemanticError::Internal {
+                    message: format!(
+                        "observer projection names untracked conversation {conversation_id}"
+                    ),
+                })?;
+            if current >= presented {
+                *owner = Some((aggregate, head));
+                continue;
+            }
+            let ObserverProgressAdvanceDecision::Commit(transaction) =
+                aggregate.decide_progress_advance(conversation_id, presented)
+            else {
+                return Err(ParticipantSemanticError::Internal {
+                    message: format!(
+                        "observer aggregate refused advancing source for conversation {conversation_id}"
+                    ),
+                });
+            };
+            let append = block_on(observer_log.append(
+                &ObserverRow::Advance {
+                    conversation_id,
+                    observer_progress: presented,
+                },
+                head,
+            ))
+            .map_err(|error| bridge_error(&error))?;
+            match append {
+                Ok(()) => {
+                    let next_head =
+                        head.checked_add(1)
+                            .ok_or_else(|| ParticipantSemanticError::Internal {
+                                message: "observer durable row sequence exhausted".to_owned(),
+                            })?;
+                    let (aggregate, _fired) = transaction.commit();
+                    *owner = Some((aggregate, next_head));
+                }
+                Err(error) => {
+                    *owner = Some((transaction.abort(), head));
+                    return Err(state_error(&StateError::Log(error)));
+                }
+            }
+        }
+        drop(owner);
+        Ok(())
     }
 
     /// Ensures a conversation's observer registration is derivable from its

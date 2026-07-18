@@ -135,6 +135,7 @@ impl ConversationAuthority {
                 Ok(ArmOutcome::respond(response.into_server_value()))
             }
             ParticipantAckDecision::Commit(commit) => {
+                let observer_projection = commit.observer_progress_projection();
                 let transitioned = apply_participant_ack_frontier(self.take_frontier()?, commit)
                     .map_err(|failure| {
                         StateError::invariant(format!(
@@ -178,6 +179,7 @@ impl ConversationAuthority {
                     StateError::invariant(format!("ack cursor commit rejected: {error:?}"))
                 })?;
                 self.install_frontier(frontier_owner);
+                self.record_observer_progress_projection(observer_projection);
                 Ok(ArmOutcome {
                     value: ParticipantAckResponse::ack_committed(outcome).into_server_value(),
                     newly_tracked,
@@ -289,6 +291,7 @@ impl ConversationAuthority {
             }
         };
         let newly_tracked = capacity.newly_tracked();
+        let observer_projection = commit.observer_progress_projection();
         let transitioned =
             apply_marker_ack_frontier(self.take_frontier()?, commit).map_err(|failure| {
                 StateError::invariant(format!(
@@ -327,6 +330,7 @@ impl ConversationAuthority {
         self.install_frontier(frontier);
         self.offered_markers
             .remove(&(request.participant_id, request.marker_delivery_seq));
+        self.record_observer_progress_projection(observer_projection);
         Ok(ArmOutcome {
             value: MarkerAckResponse::marker_ack_committed(outcome).into_server_value(),
             newly_tracked,
@@ -392,6 +396,7 @@ impl ConversationAuthority {
                 "stored MarkerAck post-transition audit drifted",
             ));
         }
+        let observer_projection = commit.observer_progress_projection();
         let transitioned =
             apply_marker_ack_frontier(self.take_frontier()?, commit).map_err(|failure| {
                 StateError::invariant(format!(
@@ -418,6 +423,7 @@ impl ConversationAuthority {
             ));
         }
         self.install_frontier(frontier);
+        self.record_observer_progress_projection(observer_projection);
         Ok(())
     }
 }

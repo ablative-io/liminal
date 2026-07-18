@@ -240,6 +240,7 @@ impl ConversationAuthority {
         let committed = commit_attach(verified, slot.cell).map_err(|error| {
             StateError::invariant(format!("protocol attach transition failed: {error:?}"))
         })?;
+        let observer_projection = committed.observer_progress_projection();
         let (committed, frontier_owner) =
             transition_attach_frontier(self.take_frontier()?, committed, request, allocation)?;
         let shell = self.take_shell()?;
@@ -312,6 +313,9 @@ impl ConversationAuthority {
             provenance_expires_at: allocation.provenance_expires_at.get(),
         });
         self.slots.insert(participant_id, slot);
+        if let Some(projection) = observer_projection {
+            self.record_observer_progress_projection(projection);
+        }
         self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
         Ok(outcome)
     }
