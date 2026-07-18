@@ -1,11 +1,20 @@
 //! Move-only outbox restore, idempotency, retention, and Leave discharge.
 
 use std::error::Error;
+use std::io::Write;
 
-use liminal_protocol::wire::ParticipantRecord;
+use liminal::protocol::{encode, encoded_len};
+use liminal_protocol::lifecycle::{
+    LiveFrontierOwner, RecipientAckObligations, RecordAdmissionCommit,
+};
+use liminal_protocol::wire::{ParticipantRecord, ServerPush};
+
+use crate::server::participant::encode_server_push;
 
 use super::outbox::{ConversationOutbox, ConversationOutboxError};
 use super::outbox_log::{OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord};
+use super::outbox_projection::ReplayedProjectionFacts;
+use super::outbox_replay::ExtensionMerge;
 
 const CONVERSATION: u64 = 0xF0_C3;
 const SENDER: u64 = 3;
@@ -173,4 +182,140 @@ fn leave_atomically_discharges_retired_obligations_and_replays() -> Result<(), B
     );
     assert_eq!(second.charged_bytes(), first.charged_bytes());
     Ok(())
+}
+
+#[test]
+fn participant_ack_only_advances_receipt_frontier() -> Result<(), Box<dyn Error>> {
+    let first = ordinary(0, 1, vec![RECIPIENT])?;
+    let third = ordinary(1, 3, vec![RECIPIENT])?;
+    let before_rows = vec![(0, first.clone()), (1, third.clone())];
+    let before = ConversationOutbox::restore(CONVERSATION, before_rows.clone())?;
+    let before_state = (
+        before.ack_through(RECIPIENT),
+        before.next_live(RECIPIENT),
+        before.live_record_count(),
+        before.charged_bytes(),
+        before.source_batch_count(),
+    );
+    assert_eq!(before_state.0, 0);
+    assert_eq!(before_state.1, Some(1));
+
+    // Select, encode, enqueue, and write the real production frame. These are
+    // transport-progress facts only: rebuilding from the same durable rows must
+    // expose byte-for-byte the same head and every receipt-owned fact.
+    let offered = before
+        .delivery_after(RECIPIENT, 0)
+        .ok_or("recipient obligation disappeared before offer")?;
+    let frame = encode_server_push(ServerPush::ParticipantDelivery(offered.clone()))
+        .map_err(|error| format!("push encoding failed: {error:?}"))?;
+    let mut encoded = vec![0; encoded_len(&frame)?];
+    let written = encode(&frame, &mut encoded)?;
+    encoded.truncate(written);
+    let mut socket_bytes = Vec::new();
+    socket_bytes.write_all(&encoded)?;
+    assert_eq!(socket_bytes, encoded);
+
+    let after_write = ConversationOutbox::restore(CONVERSATION, before_rows.clone())?;
+    assert_eq!(after_write.delivery_after(RECIPIENT, 0), Some(offered));
+    assert_eq!(
+        (
+            after_write.ack_through(RECIPIENT),
+            after_write.next_live(RECIPIENT),
+            after_write.live_record_count(),
+            after_write.charged_bytes(),
+            after_write.source_batch_count(),
+        ),
+        before_state
+    );
+
+    // Sequence two is a real conversation gap for this recipient. The exact
+    // cumulative endpoint three is nevertheless eligible and releases both
+    // obligations through it in one committed AckAdvanced row.
+    assert_eq!(
+        after_write
+            .delivery_after(RECIPIENT, 1)
+            .map(|d| d.delivery_seq),
+        Some(3)
+    );
+    let committed = ConversationOutbox::restore(
+        CONVERSATION,
+        vec![
+            (0, first),
+            (1, third),
+            (
+                2,
+                OutboxRow::AckAdvanced {
+                    source_log_sequence: 2,
+                    participant_id: RECIPIENT,
+                    through_seq: 3,
+                },
+            ),
+        ],
+    )?;
+    assert_eq!(committed.ack_through(RECIPIENT), 3);
+    assert_eq!(committed.next_live(RECIPIENT), None);
+    assert_eq!(committed.live_record_count(), 0);
+    assert_eq!(committed.charged_bytes(), 0);
+
+    // Repeated/no-op and regression rows are rejected atomically. A gap endpoint
+    // has no source row at all; restoring the unchanged durable prefix retains
+    // the original frontier and both obligations.
+    for through_seq in [3, 2] {
+        let mut rows = before_rows.clone();
+        rows.push((
+            2,
+            OutboxRow::AckAdvanced {
+                source_log_sequence: 2,
+                participant_id: RECIPIENT,
+                through_seq: 3,
+            },
+        ));
+        rows.push((
+            3,
+            OutboxRow::AckAdvanced {
+                source_log_sequence: 3,
+                participant_id: RECIPIENT,
+                through_seq,
+            },
+        ));
+        assert!(matches!(
+            ConversationOutbox::restore(CONVERSATION, rows),
+            Err(ConversationOutboxError::AckRegression { .. })
+        ));
+    }
+    let gap_unchanged = ConversationOutbox::restore(CONVERSATION, before_rows)?;
+    assert_eq!(gap_unchanged.ack_through(RECIPIENT), 0);
+    assert_eq!(gap_unchanged.next_live(RECIPIENT), Some(1));
+    Ok(())
+}
+
+macro_rules! assert_not_impl {
+    ($type:ty: $trait:path) => {
+        const _: fn() = || {
+            struct Probe<T: ?Sized>(core::marker::PhantomData<T>);
+            trait AmbiguousIfImplemented<A> {
+                fn probe() {}
+            }
+            impl<T: ?Sized> AmbiguousIfImplemented<()> for Probe<T> {}
+            impl<T: ?Sized + $trait> AmbiguousIfImplemented<u8> for Probe<T> {}
+            let _ = <Probe<$type> as AmbiguousIfImplemented<_>>::probe;
+        };
+    };
+}
+
+#[test]
+fn participant_outbox_owner_is_move_only() {
+    crate::server::connection::assert_held_heads_are_move_only();
+    assert_not_impl!(ConversationOutbox: Clone);
+    assert_not_impl!(ConversationOutbox: Copy);
+    assert_not_impl!(LiveFrontierOwner: Clone);
+    assert_not_impl!(LiveFrontierOwner: Copy);
+    assert_not_impl!(RecipientAckObligations: Clone);
+    assert_not_impl!(RecipientAckObligations: Copy);
+    assert_not_impl!(RecordAdmissionCommit: Clone);
+    assert_not_impl!(RecordAdmissionCommit: Copy);
+    assert_not_impl!(ReplayedProjectionFacts: Clone);
+    assert_not_impl!(ReplayedProjectionFacts: Copy);
+    assert_not_impl!(ExtensionMerge<'static>: Clone);
+    assert_not_impl!(ExtensionMerge<'static>: Copy);
 }

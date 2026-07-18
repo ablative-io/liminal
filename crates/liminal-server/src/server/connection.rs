@@ -44,6 +44,8 @@ mod worker_front_door;
 
 pub use conversation::{ConnectionConversation, ConversationResource};
 pub use notifier::ConnectionNotifier;
+#[cfg(test)]
+pub(crate) use participant_delivery::assert_held_heads_are_move_only;
 pub use services::{
     ChannelCluster, ConnectionServices, ConnectionSubscription, LiminalConnectionServices,
     PublishOutcome, build_connection_services,
