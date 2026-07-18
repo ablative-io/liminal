@@ -52,6 +52,37 @@ fn d2_validation_accumulates_every_field_specific_failure() {
 }
 
 #[test]
+fn canonical_v2_marker_bytes_exclude_unit2_projection_fields() -> Result<(), Box<dyn Error>> {
+    let epoch = BindingEpoch::new(ConnectionIncarnation::new(1, 2), Generation::ONE);
+    let marker =
+        |abandoned_after, abandoned_through, physical_floor_at_decision| MarkerCandidateAuthority {
+            delivery_seq: 9,
+            admission_order: AdmissionOrder::new(8, CandidatePhase::CompactionMarker, 3),
+            target_binding: FrontierBinding::Bound(epoch),
+            provenance: MarkerProvenance::NonProductM,
+            abandoned_after,
+            abandoned_through,
+            physical_floor_at_decision,
+            current_owner: MarkerSequenceOwner::Marker,
+        };
+    let first = marker(4, 7, 5);
+    let second = marker(5, 8, 6);
+
+    assert_ne!(format!("{first:?}"), format!("{second:?}"));
+    assert_eq!(
+        canonical_marker_bytes(ImmutableSequenceCandidate::Marker(first))?,
+        canonical_marker_bytes(ImmutableSequenceCandidate::Marker(second))?,
+        "Unit 2 projection facts must not alter landed v2 marker audit bytes",
+    );
+    let canonical = canonical_marker_bytes(ImmutableSequenceCandidate::Marker(first))?;
+    let canonical = String::from_utf8(canonical)?;
+    assert!(!canonical.contains("abandoned_after"));
+    assert!(!canonical.contains("abandoned_through"));
+    assert!(!canonical.contains("physical_floor_at_decision"));
+    Ok(())
+}
+
+#[test]
 fn canonical_v2_marker_attached_and_recovery_rows_fit_signed_caps() -> Result<(), Box<dyn Error>> {
     let config = test_participant_config();
     let epoch = BindingEpoch::new(

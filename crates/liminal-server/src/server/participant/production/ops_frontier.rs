@@ -405,7 +405,15 @@ pub(super) fn canonical_marker_bytes(
     candidate: ImmutableSequenceCandidate,
 ) -> Result<Vec<u8>, StateError> {
     match candidate {
-        ImmutableSequenceCandidate::Marker(marker) => Ok(format!("{marker:?}").into_bytes()),
+        ImmutableSequenceCandidate::Marker(marker) => Ok(format!(
+            "MarkerCandidateAuthority {{ delivery_seq: {:?}, admission_order: {:?}, target_binding: {:?}, provenance: {:?}, current_owner: {:?} }}",
+            marker.delivery_seq,
+            marker.admission_order,
+            marker.target_binding,
+            marker.provenance,
+            marker.current_owner,
+        )
+        .into_bytes()),
         ImmutableSequenceCandidate::BindingTerminal { .. } => Err(StateError::invariant(
             "DrainFirst selected a binding terminal instead of marker work",
         )),

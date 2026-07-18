@@ -44,7 +44,7 @@ impl MarkerAckCommit {
 
     /// Returns the exact canonical request selected into this commit.
     #[must_use]
-    pub fn canonical_request(&self) -> MarkerAck {
+    pub const fn canonical_request(&self) -> MarkerAck {
         let request = self.outcome.request();
         MarkerAck {
             conversation_id: request.conversation_id,
@@ -75,7 +75,7 @@ impl MarkerAckCommit {
     /// Returns the durable cursor prestate checked by this transition.
     #[must_use]
     pub const fn from_cursor(&self) -> DeliverySeq {
-        self.cursor_update.from_cursor()
+        self.cursor_update.previous_cursor()
     }
 
     /// Returns the exact post-transition cursor for replay audit.

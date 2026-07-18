@@ -132,7 +132,7 @@ impl LiveMemberCursorUpdate {
         }
     }
 
-    pub(super) const fn from_cursor(self) -> DeliverySeq {
+    pub(super) const fn previous_cursor(self) -> DeliverySeq {
         self.from_cursor
     }
 

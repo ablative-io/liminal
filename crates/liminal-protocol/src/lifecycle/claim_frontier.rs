@@ -525,7 +525,7 @@ pub enum MarkerSequenceOwner {
 }
 
 /// Complete immutable marker candidate authority.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerCandidateAuthority {
     /// Exact assigned marker sequence.
     pub delivery_seq: DeliverySeq,
@@ -543,21 +543,6 @@ pub struct MarkerCandidateAuthority {
     pub physical_floor_at_decision: DeliverySeq,
     /// Current sequence owner; an immutable candidate must own `M`.
     pub current_owner: MarkerSequenceOwner,
-}
-
-impl core::fmt::Debug for MarkerCandidateAuthority {
-    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // Keep the landed Unit 1 audit encoding byte-stable. Unit 2 consumes
-        // the added range through a typed projection, never by parsing Debug.
-        formatter
-            .debug_struct("MarkerCandidateAuthority")
-            .field("delivery_seq", &self.delivery_seq)
-            .field("admission_order", &self.admission_order)
-            .field("target_binding", &self.target_binding)
-            .field("provenance", &self.provenance)
-            .field("current_owner", &self.current_owner)
-            .finish()
-    }
 }
 
 /// Immutable assigned candidate above the current sequence high watermark.
@@ -1968,6 +1953,19 @@ pub(in crate::lifecycle) enum LiveFrontierTransitionError {
     ResultingFrontier,
 }
 
+fn select_retained_marker_records(records: &[RetainedCausalRecord]) -> Vec<RetainedCausalRecord> {
+    records
+        .iter()
+        .copied()
+        .filter(|record| {
+            matches!(
+                record.kind,
+                RetainedCausalRecordKind::CompactionMarker { .. }
+            )
+        })
+        .collect()
+}
+
 impl ClaimFrontiers {
     /// Constructs the complete initial frontier directly from one admitted
     /// enrollment operation and its exact encoded `Attached` charge.
@@ -2083,16 +2081,7 @@ impl ClaimFrontiers {
             history,
         )
         .map_err(corrupt_frontier)?;
-        let retained_marker_records: Vec<_> = retained_records
-            .iter()
-            .copied()
-            .filter(|record| {
-                matches!(
-                    record.kind,
-                    RetainedCausalRecordKind::CompactionMarker { .. }
-                )
-            })
-            .collect();
+        let retained_marker_records = select_retained_marker_records(&retained_records);
         let marker_records = validated_active_marker_records(
             &retained_marker_records,
             restore.active_marker_anchors,

@@ -277,7 +277,7 @@ pub fn apply_nonzero_participant_ack<EF, V, LF>(
         binding,
         receiving_binding_epoch,
         request,
-        AckAvailability::Contiguous(contiguously_available_through),
+        &AckAvailability::Contiguous(contiguously_available_through),
         episode,
     )
 }
@@ -301,7 +301,7 @@ pub fn apply_nonzero_participant_ack_with_obligations<EF, V, LF>(
         binding,
         receiving_binding_epoch,
         request,
-        AckAvailability::Obligations(obligations),
+        &AckAvailability::Obligations(obligations),
         episode,
     )
 }
@@ -316,7 +316,7 @@ fn apply_nonzero_participant_ack_by_availability<EF, V, LF>(
     binding: &BindingState,
     receiving_binding_epoch: BindingEpoch,
     request: &ParticipantAck,
-    availability: AckAvailability<'_>,
+    availability: &AckAvailability<'_>,
     episode: &NonzeroDebtCursorEpisode,
 ) -> NonzeroParticipantAckDecision {
     let lookup_request = ParticipantBindingRequest::ParticipantAck(request.clone());
@@ -359,7 +359,7 @@ fn apply_nonzero_participant_ack_by_availability<EF, V, LF>(
             member.participant_id(),
             active_binding.binding_epoch,
             request,
-            available_through,
+            *available_through,
         ),
         AckAvailability::Obligations(obligations) => resulting_episode
             .acknowledge_with_obligations(
