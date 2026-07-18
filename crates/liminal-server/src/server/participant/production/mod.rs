@@ -79,6 +79,10 @@ mod tests_observer_wake;
 #[cfg(test)]
 mod tests_observer_wake_fixture;
 #[cfg(test)]
+mod tests_outbox_barrier;
+#[cfg(test)]
+mod tests_outbox_barrier_fixture;
+#[cfg(test)]
 mod tests_outbox_log;
 #[cfg(test)]
 mod tests_outbox_owner;

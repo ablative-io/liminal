@@ -2,12 +2,19 @@
 
 use std::error::Error;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use liminal::durability::bridge::block_on;
 use liminal::durability::{DurabilityError, DurableStore, StoredEntry, open_ephemeral};
 use liminal_protocol::wire::{
-    ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken,
+    ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, ReceiptReplay,
+    ServerValue,
+};
+
+use crate::server::connection::ReadyWaker;
+use crate::server::participant::{
+    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantSemanticHandler,
 };
 
 use super::ProductionParticipantHandler;
@@ -198,4 +205,161 @@ fn impossible_extension_boundary_refuses_before_publication() -> Result<(), Box<
     };
     assert!(error.to_string().contains("impossible future boundary"));
     Ok(())
+}
+
+fn enrollment_with(token: u8) -> ClientRequest {
+    ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: CONVERSATION,
+        enrollment_token: EnrollmentToken::new([token; 16]),
+    })
+}
+
+fn raw_extension_payloads(store: &Arc<dyn DurableStore>) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
+    let key = format!("{OUTBOX_STREAM_PREFIX}{CONVERSATION}");
+    Ok(block_on(store.read_from(&key, 0, 16))??
+        .into_iter()
+        .map(|entry| entry.payload)
+        .collect())
+}
+
+fn installed_service(
+    handler: Arc<ProductionParticipantHandler>,
+    store: Arc<dyn DurableStore>,
+) -> Result<InstalledParticipantService, Box<dyn Error>> {
+    let config = test_participant_config();
+    let semantic: Arc<dyn ParticipantSemanticHandler> = handler;
+    InstalledParticipantService::new(semantic, store, config.wire_frame_limit)
+        .map_err(|error| format!("repair service configuration failed: {error:?}").into())
+}
+
+fn apply_service(
+    service: &InstalledParticipantService,
+    incarnation: ConnectionIncarnation,
+    request: ClientRequest,
+) -> Result<ServerValue, Box<dyn Error>> {
+    service
+        .handle(
+            ParticipantConnectionContext::new(incarnation),
+            &mut ParticipantConnectionConversations::default(),
+            request,
+        )
+        .map_err(Into::into)
+}
+
+fn expected_second_enrollment_payload() -> Result<Vec<u8>, Box<dyn Error>> {
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
+    let first = dispatch(
+        &handler,
+        ConnectionIncarnation::new(0xC4, 1),
+        enrollment_with(0xC1),
+    )?;
+    assert!(matches!(first, ServerValue::EnrollBound(_)));
+    let second = dispatch(
+        &handler,
+        ConnectionIncarnation::new(0xC4, 2),
+        enrollment_with(0xC2),
+    )?;
+    assert!(matches!(second, ServerValue::EnrollBound(_)));
+    raw_extension_payloads(&store)?
+        .into_iter()
+        .nth(1)
+        .ok_or_else(|| "healthy second enrollment omitted its outbox row".into())
+}
+
+fn exercise_repair_and_retry(
+    fail_append: bool,
+    fail_flush: bool,
+    expected_rows_after_fault: usize,
+    expected_second_payload: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    let inner: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let faults = Arc::new(OutboxFaultStore::new(Arc::clone(&inner)));
+    let store: Arc<dyn DurableStore> = faults.clone();
+    let config = test_participant_config();
+    let handler = Arc::new(ProductionParticipantHandler::new(
+        Arc::clone(&store),
+        config,
+    )?);
+    let service = installed_service(handler, Arc::clone(&store))?;
+    let first_incarnation = ConnectionIncarnation::new(0xC4, 1);
+    let second_incarnation = ConnectionIncarnation::new(0xC4, 2);
+    let first = apply_service(&service, first_incarnation, enrollment_with(0xC1))?;
+    assert!(matches!(first, ServerValue::EnrollBound(_)));
+
+    let wake_count = Arc::new(AtomicU64::new(0));
+    let inbox = service.new_publication_inbox();
+    service.publication_registry().register(
+        first_incarnation,
+        &inbox,
+        ReadyWaker::for_test(Arc::clone(&wake_count)),
+    )?;
+    faults.fail_append.store(fail_append, Ordering::SeqCst);
+    faults.fail_flush.store(fail_flush, Ordering::SeqCst);
+    let exact_request = enrollment_with(0xC2);
+    assert!(
+        apply_service(&service, second_incarnation, exact_request.clone()).is_err(),
+        "barrier-2 fault fabricated a successful terminal answer"
+    );
+    assert!(!inbox.has_pending()?);
+    assert_eq!(wake_count.load(Ordering::SeqCst), 0);
+
+    let base = OperationLog::new(Arc::clone(&store), CONVERSATION);
+    assert_eq!(
+        block_on(base.read_page(0))??.len(),
+        3,
+        "both enrollments plus genesis remain durable after barrier-2 failure"
+    );
+    assert_eq!(
+        raw_extension_payloads(&store)?.len(),
+        expected_rows_after_fault
+    );
+    drop(service);
+
+    faults.fail_append.store(false, Ordering::SeqCst);
+    faults.fail_flush.store(false, Ordering::SeqCst);
+    let repaired_handler = Arc::new(ProductionParticipantHandler::new(
+        Arc::clone(&store),
+        config,
+    )?);
+    let repaired_payloads = raw_extension_payloads(&store)?;
+    assert_eq!(repaired_payloads.len(), 2);
+    assert_eq!(repaired_payloads[1], expected_second_payload);
+
+    // Construction returns only after cold first-touch reconciliation. The new
+    // registry has not published authority work yet; exact-token retry remains
+    // the Unit 1 path that returns the correlated terminal result.
+    let repaired = installed_service(repaired_handler, Arc::clone(&store))?;
+    let repaired_wakes = Arc::new(AtomicU64::new(0));
+    let repaired_inbox = repaired.new_publication_inbox();
+    repaired.publication_registry().register(
+        first_incarnation,
+        &repaired_inbox,
+        ReadyWaker::for_test(Arc::clone(&repaired_wakes)),
+    )?;
+    assert!(!repaired_inbox.has_pending()?);
+    let retry = apply_service(&repaired, second_incarnation, exact_request)?;
+    let ServerValue::Bound(ReceiptReplay::Enrollment(bound)) = retry else {
+        return Err(format!("exact-token retry lost its terminal answer: {retry:?}").into());
+    };
+    assert_eq!(bound.token(), EnrollmentToken::new([0xC2; 16]));
+    assert_eq!(bound.conversation_id(), CONVERSATION);
+    assert_eq!(repaired_wakes.load(Ordering::SeqCst), 1);
+    let ready = repaired_inbox.take_ready()?;
+    assert_eq!(ready.conversations, vec![CONVERSATION]);
+    assert!(ready.observer_progressed.is_empty());
+
+    drop(repaired);
+    let restored_again =
+        ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
+    assert_eq!(raw_extension_payloads(&store)?, repaired_payloads);
+    drop(restored_again);
+    Ok(())
+}
+
+#[test]
+fn postcommit_outbox_failure_is_repaired_not_rolled_back() -> Result<(), Box<dyn Error>> {
+    let expected = expected_second_enrollment_payload()?;
+    exercise_repair_and_retry(true, false, 1, &expected)?;
+    exercise_repair_and_retry(false, true, 2, &expected)
 }
