@@ -7,6 +7,48 @@ use crate::wire::{
     ObserverRecoveryResponse,
 };
 
+/// Move-only exact observer-progress projection emitted by a committed source.
+///
+/// Participant acknowledgement and binding-ending transitions own the progress
+/// value. Consuming code can persist and publish this projection but cannot
+/// construct one from a guessed maximum or record-delivery observation.
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::ObserverProgressProjection;
+///
+/// fn require_clone<T: Clone>() {}
+/// require_clone::<ObserverProgressProjection>();
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct ObserverProgressProjection {
+    conversation_id: ConversationId,
+    new_observer_progress: DeliverySeq,
+}
+
+impl ObserverProgressProjection {
+    pub(in crate::lifecycle) const fn new(
+        conversation_id: ConversationId,
+        new_observer_progress: DeliverySeq,
+    ) -> Self {
+        Self {
+            conversation_id,
+            new_observer_progress,
+        }
+    }
+
+    /// Returns the conversation whose hard observer progress may advance.
+    #[must_use]
+    pub const fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    /// Returns the exact protocol-produced hard observer progress.
+    #[must_use]
+    pub const fn new_observer_progress(&self) -> DeliverySeq {
+        self.new_observer_progress
+    }
+}
+
 /// Restore-time validation failure for the owned observer-recovery aggregate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ObserverRecoveryAggregateRestoreError {

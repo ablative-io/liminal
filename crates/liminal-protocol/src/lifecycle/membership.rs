@@ -6,7 +6,8 @@ use crate::wire::{
 
 use super::{
     AdmissionOrder, BindingState, ClaimFrontiers, CommittedBindingTerminal, DetachCell,
-    PendingFinalization, detach::validate_pending_pair, lookup::AttachSecretProof,
+    ObserverProgressProjection, PendingFinalization, detach::validate_pending_pair,
+    lookup::AttachSecretProof,
 };
 
 /// Consuming-layer enrollment-token fingerprint with no protocol-invented width.
@@ -500,6 +501,19 @@ impl<EF, V, LF> LeaveCommit<EF, V, LF> {
     #[must_use]
     pub const fn frontiers(&self) -> &ClaimFrontiers {
         &self.frontiers
+    }
+
+    /// Projects permanent Leave's exact committed `Left` sequence.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> Option<ObserverProgressProjection> {
+        let IdentityState::Retired(retired) = &self.identity else {
+            return None;
+        };
+        let committed = retired.committed_result();
+        Some(ObserverProgressProjection::new(
+            committed.conversation_id(),
+            committed.left_delivery_seq(),
+        ))
     }
 
     /// Consumes the atomic commit for one durable transaction.

@@ -8,9 +8,9 @@ use super::{
     ActiveBinding, AttachedLifecycleRecord, AttachedRecordPosition, BindingOrigin, BindingState,
     ClosureState, CommittedBindingTerminal, CommittedBindingTerminalPosition,
     CommittedDetachedTerminal, CommittedDiedTerminal, DetachCell, Event, FencedAttachCommit,
-    LiveMember, MembershipInvariantError, OrdinaryBindingAuthority, OrdinaryBindingFate,
-    OrdinaryDetachedAttachAdmission, PendingFinalization, detach::validate_pending_pair,
-    lookup::AttachSecretProof,
+    LiveMember, MembershipInvariantError, ObserverProgressProjection, OrdinaryBindingAuthority,
+    OrdinaryBindingFate, OrdinaryDetachedAttachAdmission, PendingFinalization,
+    detach::validate_pending_pair, lookup::AttachSecretProof,
 };
 
 /// Result allocation owned by one successful credential-attach transaction.
@@ -115,6 +115,27 @@ pub struct AttachCommit<F, V> {
 }
 
 impl<F, V> AttachCommit<F, V> {
+    /// Projects the binding-ending terminal committed by this attach, if any.
+    #[must_use]
+    pub fn observer_progress_projection(&self) -> Option<ObserverProgressProjection> {
+        let terminal = match self.transition {
+            AttachTransition::Detached
+            | AttachTransition::FencedRecovery {
+                composed_terminal: None,
+                ..
+            } => return None,
+            AttachTransition::Superseded { terminal } => terminal.into(),
+            AttachTransition::FencedRecovery {
+                composed_terminal: Some(terminal),
+                ..
+            } => terminal,
+        };
+        Some(ObserverProgressProjection::new(
+            terminal.conversation_id(),
+            terminal.delivery_seq(),
+        ))
+    }
+
     /// Consumes one exact normal-ack event into this ordinary attach's cursor authority.
     ///
     /// Fenced recovery has no ordinary authority and therefore returns the

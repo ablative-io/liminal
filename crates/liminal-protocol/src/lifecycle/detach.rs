@@ -5,6 +5,7 @@ use crate::wire::{
     TerminalizedDetachCell,
 };
 
+use super::ObserverProgressProjection;
 use super::binding::{
     ActiveBinding, AdmissionOrder, BindingState, CommittedBindingTerminal,
     CommittedBindingTerminalPosition, CommittedDetachedTerminal, PendingBindingTerminalPosition,
@@ -307,6 +308,15 @@ impl<EF, V> CommittedDetachTransition<EF, V> {
     #[must_use]
     pub const fn outcome(&self) -> &DetachCommitted {
         &self.outcome
+    }
+
+    /// Projects this exact committed terminal into hard observer progress.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> ObserverProgressProjection {
+        ObserverProgressProjection::new(
+            self.terminal.conversation_id(),
+            self.terminal.delivery_seq(),
+        )
     }
 
     /// Consumes the atomic result into its persistence and response values.

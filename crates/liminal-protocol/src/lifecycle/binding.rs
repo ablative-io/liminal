@@ -603,6 +603,18 @@ pub enum DiedBindingTransition {
 }
 
 impl DiedBindingTransition {
+    /// Projects a committed Died terminal; pending finalization has no progress yet.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> Option<super::ObserverProgressProjection> {
+        let Self::Committed(terminal) = self else {
+            return None;
+        };
+        Some(super::ObserverProgressProjection::new(
+            terminal.conversation_id(),
+            terminal.delivery_seq(),
+        ))
+    }
+
     /// Returns the post-transition binding slot.
     #[must_use]
     pub const fn binding_state(self) -> BindingState {

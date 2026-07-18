@@ -2,7 +2,7 @@ use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{BindingEpoch, ConversationId, DeliverySeq, ParticipantId, ParticipantIndex};
 
 use super::{
-    ActiveBinding, CommittedDiedTerminal,
+    ActiveBinding, CommittedDiedTerminal, ObserverProgressProjection,
     claim_frontier::{ValidatedMarkerCandidate, ValidatedMarkerRecord},
 };
 
@@ -939,6 +939,11 @@ impl OrdinaryBindingFate {
     pub const fn resulting_floor(self) -> DeliverySeq {
         self.resulting_floor
     }
+    /// Projects the exact floor measured by this binding fate.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> ObserverProgressProjection {
+        ObserverProgressProjection::new(self.conversation_id, self.resulting_floor)
+    }
 
     /// Selects direct `DetachedCursorRelease` when no storage edge precedes it.
     #[must_use]
@@ -1109,6 +1114,11 @@ impl RecoveredBindingFate {
     #[must_use]
     pub const fn resulting_floor(&self) -> DeliverySeq {
         self.resulting_floor
+    }
+    /// Projects the exact floor measured by this recovered binding fate.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> ObserverProgressProjection {
+        ObserverProgressProjection::new(self.conversation_id, self.resulting_floor)
     }
 }
 

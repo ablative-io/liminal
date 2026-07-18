@@ -7,8 +7,8 @@ use crate::wire::{
 
 use super::super::{
     BindingRequiredLookupResult, BindingState, CumulativeAckAuthorizationError,
-    CumulativeAckOutcome, LiveMember, NonzeroDebtCursorEpisode, ParticipantBindingRequest,
-    PresentedIdentity, RecipientAckObligations, lookup_binding_required,
+    CumulativeAckOutcome, LiveMember, NonzeroDebtCursorEpisode, ObserverProgressProjection,
+    ParticipantBindingRequest, PresentedIdentity, RecipientAckObligations, lookup_binding_required,
     membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
 };
 
@@ -42,6 +42,13 @@ impl NonzeroParticipantAckCommit {
     #[must_use]
     pub const fn outcome(&self) -> &AckCommitted {
         &self.outcome
+    }
+
+    /// Projects the exact committed ack boundary into hard observer progress.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> ObserverProgressProjection {
+        let request = self.outcome.request();
+        ObserverProgressProjection::new(request.conversation_id, request.through_seq)
     }
 
     /// Borrows the exact episode that must be persisted with the member cursor.

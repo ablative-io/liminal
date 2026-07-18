@@ -5,8 +5,8 @@ use crate::wire::{
 
 use super::{
     super::{
-        BindingRequiredLookupResult, BindingState, LiveMember, ParticipantBindingRequest,
-        PresentedIdentity, lookup_binding_required,
+        BindingRequiredLookupResult, BindingState, LiveMember, ObserverProgressProjection,
+        ParticipantBindingRequest, PresentedIdentity, lookup_binding_required,
         membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
     },
     marker_proof::{
@@ -33,6 +33,13 @@ impl MarkerAckCommit {
     #[must_use]
     pub const fn outcome(&self) -> &MarkerAckCommitted {
         &self.outcome
+    }
+
+    /// Projects the exact committed marker boundary into hard observer progress.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> ObserverProgressProjection {
+        let request = self.outcome.request();
+        ObserverProgressProjection::new(request.conversation_id, request.marker_delivery_seq)
     }
 
     /// Borrows the exact delivered-marker authority retained by this commit.

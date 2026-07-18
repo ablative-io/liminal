@@ -4,9 +4,9 @@ use crate::wire::{
 };
 
 use super::super::{
-    BindingRequiredLookupResult, BindingState, LiveMember, ParticipantBindingRequest,
-    PresentedIdentity, RecipientAckObligations, RecipientAckObligationsContextError,
-    lookup_binding_required,
+    BindingRequiredLookupResult, BindingState, LiveMember, ObserverProgressProjection,
+    ParticipantBindingRequest, PresentedIdentity, RecipientAckObligations,
+    RecipientAckObligationsContextError, lookup_binding_required,
     membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
 };
 
@@ -26,6 +26,13 @@ impl ParticipantAckCommit {
     #[must_use]
     pub const fn outcome(&self) -> &AckCommitted {
         &self.outcome
+    }
+
+    /// Projects the exact committed ack boundary into hard observer progress.
+    #[must_use]
+    pub const fn observer_progress_projection(&self) -> ObserverProgressProjection {
+        let request = self.outcome.request();
+        ObserverProgressProjection::new(request.conversation_id, request.through_seq)
     }
 
     /// Applies this commit to either its exact old cursor or its already-written
