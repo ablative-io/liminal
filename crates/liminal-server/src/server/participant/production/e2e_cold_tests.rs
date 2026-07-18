@@ -99,8 +99,16 @@ fn commit_bound_leave_after_reopen(
         bound.capability_generation(),
         0x55,
     )?;
-    if third.delivery_seq() <= state.last_record_seq {
-        return Err("cold-reopen record sequence restarted instead of following replay".into());
+    let expected_third_seq = state
+        .last_record_seq
+        .checked_add(3)
+        .ok_or("cold-reopen sequence fixture overflowed")?;
+    if third.delivery_seq() != expected_third_seq {
+        return Err(format!(
+            "cold-reopen record sequence was {}, expected exact next post-attach sequence {expected_third_seq}",
+            third.delivery_seq()
+        )
+        .into());
     }
     let leave = LeaveRequest {
         conversation_id: 501,
