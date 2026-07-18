@@ -365,14 +365,14 @@ by Tom/Annabel.
 | `max_ordinary_record_bytes` | `max_ordinary_record_charge.bytes` | `u64`, encoded durable bytes per ordinary record | `1..=u64::MAX`; validated against canonical encoded charge |
 | `max_generated_marker_entries` | `projection_limits.marker_max.entries` | `u64`, encoded durable entries per generated marker | `1..=u64::MAX`; must cover the canonical marker row |
 | `max_generated_marker_bytes` | `projection_limits.marker_max.bytes` | `u64`, encoded durable bytes per generated marker | `1..=u64::MAX`; must cover the canonical marker row |
-| `mandatory_transaction_bound_entries` | `projection_limits.mandatory_bound.entries` | `u64`, retained entries in mandatory envelope `Q` | `0..=u64::MAX`; protocol construction must accept the signed value |
-| `mandatory_transaction_bound_bytes` | `projection_limits.mandatory_bound.bytes` | `u64`, retained bytes in mandatory envelope `Q` | `0..=u64::MAX`; protocol construction must accept the signed value |
-| `full_recovery_claim_entries` | `projection_limits.full_recovery_claim.entries` | `u64`, transferable recovery occupancy `K`, entries | `0..=u64::MAX`; protocol construction must accept the signed value |
-| `full_recovery_claim_bytes` | `projection_limits.full_recovery_claim.bytes` | `u64`, transferable recovery occupancy `K`, bytes | `0..=u64::MAX`; protocol construction must accept the signed value |
+| `mandatory_transaction_bound_entries` | `projection_limits.mandatory_bound.entries` | `u64`, retained entries in mandatory envelope `Q` | `1..=u64::MAX` [corrected r4 — the r1 `0..=` claim was false at the bytes: initial enrollment requires the one-entry Attached charge to fit inside `Q` (`enrollment_closure.rs:604-621`), so zero cannot initialize a conversation] |
+| `mandatory_transaction_bound_bytes` | `projection_limits.mandatory_bound.bytes` | `u64`, retained bytes in mandatory envelope `Q` | must admit the canonical Attached row bytes (`enrollment_closure.rs:616-621`) [corrected r4] |
+| `full_recovery_claim_entries` | `projection_limits.full_recovery_claim.entries` | `u64`, transferable recovery occupancy `K`, entries | MUST EQUAL `Q.entries` — current construction rejects `mandatory_bound != recovery_claim` (`enrollment_closure.rs:528-530`) [corrected r4] |
+| `full_recovery_claim_bytes` | `projection_limits.full_recovery_claim.bytes` | `u64`, transferable recovery occupancy `K`, bytes | MUST EQUAL `Q.bytes` (same constraint) [corrected r4] |
 | `retained_capacity_entries` | `ClosureAccounting.configured_cap.entries` | `u64`, total retained durable entries | computed initial/live baseline `..=u64::MAX`; startup rejects a cap below baseline |
 | `retained_capacity_bytes` | `ClosureAccounting.configured_cap.bytes` | `u64`, total retained encoded bytes | computed initial/live baseline `..=u64::MAX`; startup rejects a cap below baseline |
 | `max_retained_record_rows` | `ClaimFrontiersRestore.retained_record_limit` | `u64`, retained causal-row count | current required retained rows `..=u64::MAX`; no truncation to fit |
-| `closure_episode_churn_limit` | `ClosureAccounting.episode_churn_limit` | `u64`, closure churn cycles per episode | `1..=u64::MAX`; zero is explicitly invalid |
+| `closure_episode_churn_limit` | `ClosureAccounting.episode_churn_limit` | `u64`, closure churn cycles per episode | `2..=u32::MAX` [corrected r4 — the r1 `1..=u64::MAX` bound was false at the bytes: initial enrollment enforces `2..=MAX_CHURN_LIMIT` with `MAX_CHURN_LIMIT = u32::MAX` (`enrollment_closure.rs:26-27,519-524`)] |
 
 `ResourceVector` is exactly two `u64` components, entries and encoded bytes
 (`crates/liminal-protocol/src/algebra/types.rs:3-24`). The three projection
@@ -678,8 +678,51 @@ bounds but intentionally contain no values in this brief. Required owners:
 | closure episode churn limit | sign | sign | blocks config and integrated build |
 
 Sign-off must state the exact numeric value for every key and confirm each
-unit. Until both owners sign, the build CANNOT dispatch its config slice and
+unit. Until signed, the build CANNOT dispatch its config slice and
 CANNOT claim Unit 1 accepted. There are no fallback values.
+
+#### Derived value proposal [r4] — awaiting Tom's confirm-or-veto
+
+Signature chain as ruled (Waffles 05:30Z under Tom's delegation; Annabel
+deferred her half to Tom in-session ~05:35Z): Tom's direction — "no arbitrary
+limits, no arbitrary defaults, so long as things make sense, give users a good
+experience" — authorizes DERIVATION from real quantities, not invention. The
+quantities below come from the byte-grounded extraction (Sol research session
+455999d1, envelope `claude-research-f0c-d2.mx8rrN`, run against the code pin;
+its two Slice 5 bound contradictions are byte-confirmed and corrected above).
+
+| key | proposed value | derivation (one line) |
+|---|---:|---|
+| `max_ordinary_record_entries` | 1 | Exact protocol constant, not a choice: the ordinary fixed point rejects any encoded caller charge whose `entries != 1` (`ordinary_record_projection.rs:897-937`). |
+| `max_ordinary_record_bytes` | 131,072 | 2× the deployment-precedent complete-frame limit 65,536 (payload ≤ frame−44, `wire/codec.rs:501-506`): every payload the transport can carry admits with 2× headroom for v2 framing; ≪ the 4 MiB outbound sink, so deliveries always fit. The transport refuses first — a user can never feel this cap. |
+| `max_generated_marker_entries` | 1 | Exact: one drain mints exactly one retained marker row, and every retained keyed charge must have `entries == 1` (`claim_frontier.rs:2778-2817`; `ordinary_record_projection.rs:909-929`). |
+| `max_generated_marker_bytes` | 4,096 | Marker rows are payload-free fixed-field rows (ids, epochs, provenance — ~10 scalar fields, `claim_frontier.rs:222-296`); 4 KiB dwarfs any canonical encoding of that shape. Checked-assertion rider below makes this a verified claim, not a guess. |
+| `mandatory_transaction_bound_entries` | 4 | Must admit the one-entry Attached row (`enrollment_closure.rs:604-615`); every committed fixture models Q as 2 entries; doubled for free generosity. |
+| `mandatory_transaction_bound_bytes` | 16,384 | 4× the marker envelope: Attached/successor rows are id/epoch-scale (≪ 4 KiB); rider-checked against the real v2 encoder. |
+| `full_recovery_claim_entries` | 4 | Equality with Q is construction-required (`enrollment_closure.rs:528-530`); K covers the RS+RT recovery pair (`admission/sequence.rs:5-24`) with 2× margin. |
+| `full_recovery_claim_bytes` | 16,384 | Equals Q bytes (same constraint); recovery rows are id/epoch-scale. |
+| `retained_capacity_entries` | 2,048 | Row-cap-driven: 1,024 retained rows (below) + `identity_slots`×1 marker reserves + Q + K entries ≈ 1,036, doubled. Baseline validation floor holds: fresh B0 = I×marker_max = (4, 16,384) ≪ cap. |
+| `retained_capacity_bytes` | 16,777,216 | 16 MiB per conversation: ≥128 maximum-size retained records or thousands of typical ones; normal floors advance with acks so retained charge stays far below it. **This is the cost-bearing number** — worst case per fully saturated connection = 32 conversations × 16 MiB = 512 MiB durable retention; flagged for Tom's eyes per the idle-cost law, four-signature form. |
+| `max_retained_record_rows` | 1,024 | Matches the house's existing signed retention scales (`max_live_attach_receipts_server` 1,024, `max_retired_identity_slots_server` 1,024); restore rejects-not-truncates (`claim_frontier.rs:3758-3775`), and ack-driven floor advancement bounds spans in normal operation (fixture scale: 32). |
+| `closure_episode_churn_limit` | 1,024 | Orders of magnitude above any plausible binding-change cycles per episode (existing per-participant scales: 8 receipts, 64 provenance); inside the corrected `2..=u32::MAX` bound. |
+
+**Checked-assertion rider [r4] (converts NOT-DERIVABLE encodings into verified
+claims):** the canonical v2 byte sizes of marker, Attached, and recovery rows
+do not exist at the pin — the v2 encoder is this build's own deliverable. The
+build therefore SHALL add committed tests asserting the canonical v2 encoding
+of (a) every marker provenance/target variant fits `max_generated_marker_bytes`,
+(b) the Attached row fits `mandatory_transaction_bound_bytes`, and (c) each
+RS/RT recovery row fits `full_recovery_claim_bytes`. A failing assertion is a
+STOP (value renegotiation with the exact size), never a silent bump. Same form
+as the house's pinned-number cost papers.
+
+**Two derivation questions returned upward, not guessed (per Tom's
+direction):** none blocking — the two candidates (operation-to-churn-cycle
+mapping; Q/K composition formula) are absent at the bytes but the proposed
+values bound them from existing scales generously; if Tom wants them derived
+from a live formula instead, that formula is Unit 1 build output and the
+values can be revisited at his 0.2.x publish gate with real encoder numbers
+in hand.
 
 ### Pre-publish wire review — blocking publication, not implementation
 
@@ -692,5 +735,6 @@ is part of this unit.
 | revision | date | author | record |
 |---|---|---|---|
 | r1 | 2026-07-18 | Hermes Crumpet fold; Sol draft | Initial ruled build brief for F-0c Unit 1: live frontier transitions, explicit RecordAdmission token correlation, loud v2 log migration, signed D2 inputs, and Leave riding the shared acquisition. |
+| r4 | 2026-07-18 | Hermes Crumpet fold (derivation + amendment text); Sol research 455999d1 quantities, both bound contradictions byte-confirmed at the fold seat | D2 derivation round under Tom's direction (relayed by Waffles 05:30Z; Annabel deferred her half to Tom in-session): two Slice 5 bound corrections (Q/K cannot be zero and must be equal per `enrollment_closure.rs:528-530,604-621`; churn bound is `2..=u32::MAX` per `:26-27,519-524`); twelve proposed values with one-line derivations from real quantities; checked-assertion rider converting the absent v2 encoder sizes into build-verified claims; the 16 MiB retained-capacity cost number flagged for Tom's eyes in four-signature form. Research checkout note: worker ran at dc3df6d (Slice 5 byte-identical through 44d6b34). |
 | r3 | 2026-07-18 | Hermes Crumpet fold | Confirmation round (same Sol session vs dc3df6d) verdict READY with two non-blocking comments, both folded: acceptance item 7's barrier half corrected from abandonment-absent to abandonment-PRESENT (absent never exercised the fifth removal site); cold-reopen precedent citation expanded to `production/tests.rs:143-210` with the second-open lines named. All eight r1 findings confirmed CLOSED at the bytes; no new false universal found. |
 | r2 | 2026-07-18 | Hermes Crumpet fold (amendment text); Sol pre-review 752f8977 findings, all byte-confirmed at the fold seat | Pre-review NOT_READY closed by amendment: (M1) legacy-byte universal rejection withdrawn — staged layout is not byte-disjoint, fixture-narrowed test 5 plus honesty note; (M2) resume tokenless removal widened from two to five production sites plus two-cycle soak test; (M3) Slice 1 transition inputs gain the required server-computed canonical keyed row charges — commit-plus-owner was not the complete input set; (M4) marker-drain seam must be extended/composed to return the complete accounting/retention owner for the same-lock retry; (M5) WALL-MOVE-ONLY narrowed to the explicit linear-authority list, base-copyable types exempted. Minors: nested codec call-site list expanded; correlation.rs:159-245 ambiguous_authorization rewrite deletion added to D1 sites; Layer 3 harness start/stop/join/drop/reopen extension stated; WALL-ATOMIC flush-uncertainty honesty note. |
