@@ -742,6 +742,17 @@ readiness markers, or socket readability.
     reclaim → refill across permanent identities and assert the measured maximum
     never exceeds the ratified
     `checked(retained_capacity_bytes + measured fixed metadata term)` shape.
+30. **`leave_discharge_replays_deterministically_across_the_commit_boundary`**
+    [r4, ratifier's check]: the discharge crash cut, same species as tests
+    26-28, pointed at the D3-4 Leave ruling. Cut (a): Leave's v2 row and its
+    extension source batch both flush, obligations discharge, then crash before
+    any further operation; cold restore replays the discharge deterministically
+    from the Left row plus extension stream, the live payload projection
+    recomputes under the signed bound, and source/audit rows are intact. Cut
+    (b): crash BETWEEN the v2 Left flush and the extension append; cold first
+    touch reconciles the missing Leave source batch per section 3.2 and the
+    discharge holds with byte-identical results to cut (a). In both cuts a
+    second restore is idempotent and no discharged obligation reappears.
 
 ### Regressions and full gates
 
@@ -876,3 +887,4 @@ the rejected conservative formula remains printed there for the decision.
 | r1 | 2026-07-18 | implementation specialist | First pinned Unit 2 build brief: ruled D3 durable post-commit outbox, recipient snapshot, ordered readiness-driven holdback pump, ParticipantAck retention/reclaim, reattach replay, marker testimony, transport/SDK integration, loud v3 migration, layered acceptance, signed derived values, and explicit walls/out-of-scope. |
 | r2 | 2026-07-18 | seat fold (Hermes Crumpet) | Fold pass on r1 with spot anchors re-verified at `2bf71c4` (ServerPush enum, MarkerAck factual-empty seam, eight-kind v2 census, signed config fields, `DELIVERY_SLICE_BUDGET`). Ruled Q3: `MarkerAckCommitted` row body fixed to the RecordAdmission census discipline. Ratified the participant v2→v3 loud migration as a D3-7 consequence (flagged for Tom/Annabel signoff). Opened Q5: `contiguously_available_through` basis (volatile-offered vs durable-obligation prefix) routed to pre-review with the seat's lean recorded; section 7 amended to carry both candidates. |
 | r3 | 2026-07-18 | implementation specialist, pre-review fold under seat rulings | Folded all five major findings and the note. Replaced one-record Produced with source batches; reversed r2's v3 ratification after the adversarial independent-stream check and placed the ruled MarkerAck body in the Unit 2 extension stream; closed Q2 on observer-v1 live targeting and Q5 on durable-obligation testimony; recorded the discharge-on-Leave seat ruling and flagged it for Waffles/Tom ratification with both bounds visible; vendored the seat-verified frame excerpt. |
+| r4 | 2026-07-18 | seat fold (Hermes Crumpet) | Added test 30, the ratifier's check on the discharge-on-Leave ruling (Waffles, on ratifying at his seat): the Leave commit-boundary crash cut in both forms — crash after both flushes, and crash between the v2 Left flush and the extension append with reconciliation repair — proving the discharge replays deterministically from the Left row, idempotent across a second restore. |
