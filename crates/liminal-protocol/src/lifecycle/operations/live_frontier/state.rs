@@ -21,6 +21,20 @@ pub(super) fn accounting_after_rows(
     )
 }
 
+pub(super) fn accounting_after_marker_ack(
+    accounting: ClosureAccounting,
+) -> Option<ClosureAccounting> {
+    accounting_after_rows_with_state(
+        accounting,
+        &[],
+        accounting.state(),
+        accounting.marker_anchors().checked_sub(1)?,
+        accounting.edge_sequence_claims(),
+        accounting.edge_order_position_claims(),
+        accounting.edge_k_remaining(),
+    )
+}
+
 pub(super) fn accounting_after_fenced_attach(
     accounting: ClosureAccounting,
     charges: &[RetainedRecordCharge],

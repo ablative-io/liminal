@@ -195,7 +195,7 @@ fn socket_offer_and_write_never_reclaim() -> Result<(), Box<dyn Error>> {
     let offered = handler
         .next_publication(recipient.connection, CONVERSATION, None)?
         .ok_or("durable recipient head disappeared before encode")?;
-    let frame = encode_server_push(ServerPush::ParticipantDelivery(offered.delivery.clone()))
+    let frame = encode_server_push(ServerPush::ParticipantDelivery(offered.delivery))
         .map_err(|error| format!("participant push encoding failed: {error:?}"))?;
     assert_eq!(replay_sequences(&handler, recipient)?, expected);
 

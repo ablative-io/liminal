@@ -30,7 +30,8 @@ use ledger::{
     enrollment_order, enrollment_sequence, superseding_attach_order, superseding_attach_sequence,
 };
 use state::{
-    accounting_after_fenced_attach, accounting_after_rows, retained_attached, retained_terminal,
+    accounting_after_fenced_attach, accounting_after_marker_ack, accounting_after_rows,
+    retained_attached, retained_terminal,
 };
 
 /// Complete executable frontier, closure-accounting, and keyed-retention owner.
@@ -813,6 +814,9 @@ pub fn apply_marker_ack_frontier(
     else {
         return failure(owner, operation, LiveFrontierError::Authority);
     };
+    let Some(accounting) = accounting_after_marker_ack(owner.closure_accounting) else {
+        return failure(owner, operation, LiveFrontierError::ClosureAccounting);
+    };
     let participant = FrontierParticipant::new(
         request.participant_id,
         request.marker_delivery_seq,
@@ -826,6 +830,7 @@ pub fn apply_marker_ack_frontier(
             return failure(owner, operation, map_frontier_error(error));
         }
     };
+    owner.closure_accounting = accounting;
     Ok(LiveFrontierCommit { operation, owner })
 }
 

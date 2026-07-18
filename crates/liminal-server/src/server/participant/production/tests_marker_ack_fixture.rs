@@ -37,6 +37,11 @@ pub(super) struct MarkerFixture {
     pub(super) store: Arc<dyn DurableStore>,
     pub(super) target_connection: ConnectionIncarnation,
     pub(super) target_participant: ParticipantId,
+    pub(super) record_connection: ConnectionIncarnation,
+    pub(super) record_participant: ParticipantId,
+    pub(super) catchup_connection: ConnectionIncarnation,
+    pub(super) catchup_participant: ParticipantId,
+    pub(super) catchup_through_seq: u64,
     pub(super) marker_delivery: ParticipantDelivery,
 }
 
@@ -47,7 +52,7 @@ struct FixtureMembers {
     second: EnrollBound,
 }
 
-fn marker_fixture_config() -> ParticipantConfig {
+pub(super) fn marker_fixture_config() -> ParticipantConfig {
     let mut config = test_participant_config();
     // The first two ordinary commits generate marker debt; the third drains it.
     config.retained_capacity_entries = 14;
@@ -219,6 +224,45 @@ fn project_fixture_ordinary(
     )
 }
 
+fn commit_fixture_ack(
+    authority: &mut ConversationAuthority,
+    operation_log: &OperationLog,
+    outbox_log: &OutboxLog,
+    config: &ParticipantConfig,
+    conversation_id: u64,
+    members: &FixtureMembers,
+    through_seq: u64,
+) -> Result<(), Box<dyn Error>> {
+    let source_log_sequence = authority.next_log_sequence;
+    let request = ParticipantAck {
+        conversation_id,
+        participant_id: members.second.participant_id(),
+        capability_generation: Generation::ONE,
+        through_seq,
+    };
+    let outcome = authority.apply_ack(
+        &request,
+        &marker_fixture_facts(members.second_connection, config)?,
+        &FixtureAppender { log: operation_log },
+    )?;
+    if !matches!(outcome.value, ServerValue::AckCommitted(_)) {
+        return Err(format!(
+            "marker fixture ordinary ack did not commit: {:?}",
+            outcome.value
+        )
+        .into());
+    }
+    append_fixture_outbox_row(
+        authority,
+        outbox_log,
+        OutboxRow::AckAdvanced {
+            source_log_sequence,
+            participant_id: members.second.participant_id(),
+            through_seq,
+        },
+    )
+}
+
 fn record_request(conversation_id: u64, participant_id: u64, token: u8) -> RecordAdmission {
     RecordAdmission {
         conversation_id,
@@ -235,7 +279,15 @@ fn drive_marker_drain(
     config: &ParticipantConfig,
     conversation_id: u64,
     members: &FixtureMembers,
-) -> Result<(ConnectionIncarnation, ParticipantId, ParticipantDelivery), Box<dyn Error>> {
+) -> Result<
+    (
+        ConnectionIncarnation,
+        ParticipantId,
+        ParticipantDelivery,
+        u64,
+    ),
+    Box<dyn Error>,
+> {
     let operation_log = OperationLog::new(Arc::clone(&store), conversation_id);
     let outbox_log = OutboxLog::new(store, conversation_id);
     let cell = handler.cell(conversation_id)?;
@@ -246,8 +298,7 @@ fn drive_marker_drain(
         .as_mut()
         .ok_or("marker fixture conversation owner was absent")?;
 
-    for (observer_progress, token) in [(2, 0xA3), (3, 0xA4)] {
-        authority.observer_progress = observer_progress;
+    for token in [0xA3, 0xA4] {
         let request = record_request(conversation_id, members.first.participant_id(), token);
         let (source, record) = commit_fixture_record(
             authority,
@@ -259,9 +310,17 @@ fn drive_marker_drain(
         )?;
         assert!(authority.last_marker_projection.take().is_none());
         project_fixture_ordinary(authority, &outbox_log, source, &record, &request, members)?;
+        commit_fixture_ack(
+            authority,
+            &operation_log,
+            &outbox_log,
+            config,
+            conversation_id,
+            members,
+            record.delivery_seq(),
+        )?;
     }
 
-    authority.observer_progress = 4;
     let request = record_request(conversation_id, members.first.participant_id(), 0xA5);
     let (marker_source, record) = commit_fixture_record(
         authority,
@@ -318,7 +377,7 @@ fn drive_marker_drain(
         members,
     )?;
     drop(owner);
-    Ok((target_connection, target, marker))
+    Ok((target_connection, target, marker, record.delivery_seq()))
 }
 
 pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> {
@@ -328,18 +387,24 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
     let members = enroll_members(&handler, conversation_id)?;
     ack_marker_prefix(&handler, conversation_id, &members)?;
-    let (target_connection, target_participant, marker_delivery) = drive_marker_drain(
-        &handler,
-        Arc::clone(&store),
-        &config,
-        conversation_id,
-        &members,
-    )?;
+    let (target_connection, target_participant, marker_delivery, catchup_through_seq) =
+        drive_marker_drain(
+            &handler,
+            Arc::clone(&store),
+            &config,
+            conversation_id,
+            &members,
+        )?;
     Ok(MarkerFixture {
         handler,
         store,
         target_connection,
         target_participant,
+        record_connection: members.first_connection,
+        record_participant: members.first.participant_id(),
+        catchup_connection: members.second_connection,
+        catchup_participant: members.second.participant_id(),
+        catchup_through_seq,
         marker_delivery,
     })
 }
