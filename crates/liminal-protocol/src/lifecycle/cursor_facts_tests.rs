@@ -17,7 +17,8 @@ use crate::wire::{
 
 use super::cursor_facts::{
     BoundParticipantCursor, CumulativeAckAuthorizationError, CumulativeAckOutcome,
-    CursorProgressFact, CursorProgressKey, NonzeroDebtCursorEpisode,
+    CursorProgressFact, CursorProgressKey, NonzeroDebtCursorEpisode, RecipientAckObligations,
+    RecipientAckObligationsContextError, RecipientAckObligationsError,
 };
 use super::edge::ClosureDebt;
 
@@ -368,4 +369,100 @@ fn binding_epoch_authority_failure_preserves_cursors_and_facts() {
         before
     );
     assert!(episode.facts().is_empty());
+}
+
+#[test]
+fn recipient_obligation_testimony_requires_a_sorted_live_index() {
+    assert_eq!(
+        RecipientAckObligations::try_new(P0_ID, 5, vec![5]),
+        Err(RecipientAckObligationsError::NotLive {
+            acknowledged_through: 5,
+            delivery_seq: 5,
+        })
+    );
+    assert_eq!(
+        RecipientAckObligations::try_new(P0_ID, 5, vec![7, 7]),
+        Err(RecipientAckObligationsError::NotStrictlyIncreasing {
+            previous: 7,
+            current: 7,
+        })
+    );
+    assert_eq!(
+        RecipientAckObligations::try_new(P0_ID, 5, vec![8, 7]),
+        Err(RecipientAckObligationsError::NotStrictlyIncreasing {
+            previous: 8,
+            current: 7,
+        })
+    );
+}
+
+#[test]
+fn nonzero_ack_uses_durable_endpoint_membership_not_conversation_contiguity() {
+    let obligations = RecipientAckObligations::try_new(P0_ID, OBSERVER_PROGRESS, vec![2])
+        .expect("sequence two is P0's only live obligation");
+    let mut gap_subject = episode();
+    let before = gap_subject
+        .encode()
+        .expect("gap prestate remains serializable");
+    assert_eq!(
+        gap_subject
+            .acknowledge_with_obligations(
+                P0_ID,
+                epoch(0),
+                &participant_ack(P0_ID, 1),
+                &obligations,
+            )
+            .expect("request and testimony have exact authority"),
+        CumulativeAckOutcome::Gap(
+            AckGap::new(ack_envelope(P0_ID, 1), OBSERVER_PROGRESS)
+                .expect("sequence one is above the cursor")
+        )
+    );
+    assert_eq!(
+        gap_subject
+            .encode()
+            .expect("gap poststate remains serializable"),
+        before
+    );
+
+    let mut committed_subject = episode();
+    assert!(matches!(
+        committed_subject
+            .acknowledge_with_obligations(
+                P0_ID,
+                epoch(0),
+                &participant_ack(P0_ID, 2),
+                &obligations,
+            )
+            .expect("endpoint two is a durable P0 obligation"),
+        CumulativeAckOutcome::Committed(_)
+    ));
+    assert_eq!(
+        committed_subject
+            .participant(P0_ID)
+            .expect("P0 remains bound")
+            .cursor(),
+        2
+    );
+}
+
+#[test]
+fn nonzero_ack_rejects_testimony_from_another_durable_prestate() {
+    let wrong_frontier = RecipientAckObligations::try_new(P0_ID, 1, vec![2])
+        .expect("testimony is structurally valid but belongs to cursor one");
+    let mut subject = episode();
+    assert_eq!(
+        subject.acknowledge_with_obligations(
+            P0_ID,
+            epoch(0),
+            &participant_ack(P0_ID, 2),
+            &wrong_frontier,
+        ),
+        Err(CumulativeAckAuthorizationError::ObligationContext {
+            error: RecipientAckObligationsContextError::AcknowledgedThrough {
+                expected: OBSERVER_PROGRESS,
+                actual: 1,
+            },
+        })
+    );
 }

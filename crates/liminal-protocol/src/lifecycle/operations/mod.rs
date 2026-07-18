@@ -50,7 +50,7 @@ pub use marker_proof::{
 pub use nonzero_participant_ack::{
     NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
     NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError,
-    apply_nonzero_participant_ack,
+    apply_nonzero_participant_ack, apply_nonzero_participant_ack_with_obligations,
 };
 pub use ordinary_record_projection::{
     OrdinaryProjectionError, OrdinaryProjectionLimits, OrdinaryRecordDrainFirst,
@@ -59,6 +59,7 @@ pub use ordinary_record_projection::{
 };
 pub use participant_ack::{
     ParticipantAckCommit, ParticipantAckCommitError, ParticipantAckDecision, apply_participant_ack,
+    apply_participant_ack_with_obligations,
 };
 pub use record_admission::{
     CommittedOrdinaryRecord, RecordAdmissionCommit, RecordAdmissionDecision,

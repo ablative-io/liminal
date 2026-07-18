@@ -134,7 +134,8 @@ pub use conversation::{
 pub use cursor_facts::{
     BoundParticipantCursor, CumulativeAckAuthorizationError, CumulativeAckOutcome,
     CursorEpisodeBuildError, CursorFactEncodeError, CursorProgressFact, CursorProgressFacts,
-    CursorProgressKey, NonzeroDebtCursorEpisode,
+    CursorProgressKey, NonzeroDebtCursorEpisode, RecipientAckObligations,
+    RecipientAckObligationsContextError, RecipientAckObligationsError,
 };
 pub use detach::{
     CommittedDetach, CommittedDetachTransition, DetachCell, DetachCommitError, DetachReplayError,
@@ -216,7 +217,8 @@ pub use operations::{
     UnchangedRecordAdmission, apply_attach_frontier, apply_detach_frontier,
     apply_enrollment_frontier, apply_initial_enrollment, apply_marker_ack,
     apply_marker_ack_frontier, apply_nonzero_participant_ack,
-    apply_nonzero_participant_ack_frontier, apply_participant_ack, apply_participant_ack_frontier,
+    apply_nonzero_participant_ack_frontier, apply_nonzero_participant_ack_with_obligations,
+    apply_participant_ack, apply_participant_ack_frontier, apply_participant_ack_with_obligations,
     apply_record_admission, classify_record_admission_binding, commit_pending_leave_frontier,
     commit_settled_leave_frontier, drain_next_marker, select_marker_proof,
 };

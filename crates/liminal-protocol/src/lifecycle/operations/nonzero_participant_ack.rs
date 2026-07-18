@@ -8,7 +8,7 @@ use crate::wire::{
 use super::super::{
     BindingRequiredLookupResult, BindingState, CumulativeAckAuthorizationError,
     CumulativeAckOutcome, LiveMember, NonzeroDebtCursorEpisode, ParticipantBindingRequest,
-    PresentedIdentity, lookup_binding_required,
+    PresentedIdentity, RecipientAckObligations, lookup_binding_required,
     membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
 };
 
@@ -265,6 +265,53 @@ pub fn apply_nonzero_participant_ack<EF, V, LF>(
     contiguously_available_through: DeliverySeq,
     episode: &NonzeroDebtCursorEpisode,
 ) -> NonzeroParticipantAckDecision {
+    apply_nonzero_participant_ack_by_availability(
+        presented_identity,
+        binding,
+        receiving_binding_epoch,
+        request,
+        AckAvailability::Contiguous(contiguously_available_through),
+        episode,
+    )
+}
+
+/// Applies the nonzero-debt selector with durable recipient obligations.
+///
+/// Shared lookup and aggregate validation retain their existing precedence. The
+/// episode then requires a forward endpoint to occur in the sealed recipient
+/// obligation index; internal conversation sequence gaps remain legal.
+#[must_use]
+pub fn apply_nonzero_participant_ack_with_obligations<EF, V, LF>(
+    presented_identity: PresentedIdentity<'_, EF, V, LF>,
+    binding: &BindingState,
+    receiving_binding_epoch: BindingEpoch,
+    request: &ParticipantAck,
+    obligations: &RecipientAckObligations,
+    episode: &NonzeroDebtCursorEpisode,
+) -> NonzeroParticipantAckDecision {
+    apply_nonzero_participant_ack_by_availability(
+        presented_identity,
+        binding,
+        receiving_binding_epoch,
+        request,
+        AckAvailability::Obligations(obligations),
+        episode,
+    )
+}
+
+enum AckAvailability<'a> {
+    Contiguous(DeliverySeq),
+    Obligations(&'a RecipientAckObligations),
+}
+
+fn apply_nonzero_participant_ack_by_availability<EF, V, LF>(
+    presented_identity: PresentedIdentity<'_, EF, V, LF>,
+    binding: &BindingState,
+    receiving_binding_epoch: BindingEpoch,
+    request: &ParticipantAck,
+    availability: AckAvailability<'_>,
+    episode: &NonzeroDebtCursorEpisode,
+) -> NonzeroParticipantAckDecision {
     let lookup_request = ParticipantBindingRequest::ParticipantAck(request.clone());
     let (member, active_binding) = match lookup_binding_required(
         presented_identity,
@@ -300,12 +347,22 @@ pub fn apply_nonzero_participant_ack<EF, V, LF>(
     }
 
     let mut resulting_episode = episode.clone();
-    let outcome = match resulting_episode.acknowledge(
-        member.participant_id(),
-        active_binding.binding_epoch,
-        request,
-        contiguously_available_through,
-    ) {
+    let selected = match availability {
+        AckAvailability::Contiguous(available_through) => resulting_episode.acknowledge(
+            member.participant_id(),
+            active_binding.binding_epoch,
+            request,
+            available_through,
+        ),
+        AckAvailability::Obligations(obligations) => resulting_episode
+            .acknowledge_with_obligations(
+                member.participant_id(),
+                active_binding.binding_epoch,
+                request,
+                obligations,
+            ),
+    };
+    let outcome = match selected {
         Ok(outcome) => outcome,
         Err(error) => {
             return NonzeroParticipantAckDecision::Invariant(

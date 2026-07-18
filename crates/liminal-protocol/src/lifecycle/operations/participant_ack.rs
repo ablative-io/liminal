@@ -5,7 +5,8 @@ use crate::wire::{
 
 use super::super::{
     BindingRequiredLookupResult, BindingState, LiveMember, ParticipantBindingRequest,
-    PresentedIdentity, lookup_binding_required,
+    PresentedIdentity, RecipientAckObligations, RecipientAckObligationsContextError,
+    lookup_binding_required,
     membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
 };
 
@@ -203,6 +204,95 @@ pub fn apply_participant_ack<EF, V, LF>(
         ),
         outcome,
     })
+}
+
+/// Applies the Unit 2 durable-obligation endpoint rule after shared lookup.
+///
+/// Lookup precedence and relation ordering are identical to
+/// [`apply_participant_ack`]. Unlike its Unit 1 scalar boundary, this selector
+/// requires the requested forward endpoint to exist in the recipient's sealed
+/// committed-obligation index. Internal conversation sequence gaps are skipped;
+/// ending on a non-obligation is exactly `AckGap`.
+///
+/// # Errors
+///
+/// Returns [`RecipientAckObligationsContextError`] if the testimony belongs to
+/// another participant or durable cursor prestate. Such disagreement is an
+/// invariant fault, not a fabricated protocol refusal.
+pub fn apply_participant_ack_with_obligations<EF, V, LF>(
+    presented_identity: PresentedIdentity<'_, EF, V, LF>,
+    binding: &BindingState,
+    receiving_binding_epoch: BindingEpoch,
+    request: &ParticipantAck,
+    obligations: &RecipientAckObligations,
+) -> Result<ParticipantAckDecision, RecipientAckObligationsContextError> {
+    let lookup_request = ParticipantBindingRequest::ParticipantAck(request.clone());
+    let member = match lookup_binding_required(
+        presented_identity,
+        binding,
+        Some(receiving_binding_epoch),
+        &lookup_request,
+    ) {
+        BindingRequiredLookupResult::Retired(outcome) => {
+            return Ok(ParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_retired(outcome),
+            ));
+        }
+        BindingRequiredLookupResult::ParticipantUnknown(outcome) => {
+            return Ok(ParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_participant_unknown(outcome),
+            ));
+        }
+        BindingRequiredLookupResult::StaleAuthority(outcome) => {
+            return Ok(ParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_stale_authority(outcome),
+            ));
+        }
+        BindingRequiredLookupResult::NoBinding(outcome) => {
+            return Ok(ParticipantAckDecision::Respond(
+                ParticipantAckResponse::from_no_binding(outcome),
+            ));
+        }
+        BindingRequiredLookupResult::Authorized { member, .. } => member,
+    };
+
+    let current_cursor = member.cursor();
+    let endpoint_is_obligation = obligations.contains_endpoint(
+        request.participant_id,
+        current_cursor,
+        request.through_seq,
+    )?;
+    if request.through_seq < current_cursor
+        && let Some(outcome) = AckRegression::new(ack_envelope(request), current_cursor)
+    {
+        return Ok(ParticipantAckDecision::Respond(
+            ParticipantAckResponse::ack_regression(outcome),
+        ));
+    }
+    if request.through_seq == current_cursor {
+        return Ok(ParticipantAckDecision::Respond(
+            ParticipantAckResponse::ack_no_op(ack_envelope(request)),
+        ));
+    }
+    if !endpoint_is_obligation
+        && let Some(outcome) = AckGap::new(ack_envelope(request), current_cursor)
+    {
+        return Ok(ParticipantAckDecision::Respond(
+            ParticipantAckResponse::ack_gap(outcome),
+        ));
+    }
+
+    let outcome = AckCommitted::new(ack_envelope(request));
+    Ok(ParticipantAckDecision::Commit(ParticipantAckCommit {
+        cursor_update: LiveMemberCursorUpdate::new(
+            request.conversation_id,
+            request.participant_id,
+            request.capability_generation,
+            current_cursor,
+            request.through_seq,
+        ),
+        outcome,
+    }))
 }
 
 const fn ack_envelope(request: &ParticipantAck) -> ParticipantAckEnvelope {

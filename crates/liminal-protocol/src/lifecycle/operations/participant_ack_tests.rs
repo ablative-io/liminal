@@ -12,10 +12,12 @@ use crate::wire::{
 use super::super::{
     ActiveBinding, AttachSecretProof, BindingState, DetachCell, EnrollmentFingerprint,
     IdentityState, LeaveCommitParameters, LeaveFingerprint, LiveMember, LiveMemberRestore,
-    PresentedIdentity, commit_leave, test_support::settled_leave_authority,
+    PresentedIdentity, RecipientAckObligations, RecipientAckObligationsContextError, commit_leave,
+    test_support::settled_leave_authority,
 };
 use super::participant_ack::{
     ParticipantAckCommit, ParticipantAckCommitError, ParticipantAckDecision, apply_participant_ack,
+    apply_participant_ack_with_obligations,
 };
 
 const CONVERSATION_ID: u64 = 71;
@@ -256,6 +258,83 @@ fn all_four_ack_relations_select_exact_wire_outcomes() {
         panic!("contiguous forward ack must commit");
     };
     assert_eq!(commit.outcome(), &AckCommitted::new(envelope(3, 7)),);
+}
+
+#[test]
+fn durable_obligation_endpoint_skips_internal_gaps_but_rejects_gap_endpoint() {
+    let identity: TestIdentity = IdentityState::Live(member(CURRENT_CURSOR));
+    let presented = PresentedIdentity::from(Some(&identity));
+    let obligations =
+        RecipientAckObligations::try_new(PARTICIPANT_ID, CURRENT_CURSOR, vec![6, 8, 10])
+            .expect("fixture obligations are sorted, unique, and live");
+
+    assert_eq!(
+        apply_participant_ack_with_obligations(
+            presented,
+            &binding(),
+            epoch(3, 9),
+            &request(3, 7),
+            &obligations,
+        ),
+        Ok(ParticipantAckDecision::Respond(
+            ParticipantAckResponse::ack_gap(
+                AckGap::new(envelope(3, 7), CURRENT_CURSOR)
+                    .expect("non-obligation endpoint is above the cursor"),
+            ),
+        )),
+    );
+
+    let committed = apply_participant_ack_with_obligations(
+        presented,
+        &binding(),
+        epoch(3, 9),
+        &request(3, 8),
+        &obligations,
+    )
+    .expect("testimony belongs to the authorized durable prestate");
+    let ParticipantAckDecision::Commit(commit) = committed else {
+        panic!("ack may skip internal non-obligations when its endpoint is durable")
+    };
+    assert_eq!(commit.outcome(), &AckCommitted::new(envelope(3, 8)));
+}
+
+#[test]
+fn durable_obligation_context_mismatch_is_typed_invariant_not_ack_gap() {
+    let identity: TestIdentity = IdentityState::Live(member(CURRENT_CURSOR));
+    let presented = PresentedIdentity::from(Some(&identity));
+    let wrong_participant =
+        RecipientAckObligations::try_new(PARTICIPANT_ID + 1, CURRENT_CURSOR, vec![7])
+            .expect("fixture obligation is structurally valid");
+    assert_eq!(
+        apply_participant_ack_with_obligations(
+            presented,
+            &binding(),
+            epoch(3, 9),
+            &request(3, 7),
+            &wrong_participant,
+        ),
+        Err(RecipientAckObligationsContextError::Participant {
+            expected: PARTICIPANT_ID,
+            actual: PARTICIPANT_ID + 1,
+        }),
+    );
+
+    let wrong_frontier =
+        RecipientAckObligations::try_new(PARTICIPANT_ID, CURRENT_CURSOR - 1, vec![7])
+            .expect("fixture obligation is structurally valid");
+    assert_eq!(
+        apply_participant_ack_with_obligations(
+            presented,
+            &binding(),
+            epoch(3, 9),
+            &request(3, 7),
+            &wrong_frontier,
+        ),
+        Err(RecipientAckObligationsContextError::AcknowledgedThrough {
+            expected: CURRENT_CURSOR,
+            actual: CURRENT_CURSOR - 1,
+        }),
+    );
 }
 
 #[test]

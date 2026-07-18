@@ -32,6 +32,127 @@ pub struct CursorProgressFacts {
     facts: BTreeMap<CursorProgressKey, CursorProgressFact>,
 }
 
+/// Validated durable delivery obligations for one participant ack frontier.
+///
+/// The outbox supplies its sorted live-obligation index, while the protocol
+/// owns participant/frontier binding and endpoint membership. Internal
+/// conversation-sequence gaps are legal; a forward ack endpoint must occur in
+/// this exact recipient index.
+///
+/// This testimony is move-only and cannot be assembled from independent public
+/// fields:
+///
+/// ```compile_fail
+/// use liminal_protocol::lifecycle::RecipientAckObligations;
+///
+/// fn clone_testimony(value: &RecipientAckObligations) -> RecipientAckObligations {
+///     value.clone()
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct RecipientAckObligations {
+    participant_id: ParticipantId,
+    acknowledged_through: DeliverySeq,
+    delivery_sequences: Vec<DeliverySeq>,
+}
+
+/// Malformed durable recipient-obligation testimony.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecipientAckObligationsError {
+    /// An indexed obligation is already at or below the durable ack frontier.
+    NotLive {
+        /// Durable participant acknowledgement frontier.
+        acknowledged_through: DeliverySeq,
+        /// Invalid obligation endpoint.
+        delivery_seq: DeliverySeq,
+    },
+    /// Obligation endpoints are not strictly increasing and duplicate-free.
+    NotStrictlyIncreasing {
+        /// Previous obligation in the supplied index.
+        previous: DeliverySeq,
+        /// Current non-increasing obligation.
+        current: DeliverySeq,
+    },
+}
+
+/// The testimony belongs to another participant or durable ack prestate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecipientAckObligationsContextError {
+    /// The testimony names another permanent participant.
+    Participant {
+        /// Participant required by the authorized request.
+        expected: ParticipantId,
+        /// Participant carried by the testimony.
+        actual: ParticipantId,
+    },
+    /// The testimony was sealed against another durable ack frontier.
+    AcknowledgedThrough {
+        /// Cursor required by the authorized request prestate.
+        expected: DeliverySeq,
+        /// Cursor carried by the testimony.
+        actual: DeliverySeq,
+    },
+}
+
+impl RecipientAckObligations {
+    /// Validates one recipient's complete current live-obligation index.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RecipientAckObligationsError`] when an obligation is already
+    /// discharged or the index is not strictly increasing and duplicate-free.
+    pub fn try_new(
+        participant_id: ParticipantId,
+        acknowledged_through: DeliverySeq,
+        delivery_sequences: Vec<DeliverySeq>,
+    ) -> Result<Self, RecipientAckObligationsError> {
+        let mut previous = None;
+        for delivery_seq in &delivery_sequences {
+            if *delivery_seq <= acknowledged_through {
+                return Err(RecipientAckObligationsError::NotLive {
+                    acknowledged_through,
+                    delivery_seq: *delivery_seq,
+                });
+            }
+            if let Some(previous) = previous
+                && *delivery_seq <= previous
+            {
+                return Err(RecipientAckObligationsError::NotStrictlyIncreasing {
+                    previous,
+                    current: *delivery_seq,
+                });
+            }
+            previous = Some(*delivery_seq);
+        }
+        Ok(Self {
+            participant_id,
+            acknowledged_through,
+            delivery_sequences,
+        })
+    }
+
+    pub(in crate::lifecycle) fn contains_endpoint(
+        &self,
+        participant_id: ParticipantId,
+        acknowledged_through: DeliverySeq,
+        endpoint: DeliverySeq,
+    ) -> Result<bool, RecipientAckObligationsContextError> {
+        if self.participant_id != participant_id {
+            return Err(RecipientAckObligationsContextError::Participant {
+                expected: participant_id,
+                actual: self.participant_id,
+            });
+        }
+        if self.acknowledged_through != acknowledged_through {
+            return Err(RecipientAckObligationsContextError::AcknowledgedThrough {
+                expected: acknowledged_through,
+                actual: self.acknowledged_through,
+            });
+        }
+        Ok(self.delivery_sequences.binary_search(&endpoint).is_ok())
+    }
+}
+
 /// One currently bound participant's durable cumulative-cursor state.
 ///
 /// All fields are private so cursor advancement can occur only through the
@@ -149,6 +270,11 @@ pub enum CumulativeAckAuthorizationError {
     GenerationMismatch,
     /// The receiving connection does not own the participant's active epoch.
     BindingEpochMismatch,
+    /// Durable recipient-obligation testimony belongs to another prestate.
+    ObligationContext {
+        /// Exact testimony mismatch.
+        error: RecipientAckObligationsContextError,
+    },
     /// A fixed wire-outcome constructor rejected an already-proven cursor relation.
     CursorRelationInvariant,
 }
@@ -160,7 +286,7 @@ pub enum CumulativeAckOutcome {
     Committed(AckCommitted),
     /// The request exactly repeated the durable cursor.
     NoOp(AckNoOp),
-    /// The request crossed a boundary not offered contiguously to this epoch.
+    /// The forward endpoint lacks the availability testimony required by the selector.
     Gap(AckGap),
     /// The request boundary was below the durable cursor.
     Regression(AckRegression),
@@ -487,11 +613,13 @@ impl NonzeroDebtCursorEpisode {
     /// Applies one authority-checked cumulative normal acknowledgement.
     ///
     /// `receiving_binding_epoch` identifies the connection epoch on which the
-    /// request arrived. `contiguously_available_through` is the greatest
-    /// sequence offered without a gap to that exact epoch and is bounded by the
-    /// episode's `H'`. A successful advance records and consumes the fact keyed
-    /// by the selected participant index and requested boundary; any lower
-    /// pending facts for that participant are consumed in the same transition.
+    /// request arrived. This scalar entry point preserves the Unit 1 contiguous
+    /// suffix selector; Unit 2 production uses
+    /// [`Self::acknowledge_with_obligations`] so restart-safe durable recipient
+    /// testimony, rather than volatile offered progress, decides endpoint
+    /// availability. A successful advance records and consumes the fact keyed by
+    /// the selected participant index and requested boundary; any lower pending
+    /// facts for that participant are consumed in the same transition.
     /// It then recomputes the physical floor from the post-ack minimum cursor,
     /// hard observer progress, current floor, and append-free ack `cap_floor`.
     /// Another participant's equal boundary is never touched.
@@ -507,6 +635,60 @@ impl NonzeroDebtCursorEpisode {
         request: &ParticipantAck,
         contiguously_available_through: DeliverySeq,
     ) -> Result<CumulativeAckOutcome, CumulativeAckAuthorizationError> {
+        let available_through = contiguously_available_through.min(self.candidate_high_watermark);
+        self.acknowledge_by_endpoint(
+            participant_index,
+            receiving_binding_epoch,
+            request,
+            move |_, _, endpoint| Ok(endpoint <= available_through),
+        )
+    }
+
+    /// Applies the durable per-recipient obligation endpoint rule.
+    ///
+    /// Conversation-global sequence gaps are skipped as non-obligations. A
+    /// forward request commits only when its endpoint exists in `obligations`;
+    /// ending on a sender-excluded or otherwise absent sequence returns
+    /// `AckGap`. The testimony must name the selected participant and current
+    /// durable cursor exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CumulativeAckAuthorizationError`] before mutation when request
+    /// authority or testimony context differs from this episode.
+    pub fn acknowledge_with_obligations(
+        &mut self,
+        participant_index: ParticipantIndex,
+        receiving_binding_epoch: BindingEpoch,
+        request: &ParticipantAck,
+        obligations: &RecipientAckObligations,
+    ) -> Result<CumulativeAckOutcome, CumulativeAckAuthorizationError> {
+        self.acknowledge_by_endpoint(
+            participant_index,
+            receiving_binding_epoch,
+            request,
+            |participant_id, acknowledged_through, endpoint| {
+                obligations
+                    .contains_endpoint(participant_id, acknowledged_through, endpoint)
+                    .map_err(|error| CumulativeAckAuthorizationError::ObligationContext { error })
+            },
+        )
+    }
+
+    fn acknowledge_by_endpoint<F>(
+        &mut self,
+        participant_index: ParticipantIndex,
+        receiving_binding_epoch: BindingEpoch,
+        request: &ParticipantAck,
+        endpoint_is_available: F,
+    ) -> Result<CumulativeAckOutcome, CumulativeAckAuthorizationError>
+    where
+        F: FnOnce(
+            ParticipantId,
+            DeliverySeq,
+            DeliverySeq,
+        ) -> Result<bool, CumulativeAckAuthorizationError>,
+    {
         let Some(participant) = self.participants.get(&participant_index).copied() else {
             return Err(CumulativeAckAuthorizationError::ParticipantIndexUnknown);
         };
@@ -531,6 +713,8 @@ impl NonzeroDebtCursorEpisode {
             capability_generation: request.capability_generation,
             through_seq,
         };
+        let endpoint_available =
+            endpoint_is_available(participant.participant_id, current_cursor, through_seq)?;
 
         if through_seq < current_cursor {
             return AckRegression::new(envelope, current_cursor)
@@ -542,8 +726,7 @@ impl NonzeroDebtCursorEpisode {
                 envelope,
             )));
         }
-        let available_through = contiguously_available_through.min(self.candidate_high_watermark);
-        if through_seq > available_through {
+        if through_seq > self.candidate_high_watermark || !endpoint_available {
             return AckGap::new(envelope, current_cursor)
                 .map(CumulativeAckOutcome::Gap)
                 .ok_or(CumulativeAckAuthorizationError::CursorRelationInvariant);
