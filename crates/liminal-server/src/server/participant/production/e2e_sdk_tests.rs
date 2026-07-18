@@ -1,4 +1,4 @@
-//! SDK-backed real-socket acceptance oracles for ServerPush delivery and response
+//! SDK-backed real-socket acceptance oracles for `ServerPush` delivery and response
 //! correlation. These clients enter through `RemoteParticipantHandle`; no test
 //! constructs an inbound push or applies participant state directly.
 
@@ -159,12 +159,15 @@ fn expect_sent(
     }
 }
 
-#[test]
-fn serverpush_sent_is_not_receipt_real_socket() -> Result<(), Box<dyn Error>> {
-    let home = tempfile::tempdir()?;
-    let server = SdkSocketFixture::start(&home.path().join("g1"))?;
-    let address = server.address()?;
+struct G1Participants {
+    sender: SdkParticipant,
+    sender_bound: EnrollBound,
+    peer_one: SdkParticipant,
+    peer_one_bound: EnrollBound,
+    peer_two: SdkParticipant,
+}
 
+fn enroll_g1_participants(address: SocketAddr) -> Result<G1Participants, Box<dyn Error>> {
     let sender = connect_participant(address, G1_CONVERSATION)?;
     let sender_enrolled = expect_applied(exchange(
         &sender,
@@ -211,7 +214,7 @@ fn serverpush_sent_is_not_receipt_real_socket() -> Result<(), Box<dyn Error>> {
     };
     let (sender_saw_peer_two, _, _) = expect_push(&sender)?;
     let (peer_one_saw_peer_two, _, _) = expect_push(&peer_one)?;
-    let expected_peer_two_attach = ServerPush::ParticipantDelivery(ParticipantDelivery {
+    let expected = ServerPush::ParticipantDelivery(ParticipantDelivery {
         conversation_id: G1_CONVERSATION,
         delivery_seq: 3,
         record: ParticipantRecord::Attached {
@@ -219,8 +222,29 @@ fn serverpush_sent_is_not_receipt_real_socket() -> Result<(), Box<dyn Error>> {
             binding_epoch: peer_two_bound.origin_binding_epoch(),
         },
     });
-    assert_eq!(sender_saw_peer_two, expected_peer_two_attach);
-    assert_eq!(peer_one_saw_peer_two, expected_peer_two_attach);
+    assert_eq!(sender_saw_peer_two, expected);
+    assert_eq!(peer_one_saw_peer_two, expected);
+    Ok(G1Participants {
+        sender,
+        sender_bound,
+        peer_one,
+        peer_one_bound,
+        peer_two,
+    })
+}
+
+#[test]
+fn serverpush_sent_is_not_receipt_real_socket() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let server = SdkSocketFixture::start(&home.path().join("g1"))?;
+    let address = server.address()?;
+    let G1Participants {
+        sender,
+        sender_bound,
+        peer_one,
+        peer_one_bound,
+        peer_two,
+    } = enroll_g1_participants(address)?;
 
     // Clear only the pre-record obligations. The ordinary record below is never
     // acknowledged before peer one's first close, so socket handoff cannot be
@@ -323,9 +347,14 @@ fn serverpush_sent_is_not_receipt_real_socket() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn enroll_g2_pair(
-    server: &SdkSocketFixture,
-) -> Result<(SdkParticipant, Arc<SdkParticipant>, u64, EnrollBound), Box<dyn Error>> {
+struct G2Pair {
+    sender: SdkParticipant,
+    peer: Arc<SdkParticipant>,
+    sender_id: u64,
+    peer_bound: EnrollBound,
+}
+
+fn enroll_g2_pair(server: &SdkSocketFixture) -> Result<G2Pair, Box<dyn Error>> {
     let address = server.address()?;
     let sender = connect_participant(address, G2_CONVERSATION)?;
     let sender_value = expect_applied(exchange(
@@ -370,13 +399,23 @@ fn enroll_g2_pair(
         }),
     )?)?;
     assert!(matches!(sender_ack, ServerValue::AckCommitted(_)));
-    Ok((sender, peer, sender_bound.participant_id(), peer_bound))
+    Ok(G2Pair {
+        sender,
+        peer,
+        sender_id: sender_bound.participant_id(),
+        peer_bound,
+    })
 }
 
 fn assert_g2_fault_arm_is_typed() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let server = SdkSocketFixture::start_gated(&home.path().join("g2-fault"))?;
-    let (sender, peer, sender_id, _) = enroll_g2_pair(&server)?;
+    let G2Pair {
+        sender,
+        peer,
+        sender_id,
+        peer_bound: _,
+    } = enroll_g2_pair(&server)?;
     server.fail_next_outbox_append()?;
 
     let fault_token = RecordAdmissionAttemptToken::new([0xF3; 16]);
@@ -402,16 +441,23 @@ fn assert_g2_fault_arm_is_typed() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-#[test]
-fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>> {
-    let home = tempfile::tempdir()?;
-    let server = SdkSocketFixture::start_gated(&home.path().join("g2"))?;
-    let (sender, peer, sender_id, peer_bound) = enroll_g2_pair(&server)?;
+struct HeldG2 {
+    sender: SdkParticipant,
+    sender_id: u64,
+    held_peer: SdkParticipant,
+    held_pid: u64,
+    priming_seq: u64,
+    priming_payload: Vec<u8>,
+}
 
-    // Commit one unacknowledged obligation while the peer has no live socket.
-    // Its next credential attach must replay this exact frame.
+fn engage_g2_holdback(server: &SdkSocketFixture, pair: G2Pair) -> Result<HeldG2, Box<dyn Error>> {
+    let G2Pair {
+        sender,
+        peer,
+        sender_id,
+        peer_bound,
+    } = pair;
     drop(peer);
-    let priming_token = RecordAdmissionAttemptToken::new([0x50; 16]);
     let priming_payload = vec![0xA5; 400];
     let priming = expect_applied(exchange(
         &sender,
@@ -419,16 +465,13 @@ fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>
             conversation_id: G2_CONVERSATION,
             participant_id: sender_id,
             capability_generation: Generation::ONE,
-            record_admission_attempt_token: priming_token,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x50; 16]),
             payload: priming_payload.clone(),
         }),
     )?)?;
     let ServerValue::RecordCommitted(priming) = priming else {
         return Err(format!("G2 priming record did not commit: {priming:?}").into());
     };
-
-    // AttachBound and the 400-byte replay each fit this real TCP sink, but not
-    // together. The pause fires only after the production pump retains replay.
     server.queue_next_outbound_capacity(480);
     let before = server.active_connection_pids();
     let held_peer = connect_participant(server.address()?, G2_CONVERSATION)?;
@@ -452,11 +495,71 @@ fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>
     holdback
         .recv_timeout(Duration::from_secs(2))
         .map_err(|error| format!("G2 peer never engaged holdback: {error}"))?;
+    let _ = expect_push(&sender)?;
+    let _ = expect_push(&sender)?;
+    Ok(HeldG2 {
+        sender,
+        sender_id,
+        held_peer,
+        held_pid,
+        priming_seq: priming.delivery_seq(),
+        priming_payload,
+    })
+}
 
-    // Superseding attach generates two independent pushes for the sender. Drain
-    // them before asserting that record responses never enter Push correlation.
-    let _ = expect_push(&sender)?;
-    let _ = expect_push(&sender)?;
+struct HeldDeliveries {
+    priming_seq: u64,
+    priming_payload: Vec<u8>,
+    first_seq: u64,
+    first_payload: Vec<u8>,
+    second_seq: u64,
+    second_payload: Vec<u8>,
+}
+
+fn resume_and_assert_held_deliveries(
+    server: &SdkSocketFixture,
+    held_peer: &SdkParticipant,
+    held_pid: u64,
+    sender_id: u64,
+    deliveries: HeldDeliveries,
+) -> Result<(), Box<dyn Error>> {
+    assert!(server.resume_process(held_pid));
+    let attached = expect_applied(held_peer.receive()?)?;
+    assert!(matches!(attached, ServerValue::AttachBound(_)));
+    let expected = [
+        (deliveries.priming_seq, deliveries.priming_payload),
+        (deliveries.first_seq, deliveries.first_payload),
+        (deliveries.second_seq, deliveries.second_payload),
+    ];
+    for (delivery_seq, payload) in expected {
+        let (push, _, _) = expect_push(held_peer)?;
+        assert_eq!(
+            push,
+            ServerPush::ParticipantDelivery(ParticipantDelivery {
+                conversation_id: G2_CONVERSATION,
+                delivery_seq,
+                record: ParticipantRecord::OrdinaryRecord {
+                    sender_participant_id: sender_id,
+                    payload
+                },
+            })
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let server = SdkSocketFixture::start_gated(&home.path().join("g2"))?;
+    let HeldG2 {
+        sender,
+        sender_id,
+        held_peer,
+        held_pid,
+        priming_seq,
+        priming_payload,
+    } = engage_g2_holdback(&server, enroll_g2_pair(&server)?)?;
 
     let first_token = RecordAdmissionAttemptToken::new([0x51; 16]);
     let first_payload = vec![0x00, 0xFF, 0x51, 0x00];
@@ -523,47 +626,20 @@ fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>
         first_committed.delivery_seq() + 1
     );
 
-    // Resume only after both correlated answers have applied. AttachBound is
-    // still the response-correlated value; all records are independent Push arms.
-    assert!(server.resume_process(held_pid));
-    let attached = expect_applied(held_peer.receive()?)?;
-    assert!(matches!(attached, ServerValue::AttachBound(_)));
-    let (priming_push, _, _) = expect_push(&held_peer)?;
-    let (first_push, _, _) = expect_push(&held_peer)?;
-    let (second_push, _, _) = expect_push(&held_peer)?;
-    assert_eq!(
-        priming_push,
-        ServerPush::ParticipantDelivery(ParticipantDelivery {
-            conversation_id: G2_CONVERSATION,
-            delivery_seq: priming.delivery_seq(),
-            record: ParticipantRecord::OrdinaryRecord {
-                sender_participant_id: sender_id,
-                payload: priming_payload,
-            },
-        })
-    );
-    assert_eq!(
-        first_push,
-        ServerPush::ParticipantDelivery(ParticipantDelivery {
-            conversation_id: G2_CONVERSATION,
-            delivery_seq: first_committed.delivery_seq(),
-            record: ParticipantRecord::OrdinaryRecord {
-                sender_participant_id: sender_id,
-                payload: first_payload,
-            },
-        })
-    );
-    assert_eq!(
-        second_push,
-        ServerPush::ParticipantDelivery(ParticipantDelivery {
-            conversation_id: G2_CONVERSATION,
-            delivery_seq: second_committed.delivery_seq(),
-            record: ParticipantRecord::OrdinaryRecord {
-                sender_participant_id: sender_id,
-                payload: second_payload,
-            },
-        })
-    );
+    resume_and_assert_held_deliveries(
+        &server,
+        &held_peer,
+        held_pid,
+        sender_id,
+        HeldDeliveries {
+            priming_seq,
+            priming_payload,
+            first_seq: first_committed.delivery_seq(),
+            first_payload,
+            second_seq: second_committed.delivery_seq(),
+            second_payload,
+        },
+    )?;
 
     drop(held_peer);
     drop(sender);

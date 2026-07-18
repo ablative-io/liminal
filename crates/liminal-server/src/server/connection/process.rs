@@ -174,32 +174,8 @@ impl ConnectionProcess {
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return NativeOutcome::Stop(ExitReason::Error);
         }
-        if let Some(service) = self.runtime.participant_service() {
-            #[cfg(test)]
-            let held_before = self.state.held_participant_pushes.len();
-            let publication_result = service_participant_publications(
-                &mut self.state,
-                service,
-                &mut self.outbound,
-                UNIT2_PUSH_SLICE_BUDGET,
-            );
-            if let Err(error) = publication_result {
-                tracing::error!(
-                    connection_pid = pid,
-                    %error,
-                    "participant publication failed; tearing down the connection"
-                );
-                self.release_conversations();
-                self.runtime
-                    .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-                return NativeOutcome::Stop(ExitReason::Error);
-            }
-            #[cfg(test)]
-            if self.state.held_participant_pushes.len() > held_before {
-                if self.runtime.pause_participant_holdback(pid) {
-                    return NativeOutcome::Wait;
-                }
-            }
+        if let Some(outcome) = self.service_participant_pushes(pid) {
+            return outcome;
         }
         // Pump subscriptions into the outbound buffer. An overflow (or an encode
         // fault) is fatal: a dropped or truncated delivery would desync the stream,
@@ -270,6 +246,35 @@ impl ConnectionProcess {
             }
             Err(error) => self.fail_slice(pid, &error),
         }
+    }
+
+    fn service_participant_pushes(&mut self, pid: u64) -> Option<NativeOutcome> {
+        let service = self.runtime.participant_service()?;
+        #[cfg(test)]
+        let held_before = self.state.held_participant_pushes.len();
+        if let Err(error) = service_participant_publications(
+            &mut self.state,
+            service,
+            &mut self.outbound,
+            UNIT2_PUSH_SLICE_BUDGET,
+        ) {
+            tracing::error!(
+                connection_pid = pid,
+                %error,
+                "participant publication failed; tearing down the connection"
+            );
+            self.release_conversations();
+            self.runtime
+                .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+            return Some(NativeOutcome::Stop(ExitReason::Error));
+        }
+        #[cfg(test)]
+        if self.state.held_participant_pushes.len() > held_before
+            && self.runtime.pause_participant_holdback(pid)
+        {
+            return Some(NativeOutcome::Wait);
+        }
+        None
     }
 
     fn fail_slice(&mut self, pid: u64, error: &ServerError) -> NativeOutcome {

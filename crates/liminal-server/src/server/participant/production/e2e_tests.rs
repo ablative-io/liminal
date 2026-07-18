@@ -196,7 +196,7 @@ fn roundtrip(
 fn await_genuine_park(
     server: &SocketFixture,
     pid: u64,
-    marker: Receiver<u64>,
+    marker: &Receiver<u64>,
 ) -> Result<u64, Box<dyn Error>> {
     marker
         .recv_timeout(Duration::from_secs(2))
@@ -209,11 +209,7 @@ fn await_genuine_park(
     Ok(parked_at)
 }
 
-fn assert_idle_slice_count_is_stable(
-    server: &SocketFixture,
-    pid: u64,
-    parked_at: u64,
-) -> Result<(), Box<dyn Error>> {
+fn assert_idle_slice_count_is_stable(server: &SocketFixture, pid: u64, parked_at: u64) {
     let unexpected_slice = server.observe_next_slice(pid);
     assert!(
         matches!(
@@ -227,7 +223,6 @@ fn assert_idle_slice_count_is_stable(
         parked_at,
         "parked process {pid} polled while idle"
     );
-    Ok(())
 }
 
 #[test]
@@ -250,8 +245,8 @@ fn parked_tcp_and_websocket_processes_wake_on_outbox_without_polling() -> Result
     let ServerValue::EnrollBound(tcp_recipient) = tcp_recipient else {
         return Err(format!("TCP recipient enrollment did not bind: {tcp_recipient:?}").into());
     };
-    let parked_at = await_genuine_park(&tcp_server, tcp_pid, initial_tcp_park)?;
-    assert_idle_slice_count_is_stable(&tcp_server, tcp_pid, parked_at)?;
+    let parked_at = await_genuine_park(&tcp_server, tcp_pid, &initial_tcp_park)?;
+    assert_idle_slice_count_is_stable(&tcp_server, tcp_pid, parked_at);
 
     let tcp_wake_park = tcp_server.observe_next_park(tcp_pid);
     let mut tcp_sender_socket = tcp_server.spawn_peer()?;
@@ -275,9 +270,9 @@ fn parked_tcp_and_websocket_processes_wake_on_outbox_without_polling() -> Result
         })
     );
     assert_ne!(tcp_recipient.participant_id(), tcp_sender.participant_id());
-    let reparks_at = await_genuine_park(&tcp_server, tcp_pid, tcp_wake_park)?;
+    let reparks_at = await_genuine_park(&tcp_server, tcp_pid, &tcp_wake_park)?;
     assert!(reparks_at > parked_at);
-    assert_idle_slice_count_is_stable(&tcp_server, tcp_pid, reparks_at)?;
+    assert_idle_slice_count_is_stable(&tcp_server, tcp_pid, reparks_at);
     drop(tcp_sender_socket);
     tcp_server.stop();
 
@@ -301,8 +296,8 @@ fn parked_tcp_and_websocket_processes_wake_on_outbox_without_polling() -> Result
             format!("WebSocket recipient enrollment did not bind: {ws_recipient:?}").into(),
         );
     };
-    let ws_parked_at = await_genuine_park(&ws_server, ws_pid, initial_ws_park)?;
-    assert_idle_slice_count_is_stable(&ws_server, ws_pid, ws_parked_at)?;
+    let ws_parked_at = await_genuine_park(&ws_server, ws_pid, &initial_ws_park)?;
+    assert_idle_slice_count_is_stable(&ws_server, ws_pid, ws_parked_at);
 
     let ws_wake_park = ws_server.observe_next_park(ws_pid);
     let ws_sender = ws_server.request(ClientRequest::Enrollment(EnrollmentRequest {
@@ -325,9 +320,9 @@ fn parked_tcp_and_websocket_processes_wake_on_outbox_without_polling() -> Result
         })
     );
     assert_ne!(ws_recipient.participant_id(), ws_sender.participant_id());
-    let ws_reparks_at = await_genuine_park(&ws_server, ws_pid, ws_wake_park)?;
+    let ws_reparks_at = await_genuine_park(&ws_server, ws_pid, &ws_wake_park)?;
     assert!(ws_reparks_at > ws_parked_at);
-    assert_idle_slice_count_is_stable(&ws_server, ws_pid, ws_reparks_at)?;
+    assert_idle_slice_count_is_stable(&ws_server, ws_pid, ws_reparks_at);
     ws_endpoint.stop()?;
     ws_server.stop();
     Ok(())
