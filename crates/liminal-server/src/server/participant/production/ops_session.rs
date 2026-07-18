@@ -9,9 +9,9 @@
 
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, CommittedBindingTerminalPosition, DetachCell, DetachLookupContext,
-    DetachLookupResult, DetachTokenResolution, PresentedIdentity, ResolvedIdentity,
-    RetainedRecordCharge, SemanticConnectionCapacityDecision, apply_detach_frontier, commit_detach,
-    decide_detached_operation, lookup_detach,
+    DetachLookupResult, DetachTokenResolution, PresentedIdentity, RecipientAckObligations,
+    ResolvedIdentity, RetainedRecordCharge, SemanticConnectionCapacityDecision,
+    apply_detach_frontier, commit_detach, decide_detached_operation, lookup_detach,
 };
 use liminal_protocol::wire::{
     BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse, ParticipantDelivery,
@@ -275,7 +275,7 @@ impl ConversationAuthority {
         config: &ParticipantConfig,
     ) -> Result<Self, StateError> {
         let mut authority = Self::empty(conversation_id);
-        let mut merge = ExtensionMerge::new(outbox_log, extension_rows)?;
+        let mut merge = ExtensionMerge::new(outbox_log, extension_rows, conversation_id)?;
         merge.apply_boundary(&mut authority, 0, None).await?;
         let mut sequence = 0_u64;
         loop {
@@ -292,9 +292,26 @@ impl ConversationAuthority {
                     }));
                 }
                 let operation_for_projection = operation.clone();
+                let ack_obligations = match &operation {
+                    StoredOperation::ZeroDebtAck { request, .. } => {
+                        let acknowledged_through = authority
+                            .slots
+                            .get(&request.participant_id)
+                            .map_or(0, |slot| slot.member.cursor());
+                        Some(merge.recipient_ack_obligations(
+                            request.participant_id,
+                            acknowledged_through,
+                        )?)
+                    }
+                    _ => None,
+                };
                 let mut facts = capture_projection_prestate(&authority, &operation_for_projection);
-                facts.marker_delivery =
-                    authority.replay_operation(operation, stored_sequence, config)?;
+                facts.marker_delivery = authority.replay_operation(
+                    operation,
+                    stored_sequence,
+                    config,
+                    ack_obligations,
+                )?;
                 let expected = project_committed_source(
                     &authority,
                     stored_sequence,
@@ -335,6 +352,7 @@ impl ConversationAuthority {
         operation: StoredOperation,
         sequence: u64,
         config: &ParticipantConfig,
+        ack_obligations: Option<(RecipientAckObligations, u64)>,
     ) -> Result<Option<ParticipantDelivery>, StateError> {
         match operation {
             StoredOperation::Genesis { event } => self.replay_genesis(&event).map(|()| None),
@@ -383,9 +401,22 @@ impl ConversationAuthority {
                 request,
                 receiving_epoch,
                 contiguously_available_through,
-            } => self
-                .replay_zero_debt_ack(request, receiving_epoch, contiguously_available_through)
-                .map(|()| None),
+            } => {
+                let (obligations, reconciled_available_through) =
+                    ack_obligations.ok_or_else(|| {
+                        StateError::invariant(
+                            "zero-debt ack replay is missing recipient obligations",
+                        )
+                    })?;
+                self.replay_zero_debt_ack(
+                    request,
+                    receiving_epoch,
+                    contiguously_available_through,
+                    reconciled_available_through,
+                    &obligations,
+                )
+                .map(|()| None)
+            }
             StoredOperation::RecordAdmission { row } => {
                 self.replay_record_admission(&row, config).map(|()| None)
             }

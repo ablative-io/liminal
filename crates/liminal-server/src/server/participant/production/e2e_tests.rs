@@ -33,11 +33,16 @@ use crate::server::connection::{
 use crate::server::participant::{InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT};
 
 use super::ProductionParticipantHandler;
-use super::tests::{open_disk_store_for_tests, test_participant_config};
+use super::tests::{
+    dispatch as production_dispatch, open_disk_store_for_tests, test_participant_config,
+};
 
 #[path = "e2e_socket_fixture.rs"]
 mod socket_fixture;
 pub(super) use socket_fixture::SocketFixture;
+
+#[path = "tests_endpoint_ack.rs"]
+mod tests_endpoint_ack;
 
 /// Connection services carrying ONLY the production participant service.
 #[derive(Debug)]
@@ -298,10 +303,16 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let data_dir = home.path().join("durability");
     let store = open_disk_store_for_tests(&data_dir)?;
     let config = test_participant_config();
-    let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
-    let participant_service =
-        InstalledParticipantService::new(Arc::new(handler), store, config.wire_frame_limit)
-            .map_err(|error| format!("{error:?}"))?;
+    let handler = Arc::new(ProductionParticipantHandler::new(
+        Arc::clone(&store),
+        config,
+    )?);
+    let participant_service = InstalledParticipantService::new(
+        Arc::clone(&handler) as Arc<_>,
+        store,
+        config.wire_frame_limit,
+    )
+    .map_err(|error| format!("{error:?}"))?;
     let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
         participant_service,
     });
@@ -346,7 +357,19 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let participant = receipt.participant_id();
     assert_eq!(old_epoch.capability_generation, Generation::ONE);
 
-    // Acknowledge the retained lifecycle record (a real committed cursor).
+    // A peer enrollment creates sequence 2 as a real recipient obligation for
+    // participant zero; sequence 1 is its sender-excluded internal endpoint.
+    let peer = production_dispatch(
+        &handler,
+        liminal_protocol::wire::ConnectionIncarnation::new(0x401, 2),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0x41; 16]),
+        }),
+    )?;
+    assert!(matches!(peer, ServerValue::EnrollBound(_)));
+
+    // Acknowledge the real durable peer-enrollment obligation before offer.
     let acked = roundtrip(
         &mut client,
         &mut inbound,
@@ -354,7 +377,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
             conversation_id: CONVERSATION,
             participant_id: participant,
             capability_generation: Generation::ONE,
-            through_seq: 1,
+            through_seq: 2,
         }),
     )?;
     assert!(

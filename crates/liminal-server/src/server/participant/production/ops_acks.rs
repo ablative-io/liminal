@@ -9,8 +9,9 @@ use liminal::durability::bridge::block_on;
 
 use liminal_protocol::lifecycle::{
     BindingState, MarkerAckCommit, MarkerAckDecision, MarkerProofState, ParticipantAckDecision,
-    PresentedIdentity, SemanticConnectionCapacityDecision, apply_marker_ack,
-    apply_marker_ack_frontier, apply_participant_ack, apply_participant_ack_frontier,
+    PresentedIdentity, RecipientAckObligations, SemanticConnectionCapacityDecision,
+    apply_marker_ack, apply_marker_ack_frontier, apply_participant_ack_frontier,
+    apply_participant_ack_with_obligations,
 };
 use liminal_protocol::wire::{
     BindingEpoch, MarkerAck, MarkerAckEnvelope, MarkerAckResponse, ParticipantAck,
@@ -36,11 +37,21 @@ impl ConversationAuthority {
             operation_facts.receiving_incarnation,
             request.capability_generation,
         );
-        let contiguous = self.contiguously_available_through();
+        let outbox = self
+            .outbox
+            .as_ref()
+            .ok_or_else(|| StateError::invariant("participant ack outbox owner is absent"))?;
+        let acknowledged_through = self.slots.get(&request.participant_id).map_or_else(
+            || outbox.durable_ack_through(request.participant_id),
+            |slot| slot.member.cursor(),
+        );
+        let (obligations, contiguously_available_through) =
+            outbox.recipient_ack_obligations(request.participant_id, acknowledged_through)?;
         self.ack_commit(
             request,
             receiving_epoch.into(),
-            contiguous,
+            &obligations,
+            contiguously_available_through,
             Some((operation_facts, appender)),
         )
     }
@@ -51,11 +62,19 @@ impl ConversationAuthority {
         request: StoredAck,
         receiving_epoch: StoredBindingEpoch,
         contiguously_available_through: u64,
+        reconciled_available_through: u64,
+        obligations: &RecipientAckObligations,
     ) -> Result<(), StateError> {
+        if contiguously_available_through != reconciled_available_through {
+            return Err(StateError::invariant(format!(
+                "durable zero-debt ack availability {contiguously_available_through} differs from reconciled recipient availability {reconciled_available_through}"
+            )));
+        }
         let request = request.to_request()?;
         let outcome = self.ack_commit(
             &request,
             receiving_epoch,
+            obligations,
             contiguously_available_through,
             None,
         )?;
@@ -82,6 +101,7 @@ impl ConversationAuthority {
         &mut self,
         request: &ParticipantAck,
         receiving_epoch: StoredBindingEpoch,
+        obligations: &RecipientAckObligations,
         contiguously_available_through: u64,
         live: Option<(&OperationFacts, &dyn DurableAppend)>,
     ) -> Result<ArmOutcome, StateError> {
@@ -97,13 +117,18 @@ impl ConversationAuthority {
             .slots
             .get(&request.participant_id)
             .map_or(&binding_detached, |slot| &slot.binding);
-        let decision = apply_participant_ack(
+        let decision = apply_participant_ack_with_obligations(
             identity,
             binding,
             receiving,
             request,
-            contiguously_available_through,
-        );
+            obligations,
+        )
+        .map_err(|error| {
+            StateError::invariant(format!(
+                "participant ack obligation testimony disagrees with protocol state: {error:?}"
+            ))
+        })?;
         match decision {
             ParticipantAckDecision::Respond(response) => {
                 // The crate's total ack selector conflates the frozen stages:

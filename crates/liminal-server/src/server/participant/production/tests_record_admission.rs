@@ -31,6 +31,15 @@ fn authorized_record_at_static_capacity_refuses_with_exact_token() -> Result<(),
     let ServerValue::EnrollBound(receipt) = enrolled else {
         return Err(format!("capacity fixture enrollment did not bind: {enrolled:?}").into());
     };
+    let peer = dispatch(
+        &handler,
+        ConnectionIncarnation::new(87, 2),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([123; 16]),
+        }),
+    )?;
+    assert!(matches!(peer, ServerValue::EnrollBound(_)));
     let token = RecordAdmissionAttemptToken::new([0xA5; 16]);
     let refused = dispatch(
         &handler,
@@ -56,7 +65,7 @@ fn authorized_record_at_static_capacity_refuses_with_exact_token() -> Result<(),
             conversation_id,
             participant_id: receipt.participant_id(),
             capability_generation: Generation::ONE,
-            through_seq: 1,
+            through_seq: 2,
         }),
     )?;
     assert!(matches!(acknowledged, ServerValue::AckCommitted(_)));

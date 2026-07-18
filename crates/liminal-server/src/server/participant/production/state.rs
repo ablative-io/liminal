@@ -280,11 +280,6 @@ impl ConversationAuthority {
         std::mem::take(&mut self.observer_progress_projections)
     }
 
-    /// Greatest delivery sequence contiguously admitted by this conversation.
-    pub(super) const fn contiguously_available_through(&self) -> DeliverySeq {
-        self.next_seq.saturating_sub(1)
-    }
-
     /// Takes the shell for a consuming protocol decision.
     pub(super) fn take_shell(&mut self) -> Result<ParticipantConversation, StateError> {
         self.shell.take().ok_or(StateError::ShellUnavailable)

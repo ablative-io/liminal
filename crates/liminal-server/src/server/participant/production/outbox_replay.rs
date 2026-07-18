@@ -2,6 +2,8 @@
 
 use std::collections::VecDeque;
 
+use liminal_protocol::lifecycle::RecipientAckObligations;
+
 use super::outbox::{ConversationOutbox, ConversationOutboxError};
 use super::outbox_log::{OutboxLog, OutboxRow};
 use super::state::{ConversationAuthority, StateError};
@@ -10,20 +12,34 @@ use super::state::{ConversationAuthority, StateError};
 pub(super) struct ExtensionMerge<'a> {
     log: &'a OutboxLog,
     pending: VecDeque<(u64, OutboxRow)>,
-    folded: Vec<(u64, OutboxRow)>,
+    outbox: ConversationOutbox,
     next_extension_sequence: u64,
 }
 
 impl<'a> ExtensionMerge<'a> {
-    pub(super) fn new(log: &'a OutboxLog, rows: Vec<(u64, OutboxRow)>) -> Result<Self, StateError> {
+    pub(super) fn new(
+        log: &'a OutboxLog,
+        rows: Vec<(u64, OutboxRow)>,
+        conversation_id: u64,
+    ) -> Result<Self, StateError> {
         let next_extension_sequence = u64::try_from(rows.len())
             .map_err(|_| StateError::invariant("Unit 2 extension stream length exceeds u64"))?;
         Ok(Self {
             log,
             pending: rows.into(),
-            folded: Vec::new(),
+            outbox: ConversationOutbox::restore(conversation_id, Vec::new())?,
             next_extension_sequence,
         })
+    }
+
+    pub(super) fn recipient_ack_obligations(
+        &self,
+        participant_id: u64,
+        acknowledged_through: u64,
+    ) -> Result<(RecipientAckObligations, u64), StateError> {
+        Ok(self
+            .outbox
+            .recipient_ack_obligations(participant_id, acknowledged_through)?)
     }
 
     /// Applies every physical extension row tied at `base_log_head`, then
@@ -74,7 +90,7 @@ impl<'a> ExtensionMerge<'a> {
                     authority.replay_marker_ack_extension(marker)?;
                 }
             }
-            self.folded.push((physical_sequence, row));
+            self.outbox.apply_row(physical_sequence, row)?;
         }
 
         if let Some(expected) = expected_projection {
@@ -90,8 +106,8 @@ impl<'a> ExtensionMerge<'a> {
                 .append(expected, self.next_extension_sequence)
                 .await
                 .map_err(ConversationOutboxError::from)?;
-            self.folded
-                .push((self.next_extension_sequence, expected.clone()));
+            self.outbox
+                .apply_row(self.next_extension_sequence, expected.clone())?;
             self.next_extension_sequence = self
                 .next_extension_sequence
                 .checked_add(1)
@@ -115,10 +131,7 @@ impl<'a> ExtensionMerge<'a> {
                 "Unit 2 extension physical sequence {physical_sequence} has impossible future boundary {boundary} above base head {final_base_log_head}"
             )));
         }
-        authority.outbox = Some(ConversationOutbox::restore(
-            authority.conversation_id,
-            self.folded,
-        )?);
+        authority.outbox = Some(self.outbox);
         Ok(())
     }
 }

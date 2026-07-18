@@ -4,6 +4,7 @@ mod validation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use liminal_protocol::lifecycle::{RecipientAckObligations, RecipientAckObligationsError};
 use liminal_protocol::wire::{ParticipantDelivery, ParticipantId, ParticipantRecord};
 
 use super::outbox_log::{
@@ -71,6 +72,21 @@ pub(super) enum ConversationOutboxError {
         participant_id: ParticipantId,
         current: u64,
         through_seq: u64,
+    },
+    /// The protocol rejected testimony projected from the validated obligation index.
+    #[error("Unit 2 obligations for participant {participant_id} are malformed: {error:?}")]
+    AckObligations {
+        participant_id: ParticipantId,
+        error: RecipientAckObligationsError,
+    },
+    /// The outbox's normal-ack frontier is ahead of the protocol-owned cursor.
+    #[error(
+        "Unit 2 ack frontier {outbox_ack_through} for participant {participant_id} is ahead of protocol cursor {acknowledged_through}"
+    )]
+    AckFrontierAhead {
+        participant_id: ParticipantId,
+        outbox_ack_through: u64,
+        acknowledged_through: u64,
     },
     /// Checked live charge arithmetic overflowed.
     #[error("Unit 2 live outbox charge overflowed")]
@@ -369,6 +385,45 @@ impl ConversationOutbox {
                     .contains(&participant_id)
                     .then(|| record.delivery.clone())
             })
+    }
+
+    /// Seals one participant's current durable-obligation index for protocol
+    /// ack selection and returns the corresponding reconciled scalar audit.
+    pub(super) fn recipient_ack_obligations(
+        &self,
+        participant_id: ParticipantId,
+        acknowledged_through: u64,
+    ) -> Result<(RecipientAckObligations, u64), ConversationOutboxError> {
+        let outbox_ack_through = self.durable_ack_through(participant_id);
+        if outbox_ack_through > acknowledged_through {
+            return Err(ConversationOutboxError::AckFrontierAhead {
+                participant_id,
+                outbox_ack_through,
+                acknowledged_through,
+            });
+        }
+        let delivery_sequences: Vec<_> = self
+            .all_obligations
+            .get(&participant_id)
+            .into_iter()
+            .flat_map(BTreeSet::iter)
+            .copied()
+            .filter(|delivery_seq| *delivery_seq > acknowledged_through)
+            .collect();
+        let contiguously_available_through = delivery_sequences
+            .last()
+            .copied()
+            .unwrap_or(acknowledged_through);
+        let obligations = RecipientAckObligations::try_new(
+            participant_id,
+            acknowledged_through,
+            delivery_sequences,
+        )
+        .map_err(|error| ConversationOutboxError::AckObligations {
+            participant_id,
+            error,
+        })?;
+        Ok((obligations, contiguously_available_through))
     }
 
     /// Durable cumulative ack cursor used when a new binding discards an old

@@ -259,6 +259,7 @@ fn two_participant_same_suffix_acks_and_regression_refusal_survive_cold_reopen()
     let data_dir = home.path().join("durability");
     let incarnation_a = ConnectionIncarnation::new(21, 1);
     let incarnation_b = ConnectionIncarnation::new(21, 2);
+    let incarnation_c = ConnectionIncarnation::new(21, 3);
     let participant_a;
     let participant_b;
 
@@ -293,10 +294,26 @@ fn two_participant_same_suffix_acks_and_regression_refusal_survive_cold_reopen()
         participant_b = receipt_b.participant_id();
         assert_ne!(participant_a, participant_b);
 
+        // A third participant's committed attach is a real shared recipient
+        // obligation for A and B. Their own enrollment endpoints are excluded
+        // from their recipient snapshots and therefore cannot be ack targets.
+        let enrolled_c = dispatch(
+            &handler,
+            incarnation_c,
+            ClientRequest::Enrollment(EnrollmentRequest {
+                conversation_id: CONVERSATION,
+                enrollment_token: EnrollmentToken::new([0x43; 16]),
+            }),
+        )?;
+        assert!(
+            matches!(enrolled_c, ServerValue::EnrollBound(_)),
+            "third enrollment did not create the shared obligation: {enrolled_c:?}"
+        );
+
         // Both participants acknowledge through the SAME suffix boundary —
         // the exact shape the contract's fixed occurrence array could not
         // represent and per-participant cursor facts must.
-        let same_suffix_boundary = 2;
+        let same_suffix_boundary = 3;
         for (incarnation, participant) in [
             (incarnation_a, participant_a),
             (incarnation_b, participant_b),
@@ -328,7 +345,7 @@ fn two_participant_same_suffix_acks_and_regression_refusal_survive_cold_reopen()
             conversation_id: CONVERSATION,
             participant_id: participant_b,
             capability_generation: Generation::ONE,
-            through_seq: 1,
+            through_seq: 2,
         }),
     )?;
     assert!(
@@ -344,7 +361,7 @@ fn two_participant_same_suffix_acks_and_regression_refusal_survive_cold_reopen()
             conversation_id: CONVERSATION,
             participant_id: participant_a,
             capability_generation: Generation::ONE,
-            through_seq: 2,
+            through_seq: 3,
         }),
     )?;
     assert!(

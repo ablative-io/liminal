@@ -6,8 +6,9 @@ use liminal::durability::{DurableStore, open_ephemeral};
 use liminal_protocol::lifecycle::{CapacityCounter, ConnectionConversationTracking};
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, EnrollBound, EnrollmentRequest, EnrollmentToken,
-    Generation, ParticipantAck, ParticipantDelivery, ParticipantId, ParticipantRecord,
-    RecordAdmission, RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
+    Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck, ParticipantDelivery,
+    ParticipantId, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
+    RecordCommitted, ServerValue,
 };
 
 use super::ProductionParticipantHandler;
@@ -54,7 +55,8 @@ struct FixtureMembers {
 
 pub(super) fn marker_fixture_config() -> ParticipantConfig {
     let mut config = test_participant_config();
-    // The first two ordinary commits generate marker debt; the third drains it.
+    // After retiring the transient peer, three ordinary commits generate marker
+    // debt and the fourth drains it, preserving the original two-member fixture.
     config.retained_capacity_entries = 14;
     config.retained_capacity_bytes = 65_536;
     config.max_retained_record_rows = 16;
@@ -143,34 +145,63 @@ fn enroll_members(
     })
 }
 
+fn ack_members_through(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    members: &FixtureMembers,
+    through_seq: u64,
+) -> Result<(), Box<dyn Error>> {
+    for (connection, participant_id) in [
+        (members.first_connection, members.first.participant_id()),
+        (members.second_connection, members.second.participant_id()),
+    ] {
+        let outcome = dispatch(
+            handler,
+            connection,
+            ClientRequest::ParticipantAck(ParticipantAck {
+                conversation_id,
+                participant_id,
+                capability_generation: Generation::ONE,
+                through_seq,
+            }),
+        )?;
+        assert!(matches!(outcome, ServerValue::AckCommitted(_)));
+    }
+    Ok(())
+}
+
 fn ack_marker_prefix(
     handler: &ProductionParticipantHandler,
     conversation_id: u64,
     members: &FixtureMembers,
 ) -> Result<(), Box<dyn Error>> {
-    let first = dispatch(
+    let third_connection = ConnectionIncarnation::new(0xA7, 3);
+    let third = dispatch(
         handler,
-        members.first_connection,
-        ClientRequest::ParticipantAck(ParticipantAck {
+        third_connection,
+        ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id,
-            participant_id: members.first.participant_id(),
-            capability_generation: Generation::ONE,
-            through_seq: 1,
+            enrollment_token: EnrollmentToken::new([0xA0; 16]),
         }),
     )?;
-    assert!(matches!(first, ServerValue::AckCommitted(_)));
-    let second = dispatch(
+    let ServerValue::EnrollBound(third) = third else {
+        return Err(format!("third marker fixture enrollment failed: {third:?}").into());
+    };
+    ack_members_through(handler, conversation_id, members, 3)?;
+
+    let left = dispatch(
         handler,
-        members.second_connection,
-        ClientRequest::ParticipantAck(ParticipantAck {
+        third_connection,
+        ClientRequest::Leave(LeaveRequest {
             conversation_id,
-            participant_id: members.second.participant_id(),
+            participant_id: third.participant_id(),
             capability_generation: Generation::ONE,
-            through_seq: 2,
+            attach_secret: third.attach_secret(),
+            leave_attempt_token: LeaveAttemptToken::new([0xA6; 16]),
         }),
     )?;
-    assert!(matches!(second, ServerValue::AckCommitted(_)));
-    Ok(())
+    assert!(matches!(left, ServerValue::LeaveCommitted(_)));
+    ack_members_through(handler, conversation_id, members, 4)
 }
 
 fn commit_fixture_record(
@@ -191,7 +222,11 @@ fn commit_fixture_record(
     let ServerValue::RecordCommitted(record) = outcome.value else {
         return Err(format!("marker fixture record did not commit: {:?}", outcome.value).into());
     };
-    assert_eq!(authority.next_log_sequence, source_sequence + expected_rows);
+    assert_eq!(
+        authority.next_log_sequence,
+        source_sequence + expected_rows,
+        "record at source {source_sequence} appended an unexpected row count"
+    );
     Ok((source_sequence, record))
 }
 
@@ -298,7 +333,7 @@ fn drive_marker_drain(
         .as_mut()
         .ok_or("marker fixture conversation owner was absent")?;
 
-    for token in [0xA3, 0xA4] {
+    for token in [0xA3, 0xA4, 0xA5] {
         let request = record_request(conversation_id, members.first.participant_id(), token);
         let (source, record) = commit_fixture_record(
             authority,
@@ -321,7 +356,7 @@ fn drive_marker_drain(
         )?;
     }
 
-    let request = record_request(conversation_id, members.first.participant_id(), 0xA5);
+    let request = record_request(conversation_id, members.first.participant_id(), 0xA8);
     let (marker_source, record) = commit_fixture_record(
         authority,
         &operation_log,
