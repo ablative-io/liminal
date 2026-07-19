@@ -1,6 +1,6 @@
 # W1b — durable Died / Ordinary / Recovered / Detached fate sources
 
-Revision: r3, 2026-07-20. Design-first lane; this revision is docs-only.
+Revision: r4, 2026-07-20. Design-first lane; this revision is docs-only.
 
 Normative ledger: `docs/design/WIRING-LEDGER.md` r1.9 at `c77ce31`. Source pin:
 `c77ce31`. The only repository change from the r1 source pin to this pin is the
@@ -21,24 +21,24 @@ Died, Ordinary, and Recovered (`docs/design/WIRING-LEDGER.md:57-75`).
 
 - **Owner:** Hermes.
 - **Named consumer:** the full Unit 2 §8 crash-fate observer-progress repair.
-- **Build trigger:** approval of this r3 design, followed by one W1b
+- **Build trigger:** approval of this r4 design, followed by one W1b
   implementation lane.
 - **Completion:** every production entry point, v3 row/decoder, replay path,
   barrier, and oracle in §12 lands together. Protocol-only callers or rows with
   no cold completion are not completion.
 
-The r1 and r2 reviews were both **not ready**. R2's prior findings remain folded
-in the decisions below; the round-2 re-review contributes this complete
-six-element array (**5 NEW MAJOR + 1 minor**):
+The r1 and r2 reviews were not ready; the round-3 verdict is **not_ready**. Every
+earlier finding remains folded below. Round 3 closes the earlier grammar, charge,
+Pending Detached, and digest findings and leaves this complete two-element array
+(**2 MAJOR**):
 
-| round-2 finding | r3 disposition |
+| round-3 finding | r4 disposition |
 |---|---|
-| MAJOR 1 — Pending-Died completion grammar | §§4.1, 4.5, 8, and 9 define one closed grammar. Ordinary names a lower Committed Died or exact Left/Fenced-Attached finalizer source; a Pending Died row never changes disposition. Recovered after Pending Died durably reserves/presents the occurrence, and the later finalizer consumes that reservation through a typed non-presenting transition. |
-| MAJOR 2 — consume-once must revoke copyable proof | §5.3 removes Clone/Copy from `FencedAttachCommit`, moves it by value through verified attach/commit, stores one private recovered authority, and removes the old public fate-capable method. §13 records the required next-publish `liminal-protocol` 0.3.0 semver implication. |
-| MAJOR 3 — selector candidate charge | §7.1 chooses a sealed two-stage prepare/admit API. The server computes one versioned canonical candidate charge after allocation is proposed; protocol validates conversation, participant, epoch, order, sequence, and one encoded entry before deciding Committed/Pending. Every refusal returns unchanged authority. |
-| MAJOR 4 — Pending explicit Detached shape | §§4.1 and 7.2 partition ExplicitRequestCommitted, which retains the canonical shell event, from ExplicitRequestPending, which stores no event and re-mints the pending cell/outcome from exact request facts and observer baseline. |
-| MAJOR 5 — Open intent live failure policy | §§3.2–3.4 and 11 choose participant-service/server-fatal escalation after Open. Startup replay is mandatory; Drop may release only volatile transport state and cannot complete/reclassify the intent. Simultaneously unmatched Opens are bounded by signed `limits.max_connections`. |
-| MINOR — marker digest contract | §5.1 omits the digest. The exact durable marker source sequence plus full source-row/frontier validation is sole identity; replay mints one `ValidatedMarkerRecord` only after validation. |
+| MAJOR 1 — move linearity boundary to proof mint | §5.3 makes `DetachedCredentialRecovery::fenced_attach` non-public and makes its sole internal mint consume the one non-Clone/non-Copy `ValidatedMarkerRecord` removed from full frontier validation. Public copyable recovery/cursor/debt/event/successor values remain harmless descriptions: no public value can mint a proof. The downstream proof, verified attach, commit, split, and recovered authority remain one by-value chain; Oracle 26 covers both the copyable prefix and the one-use mint. |
+| MAJOR 2 — bind unmatched Opens to their historical generation bound | §§3.2–3.4 and 11 resolve each Open's connection incarnation to its lower Allocate/startup generation and validate that generation's unmatched set against the Allocate event's persisted `declared_reference_bound`. Old Opens complete under that immutable historical bound after a configured-limit reduction; the current limit governs only new admission after the old set Completes. |
+
+The three round-3 residuals are implementation-review carries rather than design
+findings; §12.1 names all three and makes them mandatory build-tear checks.
 
 ## 1. Current byte ground truth and inherited semantics
 
@@ -98,6 +98,23 @@ The fixed protocol facts are:
    witnesses, and durable observer progress
    (`participant/production/state.rs:127-169`). The test-only crash repository
    is precedent, never a production owner.
+9. The current proof mint is one step earlier than r3 addressed:
+   `DetachedCredentialRecovery` and `CursorFateSuccessor` are public Clone + Copy,
+   and public `DetachedCredentialRecovery::fenced_attach` receives only Copy
+   values (`crates/liminal-protocol/src/lifecycle/edge.rs:569-605,710-752,
+   1217-1241,1298-1358,2698-2759`). A caller can retain the predecessor and call
+   that mint twice. In contrast, `ValidatedMarkerRecord` is non-Clone/non-Copy,
+   sealed behind the private `claim_frontier` module, and full restore removes it
+   once with `take_marker_record` (`lifecycle/claim_frontier.rs:1490-1541`;
+   `lifecycle/storage.rs:233-280`; `lifecycle/mod.rs:106-123`).
+10. Each current Allocate input already stores an immutable
+    `declared_reference_bound`; encode writes it as a big-endian u64 and decode
+    rejects a count over that stored value. Replay validates against the stored
+    bound rather than the process's current configuration
+    (`crates/liminal-server/src/server/participant/incarnation_stream.rs:1-12,
+    211-218,336-367,448-470,521-562,604-653`). The supervisor currently supplies
+    `limits.max_connections` as that bound
+    (`crates/liminal-server/src/server/connection/supervisor.rs:820-837`).
 
 ## 2. Decision A — closed connection classification and live producer census
 
@@ -200,15 +217,42 @@ before any conversation mutex is taken. After all targets complete, it is
 reacquired to append/flush Complete. This preserves one lock order and prevents
 connection/conversation inversion.
 
-The same authority owns a checked in-memory set of unmatched Open sequences. Its
-server-wide hard bound is the startup-signed `LimitsConfig::max_connections`, the
-existing cap on concurrently admitted live connections
-(`crates/liminal-server/src/config/types.rs:270-284,316-340`). Startup admits no
-new connections until it has completed every restored Open, so historical Opens
-cannot overlap a new admitted generation. During live service each connection
-can own at most one Open, and the listener can have at most `max_connections`
-connections; an attempted second Open or over-bound set is a typed invariant
-failure before append. Complete removes the sequence from this set.
+The same authority owns a checked in-memory set of unmatched Open sequences, but
+**replay never reinterprets that set under the current configured limit**. R4
+chooses the reviewer's smallest shape and adds no duplicate bound field to Open:
+`connection_incarnation` already resolves the exact lower Allocate result and its
+enclosing Startup generation during deterministic incarnation-stream replay.
+That Allocate carries the immutable `declared_reference_bound` that was in force
+when the generation admitted the connection
+(`crates/liminal-server/src/server/participant/incarnation_stream.rs:211-218,
+303-379,436-470`). The canonical bytes encode and decode that stored bound before
+the reference count (`:521-562,604-653`). The first Allocate after one Startup
+establishes that startup generation's bound; every later Allocate before the next
+Startup must repeat it exactly, or replay returns a typed generation-bound
+conflict before accepting an Open. Duplicating the value in Open would add bytes
+and create two values that replay would still have to compare; the lower Allocate
+is the single historical source.
+
+Replay tracks `{ startup_sequence, server_incarnation,
+declared_reference_bound }` with the unmatched set. The first unmatched Open
+selects its lower generation. Every simultaneous unmatched Open must resolve to
+that same generation, must name a connection actually produced by one of its
+Allocate events, and the checked active count must remain `<=` that generation's
+persisted `declared_reference_bound`. A cross-generation Open, unknown allocation,
+second Open for one connection, Complete for an absent Open, or set of size
+`bound + 1` is a typed history refusal before any conversation replay or service
+publication. Complete removes exactly one sequence. The active replay index
+retains only that one bounded generation/set, not all historical allocations.
+
+On a reduced-limit restart, all unmatched old-generation Opens complete under
+their old persisted bound even when it exceeds the new
+`LimitsConfig::max_connections`. Startup admits no new connection and appends no
+new Open until that historical set is empty and Complete has flushed for every
+member. Only then does the current signed `max_connections` bound new connection
+allocation/admission and the next generation's unmatched set. During live service
+one admitted connection owns at most one Open, so the current set cannot exceed
+the same current limit (`crates/liminal-server/src/config/types.rs:270-284,
+316-340`; `crates/liminal-server/src/server/connection/supervisor.rs:820-837`).
 
 ### 3.3 Lifecycle and replay
 
@@ -224,10 +268,14 @@ failure before append. Complete removes the sequence from this set.
    durably terminalized or proved to contain no matching Bound slot does the
    incarnation authority append/flush Complete.
 4. **Replayed:** incarnation-stream replay keeps only unmatched Open rows in a
-   checked map. Before startup publishes the participant service, it hands each
-   open item to the same handler, processes the entire tail, appends Complete,
-   then performs the remaining UncleanServerRestart pass. No polling or absence
-   guess is involved; Open is positive durable work authority.
+   checked map and binds that map to §3.2's one resolved historical generation
+   and persisted bound. Before current-limit admission or participant-service
+   publication, startup hands each open item to the same handler, processes the
+   entire tail, and appends Complete; only then does it perform the remaining
+   UncleanServerRestart pass. A configuration reduction cannot refuse a legal old
+   set, while fabricated over-bound/cross-generation history refuses before any
+   handler runs. No polling or absence guess is involved; Open is positive
+   durable work authority.
 5. **Reclaimed:** Complete removes the intent from the replay-time/live active
    map immediately. Paired Open/Complete bytes remain in the append-only
    incarnation stream because `DurableStore` exposes append/read/CAS/scan/flush,
@@ -265,7 +313,9 @@ conversation owner, or continue participant service. Before Open flush, by
 contrast, Drop/release is forbidden because no durable authority owns the list.
 A non-crash injected middle failure therefore first produces an observable fatal
 latch and service refusal, then controlled restart completes every tail item from
-Open; §12 names that fixture separately from abrupt process crash.
+Open under the Open set's persisted historical-generation bound; a smaller new
+configuration cannot preempt that recovery. Section 12 names that fixture
+separately from abrupt process crash.
 
 ## 4. Decision C — four exact v3 fate rows, sources, and replay
 
@@ -431,12 +481,14 @@ than duplicating its full proof.
 **Marker identity ruling: no digest.** Conversation stream identity plus the v3
 `marker_source_sequence`, expected marker row kind, and marker delivery sequence
 select one durable row. Replay decodes that complete source row and validates its
-causal row/provenance/target binding/occurrence through total
-frontier restore, and only then obtains the private `ValidatedMarkerRecord`.
-That token cannot be fabricated from raw ids and is consumed after restore
-(`lifecycle/claim_frontier.rs:1490-1541`). A hash would add an unversioned second
-identity while still requiring this full validation, so no
-`marker_record_digest` field or function exists.
+causal row/provenance/target binding/occurrence through total frontier restore.
+Only then may the move-only prevalidated frontier remove exactly one private
+`ValidatedMarkerRecord`; its private seal and lack of Clone/Copy prevent
+fabrication or duplication (`lifecycle/claim_frontier.rs:1490-1541`;
+`lifecycle/storage.rs:233-256`). R4's sole fenced proof mint consumes that token,
+so marker identity and proof linearity share the same one-use boundary. A hash
+would add an unversioned second identity while still requiring this full
+validation, so no `marker_record_digest` field or function exists.
 
 ### 5.2 Frozen-v2 Attached mapping
 
@@ -459,30 +511,77 @@ The frozen decoder preserves every field before conversion:
 V3 never infers mode from options or prestate: the tag is mandatory and every
 redundant request/prestate field is cross-checked.
 
-### 5.3 Consume exactly once
+### 5.3 Consume exactly once, beginning at the proof mint
 
-R2's split was insufficient at the bytes. `FencedAttachCommit` is publicly
-Clone + Copy and exposes public `recovered_binding_fate(self, ...)`, while
-`AttachMode::Fenced` merely borrows it; the pre-attach caller can retain a
-fate-capable copy (`lifecycle/edge.rs:955-968,1007-1056`;
-`lifecycle/attach.rs:215-222,300-357`). R3 changes ownership itself:
+R3 moved the downstream proof by value but began one operation too late. In the
+pinned bytes, `DetachedCredentialRecovery` is public Clone + Copy and its public
+`fenced_attach(self, debt, event, successor)` constructs `FencedAttachCommit`.
+`CursorFateSuccessor`, `ClosureDebt`, `Event`, and `DebtCompletion` are also Copy,
+so retaining the predecessor permits two successful proof mints before either
+proof enters r3's linear chain (`lifecycle/edge.rs:9-29,569-605,722-752,
+955-1056,1217-1241,1298-1358,2698-2759`). R4 moves the boundary to that mint.
 
-1. Remove `Clone` and `Copy` from public `FencedAttachCommit`; retain only Debug,
-   PartialEq, and Eq. Its observational accessors borrow `&self`.
-2. `verify_fenced_attach` accepts `proof: FencedAttachCommit` **by value** and
-   returns a non-Clone `VerifiedAttachCommit<F>` whose private
-   `AttachMode::Fenced` owns the proof, with no lifetime/borrow. A verification
-   refusal returns an owning error wrapper containing the unchanged member and
-   proof, never a copied proof.
-3. `commit_attach` consumes that verified value by value. Fenced commit moves the
-   proof's fate-capable state into one private `RecoveredBindingAuthority` field
-   inside `AttachCommit`; Installed state gets only non-fate transition audit.
-4. Remove the public `FencedAttachCommit::recovered_binding_fate`. Its logic moves
-   to a crate-private consuming method on `RecoveredBindingAuthority`; only that
-   authority can produce `RecoveredBindingFate`.
-5. The final production boundary consumes once:
+The complete copyability contract is deliberate:
+
+- `DetachedCredentialRecovery` and `CursorFateSuccessor` remain public Clone +
+  Copy compatibility/descriptive values. Copying them may reproduce exact edge
+  facts or convert them to stored-edge data; it grants no marker-occurrence
+  authority.
+- `ClosureDebt`, `Event`, and `DebtCompletion` remain Clone + Copy because they
+  are bounded scalar/debt/successor descriptions independently checked against
+  the exact transition. None proves that one retained marker occurrence may be
+  consumed.
+- `ValidatedMarkerRecord` remains non-Clone/non-Copy, has a private seal, is not
+  re-exported from the private `claim_frontier` module, and is removed exactly
+  once from the move-owned prevalidated frontier after complete source-row and
+  historical occurrence validation (`lifecycle/claim_frontier.rs:1490-1541`;
+  `lifecycle/storage.rs:233-256`; `lifecycle/mod.rs:106-123`). It is the first
+  one-use value and therefore the **linearity boundary**.
+
+There is one public production operation and one private proof constructor:
 
 ```text
+LiveFrontierOwner::mint_fenced_attach(
+    self,
+    marker_source_sequence,
+    recovery: DetachedCredentialRecovery,
+    debt,
+    event,
+    successor,
+)
+ -> Minted { owner_without_marker_authority, proof: FencedAttachCommit }
+  | MintRefused { unchanged_owner, unchanged_inputs, typed_reason }
+```
+
+The public operation consumes the move-only coupled owner, resolves the exact
+source selected by the v3 row, and removes its sole `ValidatedMarkerRecord`; it
+never accepts a record token or raw replacement from the caller. Change
+`DetachedCredentialRecovery::fenced_attach` from `pub` to `pub(super)` and require
+that removed `record_authority: ValidatedMarkerRecord` by value in addition to the
+existing inputs. Only the owner operation can call the private method; neither it
+nor the record type is exposed publicly. The private mint validates the record's
+conversation, participant, delivered marker sequence, target prior binding epoch,
+and delivered occurrence against the recovery edge, then validates the event's
+participant, marker, prior/new epochs, debt, and restricted successor. A refusal
+constructs no proof and returns the original owner with the same record installed
+plus every unchanged input; it can be retried serially but cannot fork. Success
+returns the owner with that record authority absent, consumes the record's seal,
+and returns exactly one non-Clone/non-Copy `FencedAttachCommit`. No other
+constructor, restore shortcut, raw-id upgrade, test-only production seam, or
+public Copy value can cross this boundary.
+
+The remainder of the chain is also linear:
+
+```text
+full source-row + frontier validation
+  -> move-only LiveFrontierOwner owns one ValidatedMarkerRecord
+  -> mint_fenced_attach consumes owner and takes that record
+  -> private fenced_attach consumes record and mints one FencedAttachCommit
+  -> verify_fenced_attach consumes proof into VerifiedAttachCommit<F>
+  -> commit_attach consumes verified value into AttachCommit
+  -> into_slot_and_fate consumes commit and splits once
+  -> RecoveredBindingAuthority consumes into RecoveredBindingFate
+
 AttachCommit::into_slot_and_fate(self)
     -> (InstalledAttachState<F, V>, SealedBindingFateToken)
 
@@ -490,14 +589,30 @@ SealedBindingFateToken = None | Ordinary(OrdinaryFateAuthority)
                               | Recovered(RecoveredBindingAuthority)
 ```
 
-`InstalledAttachState` owns member, active binding, detach cell, Attached record,
-outcome, and receipt facts. `ConversationAuthority` stores exactly one private
-slot token and moves it into §4.3. On fate refusal it receives the same authority
-back; on success it is consumed. No public/borrowing fate accessor remains.
-Oracle 25 includes trybuild cases that attempt to retain the pre-attach proof,
-copy/clone it, invoke recovered fate after moving it into verification, and call
-the old public fate method; every case must fail to compile. Live and replay each
-exercise one successful by-value chain.
+Remove Clone/Copy from public `FencedAttachCommit`; its observational accessors
+borrow `&self`. `verify_fenced_attach` takes it by value and owns it in non-Clone
+`VerifiedAttachCommit<F>`/private `AttachMode::Fenced`; a refusal returns the
+same owned proof. `commit_attach` moves fate-capable state into exactly one
+private `RecoveredBindingAuthority` in `AttachCommit`. Remove public
+`FencedAttachCommit::recovered_binding_fate`; only a crate-private consuming
+method on that recovered authority can produce fate. `InstalledAttachState` gets
+only non-fate audit, while `ConversationAuthority` stores one private slot token,
+returns the same token on refusal, and consumes it on success. These downstream
+changes remain grounded in the current Copy proof and borrowing attach path
+(`lifecycle/edge.rs:955-1056`; `lifecycle/attach.rs:215-222,300-357`).
+
+Oracle 26 extends its UI set in both directions. Passing cases retain/copy
+`DetachedCredentialRecovery` and `CursorFateSuccessor` to prove that the harmless
+prefix remains copyable. External compile-fail cases copy those values and try to
+call the private raw mint or invoke the public owner operation twice with one
+moved `LiveFrontierOwner`. Crate-internal UI cases try to clone/copy
+`ValidatedMarkerRecord` or feed one record to two copied recovery values. Further
+cases retain/copy/clone a minted proof, reuse it after verification, call the
+removed fate method, and split twice. A successful live fixture and a successful
+cold fixture each traverse the complete chain and instrument exactly one proof
+mint, one verification, one commit, one split, and one recovered-authority
+consumption. Thus only one complete chain can exist even though every descriptive
+value before the marker authority remains copyable.
 
 ## 6. Decision E — participant schema v3 and cross-page phase
 
@@ -770,6 +885,12 @@ Exact crash cuts:
   volatile transport, and controlled restart completes every tail from Open;
 - after an abrupt middle crash: startup performs the same tail completion before
   accepting a connection;
+- after restart with a reduced `max_connections`: replay resolves all unmatched
+  Opens to their one lower Allocate/startup generation, validates their count
+  against that generation's persisted `declared_reference_bound`, completes the
+  exact set, and only then permits admission under the smaller current limit;
+  fabricated cross-generation or historical `bound + 1` input refuses before
+  conversation mutation/publication;
 - after Died/Detached flush before state/Advance: cold replay restores the source
   and repairs before publication;
 - after Died flush before Ordinary/Recovered: the explicit specific intent
@@ -789,9 +910,11 @@ Exact crash cuts:
 
 ## 12. Acceptance oracle census
 
-Each exact name appears once in this brief. These 48 names are implementation
+Each exact name appears once in this brief. These 49 names are implementation
 floor, not suggestions. Fixtures use deterministic append/flush gates and actual
 observations; no sleeps, eventual assertions, or constant-versus-constant claims.
+The r3-to-r4 renumber map is exact: old 1–26 remain 1–26; new historical-bound
+fixture is 27; old 27–48 become 28–49.
 
 | # | exact oracle | required proof |
 |---:|---|---|
@@ -820,29 +943,30 @@ observations; no sleeps, eventual assertions, or constant-versus-constant claims
 | 23 | `died_specific_fate_intent_completes_after_source_only_crash` | Cut after Died flush, restart, append exactly one named Ordinary/Recovered completion, then publish. |
 | 24 | `attached_v3_closed_modes_round_trip_complete_fenced_proof` | Round-trip all modes; Fenced resolves exact source row, mints one ValidatedMarkerRecord without digest, and checks predecessor/debt/successor/composed terminal. |
 | 25 | `attached_v2_mapping_is_lossless_and_marker_rows_refuse_without_proof` | Map both legal v2 modes exactly; marker-bearing v2 returns the named typed proof-unavailable refusal. |
-| 26 | `attach_commit_splits_operational_state_and_one_noncloneable_fate_token` | Trybuild proves pre-attach proof cannot be retained/copied/cloned or used for fate after move, old public method is inaccessible, and split cannot repeat; live/replay consume one chain. |
-| 27 | `old_v2_reader_refuses_v3_fate_row_with_typed_schema_version` | Frozen old reader returns SchemaVersion(3) before enum decode/publication. |
-| 28 | `v3_reader_accepts_v2_prefix_and_refuses_v2_after_v3` | Contiguous histories pass; regression reports exact sequence. |
-| 29 | `v2_after_v3_across_operation_page_boundary_refuses_before_apply` | V3 at page tail then v2 at next-page head retains phase and refuses before authority/Advance apply. |
-| 30 | `missing_unknown_malformed_and_mixed_operation_versions_refuse_before_publication` | Independent fixtures read exact typed errors and no publication. |
-| 31 | `terminal_disposition_selector_commits_or_pends_from_protocol_state` | Two-stage prepare/encode/admit validates all candidate identities, v3 encoding, keyed charge, and one entry; real states select Committed/Pending and every refusal returns unchanged owner/allocators. |
-| 32 | `fate_occurrence_key_presents_each_new_arm_at_most_once` | Four independent arms derive exact key; same/cross-class duplicates cannot add a second witness. |
-| 33 | `died_then_recovered_same_epoch_presents_died_once` | Both durable transitions replay; Committed Died alone presents without numeric dedup. |
-| 34 | `recovered_then_died_same_epoch_refuses_before_observer_mutation` | Reversed base rows fail validate-first grammar with unchanged owner/outbox/observer state. |
-| 35 | `recovered_then_died_same_epoch_after_advance_flush_refuses_without_second_presentation` | Include durable Recovered Advance; reverse Died still refuses before apply/publication and durable rows remain unchanged. |
-| 36 | `recovered_after_pending_died_presents_measured_floor_once` | Pending Died precedes RecoveredOwnsAndReservesFinalizer, which presents one measured floor and one durable reservation. |
-| 37 | `pending_died_recovered_reservation_makes_leave_finalizer_non_presenting` | Real Pending Died + Recovered intent + Leave; Recovered presents/reserves, Left commits state while consuming reservation with no projection, live/cold agree. |
-| 38 | `pending_died_recovered_reservation_makes_fenced_attach_finalizer_non_presenting` | Same grammar through real Fenced Attached; composed terminal is audited, reservation consumed, and no Attached terminal witness exists. |
-| 39 | `pending_died_restart_restores_cause_epoch_order_without_refinish` | Source-only restart restores Pending/open intent without calling finish twice or assigning terminal seq. |
-| 40 | `pending_detached_restart_restores_disconnect_or_shutdown_without_refinish` | Real selector-generated Pending Detached restores exact cause/source/order without projection. |
-| 41 | `pending_died_finalized_by_leave_presents_only_live_leave_commit` | Pending Died without a Recovered reservation plus Leave presents only Left; Ordinary later references Left and remains non-presenting. |
-| 42 | `pending_detached_finalized_by_leave_presents_only_live_leave_commit` | Real clean/shutdown Pending Detached plus Leave presents only Left. |
-| 43 | `pending_terminal_composed_by_attach_presents_only_attached_source` | Pending Died/Detached without Recovered reservation through Fenced mode audits terminal and presents only Attached. |
-| 44 | `standalone_pending_finalizer_has_no_production_entry_point` | Type-aware census finds only Leave/Fenced Attached and no alternate row. |
-| 45 | `leave_finalizer_resolves_pending_source_without_claiming_stored_cause` | Decode Left without cause, resolve pending source and optional Recovered reservation, and compare source cause/epoch/terminal. |
-| 46 | `same_participant_ack_lineage_regression_refuses_before_observer_mutation` | Retained test reads exact refusal and unchanged durable rows after decoration deletion. |
-| 47 | `w1b_tear_rider_removes_tautological_four_counter_tuple` | Source census proves declarations/tuple absent and no constant-only replacement. |
-| 48 | `fate_live_and_cold_replay_produce_identical_witnesses_and_state` | For all four classes, finalizer grammar branches, and intent failures, compare decoded rows, authority, reservations, witnesses, outbox, and observer progress. |
+| 26 | `attach_commit_splits_operational_state_and_one_noncloneable_fate_token` | Pass UI fixtures retain/copy `DetachedCredentialRecovery` and `CursorFateSuccessor`; compile-fail fixtures prove the move-only owner/private mint/one `ValidatedMarkerRecord` cannot yield two proofs, then prove proof/verify/commit/split/recovered authority cannot clone, reuse, or fork. Live/cold instrument exactly one complete chain. |
+| 27 | `historical_open_generation_bound_survives_limit_reduction_and_refuses_overbound_history` | Under an old larger limit create multiple unmatched Opens, restart with a smaller current limit, and complete the exact old set under its persisted Allocate bound before admission; fabricate historical bound + 1 and observe typed refusal before conversation mutation/publication. |
+| 28 | `old_v2_reader_refuses_v3_fate_row_with_typed_schema_version` | Frozen old reader returns SchemaVersion(3) before enum decode/publication. |
+| 29 | `v3_reader_accepts_v2_prefix_and_refuses_v2_after_v3` | Contiguous histories pass; regression reports exact sequence. |
+| 30 | `v2_after_v3_across_operation_page_boundary_refuses_before_apply` | V3 at page tail then v2 at next-page head retains phase and refuses before authority/Advance apply. |
+| 31 | `missing_unknown_malformed_and_mixed_operation_versions_refuse_before_publication` | Independent fixtures read exact typed errors and no publication. |
+| 32 | `terminal_disposition_selector_commits_or_pends_from_protocol_state` | Two-stage prepare/encode/admit validates all candidate identities, v3 encoding, keyed charge, and one entry; real states select Committed/Pending and every refusal returns unchanged owner/allocators. |
+| 33 | `fate_occurrence_key_presents_each_new_arm_at_most_once` | Four independent arms derive exact key; same/cross-class duplicates cannot add a second witness. |
+| 34 | `died_then_recovered_same_epoch_presents_died_once` | Both durable transitions replay; Committed Died alone presents without numeric dedup. |
+| 35 | `recovered_then_died_same_epoch_refuses_before_observer_mutation` | Reversed base rows fail validate-first grammar with unchanged owner/outbox/observer state. |
+| 36 | `recovered_then_died_same_epoch_after_advance_flush_refuses_without_second_presentation` | Include durable Recovered Advance; reverse Died still refuses before apply/publication and durable rows remain unchanged. |
+| 37 | `recovered_after_pending_died_presents_measured_floor_once` | Pending Died precedes RecoveredOwnsAndReservesFinalizer, which presents one measured floor and one durable reservation. |
+| 38 | `pending_died_recovered_reservation_makes_leave_finalizer_non_presenting` | Real Pending Died + Recovered intent + Leave; Recovered presents/reserves, Left commits state while consuming reservation with no projection, live/cold agree. |
+| 39 | `pending_died_recovered_reservation_makes_fenced_attach_finalizer_non_presenting` | Same grammar through real Fenced Attached; composed terminal is audited, reservation consumed, and no Attached terminal witness exists. |
+| 40 | `pending_died_restart_restores_cause_epoch_order_without_refinish` | Source-only restart restores Pending/open intent without calling finish twice or assigning terminal seq. |
+| 41 | `pending_detached_restart_restores_disconnect_or_shutdown_without_refinish` | Real selector-generated Pending Detached restores exact cause/source/order without projection. |
+| 42 | `pending_died_finalized_by_leave_presents_only_live_leave_commit` | Pending Died without a Recovered reservation plus Leave presents only Left; Ordinary later references Left and remains non-presenting. |
+| 43 | `pending_detached_finalized_by_leave_presents_only_live_leave_commit` | Real clean/shutdown Pending Detached plus Leave presents only Left. |
+| 44 | `pending_terminal_composed_by_attach_presents_only_attached_source` | Pending Died/Detached without Recovered reservation through Fenced mode audits terminal and presents only Attached. |
+| 45 | `standalone_pending_finalizer_has_no_production_entry_point` | Type-aware census finds only Leave/Fenced Attached and no alternate row. |
+| 46 | `leave_finalizer_resolves_pending_source_without_claiming_stored_cause` | Decode Left without cause, resolve pending source and optional Recovered reservation, and compare source cause/epoch/terminal. |
+| 47 | `same_participant_ack_lineage_regression_refuses_before_observer_mutation` | Retained test reads exact refusal and unchanged durable rows after decoration deletion. |
+| 48 | `w1b_tear_rider_removes_tautological_four_counter_tuple` | Source census proves declarations/tuple absent and no constant-only replacement. |
+| 49 | `fate_live_and_cold_replay_produce_identical_witnesses_and_state` | For all four classes, finalizer grammar branches, intent failures, and historical Open bounds, compare decoded rows, authority, reservations, witnesses, outbox, and observer progress. |
 
 Repository gates for implementation are:
 
@@ -856,6 +980,47 @@ cargo check -p liminal-sdk --target wasm32-unknown-unknown --no-default-features
 ```
 
 The wasm legs are mandatory because protocol fate/attach types change.
+
+### 12.1 Implementation-review carries
+
+These three round-3 residuals do not reopen the closed design rulings, but the W1b
+build tear must name and discharge each one with code, ownership inspection, and
+the relevant census fixtures:
+
+1. **startup composition sequencing.** Inspect the concrete composition order from
+   incarnation replay/current Startup fsync through historical Open validation,
+   handler tail completion, Complete flush, UncleanServerRestart repair, owner
+   publication, scheduler/listener readiness, and new admission. The tear must
+   prove no publication/accept seam can race ahead, including reduced-limit
+   restart and every error return. Current bytes replay then fsync Startup inside
+   the authority constructor and install that authority while building the
+   supervisor (`crates/liminal-server/src/server/participant/incarnation_stream.rs:270-301`;
+   `crates/liminal-server/src/server/connection/incarnation.rs:40-75`;
+   `crates/liminal-server/src/server/connection/supervisor.rs:820-864`); W1b must
+   show the final composed
+   ordering rather than infer it from local functions.
+2. **charge constructor/error-path ownership.** Inspect visibility and every
+   `Result` arm for `CandidateTerminalKey`, `BindingTerminalCandidateCharge`,
+   `PreparedBindingTerminal`, and encode/admit errors. Only the canonical server
+   encoder may build the keyed charge; no public/raw constructor may splice its
+   fields. Every serialization, length conversion, key mismatch, capacity,
+   arithmetic, closure, and disposition refusal must return the original
+   `LiveFrontierOwner` and unchanged order/sequence allocators. The tear follows
+   the current canonical charge/error sites and the move-only owner's private
+   coupled fields
+   (`crates/liminal-server/src/server/participant/production/frontier.rs:126-147`;
+   `crates/liminal-protocol/src/lifecycle/operations/live_frontier.rs:37-67,
+   134-164`), not merely success-path types.
+3. **validate-pass memory proof.** Inventory every value retained across §6's
+   complete validate pass, state its signed/protocol bound, and measure a
+   multi-page high-water fixture. The pass may retain phase, checked scalar
+   allocators, active slot/occurrence/intent state, and one page, but not clone or
+   collect the full operation history; the apply pass rereads bounded pages only
+   after validation succeeds. The tear must reconcile this with today's
+   single-pass page loop
+   (`crates/liminal-server/src/server/participant/production/ops_session.rs:274-354`)
+   and demonstrate that source references and marker lookup do not introduce a
+   history-linear in-memory index.
 
 ## 13. Honesty, semver, and bounded cost
 
@@ -878,19 +1043,22 @@ bounded by the connection's tracked conversations and each conversation's signed
 slot capacity, not total registered conversations and not a periodic scan.
 
 Replay retains one active-map entry per unmatched connection intent, each with at
-most K ids, and discards it on Complete. Fate rows add fixed bounded metadata;
-Fenced Attached proof is a fixed product of existing bounded proof types. The
-append-only bytes remain historical; r3 makes no physical compaction or
-unbounded-history safety claim.
+most K ids, and discards it on Complete. The simultaneous set belongs to one
+historical generation and is bounded by that generation's persisted
+`declared_reference_bound`; a lower current limit does not multiply or retain a
+second set. Fate rows add fixed bounded metadata; Fenced Attached proof is a fixed
+product of existing bounded proof types. The append-only bytes remain historical;
+r4 makes no physical compaction or unbounded-history safety claim.
 
 ### 13.2 Published protocol semver
 
 `FencedAttachCommit` is a public type in published `liminal-protocol` 0.2.0;
 the repository currently declares 0.2.1
 (`crates/liminal-protocol/Cargo.toml:1-4`; workspace dependency at
-`Cargo.toml:27`). Removing public Clone/Copy and the public recovered-fate method
-is a breaking API change even though it repairs authority soundness. Therefore a
-W1b implementation landing implies **`liminal-protocol` 0.3.0 at the next
+`Cargo.toml:27`). Removing public Clone/Copy, the public recovered-fate method, and public
+`DetachedCredentialRecovery::fenced_attach` is a breaking API change even though
+it repairs authority soundness. Therefore a W1b implementation landing implies
+**`liminal-protocol` 0.3.0 at the next
 publish**. This brief flags that requirement for the coordinator's version list;
 it does not decide the release train or edit package versions in this docs-only
 revision.
@@ -915,8 +1083,11 @@ Ordinary/Recovered callers are **not** deferred.
   inside `ConversationAuthority`; the incarnation stream owns only bounded fold
   work identity.
 - **WALL-W1B-BOUNDED-INTENT:** one Open list is sorted, unique, and no longer than
-  `max_semantic_conversations_per_connection`; simultaneously unmatched Opens
-  never exceed signed `limits.max_connections`; Complete logically reclaims one.
+  `max_semantic_conversations_per_connection`; simultaneous unmatched Opens all
+  resolve to one lower Allocate/startup generation and never exceed that
+  generation's persisted `declared_reference_bound`. Complete logically reclaims
+  one; the current `limits.max_connections` applies only to new admission after
+  the historical set is empty.
 - **WALL-W1B-OPEN-FAILURE-FATAL:** after Open, any incomplete live fold latches
   participant/server fatal and requires startup replay; Drop can release only
   volatile transport state and cannot complete or reclassify the intent.
@@ -926,11 +1097,14 @@ Ordinary/Recovered callers are **not** deferred.
   the consuming protocol selector computes it from coupled frontier state.
 - **WALL-W1B-TERMINAL-CHARGE:** sealed prepare plus versioned keyed candidate
   charge precedes admit; mismatch/refusal returns unchanged owner and allocators.
-- **WALL-W1B-SEALED-ATTACH:** public `FencedAttachCommit` is non-Clone/non-Copy,
-  moves by value through attach, and yields one private recovered authority; no
-  pre-attach caller retains a fate-capable proof.
+- **WALL-W1B-SEALED-ATTACH:** the one-use boundary is the non-public proof mint:
+  it consumes the sole non-Clone/non-Copy `ValidatedMarkerRecord` before yielding
+  one non-Clone/non-Copy `FencedAttachCommit`. Copyable DCR/cursor/debt/event/
+  successor values cannot invoke or cross that boundary; proof, verification,
+  commit, split, and recovered authority then move by value exactly once.
 - **WALL-W1B-MARKER-SOURCE:** exact source-row decode plus full frontier validation
-  is sole marker identity; no digest duplicates it.
+  is sole marker identity; its removed record token authorizes one proof mint and
+  no digest duplicates it.
 - **WALL-W1B-RECOVERED-NO-TERMINAL:** Recovered has a lower Died source reference
   for order but receives no Died terminal protocol input.
 - **WALL-W1B-PENDING-DIED-GRAMMAR:** immutable Pending Died completes Ordinary
@@ -958,7 +1132,7 @@ Ordinary/Recovered callers are **not** deferred.
   constant-only rider decoration is deleted.
 - **WALL-W1B-OBSERVATION-LENS:** no proposed oracle proves constants with
   constants; every assertion reads real protocol/production/durable state.
-- **WALL-W1B-DOCS-ONLY-R3:** this revision changes only this brief.
+- **WALL-W1B-DOCS-ONLY-R4:** this revision changes only this brief.
 
 ## 16. Revision record
 
@@ -967,3 +1141,4 @@ Ordinary/Recovered callers are **not** deferred.
 | r1 | 2026-07-19 | Initial three-fate brief against ledger r1.8. Pre-review verdict: not ready. |
 | r2 | 2026-07-20 | Pins `c77ce31` / ledger r1.9 and folds the full findings array (**5 MAJOR + 1 minor**), the coordinator's **EXTEND** ruling for first-class Detached, and both coordinator notes (bounded intent owner/lifecycle; airtight fenced-Attached lens). Adds clean Disconnect/server-shutdown producers, durable bounded tail intent, exact Ordinary/Recovered caller and protocol floor selector, replay-completed Died-specific intent, closed v3 Attached modes and lossless v2 mapping, one-use fate token, cross-page schema phase, protocol disposition selector, honest StoredLeave source audit, enforced Died-before-Recovered including Advance case, 45-oracle renumbered census, and bounded active-cost statement. |
 | r3 | 2026-07-20 | Keeps pin `c77ce31` and folds the complete round-2 six-element findings array (**5 NEW MAJOR + 1 minor**): immutable Pending-Died Ordinary finalizer sources and Recovered-owned reservation/non-presenting Leave+Fenced finalizers; by-value non-Clone/non-Copy `FencedAttachCommit` with private recovered authority and 0.3.0 next-publish semver flag; sealed two-stage terminal prepare/admit with exact v3 keyed candidate charge; event-free ExplicitRequestPending Detached; post-Open participant/server-fatal policy with `max_connections` unmatched bound and non-crash recovery; and source-row/full-validation marker identity with no digest. Extends the census from 45 to 48. |
+| r4 | 2026-07-20 | Keeps pin `c77ce31` and folds the complete round-3 two-element findings array (**2 MAJOR**): moves proof linearity to a non-public fenced mint that consumes the one fully validated non-Clone/non-Copy marker record before the r3 by-value chain; and binds simultaneous unmatched Opens to their lower Allocate/startup generation's persisted `declared_reference_bound`, allowing exact recovery after a current-limit reduction and refusing fabricated over-bound/cross-generation history. Names all three implementation-review carries (startup composition sequencing, charge constructor/error-path ownership, validate-pass memory proof), extends Oracle 26, and extends/renumbers the census from 48 to 49. |
