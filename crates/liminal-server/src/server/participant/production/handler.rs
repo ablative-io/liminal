@@ -269,11 +269,14 @@ impl ProductionParticipantHandler {
             RestoreError::Extension(error) => outbox_log_error(&error),
             RestoreError::Semantic(error) => state_error(&error),
         })?;
-        let observer_projections = replayed.take_observer_progress_projections();
+        let observer_witnesses = replayed.take_observer_progress_witnesses();
         if !replayed.tokens.is_empty() {
-            self.ensure_observer_tracked(conversation_id)?;
-            self.reconcile_observer_progress(conversation_id, observer_projections)?;
-        } else if !observer_projections.is_empty() {
+            self.reconcile_observer_progress(
+                conversation_id,
+                &observer_witnesses,
+                replayed.observer_progress,
+            )?;
+        } else if !observer_witnesses.is_empty() {
             return Err(ParticipantSemanticError::Internal {
                 message: format!(
                     "unenrolled conversation {conversation_id} projected observer progress"

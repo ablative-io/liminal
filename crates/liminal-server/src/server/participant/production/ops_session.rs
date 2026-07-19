@@ -23,6 +23,7 @@ use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barr
 use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{OperationLog, StoredBindingEpoch, StoredDetachRequest, StoredOperation};
+use super::observer_progress::ObserverProgressSourceMetadata;
 use super::outbox::ConversationOutboxLimits;
 use super::outbox_log::OutboxLog;
 use super::outbox_projection::{capture_projection_prestate, project_committed_source};
@@ -168,6 +169,7 @@ impl ConversationAuthority {
         terminal_seq: u64,
         mode: CommitMode<'_>,
     ) -> Result<liminal_protocol::wire::DetachCommitted, StateError> {
+        let source_sequence = self.next_log_sequence;
         let (participant_id, mut slot) = self
             .slots
             .remove_entry(&request.participant_id)
@@ -263,9 +265,9 @@ impl ConversationAuthority {
         slot.cell = DetachCell::Committed(cell);
         slot.exact_detach_token = Some(request.detach_attempt_token);
         self.slots.insert(participant_id, slot);
-        self.record_observer_progress_projection(observer_projection);
-        self.next_order = self.next_order.max(terminal_order.saturating_add(1));
-        self.next_seq = self.next_seq.max(terminal_seq.saturating_add(1));
+        let metadata = detach_metadata(source_sequence, request, terminal_seq);
+        self.record_observer_progress_projection(observer_projection, metadata)?;
+        self.observe_replayed_position(terminal_order, terminal_seq)?;
         Ok(outcome)
     }
 
@@ -310,6 +312,7 @@ impl ConversationAuthority {
                     }
                     _ => None,
                 };
+                authority.begin_observer_progress_source()?;
                 let mut facts = capture_projection_prestate(&authority, &operation_for_projection);
                 facts.marker_delivery = authority.replay_operation(
                     operation,
@@ -323,6 +326,7 @@ impl ConversationAuthority {
                     &operation_for_projection,
                     facts,
                 )?;
+                authority.end_observer_progress_source()?;
                 sequence = sequence
                     .checked_add(1)
                     .ok_or(StateError::AllocationExhausted {
@@ -397,6 +401,7 @@ impl ConversationAuthority {
                     }
                     _ => None,
                 };
+                authority.begin_observer_progress_source()?;
                 let mut facts = capture_projection_prestate(&authority, &operation_for_projection);
                 facts.marker_delivery = authority.replay_operation(
                     operation,
@@ -410,6 +415,7 @@ impl ConversationAuthority {
                     &operation_for_projection,
                     facts,
                 )?;
+                authority.end_observer_progress_source()?;
                 sequence = sequence
                     .checked_add(1)
                     .ok_or(StateError::AllocationExhausted {
@@ -516,6 +522,19 @@ impl ConversationAuthority {
             StoredOperation::Left { row } => self.replay_leave(&row).map(|()| None),
         }
     }
+}
+
+const fn detach_metadata(
+    source_sequence: u64,
+    request: &DetachRequest,
+    terminal_seq: u64,
+) -> ObserverProgressSourceMetadata {
+    ObserverProgressSourceMetadata::detached(
+        source_sequence,
+        request.conversation_id,
+        request.participant_id,
+        terminal_seq,
+    )
 }
 
 /// Stored inputs of one committed detach entry, regrouped for replay.

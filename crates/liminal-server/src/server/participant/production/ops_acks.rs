@@ -22,6 +22,7 @@ use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::Digest;
 use super::log::{StoredAck, StoredBindingEpoch, StoredOperation};
 use super::marker_progress::{marker_delivery_progress, marker_replay_progress};
+use super::observer_progress::ObserverProgressSourceMetadata;
 use super::outbox_log::{OutboxLog, OutboxRow, StoredMarkerAckCommitted};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
@@ -105,6 +106,7 @@ impl ConversationAuthority {
         contiguously_available_through: u64,
         live: Option<(&OperationFacts, &dyn DurableAppend)>,
     ) -> Result<ArmOutcome, StateError> {
+        let source_sequence = self.next_log_sequence;
         let receiving = receiving_epoch.to_epoch()?;
         let identity = self
             .slots
@@ -204,7 +206,8 @@ impl ConversationAuthority {
                     StateError::invariant(format!("ack cursor commit rejected: {error:?}"))
                 })?;
                 self.install_frontier(frontier_owner);
-                self.record_observer_progress_projection(observer_projection);
+                let metadata = participant_ack_metadata(source_sequence, request);
+                self.record_observer_progress_projection(observer_projection, metadata)?;
                 Ok(ArmOutcome {
                     value: ParticipantAckResponse::ack_committed(outcome).into_server_value(),
                     newly_tracked,
@@ -340,6 +343,14 @@ impl ConversationAuthority {
             base_log_head: self.next_log_sequence,
             extension_sequence,
         };
+        let metadata = ObserverProgressSourceMetadata::marker_ack(
+            stored.base_log_head,
+            stored.extension_sequence,
+            stored.request.conversation_id,
+            stored.request.participant_id,
+            stored.request.marker_delivery_seq,
+            stored.resulting_cursor,
+        );
         let row = OutboxRow::MarkerAckCommitted(stored);
         block_on(outbox_log.append(&row, extension_sequence))??;
         self.outbox
@@ -355,7 +366,7 @@ impl ConversationAuthority {
         self.install_frontier(frontier);
         self.offered_markers
             .remove(&(request.participant_id, request.marker_delivery_seq));
-        self.record_observer_progress_projection(observer_projection);
+        self.record_observer_progress_projection(observer_projection, metadata)?;
         Ok(ArmOutcome {
             value: MarkerAckResponse::marker_ack_committed(outcome).into_server_value(),
             newly_tracked,
@@ -422,6 +433,14 @@ impl ConversationAuthority {
             ));
         }
         let observer_projection = commit.observer_progress_projection();
+        let metadata = ObserverProgressSourceMetadata::marker_ack(
+            row.base_log_head,
+            row.extension_sequence,
+            row.request.conversation_id,
+            row.request.participant_id,
+            row.request.marker_delivery_seq,
+            row.resulting_cursor,
+        );
         let transitioned =
             apply_marker_ack_frontier(self.take_frontier()?, commit).map_err(|failure| {
                 StateError::invariant(format!(
@@ -448,9 +467,21 @@ impl ConversationAuthority {
             ));
         }
         self.install_frontier(frontier);
-        self.record_observer_progress_projection(observer_projection);
+        self.record_observer_progress_projection(observer_projection, metadata)?;
         Ok(())
     }
+}
+
+const fn participant_ack_metadata(
+    source_sequence: u64,
+    request: &ParticipantAck,
+) -> ObserverProgressSourceMetadata {
+    ObserverProgressSourceMetadata::participant_ack(
+        source_sequence,
+        request.conversation_id,
+        request.participant_id,
+        request.through_seq,
+    )
 }
 
 const fn participant_ack_envelope(request: &ParticipantAck) -> ParticipantAckEnvelope {

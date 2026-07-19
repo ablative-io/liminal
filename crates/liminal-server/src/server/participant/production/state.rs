@@ -24,6 +24,10 @@ use liminal_protocol::wire::{
 
 use super::facts::{Digest, FactsError};
 use super::log::{OperationLogError, StoredOperation};
+use super::observer_progress::{
+    ObserverProgressConformanceError, ObserverProgressSourceMetadata,
+    ObserverProgressSourceWitness, ObserverProgressWitnessState,
+};
 use super::outbox::{ConversationOutbox, ConversationOutboxError};
 use super::outbox_log::OutboxLogError;
 
@@ -156,10 +160,10 @@ pub(super) struct ConversationAuthority {
     pub(super) next_participant: ParticipantId,
     /// Optimistic durable log head.
     pub(super) next_log_sequence: u64,
-    /// Exact move-only projections surrendered by replayed protocol sources.
-    /// The handler drains these only into the serialized observer owner after
-    /// the participant source barrier has crossed.
-    observer_progress_projections: Vec<ObserverProgressProjection>,
+    /// The pre-existing replay vector enriched with source, occurrence,
+    /// producer, lineage, and checked merged-order provenance. The handler
+    /// drains it only after the complete source replay succeeds.
+    observer_progress_witnesses: ObserverProgressWitnessState,
     /// Durable hard-observer progress for this conversation.
     pub(super) observer_progress: DeliverySeq,
 }
@@ -182,6 +186,9 @@ pub(super) enum StateError {
     /// A server-owned fact could not be minted.
     #[error(transparent)]
     Facts(#[from] FactsError),
+    /// Observer-progress source or durable-prefix conformance failed.
+    #[error(transparent)]
+    ObserverProgressConformance(#[from] ObserverProgressConformanceError),
     /// The protocol shell refused an operation the log claims committed.
     #[error("conversation shell refused a committed operation: {reason:?}")]
     ShellRefused {
@@ -259,7 +266,7 @@ impl ConversationAuthority {
             next_seq: 1,
             next_participant: 0,
             next_log_sequence: 0,
-            observer_progress_projections: Vec::new(),
+            observer_progress_witnesses: ObserverProgressWitnessState::new(),
             observer_progress: 0,
         }
     }
@@ -268,16 +275,32 @@ impl ConversationAuthority {
     pub(super) fn record_observer_progress_projection(
         &mut self,
         projection: ObserverProgressProjection,
-    ) {
-        if projection.new_observer_progress() > self.observer_progress {
-            self.observer_progress = projection.new_observer_progress();
-        }
-        self.observer_progress_projections.push(projection);
+        metadata: ObserverProgressSourceMetadata,
+    ) -> Result<(), StateError> {
+        let progress = projection.new_observer_progress();
+        self.observer_progress_witnesses
+            .record(self.conversation_id, projection, metadata)?;
+        self.observer_progress = self.observer_progress.max(progress);
+        Ok(())
     }
 
-    /// Surrenders every source projection in participant-log order.
-    pub(super) fn take_observer_progress_projections(&mut self) -> Vec<ObserverProgressProjection> {
-        std::mem::take(&mut self.observer_progress_projections)
+    /// Begins one checked source visit in the actual base/extension merge.
+    pub(super) fn begin_observer_progress_source(&mut self) -> Result<(), StateError> {
+        self.observer_progress_witnesses.begin_source()?;
+        Ok(())
+    }
+
+    /// Completes the current checked merged source visit.
+    pub(super) fn end_observer_progress_source(&mut self) -> Result<(), StateError> {
+        self.observer_progress_witnesses.end_source()?;
+        Ok(())
+    }
+
+    /// Surrenders the complete validated source pass in merged replay order.
+    pub(super) fn take_observer_progress_witnesses(
+        &mut self,
+    ) -> Vec<ObserverProgressSourceWitness> {
+        self.observer_progress_witnesses.take()
     }
 
     /// Takes the shell for a consuming protocol decision.
@@ -354,9 +377,22 @@ impl ConversationAuthority {
     }
 
     /// Advances the position allocators past a replayed entry's positions.
-    pub(super) fn observe_replayed_position(&mut self, order: u64, seq: u64) {
-        self.next_order = self.next_order.max(order.saturating_add(1));
-        self.next_seq = self.next_seq.max(seq.saturating_add(1));
+    pub(super) fn observe_replayed_position(
+        &mut self,
+        order: u64,
+        seq: u64,
+    ) -> Result<(), StateError> {
+        let next_order = order
+            .checked_add(1)
+            .ok_or(StateError::AllocationExhausted {
+                domain: "transaction order",
+            })?;
+        let next_seq = seq.checked_add(1).ok_or(StateError::AllocationExhausted {
+            domain: "delivery sequence",
+        })?;
+        self.next_order = self.next_order.max(next_order);
+        self.next_seq = self.next_seq.max(next_seq);
+        Ok(())
     }
 
     /// Ensures durable shell genesis, appending event zero on first touch.

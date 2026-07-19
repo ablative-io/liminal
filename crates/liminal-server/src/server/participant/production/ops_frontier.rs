@@ -249,8 +249,7 @@ impl ConversationAuthority {
             retained_record_limit,
         );
         self.install_frontier(owner);
-        self.next_order = self.next_order.max(order.saturating_add(1));
-        self.next_seq = self.next_seq.max(sequence.saturating_add(1));
+        self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()?;
         Ok(ArmOutcome::committed(
             RecordAdmissionResponse::record_committed(response).into_server_value(),
@@ -415,8 +414,7 @@ impl ConversationAuthority {
             retained_record_limit,
         );
         self.install_frontier(owner);
-        self.next_order = self.next_order.max(order.saturating_add(1));
-        self.next_seq = self.next_seq.max(sequence.saturating_add(1));
+        self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()
     }
 }

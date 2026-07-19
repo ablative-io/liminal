@@ -18,6 +18,7 @@ use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::{self, Digest};
 use super::frontier::{left_record_charge, terminal_charge as terminal_record_charge};
 use super::log::{StoredBindingEpoch, StoredLeave, StoredLeaveRequest, StoredOperation};
+use super::observer_progress::ObserverProgressSourceMetadata;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 /// Complete move-only server input to one protocol-owned Leave transition.
@@ -192,6 +193,7 @@ impl ConversationAuthority {
         capacity: ConnectionConversationCapacityCommit,
         appender: &dyn DurableAppend,
     ) -> Result<ArmOutcome, StateError> {
+        let source_sequence = self.next_log_sequence;
         let prepared = self.prepare_leave_transition(request, request_verifier)?;
         let outcome = prepared.tombstone.committed_result().clone();
         let row = StoredLeave {
@@ -207,9 +209,16 @@ impl ConversationAuthority {
         self.install_frontier(prepared.owner);
         self.retired
             .insert(request.participant_id, prepared.tombstone);
-        self.record_observer_progress_projection(prepared.observer_projection);
-        self.next_order = self.next_order.max(prepared.left_order.saturating_add(1));
-        self.next_seq = prepared.left_seq.saturating_add(1);
+        self.record_observer_progress_projection(
+            prepared.observer_projection,
+            ObserverProgressSourceMetadata::leave(
+                source_sequence,
+                request.conversation_id,
+                request.participant_id,
+                prepared.left_seq,
+            ),
+        )?;
+        self.observe_replayed_position(prepared.left_order, prepared.left_seq)?;
         self.advance_log_head()?;
         Ok(ArmOutcome::committed(
             LeaveResponse::leave_committed(outcome).into_server_value(),
@@ -258,6 +267,7 @@ impl ConversationAuthority {
     /// Replays one v2 Left row through the same protocol-owned Leave
     /// transition and validates every persisted tombstone allocation.
     pub(super) fn replay_leave(&mut self, row: &StoredLeave) -> Result<(), StateError> {
+        let source_sequence = self.next_log_sequence;
         let request = row.request.into_request()?;
         let request_verifier = facts::leave_request_verifier(&request);
         if request_verifier != row.request_verifier {
@@ -294,11 +304,16 @@ impl ConversationAuthority {
         self.install_frontier(prepared.owner);
         self.retired
             .insert(request.participant_id, prepared.tombstone);
-        self.record_observer_progress_projection(prepared.observer_projection);
-        self.next_order = self
-            .next_order
-            .max(row.left_transaction_order.saturating_add(1));
-        self.next_seq = row.left_delivery_seq.saturating_add(1);
+        self.record_observer_progress_projection(
+            prepared.observer_projection,
+            ObserverProgressSourceMetadata::leave(
+                source_sequence,
+                request.conversation_id,
+                request.participant_id,
+                row.left_delivery_seq,
+            ),
+        )?;
+        self.observe_replayed_position(row.left_transaction_order, row.left_delivery_seq)?;
         self.advance_log_head()
     }
 }

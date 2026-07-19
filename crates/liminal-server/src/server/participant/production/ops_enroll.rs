@@ -403,7 +403,7 @@ impl ConversationAuthority {
                 domain: "participant index",
             })?
             .max(self.next_participant);
-        self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
+        self.observe_replayed_position(allocation.attached_order, allocation.attached_seq)?;
         Ok(outcome)
     }
 }

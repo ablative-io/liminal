@@ -47,7 +47,7 @@ impl ProductionParticipantHandler {
     ) -> Result<ServerValue, ParticipantSemanticError> {
         let operation_facts =
             self.operation_facts(context, request.conversation_id, conversations)?;
-        let value = self.conversation_operation(
+        self.conversation_operation(
             request.conversation_id,
             conversations,
             |authority, appender| {
@@ -59,13 +59,7 @@ impl ProductionParticipantHandler {
                     appender,
                 )
             },
-        )?;
-        // Only a fresh commit registers observer tracking; refusals and replays
-        // leave the observer log untouched.
-        if matches!(value, ServerValue::EnrollBound(_)) {
-            self.ensure_observer_tracked(request.conversation_id)?;
-        }
-        Ok(value)
+        )
     }
 }
 

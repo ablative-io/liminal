@@ -84,6 +84,9 @@ impl<'a> ExtensionMerge<'a> {
                     "Unit 2 extension merge lost its physical head",
                 ))
             })?;
+            authority
+                .begin_observer_progress_source()
+                .map_err(RestoreError::Semantic)?;
             match &row {
                 OutboxRow::Produced(_) | OutboxRow::AckAdvanced { .. } => {
                     if expected_projection != Some(&row) {
@@ -108,6 +111,9 @@ impl<'a> ExtensionMerge<'a> {
             self.outbox
                 .apply_row(physical_sequence, row)
                 .map_err(StateError::from)
+                .map_err(RestoreError::Semantic)?;
+            authority
+                .end_observer_progress_source()
                 .map_err(RestoreError::Semantic)?;
         }
 
@@ -134,10 +140,12 @@ impl<'a> ExtensionMerge<'a> {
                 .map_err(ConversationOutboxError::from)
                 .map_err(StateError::from)
                 .map_err(RestoreError::Semantic)?;
+            authority.begin_observer_progress_source()?;
             self.outbox
                 .apply_row(next_extension_sequence, expected.clone())
                 .map_err(StateError::from)
                 .map_err(RestoreError::Semantic)?;
+            authority.end_observer_progress_source()?;
             self.repair_head = Some(next_extension_sequence.checked_add(1).ok_or_else(|| {
                 RestoreError::Semantic(StateError::invariant("Unit 2 extension head overflowed"))
             })?);
@@ -236,6 +244,7 @@ impl<'a> AggregateExtensionMerge<'a> {
             let (_, row) = self.pending.pop_front().ok_or_else(|| {
                 StateError::invariant("Unit 2 extension merge lost its physical head")
             })?;
+            authority.begin_observer_progress_source()?;
             match &row {
                 OutboxRow::Produced(_) | OutboxRow::AckAdvanced { .. } => {
                     if expected_projection != Some(&row) {
@@ -256,6 +265,7 @@ impl<'a> AggregateExtensionMerge<'a> {
                 }
             }
             self.outbox.apply_row(physical_sequence, row)?;
+            authority.end_observer_progress_source()?;
         }
 
         if let Some(expected) = expected_projection {
@@ -271,8 +281,10 @@ impl<'a> AggregateExtensionMerge<'a> {
                 .append(expected, self.next_extension_sequence)
                 .await
                 .map_err(ConversationOutboxError::from)?;
+            authority.begin_observer_progress_source()?;
             self.outbox
                 .apply_row(self.next_extension_sequence, expected.clone())?;
+            authority.end_observer_progress_source()?;
             self.next_extension_sequence = self
                 .next_extension_sequence
                 .checked_add(1)

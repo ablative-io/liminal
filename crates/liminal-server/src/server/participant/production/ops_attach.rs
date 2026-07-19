@@ -31,6 +31,7 @@ use super::capacity::ServerCapacity;
 use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{StoredAttachAllocation, StoredAttachRequest, StoredOperation};
+use super::observer_progress::ObserverProgressSourceMetadata;
 use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
 use super::state::{
@@ -213,6 +214,7 @@ impl ConversationAuthority {
         allocation: &StoredAttachAllocation,
         mode: CommitMode<'_>,
     ) -> Result<AttachBound, StateError> {
+        let source_sequence = self.next_log_sequence;
         let (participant_id, mut slot) = self
             .slots
             .remove_entry(&request.participant_id)
@@ -314,11 +316,26 @@ impl ConversationAuthority {
         });
         self.slots.insert(participant_id, slot);
         if let Some(projection) = observer_projection {
-            self.record_observer_progress_projection(projection);
+            let terminal_delivery_seq = projection.new_observer_progress();
+            let metadata = attach_metadata(source_sequence, request, terminal_delivery_seq);
+            self.record_observer_progress_projection(projection, metadata)?;
         }
-        self.observe_replayed_position(allocation.attached_order, allocation.attached_seq);
+        self.observe_replayed_position(allocation.attached_order, allocation.attached_seq)?;
         Ok(outcome)
     }
+}
+
+const fn attach_metadata(
+    source_sequence: u64,
+    request: &CredentialAttachRequest,
+    terminal_delivery_seq: u64,
+) -> ObserverProgressSourceMetadata {
+    ObserverProgressSourceMetadata::attached(
+        source_sequence,
+        request.conversation_id,
+        request.participant_id,
+        terminal_delivery_seq,
+    )
 }
 
 fn transition_attach_frontier(
