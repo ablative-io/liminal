@@ -1,7 +1,8 @@
 # Wiring ledger — dormant machinery and its roads back
 
-- **Revision:** r1.8, 2026-07-20 (lane W1a CLOSED at 8ce73bf). Owner of
-  the ledger: Waffles (coordination seat).
+- **Revision:** r1.9, 2026-07-20 (W1b scope EXTENDED to Detached sources —
+  W1b pre-review findings 3+5). Owner of the ledger: Waffles
+  (coordination seat).
   Lane owner unless stated otherwise: Hermes Crumpet (liminal seat).
 - **Why this exists:** the F-0c Unit 2 fold minted the unwired-seam sweep as a
   mandatory discipline: every entry point a branch adds either has a production
@@ -76,9 +77,21 @@ the tuple.
   via structural-absence check + `cfg(test)` duplicate-injection seam.
 - **Owner:** Hermes (brief r2 folds findings 2, 3, 5 at his seat).
 
-#### W1b — Died/Ordinary/Recovered durable source rows (design-first)
-- **What is missing:** the three fate `StoredOperation` variants, their
-  replay transitions, and their §8 flush barriers — never built.
+#### W1b — Died/Ordinary/Recovered/Detached durable source rows (design-first)
+- **Scope EXTENDED r1.9 (pre-review findings 3+5, verified at the
+  coordination seat):** orderly close today leaves durable participant
+  bindings `Bound` — `Frame::Disconnect` returns `Close` with no binding
+  disposition (`apply.rs`), while the exact `clean_disconnect` /
+  `server_shutdown` Detached producers sit dormant
+  (`binding.rs:721-753`). That was a live no-row-no-dormancy violation at
+  the bytes; this extension is its repair-in-place. Rationale for extend
+  over successor row: a fate-sources lane that leaves the commonest fate
+  (orderly close) undispositioned is incoherent, the schema/replay/witness
+  design work is shared, and the brief's Pending-Detached oracles gain a
+  real producer instead of being cut.
+- **What is missing:** the fate `StoredOperation` variants (now four
+  fate classes), their replay transitions, and their §8 flush barriers —
+  never built.
 - **Named consumer:** the full §8 crash-fate window repair (what W1's
   original row wrongly presumed already had sources).
 - **Trigger:** design brief at Hermes's seat, its own review round — the
