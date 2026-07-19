@@ -380,6 +380,41 @@ fn push_slice_budget_and_round_robin_are_exact() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+#[test]
+fn held_fresh_encodes_share_the_exact_slice_budget_across_push_classes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let participant_conversations = 1..=20;
+    let source = Arc::new(FixtureSource::new(
+        participant_conversations
+            .clone()
+            .map(|conversation_id| delivery(conversation_id, 1)),
+    ));
+    let service = service(source)?;
+    let mut state = state(&service, &participant_conversations.collect::<Vec<_>>())?;
+    state
+        .participant_publication
+        .as_ref()
+        .ok_or("missing publication inbox")?
+        .requeue_observers((21..=40).map(|conversation_id| ObserverPublication {
+            conversation_id,
+            refused_epoch: 10 + conversation_id,
+            observer_progress: 20 + conversation_id,
+        }))?;
+    let mut sink = RecordingSink::new(4096);
+    sink.fill_current_room();
+
+    assert_eq!(
+        service_participant_publications(&mut state, &service, &mut sink, UNIT2_PUSH_SLICE_BUDGET,)?,
+        0
+    );
+    assert_eq!(
+        state.held_participant_pushes.len() + state.held_observer_pushes.len(),
+        UNIT2_PUSH_SLICE_BUDGET,
+        "fresh held encodes must stop at the shared signed slice budget"
+    );
+    Ok(())
+}
+
 #[path = "participant_delivery_observer_requeue_tests.rs"]
 mod observer_requeue;
 

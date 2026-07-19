@@ -79,8 +79,8 @@ pub(super) enum ParticipantPumpError {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConversationOutcome {
     Done,
-    Enqueued,
-    Held,
+    Enqueued { fresh_encode: bool },
+    Held { fresh_encode: bool },
 }
 
 #[derive(Debug)]
@@ -102,8 +102,9 @@ struct ConversationWork {
 /// Each gets at most one push before any still-ready conversation gets a second.
 /// Within one conversation an observer wake is serviced before participant work
 /// so a refusal wake cannot starve behind durable replay; an existing participant
-/// head still precedes every later participant sequence. Both classes debit the
-/// same `remaining` counter and observer work receives no second allowance.
+/// head still precedes every later participant sequence. Every fresh encode in
+/// either class debits the same `remaining` counter. Resuming an exact held head
+/// does not debit again because its encode was charged when the head was created.
 pub(super) fn service_participant_publications<Sink: DeliverySink>(
     state: &mut ConnectionProcessState,
     service: &InstalledParticipantService,
@@ -161,14 +162,19 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
         };
         if let Some(observer) = work.observer.take() {
             match service_one_observer(state, sink, work.conversation_id, &observer)? {
-                ConversationOutcome::Enqueued => {
-                    remaining -= 1;
+                ConversationOutcome::Enqueued { fresh_encode } => {
+                    if fresh_encode {
+                        remaining -= 1;
+                    }
                     enqueued += 1;
                     if work.participant {
                         queue.push_back(work);
                     }
                 }
-                ConversationOutcome::Held => {
+                ConversationOutcome::Held { fresh_encode } => {
+                    if fresh_encode {
+                        remaining -= 1;
+                    }
                     if work.participant {
                         deferred_participants.insert(work.conversation_id);
                     }
@@ -187,10 +193,17 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
             connection_incarnation,
             work.conversation_id,
         )? {
-            ConversationOutcome::Done | ConversationOutcome::Held => {}
-            ConversationOutcome::Enqueued => {
+            ConversationOutcome::Done => {}
+            ConversationOutcome::Held { fresh_encode } => {
+                if fresh_encode {
+                    remaining -= 1;
+                }
+            }
+            ConversationOutcome::Enqueued { fresh_encode } => {
                 queue.push_back(work);
-                remaining -= 1;
+                if fresh_encode {
+                    remaining -= 1;
+                }
                 enqueued += 1;
             }
         }
@@ -222,6 +235,7 @@ fn service_one_observer<Sink: DeliverySink>(
     conversation_id: ConversationId,
     work: &ObserverWork,
 ) -> Result<ConversationOutcome, ParticipantPumpError> {
+    let fresh_encode = matches!(work, ObserverWork::Pending(_));
     let (publication, frame, needed) = match work {
         ObserverWork::Pending(publication) => {
             let publication = *publication;
@@ -253,10 +267,10 @@ fn service_one_observer<Sink: DeliverySink>(
                 needed,
             },
         );
-        return Ok(ConversationOutcome::Held);
+        return Ok(ConversationOutcome::Held { fresh_encode });
     }
     sink.enqueue_frame(&frame)?;
-    Ok(ConversationOutcome::Enqueued)
+    Ok(ConversationOutcome::Enqueued { fresh_encode })
 }
 
 fn service_one_conversation<Sink: DeliverySink>(
@@ -266,6 +280,7 @@ fn service_one_conversation<Sink: DeliverySink>(
     connection_incarnation: liminal_protocol::wire::ConnectionIncarnation,
     conversation_id: ConversationId,
 ) -> Result<ConversationOutcome, ParticipantPumpError> {
+    let fresh_encode = !state.held_participant_pushes.contains_key(&conversation_id);
     let publication_and_frame =
         if let Some(held) = state.held_participant_pushes.remove(&conversation_id) {
             if !service.publication_binding_is_current(
@@ -309,7 +324,7 @@ fn service_one_conversation<Sink: DeliverySink>(
                 needed,
             },
         );
-        return Ok(ConversationOutcome::Held);
+        return Ok(ConversationOutcome::Held { fresh_encode });
     }
 
     sink.enqueue_frame(&frame)?;
@@ -322,7 +337,7 @@ fn service_one_conversation<Sink: DeliverySink>(
             through_seq,
         },
     );
-    Ok(ConversationOutcome::Enqueued)
+    Ok(ConversationOutcome::Enqueued { fresh_encode })
 }
 
 /// Whether an exact participant or observer head waits for current outbound
