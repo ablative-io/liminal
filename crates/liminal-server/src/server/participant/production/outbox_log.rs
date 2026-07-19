@@ -260,6 +260,7 @@ pub(super) struct RestorePageAccounting {
     pub(super) application_peak_rows: usize,
     pub(super) application_pages: usize,
     pub(super) cursor_overlap_observed: bool,
+    pub(super) counter_overflow_observed: bool,
 }
 
 #[cfg(test)]
@@ -286,6 +287,7 @@ std::thread_local! {
 #[cfg(test)]
 pub(super) struct RestorePageAccountingGuard {
     _not_send: PhantomData<*const ()>,
+    active: bool,
 }
 
 #[cfg(test)]
@@ -296,15 +298,19 @@ impl RestorePageAccountingGuard {
         });
         Self {
             _not_send: PhantomData,
+            active: true,
         }
     }
 
     pub(super) fn snapshot(&self) -> RestorePageAccounting {
+        if !self.active {
+            return RestorePageAccounting::default();
+        }
         RESTORE_PAGE_ACCOUNTING.with(|accounting| {
             accounting
                 .borrow()
                 .as_ref()
-                .map_or(RestorePageAccounting::default(), |active| active.snapshot)
+                .map_or_else(RestorePageAccounting::default, |active| active.snapshot)
         })
     }
 }
@@ -312,6 +318,7 @@ impl RestorePageAccountingGuard {
 #[cfg(test)]
 impl Drop for RestorePageAccountingGuard {
     fn drop(&mut self) {
+        self.active = false;
         RESTORE_PAGE_ACCOUNTING.with(|accounting| {
             *accounting.borrow_mut() = None;
         });
@@ -329,8 +336,16 @@ fn account_cursor_started() -> Option<RestorePass> {
             _ => return None,
         };
         active.snapshot.cursor_overlap_observed |= active.active_cursors != 0;
-        active.cursors_started = active.cursors_started.saturating_add(1);
-        active.active_cursors = active.active_cursors.saturating_add(1);
+        let Some(cursors_started) = active.cursors_started.checked_add(1) else {
+            active.snapshot.counter_overflow_observed = true;
+            return None;
+        };
+        let Some(active_cursors) = active.active_cursors.checked_add(1) else {
+            active.snapshot.counter_overflow_observed = true;
+            return None;
+        };
+        active.cursors_started = cursors_started;
+        active.active_cursors = active_cursors;
         Some(pass)
     })
 }
@@ -353,7 +368,11 @@ fn account_page_loaded(pass: RestorePass, rows: usize) {
             };
             *current = rows;
             *peak = (*peak).max(rows);
-            *pages = pages.saturating_add(1);
+            if let Some(next_pages) = pages.checked_add(1) {
+                *pages = next_pages;
+            } else {
+                active.snapshot.counter_overflow_observed = true;
+            }
         }
     });
 }
@@ -373,6 +392,18 @@ pub(super) struct OutboxRestoreCursor<'a> {
 }
 
 impl<'a> OutboxRestoreCursor<'a> {
+    #[cfg(not(test))]
+    const fn new(log: &'a OutboxLog) -> Self {
+        Self {
+            log,
+            next_expected_sequence: 0,
+            established_version: None,
+            eof: false,
+            page: VecDeque::new(),
+        }
+    }
+
+    #[cfg(test)]
     fn new(log: &'a OutboxLog) -> Self {
         Self {
             log,
@@ -380,7 +411,6 @@ impl<'a> OutboxRestoreCursor<'a> {
             established_version: None,
             eof: false,
             page: VecDeque::new(),
-            #[cfg(test)]
             accounting_pass: account_cursor_started(),
         }
     }
@@ -501,7 +531,11 @@ impl Drop for OutboxRestoreCursor<'_> {
         if self.accounting_pass.is_some() {
             RESTORE_PAGE_ACCOUNTING.with(|accounting| {
                 if let Some(active) = accounting.borrow_mut().as_mut() {
-                    active.active_cursors = active.active_cursors.saturating_sub(1);
+                    if let Some(active_cursors) = active.active_cursors.checked_sub(1) {
+                        active.active_cursors = active_cursors;
+                    } else {
+                        active.snapshot.counter_overflow_observed = true;
+                    }
                 }
             });
         }
@@ -524,6 +558,13 @@ impl OutboxLog {
     }
 
     /// Starts a fresh bounded traversal at physical sequence zero.
+    #[cfg(not(test))]
+    pub(super) const fn restore_cursor(&self) -> OutboxRestoreCursor<'_> {
+        OutboxRestoreCursor::new(self)
+    }
+
+    /// Starts a fresh instrumented bounded traversal in tests.
+    #[cfg(test)]
     pub(super) fn restore_cursor(&self) -> OutboxRestoreCursor<'_> {
         OutboxRestoreCursor::new(self)
     }

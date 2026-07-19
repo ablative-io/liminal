@@ -29,9 +29,9 @@ pub(super) fn enrollment(token: u8) -> ClientRequest {
 }
 
 pub(super) fn seed_enrollment(
-    store: Arc<dyn DurableStore>,
+    store: &Arc<dyn DurableStore>,
 ) -> Result<ProductionParticipantHandler, Box<dyn Error>> {
-    let handler = ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
+    let handler = ProductionParticipantHandler::new(Arc::clone(store), test_participant_config())?;
     let value = dispatch(
         &handler,
         ConnectionIncarnation::new(CONVERSATION, 1),
@@ -189,8 +189,9 @@ enum RunKind {
     W3,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum TraversalPhase {
+    #[default]
     NotStarted,
     Validation,
     ValidationComplete,
@@ -230,6 +231,7 @@ impl PhaseAwareStore {
             phase: TraversalPhase::NotStarted,
             arm,
         };
+        drop(control);
         Ok(())
     }
 
@@ -241,6 +243,7 @@ impl PhaseAwareStore {
             phase: TraversalPhase::NotStarted,
             arm,
         };
+        drop(control);
         Ok(())
     }
 }
@@ -303,6 +306,7 @@ impl DurableStore for PhaseAwareStore {
             if control.phase == TraversalPhase::Validation {
                 control.phase = TraversalPhase::ValidationComplete;
             }
+            drop(control);
             if run == RunKind::W3
                 && phase == TraversalPhase::Application
                 && arm == CursorFaultArm::PassTwoEmptyEof
@@ -338,12 +342,6 @@ struct ShortReadState {
     phase: TraversalPhase,
     validation_empty_reads: usize,
     application_empty_reads: usize,
-}
-
-impl Default for TraversalPhase {
-    fn default() -> Self {
-        Self::NotStarted
-    }
 }
 
 #[derive(Debug)]

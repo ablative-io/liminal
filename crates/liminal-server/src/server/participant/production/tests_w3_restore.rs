@@ -89,7 +89,7 @@ fn ordered_pushes(
 #[test]
 fn outbox_restore_peak_decoded_rows_never_exceeds_one_page() -> Result<(), Box<dyn Error>> {
     let store = new_store()?;
-    let handler = seed_enrollment(Arc::clone(&store))?;
+    let handler = seed_enrollment(&store)?;
     drop(handler);
     let row_count = more_than_two_pages()?;
     duplicate_extension_to(&store, row_count)?;
@@ -105,6 +105,7 @@ fn outbox_restore_peak_decoded_rows_never_exceeds_one_page() -> Result<(), Box<d
     assert_eq!(snapshot.validation_current_rows, 0);
     assert_eq!(snapshot.application_current_rows, 0);
     assert!(!snapshot.cursor_overlap_observed);
+    assert!(!snapshot.counter_overflow_observed);
     assert!(owner_is_present(&restored)?);
     assert_eq!(stream_payloads(&store, &extension_key())?.len(), row_count);
     Ok(())
@@ -114,7 +115,7 @@ fn outbox_restore_peak_decoded_rows_never_exceeds_one_page() -> Result<(), Box<d
 fn midstream_outbox_decode_failure_preserves_typed_error_and_publishes_no_state()
 -> Result<(), Box<dyn Error>> {
     let store = new_store()?;
-    let handler = seed_enrollment(Arc::clone(&store))?;
+    let handler = seed_enrollment(&store)?;
     duplicate_extension_to(&store, UNIT2_OUTBOX_RESTORE_BATCH_ROWS)?;
     append_payload(
         &store,
@@ -241,7 +242,7 @@ fn restore_retained_authority_counts_are_measured_and_ledgered() -> Result<(), B
 fn observer_recovery_restores_absent_owner_page_wise_with_exact_errors()
 -> Result<(), Box<dyn Error>> {
     let valid_store = new_store()?;
-    let valid = seed_enrollment(Arc::clone(&valid_store))?;
+    let valid = seed_enrollment(&valid_store)?;
     duplicate_extension_to(&valid_store, more_than_two_pages()?)?;
     clear_owner(&valid)?;
     let accounting = RestorePageAccountingGuard::start();
@@ -263,10 +264,11 @@ fn observer_recovery_restores_absent_owner_page_wise_with_exact_errors()
     let snapshot = accounting.snapshot();
     assert!(snapshot.validation_pages > 2 && snapshot.application_pages > 2);
     assert!(!snapshot.cursor_overlap_observed);
+    assert!(!snapshot.counter_overflow_observed);
     drop(accounting);
 
     let malformed_store = new_store()?;
-    let malformed = seed_enrollment(Arc::clone(&malformed_store))?;
+    let malformed = seed_enrollment(&malformed_store)?;
     duplicate_extension_to(&malformed_store, UNIT2_OUTBOX_RESTORE_BATCH_ROWS)?;
     append_payload(
         &malformed_store,
@@ -302,7 +304,7 @@ fn observer_recovery_restores_absent_owner_page_wise_with_exact_errors()
 fn later_page_decode_failure_takes_precedence_over_earlier_semantic_conflict()
 -> Result<(), Box<dyn Error>> {
     let store = new_store()?;
-    let handler = seed_enrollment(Arc::clone(&store))?;
+    let handler = seed_enrollment(&store)?;
     let valid_payload = stream_payloads(&store, &extension_key())?
         .first()
         .cloned()
@@ -450,7 +452,7 @@ fn same_base_head_group_straddling_page_cut_replays_without_repair() -> Result<(
 fn short_nonempty_pages_with_remaining_rows_do_not_terminate_restore() -> Result<(), Box<dyn Error>>
 {
     let inner = new_store()?;
-    let seeded = seed_enrollment(Arc::clone(&inner))?;
+    let seeded = seed_enrollment(&inner)?;
     drop(seeded);
     let row_count = more_than_two_pages()?;
     duplicate_extension_to(&inner, row_count)?;
@@ -471,13 +473,19 @@ fn short_nonempty_pages_with_remaining_rows_do_not_terminate_restore() -> Result
     Ok(())
 }
 
+struct RepairFailureResult {
+    error: String,
+    extension_bytes: Vec<Vec<u8>>,
+    owner_present: bool,
+}
+
 fn repair_then_later_failure(
     aggregate_reference: bool,
-) -> Result<(String, Vec<Vec<u8>>, bool), Box<dyn Error>> {
+) -> Result<RepairFailureResult, Box<dyn Error>> {
     let inner = new_store()?;
     let faults = Arc::new(OutboxAppendFaultStore::new(Arc::clone(&inner)));
     let store: Arc<dyn DurableStore> = faults.clone();
-    let handler = seed_enrollment(Arc::clone(&store))?;
+    let handler = seed_enrollment(&store)?;
     faults.set_fail(true);
     assert!(
         dispatch(
@@ -509,7 +517,11 @@ fn repair_then_later_failure(
         .err()
         .ok_or("later invalid base unexpectedly replayed")?;
     let after = stream_payloads(&store, &extension_key())?;
-    Ok((error.to_string(), after, owner_is_present(&handler)?))
+    Ok(RepairFailureResult {
+        error: error.to_string(),
+        extension_bytes: after,
+        owner_present: owner_is_present(&handler)?,
+    })
 }
 
 #[test]
@@ -517,11 +529,11 @@ fn missing_tail_repair_persists_before_later_base_failure_byte_identically()
 -> Result<(), Box<dyn Error>> {
     let reference = repair_then_later_failure(true)?;
     let w3 = repair_then_later_failure(false)?;
-    assert_eq!(w3.0, reference.0);
-    assert_eq!(w3.1, reference.1);
-    assert_eq!(w3.1.len(), 2);
-    assert!(!reference.2 && !w3.2);
-    assert!(w3.0.contains("participant production operation failed"));
+    assert_eq!(w3.error, reference.error);
+    assert_eq!(w3.extension_bytes, reference.extension_bytes);
+    assert_eq!(w3.extension_bytes.len(), 2);
+    assert!(!reference.owner_present && !w3.owner_present);
+    assert!(w3.error.contains("participant production operation failed"));
     Ok(())
 }
 
@@ -544,7 +556,7 @@ fn direct_w3_error(store: Arc<dyn DurableStore>) -> Result<RestoreError, Box<dyn
 fn pass_two_cursor_failure_maps_through_extension_log_error_and_drops_staged_state()
 -> Result<(), Box<dyn Error>> {
     let inner = new_store()?;
-    let seeded = seed_enrollment(Arc::clone(&inner))?;
+    let seeded = seed_enrollment(&inner)?;
     drop(seeded);
     let phase = Arc::new(PhaseAwareStore::new(
         Arc::clone(&inner),
