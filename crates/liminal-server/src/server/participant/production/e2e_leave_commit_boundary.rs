@@ -16,7 +16,7 @@ use super::e2e_leave_regression::{CONVERSATION, enroll_three};
 use super::e2e_tests::{OutboxOwnerFacts, SocketFixture};
 use super::log::{READ_BATCH_SIZE, STREAM_PREFIX, StoredOperation};
 use super::outbox_log::{
-    OUTBOX_READ_BATCH_SIZE, OUTBOX_STREAM_PREFIX, OutboxRow, ProducedSourceKind,
+    OUTBOX_STREAM_PREFIX, OutboxRow, ProducedSourceKind, UNIT2_OUTBOX_RESTORE_BATCH_ROWS,
 };
 use super::tests::{open_disk_store_for_tests, test_participant_config};
 use super::tests_outbox_barrier_fixture::OutboxBarrierKind;
@@ -95,7 +95,7 @@ fn durable_history_bytes(data_dir: &Path) -> Result<DurableHistoryBytes, Box<dyn
         extension: stream_bytes(
             &store,
             &format!("{OUTBOX_STREAM_PREFIX}{CONVERSATION}"),
-            OUTBOX_READ_BATCH_SIZE,
+            UNIT2_OUTBOX_RESTORE_BATCH_ROWS,
         )?,
     })
 }

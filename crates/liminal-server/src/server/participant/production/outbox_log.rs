@@ -19,7 +19,7 @@ pub(super) use codec::{decode_row, encode_row};
 /// Stream-key prefix for Unit 2 participant extension rows.
 pub(super) const OUTBOX_STREAM_PREFIX: &str = "liminal:participant-production-unit2:";
 /// Durable page size signed for Unit 2 restore.
-pub(super) const OUTBOX_READ_BATCH_SIZE: usize = 64;
+pub(super) const UNIT2_OUTBOX_RESTORE_BATCH_ROWS: usize = 64;
 /// Exact Unit 2 extension schema version.
 pub(super) const OUTBOX_SCHEMA_VERSION: u8 = 1;
 
@@ -292,7 +292,7 @@ impl OutboxLog {
         loop {
             let entries = self
                 .store
-                .read_from(&self.stream_key, sequence, OUTBOX_READ_BATCH_SIZE)
+                .read_from(&self.stream_key, sequence, UNIT2_OUTBOX_RESTORE_BATCH_ROWS)
                 .await?;
             if entries.is_empty() {
                 break;
@@ -329,7 +329,7 @@ impl OutboxLog {
                     actual: entry.sequence,
                 })?;
             }
-            if page_len < OUTBOX_READ_BATCH_SIZE {
+            if page_len < UNIT2_OUTBOX_RESTORE_BATCH_ROWS {
                 break;
             }
         }

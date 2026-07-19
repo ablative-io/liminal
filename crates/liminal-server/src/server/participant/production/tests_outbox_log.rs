@@ -15,14 +15,19 @@ use crate::config::types::ParticipantConfig;
 
 use super::outbox_log::{
     OUTBOX_SCHEMA_VERSION, OUTBOX_STREAM_PREFIX, OutboxLog, OutboxLogError, OutboxRow,
-    ProducedBatch, ProducedSourceKind, ProjectedRecord, StoredMarkerAckCommitted, decode_row,
-    encode_row,
+    ProducedBatch, ProducedSourceKind, ProjectedRecord, StoredMarkerAckCommitted,
+    UNIT2_OUTBOX_RESTORE_BATCH_ROWS, decode_row, encode_row,
 };
 use super::tests::test_participant_config;
 
 const CONVERSATION: u64 = 0xF0_C2;
 const SOURCE_SEQUENCE: u64 = 17;
 const DELIVERY_SEQUENCE: u64 = 29;
+
+#[test]
+fn unit2_outbox_restore_batch_rows_has_the_signed_name_and_value() {
+    assert_eq!(UNIT2_OUTBOX_RESTORE_BATCH_ROWS, 64);
+}
 
 fn generation(value: u64) -> Result<Generation, Box<dyn Error>> {
     Generation::new(value).ok_or_else(|| io::Error::other("test generation must be nonzero").into())
