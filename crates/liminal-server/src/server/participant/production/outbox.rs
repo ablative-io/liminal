@@ -119,6 +119,18 @@ struct LiveRecord {
     encoded_push_bytes: u64,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RetainedAuthorityMeasurements {
+    pub(super) source_batch_count: usize,
+    pub(super) source_batch_owned_bytes: usize,
+    pub(super) ack_source_count: usize,
+    pub(super) ack_source_owned_bytes: usize,
+    pub(super) obligation_participant_count: usize,
+    pub(super) obligation_sequence_count: usize,
+    pub(super) all_obligations_owned_bytes: usize,
+}
+
 /// Sole move-only owner of one conversation's durable delivery obligations.
 #[derive(Debug)]
 pub(super) struct ConversationOutbox {
@@ -530,5 +542,55 @@ impl ConversationOutbox {
     #[cfg(test)]
     pub(super) fn source_batch_count(&self) -> usize {
         self.source_batches.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_authority_measurements(
+        &self,
+    ) -> Result<RetainedAuthorityMeasurements, ConversationOutboxError> {
+        let source_batch_owned_bytes =
+            self.source_batches
+                .iter()
+                .try_fold(0_usize, |bytes, (_source_sequence, canonical)| {
+                    bytes
+                        .checked_add(std::mem::size_of::<u64>())
+                        .and_then(|bytes| bytes.checked_add(canonical.len()))
+                });
+        let ack_source_owned_bytes = self.ack_sources.len().checked_mul(
+            std::mem::size_of::<u64>()
+                .checked_add(std::mem::size_of::<ParticipantId>())
+                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u64>()))
+                .ok_or(ConversationOutboxError::ChargeOverflow)?,
+        );
+        let obligation_sequence_count = self
+            .all_obligations
+            .values()
+            .try_fold(0_usize, |count, sequences| {
+                count.checked_add(sequences.len())
+            });
+        let all_obligations_owned_bytes = self
+            .all_obligations
+            .len()
+            .checked_mul(std::mem::size_of::<ParticipantId>())
+            .and_then(|participant_bytes| {
+                obligation_sequence_count.and_then(|count| {
+                    count
+                        .checked_mul(std::mem::size_of::<u64>())
+                        .and_then(|sequence_bytes| participant_bytes.checked_add(sequence_bytes))
+                })
+            });
+        Ok(RetainedAuthorityMeasurements {
+            source_batch_count: self.source_batches.len(),
+            source_batch_owned_bytes: source_batch_owned_bytes
+                .ok_or(ConversationOutboxError::ChargeOverflow)?,
+            ack_source_count: self.ack_sources.len(),
+            ack_source_owned_bytes: ack_source_owned_bytes
+                .ok_or(ConversationOutboxError::ChargeOverflow)?,
+            obligation_participant_count: self.all_obligations.len(),
+            obligation_sequence_count: obligation_sequence_count
+                .ok_or(ConversationOutboxError::ChargeOverflow)?,
+            all_obligations_owned_bytes: all_obligations_owned_bytes
+                .ok_or(ConversationOutboxError::ChargeOverflow)?,
+        })
     }
 }

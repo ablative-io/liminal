@@ -7,6 +7,8 @@
 
 mod codec;
 
+#[cfg(test)]
+use std::{cell::RefCell, marker::PhantomData};
 use std::{collections::VecDeque, sync::Arc};
 
 use liminal::durability::{DurabilityError, DurableStore};
@@ -248,6 +250,114 @@ impl OutboxRow {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct RestorePageAccounting {
+    pub(super) validation_current_rows: usize,
+    pub(super) validation_peak_rows: usize,
+    pub(super) validation_pages: usize,
+    pub(super) application_current_rows: usize,
+    pub(super) application_peak_rows: usize,
+    pub(super) application_pages: usize,
+    pub(super) cursor_overlap_observed: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum RestorePass {
+    Validation,
+    Application,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ActiveRestorePageAccounting {
+    snapshot: RestorePageAccounting,
+    cursors_started: usize,
+    active_cursors: usize,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static RESTORE_PAGE_ACCOUNTING: RefCell<Option<ActiveRestorePageAccounting>> =
+        const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) struct RestorePageAccountingGuard {
+    _not_send: PhantomData<*const ()>,
+}
+
+#[cfg(test)]
+impl RestorePageAccountingGuard {
+    pub(super) fn start() -> Self {
+        RESTORE_PAGE_ACCOUNTING.with(|accounting| {
+            *accounting.borrow_mut() = Some(ActiveRestorePageAccounting::default());
+        });
+        Self {
+            _not_send: PhantomData,
+        }
+    }
+
+    pub(super) fn snapshot(&self) -> RestorePageAccounting {
+        RESTORE_PAGE_ACCOUNTING.with(|accounting| {
+            accounting
+                .borrow()
+                .as_ref()
+                .map_or(RestorePageAccounting::default(), |active| active.snapshot)
+        })
+    }
+}
+
+#[cfg(test)]
+impl Drop for RestorePageAccountingGuard {
+    fn drop(&mut self) {
+        RESTORE_PAGE_ACCOUNTING.with(|accounting| {
+            *accounting.borrow_mut() = None;
+        });
+    }
+}
+
+#[cfg(test)]
+fn account_cursor_started() -> Option<RestorePass> {
+    RESTORE_PAGE_ACCOUNTING.with(|accounting| {
+        let mut accounting = accounting.borrow_mut();
+        let active = accounting.as_mut()?;
+        let pass = match active.cursors_started {
+            0 => RestorePass::Validation,
+            1 => RestorePass::Application,
+            _ => return None,
+        };
+        active.snapshot.cursor_overlap_observed |= active.active_cursors != 0;
+        active.cursors_started = active.cursors_started.saturating_add(1);
+        active.active_cursors = active.active_cursors.saturating_add(1);
+        Some(pass)
+    })
+}
+
+#[cfg(test)]
+fn account_page_loaded(pass: RestorePass, rows: usize) {
+    RESTORE_PAGE_ACCOUNTING.with(|accounting| {
+        if let Some(active) = accounting.borrow_mut().as_mut() {
+            let (current, peak, pages) = match pass {
+                RestorePass::Validation => (
+                    &mut active.snapshot.validation_current_rows,
+                    &mut active.snapshot.validation_peak_rows,
+                    &mut active.snapshot.validation_pages,
+                ),
+                RestorePass::Application => (
+                    &mut active.snapshot.application_current_rows,
+                    &mut active.snapshot.application_peak_rows,
+                    &mut active.snapshot.application_pages,
+                ),
+            };
+            *current = rows;
+            *peak = (*peak).max(rows);
+            *pages = pages.saturating_add(1);
+        }
+    });
+}
+
 /// Move-only, one-page cursor over one conversation's Unit 2 extension stream.
 ///
 /// A short nonempty store read is never EOF. The cursor advances to the checked
@@ -258,6 +368,8 @@ pub(super) struct OutboxRestoreCursor<'a> {
     established_version: Option<u8>,
     eof: bool,
     page: VecDeque<(u64, OutboxRow)>,
+    #[cfg(test)]
+    accounting_pass: Option<RestorePass>,
 }
 
 impl<'a> OutboxRestoreCursor<'a> {
@@ -268,6 +380,8 @@ impl<'a> OutboxRestoreCursor<'a> {
             established_version: None,
             eof: false,
             page: VecDeque::new(),
+            #[cfg(test)]
+            accounting_pass: account_cursor_started(),
         }
     }
 
@@ -325,6 +439,10 @@ impl<'a> OutboxRestoreCursor<'a> {
                     })?;
         }
         self.page = decoded;
+        #[cfg(test)]
+        if let Some(pass) = self.accounting_pass {
+            account_page_loaded(pass, self.page.len());
+        }
         Ok(())
     }
 
@@ -336,7 +454,26 @@ impl<'a> OutboxRestoreCursor<'a> {
 
     /// Consumes the current physical head after a successful [`Self::front`].
     pub(super) fn pop_front(&mut self) -> Option<(u64, OutboxRow)> {
-        self.page.pop_front()
+        let row = self.page.pop_front();
+        #[cfg(test)]
+        if row.is_some() {
+            self.account_current_rows(self.page.len());
+        }
+        row
+    }
+
+    #[cfg(test)]
+    fn account_current_rows(&self, rows: usize) {
+        RESTORE_PAGE_ACCOUNTING.with(|accounting| {
+            if let (Some(active), Some(pass)) =
+                (accounting.borrow_mut().as_mut(), self.accounting_pass)
+            {
+                match pass {
+                    RestorePass::Validation => active.snapshot.validation_current_rows = rows,
+                    RestorePass::Application => active.snapshot.application_current_rows = rows,
+                }
+            }
+        });
     }
 
     /// Streams and discards every decoded row through explicit empty-read EOF.
@@ -353,6 +490,20 @@ impl<'a> OutboxRestoreCursor<'a> {
             Some(self.next_expected_sequence)
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for OutboxRestoreCursor<'_> {
+    fn drop(&mut self) {
+        self.account_current_rows(0);
+        if self.accounting_pass.is_some() {
+            RESTORE_PAGE_ACCOUNTING.with(|accounting| {
+                if let Some(active) = accounting.borrow_mut().as_mut() {
+                    active.active_cursors = active.active_cursors.saturating_sub(1);
+                }
+            });
         }
     }
 }

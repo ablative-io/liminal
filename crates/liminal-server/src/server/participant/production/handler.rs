@@ -300,6 +300,30 @@ impl ProductionParticipantHandler {
         Ok(replayed)
     }
 
+    /// Runs the frozen pre-W3 aggregate reference without installing any
+    /// owner, observer, capacity, or publication state.
+    #[cfg(test)]
+    pub(super) fn replay_aggregate_reference(
+        &self,
+        conversation_id: ConversationId,
+        log: &OperationLog,
+    ) -> Result<ConversationAuthority, ParticipantSemanticError> {
+        let outbox_log = OutboxLog::new(Arc::clone(&self.store), conversation_id);
+        let extension_rows = block_on(outbox_log.read_all())
+            .map_err(|error| bridge_error(&error))?
+            .map_err(|error| outbox_log_error(&error))?;
+        block_on(ConversationAuthority::replay_aggregate_reference(
+            conversation_id,
+            log,
+            &outbox_log,
+            extension_rows,
+            &self.config,
+            self.outbox_limits,
+        ))
+        .map_err(|error| bridge_error(&error))?
+        .map_err(|error| state_error(&error))
+    }
+
     /// Removes a conversation's registry cell after a durably empty touch.
     ///
     /// Only the exact cell this operation used is removed (a racing request

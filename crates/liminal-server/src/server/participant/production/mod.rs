@@ -111,6 +111,10 @@ mod tests_record_admission;
 mod tests_residue;
 #[cfg(test)]
 mod tests_unit2_layer1;
+#[cfg(test)]
+mod tests_w3_restore;
+#[cfg(test)]
+mod tests_w3_restore_fixture;
 
 pub use facts::constant_time_eq;
 pub use handler::ProductionParticipantHandler;
