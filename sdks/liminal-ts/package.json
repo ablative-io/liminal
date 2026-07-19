@@ -2,7 +2,7 @@
   "name": "@liminal/sdk",
   "version": "0.3.0",
   "description": "TypeScript SDK facade for typed liminal channels backed by the Rust WASM protocol bridge",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/ablative-io/liminal.git",
@@ -21,7 +21,8 @@
   },
   "files": [
     "dist",
-    "wasm"
+    "wasm",
+    "LICENSE"
   ],
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
