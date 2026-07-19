@@ -225,9 +225,9 @@ impl ParticipantPublicationInbox {
         Ok(())
     }
 
-    /// Requeues budget-deferred observer payloads. Per-conversation replacement
-    /// keeps only the latest progress and preserves the signed conversation
-    /// bound.
+    /// Requeues budget-deferred observer payloads only for vacant conversations.
+    /// Any incumbent arrived after the pump's take and supersedes the deferred
+    /// payload; skipping it consumes no signed conversation capacity.
     pub(crate) fn requeue_observers(
         &self,
         publications: impl IntoIterator<Item = ObserverPublication>,
@@ -237,14 +237,15 @@ impl ParticipantPublicationInbox {
             .lock()
             .map_err(|_| ParticipantPublicationError::InboxPoisoned)?;
         for publication in publications {
-            let replacing = inbox
+            if inbox
                 .observer_progressed
-                .contains_key(&publication.conversation_id);
-            if !replacing {
-                let occupied = u64::try_from(inbox.observer_progressed.len()).unwrap_or(u64::MAX);
-                if occupied >= inbox.limit {
-                    return Err(ParticipantPublicationError::InboxCapacity { limit: inbox.limit });
-                }
+                .contains_key(&publication.conversation_id)
+            {
+                continue;
+            }
+            let occupied = u64::try_from(inbox.observer_progressed.len()).unwrap_or(u64::MAX);
+            if occupied >= inbox.limit {
+                return Err(ParticipantPublicationError::InboxCapacity { limit: inbox.limit });
             }
             inbox
                 .observer_progressed

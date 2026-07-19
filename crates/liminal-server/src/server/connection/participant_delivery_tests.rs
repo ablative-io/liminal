@@ -380,6 +380,9 @@ fn push_slice_budget_and_round_robin_are_exact() -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+#[path = "participant_delivery_observer_requeue_tests.rs"]
+mod observer_requeue;
+
 #[test]
 fn tcp_and_websocket_publish_identical_participant_bytes() -> Result<(), Box<dyn std::error::Error>>
 {
