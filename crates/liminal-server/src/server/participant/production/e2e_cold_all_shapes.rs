@@ -1,32 +1,37 @@
 //! Full mapped-shape real-socket history across a same-directory cold reopen.
 
 use std::error::Error;
+use std::path::Path;
 
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, CredentialAttachRequest, DetachAttemptToken, DetachRequest,
     EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest, MarkerAck,
-    ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken, ServerPush, ServerValue,
+    ParticipantDelivery, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
+    ServerPush, ServerValue,
 };
+
+use crate::config::types::ParticipantConfig;
 
 use super::e2e_cold_all_shapes_fixture::{
     ALL_SHAPES_CONVERSATION, ColdMember, MARKER_INTERLEAVING_CONVERSATION, ack_through,
     assert_decoded_source_census, decoded_history, expect_enrolled, expected_live_deliveries,
 };
-use super::e2e_tests::SocketFixture;
+use super::e2e_tests::{SocketFixture, SocketPeer};
 use super::log::StoredOperation;
 use super::outbox_log::OutboxRow;
 use super::tests_marker_ack_fixture::marker_fixture_config;
 
-#[test]
-fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn Error>> {
-    let home = tempfile::tempdir()?;
-    let data_dir = home.path().join("durability");
-    let config = marker_fixture_config();
-    let mut first = SocketFixture::start_replay_gated_with_config(&data_dir, config)?;
-    let mut second = first.spawn_peer()?;
-    let mut observer = first.spawn_peer()?;
-    let mut transient = first.spawn_peer()?;
+struct ExpectedDeliveries {
+    main: Vec<ParticipantDelivery>,
+    marker: Vec<ParticipantDelivery>,
+}
 
+fn enroll_main_members(
+    first: &mut SocketFixture,
+    second: &mut SocketPeer,
+    observer: &mut SocketPeer,
+    transient: &mut SocketPeer,
+) -> Result<(ColdMember, ColdMember, ColdMember), Box<dyn Error>> {
     let primary = ColdMember::enrolled(&expect_enrolled(
         first.request(ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: ALL_SHAPES_CONVERSATION,
@@ -34,7 +39,7 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         }))?,
         "primary",
     )?);
-    let mut actor = ColdMember::enrolled(&expect_enrolled(
+    let actor = ColdMember::enrolled(&expect_enrolled(
         second.request(ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: ALL_SHAPES_CONVERSATION,
             enrollment_token: EnrollmentToken::new([0x25; 16]),
@@ -63,7 +68,15 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         leave_attempt_token: LeaveAttemptToken::new([0x28; 16]),
     }))?;
     assert!(matches!(left, ServerValue::LeaveCommitted(_)));
+    Ok((primary, actor, replay_recipient))
+}
 
+fn commit_main_shapes(
+    first: &mut SocketFixture,
+    second: &mut SocketPeer,
+    primary: ColdMember,
+    mut actor: ColdMember,
+) -> Result<(), Box<dyn Error>> {
     assert!(matches!(
         second.request(ClientRequest::Detach(DetachRequest {
             conversation_id: ALL_SHAPES_CONVERSATION,
@@ -124,13 +137,20 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         return Err(format!("all-shapes Leave did not commit: {actor_left:?}").into());
     };
     ack_through(
-        &mut first,
+        first,
         ALL_SHAPES_CONVERSATION,
         primary,
         actor_left.left_delivery_seq(),
     )?;
     assert!(record.delivery_seq() < actor_left.left_delivery_seq());
+    Ok(())
+}
 
+fn fill_marker_history(
+    first: &mut SocketFixture,
+    second: &mut SocketPeer,
+    transient: &mut SocketPeer,
+) -> Result<(ColdMember, ColdMember, u64), Box<dyn Error>> {
     let marker_a = ColdMember::enrolled(&expect_enrolled(
         first.request(ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: MARKER_INTERLEAVING_CONVERSATION,
@@ -152,8 +172,8 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         }))?,
         "marker C",
     )?);
-    ack_through(&mut first, MARKER_INTERLEAVING_CONVERSATION, marker_a, 3)?;
-    ack_through(&mut second, MARKER_INTERLEAVING_CONVERSATION, marker_b, 3)?;
+    ack_through(first, MARKER_INTERLEAVING_CONVERSATION, marker_a, 3)?;
+    ack_through(second, MARKER_INTERLEAVING_CONVERSATION, marker_b, 3)?;
     let marker_c_left = transient.request(ClientRequest::Leave(LeaveRequest {
         conversation_id: MARKER_INTERLEAVING_CONVERSATION,
         participant_id: marker_c.participant_id,
@@ -165,13 +185,13 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         return Err(format!("marker C Leave did not commit: {marker_c_left:?}").into());
     };
     ack_through(
-        &mut first,
+        first,
         MARKER_INTERLEAVING_CONVERSATION,
         marker_a,
         marker_c_left.left_delivery_seq(),
     )?;
     ack_through(
-        &mut second,
+        second,
         MARKER_INTERLEAVING_CONVERSATION,
         marker_b,
         marker_c_left.left_delivery_seq(),
@@ -191,13 +211,23 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         latest_record = committed.delivery_seq();
         if token != 0x38 {
             ack_through(
-                &mut second,
+                second,
                 MARKER_INTERLEAVING_CONVERSATION,
                 marker_b,
                 latest_record,
             )?;
         }
     }
+    Ok((marker_a, marker_b, latest_record))
+}
+
+fn finish_marker_history(
+    first: &mut SocketFixture,
+    second: &mut SocketPeer,
+    marker_a: ColdMember,
+    marker_b: ColdMember,
+    latest_record: u64,
+) -> Result<(), Box<dyn Error>> {
     first.open_publication_replay()?;
     let mut marker_wake = first.spawn_peer()?;
     let _ = marker_wake.request(ClientRequest::RecordAdmission(RecordAdmission {
@@ -243,7 +273,7 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         ServerValue::MarkerAckCommitted(_)
     ));
     ack_through(
-        &mut second,
+        second,
         MARKER_INTERLEAVING_CONVERSATION,
         marker_b,
         latest_record,
@@ -257,18 +287,17 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         payload: vec![0xFF],
     }))?;
     assert!(matches!(post_marker, ServerValue::RecordCommitted(_)));
+    Ok(())
+}
 
-    drop(ordinary_attach);
-    drop(superseding);
-    drop(second);
-    drop(observer);
-    drop(transient);
-    drop(marker_wake);
-    first.stop();
-
-    let (main_base, main_extension) = decoded_history(&data_dir, ALL_SHAPES_CONVERSATION)?;
+fn decoded_expectations(
+    data_dir: &Path,
+    replay_recipient: ColdMember,
+    marker_a: ColdMember,
+) -> Result<ExpectedDeliveries, Box<dyn Error>> {
+    let (main_base, main_extension) = decoded_history(data_dir, ALL_SHAPES_CONVERSATION)?;
     let (marker_base, marker_extension) =
-        decoded_history(&data_dir, MARKER_INTERLEAVING_CONVERSATION)?;
+        decoded_history(data_dir, MARKER_INTERLEAVING_CONVERSATION)?;
     assert_decoded_source_census(&main_base, &main_extension)?;
     assert_decoded_source_census(&marker_base, &marker_extension)?;
     assert!(main_base.iter().any(|(sequence, row)| {
@@ -306,21 +335,29 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
             .iter()
             .any(|(_, row)| matches!(row, OutboxRow::Produced(_)))
     );
-
-    let expected_main = expected_live_deliveries(
+    let main = expected_live_deliveries(
         ALL_SHAPES_CONVERSATION,
         replay_recipient.participant_id,
         &main_extension,
     );
-    let expected_marker = expected_live_deliveries(
+    let marker = expected_live_deliveries(
         MARKER_INTERLEAVING_CONVERSATION,
         marker_a.participant_id,
         &marker_extension,
     );
-    assert!(!expected_main.is_empty());
-    assert!(!expected_marker.is_empty());
+    assert!(!main.is_empty());
+    assert!(!marker.is_empty());
+    Ok(ExpectedDeliveries { main, marker })
+}
 
-    let mut reopened = SocketFixture::start_replay_gated_with_config(&data_dir, config)?;
+fn replay_expected_deliveries(
+    data_dir: &Path,
+    config: ParticipantConfig,
+    replay_recipient: ColdMember,
+    marker_a: ColdMember,
+    expected: ExpectedDeliveries,
+) -> Result<(), Box<dyn Error>> {
+    let mut reopened = SocketFixture::start_replay_gated_with_config(data_dir, config)?;
     let main_attach =
         reopened.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
             conversation_id: ALL_SHAPES_CONVERSATION,
@@ -342,10 +379,7 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
             accept_marker_delivery_seq: None,
         }))?;
     assert!(matches!(marker_attach, ServerValue::AttachBound(_)));
-    assert!(
-        reopened.blocked_publication_scans()? > 0,
-        "cold reconciliation did not finish behind the publication gate"
-    );
+    assert!(reopened.blocked_publication_scans()? > 0);
     reopened.open_publication_replay()?;
     let mut replay_wake = reopened.spawn_peer()?;
     let _ = replay_wake.request(ClientRequest::RecordAdmission(RecordAdmission {
@@ -355,14 +389,17 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x3D; 16]),
         payload: Vec::new(),
     }))?;
-    for (index, expected) in expected_main.into_iter().enumerate() {
-        let observed = reopened.read_push().map_err(|error| {
+    for (index, expected_delivery) in expected.main.into_iter().enumerate() {
+        let delivered = reopened.read_push().map_err(|error| {
             format!(
                 "main cold replay stopped before decoded obligation {index} at sequence {}: {error}",
-                expected.delivery_seq
+                expected_delivery.delivery_seq
             )
         })?;
-        assert_eq!(observed, ServerPush::ParticipantDelivery(expected));
+        assert_eq!(
+            delivered,
+            ServerPush::ParticipantDelivery(expected_delivery)
+        );
     }
     let _ = marker_replay.request(ClientRequest::RecordAdmission(RecordAdmission {
         conversation_id: MARKER_INTERLEAVING_CONVERSATION,
@@ -371,17 +408,44 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x3E; 16]),
         payload: Vec::new(),
     }))?;
-    for (index, expected) in expected_marker.into_iter().enumerate() {
-        let observed = marker_replay.read_push().map_err(|error| {
+    for (index, expected_delivery) in expected.marker.into_iter().enumerate() {
+        let delivered = marker_replay.read_push().map_err(|error| {
             format!(
                 "marker cold replay stopped before decoded obligation {index} at sequence {}: {error}",
-                expected.delivery_seq
+                expected_delivery.delivery_seq
             )
         })?;
-        assert_eq!(observed, ServerPush::ParticipantDelivery(expected));
+        assert_eq!(
+            delivered,
+            ServerPush::ParticipantDelivery(expected_delivery)
+        );
     }
-    drop(marker_replay);
-    drop(replay_wake);
     reopened.stop();
     Ok(())
+}
+
+#[test]
+fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let config = marker_fixture_config();
+    let mut first = SocketFixture::start_replay_gated_with_config(&data_dir, config)?;
+    let mut second = first.spawn_peer()?;
+    let mut observer = first.spawn_peer()?;
+    let mut transient = first.spawn_peer()?;
+
+    let (primary, actor, replay_recipient) =
+        enroll_main_members(&mut first, &mut second, &mut observer, &mut transient)?;
+    commit_main_shapes(&mut first, &mut second, primary, actor)?;
+    let (marker_a, marker_b, latest_record) =
+        fill_marker_history(&mut first, &mut second, &mut transient)?;
+    finish_marker_history(&mut first, &mut second, marker_a, marker_b, latest_record)?;
+
+    drop(second);
+    drop(observer);
+    drop(transient);
+    first.stop();
+
+    let expected = decoded_expectations(&data_dir, replay_recipient, marker_a)?;
+    replay_expected_deliveries(&data_dir, config, replay_recipient, marker_a, expected)
 }

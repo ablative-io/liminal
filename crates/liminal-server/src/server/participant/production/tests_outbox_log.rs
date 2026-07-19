@@ -11,6 +11,8 @@ use liminal_protocol::wire::{
     ParticipantFrame, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken, encoded_len,
 };
 
+use crate::config::types::ParticipantConfig;
+
 use super::outbox_log::{
     OUTBOX_SCHEMA_VERSION, OUTBOX_STREAM_PREFIX, OutboxLog, OutboxLogError, OutboxRow,
     ProducedBatch, ProducedSourceKind, ProjectedRecord, StoredMarkerAckCommitted, decode_row,
@@ -58,8 +60,7 @@ fn produced(source_kind: ProducedSourceKind, record: ProjectedRecord) -> OutboxR
     ))
 }
 
-fn max_record_admission_payload() -> Result<usize, Box<dyn Error>> {
-    let config = test_participant_config();
+fn max_record_admission_payload(config: &ParticipantConfig) -> Result<usize, Box<dyn Error>> {
     let empty = ParticipantFrame::ClientRequest(ClientRequest::RecordAdmission(RecordAdmission {
         conversation_id: CONVERSATION,
         participant_id: u64::MAX - 4,
@@ -73,6 +74,35 @@ fn max_record_admission_payload() -> Result<usize, Box<dyn Error>> {
     limit
         .checked_sub(fixed)
         .ok_or_else(|| io::Error::other("signed frame limit cannot hold RecordAdmission").into())
+}
+
+pub(super) fn measured_fixed_outbox_overhead(
+    config: &ParticipantConfig,
+) -> Result<(u64, u64), Box<dyn Error>> {
+    let payload = vec![u8::MAX; max_record_admission_payload(config)?];
+    let mut maximum_fixed_per_record = 0_u64;
+    for (_, row) in all_record_rows(payload)? {
+        let encoded = encode_row(&row)?;
+        let OutboxRow::Produced(batch) = row else {
+            return Err(io::Error::other("measurement row was not Produced").into());
+        };
+        let Some(record) = batch.ordered_records().first() else {
+            return Err(io::Error::other("measurement batch was empty").into());
+        };
+        let payload_length = match record.body() {
+            ParticipantRecord::OrdinaryRecord { payload, .. } => payload.len(),
+            _ => 0,
+        };
+        let fixed = encoded
+            .len()
+            .checked_sub(payload_length)
+            .ok_or_else(|| io::Error::other("encoded row shorter than its raw payload"))?;
+        maximum_fixed_per_record = maximum_fixed_per_record.max(u64::try_from(fixed)?);
+    }
+    let fixed_metadata_term = maximum_fixed_per_record
+        .checked_mul(config.max_retained_record_rows)
+        .ok_or_else(|| io::Error::other("signed fixed outbox metadata term overflowed"))?;
+    Ok((maximum_fixed_per_record, fixed_metadata_term))
 }
 
 fn all_record_rows(payload: Vec<u8>) -> Result<Vec<(&'static str, OutboxRow)>, Box<dyn Error>> {
@@ -265,7 +295,7 @@ fn mixed_extension_stream_refuses_without_returning_rows() -> Result<(), Box<dyn
 #[test]
 fn canonical_outbox_encoder_prints_checked_q4_measurements() -> Result<(), Box<dyn Error>> {
     let config = test_participant_config();
-    let payload_bytes = max_record_admission_payload()?;
+    let payload_bytes = max_record_admission_payload(&config)?;
     let payload = vec![u8::MAX; payload_bytes];
     let rows = all_record_rows(payload)?;
     let mut maximum_encoded_push = 0_u64;
@@ -298,9 +328,8 @@ fn canonical_outbox_encoder_prints_checked_q4_measurements() -> Result<(), Box<d
         assert_eq!(decode_row(&encoded)?, row);
     }
 
-    let fixed_metadata_term = maximum_fixed_per_record
-        .checked_mul(config.max_retained_record_rows)
-        .ok_or_else(|| io::Error::other("signed fixed outbox metadata term overflowed"))?;
+    let (measured_fixed_per_record, fixed_metadata_term) = measured_fixed_outbox_overhead(&config)?;
+    assert_eq!(maximum_fixed_per_record, measured_fixed_per_record);
     let signed_capacity = config
         .retained_capacity_bytes
         .checked_add(fixed_metadata_term)

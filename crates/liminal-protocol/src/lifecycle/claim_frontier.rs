@@ -2921,6 +2921,13 @@ impl ClaimFrontiers {
             return Err(LeaveCommitError::ResultingFrontier);
         };
         self.active_identities.participants.remove(active_index);
+        self.marker_records.retain(|record| {
+            !matches!(
+                record.kind,
+                RetainedCausalRecordKind::CompactionMarker { participant_index, .. }
+                    if participant_index == participant_id
+            )
+        });
         let resulting_live = usize_to_u64(self.active_identities.participants.len());
 
         let mut exit_consumed = false;

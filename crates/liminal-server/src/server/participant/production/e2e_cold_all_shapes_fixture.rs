@@ -20,6 +20,8 @@ use super::tests::open_disk_store_for_tests;
 pub(super) const ALL_SHAPES_CONVERSATION: u64 = 0x24_01;
 pub(super) const MARKER_INTERLEAVING_CONVERSATION: u64 = 0x24_02;
 
+type DecodedHistory = (Vec<(u64, StoredOperation)>, Vec<(u64, OutboxRow)>);
+
 #[derive(Clone, Copy)]
 pub(super) struct ColdMember {
     pub(super) participant_id: u64,
@@ -50,7 +52,7 @@ pub(super) fn expect_enrolled(
 pub(super) fn decoded_history(
     data_dir: &Path,
     conversation_id: u64,
-) -> Result<(Vec<(u64, StoredOperation)>, Vec<(u64, OutboxRow)>), Box<dyn Error>> {
+) -> Result<DecodedHistory, Box<dyn Error>> {
     let store: Arc<dyn DurableStore> = open_disk_store_for_tests(data_dir)?;
     let log = OperationLog::new(Arc::clone(&store), conversation_id);
     let mut base = Vec::new();

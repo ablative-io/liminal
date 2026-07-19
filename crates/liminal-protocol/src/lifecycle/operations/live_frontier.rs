@@ -30,8 +30,8 @@ use ledger::{
     enrollment_order, enrollment_sequence, superseding_attach_order, superseding_attach_sequence,
 };
 use state::{
-    accounting_after_fenced_attach, accounting_after_marker_ack, accounting_after_rows,
-    retained_attached, retained_terminal,
+    accounting_after_fenced_attach, accounting_after_leave, accounting_after_marker_ack,
+    accounting_after_rows, retained_attached, retained_terminal,
 };
 
 /// Complete executable frontier, closure-accounting, and keyed-retention owner.
@@ -274,6 +274,8 @@ pub fn commit_settled_leave_frontier<EF, V, LF, D>(
         mut retained_charges,
         retained_record_limit,
     } = owner;
+    let retired_marker_charge =
+        retired_marker_charge(&frontiers, &retained_charges, member.participant_id())?;
     let authority = frontiers
         .prepare_settled_leave_authority(&member, binding)
         .map_err(LiveLeaveError::Prepare)?;
@@ -305,8 +307,9 @@ pub fn commit_settled_leave_frontier<EF, V, LF, D>(
     {
         return Err(LiveLeaveError::RetainedRecordLimit);
     }
-    let closure_accounting = accounting_after_rows(closure_accounting, &[left_charge])
-        .ok_or(LiveLeaveError::ClosureAccounting)?;
+    let closure_accounting =
+        accounting_after_leave(closure_accounting, &[left_charge], retired_marker_charge)
+            .ok_or(LiveLeaveError::ClosureAccounting)?;
     Ok(LiveLeaveCommit {
         identity,
         owner: LiveFrontierOwner {
@@ -343,6 +346,8 @@ pub fn commit_pending_leave_frontier<EF, V, LF, D>(
         mut retained_charges,
         retained_record_limit,
     } = owner;
+    let retired_marker_charge =
+        retired_marker_charge(&frontiers, &retained_charges, member.participant_id())?;
     let authority = frontiers
         .prepare_pending_leave_authority(&member, pending)
         .map_err(LiveLeaveError::Prepare)?;
@@ -378,9 +383,12 @@ pub fn commit_pending_leave_frontier<EF, V, LF, D>(
     {
         return Err(LiveLeaveError::RetainedRecordLimit);
     }
-    let closure_accounting =
-        accounting_after_rows(closure_accounting, &[terminal_charge, left_charge])
-            .ok_or(LiveLeaveError::ClosureAccounting)?;
+    let closure_accounting = accounting_after_leave(
+        closure_accounting,
+        &[terminal_charge, left_charge],
+        retired_marker_charge,
+    )
+    .ok_or(LiveLeaveError::ClosureAccounting)?;
     Ok(LiveLeaveCommit {
         identity,
         owner: LiveFrontierOwner {
@@ -390,6 +398,35 @@ pub fn commit_pending_leave_frontier<EF, V, LF, D>(
             retained_record_limit,
         },
     })
+}
+
+fn retired_marker_charge(
+    frontiers: &ClaimFrontiers,
+    retained_charges: &[RetainedRecordCharge],
+    participant_id: crate::wire::ParticipantId,
+) -> Result<Option<RetainedRecordCharge>, LiveLeaveError> {
+    let marker_sequence = frontiers
+        .retained_marker_records()
+        .iter()
+        .find_map(|record| {
+            matches!(
+                record.kind,
+                RetainedCausalRecordKind::CompactionMarker {
+                    participant_index,
+                    ..
+                } if participant_index == participant_id
+            )
+            .then_some(record.delivery_seq)
+        });
+    let Some(marker_sequence) = marker_sequence else {
+        return Ok(None);
+    };
+    retained_charges
+        .iter()
+        .copied()
+        .find(|charge| charge.delivery_seq() == marker_sequence)
+        .map(Some)
+        .ok_or(LiveLeaveError::RetainedCharge)
 }
 
 /// Exact charges for a credential attach's one or two retained rows.

@@ -3,15 +3,19 @@
 use std::error::Error;
 use std::path::Path;
 
+use liminal_protocol::algebra::ResourceDimension;
 use liminal_protocol::wire::{
-    AttachAttemptToken, AttachBound, ClientRequest, CredentialAttachRequest, DetachAttemptToken,
-    DetachRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken,
-    LeaveRequest, ParticipantId, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
-    RecordCommitted, ServerPush, ServerValue,
+    AttachAttemptToken, AttachBound, ClientRequest, ClosureRefusalReason, CredentialAttachRequest,
+    DetachAttemptToken, DetachRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation,
+    LeaveAttemptToken, LeaveRequest, ParticipantFrame, ParticipantId, ParticipantRecord,
+    RecordAdmission, RecordAdmissionAttemptToken, RecordCommitted, ServerPush, ServerValue,
+    encoded_len,
 };
 
 use super::e2e_tests::{SocketFixture, SocketPeer};
+use super::tests::test_participant_config;
 use super::tests_marker_ack_fixture::marker_fixture_config;
+use super::tests_outbox_log::measured_fixed_outbox_overhead;
 
 const CONVERSATION: u64 = 527;
 
@@ -185,5 +189,200 @@ fn leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_re
         ServerValue::LeaveCommitted(committed)
     );
     reopened.stop();
+    Ok(())
+}
+
+fn fill_item29_cycle(
+    sender_socket: &mut SocketFixture,
+    sender: &EnrollBound,
+    recipient: &EnrollBound,
+    payload_len: usize,
+    retained_capacity_bytes: u64,
+    signed_outbox_bound: u64,
+    admission_attempt: &mut u8,
+) -> Result<(u64, bool, u64), Box<dyn Error>> {
+    let mut committed_in_cycle = 0_u64;
+    let mut closure_refused = false;
+    let mut maximum_live_outbox_bytes = 0_u64;
+    loop {
+        *admission_attempt = admission_attempt
+            .checked_add(1)
+            .ok_or("item 29 attempt counter overflowed")?;
+        let outcome = sender_socket.request(ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: CONVERSATION + 1,
+            participant_id: sender.participant_id(),
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new(
+                [*admission_attempt; 16],
+            ),
+            payload: vec![0xD3; payload_len],
+        }))?;
+        let facts =
+            sender_socket.outbox_owner_facts(CONVERSATION + 1, recipient.participant_id())?;
+        maximum_live_outbox_bytes = maximum_live_outbox_bytes.max(facts.charged_bytes);
+        assert!(
+            facts.charged_bytes <= signed_outbox_bound,
+            "item 29 live outbox {} exceeded signed bound {signed_outbox_bound}",
+            facts.charged_bytes
+        );
+        match outcome {
+            ServerValue::RecordCommitted(_) => {
+                committed_in_cycle = committed_in_cycle
+                    .checked_add(1)
+                    .ok_or("item 29 commit counter overflowed")?;
+            }
+            ServerValue::ObserverBackpressure(
+                liminal_protocol::wire::ObserverBackpressure::RecordAdmission { state, .. },
+            ) => {
+                assert_eq!(state.backpressure_epoch(), state.observer_progress());
+                break;
+            }
+            ServerValue::MarkerClosureCapacityExceeded(refusal) => {
+                let ClosureRefusalReason::Capacity(reason) = refusal.reason else {
+                    return Err(format!(
+                        "item 29 closure edge was not typed capacity refusal: {refusal:?}"
+                    )
+                    .into());
+                };
+                assert_eq!(reason.dimension, ResourceDimension::Bytes);
+                assert_eq!(reason.limit, u128::from(retained_capacity_bytes));
+                closure_refused = true;
+                break;
+            }
+            other => {
+                return Err(format!(
+                    "item 29 admission attempt {admission_attempt} returned {other:?}"
+                )
+                .into());
+            }
+        }
+    }
+    Ok((
+        committed_in_cycle,
+        closure_refused,
+        maximum_live_outbox_bytes,
+    ))
+}
+
+fn run_item29_turnover_cycle(
+    sender_socket: &mut SocketFixture,
+    sender: &EnrollBound,
+    cycle: u8,
+    payload_len: usize,
+    retained_capacity_bytes: u64,
+    signed_outbox_bound: u64,
+    admission_attempt: &mut u8,
+) -> Result<u64, Box<dyn Error>> {
+    let mut recipient_socket = sender_socket.spawn_peer()?;
+    let recipient = recipient_socket.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: CONVERSATION + 1,
+        enrollment_token: EnrollmentToken::new([0x20 + cycle; 16]),
+    }))?;
+    let ServerValue::EnrollBound(recipient) = recipient else {
+        return Err(format!("item 29 recipient {cycle} did not enroll: {recipient:?}").into());
+    };
+    let (committed, closure_refused, maximum) = fill_item29_cycle(
+        sender_socket,
+        sender,
+        &recipient,
+        payload_len,
+        retained_capacity_bytes,
+        signed_outbox_bound,
+        admission_attempt,
+    )?;
+    assert_eq!(
+        (committed, closure_refused),
+        if cycle < 2 { (7, false) } else { (1, true) }
+    );
+
+    let before_leave =
+        sender_socket.outbox_owner_facts(CONVERSATION + 1, recipient.participant_id())?;
+    assert!(before_leave.next_live_obligation.is_some());
+    let left = recipient_socket.request(ClientRequest::Leave(LeaveRequest {
+        conversation_id: CONVERSATION + 1,
+        participant_id: recipient.participant_id(),
+        capability_generation: Generation::ONE,
+        attach_secret: recipient.attach_secret(),
+        leave_attempt_token: LeaveAttemptToken::new([0x30 + cycle; 16]),
+    }))?;
+    assert!(matches!(left, ServerValue::LeaveCommitted(_)));
+    let after_leave =
+        sender_socket.outbox_owner_facts(CONVERSATION + 1, recipient.participant_id())?;
+    assert_eq!(after_leave.next_live_obligation, None);
+    assert!(after_leave.charged_bytes < before_leave.charged_bytes);
+    assert!(after_leave.source_batch_count > before_leave.source_batch_count);
+    assert!(after_leave.charged_bytes <= signed_outbox_bound);
+    Ok(maximum)
+}
+
+#[test]
+fn leave_discharges_the_left_identitys_obligations_and_bounds_live_payload()
+-> Result<(), Box<dyn Error>> {
+    const RETAINED_BYTES_PER_IDENTITY_SLOT: u64 = 131_072;
+
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let mut config = test_participant_config();
+    config.retained_capacity_bytes = RETAINED_BYTES_PER_IDENTITY_SLOT
+        .checked_mul(config.identity_slots)
+        .ok_or("item 29 retained-capacity fixture overflowed")?;
+    let (maximum_fixed_per_record, fixed_outbox_overhead) =
+        measured_fixed_outbox_overhead(&config)?;
+    assert_eq!(
+        fixed_outbox_overhead,
+        maximum_fixed_per_record
+            .checked_mul(config.max_retained_record_rows)
+            .ok_or("item 29 fixed outbox metadata term overflowed")?
+    );
+    let signed_outbox_bound = config
+        .retained_capacity_bytes
+        .checked_add(fixed_outbox_overhead)
+        .ok_or("item 29 signed outbox bound overflowed")?;
+    let fixed_request_bytes = encoded_len(&ParticipantFrame::ClientRequest(
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: CONVERSATION + 1,
+            participant_id: u64::MAX,
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([u8::MAX; 16]),
+            payload: Vec::new(),
+        }),
+    ))
+    .map_err(|error| format!("item 29 request codec failed: {error:?}"))?;
+    let payload_len = usize::try_from(config.wire_frame_limit)?
+        .checked_sub(fixed_request_bytes)
+        .ok_or("wire frame cannot contain an item 29 RecordAdmission")?;
+    assert_eq!(payload_len, 65_476);
+
+    let conversation_id = CONVERSATION + 1;
+    let mut sender_socket = SocketFixture::start_replay_gated_with_config(&data_dir, config)?;
+    let sender = sender_socket.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id,
+        enrollment_token: EnrollmentToken::new([0x10; 16]),
+    }))?;
+    let ServerValue::EnrollBound(sender) = sender else {
+        return Err(format!("item 29 sender did not enroll: {sender:?}").into());
+    };
+
+    let mut maximum_live_outbox_bytes = 0_u64;
+    let mut admission_attempt = 0_u8;
+    for cycle in 0..3_u8 {
+        let cycle_maximum = run_item29_turnover_cycle(
+            &mut sender_socket,
+            &sender,
+            cycle,
+            payload_len,
+            config.retained_capacity_bytes,
+            signed_outbox_bound,
+            &mut admission_attempt,
+        )?;
+        maximum_live_outbox_bytes = maximum_live_outbox_bytes.max(cycle_maximum);
+    }
+
+    assert_eq!(maximum_live_outbox_bytes, 458_985);
+    assert!(maximum_live_outbox_bytes <= signed_outbox_bound);
+    println!(
+        "MEASURED_ITEM29_PAYLOAD_BYTES={payload_len} MAXIMUM_LIVE_OUTBOX_BYTES={maximum_live_outbox_bytes} FIXED_OUTBOX_OVERHEAD_BYTES={fixed_outbox_overhead} SIGNED_OUTBOX_BOUND_BYTES={signed_outbox_bound}"
+    );
+    sender_socket.stop();
     Ok(())
 }

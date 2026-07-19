@@ -6,6 +6,12 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy)]
+struct MarkerAccounting {
+    credits: u64,
+    anchors: u64,
+}
+
 pub(super) fn accounting_after_rows(
     accounting: ClosureAccounting,
     charges: &[RetainedRecordCharge],
@@ -14,7 +20,10 @@ pub(super) fn accounting_after_rows(
         accounting,
         charges,
         accounting.state(),
-        accounting.marker_anchors(),
+        MarkerAccounting {
+            credits: accounting.marker_capacity_credits(),
+            anchors: accounting.marker_anchors(),
+        },
         accounting.edge_sequence_claims(),
         accounting.edge_order_position_claims(),
         accounting.edge_k_remaining(),
@@ -28,7 +37,10 @@ pub(super) fn accounting_after_marker_ack(
         accounting,
         &[],
         accounting.state(),
-        accounting.marker_anchors().checked_sub(1)?,
+        MarkerAccounting {
+            credits: accounting.marker_capacity_credits(),
+            anchors: accounting.marker_anchors().checked_sub(1)?,
+        },
         accounting.edge_sequence_claims(),
         accounting.edge_order_position_claims(),
         accounting.edge_k_remaining(),
@@ -44,10 +56,39 @@ pub(super) fn accounting_after_fenced_attach(
         accounting,
         charges,
         next_state,
-        accounting.marker_anchors().checked_sub(1)?,
+        MarkerAccounting {
+            credits: accounting.marker_capacity_credits(),
+            anchors: accounting.marker_anchors().checked_sub(1)?,
+        },
         0,
         0,
         crate::algebra::ResourceVector::default(),
+    )
+}
+
+pub(super) fn accounting_after_leave(
+    accounting: ClosureAccounting,
+    charges: &[RetainedRecordCharge],
+    retired_marker_charge: Option<RetainedRecordCharge>,
+) -> Option<ClosureAccounting> {
+    let marker_released = u64::from(retired_marker_charge.is_some());
+    let mut charges = charges.to_vec();
+    if let Some(charge) = retired_marker_charge {
+        charges.push(charge);
+    }
+    accounting_after_rows_with_state(
+        accounting,
+        &charges,
+        accounting.state(),
+        MarkerAccounting {
+            credits: accounting
+                .marker_capacity_credits()
+                .checked_sub(marker_released)?,
+            anchors: accounting.marker_anchors().checked_sub(marker_released)?,
+        },
+        accounting.edge_sequence_claims(),
+        accounting.edge_order_position_claims(),
+        accounting.edge_k_remaining(),
     )
 }
 
@@ -55,7 +96,7 @@ fn accounting_after_rows_with_state(
     accounting: ClosureAccounting,
     charges: &[RetainedRecordCharge],
     state: crate::lifecycle::ClosureState,
-    marker_anchors: u64,
+    marker: MarkerAccounting,
     edge_sequence_claims: u64,
     edge_order_position_claims: u64,
     edge_k_remaining: crate::algebra::ResourceVector,
@@ -71,8 +112,8 @@ fn accounting_after_rows_with_state(
         })?;
     ClosureAccounting::try_new(
         state,
-        accounting.marker_capacity_credits(),
-        marker_anchors,
+        marker.credits,
+        marker.anchors,
         edge_sequence_claims,
         edge_order_position_claims,
         edge_k_remaining,

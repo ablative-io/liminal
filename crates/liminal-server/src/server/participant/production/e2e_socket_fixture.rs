@@ -149,6 +149,7 @@ pub(in crate::server::participant::production) struct OutboxOwnerFacts {
     pub(in crate::server::participant::production) ack_through: u64,
     pub(in crate::server::participant::production) next_live_obligation: Option<u64>,
     pub(in crate::server::participant::production) live_record_count: usize,
+    pub(in crate::server::participant::production) source_batch_count: usize,
     pub(in crate::server::participant::production) charged_bytes: u64,
 }
 
@@ -453,6 +454,7 @@ impl SocketFixture {
             ack_through: outbox.ack_through(participant_id),
             next_live_obligation: outbox.next_live(participant_id),
             live_record_count: outbox.live_record_count(),
+            source_batch_count: outbox.source_batch_count(),
             charged_bytes: outbox.charged_bytes(),
         };
         drop(owner);
