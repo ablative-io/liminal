@@ -103,7 +103,8 @@ pub fn unsubscribe(stream_id: u32, subscription_id: u64) -> Result<Vec<u8>, JsVa
 /// - bytes 0..4: decoded frame length, big-endian `u32`
 /// - byte 4: stable protocol frame-type discriminant
 /// - bytes 5..9: stream id, big-endian `u32`
-/// - bytes 9..17: `SubscribeAck` subscription id, big-endian `u64` (zero otherwise)
+/// - bytes 9..17: `SubscribeAck` subscription id or `PublishAck` message id,
+///   big-endian `u64` (zero otherwise)
 /// - bytes 17..19: protocol error reason, big-endian `u16` (zero otherwise)
 /// - bytes 19..: exact envelope payload for message frames, or UTF-8 error detail
 ///
