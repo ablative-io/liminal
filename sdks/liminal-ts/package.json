@@ -1,11 +1,11 @@
 {
   "name": "@liminal/sdk",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "TypeScript SDK facade for typed liminal channels backed by the Rust WASM protocol bridge",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tomWhiting/liminal.git",
+    "url": "https://github.com/ablative-io/liminal.git",
     "directory": "sdks/liminal-ts"
   },
   "type": "module",
