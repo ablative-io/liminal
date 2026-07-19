@@ -46,17 +46,43 @@
 - **Oracle floor:** dispatch-arm tests exercising both the nonzero-debt path
   and the scalar path against the same fixture, asserting they cannot diverge.
 
-### W3 — Apply-per-page restore (row R)
+### W3 — Apply-per-page restore (row R) — SCOPE NARROWED r1.1
 - **What sits open:** `spec:570 total-restore-streaming` — `read_all`
   materializes the full decoded stream; only the 64-row page size is enforced.
   Disclosed in the Unit 2 declaration under its own line; disposition
   Tom-ratified (disclose-with-teeth).
+- **Scope (narrowed 2026-07-19, W3 pre-review finding 1):** W3 removes the
+  duplicate aggregate materialization (the `read_all` Vec) ONLY. The brief's
+  original "safe for unbounded history" claim was FALSE at the bytes — the
+  restored authority itself retains history-linear indexes (see W7). W3
+  does NOT alone discharge the unbounded-history trigger.
 - **Named consumer:** restore path under unbounded outbox history.
-- **Trigger:** HARD — before any deployment with unbounded outbox history.
+- **Trigger:** HARD, SHARED WITH W7 — before any deployment with unbounded
+  outbox history, BOTH W3 and W7 must be discharged. Stated on both rows so
+  neither landing alone can be read as unblocking unbounded history.
 - **Oracle floor:** the apply-per-page brief's acceptance re-runs the 24/30
-  determinism oracles (the ratified floor).
-- **Owner:** Hermes (brief drafts at his seat when this ledger lands the
-  trigger formally — this row is that formal landing).
+  determinism oracles (the ratified floor), PLUS a retained-authority-counts
+  oracle measuring the narrowed claim (what memory the restored authority
+  actually holds), not asserting it. Error precedence for multiply-invalid
+  durable states is preserved EXACTLY via a bounded validate-then-apply
+  two-pass (one-page peak, zero observable contract change) — ruled at the
+  coordination seat 2026-07-19; a new error order would have been a contract
+  change needing Tom.
+- **Owner:** Hermes (brief r2 fold in flight).
+
+### W7 — Authority restore history-linear indexes (opened by W3 pre-review)
+- **What sits open:** the restored `ConversationOutbox` retains
+  history-linear indexes — `source_batches` / `ack_sources` /
+  `all_obligations` (`outbox.rs:124-137`; inserts `:205-252`, `:298-325`,
+  `:262-270`; reclamation removes live records only, `:330-395`). Restore
+  memory is Θ(history) with or without W3.
+- **Named consumer:** any deployment with unbounded outbox history.
+- **Trigger:** HARD, SHARED WITH W3 (see W3's trigger wording verbatim).
+- **Oracle floor:** its own bounding design brief (index compaction /
+  reconstruction touches ack + conflict semantics — a design-first lane,
+  NOT foldable into W3); acceptance includes the retained-authority-counts
+  oracle family measuring each index under bounded and unbounded fixtures.
+- **Owner:** Hermes.
 
 ### W4 — LAW-1 polling retirement
 - **What sits open:** the polling seams LAW-1 retires, board item since
