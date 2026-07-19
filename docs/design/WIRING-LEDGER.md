@@ -1,7 +1,6 @@
 # Wiring ledger — dormant machinery and its roads back
 
-- **Revision:** r1.7, 2026-07-20 (W1a oracle-floor wording: per-lineage
-  regression, not "decreasing-source" — W1a round-2 finding 1). Owner of
+- **Revision:** r1.8, 2026-07-20 (lane W1a CLOSED at 8ce73bf). Owner of
   the ledger: Waffles (coordination seat).
   Lane owner unless stated otherwise: Hermes Crumpet (liminal seat).
 - **Why this exists:** the F-0c Unit 2 fold minted the unwired-seam sweep as a
@@ -39,7 +38,24 @@ projections. The r1.5 "Advance is the only new persisted output, no new
 row shape" disposition is EXPRESSLY AMENDED: it stands for W1a and is
 superseded for the fate sources, whose creation is W1b's design scope.
 
-#### W1a — Leave survivor + reconcile validation (wireable today)
+#### W1a — CLOSED r1.8 (landed 8ce73bf)
+
+Torn at the coordination seat 2026-07-20: eight-oracle census verbatim
+(one hit each), plain-arm projection removed from the protocol with the
+trybuild compile-fail fixture proving it, refusals mutation-free via
+durable observer-rows equality, witness vector = the pre-existing
+projection queue enriched with typed provenance (lineage map is
+participant-bounded — no W7-species materialization), docs commit exactly
+one (§9.1, Apollo's phrasing verbatim). Battery green my hands
+(fmt/check/clippy/test workspace). The §8 reconcile-conformance
+disclosure-class gap on main is REPAIRED by this landing. Tear rider
+carried to W1b's first touch: the four-counter tuple assertion in
+`same_participant_ack_lineage_regression_refuses_before_observer_mutation`
+compares freshly-declared zeros to zeros (tautological decoration; the
+durable-rows equality is the real proof) — wire the counters or delete
+the tuple.
+
+#### W1a — original row (historical)
 - **Scope:** the canonical Leave producer ruling (one producer per fate,
   single-presentation oracle, r1.5) applied to the ONLY wireable arm; PLUS
   the §8 reconcile-conformance repair: production today silently tolerates
