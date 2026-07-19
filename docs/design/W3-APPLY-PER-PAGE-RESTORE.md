@@ -1,9 +1,9 @@
 # W3 — apply-per-page outbox restore design brief
 
-Base: `liminal` branch at `9875cdd`; production anchors remain the bytes from
-`eb3ae30`. R3 pins the amended wiring ledger at `origin/main@13c5cdf`.
+Base: `liminal` branch at `c885475`; production anchors remain the bytes from
+`eb3ae30`. R4 retains the wiring-ledger pin `origin/main@13c5cdf`.
 
-Revision: r3, 2026-07-19. This is the complete re-review fold of r2. The Unit 2
+Revision: r4, 2026-07-19. This is the round-3 fold of r3. The Unit 2
 spec of record remains
 `0cdff85:docs/design/F0C-UNIT2-SERVERPUSH-PRODUCER.md`, SHA-256
 `98f9130faa175f323206eb6640e9f625ab6385dc285e11f5b2774fb306b5de6a`.
@@ -14,10 +14,13 @@ All repository anchors in this revision were checked against the cited bytes.
 Remove only the duplicate, complete decoded-extension `Vec` built by
 `OutboxLog::read_all`. Restore SHALL validate the complete extension stream one
 bounded page at a time, then re-read and apply it one bounded page at a time,
-preserving error precedence, replay order, repair timing/bytes, restored state,
-and visibility for the production durability adapter. R3 separately signs the
-empty-read EOF correction for other conforming `DurableStore` implementations;
-that abstract behavior intentionally improves on today's short-page bug.
+preserving success state, error precedence, replay order, repair timing/bytes,
+and visibility under **stable-read durable-state equivalence**: every required
+read succeeds and both traversals observe the same durable bytes. The second
+traversal and empty-EOF confirmations are additional fallible production reads;
+a restore that succeeds today on a partially faulting store may instead fail
+loudly with typed `OutboxLogError::Durability` under W3. R4 carries that as an
+explicit veto-record position, not as an unchanged-behavior claim.
 
 W3 does **not** bound total restore memory as history grows. The restored
 `ConversationOutbox` itself retains history-linear indexes; bounding those is
@@ -40,7 +43,7 @@ while total restore remains streaming
 ledger narrows W3 to removing “the duplicate aggregate materialization (the
 `read_all` Vec) ONLY,” explicitly rejects r1's safe-for-unbounded-history claim,
 and opens W7 for the retained authority indexes
-(`13c5cdf:docs/design/WIRING-LEDGER.md:49-103`). R3 also pins both r1.3
+(`13c5cdf:docs/design/WIRING-LEDGER.md:49-103`). This brief also pins both r1.3
 amendments: W7 now prints its shared trigger verbatim on its own row, and the
 four-route census is qualified by the row shapes that actually reconstruct each
 index (`13c5cdf:docs/design/WIRING-LEDGER.md:79-98`).
@@ -234,15 +237,28 @@ outlaw conforming short-page stores is REJECTED; that would hide the reader bug
 by making correct stores illegal.
 
 The production Haematite adapter is never-short-with-more: it reads every event
-from the offset and then truncates to `limit`, so a short nonempty result means
-there was no successor in that production read
-(`crates/liminal/src/durability/store.rs:104-117`). Thus deployed production
-behavior is unchanged even though the abstract trait behavior is corrected.
+from the offset and then truncates to `limit`, so a short nonempty success means
+there was no successor in that read. But every call is fallible: the adapter
+returns `Result`, and its engine read maps failure into `DurabilityError`
+(`crates/liminal/src/durability/store.rs:104-117`). Pass 2 repeats the complete
+traversal, and both passes issue empty-EOF confirmations. Those are additional
+fallible production operations that today's single traversal does not all
+issue.
 
-**R3 EOF signing — KEEP-AND-SIGN.** The empty-read rule stands, is recorded here
-for veto, and needs no Tom escalation because the production adapter's behavior
-does not change. The signature and its required backticked proof land as one
-unit in acceptance item 9.
+**R4 veto-record position — STABLE-READ DURABLE-STATE EQUIVALENCE.** KEEP-AND-SIGN
+the empty-read correction. When all required reads succeed and both passes
+observe the same durable bytes, success state, bytes, repair timing, precedence,
+and error mapping are identical. On a degrading store, however, a pass-2 read or
+added EOF probe can fail where today's path happened to succeed. W3 deliberately
+fails that restore LOUDLY AND EARLIER through the typed extension-log error.
+Today's single pass surviving a partially faulting store was survivorship,
+never a designed guarantee; typed failure during a durability incident is house
+doctrine, not a regression.
+
+This position is recorded for veto, not escalated. “Deployed-unchanged” was the
+coordination seat's shorthand for stable-read semantics when the EOF and pass-2
+error rulings were made; it was never a condition Tom stated. Acceptance item 9
+signs the EOF correction, and item 11 measures the added fallible-read surface.
 
 ## 4. Application, determinism, precedence, and visibility
 
@@ -267,22 +283,35 @@ physical extension sequences (`crates/liminal-server/src/server/participant/prod
 
 ### 4.2 Determinism and exact-error-precedence invariants
 
-**W3-D1 — production-adapter page-partition invariance.** For the deployed
-Haematite adapter's never-short-with-more page shape, the final restored state,
-durable repair bytes/head and timing, typed errors, authority facts, observer
-projections, capacity contribution, and ordered push bytes are byte-identical to
-today regardless of physical full-page cuts. This equivalence does not extend to
-today's buggy generic-store short-page termination; section 3.4 signs that
-correction separately.
+**W3-D1 — stable-read durable-state equivalence.** For the deployed Haematite
+adapter on a stable durable state—every required read succeeds and both
+traversals observe the same bytes—the final restored state, durable repair
+bytes/head and timing, error precedence, authority facts, observer projections,
+capacity contribution, and ordered push bytes are byte-identical to today
+regardless of physical full-page cuts. Any cursor failure that does occur maps
+through the exact extension-log wrapper in section 5. This equivalence does not
+claim identical success versus failure on a degrading store: pass 2 and the
+empty-EOF probes are additional fallible reads. Nor does it extend to today's
+buggy generic-store short-page termination; section 3.4 signs that correction
+separately.
+
+**R4 supersession.** The coordination seat's earlier phrase **“zero observable
+contract change”** is expressly superseded by **“stable-read durable-state
+equivalence.”** The old phrase was coordination shorthand, not a condition Tom
+stated. The new phrase preserves results, bytes, repair timing, precedence, and
+exact error mapping under successful stable reads while disclosing that a newly
+issued read can turn today's accidental success during a durability incident
+into a typed failure.
 
 **W3-D2 — decode-before-semantics precedence.** For every multiply-invalid
-input fully exposed by the production adapter, the validation pass selects the
-exact first extension stream/codec error that today's complete `read_all`
-selects before `ConversationAuthority::replay` can observe a base/extension
-semantic conflict. A later-page malformed suffix therefore beats an
-earlier-page projection conflict. For deployed production this ordering is a
-zero-observable contract change, not a new priority; a conforming short-page
-fixture is governed by the signed abstract correction instead.
+input fully exposed by successful stable production reads, the validation pass
+selects the exact first extension stream/codec error that today's complete
+`read_all` selects before `ConversationAuthority::replay` can observe a
+base/extension semantic conflict. A later-page malformed suffix therefore beats
+an earlier-page projection conflict. This ordering is identical on the
+stable-read domain, not a new priority; a conforming short-page fixture is
+governed by the signed abstract correction, and a newly encountered read failure
+uses the extension-log mapping instead.
 
 **W3-D3 — narrowed materialization.** The duplicate decoded-stream residency is
 at most `UNIT2_OUTBOX_RESTORE_BATCH_ROWS` rows in pass 1 or pass 2, never both.
@@ -391,7 +420,7 @@ byte/count derivation must use checked conversion/arithmetic from this value or
 an existing signed config input. No second page size, measured literal, hidden
 prefetch allowance, or asserted W7 memory bound is permitted.
 
-Compared with current restore and r1's rejected single-pass design, r3 reads and
+Compared with current restore and r1's rejected single-pass design, W3 reads and
 decodes each extension row twice: once to validate and once to apply. Each pass
 also performs a terminal empty read, and a store returning short nonempty pages
 may require more calls because “up to limit” is not “fill to limit.” Exact call
@@ -420,9 +449,9 @@ the tear census.
 | 6 | `observer_recovery_restores_absent_owner_page_wise_with_exact_errors` | Use the existing operation-error/failed-reconciliation transition to leave a durable conversation owner absent, then reach restore only through `ClientRequest::ObserverRecovery`. A valid case proves both passes, correct owner/capacity/observer installation, and normal classification only after the pre-pass. A malformed-suffix case proves the same concrete `OutboxLogError` and `ParticipantSemanticError` wrapper as the ordinary routes, no owner prefix, and no observer-batch classification/publication. |
 | 7 | `later_page_decode_failure_takes_precedence_over_earlier_semantic_conflict` | Construct the reviewer's dual fault: a page-1 row that would produce an expected-projection semantic conflict plus a later page containing only the schema-version byte. Assert the later `UnexpectedEnd { field: "row_kind" }` wins through `crates/liminal-server/src/server/participant/production/outbox_log/codec.rs:65-77` to `crates/liminal-server/src/server/participant/production/handler.rs:412-415`, exactly as decode-everything-first does today; the semantic conflict is never applied. |
 | 8 | `same_base_head_group_straddling_page_cut_replays_without_repair` | Using checked arithmetic from the signed page size, place a valid group containing its exact `Produced` row and multiple unchanged-base-head MarkerAck rows across the physical cut. Shift the derived prefix across every interior group position so both sides of the cut are exercised. Assert no repair append; exact extension bytes/head; complete owner, capacity, and observer facts; and exact ordered pushes. |
-| 9 | EOF signing proof | **EOF signing statement and cited proof:** KEEP-AND-SIGN the empty-read correction and `short_nonempty_pages_with_remaining_rows_do_not_terminate_restore` together. Back both passes with a conforming instrumented `DurableStore` that returns short nonempty pages while rows remain; assert every row is consumed through an empty read and the expected complete-history facts/bytes result. This intentionally corrects today's generic `read_all` truncation behavior; it does not claim identity with today's generic short-page result. Also rerun against the never-short-with-more production adapter shape to pin unchanged deployed behavior. |
+| 9 | EOF signing proof | **EOF signing statement and cited proof:** KEEP-AND-SIGN the empty-read correction and `short_nonempty_pages_with_remaining_rows_do_not_terminate_restore` together. Back both passes with a conforming instrumented `DurableStore` that returns short nonempty pages while rows remain; assert every row is consumed through an empty read and the expected complete-history facts/bytes result. This intentionally corrects today's generic `read_all` truncation behavior; it does not claim identity with today's generic short-page result. Also rerun against the never-short-with-more production-adapter shape and assert stable successful reads preserve the complete result/bytes. |
 | 10 | `missing_tail_repair_persists_before_later_base_failure_byte_identically` | First-class repair-placement proof. Deterministically omit an earlier tail projection, then place a later base row that decodes but fails semantically. Compare the new path against a `cfg(test)` reference retaining today's aggregate path: the missing projection must append and flush before the later failure; the exact durable extension bytes/head and exact typed failure/wrapper must be byte-identical; no owner/observer/capacity/publication state is installed. This byte comparison is the load-bearing proof and a sub-assert in another oracle does not satisfy the item. |
-| 11 | `pass_two_cursor_failure_maps_through_extension_log_error_and_drops_staged_state` | Use a phase-aware store that succeeds throughout validation and fails a named pass-2 cursor read before EOF. Assert concrete `OutboxLogError::Durability` carrying the named fixture fault (`crates/liminal-server/src/server/participant/production/outbox_log.rs:26-31`), the exact `participant Unit 2 extension log failed: {error}` wrapper, staged-authority/page drop, no repair append, and no owner/observer/capacity/publication. Assert the generic `participant production operation failed` wrapper is absent. |
+| 11 | `pass_two_cursor_failure_maps_through_extension_log_error_and_drops_staged_state` | Use a phase-aware store with two arms whose named fixture fault is armed **only** for a read today's aggregate path never issues: (a) a non-EOF pass-2 read after validation succeeds, and (b) the pass-2 empty-EOF probe after the final nonempty page. For each arm, first run the `cfg(test)` aggregate reference against the same durable bytes and prove it succeeds because it never makes the armed call; then run W3 and assert concrete `OutboxLogError::Durability` carrying that fault (`crates/liminal-server/src/server/participant/production/outbox_log.rs:26-31`), the exact `participant Unit 2 extension log failed: {error}` production wrapper, staged-authority/page drop, no repair append, and no owner/observer/capacity/publication. Assert the generic `participant production operation failed` wrapper is absent. The added-read disclosure is honest only because these old-path-never-issued arms measure it directly. |
 
 The page and retained-authority accounting seams may be `cfg(test)`-gated. They
 must instrument the real cursor/container ownership exercised by production
@@ -467,9 +496,13 @@ Bounded-history operation remains required until both W3 and W7 land.
 - W3 removes only the duplicate aggregate decoded-stream materialization.
 - W3 does not make total restore memory bounded or safe as history grows. The
   authority remains `Theta(history)` because of W7's row-shaped indexes.
-- Production-adapter results, errors, and immediate repair timing remain
-  byte-identical. The signed empty-read EOF rule intentionally corrects only the
-  wider `DurableStore` abstraction's short-nonempty-page behavior; the rejected
+- On a stable durable state whose required reads all succeed and observe the
+  same bytes, production-adapter results, durable bytes, immediate repair
+  timing, precedence, and error mapping remain identical. The second traversal
+  and empty-EOF probes are additional fallible reads: on a degrading store W3
+  may fail typed where today's path happened to succeed. That survivorship was
+  never a guarantee. The signed EOF rule also intentionally corrects the wider
+  `DurableStore` abstraction's short-nonempty-page behavior; the rejected
   alternative was outlawing those conforming stores.
 - A missing-tail repair may append/flush after pass-2 EOF and before `finish`,
   and may survive a later base semantic failure. Only
@@ -526,9 +559,11 @@ and the complete eleven-oracle floor land together.
 - **WALL-ONE-PAGE-PER-PASS:** no pass retains decoded rows from two pages, the
   passes do not overlap, and no complete history collection is rebuilt under
   another name.
-- **WALL-PRODUCTION-EQUIVALENCE:** byte/error equivalence is promised for the
-  never-short-with-more production adapter; generic short-page behavior is the
-  signed correction, not hidden under a universal equivalence claim.
+- **WALL-STABLE-READ-EQUIVALENCE:** result/byte/repair-timing/precedence
+  equivalence is promised only when production reads succeed against a stable
+  durable state. The second traversal and EOF probes add fallible calls whose
+  failures retain the exact extension-log mapping; generic short-page behavior
+  remains the signed correction.
 - **WALL-EXACT-PRECEDENCE:** production-adapter extension decode failures retain
   today's precedence over earlier semantic conflicts.
 - **WALL-RESTORE-ERROR-SUM:** cursor `OutboxLogError` remains distinct from
@@ -558,3 +593,4 @@ and the complete eleven-oracle floor land together.
 | r1 | 2026-07-19 | Initial W3 brief: one-page single-pass design, three-route census, four-oracle floor, and an incorrect claim that final authority overhead was fixed with respect to history. |
 | r2 | 2026-07-19 | Pre-review fold (`not_ready`, four majors plus one minor), disposition counted against all five findings: (1) MAJOR memory claim narrowed to duplicate aggregate only, opened/cross-referenced W7, added retained-index measurement; (2) MAJOR fourth ObserverRecovery route added with visibility/error oracle and W7-inheritance finding; (3) MAJOR error precedence preserved exactly by bounded validate-then-apply two-pass with both-pass measurement and dual-fault oracle; (4) MAJOR page-cut gap closed by same-base-head straddle oracle; (5) MINOR EOF defined only by an empty read and short-page oracle. Updated two-pass/EOF costs, shared trigger, honesty, walls, and full nine-oracle census. |
 | r3 | 2026-07-19 | Re-review fold (`not_ready`, four majors plus two minors), disposition counted against all six entries: (1) MAJOR A removed durable repair from the post-finish atomic wall, preserved immediate append/flush and survival across later base failure, forbade deferral, and added the first-class byte-identity oracle; (2) MAJOR B kept-and-signed empty-read EOF, rejected trait strengthening, narrowed equivalence to the production adapter, and coupled signature to its oracle; (3) MAJOR C introduced the restore-level Extension-versus-Semantic error sum and pass-2 cursor oracle; (4) MAJOR acceptance/ledger integration pinned `13c5cdf`, printed both row triggers verbatim, and completed the eleven-name first-class census; (5) MINOR D recast the cost headline and disclosed the second full pass on every source-advancing live commit; (6) MINOR E qualified W7 inheritance by row shape and required feeder-row coverage in the measurement fixture. Updated honesty and walls to match all dispositions. |
+| r4 | 2026-07-19 | Round-3 fold, disposition counted against the complete one-entry findings array: (1) MAJOR, closed under the coordinator's ruling. The two-pass traversal and empty-EOF probes add fallible production reads, so a partially faulting store can succeed today yet fail typed under W3. The veto position is loud-and-earlier failure: prior survival was not a guarantee, and no Tom escalation is required. The r2/r3 wording followed the coordination seat's shorthand; r4 expressly supersedes “zero observable contract change” with “stable-read durable-state equivalence.” Acceptance item 11 was extended, without minting a twelfth oracle, to compare today's successful aggregate path with old-path-never-issued pass-2 and empty-EOF-probe fault arms and assert the exact durability wrapper. Honesty and the equivalence wall now carry the same boundary. |
