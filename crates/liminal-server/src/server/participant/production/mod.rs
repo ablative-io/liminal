@@ -47,6 +47,8 @@ mod e2e_cold_all_shapes_fixture;
 #[cfg(test)]
 mod e2e_cold_tests;
 #[cfg(test)]
+mod e2e_leave_commit_boundary;
+#[cfg(test)]
 mod e2e_leave_regression;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]

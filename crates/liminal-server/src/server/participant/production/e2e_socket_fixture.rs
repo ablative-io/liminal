@@ -158,6 +158,7 @@ pub(in crate::server::participant::production) struct SocketFixture {
     inbound: Vec<u8>,
     handler: Arc<ProductionParticipantHandler>,
     publication_gate: Option<Arc<PublicationGate>>,
+    barriers: Option<Arc<OutboxBarrierStore>>,
     supervisor: ConnectionSupervisor,
     connection: ConnectionHandle,
 }
@@ -189,7 +190,7 @@ impl SocketFixture {
     pub(in crate::server::participant::production) fn start(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(data_dir, None, test_participant_config())
+        Self::start_inner(data_dir, None, test_participant_config(), false)
     }
 
     pub(in crate::server::participant::production) fn start_replay_gated(
@@ -199,6 +200,7 @@ impl SocketFixture {
             data_dir,
             Some(Arc::new(PublicationGate::closed())),
             test_participant_config(),
+            false,
         )
     }
 
@@ -206,7 +208,24 @@ impl SocketFixture {
         data_dir: &Path,
         config: ParticipantConfig,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(data_dir, Some(Arc::new(PublicationGate::closed())), config)
+        Self::start_inner(
+            data_dir,
+            Some(Arc::new(PublicationGate::closed())),
+            config,
+            false,
+        )
+    }
+
+    pub(in crate::server::participant::production) fn start_replay_gated_with_barriers(
+        data_dir: &Path,
+        config: ParticipantConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(
+            data_dir,
+            Some(Arc::new(PublicationGate::closed())),
+            config,
+            true,
+        )
     }
 
     pub(in crate::server::participant::production) fn start_with_replay_gate(
@@ -216,6 +235,7 @@ impl SocketFixture {
             data_dir,
             Some(Arc::new(PublicationGate::open())),
             test_participant_config(),
+            false,
         )
     }
 
@@ -223,8 +243,16 @@ impl SocketFixture {
         data_dir: &Path,
         publication_gate: Option<Arc<PublicationGate>>,
         config: ParticipantConfig,
+        barrier_gated: bool,
     ) -> Result<Self, Box<dyn Error>> {
-        let store = open_disk_store_for_tests(data_dir)?;
+        let inner = open_disk_store_for_tests(data_dir)?;
+        let (store, barriers): (Arc<dyn DurableStore>, Option<Arc<OutboxBarrierStore>>) =
+            if barrier_gated {
+                let barriers = Arc::new(OutboxBarrierStore::new(inner));
+                (barriers.clone(), Some(barriers))
+            } else {
+                (inner, None)
+            };
         let handler = Arc::new(ProductionParticipantHandler::new(
             Arc::clone(&store),
             config,
@@ -252,6 +280,7 @@ impl SocketFixture {
             inbound,
             handler,
             publication_gate,
+            barriers,
             supervisor,
             connection,
         })
@@ -382,6 +411,45 @@ impl SocketFixture {
         Ok(())
     }
 
+    pub(in crate::server::participant::production) fn arm_outbox_barriers(
+        &self,
+        gates: impl IntoIterator<Item = OutboxBarrierKind>,
+    ) -> Result<(), Box<dyn Error>> {
+        self.barriers
+            .as_ref()
+            .ok_or("socket fixture has no durability gates")?
+            .arm(gates)
+    }
+
+    pub(in crate::server::participant::production) fn fail_next_outbox_append(
+        &self,
+    ) -> Result<(), Box<dyn Error>> {
+        self.barriers
+            .as_ref()
+            .ok_or("socket fixture has no durability gates")?
+            .fail_next(OutboxBarrierKind::OutboxAppend)
+    }
+
+    pub(in crate::server::participant::production) fn wait_for_outbox_barrier(
+        &self,
+        expected: OutboxBarrierKind,
+    ) -> Result<(), Box<dyn Error>> {
+        self.barriers
+            .as_ref()
+            .ok_or("socket fixture has no durability gates")?
+            .wait_for(expected)
+    }
+
+    pub(in crate::server::participant::production) fn release_outbox_barrier(
+        &self,
+        expected: OutboxBarrierKind,
+    ) -> Result<(), Box<dyn Error>> {
+        self.barriers
+            .as_ref()
+            .ok_or("socket fixture has no durability gates")?
+            .release(expected)
+    }
+
     pub(in crate::server::participant::production) fn read_push(
         &mut self,
     ) -> Result<ServerPush, Box<dyn Error>> {
@@ -499,6 +567,7 @@ impl SocketFixture {
             inbound,
             handler,
             publication_gate,
+            barriers,
             supervisor,
             connection,
         } = self;
@@ -509,6 +578,7 @@ impl SocketFixture {
         drop(supervisor);
         drop(handler);
         drop(publication_gate);
+        drop(barriers);
     }
 }
 

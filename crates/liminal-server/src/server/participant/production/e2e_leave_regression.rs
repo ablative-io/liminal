@@ -17,9 +17,9 @@ use super::tests::test_participant_config;
 use super::tests_marker_ack_fixture::marker_fixture_config;
 use super::tests_outbox_log::measured_fixed_outbox_overhead;
 
-const CONVERSATION: u64 = 527;
+pub(super) const CONVERSATION: u64 = 527;
 
-fn enroll_three(
+pub(super) fn enroll_three(
     primary: &mut SocketFixture,
     peer: &mut SocketPeer,
     leaver: &mut SocketPeer,
