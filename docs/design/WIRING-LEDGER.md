@@ -81,12 +81,21 @@
   `replay_and_repair` (`handler_observer.rs:357-364`) →
   `ConversationAuthority::replay` (`handler.rs:250-268`) → full
   `ConversationOutbox` reconstruction (`ops_session.rs:270-349`,
-  `outbox_replay.rs:20-33,71-95,120-136`), executing all three index
-  insertion paths. Traced at the liminal seat (W3 r2 fold @ `9875cdd`),
-  re-verification instructed in the W3 re-review before treated as
-  settled. W7's bounding design must cover all four routes.
+  `outbox_replay.rs:20-33,71-95,120-136`), reconstructing all three
+  indexes **for the corresponding row shapes** (r1.3 precision:
+  `apply_row` branches by kind — only `Produced` rows feed
+  `source_batches`/`all_obligations` (`outbox.rs:205-270`), only
+  `AckAdvanced` feeds `ack_sources` (`:298-325`), `MarkerAck` feeds
+  none). Four-route inheritance SETTLED — survived the independent
+  re-trace (W3 re-review, session 16e12546). W7's bounding design must
+  cover all four routes, and any all-three-coverage fixture must
+  construct the row classes that actually feed each index.
 - **Named consumer:** any deployment with unbounded outbox history.
-- **Trigger:** HARD, SHARED WITH W3 (see W3's trigger wording verbatim).
+- **Trigger:** HARD, SHARED WITH W3 — before any deployment with unbounded
+  outbox history, BOTH W3 and W7 must be discharged. Stated on both rows so
+  neither landing alone can be read as unblocking unbounded history.
+  (r1.3: wording now verbatim on this row — the prior by-reference form
+  violated the byte-parity requirement of the r1.1 ruling itself.)
 - **Oracle floor:** its own bounding design brief (index compaction /
   reconstruction touches ack + conflict semantics — a design-first lane,
   NOT foldable into W3); acceptance includes the retained-authority-counts
