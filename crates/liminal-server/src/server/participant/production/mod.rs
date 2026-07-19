@@ -115,6 +115,10 @@ mod tests_residue;
 #[cfg(test)]
 mod tests_unit2_layer1;
 #[cfg(test)]
+mod tests_w1a;
+#[cfg(test)]
+mod tests_w1a_leave_barrier;
+#[cfg(test)]
 mod tests_w3_restore;
 #[cfg(test)]
 mod tests_w3_restore_fixture;

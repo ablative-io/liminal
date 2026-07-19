@@ -23,7 +23,9 @@ use super::tests_observer_wake_fixture::{BarrierKind, ObserverBarrierStore};
 
 const OBSERVER_STREAM_KEY: &str = "liminal:participant-observer-recovery";
 
-fn installed(store: Arc<dyn DurableStore>) -> Result<InstalledParticipantService, Box<dyn Error>> {
+pub(super) fn installed(
+    store: Arc<dyn DurableStore>,
+) -> Result<InstalledParticipantService, Box<dyn Error>> {
     let config = test_participant_config();
     let handler = Arc::new(ProductionParticipantHandler::new(
         Arc::clone(&store),
@@ -33,7 +35,7 @@ fn installed(store: Arc<dyn DurableStore>) -> Result<InstalledParticipantService
         .map_err(|error| format!("participant service configuration failed: {error:?}").into())
 }
 
-fn apply(
+pub(super) fn apply(
     service: &InstalledParticipantService,
     incarnation: ConnectionIncarnation,
     conversations: &mut ParticipantConnectionConversations,
@@ -82,7 +84,7 @@ fn enroll_two(
     Ok((incarnation_a, first.participant_id()))
 }
 
-fn register(
+pub(super) fn register(
     service: &InstalledParticipantService,
     incarnation: ConnectionIncarnation,
     wake_count: Arc<AtomicU64>,
@@ -96,7 +98,7 @@ fn register(
     Ok(inbox)
 }
 
-fn recover(
+pub(super) fn recover(
     service: &InstalledParticipantService,
     incarnation: ConnectionIncarnation,
     conversations: &mut ParticipantConnectionConversations,
@@ -195,7 +197,9 @@ fn assert_progressed(
     Ok(())
 }
 
-fn observer_advance_rows(store: &Arc<dyn DurableStore>) -> Result<usize, Box<dyn Error>> {
+pub(super) fn observer_advance_rows(
+    store: &Arc<dyn DurableStore>,
+) -> Result<usize, Box<dyn Error>> {
     Ok(block_on(store.read_from(OBSERVER_STREAM_KEY, 0, 128))??
         .into_iter()
         .filter(|entry| {
@@ -461,7 +465,7 @@ fn pre_handoff_process_cut() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn observer_progressed_fires_after_source_and_advance_flushes() -> Result<(), Box<dyn Error>> {
+fn dead_or_missing_weak_observer_handle_drops_only_targeted_wake() -> Result<(), Box<dyn Error>> {
     gated_barriers_and_advance_first()?;
     reattach_first_and_dead_target()?;
     flush_fault_reopen_cuts()?;

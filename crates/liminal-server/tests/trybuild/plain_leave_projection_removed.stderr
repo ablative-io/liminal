@@ -1,0 +1,5 @@
+error[E0599]: no method named `observer_progress_projection` found for reference `&LeaveCommit<(), (), ()>` in the current scope
+ --> tests/trybuild/plain_leave_projection_removed.rs:4:17
+  |
+4 |     drop(commit.observer_progress_projection());
+  |                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `&LeaveCommit<(), (), ()>`

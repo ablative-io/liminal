@@ -277,9 +277,18 @@ impl ConversationAuthority {
         projection: ObserverProgressProjection,
         metadata: ObserverProgressSourceMetadata,
     ) -> Result<(), StateError> {
+        #[cfg(test)]
+        let inject_duplicate = super::observer_progress::duplicate_leave_injection_armed()
+            && metadata.producer()
+                == super::observer_progress::ObserverProgressProducer::LiveLeaveCommit;
         let progress = projection.new_observer_progress();
         self.observer_progress_witnesses
             .record(self.conversation_id, projection, metadata)?;
+        #[cfg(test)]
+        if inject_duplicate {
+            self.observer_progress_witnesses
+                .inject_duplicate_producer(metadata)?;
+        }
         self.observer_progress = self.observer_progress.max(progress);
         Ok(())
     }

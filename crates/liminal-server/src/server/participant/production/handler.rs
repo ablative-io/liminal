@@ -361,6 +361,24 @@ impl ProductionParticipantHandler {
             .map_or(usize::MAX, |conversations| conversations.len())
     }
 
+    /// Drops only volatile participant/observer owners for cold-first-touch tests.
+    #[cfg(test)]
+    pub(super) fn discard_owners_for_test(&self) -> Result<(), ParticipantSemanticError> {
+        self.conversations
+            .lock()
+            .map_err(|_| ParticipantSemanticError::Internal {
+                message: "participant conversation registry lock is poisoned".to_owned(),
+            })?
+            .clear();
+        self.observer
+            .lock()
+            .map_err(|_| ParticipantSemanticError::Internal {
+                message: "observer recovery aggregate lock is poisoned".to_owned(),
+            })?
+            .take();
+        Ok(())
+    }
+
     pub(super) fn operation_facts(
         &self,
         context: ParticipantConnectionContext,

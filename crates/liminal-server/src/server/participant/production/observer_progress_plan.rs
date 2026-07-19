@@ -56,6 +56,9 @@ pub(super) fn plan_observer_progress_reconcile(
         ObserverProgressPreflight::Untracked => (true, 0),
         ObserverProgressPreflight::Tracked(progress) => (false, progress),
     };
+    if running_maximum == 0 && durable_progress > 0 {
+        return Err(ObserverProgressConformanceError::AdvanceWithoutRunningMaximumWitness);
+    }
     if durable_progress > running_maximum {
         return Err(ObserverProgressConformanceError::AheadOfValidatedSourceMaximum);
     }

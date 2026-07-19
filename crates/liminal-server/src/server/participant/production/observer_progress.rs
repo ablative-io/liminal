@@ -6,6 +6,8 @@
 //! protocol transitions while this module validates provenance and plans the
 //! exact running-maximum repair suffix.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use liminal_protocol::lifecycle::ObserverProgressProjection;
@@ -170,6 +172,8 @@ pub(super) enum ObserverProgressProducer {
     ParticipantAck,
     MarkerAck,
     LiveLeaveCommit,
+    #[cfg(test)]
+    InjectedDuplicate,
 }
 
 /// Typed metadata constructed while the durable source row and commit are owned.
@@ -292,6 +296,17 @@ impl ObserverProgressSourceMetadata {
             lineage: ObserverProgressLineage::ParticipantTerminal(participant_id),
             producer: ObserverProgressProducer::LiveLeaveCommit,
         }
+    }
+
+    #[cfg(test)]
+    const fn injected_duplicate(mut self) -> Self {
+        self.producer = ObserverProgressProducer::InjectedDuplicate;
+        self
+    }
+
+    #[cfg(test)]
+    pub(super) const fn producer(self) -> ObserverProgressProducer {
+        self.producer
     }
 }
 
@@ -419,6 +434,38 @@ impl ObserverProgressWitnessState {
     pub(super) fn take(&mut self) -> Vec<ObserverProgressSourceWitness> {
         std::mem::take(&mut self.witnesses)
     }
+
+    #[cfg(test)]
+    pub(super) fn inject_duplicate_producer(
+        &self,
+        metadata: ObserverProgressSourceMetadata,
+    ) -> Result<(), ObserverProgressConformanceError> {
+        let injected = metadata.injected_duplicate();
+        if self.occurrences.contains(&injected.occurrence) {
+            return Err(ObserverProgressConformanceError::DuplicateOccurrenceProducer);
+        }
+        validate_metadata(injected.occurrence.progress(), injected)
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DUPLICATE_LEAVE_INJECTION: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn with_duplicate_leave_injection<T>(operation: impl FnOnce() -> T) -> T {
+    DUPLICATE_LEAVE_INJECTION.with(|armed| {
+        let previous = armed.replace(true);
+        let result = operation();
+        armed.set(previous);
+        result
+    })
+}
+
+#[cfg(test)]
+pub(super) fn duplicate_leave_injection_armed() -> bool {
+    DUPLICATE_LEAVE_INJECTION.with(Cell::get)
 }
 
 const fn validate_metadata(
@@ -453,24 +500,6 @@ const fn validate_metadata(
             )
             | (
                 ObserverProgressSourceIdentity::Base {
-                    kind: BaseSourceKind::ParticipantAck,
-                    ..
-                },
-                ObserverProgressOccurrence::ParticipantAck { .. },
-                ObserverProgressLineage::ParticipantCursor(lineage_participant),
-                ObserverProgressProducer::ParticipantAck,
-            )
-            | (
-                ObserverProgressSourceIdentity::Extension {
-                    kind: ExtensionSourceKind::MarkerAck,
-                    ..
-                },
-                ObserverProgressOccurrence::MarkerAck { .. },
-                ObserverProgressLineage::ParticipantCursor(lineage_participant),
-                ObserverProgressProducer::MarkerAck,
-            )
-            | (
-                ObserverProgressSourceIdentity::Base {
                     kind: BaseSourceKind::Left,
                     ..
                 },
@@ -478,6 +507,35 @@ const fn validate_metadata(
                 ObserverProgressLineage::ParticipantTerminal(lineage_participant),
                 ObserverProgressProducer::LiveLeaveCommit,
             ) => lineage_participant == participant_id,
+            (
+                ObserverProgressSourceIdentity::Base {
+                    sequence,
+                    kind: BaseSourceKind::ParticipantAck,
+                },
+                ObserverProgressOccurrence::ParticipantAck {
+                    source_sequence, ..
+                },
+                ObserverProgressLineage::ParticipantCursor(lineage_participant),
+                ObserverProgressProducer::ParticipantAck,
+            ) => lineage_participant == participant_id && sequence == source_sequence,
+            (
+                ObserverProgressSourceIdentity::Extension {
+                    base_log_head,
+                    extension_sequence,
+                    kind: ExtensionSourceKind::MarkerAck,
+                },
+                ObserverProgressOccurrence::MarkerAck {
+                    base_log_head: occurrence_base_log_head,
+                    extension_sequence: occurrence_extension_sequence,
+                    ..
+                },
+                ObserverProgressLineage::ParticipantCursor(lineage_participant),
+                ObserverProgressProducer::MarkerAck,
+            ) => {
+                lineage_participant == participant_id
+                    && base_log_head == occurrence_base_log_head
+                    && extension_sequence == occurrence_extension_sequence
+            }
             _ => false,
         };
     if valid {
