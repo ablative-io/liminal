@@ -1,6 +1,6 @@
 # W1b — durable Died / Ordinary / Recovered / Detached fate sources
 
-Revision: r2, 2026-07-20. Design-first lane; this revision is docs-only.
+Revision: r3, 2026-07-20. Design-first lane; this revision is docs-only.
 
 Normative ledger: `docs/design/WIRING-LEDGER.md` r1.9 at `c77ce31`. Source pin:
 `c77ce31`. The only repository change from the r1 source pin to this pin is the
@@ -21,25 +21,24 @@ Died, Ordinary, and Recovered (`docs/design/WIRING-LEDGER.md:57-75`).
 
 - **Owner:** Hermes.
 - **Named consumer:** the full Unit 2 §8 crash-fate observer-progress repair.
-- **Build trigger:** approval of this r2 design, followed by one W1b
+- **Build trigger:** approval of this r3 design, followed by one W1b
   implementation lane.
 - **Completion:** every production entry point, v3 row/decoder, replay path,
   barrier, and oracle in §12 lands together. Protocol-only callers or rows with
   no cold completion are not completion.
 
-The r1 pre-review verdict was **not ready**. This is the complete disposition:
+The r1 and r2 reviews were both **not ready**. R2's prior findings remain folded
+in the decisions below; the round-2 re-review contributes this complete
+six-element array (**5 NEW MAJOR + 1 minor**):
 
-| finding/ruling | r2 disposition |
+| round-2 finding | r3 disposition |
 |---|---|
-| MAJOR 1 — Ordinary/Recovered production source | §4.3 names the new aggregate caller, typed inputs, owner, lock, trigger, and protocol-owned floor selector. §4.4 makes Died-to-specific-fate an explicit durable pending intent, never row-absence inference. |
-| MAJOR 2 — fenced Attached v3 | §5 defines the closed Ordinary/Superseding/Fenced shape, frozen-v2 mapping, one-consumption API, marker proof, optional composed-terminal audit, and page-spanning schema phase. |
-| MAJOR 3 — disposition selector | §7 assigns Committed/Pending to a protocol-owned terminal-admission selector over exact frontier/observer/capacity state. §9 corrects the StoredLeave audit claim. |
-| MAJOR 4 — connection-fate fold durability | §3 adds an Open/Complete intent in the existing incarnation event stream. It survives failure on a middle conversation and is completed before publication on replay. |
-| MAJOR 5 — temporal order | §8 enforces Died-before-Ordinary/Recovered by durable source reference and validate-before-apply grammar; Recovered-then-Died refuses, including an already-flushed Advance fixture. |
-| MINOR — active cost | §13 says termination/startup append no participant fate rows today, uses the existing OperationLog barrier abstraction as the new implementation seam, and bounds work per affected conversation and slot. |
-| EXTEND — findings 3+5 | §§2.3, 4, 8, and 9 make Detached first-class and wire clean Disconnect plus orderly ForceClose/server shutdown to `clean_disconnect` and `server_shutdown`. |
-| Coordinator note — intent bound and owner | §3 names `max_semantic_conversations_per_connection` as the hard list bound, the incarnation-stream authority as owner, and Open, Complete, logical reclamation, and append-only physical retention explicitly. |
-| Coordinator note — fenced-Attached lens | §5 makes mode and proof data closed and lossless, prevents cloned fate authority, and carries schema phase across every replay page. |
+| MAJOR 1 — Pending-Died completion grammar | §§4.1, 4.5, 8, and 9 define one closed grammar. Ordinary names a lower Committed Died or exact Left/Fenced-Attached finalizer source; a Pending Died row never changes disposition. Recovered after Pending Died durably reserves/presents the occurrence, and the later finalizer consumes that reservation through a typed non-presenting transition. |
+| MAJOR 2 — consume-once must revoke copyable proof | §5.3 removes Clone/Copy from `FencedAttachCommit`, moves it by value through verified attach/commit, stores one private recovered authority, and removes the old public fate-capable method. §13 records the required next-publish `liminal-protocol` 0.3.0 semver implication. |
+| MAJOR 3 — selector candidate charge | §7.1 chooses a sealed two-stage prepare/admit API. The server computes one versioned canonical candidate charge after allocation is proposed; protocol validates conversation, participant, epoch, order, sequence, and one encoded entry before deciding Committed/Pending. Every refusal returns unchanged authority. |
+| MAJOR 4 — Pending explicit Detached shape | §§4.1 and 7.2 partition ExplicitRequestCommitted, which retains the canonical shell event, from ExplicitRequestPending, which stores no event and re-mints the pending cell/outcome from exact request facts and observer baseline. |
+| MAJOR 5 — Open intent live failure policy | §§3.2–3.4 and 11 choose participant-service/server-fatal escalation after Open. Startup replay is mandatory; Drop may release only volatile transport state and cannot complete/reclassify the intent. Simultaneously unmatched Opens are bounded by signed `limits.max_connections`. |
+| MINOR — marker digest contract | §5.1 omits the digest. The exact durable marker source sequence plus full source-row/frontier validation is sole identity; replay mints one `ValidatedMarkerRecord` only after validation. |
 
 ## 1. Current byte ground truth and inherited semantics
 
@@ -201,6 +200,16 @@ before any conversation mutex is taken. After all targets complete, it is
 reacquired to append/flush Complete. This preserves one lock order and prevents
 connection/conversation inversion.
 
+The same authority owns a checked in-memory set of unmatched Open sequences. Its
+server-wide hard bound is the startup-signed `LimitsConfig::max_connections`, the
+existing cap on concurrently admitted live connections
+(`crates/liminal-server/src/config/types.rs:270-284,316-340`). Startup admits no
+new connections until it has completed every restored Open, so historical Opens
+cannot overlap a new admitted generation. During live service each connection
+can own at most one Open, and the listener can have at most `max_connections`
+connections; an attempted second Open or over-bound set is a typed invariant
+failure before append. Complete removes the sequence from this set.
+
 ### 3.3 Lifecycle and replay
 
 1. **Created:** after the terminal event has an exact typed class and before
@@ -235,6 +244,29 @@ every tail binding before service publication. Failure to finish any tail item
 is startup-fatal and leaves the intent open for the next exact replay; it never
 publishes a partial owner set.
 
+### 3.4 Chosen live failure policy: fatal after Open
+
+W1b chooses policy **(a)**. Once Open flushes, any non-idempotent per-conversation
+protocol, lock, append, flush, replay, or observer-repair failure latches
+`ParticipantServiceFatal::ConnectionFateIntentIncomplete { open_sequence,
+conversation_id }`. The participant service atomically stops accepting semantic
+requests, owner publication, observer classification, and new connection-intent
+opens; the server stops accepting connections and exits through its normal fatal
+composition path. A fresh startup must replay and Complete the Open before
+re-exposing service. There is no live background runner, retry loop, or request
+handoff, so the policy cannot silently depend on a task that the design did not
+name.
+
+After the fatal latch, transport Drop/release **may** close the socket, cancel
+pending replies, deregister weak publication targets, and release volatile
+connection actors: Open already owns the exact sorted conversation list. It may
+not append Complete, erase/reclassify Open, append a different cause, publish any
+conversation owner, or continue participant service. Before Open flush, by
+contrast, Drop/release is forbidden because no durable authority owns the list.
+A non-crash injected middle failure therefore first produces an observable fatal
+latch and service refusal, then controlled restart completes every tail item from
+Open; §12 names that fixture separately from abrupt process crash.
+
 ## 4. Decision C — four exact v3 fate rows, sources, and replay
 
 ### 4.1 `StoredOperationV3` grammar
@@ -255,9 +287,9 @@ specified below.
 | class | exact v3 fields | invariant |
 |---|---|---|
 | Died | `participant_id`; `binding_epoch`; `cause: ConnectionLost | ProcessKilled | ProtocolError | UncleanServerRestart { prior_server_incarnation }`; `terminal_order`; `disposition: Committed { terminal_seq } | Pending`; `connection_intent_sequence: Option<u64>`; `specific_fate_intent: None | Ordinary { attached_source_sequence } | Recovered { attached_source_sequence, prior_binding_epoch, marker_delivery_seq }` | Cause is closed. Restart incarnation equals the epoch-derived value. Connection causes reference Open; startup repair may use None. The specific intent is selected from the consume-once slot token before Died flush and is positive durable completion authority. |
-| Detached | `participant_id`; `binding_epoch`; `cause: CleanDeregister | ServerShutdown`; `terminal_order`; `disposition: Committed { terminal_seq } | Pending`; `source: ExplicitRequest { request, secret_verified, verifier, receiving_epoch, event } | ConnectionClose { connection_intent_sequence }` | ExplicitRequest losslessly contains the current v2 request fields/event. ConnectionClose must reference matching Open class/incarnation. Superseded is forbidden here because v3 Attached owns it. |
-| Ordinary | `participant_id`; `last_dead_binding_epoch`; `died_source_sequence`; `ordinary_attached_source_sequence`; `died_cause`; `died_transaction_order`; `died_terminal_seq`; `resulting_floor` | It consumes the exact Ordinary intent of an earlier **Committed** Died row and audits its terminal. `event` is the canonical `BindingFateOperation::from_ordinary` bytes. |
-| Recovered | `participant_id`; `last_dead_binding_epoch`; `died_source_sequence`; `fenced_attached_source_sequence`; `prior_binding_epoch`; `marker_delivery_seq`; `resulting_floor` | It consumes the Recovered intent of an earlier Died row, but contains no Died cause/order/terminal because the protocol transition accepts none. `event` is canonical `from_recovered` bytes. |
+| Detached | `participant_id`; `binding_epoch`; `cause: CleanDeregister | ServerShutdown`; `terminal_order`; `disposition: Committed { terminal_seq } | Pending`; `source: ExplicitRequestCommitted { request, secret_verified, verifier, receiving_epoch, event } | ExplicitRequestPending { request, secret_verified, verifier, receiving_epoch, observer_baseline } | ConnectionClose { connection_intent_sequence }` | ExplicitRequestCommitted is legal only with Committed and retains the existing canonical committed shell event. ExplicitRequestPending is legal only with Pending, stores **no event**, and re-mints the exact pending cell/outcome from inputs. ConnectionClose must reference matching Open. Superseded is forbidden because v3 Attached owns it. |
+| Ordinary | `participant_id`; `last_dead_binding_epoch`; `ordinary_attached_source_sequence`; `terminal_source: DiedCommitted { died_source_sequence } | PendingDiedFinalized { died_source_sequence, finalizer: Left { source_sequence } | FencedAttached { source_sequence } }`; `committed_terminal_audit: { cause, transaction_order, terminal_seq }`; `resulting_floor` | DiedCommitted requires the lower Died row itself be Committed. PendingDiedFinalized requires the Died row remain Pending forever, resolves the exact lower finalizer row, and validates its committed terminal before consuming Ordinary authority. `event` is canonical `BindingFateOperation::from_ordinary` bytes. |
+| Recovered | `participant_id`; `last_dead_binding_epoch`; `died_source_sequence`; `fenced_attached_source_sequence`; `prior_binding_epoch`; `marker_delivery_seq`; `resulting_floor`; `presentation: DiedCommittedOwns | RecoveredOwnsAndReservesFinalizer` | It consumes an earlier Died intent but no Died terminal protocol input. DiedCommittedOwns is non-presenting because committed Died already owns the occurrence. RecoveredOwnsAndReservesFinalizer is legal only after Pending Died: this row presents and durably reserves the occurrence, and a later exact finalizer must consume the reservation through §4.5's non-presenting mode. `event` is canonical `from_recovered` bytes. |
 
 Conversation id remains stream identity and is revalidated against every
 protocol-produced value. Every epoch uses checked `StoredBindingEpoch`
@@ -266,8 +298,9 @@ references, wrong class, wrong intent, event drift, cause/mode mismatch, unknown
 tags, or unchecked arithmetic are typed restore failures before publication.
 
 Frozen v2 Detached converts only as follows: its request/verifier/receiving epoch,
-terminal order/sequence, and event become v3 ExplicitRequest + CleanDeregister +
-Committed. There is no v2 Pending connection-close row to invent.
+terminal order/sequence, and event become v3 ExplicitRequestCommitted +
+CleanDeregister + Committed. There is no v2 Pending request or connection-close
+row to invent.
 
 ### 4.2 Four canonical live producers
 
@@ -275,8 +308,8 @@ Committed. There is no v2 Pending connection-close row to invent.
 |---|---|---|
 | Died | `ConversationAuthority::apply_connection_fate` receives one referenced Open work item, exact Bound slot, and §7 protocol terminal-admission decision; startup uses the same method with UncleanServerRestart | Conversation owner under its mutex; classified loss/protocol event or startup restore. Died append/flush precedes slot installation, specific completion, Advance, and publication. |
 | Detached | The same method receives CleanDisconnect/ServerShutdown work, or existing `apply_detach` receives an explicit verified request; both consume §7's selector output | Same owner/mutex. Clean Disconnect, orderly ForceClose, or explicit request is the trigger. Detached append/flush precedes transition installation and projection. |
-| Ordinary | `ConversationAuthority::complete_binding_fate_intent` receives `PendingSpecificFate::Ordinary { died_source, token }`, where `token` was reconstructed from the referenced ordinary Attached row and the Died row is Committed | Same owner/mutex. The trigger is successful Died flush or replay of its explicit open intent. The protocol consumes the token and committed terminal, measures the floor, and the Ordinary append/flush precedes closure installation/observer handling. There is no caller in today's request match; this method is new. |
-| Recovered | The same completion method receives `PendingSpecificFate::Recovered { died_source, token }`, where token is the sole sealed `FencedAttachCommit` provenance from §5 | Same owner/mutex. The trigger is successful Died flush or replay of its explicit intent. The protocol measures the floor and consumes the token through `recovered_binding_fate`; Recovered flush precedes closure/observer handling. No Died terminal is constructed or passed. |
+| Ordinary | `ConversationAuthority::complete_binding_fate_intent` receives `PendingSpecificFate::Ordinary { died_source, terminal_source, authority }`. `terminal_source` is either that Committed Died row or an exact lower Left/Fenced-Attached row that committed the terminal for an immutable Pending Died | Same owner/mutex. The trigger is successful Committed Died flush, or a real finalizer/replay satisfying a Pending Died intent. Protocol consumes the private ordinary authority and the terminal reconstructed from the selected source, measures the floor, and Ordinary flush precedes closure/observer handling. |
+| Recovered | The same completion method receives `PendingSpecificFate::Recovered { died_source, recovered_authority }`, where `recovered_authority` is the sole private by-value authority emitted by §5's attach commit | Same owner/mutex. Successful Died flush or explicit-intent replay is the trigger. Protocol measures the floor and consumes the private authority. No caller retains `FencedAttachCommit`; no Died terminal is constructed or passed. Pending-Died presentation uses the durable reservation grammar in §4.5. |
 
 ### 4.3 Protocol-owned floor measurement
 
@@ -284,7 +317,7 @@ W1b adds one consuming protocol operation on `LiveFrontierOwner`, not a server
 formula:
 
 ```text
-prepare_binding_fate(owner, sealed_fate_token, died_terminal_if_ordinary)
+prepare_binding_fate(owner, sealed_fate_token, terminal_source_if_ordinary)
     -> PreparedBindingFate { next_owner, fate, event }
 ```
 
@@ -299,11 +332,11 @@ it. Production stops calling the raw public constructor; it becomes crate-privat
 or remains unreachable from the production module. This closes the current hole
 where the constructor accepts any caller number (`edge.rs:1477-1488`).
 
-The Ordinary branch additionally consumes the exact committed Died terminal as
-required by `AttachCommit::ordinary_binding_fate`. The Recovered branch consumes
-only the fenced token and internally minted event as required by
-`FencedAttachCommit::recovered_binding_fate`. A protocol refusal returns the
-unchanged boxed/token authority and no row is appended.
+The Ordinary branch additionally consumes the exact committed Died terminal
+reconstructed from its closed terminal-source tag. The Recovered branch consumes
+only §5's private recovered authority and internally minted event; the old
+fate-capable method on public `FencedAttachCommit` no longer exists. A protocol
+refusal returns the unchanged boxed/private authority and no row is appended.
 
 ### 4.4 Died-to-specific-fate choreography
 
@@ -322,22 +355,49 @@ not fictitious two-row atomicity:
    deterministic completion at the current checked head, flushes, replays that
    row, and only then publishes. This is not “row absent, guess fate”: the Died
    row explicitly commands one named completion.
-5. Ordinary waits while Died is Pending because its protocol input requires a
-   committed terminal. When an enclosing Left or fenced Attached row commits
-   that exact pending terminal, the still-open Ordinary intent completes from
-   the referenced source. Recovered requires no committed terminal and may
-   complete after a Pending Died, but still only after the Died source flush.
-6. A Died row with no specific token is complete history. Enrollment-origin
+5. A Pending Died row is immutable: its disposition never changes to Committed.
+   Ordinary waits until a lower Left or Fenced-Attached finalizer commits the
+   terminal, then persists that finalizer as its terminal source and audits the
+   resulting terminal. It never labels the Died row Committed.
+6. Recovered may complete immediately after Pending Died because it consumes no
+   terminal. That Recovered row presents and durably reserves the occurrence;
+   the later finalizer must encode and consume the reservation through a typed
+   non-presenting transition. Silence or numeric suppression is forbidden.
+7. A Died row with no specific token is complete history. Enrollment-origin
    bindings currently select None; no Ordinary authority is fabricated.
 
-### 4.5 Replay and W1a join at equal depth
+### 4.5 Closed Pending-Died completion grammar
+
+There is one grammar, used by live application, validation, replay, and W1a:
+
+| pending-Died branch | required durable sequence | presentation owner and validation |
+|---|---|---|
+| Ordinary finalized by Leave | Died Pending `<` Left with `pending_source_sequence = Died` `<` Ordinary with `PendingDiedFinalized::Left = Left` | Left commits the exact Died terminal and presents. Ordinary repeats cause/order/terminal sequence, resolves both lower rows, consumes the ordinary authority, and is non-presenting because Left owns the occurrence. The Died row remains Pending. |
+| Ordinary finalized by Fenced Attached | Died Pending `<` Fenced Attached whose composed-terminal source is Died `<` Ordinary with `PendingDiedFinalized::FencedAttached = Attached` | Attached commits/audits the exact Died terminal and presents. Ordinary resolves the composed terminal and is non-presenting. The Died row remains Pending. |
+| Recovered before Leave finalization | Died Pending `<` Recovered with `RecoveredOwnsAndReservesFinalizer` `<` Left with `ConsumeRecoveredReservation { recovered_source_sequence }` | Recovered presents its measured floor and reserves the occurrence key. Left still commits the terminal/member transition but the protocol returns `NonPresentingFinalizerCommit`; it has no projection accessor. Replay requires reciprocal source/key references. |
+| Recovered before Fenced-Attached finalization | Died Pending `<` Recovered with reservation `<` Fenced Attached whose composed-terminal presentation is `ConsumeRecoveredReservation { recovered_source_sequence }` | Recovered presents. Attached consumes Pending and rotates state but returns the same typed non-presenting finalizer result. The composed terminal remains fully audited; no Attached terminal witness is constructed. |
+
+V3 Left and Fenced Attached therefore carry a closed
+`FinalizerPresentation = PresentEnclosing | ConsumeRecoveredReservation {
+recovered_source_sequence }`. The consuming tag is legal only when the referenced
+lower Recovered row names this exact Pending Died source, participant, epoch, and
+`RecoveredOwnsAndReservesFinalizer` mode. `PresentEnclosing` is illegal after such
+a reservation. The occurrence router validates this before constructing either
+`LiveLeaveCommit`/Attached projection or the projection-free
+`NonPresentingFinalizerCommit`; it does not construct a projection and then drop
+it. An open reservation with no later finalizer is legal pending history.
+Duplicate consumption, a finalizer claiming a missing/wrong reservation, or a
+finalizer after a reservation that silently omits the tag is a typed
+`FateOccurrenceConflict`.
+
+### 4.6 Replay and W1a join at equal depth
 
 | class | replay transition | source / occurrence audit / lineage |
 |---|---|---|
 | Died | Reconstruct exact Bound slot and §7 disposition, invoke stored cause once, validate state/terminal/order, and restore the explicit specific intent. Pending creates no terminal/projection. | base sequence + Died; `(conversation, participant, epoch)` plus terminal audit; `ParticipantTerminal` lineage for Committed. |
 | Detached | Resolve ExplicitRequest or referenced ConnectionClose, invoke clean_disconnect/server_shutdown or committed/pending explicit detach exactly once, and validate terminal/cell/state. | base sequence + Detached; same occurrence plus cause/source/terminal audit; `ParticipantTerminal` lineage for Committed. |
-| Ordinary | Resolve earlier Died and ordinary Attached, require matching open intent and committed terminal, re-run protocol measurement, byte-check event, install next frontier. | base sequence + Ordinary; same occurrence plus Died/Attached audits; `BindingFateFloor` lineage. |
-| Recovered | Resolve earlier Died and fenced Attached, restore the full fenced proof, re-run protocol measurement with no Died terminal, byte-check event, install next frontier. | base sequence + Recovered; same occurrence plus Died/Attached/marker audits; `BindingFateFloor` lineage. |
+| Ordinary | Resolve ordinary Attached and the closed terminal source. DiedCommitted resolves a committed Died; PendingDiedFinalized resolves immutable Pending Died plus exact lower Left/Fenced Attached and reconstructs its committed terminal. Re-run measurement and byte-check event. | base sequence + Ordinary; same occurrence plus Died/Attached/finalizer/terminal audits; `BindingFateFloor` lineage. |
+| Recovered | Resolve earlier Died and fenced Attached, restore the private recovered authority, re-run measurement with no Died terminal, byte-check event, and validate DiedOwned versus reservation presentation mode. | base sequence + Recovered; same occurrence plus Died/Attached/marker/reservation audits; `BindingFateFloor` lineage. |
 
 Every candidate enters §8's router before W1a's existing
 `record_observer_progress_projection`. Detached gains the same sealed
@@ -359,7 +419,7 @@ option and requires one closed tag:
 |---|---|
 | Ordinary | no mode payload; request marker must be None; prestate must be Detached with ordinary closure admission. |
 | Superseding | `prior_binding_epoch`; `terminal_transaction_order`; `terminal_delivery_seq`; request marker None. Prior epoch is the exact Bound prestate; terminal order equals common Attached order; protocol verifies the indivisible Superseded/Attached handoff. |
-| Fenced | `prior_binding_epoch`; `marker_delivery_seq`; `marker_source: { outbox_source_sequence, marker_record_digest }`; `proof: { detached_credential_recovery, predecessor_debt, fenced_resulting_floor, successor }`; `composed_terminal: None | Some { kind: Died | Detached, cause, transaction_order, delivery_seq, pending_source_sequence }` | Request marker equals the marker. Proof mirrors the complete `FencedAttachCommitRestore`: predecessor, nonzero debt, participant, marker, old/new epochs, measured fenced floor, and restricted successor (`lifecycle/storage.rs:1538-1606`). The marker source identifies the exact durable marker record whose one-use validation authority is consumed. Optional terminal must match the exact Pending state and source; None requires Detached state and matching retained terminal history (`lifecycle/attach.rs:300-357`). |
+| Fenced | `prior_binding_epoch`; `marker_delivery_seq`; `marker_source_sequence`; `proof: { detached_credential_recovery, predecessor_debt, fenced_resulting_floor, successor }`; `composed_terminal: None | Some { kind: Died | Detached, cause, transaction_order, delivery_seq, pending_source_sequence, presentation }` | Request marker equals the marker. Proof mirrors complete `FencedAttachCommitRestore`: predecessor, nonzero debt, participant, marker, old/new epochs, measured fenced floor, and restricted successor (`lifecycle/storage.rs:1538-1606`). The exact source sequence resolves one durable marker row; full frontier restoration must mint the one-use validation authority. Optional terminal must match Pending/source and §4.5 presentation mode; None requires Detached state/history (`lifecycle/attach.rs:300-357`). |
 
 The Fenced proof is not just marker number + epochs. Existing
 `FencedAttachCommit` also owns the restricted closure successor
@@ -367,6 +427,16 @@ The Fenced proof is not just marker number + epochs. Existing
 epoch, debt, predecessor, and successor. V3 persists every input needed to
 re-run that transition. `StoredRecoveredFate` references this Attached row rather
 than duplicating its full proof.
+
+**Marker identity ruling: no digest.** Conversation stream identity plus the v3
+`marker_source_sequence`, expected marker row kind, and marker delivery sequence
+select one durable row. Replay decodes that complete source row and validates its
+causal row/provenance/target binding/occurrence through total
+frontier restore, and only then obtains the private `ValidatedMarkerRecord`.
+That token cannot be fabricated from raw ids and is consumed after restore
+(`lifecycle/claim_frontier.rs:1490-1541`). A hash would add an unversioned second
+identity while still requiring this full validation, so no
+`marker_record_digest` field or function exists.
 
 ### 5.2 Frozen-v2 Attached mapping
 
@@ -391,27 +461,43 @@ redundant request/prestate field is cross-checked.
 
 ### 5.3 Consume exactly once
 
-Current `AttachCommit` is Clone and production reads/decomposes it across
-`ops_attach.rs:240-317`, while its ordinary authority is retained internally
-(`lifecycle/attach.rs:98-115,139-213`). W1b replaces that production boundary
-with one consuming protocol API:
+R2's split was insufficient at the bytes. `FencedAttachCommit` is publicly
+Clone + Copy and exposes public `recovered_binding_fate(self, ...)`, while
+`AttachMode::Fenced` merely borrows it; the pre-attach caller can retain a
+fate-capable copy (`lifecycle/edge.rs:955-968,1007-1056`;
+`lifecycle/attach.rs:215-222,300-357`). R3 changes ownership itself:
+
+1. Remove `Clone` and `Copy` from public `FencedAttachCommit`; retain only Debug,
+   PartialEq, and Eq. Its observational accessors borrow `&self`.
+2. `verify_fenced_attach` accepts `proof: FencedAttachCommit` **by value** and
+   returns a non-Clone `VerifiedAttachCommit<F>` whose private
+   `AttachMode::Fenced` owns the proof, with no lifetime/borrow. A verification
+   refusal returns an owning error wrapper containing the unchanged member and
+   proof, never a copied proof.
+3. `commit_attach` consumes that verified value by value. Fenced commit moves the
+   proof's fate-capable state into one private `RecoveredBindingAuthority` field
+   inside `AttachCommit`; Installed state gets only non-fate transition audit.
+4. Remove the public `FencedAttachCommit::recovered_binding_fate`. Its logic moves
+   to a crate-private consuming method on `RecoveredBindingAuthority`; only that
+   authority can produce `RecoveredBindingFate`.
+5. The final production boundary consumes once:
 
 ```text
 AttachCommit::into_slot_and_fate(self)
     -> (InstalledAttachState<F, V>, SealedBindingFateToken)
 
 SealedBindingFateToken = None | Ordinary(OrdinaryFateAuthority)
-                              | Recovered(FencedFateAuthority)
+                              | Recovered(RecoveredBindingAuthority)
 ```
 
 `InstalledAttachState` owns member, active binding, detach cell, Attached record,
-outcome, and receipt facts. The token alone owns the fate authority and exact
-Attached source audit. The authority types lose Clone/Copy; fields stay private;
-there is no borrowing accessor that can mint another token. `ConversationAuthority`
-stores exactly one `Option<SealedBindingFateToken>` in the slot and moves it into
-§4.3. On refusal it gets the same token back; on commit it is consumed. Live and
-replay both call this split once. Static/compile-fail tests prove the commit/token
-cannot be cloned and the split cannot be called twice.
+outcome, and receipt facts. `ConversationAuthority` stores exactly one private
+slot token and moves it into §4.3. On fate refusal it receives the same authority
+back; on success it is consumed. No public/borrowing fate accessor remains.
+Oracle 25 includes trybuild cases that attempt to retain the pre-attach proof,
+copy/clone it, invoke recovered fate after moving it into verification, and call
+the old public fate method; every case must fail to compile. Live and replay each
+exercise one successful by-value chain.
 
 ## 6. Decision E — participant schema v3 and cross-page phase
 
@@ -459,7 +545,12 @@ fates are synthesized; a later real event starts the v3 suffix.
 ### 7.1 Exact selector and production state
 
 The Died/Detached cause methods require disposition as input; they do not decide
-it (`binding.rs:630-685,756-801`). W1b adds a consuming protocol operation:
+it (`binding.rs:630-685,756-801`). Allocation values are also inputs to the exact
+candidate charge: today the server serializes a terminal-shaped row only after it
+has order/sequence (`participant/production/frontier.rs:126-147`) and passes the
+resulting `RetainedRecordCharge` into protocol frontier application
+(`lifecycle/operations/live_frontier.rs:695-740`). W1b therefore chooses a sealed
+two-stage API rather than allocating before an unpriced admission:
 
 ```text
 LiveFrontierOwner::prepare_binding_terminal(
@@ -469,32 +560,64 @@ LiveFrontierOwner::prepare_binding_terminal(
     next_delivery_sequence,
     hard_observer_progress,
 )
+ -> PreparedBindingTerminal { unchanged_owner, CandidateTerminalKey }
+  | PrepareRefused { unchanged_owner, typed_reason }
+
+BindingTerminalCandidateCharge {
+    conversation_id,
+    participant_id,
+    binding_epoch,
+    transaction_order,
+    delivery_seq,
+    encoding: ParticipantLifecycleV3CanonicalJson,
+    charge: RetainedRecordCharge,
+}
+
+PreparedBindingTerminal::admit(candidate_charge)
  -> Commit { next_owner, CommittedBindingTerminalPosition }
   | Pending { next_owner, PendingBindingTerminalPosition, blocked_at_observer }
-  | Refused { unchanged_owner, typed_reason }
+  | AdmitRefused { unchanged_owner, typed_reason }
 ```
 
-The selector uses the exact coupled ClaimFrontiers/ClosureAccounting, retained
-terminal charge, `max_retained_record_rows`, current retained/cap floors, hard
-observer progress, and checked next order/sequence. It returns **Committed** only
-when the terminal record can be admitted now, consuming both order and delivery
-sequence. It returns **Pending** only for the protocol's observer-blocked terminal
-admission, consuming order but not a delivery sequence and recording the observed
-blocking progress. Capacity exhaustion, arithmetic exhaustion, wrong authority,
-or closure mismatch are typed refusals—not aliases for Pending.
+Prepare validates authority and checked candidate order/sequence but mutates
+nothing and consumes no allocator. Its sealed `CandidateTerminalKey` exposes only
+the exact fields needed to encode the candidate. The server builds
+`CanonicalLifecycleRowV3::BindingTerminal { conversation_id, participant_id,
+binding_epoch, admission_order, delivery_seq }`, serializes it with the v3
+canonical JSON encoder, converts byte length with checked arithmetic, and wraps
+`ResourceVector::new(1, bytes)` in the keyed `RetainedRecordCharge`.
+Storage framing stays server-owned, but the encoding tag makes the charge contract
+versioned and prevents v2/v3 ambiguity.
 
-Production never constructs either position directly. It passes the selector's
-sealed result into `clean_disconnect`, `server_shutdown`, or the Died producer.
-The row stores the selected disposition and replay re-runs the selector from the
-same prestate and checked allocators.
+Admit requires every repeated conversation/participant/epoch/order/sequence to
+equal the sealed key, the charge's delivery/order keys to match, encoding to be
+v3, and encoded entry count to be exactly one. It then uses the coupled
+ClaimFrontiers/ClosureAccounting, retained charges/row limit, current retained and
+cap floors, hard observer progress, and candidate charge. **Committed** consumes
+order+sequence only when the row is admissible. **Pending** is only the
+observer-blocked result, consumes order but not candidate sequence, and persists
+the observed baseline. Wrong charge, capacity/arithmetic exhaustion, wrong
+authority, or closure mismatch returns `AdmitRefused` with the original
+`LiveFrontierOwner` and no allocator movement. Live and replay call the identical
+v3 encoder and both stages; neither can hand protocol an unkeyed byte count.
+
+Production passes only the sealed admitted result into `clean_disconnect`,
+`server_shutdown`, or Died. The row stores the selected disposition and replay
+re-runs prepare/encode/admit from the same prestate.
 
 ### 7.2 Required production changes
 
 - Explicit detach stops unconditionally calling `allocate_position` and gains
   its real `start_blocked_detach` route; current code always commits and treats
   pending replay as impossible (`production/ops_session.rs:103-128`;
-  `lifecycle/detach.rs:501-545`). Its v3 Detached ExplicitRequest row therefore
-  creates a truthful Pending Detached state when observer-blocked.
+  `lifecycle/detach.rs:501-544`). Committed selects
+  `ExplicitRequestCommitted` and persists the existing shell event. Pending
+  selects `ExplicitRequestPending` and persists request, verifier,
+  receiving epoch, terminal admission order, and exact `observer_baseline`, but
+  **no event bytes**. Replay calls `start_blocked_detach` and validates its
+  PendingFinalization, PendingDetach cell, refused epoch, and backpressure outcome
+  against those inputs. It never invokes the committed aggregate event decision
+  or fabricates a canonical event for a transition that produces none.
 - Clean Disconnect and ServerShutdown use the same selector and v3 Detached
   ConnectionClose row. They are the new non-request Pending Detached producers.
 - Died causes use the same selector; a Pending Died row carries its specific-fate
@@ -526,10 +649,13 @@ references, or Ordinary-versus-Recovered conflict are typed
 
 A compatible specific-fate row after Died remains a required durable closure fact
 but cannot double-present an already committed Died occurrence. If Died was
-Pending, Recovered may present its floor because there was no terminal
-presentation; an Ordinary intent cannot complete until it has a committed Died
-terminal, and the enclosing Left/Attached source owns that later terminal
-presentation.
+Pending, Recovered presents its floor and atomically records
+`RecoveredOwnsAndReservesFinalizer`; a later Left/Fenced-Attached row must consume
+that exact reservation through the projection-free finalizer transition in §4.5.
+An Ordinary intent cannot complete until a terminal exists: its referenced
+Left/Attached finalizer presents, while the later Ordinary row is a validated
+non-presenting closure fact. These ownership choices are durable row tags, never
+silent suppression in the router.
 
 ### 8.2 Enforced Died-before-specific order
 
@@ -541,43 +667,56 @@ consumes that row's exact specific intent. The validate-first pass rejects:
 - Recovered followed by Died for the same epoch;
 - Died after any earlier Recovered-only presentation;
 - a duplicate Died after an extension Advance already names the Recovered
-  witness; or
+  witness;
+- an Ordinary PendingDiedFinalized source whose Died is not Pending, whose
+  finalizer is not lower, or whose committed terminal audit differs;
+- a Leave/Fenced-Attached finalizer after reserved Recovered that selects
+  PresentEnclosing, omits/wrongly consumes the reservation, or repeats its
+  consumption; or
 - a Died/specific class or Attached-token mismatch.
 
 Thus the legal order is **Died flush → specific row flush → optional Advance**.
-No durable occurrence reservation delays presentation, no polling waits for a
-row, and no Died can appear after Recovered. Recovered still receives no Died
-terminal input: source ordering/audit and protocol transition inputs are distinct
-contracts.
+For Pending-Died Recovered, the specific flush also durably reserves the
+occurrence; finalization later consumes that reservation without a projection.
+No polling waits for a row, and no Died can appear after Recovered. Recovered
+still receives no Died terminal input: source order/reservation and protocol
+transition inputs are distinct contracts.
 
 For Died then Recovered, both rows and transitions survive replay, but Committed
-Died presents once. For Pending Died then Recovered, Recovered presents once. A
-fabricated Recovered-then-Died history refuses during preflight before authority
-or extension application. If an Advance for that Recovered is already durable,
-its bytes remain unchanged, no second witness is produced, and no owner is
-published.
+Died presents once. For Pending Died then Recovered, Recovered presents once and
+either Leave or Fenced Attached later makes an explicit non-presenting state
+transition. A fabricated Recovered-then-Died history refuses during preflight
+before authority or extension application. If an Advance for that Recovered is
+already durable, its bytes remain unchanged, no second witness is produced, and
+no owner is published.
 
 ## 9. Decision H — finalizer routing for Died and Detached
 
 | initial/source state | real finalizer and canonical presentation | durable/replay rule |
 |---|---|---|
 | Died Committed | Died terminal sequence; later compatible Ordinary/Recovered does not present twice | Died source flush opens/finishes its specific intent. Replay invokes Died once and consumes the intent once. |
-| Died Pending | no initial presentation | Replay restores exact cause/epoch/order and open specific intent. Recovered may complete without a terminal; Ordinary waits. |
+| Died Pending | no initial presentation | Replay restores exact cause/epoch/order and open specific intent; its row remains Pending permanently. Ordinary waits for a named finalizer; Recovered may present only with a reservation. |
 | Detached Committed from Disconnect/Shutdown/request | Detached terminal sequence | Replay invokes exact source/cause once and installs committed terminal/cell as applicable. |
-| Detached Pending from Disconnect/Shutdown/request | no initial presentation | Replay restores exact pending cause/epoch/order; this is now reachable through §7. |
-| Pending Died finalized by Leave | only `StoredOperation::Left` / `LiveLeaveCommit` Left sequence presents | Leave commits the exact pending terminal once. If an Ordinary intent was waiting, it may then complete as a durable specific fact but cannot displace Left. |
+| Detached Pending from Disconnect/Shutdown/request | no initial presentation | Replay restores exact pending cause/epoch/order and, for explicit request, its event-free pending cell/outcome. |
+| Pending Died + Ordinary finalized by Leave | Left presents; Ordinary later presents none | Left commits the terminal. Ordinary's PendingDiedFinalized::Left tag resolves Left and audits that terminal; Died remains Pending. |
+| Pending Died + Ordinary finalized by Fenced Attached | Attached presents; Ordinary later presents none | Composed terminal names Died source. Ordinary resolves exact Attached source/audit; Died remains Pending. |
+| Pending Died + reserved Recovered finalized by Leave | Recovered already presented; Left is typed non-presenting | Left stores/consumes recovered source reservation and commits terminal/member state through `NonPresentingFinalizerCommit`. |
+| Pending Died + reserved Recovered finalized by Fenced Attached | Recovered already presented; Attached composed terminal is typed non-presenting | Attached stores/consumes reservation, rotates state, and exposes no terminal projection. `commit_attach` consumes Pending once (`lifecycle/attach.rs:325-357,432-449`). |
 | Pending Detached finalized by Leave | only Left presents | Same generic PendingFinalization commit. No Died or Detached second candidate is minted. |
-| Pending Died or Detached composed by Fenced Attached | only enclosing Attached composed-terminal projection presents | Fenced mode requires exact pending state and persists kind/cause/order/sequence/source. `commit_attach` consumes finalization once (`lifecycle/attach.rs:325-357,432-449`). |
-| Restart with pending row | no new initial transition | Restore the Died/Detached Pending row, then route a later durable Left/Fenced Attached through the enclosing source. Never call finish_died/finish_detached twice. |
+| Pending Detached composed by Fenced Attached | only Attached presents | Fenced mode persists exact Detached cause/order/sequence/source and PresentEnclosing. |
+| Restart with pending row | no new initial transition | Restore Died/Detached Pending plus any Recovered reservation, then route a later durable Left/Fenced Attached through the exact selected mode. Never call finish twice. |
 | Standalone pending finalization | excluded | No public row/handler is added. A future owner needs a ledger row before implementation. |
 
 Correction to r1: current `StoredLeave` does **not** audit cause. It stores request,
 verifier, receiving epoch, Left order/sequence, ended binding epoch, and optional
 prior terminal sequence only (`participant/production/log.rs:332-342`). V3 Left
-adds `pending_source_sequence: Option<u64>` for a pending finalizer. Replay resolves
-that earlier Died/Detached row and obtains cause from the source; it cross-checks
-ended epoch and prior terminal sequence. V2 Left converts with None and makes no
-cause claim. Cause is never inferred from the optional terminal number.
+adds `pending_source_sequence: Option<u64>` plus `finalizer_presentation`.
+PresentEnclosing stores no reservation. ConsumeRecoveredReservation stores the
+exact lower Recovered source. Replay resolves the Died/Detached pending source for
+cause and, when present, the Recovered row for occurrence ownership; it
+cross-checks ended epoch and committed terminal sequence. V2 Left converts with
+no pending source and PresentEnclosing. Cause is never inferred from the optional
+terminal number.
 
 ## 10. Decision I — W1a tear-rider discharge
 
@@ -606,30 +745,39 @@ For a connection fold:
 5. run §7 terminal admission and the exact Died/Detached transition;
 6. append/flush the v3 source through `OperationLog`/`DurableAppend`;
 7. install committed transition state and, for Died, complete the explicit
-   specific-fate intent or retain it for a real finalizer;
-8. run the existing W1a read-only plan and fused Advance executor;
+   specific-fate intent, persist a Recovered reservation, or retain Ordinary for
+   an exact finalizer;
+8. run the existing W1a read-only plan and fused Advance executor, respecting any
+   typed non-presenting finalizer result;
 9. release the conversation mutex and continue;
 10. after every target succeeds, append/flush Complete under the incarnation
-    owner; only then deregister/release/publish close completion.
+    owner; only then deregister/release/publish close completion. Any failure
+    after step 2 takes §3.4's fatal path instead.
 
 For a specific fate, Died source flush always precedes Ordinary/Recovered flush,
-which precedes its Advance. For a clean fate, Detached flush precedes its Advance.
+which precedes its Advance. A Recovered reservation precedes and is consumed by
+its finalizer. For a clean fate, Detached flush precedes its Advance.
 `handler_observer_reconcile` remains the only observer mutation path.
 
 Exact crash cuts:
 
 - before Open flush: no durable fold authority and no connection state may be
   destroyed; return terminal failure while state remains owned;
-- after Open flush before first conversation: startup/live replay owns the full
-  bounded work list;
-- after a middle conversation: already flushed prefixes are idempotent and every
-  tail conversation is retried from Open;
+- after Open flush before first conversation: the live owner must Complete, or
+  any failure latches service/server fatal and startup replay owns the full list;
+- after a non-crash middle failure: already flushed prefixes remain idempotent,
+  participant operations refuse under the fatal latch, Drop may release only the
+  volatile transport, and controlled restart completes every tail from Open;
+- after an abrupt middle crash: startup performs the same tail completion before
+  accepting a connection;
 - after Died/Detached flush before state/Advance: cold replay restores the source
   and repairs before publication;
 - after Died flush before Ordinary/Recovered: the explicit specific intent
   deterministically appends its completion on replay;
-- after a Pending source: replay waits for event-driven Left/Fenced Attached,
-  never a timer;
+- after Pending Died with Ordinary intent: only an event-driven lower Left/Fenced
+  Attached source unlocks completion; the Died row stays Pending;
+- after Pending Died with Recovered intent: Recovered may flush/present/reserve;
+  its later finalizer must consume the reservation without presentation;
 - after specific source before Advance: cold first touch repairs exact measured
   progress;
 - after Advance before wake: only the exact weak-target wake may be dropped;
@@ -641,7 +789,7 @@ Exact crash cuts:
 
 ## 12. Acceptance oracle census
 
-Each exact name appears once in this brief. These 45 names are implementation
+Each exact name appears once in this brief. These 48 names are implementation
 floor, not suggestions. Fixtures use deterministic append/flush gates and actual
 observations; no sleeps, eventual assertions, or constant-versus-constant claims.
 
@@ -658,40 +806,43 @@ observations; no sleeps, eventual assertions, or constant-versus-constant claims
 | 9 | `unclean_restart_appends_prior_incarnation_died_before_owner_publication` | After resuming Open intents, old remaining Bound epochs flush exact restart Died before service publication. |
 | 10 | `process_killed_has_no_production_participant_binding_emitter` | Type-aware source census preserves the explicit exclusion/road back. |
 | 11 | `died_stored_operation_round_trips_and_replays_committed_and_pending` | Both dispositions, all causes, connection ref, and specific intents round-trip/replay. |
-| 12 | `detached_stored_operation_round_trips_request_disconnect_and_shutdown` | Explicit request plus clean/shutdown connection modes and both dispositions round-trip/replay; Superseded refuses. |
-| 13 | `ordinary_stored_operation_round_trips_and_replays_measured_fate` | Full Died/Attached references and terminal audit replay through protocol and byte-check event. |
-| 14 | `recovered_stored_operation_round_trips_without_died_terminal` | Died ordering reference plus full fenced source replay, but no Died terminal field/call. |
+| 12 | `detached_stored_operation_round_trips_request_disconnect_and_shutdown` | Assert distinct ExplicitRequestCommitted-with-event and ExplicitRequestPending-without-event shapes plus connection modes; replay the pending cell/outcome from observer baseline. |
+| 13 | `ordinary_stored_operation_round_trips_and_replays_measured_fate` | Exercise DiedCommitted and PendingDiedFinalized via both lower Left and Fenced-Attached sources; validate terminal audits and byte-check event. |
+| 14 | `recovered_stored_operation_round_trips_without_died_terminal` | Died ordering reference, full fenced source, and both presentation tags replay with no Died terminal field/call. |
 | 15 | `died_source_flush_precedes_observer_advance_and_cold_repair` | Source-only cut repairs Advance and repeats idempotently. |
 | 16 | `detached_source_flush_precedes_observer_advance_and_cold_repair` | Same cut for clean/shutdown Detached with real sealed projection. |
 | 17 | `ordinary_source_flush_precedes_observer_advance_and_cold_repair` | Same cut for Ordinary and measured durable floor/event. |
 | 18 | `recovered_source_flush_precedes_observer_advance_and_cold_repair` | Same cut for Recovered with fenced proof and no terminal input. |
 | 19 | `connection_fate_intent_failure_on_middle_conversation_completes_every_tail_binding` | Open K real tracked conversations, fail after middle flush, restart, and observe each tail terminal row before Complete/publication. |
-| 20 | `ordinary_completion_uses_protocol_floor_and_exact_production_caller` | Production instrumentation proves only complete_binding_fate_intent calls selector; stored floor equals returned protocol result, not observer maximum. |
-| 21 | `recovered_completion_uses_protocol_floor_and_exact_production_caller` | Same for sole fenced token consumer; raw caller-supplied constructor is unreachable from production. |
-| 22 | `died_specific_fate_intent_completes_after_source_only_crash` | Cut after Died flush, restart, append exactly one named Ordinary/Recovered completion, then publish. |
-| 23 | `attached_v3_closed_modes_round_trip_complete_fenced_proof` | Ordinary, Superseding, and Fenced rows round-trip; Fenced checks predecessor/debt/source/successor/composed terminal. |
-| 24 | `attached_v2_mapping_is_lossless_and_marker_rows_refuse_without_proof` | Map both legal v2 modes exactly; marker-bearing v2 returns the named typed proof-unavailable refusal. |
-| 25 | `attach_commit_splits_operational_state_and_one_noncloneable_fate_token` | Compile-fail/static assertions prove no clone/copy/second split; live/replay each store one token. |
-| 26 | `old_v2_reader_refuses_v3_fate_row_with_typed_schema_version` | Frozen old reader returns SchemaVersion(3) before enum decode/publication. |
-| 27 | `v3_reader_accepts_v2_prefix_and_refuses_v2_after_v3` | Contiguous histories pass; regression reports exact sequence. |
-| 28 | `v2_after_v3_across_operation_page_boundary_refuses_before_apply` | V3 at page tail then v2 at next-page head retains phase and refuses before authority/Advance apply. |
-| 29 | `missing_unknown_malformed_and_mixed_operation_versions_refuse_before_publication` | Independent fixtures read exact typed errors and no publication. |
-| 30 | `terminal_disposition_selector_commits_or_pends_from_protocol_state` | Real admitted and observer-blocked frontier states select order+sequence versus order-only; other failures are not Pending. |
-| 31 | `fate_occurrence_key_presents_each_new_arm_at_most_once` | Four independent arms derive exact key; same/cross-class duplicates cannot add a second witness. |
-| 32 | `died_then_recovered_same_epoch_presents_died_once` | Both durable transitions replay; Committed Died alone presents without numeric dedup. |
-| 33 | `recovered_then_died_same_epoch_refuses_before_observer_mutation` | Reversed base rows fail validate-first grammar with unchanged owner/outbox/observer state. |
-| 34 | `recovered_then_died_same_epoch_after_advance_flush_refuses_without_second_presentation` | Include durable Recovered Advance; reverse Died still refuses before apply/publication and durable rows remain unchanged. |
-| 35 | `recovered_after_pending_died_presents_measured_floor_once` | Corrected real no-committed-terminal state: Pending Died precedes Recovered, which presents one measured floor. |
-| 36 | `pending_died_restart_restores_cause_epoch_order_without_refinish` | Source-only restart restores Pending/open intent without calling finish twice or assigning terminal seq. |
-| 37 | `pending_detached_restart_restores_disconnect_or_shutdown_without_refinish` | Real selector-generated Pending Detached restores exact cause/source/order without projection. |
-| 38 | `pending_died_finalized_by_leave_presents_only_live_leave_commit` | Real Pending Died plus Leave presents only Left; any later specific fact cannot double-present. |
-| 39 | `pending_detached_finalized_by_leave_presents_only_live_leave_commit` | Real clean/shutdown Pending Detached plus Leave presents only Left. |
-| 40 | `pending_terminal_composed_by_attach_presents_only_attached_source` | Died/Detached Pending through real Fenced mode audit composed terminal and present only Attached. |
-| 41 | `standalone_pending_finalizer_has_no_production_entry_point` | Type-aware census finds only Leave/Fenced Attached and no alternate row. |
-| 42 | `leave_finalizer_resolves_pending_source_without_claiming_stored_cause` | Decode Left without cause, resolve pending_source_sequence, and compare source cause/epoch/terminal. |
-| 43 | `same_participant_ack_lineage_regression_refuses_before_observer_mutation` | Retained test reads exact refusal and unchanged durable rows after decoration deletion. |
-| 44 | `w1b_tear_rider_removes_tautological_four_counter_tuple` | Source census proves declarations/tuple absent and no constant-only replacement. |
-| 45 | `fate_live_and_cold_replay_produce_identical_witnesses_and_state` | For all four classes and specific completions, compare decoded rows, authority, intent state, witnesses, outbox, and final observer progress. |
+| 20 | `post_open_middle_failure_latches_service_fatal_and_startup_completes_tail` | Inject a live non-crash failure after a middle row; observe fatal latch/refusals, permitted volatile Drop only, then controlled startup tail completion and Complete. |
+| 21 | `ordinary_completion_uses_protocol_floor_and_exact_production_caller` | Production instrumentation proves only complete_binding_fate_intent calls selector; stored floor equals protocol result, not observer maximum. |
+| 22 | `recovered_completion_uses_protocol_floor_and_exact_production_caller` | Same for sole private recovered authority; raw caller-supplied constructor/public proof method is unreachable. |
+| 23 | `died_specific_fate_intent_completes_after_source_only_crash` | Cut after Died flush, restart, append exactly one named Ordinary/Recovered completion, then publish. |
+| 24 | `attached_v3_closed_modes_round_trip_complete_fenced_proof` | Round-trip all modes; Fenced resolves exact source row, mints one ValidatedMarkerRecord without digest, and checks predecessor/debt/successor/composed terminal. |
+| 25 | `attached_v2_mapping_is_lossless_and_marker_rows_refuse_without_proof` | Map both legal v2 modes exactly; marker-bearing v2 returns the named typed proof-unavailable refusal. |
+| 26 | `attach_commit_splits_operational_state_and_one_noncloneable_fate_token` | Trybuild proves pre-attach proof cannot be retained/copied/cloned or used for fate after move, old public method is inaccessible, and split cannot repeat; live/replay consume one chain. |
+| 27 | `old_v2_reader_refuses_v3_fate_row_with_typed_schema_version` | Frozen old reader returns SchemaVersion(3) before enum decode/publication. |
+| 28 | `v3_reader_accepts_v2_prefix_and_refuses_v2_after_v3` | Contiguous histories pass; regression reports exact sequence. |
+| 29 | `v2_after_v3_across_operation_page_boundary_refuses_before_apply` | V3 at page tail then v2 at next-page head retains phase and refuses before authority/Advance apply. |
+| 30 | `missing_unknown_malformed_and_mixed_operation_versions_refuse_before_publication` | Independent fixtures read exact typed errors and no publication. |
+| 31 | `terminal_disposition_selector_commits_or_pends_from_protocol_state` | Two-stage prepare/encode/admit validates all candidate identities, v3 encoding, keyed charge, and one entry; real states select Committed/Pending and every refusal returns unchanged owner/allocators. |
+| 32 | `fate_occurrence_key_presents_each_new_arm_at_most_once` | Four independent arms derive exact key; same/cross-class duplicates cannot add a second witness. |
+| 33 | `died_then_recovered_same_epoch_presents_died_once` | Both durable transitions replay; Committed Died alone presents without numeric dedup. |
+| 34 | `recovered_then_died_same_epoch_refuses_before_observer_mutation` | Reversed base rows fail validate-first grammar with unchanged owner/outbox/observer state. |
+| 35 | `recovered_then_died_same_epoch_after_advance_flush_refuses_without_second_presentation` | Include durable Recovered Advance; reverse Died still refuses before apply/publication and durable rows remain unchanged. |
+| 36 | `recovered_after_pending_died_presents_measured_floor_once` | Pending Died precedes RecoveredOwnsAndReservesFinalizer, which presents one measured floor and one durable reservation. |
+| 37 | `pending_died_recovered_reservation_makes_leave_finalizer_non_presenting` | Real Pending Died + Recovered intent + Leave; Recovered presents/reserves, Left commits state while consuming reservation with no projection, live/cold agree. |
+| 38 | `pending_died_recovered_reservation_makes_fenced_attach_finalizer_non_presenting` | Same grammar through real Fenced Attached; composed terminal is audited, reservation consumed, and no Attached terminal witness exists. |
+| 39 | `pending_died_restart_restores_cause_epoch_order_without_refinish` | Source-only restart restores Pending/open intent without calling finish twice or assigning terminal seq. |
+| 40 | `pending_detached_restart_restores_disconnect_or_shutdown_without_refinish` | Real selector-generated Pending Detached restores exact cause/source/order without projection. |
+| 41 | `pending_died_finalized_by_leave_presents_only_live_leave_commit` | Pending Died without a Recovered reservation plus Leave presents only Left; Ordinary later references Left and remains non-presenting. |
+| 42 | `pending_detached_finalized_by_leave_presents_only_live_leave_commit` | Real clean/shutdown Pending Detached plus Leave presents only Left. |
+| 43 | `pending_terminal_composed_by_attach_presents_only_attached_source` | Pending Died/Detached without Recovered reservation through Fenced mode audits terminal and presents only Attached. |
+| 44 | `standalone_pending_finalizer_has_no_production_entry_point` | Type-aware census finds only Leave/Fenced Attached and no alternate row. |
+| 45 | `leave_finalizer_resolves_pending_source_without_claiming_stored_cause` | Decode Left without cause, resolve pending source and optional Recovered reservation, and compare source cause/epoch/terminal. |
+| 46 | `same_participant_ack_lineage_regression_refuses_before_observer_mutation` | Retained test reads exact refusal and unchanged durable rows after decoration deletion. |
+| 47 | `w1b_tear_rider_removes_tautological_four_counter_tuple` | Source census proves declarations/tuple absent and no constant-only replacement. |
+| 48 | `fate_live_and_cold_replay_produce_identical_witnesses_and_state` | For all four classes, finalizer grammar branches, and intent failures, compare decoded rows, authority, reservations, witnesses, outbox, and observer progress. |
 
 Repository gates for implementation are:
 
@@ -706,7 +857,9 @@ cargo check -p liminal-sdk --target wasm32-unknown-unknown --no-default-features
 
 The wasm legs are mandatory because protocol fate/attach types change.
 
-## 13. Idle and bounded active cost
+## 13. Honesty, semver, and bounded cost
+
+### 13.1 Idle and bounded active cost
 
 W1b adds no task, timer, polling loop, sweep, heartbeat, backoff, read-timeout
 wake, stop-flag sampler, or synthetic probe. Across `N` idle conversations,
@@ -727,8 +880,20 @@ slot capacity, not total registered conversations and not a periodic scan.
 Replay retains one active-map entry per unmatched connection intent, each with at
 most K ids, and discards it on Complete. Fate rows add fixed bounded metadata;
 Fenced Attached proof is a fixed product of existing bounded proof types. The
-append-only bytes remain historical; r2 makes no physical compaction or
+append-only bytes remain historical; r3 makes no physical compaction or
 unbounded-history safety claim.
+
+### 13.2 Published protocol semver
+
+`FencedAttachCommit` is a public type in published `liminal-protocol` 0.2.0;
+the repository currently declares 0.2.1
+(`crates/liminal-protocol/Cargo.toml:1-4`; workspace dependency at
+`Cargo.toml:27`). Removing public Clone/Copy and the public recovered-fate method
+is a breaking API change even though it repairs authority soundness. Therefore a
+W1b implementation landing implies **`liminal-protocol` 0.3.0 at the next
+publish**. This brief flags that requirement for the coordinator's version list;
+it does not decide the release train or edit package versions in this docs-only
+revision.
 
 ## 14. Deferred/excluded seams under no-row-no-dormancy
 
@@ -750,15 +915,29 @@ Ordinary/Recovered callers are **not** deferred.
   inside `ConversationAuthority`; the incarnation stream owns only bounded fold
   work identity.
 - **WALL-W1B-BOUNDED-INTENT:** one Open list is sorted, unique, and no longer than
-  `max_semantic_conversations_per_connection`; Complete logically reclaims it.
+  `max_semantic_conversations_per_connection`; simultaneously unmatched Opens
+  never exceed signed `limits.max_connections`; Complete logically reclaims one.
+- **WALL-W1B-OPEN-FAILURE-FATAL:** after Open, any incomplete live fold latches
+  participant/server fatal and requires startup replay; Drop can release only
+  volatile transport state and cannot complete or reclassify the intent.
 - **WALL-W1B-SOURCE-BEFORE-ADVANCE:** Open precedes per-conversation destruction;
   fate source precedes specific source; every source precedes Advance/publication.
 - **WALL-W1B-PROTOCOL-FLOOR:** server code cannot choose a binding-fate floor;
   the consuming protocol selector computes it from coupled frontier state.
-- **WALL-W1B-SEALED-ATTACH:** v3 Attached mode is closed and a consumed commit
-  yields one noncloneable fate token.
+- **WALL-W1B-TERMINAL-CHARGE:** sealed prepare plus versioned keyed candidate
+  charge precedes admit; mismatch/refusal returns unchanged owner and allocators.
+- **WALL-W1B-SEALED-ATTACH:** public `FencedAttachCommit` is non-Clone/non-Copy,
+  moves by value through attach, and yields one private recovered authority; no
+  pre-attach caller retains a fate-capable proof.
+- **WALL-W1B-MARKER-SOURCE:** exact source-row decode plus full frontier validation
+  is sole marker identity; no digest duplicates it.
 - **WALL-W1B-RECOVERED-NO-TERMINAL:** Recovered has a lower Died source reference
   for order but receives no Died terminal protocol input.
+- **WALL-W1B-PENDING-DIED-GRAMMAR:** immutable Pending Died completes Ordinary
+  through an exact finalizer source or lets Recovered reserve/present and forces
+  the finalizer through a typed non-presenting transition.
+- **WALL-W1B-PENDING-DETACHED-NO-EVENT:** ExplicitRequestPending stores/replays
+  exact blocked inputs and outcome without fabricated committed event bytes.
 - **WALL-W1B-DIED-FIRST:** Ordinary/Recovered cannot precede their named Died
   intent; Recovered-then-Died refuses before apply, including existing Advance.
 - **WALL-W1B-FINISH-ONCE:** replay reconstructs each initial Died/Detached
@@ -779,7 +958,7 @@ Ordinary/Recovered callers are **not** deferred.
   constant-only rider decoration is deleted.
 - **WALL-W1B-OBSERVATION-LENS:** no proposed oracle proves constants with
   constants; every assertion reads real protocol/production/durable state.
-- **WALL-W1B-DOCS-ONLY-R2:** this revision changes only this brief.
+- **WALL-W1B-DOCS-ONLY-R3:** this revision changes only this brief.
 
 ## 16. Revision record
 
@@ -787,3 +966,4 @@ Ordinary/Recovered callers are **not** deferred.
 |---|---|---|
 | r1 | 2026-07-19 | Initial three-fate brief against ledger r1.8. Pre-review verdict: not ready. |
 | r2 | 2026-07-20 | Pins `c77ce31` / ledger r1.9 and folds the full findings array (**5 MAJOR + 1 minor**), the coordinator's **EXTEND** ruling for first-class Detached, and both coordinator notes (bounded intent owner/lifecycle; airtight fenced-Attached lens). Adds clean Disconnect/server-shutdown producers, durable bounded tail intent, exact Ordinary/Recovered caller and protocol floor selector, replay-completed Died-specific intent, closed v3 Attached modes and lossless v2 mapping, one-use fate token, cross-page schema phase, protocol disposition selector, honest StoredLeave source audit, enforced Died-before-Recovered including Advance case, 45-oracle renumbered census, and bounded active-cost statement. |
+| r3 | 2026-07-20 | Keeps pin `c77ce31` and folds the complete round-2 six-element findings array (**5 NEW MAJOR + 1 minor**): immutable Pending-Died Ordinary finalizer sources and Recovered-owned reservation/non-presenting Leave+Fenced finalizers; by-value non-Clone/non-Copy `FencedAttachCommit` with private recovered authority and 0.3.0 next-publish semver flag; sealed two-stage terminal prepare/admit with exact v3 keyed candidate charge; event-free ExplicitRequestPending Detached; post-Open participant/server-fatal policy with `max_connections` unmatched bound and non-crash recovery; and source-row/full-validation marker identity with no digest. Extends the census from 45 to 48. |
