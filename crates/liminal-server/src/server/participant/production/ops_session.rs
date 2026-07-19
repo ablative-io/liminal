@@ -24,9 +24,9 @@ use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{OperationLog, StoredBindingEpoch, StoredDetachRequest, StoredOperation};
 use super::outbox::ConversationOutboxLimits;
-use super::outbox_log::{OutboxLog, OutboxRow};
+use super::outbox_log::OutboxLog;
 use super::outbox_projection::{capture_projection_prestate, project_committed_source};
-use super::outbox_replay::ExtensionMerge;
+use super::outbox_replay::{ExtensionMerge, RestoreError};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
@@ -272,27 +272,27 @@ impl ConversationAuthority {
         conversation_id: u64,
         log: &OperationLog,
         outbox_log: &OutboxLog,
-        extension_rows: Vec<(u64, OutboxRow)>,
         config: &ParticipantConfig,
         outbox_limits: ConversationOutboxLimits,
-    ) -> Result<Self, StateError> {
+    ) -> Result<Self, RestoreError> {
         let mut authority = Self::empty(conversation_id);
-        let mut merge =
-            ExtensionMerge::new(outbox_log, extension_rows, conversation_id, outbox_limits)?;
+        let mut merge = ExtensionMerge::new(outbox_log, conversation_id, outbox_limits)?;
         merge.apply_boundary(&mut authority, 0, None).await?;
         let mut sequence = 0_u64;
         loop {
-            let page = log.read_page(sequence).await?;
+            let page = log.read_page(sequence).await.map_err(StateError::from)?;
             if page.is_empty() {
                 break;
             }
             let page_len = page.len();
             for (stored_sequence, operation) in page {
                 if stored_sequence != sequence {
-                    return Err(StateError::Log(super::log::OperationLogError::Sequence {
-                        expected: sequence,
-                        actual: stored_sequence,
-                    }));
+                    return Err(RestoreError::Semantic(StateError::Log(
+                        super::log::OperationLogError::Sequence {
+                            expected: sequence,
+                            actual: stored_sequence,
+                        },
+                    )));
                 }
                 let operation_for_projection = operation.clone();
                 let ack_obligations = match &operation {
@@ -336,14 +336,14 @@ impl ConversationAuthority {
         }
         if authority.tokens.is_empty() {
             if authority.frontier.is_some() {
-                return Err(StateError::invariant(
+                return Err(RestoreError::Semantic(StateError::invariant(
                     "durably empty conversation rebuilt an executable frontier",
-                ));
+                )));
             }
         } else if authority.frontier.is_none() {
-            return Err(StateError::invariant(
+            return Err(RestoreError::Semantic(StateError::invariant(
                 "enrolled conversation replay completed without executable frontier ownership",
-            ));
+            )));
         }
         merge.finish(&mut authority, sequence)?;
         Ok(authority)
