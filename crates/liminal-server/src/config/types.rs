@@ -624,6 +624,10 @@ impl ParticipantConfig {
                 "participant.closure_episode_churn_limit: must be in 2..=u32::MAX".to_owned(),
             );
         }
+        self.collect_unit2_derived_errors(errors);
+    }
+
+    fn collect_unit2_derived_errors(&self, errors: &mut Vec<String>) {
         if self
             .max_retained_record_rows
             .checked_mul(self.identity_slots)

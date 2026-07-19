@@ -210,23 +210,31 @@ pub(super) fn service_participant_publications<Sink: DeliverySink>(
     }
 
     if !queue.is_empty() || !deferred_participants.is_empty() {
-        let Some(inbox) = state.participant_publication.as_ref() else {
-            return Err(ParticipantPumpError::MissingInbox);
-        };
-        let mut conversations = deferred_participants;
-        let mut observers = Vec::new();
-        for work in queue {
-            if work.participant {
-                conversations.insert(work.conversation_id);
-            }
-            if let Some(ObserverWork::Pending(publication)) = work.observer {
-                observers.push(publication);
-            }
-        }
-        inbox.requeue(conversations)?;
-        inbox.requeue_observers(observers)?;
+        requeue_deferred_work(state, queue, deferred_participants)?;
     }
     Ok(enqueued)
+}
+
+fn requeue_deferred_work(
+    state: &ConnectionProcessState,
+    queue: VecDeque<ConversationWork>,
+    mut conversations: BTreeSet<ConversationId>,
+) -> Result<(), ParticipantPumpError> {
+    let Some(inbox) = state.participant_publication.as_ref() else {
+        return Err(ParticipantPumpError::MissingInbox);
+    };
+    let mut observers = Vec::new();
+    for work in queue {
+        if work.participant {
+            conversations.insert(work.conversation_id);
+        }
+        if let Some(ObserverWork::Pending(publication)) = work.observer {
+            observers.push(publication);
+        }
+    }
+    inbox.requeue(conversations)?;
+    inbox.requeue_observers(observers)?;
+    Ok(())
 }
 
 fn service_one_observer<Sink: DeliverySink>(
