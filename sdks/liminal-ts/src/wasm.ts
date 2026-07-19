@@ -54,6 +54,8 @@ export interface WasmReceivedFrame {
   readonly frameType: number;
   readonly streamId: number;
   readonly subscriptionId?: bigint;
+  /** Server-assigned message id, present only on `PublishAck` (0x0a) frames. */
+  readonly messageId?: bigint;
   readonly reasonCode?: number;
   /** Exact payload bytes; no JSON decode/re-encode is performed. */
   readonly payload: Uint8Array;
@@ -292,13 +294,16 @@ function decodeReceivedFrame(decoded: Uint8Array): Omit<WasmReceivedFrame, "chan
   const consumedBytes = view.getUint32(0);
   const frameType = view.getUint8(4);
   const streamId = view.getUint32(5);
-  const subscriptionId = view.getBigUint64(9);
+  // The bridge's u64 slot carries the SubscribeAck subscription id or the
+  // PublishAck message id (zero otherwise); expose each under its own name.
+  const identifier = view.getBigUint64(9);
   const reasonCode = view.getUint16(17);
   return {
     consumedBytes,
     frameType,
     streamId,
-    ...(frameType === 0x06 ? { subscriptionId } : {}),
+    ...(frameType === 0x06 ? { subscriptionId: identifier } : {}),
+    ...(frameType === 0x0a ? { messageId: identifier } : {}),
     ...([0x03, 0x07, 0x0b, 0x0f].includes(frameType) ? { reasonCode } : {}),
     payload: decoded.slice(RECEIVE_PREFIX_LENGTH),
   };
