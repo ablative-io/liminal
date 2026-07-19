@@ -26,6 +26,8 @@ use super::log::{OperationLog, StoredBindingEpoch, StoredDetachRequest, StoredOp
 use super::outbox::ConversationOutboxLimits;
 use super::outbox_log::OutboxLog;
 use super::outbox_projection::{capture_projection_prestate, project_committed_source};
+#[cfg(test)]
+use super::outbox_replay::AggregateExtensionMerge;
 use super::outbox_replay::{ExtensionMerge, RestoreError};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
@@ -344,6 +346,93 @@ impl ConversationAuthority {
             return Err(RestoreError::Semantic(StateError::invariant(
                 "enrolled conversation replay completed without executable frontier ownership",
             )));
+        }
+        merge.finish(&mut authority, sequence)?;
+        Ok(authority)
+    }
+
+    /// Frozen pre-W3 complete-vector replay used only by equivalence oracles.
+    #[cfg(test)]
+    pub(super) async fn replay_aggregate_reference(
+        conversation_id: u64,
+        log: &OperationLog,
+        outbox_log: &OutboxLog,
+        extension_rows: Vec<(u64, super::outbox_log::OutboxRow)>,
+        config: &ParticipantConfig,
+        outbox_limits: ConversationOutboxLimits,
+    ) -> Result<Self, StateError> {
+        let mut authority = Self::empty(conversation_id);
+        let mut merge = AggregateExtensionMerge::new(
+            outbox_log,
+            extension_rows,
+            conversation_id,
+            outbox_limits,
+        )?;
+        merge.apply_boundary(&mut authority, 0, None).await?;
+        let mut sequence = 0_u64;
+        loop {
+            let page = log.read_page(sequence).await?;
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            for (stored_sequence, operation) in page {
+                if stored_sequence != sequence {
+                    return Err(StateError::Log(super::log::OperationLogError::Sequence {
+                        expected: sequence,
+                        actual: stored_sequence,
+                    }));
+                }
+                let operation_for_projection = operation.clone();
+                let ack_obligations = match &operation {
+                    StoredOperation::ZeroDebtAck { request, .. } => {
+                        let acknowledged_through = authority
+                            .slots
+                            .get(&request.participant_id)
+                            .map_or(0, |slot| slot.member.cursor());
+                        Some(merge.recipient_ack_obligations(
+                            request.participant_id,
+                            acknowledged_through,
+                        )?)
+                    }
+                    _ => None,
+                };
+                let mut facts = capture_projection_prestate(&authority, &operation_for_projection);
+                facts.marker_delivery = authority.replay_operation(
+                    operation,
+                    stored_sequence,
+                    config,
+                    ack_obligations,
+                )?;
+                let expected = project_committed_source(
+                    &authority,
+                    stored_sequence,
+                    &operation_for_projection,
+                    facts,
+                )?;
+                sequence = sequence
+                    .checked_add(1)
+                    .ok_or(StateError::AllocationExhausted {
+                        domain: "log sequence",
+                    })?;
+                merge
+                    .apply_boundary(&mut authority, sequence, expected.as_ref())
+                    .await?;
+            }
+            if page_len < super::log::READ_BATCH_SIZE {
+                break;
+            }
+        }
+        if authority.tokens.is_empty() {
+            if authority.frontier.is_some() {
+                return Err(StateError::invariant(
+                    "durably empty conversation rebuilt an executable frontier",
+                ));
+            }
+        } else if authority.frontier.is_none() {
+            return Err(StateError::invariant(
+                "enrolled conversation replay completed without executable frontier ownership",
+            ));
         }
         merge.finish(&mut authority, sequence)?;
         Ok(authority)
