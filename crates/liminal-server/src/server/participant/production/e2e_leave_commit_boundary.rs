@@ -132,6 +132,74 @@ fn assert_left_source_and_audit_rows(
     Ok(())
 }
 
+fn restore_and_assert_idempotency(
+    data_dir: &Path,
+    cut: LeaveCrashCut,
+    crash: &DurableHistoryBytes,
+    live_after_flushes: Option<OutboxOwnerFacts>,
+    leaver_id: u64,
+    signed_outbox_bound: u64,
+) -> Result<(DurableHistoryBytes, OutboxOwnerFacts), Box<dyn Error>> {
+    // SocketFixture constructs ProductionParticipantHandler before installing
+    // the service, supervisor, or first socket. Thus this returned fixture proves
+    // reconciliation completed before authority could be published to transport.
+    let config = test_participant_config();
+    let first_restore = SocketFixture::start_replay_gated_with_config(data_dir, config)?;
+    let first_owner = first_restore.outbox_owner_facts(CONVERSATION, leaver_id)?;
+    assert_eq!(first_owner.next_live_obligation, None);
+    assert!(first_owner.charged_bytes <= signed_outbox_bound);
+    if let Some(live) = live_after_flushes {
+        assert_eq!(first_owner, live);
+    }
+    first_restore.stop();
+    let restored = durable_history_bytes(data_dir)?;
+    assert_left_source_and_audit_rows(data_dir, 1)?;
+
+    match cut {
+        LeaveCrashCut::AfterBothFlushes => assert_eq!(&restored, crash),
+        LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
+            assert_eq!(restored.base, crash.base);
+            assert_eq!(restored.extension.row_count, crash.extension.row_count + 1);
+            assert_eq!(restored.extension.head, crash.extension.head + 1);
+        }
+    }
+
+    let second_restore = SocketFixture::start_replay_gated_with_config(data_dir, config)?;
+    let second_owner = second_restore.outbox_owner_facts(CONVERSATION, leaver_id)?;
+    assert_eq!(second_owner, first_owner);
+    assert_eq!(second_owner.next_live_obligation, None);
+    assert!(second_owner.charged_bytes <= signed_outbox_bound);
+    second_restore.stop();
+    let restored_again = durable_history_bytes(data_dir)?;
+
+    // R5's concrete idempotency oracle: a second restore changes neither the
+    // extension row count nor its optimistic head, and no source/audit byte moves.
+    assert_eq!(
+        restored_again.extension.row_count,
+        restored.extension.row_count
+    );
+    assert_eq!(restored_again.extension.head, restored.extension.head);
+    assert_eq!(
+        restored_again.extension.payloads,
+        restored.extension.payloads
+    );
+    assert_eq!(restored_again.base, restored.base);
+    Ok((restored, first_owner))
+}
+
+fn arm_leave_crash_cut(server: &SocketFixture, cut: LeaveCrashCut) -> Result<(), Box<dyn Error>> {
+    match cut {
+        LeaveCrashCut::AfterBothFlushes => server.arm_outbox_barriers([
+            OutboxBarrierKind::OperationFlush,
+            OutboxBarrierKind::OutboxFlush,
+        ]),
+        LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
+            server.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+            server.fail_next_outbox_append()
+        }
+    }
+}
+
 fn run_leave_crash_cut(cut: LeaveCrashCut) -> Result<LeaveCrashCutEvidence, Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
@@ -173,16 +241,7 @@ fn run_leave_crash_cut(cut: LeaveCrashCut) -> Result<LeaveCrashCutEvidence, Box<
     );
     assert!(before_leave.charged_bytes <= signed_outbox_bound);
 
-    match cut {
-        LeaveCrashCut::AfterBothFlushes => server.arm_outbox_barriers([
-            OutboxBarrierKind::OperationFlush,
-            OutboxBarrierKind::OutboxFlush,
-        ])?,
-        LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
-            server.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
-            server.fail_next_outbox_append()?;
-        }
-    }
+    arm_leave_crash_cut(&server, cut)?;
     let leave = LeaveRequest {
         conversation_id: CONVERSATION,
         participant_id: leaver.participant_id(),
@@ -233,54 +292,19 @@ fn run_leave_crash_cut(cut: LeaveCrashCut) -> Result<LeaveCrashCutEvidence, Box<
         usize::from(cut == LeaveCrashCut::AfterBothFlushes),
     )?;
 
-    // SocketFixture constructs ProductionParticipantHandler before installing
-    // the service, supervisor, or first socket. Thus this returned fixture proves
-    // reconciliation completed before authority could be published to transport.
-    let first_restore = SocketFixture::start_replay_gated_with_config(&data_dir, config)?;
-    let first_owner = first_restore.outbox_owner_facts(CONVERSATION, leaver.participant_id())?;
-    assert_eq!(first_owner.next_live_obligation, None);
-    assert!(first_owner.charged_bytes <= signed_outbox_bound);
-    if let Some(live) = live_after_flushes {
-        assert_eq!(first_owner, live);
-    }
-    first_restore.stop();
-    let restored = durable_history_bytes(&data_dir)?;
-    assert_left_source_and_audit_rows(&data_dir, 1)?;
-
-    match cut {
-        LeaveCrashCut::AfterBothFlushes => assert_eq!(restored, crash),
-        LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
-            assert_eq!(restored.base, crash.base);
-            assert_eq!(restored.extension.row_count, crash.extension.row_count + 1);
-            assert_eq!(restored.extension.head, crash.extension.head + 1);
-        }
-    }
-
-    let second_restore = SocketFixture::start_replay_gated_with_config(&data_dir, config)?;
-    let second_owner = second_restore.outbox_owner_facts(CONVERSATION, leaver.participant_id())?;
-    assert_eq!(second_owner, first_owner);
-    assert_eq!(second_owner.next_live_obligation, None);
-    assert!(second_owner.charged_bytes <= signed_outbox_bound);
-    second_restore.stop();
-    let restored_again = durable_history_bytes(&data_dir)?;
-
-    // R5's concrete idempotency oracle: a second restore changes neither the
-    // extension row count nor its optimistic head, and no source/audit byte moves.
-    assert_eq!(
-        restored_again.extension.row_count,
-        restored.extension.row_count
-    );
-    assert_eq!(restored_again.extension.head, restored.extension.head);
-    assert_eq!(
-        restored_again.extension.payloads,
-        restored.extension.payloads
-    );
-    assert_eq!(restored_again.base, restored.base);
+    let (restored, restored_owner) = restore_and_assert_idempotency(
+        &data_dir,
+        cut,
+        &crash,
+        live_after_flushes,
+        leaver.participant_id(),
+        signed_outbox_bound,
+    )?;
 
     Ok(LeaveCrashCutEvidence {
         crash,
         restored,
-        restored_owner: first_owner,
+        restored_owner,
     })
 }
 
