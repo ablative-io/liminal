@@ -8,11 +8,13 @@ use liminal::durability::bridge::block_on;
 use liminal::durability::{DurableStore, open_ephemeral};
 use liminal_protocol::wire::{
     BindingEpoch, ClientRequest, ConnectionIncarnation, DetachedCause, DiedCause, Generation,
-    ParticipantFrame, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken, encoded_len,
+    ParticipantDelivery, ParticipantFrame, ParticipantRecord, RecordAdmission,
+    RecordAdmissionAttemptToken, ServerPush, encoded_len,
 };
 
 use crate::config::types::ParticipantConfig;
 
+use super::frontier::ordinary_record_charge;
 use super::outbox_log::{
     OUTBOX_SCHEMA_VERSION, OUTBOX_STREAM_PREFIX, OutboxLog, OutboxLogError, OutboxRow,
     ProducedBatch, ProducedSourceKind, ProjectedRecord, StoredMarkerAckCommitted,
@@ -65,14 +67,20 @@ fn produced(source_kind: ProducedSourceKind, record: ProjectedRecord) -> OutboxR
     ))
 }
 
-fn max_record_admission_payload(config: &ParticipantConfig) -> Result<usize, Box<dyn Error>> {
-    let empty = ParticipantFrame::ClientRequest(ClientRequest::RecordAdmission(RecordAdmission {
+fn record_admission(payload: Vec<u8>) -> Result<RecordAdmission, Box<dyn Error>> {
+    Ok(RecordAdmission {
         conversation_id: CONVERSATION,
         participant_id: u64::MAX - 4,
         capability_generation: generation(u64::MAX)?,
         record_admission_attempt_token: RecordAdmissionAttemptToken::new([u8::MAX; 16]),
-        payload: Vec::new(),
-    }));
+        payload,
+    })
+}
+
+fn max_record_admission_payload(config: &ParticipantConfig) -> Result<usize, Box<dyn Error>> {
+    let empty = ParticipantFrame::ClientRequest(ClientRequest::RecordAdmission(record_admission(
+        Vec::new(),
+    )?));
     let fixed = encoded_len(&empty)
         .map_err(|error| io::Error::other(format!("request codec failed: {error:?}")))?;
     let limit = usize::try_from(config.wire_frame_limit)?;
@@ -344,5 +352,106 @@ fn canonical_outbox_encoder_prints_checked_q4_measurements() -> Result<(), Box<d
     assert_eq!(recipients().len(), usize::try_from(config.identity_slots)?);
     println!("MEASURED_Q4_FIXED_OUTBOX_OVERHEAD_BYTES={fixed_metadata_term}");
     println!("MEASURED_Q4_MAXIMUM_ENCODED_PUSH_BYTES={maximum_encoded_push}");
+    Ok(())
+}
+
+#[test]
+fn outbox_bound_domination_inequalities_hold_at_the_codec() -> Result<(), Box<dyn Error>> {
+    let config = test_participant_config();
+    let maximum_payload = vec![u8::MAX; max_record_admission_payload(&config)?];
+    let payload_bytes = u64::try_from(maximum_payload.len())?;
+    let core_retained_bytes =
+        ordinary_record_charge(&record_admission(maximum_payload.clone())?)?.bytes;
+    let core_retained_overhead = core_retained_bytes
+        .checked_sub(payload_bytes)
+        .ok_or_else(|| io::Error::other("core retained charge was smaller than its payload"))?;
+    let one_identity_recipient = std::iter::once(u64::MAX).collect::<Vec<_>>();
+    let mut ordinary_push_overhead = None;
+    let mut maximum_nonordinary_push = None;
+    let mut minimum_per_row_fixed_outbox_term = None;
+
+    for (name, row) in all_record_rows(maximum_payload)? {
+        let OutboxRow::Produced(batch) = row else {
+            return Err(io::Error::other("domination measurement row was not Produced").into());
+        };
+        let Some(record) = batch.ordered_records().first() else {
+            return Err(io::Error::other("domination measurement batch was empty").into());
+        };
+        let canonical_push =
+            ParticipantFrame::ServerPush(ServerPush::ParticipantDelivery(ParticipantDelivery {
+                conversation_id: CONVERSATION,
+                delivery_seq: record.delivery_seq(),
+                record: record.body().clone(),
+            }));
+        let push_bytes = u64::try_from(
+            encoded_len(&canonical_push)
+                .map_err(|error| io::Error::other(format!("push codec failed: {error:?}")))?,
+        )?;
+        assert_eq!(push_bytes, record.encoded_push_bytes());
+
+        let raw_payload_bytes = match record.body() {
+            ParticipantRecord::OrdinaryRecord { payload, .. } => u64::try_from(payload.len())?,
+            _ => u64::default(),
+        };
+        if matches!(record.body(), ParticipantRecord::OrdinaryRecord { .. }) {
+            ordinary_push_overhead =
+                Some(push_bytes.checked_sub(raw_payload_bytes).ok_or_else(|| {
+                    io::Error::other("ordinary push was smaller than its payload")
+                })?);
+        } else {
+            maximum_nonordinary_push = Some(
+                maximum_nonordinary_push.map_or(push_bytes, |maximum: u64| maximum.max(push_bytes)),
+            );
+        }
+
+        let one_identity_record = ProjectedRecord::try_new(
+            CONVERSATION,
+            record.delivery_seq(),
+            record.body().clone(),
+            one_identity_recipient.clone(),
+            record.sender(),
+        )?;
+        let one_identity_row = OutboxRow::Produced(ProducedBatch::new(
+            batch.source_log_sequence(),
+            batch.source_kind(),
+            vec![one_identity_record],
+        ));
+        let fixed_at_one_identity = u64::try_from(encode_row(&one_identity_row)?.len())?
+            .checked_sub(raw_payload_bytes)
+            .ok_or_else(|| {
+                io::Error::other("one-identity outbox row was smaller than its payload")
+            })?;
+        minimum_per_row_fixed_outbox_term = Some(
+            minimum_per_row_fixed_outbox_term.map_or(fixed_at_one_identity, |maximum: u64| {
+                maximum.max(fixed_at_one_identity)
+            }),
+        );
+        println!(
+            "MEASURED_ROW4_RECORD_KIND_{name}_PUSH_BYTES={push_bytes} FIXED_OUTBOX_F1_BYTES={fixed_at_one_identity}"
+        );
+    }
+
+    let ordinary_push_overhead = ordinary_push_overhead
+        .ok_or_else(|| io::Error::other("ordinary push measurement was absent"))?;
+    let maximum_nonordinary_push = maximum_nonordinary_push
+        .ok_or_else(|| io::Error::other("non-ordinary push measurement was absent"))?;
+    let minimum_per_row_fixed_outbox_term = minimum_per_row_fixed_outbox_term
+        .ok_or_else(|| io::Error::other("one-identity fixed outbox measurement was absent"))?;
+
+    // This is the tripwire for the structural proof that the signed
+    // UNIT2_MAX_LIVE_OUTBOX_PAYLOAD_BYTES bound is dominated by the core caps. If
+    // either strict inequality fails, that proof is dead and production needs a
+    // comparator; fail loudly here rather than silently losing the guarantee.
+    assert!(
+        ordinary_push_overhead < core_retained_overhead,
+        "ordinary push overhead {ordinary_push_overhead} no longer falls strictly below core retained overhead {core_retained_overhead}"
+    );
+    assert!(
+        maximum_nonordinary_push < minimum_per_row_fixed_outbox_term,
+        "maximum non-ordinary push {maximum_nonordinary_push} no longer falls strictly below fixed outbox F(1) {minimum_per_row_fixed_outbox_term}"
+    );
+    println!(
+        "MEASURED_ROW4_ORDINARY_PUSH_OVERHEAD_BYTES={ordinary_push_overhead} CORE_RETAINED_OVERHEAD_BYTES={core_retained_overhead} MAXIMUM_NONORDINARY_PUSH_BYTES={maximum_nonordinary_push} MINIMUM_FIXED_OUTBOX_F1_BYTES={minimum_per_row_fixed_outbox_term}"
+    );
     Ok(())
 }
