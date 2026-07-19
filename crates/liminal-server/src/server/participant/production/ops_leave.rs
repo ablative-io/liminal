@@ -68,6 +68,19 @@ impl ConversationAuthority {
             }
             SemanticConnectionCapacityDecision::Commit(capacity) => capacity,
         };
+        let next_immutable = self.frontier.as_ref().and_then(|owner| {
+            owner
+                .frontiers()
+                .sequence()
+                .immutable_candidates()
+                .first()
+                .copied()
+        });
+        if let Some(candidate) = next_immutable {
+            let owner = self.take_frontier()?;
+            self.persist_next_marker(candidate, owner, appender)?;
+            return self.apply_leave(request, operation_facts, appender);
+        }
         self.persist_leave(
             request,
             receiving_epoch,

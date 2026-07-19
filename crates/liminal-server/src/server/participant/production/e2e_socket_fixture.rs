@@ -20,7 +20,9 @@ use tungstenite::Message;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::protocol::WebSocket;
 
-use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig, WebSocketConfig};
+use crate::config::types::{
+    LimitsConfig, ParticipantConfig, ServerConfig, ServicesConfig, WebSocketConfig,
+};
 use crate::server::connection::{
     ConnectionHandle, ConnectionServices, ConnectionSupervisor, WebSocketListener,
 };
@@ -142,6 +144,14 @@ pub(in crate::server::participant::production) struct ParticipantOwnerFacts {
     pub(in crate::server::participant::production) charged_bytes: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::server::participant::production) struct OutboxOwnerFacts {
+    pub(in crate::server::participant::production) ack_through: u64,
+    pub(in crate::server::participant::production) next_live_obligation: Option<u64>,
+    pub(in crate::server::participant::production) live_record_count: usize,
+    pub(in crate::server::participant::production) charged_bytes: u64,
+}
+
 pub(in crate::server::participant::production) struct SocketFixture {
     client: TcpStream,
     inbound: Vec<u8>,
@@ -178,27 +188,42 @@ impl SocketFixture {
     pub(in crate::server::participant::production) fn start(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(data_dir, None)
+        Self::start_inner(data_dir, None, test_participant_config())
     }
 
     pub(in crate::server::participant::production) fn start_replay_gated(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(data_dir, Some(Arc::new(PublicationGate::closed())))
+        Self::start_inner(
+            data_dir,
+            Some(Arc::new(PublicationGate::closed())),
+            test_participant_config(),
+        )
+    }
+
+    pub(in crate::server::participant::production) fn start_replay_gated_with_config(
+        data_dir: &Path,
+        config: ParticipantConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(data_dir, Some(Arc::new(PublicationGate::closed())), config)
     }
 
     pub(in crate::server::participant::production) fn start_with_replay_gate(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {
-        Self::start_inner(data_dir, Some(Arc::new(PublicationGate::open())))
+        Self::start_inner(
+            data_dir,
+            Some(Arc::new(PublicationGate::open())),
+            test_participant_config(),
+        )
     }
 
     fn start_inner(
         data_dir: &Path,
         publication_gate: Option<Arc<PublicationGate>>,
+        config: ParticipantConfig,
     ) -> Result<Self, Box<dyn Error>> {
         let store = open_disk_store_for_tests(data_dir)?;
-        let config = test_participant_config();
         let handler = Arc::new(ProductionParticipantHandler::new(
             Arc::clone(&store),
             config,
@@ -345,6 +370,17 @@ impl SocketFixture {
         Ok(())
     }
 
+    pub(in crate::server::participant::production) fn open_publication_replay(
+        &self,
+    ) -> Result<(), Box<dyn Error>> {
+        let gate = self
+            .publication_gate
+            .as_ref()
+            .ok_or("socket fixture has no publication gate")?;
+        gate.open.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+
     pub(in crate::server::participant::production) fn read_push(
         &mut self,
     ) -> Result<ServerPush, Box<dyn Error>> {
@@ -397,6 +433,55 @@ impl SocketFixture {
         Ok(facts)
     }
 
+    pub(in crate::server::participant::production) fn outbox_owner_facts(
+        &self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+    ) -> Result<OutboxOwnerFacts, Box<dyn Error>> {
+        let cell = self.handler.cell(conversation_id)?;
+        let owner = cell
+            .lock()
+            .map_err(|_| "conversation authority lock was poisoned")?;
+        let authority = owner
+            .as_ref()
+            .ok_or("conversation authority was not restored")?;
+        let outbox = authority
+            .outbox
+            .as_ref()
+            .ok_or("conversation outbox owner was absent")?;
+        let facts = OutboxOwnerFacts {
+            ack_through: outbox.ack_through(participant_id),
+            next_live_obligation: outbox.next_live(participant_id),
+            live_record_count: outbox.live_record_count(),
+            charged_bytes: outbox.charged_bytes(),
+        };
+        drop(owner);
+        Ok(facts)
+    }
+
+    pub(in crate::server::participant::production) fn immutable_candidate_counts(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(usize, usize), Box<dyn Error>> {
+        let cell = self.handler.cell(conversation_id)?;
+        let owner = cell
+            .lock()
+            .map_err(|_| "conversation authority lock was poisoned")?;
+        let authority = owner
+            .as_ref()
+            .ok_or("conversation authority was not restored")?;
+        let frontier = authority
+            .frontier
+            .as_ref()
+            .ok_or("conversation frontier owner was absent")?;
+        let counts = (
+            frontier.frontiers().sequence().immutable_candidates().len(),
+            frontier.frontiers().order().immutable_candidates().len(),
+        );
+        drop(owner);
+        Ok(counts)
+    }
+
     pub(in crate::server::participant::production) fn blocked_publication_scans(
         &self,
     ) -> Result<u64, Box<dyn Error>> {
@@ -431,6 +516,19 @@ impl SocketPeer {
         request: ClientRequest,
     ) -> Result<ServerValue, Box<dyn Error>> {
         roundtrip(&mut self.client, &mut self.inbound, request)
+    }
+
+    pub(in crate::server::participant::production) fn read_push(
+        &mut self,
+    ) -> Result<ServerPush, Box<dyn Error>> {
+        let frame = read_frame(&mut self.client, &mut self.inbound)?;
+        let bytes = encode_frame(&frame)?;
+        let decoded = decode_participant(&bytes, ReceiverDirection::Client)
+            .map_err(|error| format!("{error:?}"))?;
+        let ParticipantFrame::ServerPush(push) = decoded else {
+            return Err(format!("expected participant push, got {decoded:?}").into());
+        };
+        Ok(push)
     }
 }
 

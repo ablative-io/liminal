@@ -43,6 +43,8 @@ mod state;
 #[cfg(test)]
 mod e2e_cold_tests;
 #[cfg(test)]
+mod e2e_leave_regression;
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod e2e_tests;
 #[cfg(test)]

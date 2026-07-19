@@ -151,6 +151,23 @@ impl ConversationAuthority {
         config: &ParticipantConfig,
         appender: &dyn DurableAppend,
     ) -> Result<ArmOutcome, StateError> {
+        self.persist_next_marker(candidate, owner, appender)?;
+        self.apply_record_admission(request, operation_facts, config, appender)
+    }
+
+    pub(super) fn persist_next_marker(
+        &mut self,
+        candidate: ImmutableSequenceCandidate,
+        owner: LiveFrontierOwner,
+        appender: &dyn DurableAppend,
+    ) -> Result<(), StateError> {
+        let next_seq =
+            candidate
+                .delivery_seq()
+                .checked_add(1)
+                .ok_or(StateError::AllocationExhausted {
+                    domain: "delivery sequence after marker drain",
+                })?;
         let retained_record_limit = owner.retained_record_limit();
         let marker = canonical_marker_bytes(candidate)?;
         let marker_bytes = u64::try_from(marker.len())
@@ -187,8 +204,9 @@ impl ConversationAuthority {
             self.next_log_sequence,
         )?;
         self.install_frontier(owner);
+        self.next_seq = self.next_seq.max(next_seq);
         self.advance_log_head()?;
-        self.apply_record_admission(request, operation_facts, config, appender)
+        Ok(())
     }
 
     fn persist_record_commit(
@@ -255,6 +273,13 @@ impl ConversationAuthority {
             .first()
             .copied()
             .ok_or_else(|| StateError::invariant("durable marker drain has no candidate"))?;
+        let next_seq =
+            candidate
+                .delivery_seq()
+                .checked_add(1)
+                .ok_or(StateError::AllocationExhausted {
+                    domain: "delivery sequence after durable marker drain",
+                })?;
         let marker = canonical_marker_bytes(candidate)?;
         if marker != row.marker {
             return Err(StateError::invariant("durable marker row drifted"));
@@ -290,6 +315,7 @@ impl ConversationAuthority {
             LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
         validate_marker_projection(self.conversation_id, &projection)?;
         self.install_frontier(owner);
+        self.next_seq = self.next_seq.max(next_seq);
         self.advance_log_head()?;
         Ok(projection.into_delivery())
     }
