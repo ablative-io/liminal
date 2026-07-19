@@ -117,6 +117,44 @@ test(
   },
 );
 
+test(
+  "LiminalFeedSource publishes over its own subscription WebSocket and receives the byte-identical Deliver",
+  { timeout: 120_000 },
+  async (context) => {
+    const server = await startLiminalServer(DEFAULT_FEED_CHANNEL, AUTH_TOKEN);
+    context.after(() => server.close());
+    const wasm: WasmLoadOptions = { source: new Uint8Array(await readFile(server.wasmPath)) };
+    const feed = receivedFeed();
+    const source = new LiminalFeedSource(
+      `ws://127.0.0.1:${server.websocketPort}/liminal`,
+      AUTH_TOKEN,
+      DEFAULT_FEED_CHANNEL,
+      { wasm },
+    );
+    const unsubscribe = source.subscribe(feed.receiver);
+    context.after(unsubscribe);
+    await withTimeout(source.whenSubscribed(), 10_000, "WebSocket subscribe handshake");
+
+    // Publish and subscribe compose on the ONE WebSocket: the publish is
+    // acknowledged with a real PublishAck receipt and the same socket's
+    // subscription receives the byte-identical Deliver.
+    const published = envelope("snapshot", 1, 0, '{"nodes":[],"edges":[]}');
+    const receipt = await withTimeout(
+      source.publish(published),
+      10_000,
+      "WebSocket publish acknowledgement",
+    );
+    assert.equal(typeof receipt.messageId, "bigint");
+    await withTimeout(feed.waitForCount(1), 10_000, "self-published Deliver");
+    assert.deepEqual(feed.envelopes, [published]);
+    assert.deepEqual(
+      encoder.encode(feed.envelopes[0] ?? ""),
+      encoder.encode(published),
+      "delivered UTF-8 bytes must be identical to the published envelope",
+    );
+  },
+);
+
 async function publishAndConfirm(
   publisher: ProtocolTcpClient,
   wasm: WasmLoadOptions,

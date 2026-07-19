@@ -3,6 +3,7 @@ import {
   close as encodeDisconnect,
   connect as encodeConnect,
   receive as decodeFrame,
+  send as encodePublish,
   subscribe as encodeSubscribe,
   unsubscribe as encodeUnsubscribe,
 } from "./wasm.js";
@@ -13,9 +14,17 @@ const CONNECT_ERROR = 0x03;
 const DISCONNECT = 0x04;
 const SUBSCRIBE_ACK = 0x06;
 const SUBSCRIBE_ERROR = 0x07;
+const PUBLISH_ACK = 0x0a;
 const PUBLISH_ERROR = 0x0b;
 const DELIVER = 0x19;
 const SUBSCRIPTION_STREAM_ID = 1;
+/**
+ * Client-chosen stream id for outbound publishes, mirroring the Rust WebSocket
+ * transport's `APPLICATION_STREAM_ID`
+ * (`crates/liminal-sdk/src/remote/websocket.rs`). The server echoes it back on
+ * the matching `PublishAck`/`PublishError`.
+ */
+const PUBLISH_STREAM_ID = 1;
 const SOCKET_OPEN = 1;
 
 export type FeedWebSocketFactory = (endpoint: string) => WebSocket;
@@ -28,12 +37,34 @@ export interface FeedWebSocketHandlers {
 
 type Phase = "opening" | "connect" | "subscribe" | "active" | "closing" | "closed";
 
+/** Server acknowledgement of one publish sent on this WebSocket. */
+export interface FeedPublishReceipt {
+  /** Server-assigned message id carried by the `PublishAck`. */
+  readonly messageId: bigint;
+  /** Stream id the acknowledgement rode, echoing the publish's stream id. */
+  readonly streamId: number;
+}
+
+interface PendingPublish {
+  readonly resolve: (receipt: FeedPublishReceipt) => void;
+  readonly reject: (error: LiminalFeedSourceError) => void;
+}
+
 /** One browser WebSocket carrying one canonical liminal frame per binary message. */
 export class FeedWebSocketSubscription {
   private socket: WebSocket | undefined;
   private phase: Phase = "opening";
   private subscriptionId: bigint | undefined;
   private inbound: Promise<void> = Promise.resolve();
+  /**
+   * Publishes awaiting their `PublishAck`/`PublishError`, resolved in FIFO
+   * order: the server applies inbound frames sequentially per connection and
+   * enqueues each response in receipt order
+   * (`crates/liminal-server/src/server/connection/apply.rs`), so
+   * acknowledgements arrive in publish order, with unsolicited `Deliver`
+   * frames interleaved and routed by frame type.
+   */
+  private readonly pendingPublishes: PendingPublish[] = [];
   private readonly decoder = new TextDecoder("utf-8", { fatal: true });
 
   constructor(
@@ -59,9 +90,59 @@ export class FeedWebSocketSubscription {
     }
   }
 
+  /**
+   * Publishes one envelope on this subscription's WebSocket, resolving with
+   * the server's `PublishAck` receipt or rejecting with the server's typed
+   * `PublishError` refusal.
+   *
+   * Publishing composes with the active subscription on the one socket: the
+   * server applies `Publish` and `Subscribe` frames on the same authenticated
+   * connection. Publishes are only sent once the handshake is complete
+   * (`active` phase); an earlier call is refused loudly instead of queued.
+   */
+  async publish(envelope: Uint8Array): Promise<FeedPublishReceipt> {
+    this.requireActiveForPublish();
+    let frame: Uint8Array;
+    try {
+      ({ frame } = await encodePublish(
+        {
+          connectionId: 0,
+          streamId: PUBLISH_STREAM_ID,
+          channel: this.channel,
+          payload: envelope,
+        },
+        this.wasm,
+      ));
+    } catch (cause) {
+      throw feedError("WASM_ERROR", "Failed to encode the liminal Publish frame", cause);
+    }
+    // The encoder await may have raced a teardown; re-check before sending.
+    this.requireActiveForPublish();
+    const socket = this.requireOpenSocket();
+    return new Promise<FeedPublishReceipt>((resolve, reject) => {
+      const pending: PendingPublish = { resolve, reject };
+      this.pendingPublishes.push(pending);
+      try {
+        socket.send(frame);
+      } catch (cause) {
+        const index = this.pendingPublishes.indexOf(pending);
+        if (index !== -1) this.pendingPublishes.splice(index, 1);
+        reject(
+          feedError("CONNECTION_FAILED", "Failed to transmit the liminal Publish frame", cause),
+        );
+      }
+    });
+  }
+
   async close(): Promise<void> {
     if (this.phase === "closing" || this.phase === "closed") return;
     this.phase = "closing";
+    this.rejectPendingPublishes(
+      feedError(
+        "CONNECTION_CLOSED",
+        "Liminal subscription closed while a publish was awaiting its acknowledgement",
+      ),
+    );
     const socket = this.socket;
     try {
       if (socket?.readyState === SOCKET_OPEN) {
@@ -152,8 +233,30 @@ export class FeedWebSocketSubscription {
     if (frame.frameType === SUBSCRIBE_ERROR) {
       throw this.rejection("SUBSCRIBE_REJECTED", "server rejected Subscribe", frame);
     }
+    if (frame.frameType === PUBLISH_ACK) {
+      const pending = this.pendingPublishes.shift();
+      if (pending === undefined) {
+        throw feedError("PROTOCOL_ERROR", "PublishAck arrived with no publish in flight");
+      }
+      if (frame.messageId === undefined) {
+        // Keep the publish pending so the connection failure below rejects it.
+        this.pendingPublishes.unshift(pending);
+        throw feedError("PROTOCOL_ERROR", "PublishAck omitted its message id");
+      }
+      pending.resolve({ messageId: frame.messageId, streamId: frame.streamId });
+      return;
+    }
     if (frame.frameType === PUBLISH_ERROR) {
-      throw this.rejection("PROTOCOL_ERROR", "subscriber received PublishError", frame);
+      const pending = this.pendingPublishes.shift();
+      if (pending === undefined) {
+        // An unsolicited PublishError is a protocol breach, exactly as before
+        // publishes existed on this socket: it terminates the subscription.
+        throw this.rejection("PROTOCOL_ERROR", "subscriber received PublishError", frame);
+      }
+      // A correlated refusal rejects only the publish; the subscription and
+      // the socket stay healthy.
+      pending.reject(this.rejection("PUBLISH_REJECTED", "server rejected Publish", frame));
+      return;
     }
     if (frame.frameType === DISCONNECT) {
       throw feedError("CONNECTION_CLOSED", "Liminal server disconnected the feed");
@@ -162,7 +265,7 @@ export class FeedWebSocketSubscription {
   }
 
   private rejection(
-    code: "CONNECT_REJECTED" | "SUBSCRIBE_REJECTED" | "PROTOCOL_ERROR",
+    code: "CONNECT_REJECTED" | "SUBSCRIBE_REJECTED" | "PUBLISH_REJECTED" | "PROTOCOL_ERROR",
     summary: string,
     frame: WasmReceivedFrame,
   ): LiminalFeedSourceError {
@@ -198,8 +301,24 @@ export class FeedWebSocketSubscription {
   private fail(error: LiminalFeedSourceError): void {
     if (this.phase === "closed" || this.phase === "closing") return;
     this.phase = "closed";
+    this.rejectPendingPublishes(error);
     this.socket?.close();
     this.handlers.failed(error);
+  }
+
+  /** Refuses a publish loudly outside the `active` phase — never queues it. */
+  private requireActiveForPublish(): void {
+    if (this.phase !== "active") {
+      throw feedError(
+        "NOT_SUBSCRIBED",
+        "Publish requires a completed subscription handshake; await readiness before publishing",
+      );
+    }
+  }
+
+  private rejectPendingPublishes(error: LiminalFeedSourceError): void {
+    const pending = this.pendingPublishes.splice(0);
+    pending.forEach(({ reject }) => reject(error));
   }
 }
 

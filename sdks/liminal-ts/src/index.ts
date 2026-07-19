@@ -66,6 +66,7 @@ export {
 } from "./feed-source.js";
 export { LiminalFeedSourceError } from "./feed-source-error.js";
 export type {
+  FeedPublishReceipt,
   FeedSource,
   LiminalFeedSourceErrorListener,
   LiminalFeedSourceOptions,

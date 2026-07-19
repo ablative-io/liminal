@@ -2,9 +2,12 @@ import { feedError, LiminalFeedSourceError } from "./feed-source-error.js";
 import { FeedSnapshotCache } from "./feed-snapshot-cache.js";
 import {
   FeedWebSocketSubscription,
+  type FeedPublishReceipt,
   type FeedWebSocketFactory,
 } from "./feed-websocket.js";
 import type { WasmLoadOptions } from "./wasm.js";
+
+export type { FeedPublishReceipt } from "./feed-websocket.js";
 
 export const DEFAULT_FEED_CHANNEL = "frame.demo.graph-view";
 export const RESERVED_OBSERVABILITY_CHANNEL = "aion.observability.v1";
@@ -125,6 +128,30 @@ export class LiminalFeedSource implements FeedSource {
       return Promise.reject(feedError("NOT_SUBSCRIBED", "Snapshot requested without a subscription"));
     }
     return this.snapshots.request();
+  }
+
+  /**
+   * Publishes one envelope to this source's channel over the SAME WebSocket
+   * the subscription rides — the server applies `Publish` and `Subscribe`
+   * frames on one authenticated connection, so no second socket is opened.
+   *
+   * Resolves with the server's `PublishAck` receipt. Rejects with
+   * `PUBLISH_REJECTED` carrying the server's `PublishError` reason when the
+   * publish is refused, and with `NOT_SUBSCRIBED` when called before
+   * `subscribe()` or before the handshake completes (await
+   * {@link whenSubscribed} first) — a premature publish is refused loudly,
+   * never queued.
+   */
+  async publish(envelope: string | Uint8Array): Promise<FeedPublishReceipt> {
+    const session = this.session;
+    if (session === undefined) {
+      throw feedError(
+        "NOT_SUBSCRIBED",
+        "Publish requires an active subscription; call subscribe() first",
+      );
+    }
+    const bytes = typeof envelope === "string" ? new TextEncoder().encode(envelope) : envelope;
+    return session.publish(bytes);
   }
 
   onError(listener: LiminalFeedSourceErrorListener): () => void {

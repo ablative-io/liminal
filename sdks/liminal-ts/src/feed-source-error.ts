@@ -8,6 +8,7 @@ export type LiminalFeedSourceErrorCode =
   | "CONNECTION_CLOSED"
   | "CONNECT_REJECTED"
   | "SUBSCRIBE_REJECTED"
+  | "PUBLISH_REJECTED"
   | "PROTOCOL_ERROR"
   | "WASM_ERROR"
   | "RECEIVER_FAILED"
