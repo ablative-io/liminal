@@ -650,7 +650,12 @@ ledger row requires (`2a41a60:docs/design/WIRING-LEDGER.md:63-73`).
 
 W1a consumes `liminal_protocol::lifecycle::ObserverProgressProjection` and
 persists/replays through liminal's `DurableStore` and observer-log machinery.
-It does not call haematite branch/WAL crash-gates. The lifecycle-facing surface
+It does not call haematite branch/WAL crash-gates — per the haematite seat
+(Apollo, 2026-07-19, verbatim): "the crash gates aren't an API a consumer
+could call — they're the canonical tests binding the per-op durability
+contract (COMMIT-DURABILITY-CONTRACT) at the append/cas surface, so W1a is
+protected by that contract automatically through the existing HaematiteStore
+adapter". The lifecycle-facing surface
 is `DurableStore` (`crates/liminal/src/durability/store.rs:20-57`), its
 production adapter delegates to `EventStore`
 (`crates/liminal/src/durability/store.rs:60-191`), and bootstrap wraps the
