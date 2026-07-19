@@ -1,6 +1,7 @@
 # Wiring ledger — dormant machinery and its roads back
 
-- **Revision:** r1.4, 2026-07-20 (W3 closed). Owner of the ledger: Waffles (coordination seat).
+- **Revision:** r1.5, 2026-07-20 (W3 closed; W1 consumer narrowed per ground
+  scout). Owner of the ledger: Waffles (coordination seat).
   Lane owner unless stated otherwise: Hermes Crumpet (liminal seat).
 - **Why this exists:** the F-0c Unit 2 fold minted the unwired-seam sweep as a
   mandatory discipline: every entry point a branch adds either has a production
@@ -29,11 +30,31 @@
   (`Died` / `Ordinary` / `Recovered` / `LeaveCommit`), landed with Unit 2,
   zero production callers (declared in the Unit 2 Census A, verified at my
   tear of `7a9b2cb`).
-- **Named consumer:** the §8 crash-fate arms of the durability design — these
-  projections are what the crash repository reads when it goes production.
-- **Trigger:** the crash repository moving to production use.
+- **Named consumer (NARROWED r1.5, W1 ground scout):** the §8
+  observer-progress crash-window repair. The prior "crash repository reads
+  the four projections" premise was payload-false at the bytes: all four
+  arms surrender the same sealed two-field
+  `ObserverProgressProjection { conversation_id, new_observer_progress }`
+  (`liminal-protocol/src/lifecycle/observer_recovery.rs`) — fate class,
+  cause, participant, and epoch are ERASED, so progress repair is all the
+  projection can drive. Full crash-fate persistence (what typed source rows,
+  if any, are preserved) must be an EXPLICIT section of the W1 brief — ruled
+  a required brief section, not smuggled into a projection that cannot carry
+  it. (Same discipline as the W3 r1.1 narrowing.)
+- **Canonical-producer rule (r1.5):** production already consumes a
+  semantically duplicate leave projection via `LiveLeaveCommit`
+  (`live_frontier.rs`, wired at `ops_leave.rs`) while this row names the
+  dormant `LeaveCommit` arm. The W1 brief must rule ONE canonical producer
+  per fate, with an oracle proving single-presentation (tolerance of double
+  presentation by `current >= presented` is an accident, not a design);
+  this row's arm naming amends to whichever producer survives.
+- **Trigger:** the crash-window repair consumer moving to production use.
 - **Oracle floor:** per-arm projection tests (each fate arm drives its
   projection and asserts the projected row; no shared fixture shortcuts).
+- **Normative §8 source (r1.5):** the Unit 2 brief is on main as historical
+  record at `docs/design/F0C-UNIT2-SERVERPUSH-PRODUCER.md` (brought verbatim
+  from preserved branch tip `0cdff85`; content sha256 `98f9130f…`). Lane
+  briefs cite the main path.
 
 ### W2 — Nonzero-debt ack-obligations pair
 - **What sits dormant:** the nonzero-debt ack obligations pair landed with
