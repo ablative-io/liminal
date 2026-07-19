@@ -26,6 +26,7 @@ pub fn receive_parts(frame: Frame) -> (u64, u16, Vec<u8>) {
         Frame::SubscribeAck {
             subscription_id, ..
         } => (subscription_id, 0, Vec::new()),
+        Frame::PublishAck { message_id, .. } => (message_id, 0, Vec::new()),
         Frame::ConnectError {
             reason_code,
             message,

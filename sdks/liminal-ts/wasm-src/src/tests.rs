@@ -1,4 +1,4 @@
-use super::{RECEIVE_PREFIX_LEN, SUBSCRIBE_MAX_IN_FLIGHT, receive, subscribe, unsubscribe};
+use super::{RECEIVE_PREFIX_LEN, SUBSCRIBE_MAX_IN_FLIGHT, receive, send, subscribe, unsubscribe};
 use crate::protocol::{
     CausalContext, Frame, MessageEnvelope, ProtocolError, SchemaId, decode, encode, encoded_len,
 };
@@ -84,6 +84,49 @@ fn receive_surfaces_subscribe_ack_id() -> Result<(), ProtocolError> {
     assert_eq!(decoded[4], 0x06);
     assert_eq!(read_u32(&decoded[5..9])?, 5);
     assert_eq!(read_u64(&decoded[9..17])?, 99);
+    assert_eq!(decoded.len(), RECEIVE_PREFIX_LEN);
+    Ok(())
+}
+
+#[test]
+fn send_encodes_canonical_publish_frame() -> Result<(), ProtocolError> {
+    let schema = [0x33; SchemaId::WIRE_LEN];
+    let payload = br#"{"kind":"delta","seq":4}"#.to_vec();
+
+    let encoded = wasm_result(send(1, "frame.demo.graph-view", &schema, &payload))?;
+    let (frame, consumed) = decode(&encoded)?;
+
+    assert_eq!(consumed, encoded.len());
+    assert!(matches!(
+        frame,
+        Frame::Publish {
+            stream_id: 1,
+            channel,
+            envelope,
+            idempotency_key: None,
+            ..
+        } if channel == "frame.demo.graph-view"
+            && envelope.schema_id == SchemaId::new(schema)
+            && envelope.payload == payload
+    ));
+    Ok(())
+}
+
+#[test]
+fn receive_surfaces_publish_ack_message_id() -> Result<(), ProtocolError> {
+    let frame = Frame::PublishAck {
+        flags: 0,
+        stream_id: 1,
+        message_id: 7_777,
+    };
+    let encoded = encode_test_frame(&frame)?;
+
+    let decoded = wasm_result(receive(&encoded))?;
+
+    assert_eq!(decoded[4], 0x0A);
+    assert_eq!(read_u32(&decoded[5..9])?, 1);
+    assert_eq!(read_u64(&decoded[9..17])?, 7_777);
+    assert_eq!(u16::from_be_bytes([decoded[17], decoded[18]]), 0);
     assert_eq!(decoded.len(), RECEIVE_PREFIX_LEN);
     Ok(())
 }
