@@ -11,7 +11,7 @@ use liminal_protocol::wire::{ParticipantRecord, ServerPush};
 
 use crate::server::participant::encode_server_push;
 
-use super::outbox::{ConversationOutbox, ConversationOutboxError};
+use super::outbox::{ConversationOutbox, ConversationOutboxError, ConversationOutboxLimits};
 use super::outbox_log::{OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord};
 use super::outbox_projection::ReplayedProjectionFacts;
 use super::outbox_replay::ExtensionMerge;
@@ -19,6 +19,16 @@ use super::outbox_replay::ExtensionMerge;
 const CONVERSATION: u64 = 0xF0_C3;
 const SENDER: u64 = 3;
 const RECIPIENT: u64 = 7;
+
+fn test_limits() -> Result<ConversationOutboxLimits, ConversationOutboxError> {
+    ConversationOutboxLimits::try_new(64, 64)
+}
+
+fn restore_owner(
+    rows: Vec<(u64, OutboxRow)>,
+) -> Result<ConversationOutbox, ConversationOutboxError> {
+    ConversationOutbox::restore(CONVERSATION, rows, test_limits()?)
+}
 
 fn ordinary(
     source_sequence: u64,
@@ -68,8 +78,7 @@ fn left(
 fn uncertain_duplicate_source_batch_is_idempotent_only_by_exact_bytes() -> Result<(), Box<dyn Error>>
 {
     let exact = ordinary(0, 1, vec![RECIPIENT])?;
-    let owner =
-        ConversationOutbox::restore(CONVERSATION, vec![(0, exact.clone()), (1, exact.clone())])?;
+    let owner = restore_owner(vec![(0, exact.clone()), (1, exact.clone())])?;
     assert_eq!(owner.next_extension_sequence(), 2);
     assert_eq!(owner.source_batch_count(), 1);
     assert_eq!(owner.live_record_count(), 1);
@@ -107,10 +116,10 @@ fn uncertain_duplicate_source_batch_is_idempotent_only_by_exact_bytes() -> Resul
     mutations.push(OutboxRow::Produced(changed_charge));
 
     for mutation in mutations {
-        let result = ConversationOutbox::restore(
-            CONVERSATION,
-            vec![(0, OutboxRow::Produced(base_batch.clone())), (1, mutation)],
-        );
+        let result = restore_owner(vec![
+            (0, OutboxRow::Produced(base_batch.clone())),
+            (1, mutation),
+        ]);
         assert!(result.is_err(), "conflicting source mutation was accepted");
     }
     Ok(())
@@ -124,7 +133,7 @@ fn cumulative_ack_reclaims_only_the_recipient_prefix() -> Result<(), Box<dyn Err
         participant_id: RECIPIENT,
         through_seq: 1,
     };
-    let owner = ConversationOutbox::restore(CONVERSATION, vec![(0, produced), (1, ack)])?;
+    let owner = restore_owner(vec![(0, produced), (1, ack)])?;
     assert_eq!(owner.ack_through(RECIPIENT), 1);
     assert_eq!(owner.next_live(RECIPIENT), None);
     assert_eq!(owner.next_live(RECIPIENT + 1), Some(1));
@@ -141,8 +150,7 @@ fn literal_v2_nonobligation_ack_restores_while_regression_refuses() -> Result<()
         participant_id: RECIPIENT,
         through_seq: 2,
     };
-    let historical_owner =
-        ConversationOutbox::restore(CONVERSATION, vec![(0, produced.clone()), (1, historical)])?;
+    let historical_owner = restore_owner(vec![(0, produced.clone()), (1, historical)])?;
     assert_eq!(historical_owner.ack_through(RECIPIENT), 2);
     assert_eq!(historical_owner.live_record_count(), 0);
 
@@ -157,7 +165,7 @@ fn literal_v2_nonobligation_ack_restores_while_regression_refuses() -> Result<()
         through_seq: 1,
     };
     assert!(matches!(
-        ConversationOutbox::restore(CONVERSATION, vec![(0, produced), (1, ack), (2, repeated)]),
+        restore_owner(vec![(0, produced), (1, ack), (2, repeated)]),
         Err(ConversationOutboxError::AckRegression { through_seq: 1, .. })
     ));
     Ok(())
@@ -168,13 +176,13 @@ fn leave_atomically_discharges_retired_obligations_and_replays() -> Result<(), B
     let payload = ordinary(0, 1, vec![RECIPIENT])?;
     let leave = left(1, 2, RECIPIENT)?;
     let rows = vec![(0, payload), (1, leave)];
-    let first = ConversationOutbox::restore(CONVERSATION, rows.clone())?;
+    let first = restore_owner(rows.clone())?;
     assert_eq!(first.source_batch_count(), 2);
     assert_eq!(first.live_record_count(), 0);
     assert_eq!(first.charged_bytes(), 0);
     assert_eq!(first.next_live(RECIPIENT), None);
 
-    let second = ConversationOutbox::restore(CONVERSATION, rows)?;
+    let second = restore_owner(rows)?;
     assert_eq!(second.source_batch_count(), first.source_batch_count());
     assert_eq!(
         second.next_extension_sequence(),
@@ -189,7 +197,7 @@ fn participant_ack_only_advances_receipt_frontier() -> Result<(), Box<dyn Error>
     let first = ordinary(0, 1, vec![RECIPIENT])?;
     let third = ordinary(1, 3, vec![RECIPIENT])?;
     let before_rows = vec![(0, first.clone()), (1, third.clone())];
-    let before = ConversationOutbox::restore(CONVERSATION, before_rows.clone())?;
+    let before = restore_owner(before_rows.clone())?;
     let before_state = (
         before.ack_through(RECIPIENT),
         before.next_live(RECIPIENT),
@@ -215,7 +223,7 @@ fn participant_ack_only_advances_receipt_frontier() -> Result<(), Box<dyn Error>
     socket_bytes.write_all(&encoded)?;
     assert_eq!(socket_bytes, encoded);
 
-    let after_write = ConversationOutbox::restore(CONVERSATION, before_rows.clone())?;
+    let after_write = restore_owner(before_rows.clone())?;
     assert_eq!(after_write.delivery_after(RECIPIENT, 0), Some(offered));
     assert_eq!(
         (
@@ -237,21 +245,18 @@ fn participant_ack_only_advances_receipt_frontier() -> Result<(), Box<dyn Error>
             .map(|d| d.delivery_seq),
         Some(3)
     );
-    let committed = ConversationOutbox::restore(
-        CONVERSATION,
-        vec![
-            (0, first),
-            (1, third),
-            (
-                2,
-                OutboxRow::AckAdvanced {
-                    source_log_sequence: 2,
-                    participant_id: RECIPIENT,
-                    through_seq: 3,
-                },
-            ),
-        ],
-    )?;
+    let committed = restore_owner(vec![
+        (0, first),
+        (1, third),
+        (
+            2,
+            OutboxRow::AckAdvanced {
+                source_log_sequence: 2,
+                participant_id: RECIPIENT,
+                through_seq: 3,
+            },
+        ),
+    ])?;
     assert_eq!(committed.ack_through(RECIPIENT), 3);
     assert_eq!(committed.next_live(RECIPIENT), None);
     assert_eq!(committed.live_record_count(), 0);
@@ -279,14 +284,63 @@ fn participant_ack_only_advances_receipt_frontier() -> Result<(), Box<dyn Error>
             },
         ));
         assert!(matches!(
-            ConversationOutbox::restore(CONVERSATION, rows),
+            restore_owner(rows),
             Err(ConversationOutboxError::AckRegression { .. })
         ));
     }
-    let gap_unchanged = ConversationOutbox::restore(CONVERSATION, before_rows)?;
+    let gap_unchanged = restore_owner(before_rows)?;
     assert_eq!(gap_unchanged.ack_through(RECIPIENT), 0);
     assert_eq!(gap_unchanged.next_live(RECIPIENT), Some(1));
     Ok(())
+}
+
+#[test]
+fn live_recipient_obligation_bound_holds_without_mutation_and_owner_continues()
+-> Result<(), Box<dyn Error>> {
+    let limits = ConversationOutboxLimits::try_new(1, 2)?;
+    let mut owner = ConversationOutbox::restore(CONVERSATION, Vec::new(), limits)?;
+    owner.apply_row(0, ordinary(0, 1, vec![RECIPIENT, RECIPIENT + 1])?)?;
+    assert_eq!(owner.live_recipient_obligation_count(), 2);
+
+    let Err(error) = owner.apply_row(1, ordinary(1, 2, vec![RECIPIENT + 2])?) else {
+        return Err("third live recipient obligation exceeded the signed bound".into());
+    };
+    assert!(matches!(
+        error,
+        ConversationOutboxError::LiveRecipientObligationsExceeded {
+            limit: 2,
+            attempted: 3
+        }
+    ));
+    assert_eq!(owner.next_extension_sequence(), 1);
+    assert_eq!(owner.source_batch_count(), 1);
+    assert_eq!(owner.live_recipient_obligation_count(), 2);
+    assert!(owner.delivery_after(RECIPIENT, 0).is_some());
+
+    owner.apply_row(
+        1,
+        OutboxRow::AckAdvanced {
+            source_log_sequence: 2,
+            participant_id: RECIPIENT,
+            through_seq: 1,
+        },
+    )?;
+    assert_eq!(owner.live_recipient_obligation_count(), 1);
+    owner.apply_row(2, ordinary(1, 2, vec![RECIPIENT + 2])?)?;
+    assert_eq!(owner.live_recipient_obligation_count(), 2);
+    assert_eq!(owner.next_extension_sequence(), 3);
+    assert!(owner.delivery_after(RECIPIENT + 2, 0).is_some());
+    Ok(())
+}
+
+#[test]
+fn live_recipient_obligation_bound_rejects_checked_product_overflow() {
+    assert!(matches!(
+        ConversationOutboxLimits::try_new(u64::MAX, 2),
+        Err(ConversationOutboxError::BoundOverflow {
+            name: "UNIT2_MAX_LIVE_RECIPIENT_OBLIGATIONS"
+        })
+    ));
 }
 
 macro_rules! assert_not_impl {

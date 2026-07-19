@@ -6,6 +6,25 @@ use liminal_protocol::wire::{DetachedCause, ParticipantId, ParticipantRecord};
 
 use super::{ConversationOutboxError, ProducedBatch, ProducedSourceKind, ProjectedRecord};
 
+pub(super) fn retiring_participant(
+    batch: &ProducedBatch,
+) -> Result<Option<ParticipantId>, ConversationOutboxError> {
+    if batch.source_kind() != ProducedSourceKind::Left {
+        return Ok(None);
+    }
+    let ParticipantRecord::Left {
+        affected_participant_id,
+        ..
+    } = batch.ordered_records()[0].body()
+    else {
+        return Err(ConversationOutboxError::SourceBody {
+            source_sequence: batch.source_log_sequence(),
+            source_kind: batch.source_kind(),
+        });
+    };
+    Ok(Some(*affected_participant_id))
+}
+
 pub(super) fn validate_batch_shape(batch: &ProducedBatch) -> Result<(), ConversationOutboxError> {
     let records = batch.ordered_records();
     let count_valid = if batch.source_kind() == ProducedSourceKind::Attached {

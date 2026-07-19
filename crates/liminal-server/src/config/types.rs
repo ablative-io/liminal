@@ -624,6 +624,13 @@ impl ParticipantConfig {
                 "participant.closure_episode_churn_limit: must be in 2..=u32::MAX".to_owned(),
             );
         }
+        if self
+            .max_retained_record_rows
+            .checked_mul(self.identity_slots)
+            .is_none()
+        {
+            errors.push("participant.UNIT2_MAX_LIVE_RECIPIENT_OBLIGATIONS: max_retained_record_rows * identity_slots overflows u64".to_owned());
+        }
     }
 }
 

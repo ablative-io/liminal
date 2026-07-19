@@ -29,6 +29,7 @@ use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
 use super::capacity::ServerCapacity;
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
+use super::outbox::ConversationOutboxLimits;
 use super::outbox_log::{OutboxLog, OutboxLogError};
 use super::registry::ConversationRegistry;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
@@ -59,6 +60,7 @@ pub(super) struct ObserverOwner {
 pub struct ProductionParticipantHandler {
     pub(super) store: Arc<dyn DurableStore>,
     pub(super) config: ParticipantConfig,
+    outbox_limits: ConversationOutboxLimits,
     conversations: Mutex<HashMap<ConversationId, Arc<Mutex<Option<ConversationAuthority>>>>>,
     /// Server-wide observer-recovery aggregate paired with its durable row
     /// head (`None` until first restored).
@@ -88,10 +90,18 @@ impl ProductionParticipantHandler {
         store: Arc<dyn DurableStore>,
         config: ParticipantConfig,
     ) -> Result<Self, ParticipantSemanticError> {
+        let outbox_limits = ConversationOutboxLimits::try_new(
+            config.max_retained_record_rows,
+            config.identity_slots,
+        )
+        .map_err(|error| ParticipantSemanticError::Internal {
+            message: format!("participant outbox limit configuration failed: {error}"),
+        })?;
         let registry = ConversationRegistry::new(Arc::clone(&store));
         let handler = Self {
             store,
             config,
+            outbox_limits,
             conversations: Mutex::new(HashMap::new()),
             observer: Mutex::new(None),
             capacity: ServerCapacity::default(),
@@ -252,6 +262,7 @@ impl ProductionParticipantHandler {
             &outbox_log,
             extension_rows,
             &self.config,
+            self.outbox_limits,
         ))
         .map_err(|error| bridge_error(&error))?
         .map_err(|error| state_error(&error))?;

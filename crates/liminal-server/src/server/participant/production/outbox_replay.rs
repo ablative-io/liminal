@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 
 use liminal_protocol::lifecycle::RecipientAckObligations;
 
-use super::outbox::{ConversationOutbox, ConversationOutboxError};
+use super::outbox::{ConversationOutbox, ConversationOutboxError, ConversationOutboxLimits};
 use super::outbox_log::{OutboxLog, OutboxRow};
 use super::state::{ConversationAuthority, StateError};
 
@@ -21,13 +21,14 @@ impl<'a> ExtensionMerge<'a> {
         log: &'a OutboxLog,
         rows: Vec<(u64, OutboxRow)>,
         conversation_id: u64,
+        limits: ConversationOutboxLimits,
     ) -> Result<Self, StateError> {
         let next_extension_sequence = u64::try_from(rows.len())
             .map_err(|_| StateError::invariant("Unit 2 extension stream length exceeds u64"))?;
         Ok(Self {
             log,
             pending: rows.into(),
-            outbox: ConversationOutbox::restore(conversation_id, Vec::new())?,
+            outbox: ConversationOutbox::restore(conversation_id, Vec::new(), limits)?,
             next_extension_sequence,
         })
     }

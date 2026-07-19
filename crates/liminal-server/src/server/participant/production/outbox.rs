@@ -1,5 +1,6 @@
 //! Move-only in-memory owner rebuilt from the Unit 2 extension stream.
 
+mod limits;
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,7 +11,9 @@ use liminal_protocol::wire::{ParticipantDelivery, ParticipantId, ParticipantReco
 use super::outbox_log::{
     OutboxLogError, OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord, encode_row,
 };
-use validation::{validate_batch_shape, validate_record_snapshot};
+pub(super) use limits::ConversationOutboxLimits;
+use limits::ensure_live_obligation_capacity;
+use validation::{retiring_participant, validate_batch_shape, validate_record_snapshot};
 
 /// Typed corruption found while folding canonical Unit 2 rows.
 #[derive(Debug, thiserror::Error)]
@@ -91,6 +94,22 @@ pub(super) enum ConversationOutboxError {
     /// Checked live charge arithmetic overflowed.
     #[error("Unit 2 live outbox charge overflowed")]
     ChargeOverflow,
+    /// A signed outbox bound could not be formed from its signed inputs.
+    #[error("signed outbox bound {name} overflowed")]
+    BoundOverflow {
+        /// Signed §9 placeholder whose checked derivation failed.
+        name: &'static str,
+    },
+    /// A new live recipient obligation would exceed the signed product bound.
+    #[error(
+        "Unit 2 live recipient obligations would reach {attempted}, exceeding signed bound {limit}"
+    )]
+    LiveRecipientObligationsExceeded {
+        /// Derived signed maximum.
+        limit: u64,
+        /// Prospective live count rejected before owner mutation.
+        attempted: u64,
+    },
 }
 
 #[derive(Debug)]
@@ -103,6 +122,7 @@ struct LiveRecord {
 /// Sole move-only owner of one conversation's durable delivery obligations.
 #[derive(Debug)]
 pub(super) struct ConversationOutbox {
+    limits: ConversationOutboxLimits,
     conversation_id: u64,
     records: BTreeMap<u64, LiveRecord>,
     source_batches: BTreeMap<u64, Vec<u8>>,
@@ -113,6 +133,7 @@ pub(super) struct ConversationOutbox {
     retired: BTreeSet<ParticipantId>,
     highest_delivery_seq: u64,
     next_extension_sequence: u64,
+    live_recipient_obligations: u64,
     charged_bytes: u64,
 }
 
@@ -121,8 +142,10 @@ impl ConversationOutbox {
     pub(super) fn restore(
         conversation_id: u64,
         rows: Vec<(u64, OutboxRow)>,
+        limits: ConversationOutboxLimits,
     ) -> Result<Self, ConversationOutboxError> {
         let mut owner = Self {
+            limits,
             conversation_id,
             records: BTreeMap::new(),
             source_batches: BTreeMap::new(),
@@ -133,6 +156,7 @@ impl ConversationOutbox {
             retired: BTreeSet::new(),
             highest_delivery_seq: 0,
             next_extension_sequence: 0,
+            live_recipient_obligations: 0,
             charged_bytes: 0,
         };
         for (physical_sequence, row) in rows {
@@ -223,22 +247,14 @@ impl ConversationOutbox {
             prepared.push(record.clone());
         }
 
+        let retiring = retiring_participant(batch)?;
+        ensure_live_obligation_capacity(self, &prepared, retiring)?;
         self.source_batches.insert(source_sequence, canonical);
+        if let Some(participant_id) = retiring {
+            self.discharge_retired(participant_id)?;
+        }
         for record in prepared {
             self.install_record(record)?;
-        }
-        if batch.source_kind() == ProducedSourceKind::Left {
-            let ParticipantRecord::Left {
-                affected_participant_id,
-                ..
-            } = batch.ordered_records()[0].body()
-            else {
-                return Err(ConversationOutboxError::SourceBody {
-                    source_sequence,
-                    source_kind: batch.source_kind(),
-                });
-            };
-            self.discharge_retired(*affected_participant_id)?;
         }
         Ok(())
     }
@@ -253,6 +269,12 @@ impl ConversationOutbox {
                 .insert(sequence);
             self.ack_frontiers.entry(*participant).or_insert(0);
         }
+        let added = u64::try_from(record.recipients().len())
+            .map_err(|_| ConversationOutboxError::ChargeOverflow)?;
+        self.live_recipient_obligations = self
+            .live_recipient_obligations
+            .checked_add(added)
+            .ok_or(ConversationOutboxError::ChargeOverflow)?;
         let recipients: BTreeSet<_> = record.recipients().iter().copied().collect();
         if !recipients.is_empty() {
             let encoded_push_bytes = record.encoded_push_bytes();
@@ -310,11 +332,17 @@ impl ConversationOutbox {
         participant_id: ParticipantId,
         through_seq: u64,
     ) -> Result<(), ConversationOutboxError> {
+        let mut discharged = 0_u64;
         for record in self.records.values_mut() {
-            if record.delivery.delivery_seq <= through_seq {
-                record.recipients.remove(&participant_id);
+            if record.delivery.delivery_seq <= through_seq
+                && record.recipients.remove(&participant_id)
+            {
+                discharged = discharged
+                    .checked_add(1)
+                    .ok_or(ConversationOutboxError::ChargeOverflow)?;
             }
         }
+        self.subtract_live_obligations(discharged)?;
         self.reclaim_empty_records()?;
         self.recompute_next_live();
         Ok(())
@@ -325,11 +353,28 @@ impl ConversationOutbox {
         participant_id: ParticipantId,
     ) -> Result<(), ConversationOutboxError> {
         self.retired.insert(participant_id);
+        let mut discharged = 0_u64;
         for record in self.records.values_mut() {
-            record.recipients.remove(&participant_id);
+            if record.recipients.remove(&participant_id) {
+                discharged = discharged
+                    .checked_add(1)
+                    .ok_or(ConversationOutboxError::ChargeOverflow)?;
+            }
         }
+        self.subtract_live_obligations(discharged)?;
         self.reclaim_empty_records()?;
         self.recompute_next_live();
+        Ok(())
+    }
+
+    fn subtract_live_obligations(
+        &mut self,
+        discharged: u64,
+    ) -> Result<(), ConversationOutboxError> {
+        self.live_recipient_obligations = self
+            .live_recipient_obligations
+            .checked_sub(discharged)
+            .ok_or(ConversationOutboxError::ChargeOverflow)?;
         Ok(())
     }
 
@@ -475,6 +520,11 @@ impl ConversationOutbox {
     #[cfg(test)]
     pub(super) fn live_record_count(&self) -> usize {
         self.records.len()
+    }
+
+    #[cfg(test)]
+    pub(super) const fn live_recipient_obligation_count(&self) -> u64 {
+        self.live_recipient_obligations
     }
 
     #[cfg(test)]

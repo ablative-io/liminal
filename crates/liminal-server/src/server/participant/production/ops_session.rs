@@ -23,6 +23,7 @@ use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barr
 use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{OperationLog, StoredBindingEpoch, StoredDetachRequest, StoredOperation};
+use super::outbox::ConversationOutboxLimits;
 use super::outbox_log::{OutboxLog, OutboxRow};
 use super::outbox_projection::{capture_projection_prestate, project_committed_source};
 use super::outbox_replay::ExtensionMerge;
@@ -273,9 +274,11 @@ impl ConversationAuthority {
         outbox_log: &OutboxLog,
         extension_rows: Vec<(u64, OutboxRow)>,
         config: &ParticipantConfig,
+        outbox_limits: ConversationOutboxLimits,
     ) -> Result<Self, StateError> {
         let mut authority = Self::empty(conversation_id);
-        let mut merge = ExtensionMerge::new(outbox_log, extension_rows, conversation_id)?;
+        let mut merge =
+            ExtensionMerge::new(outbox_log, extension_rows, conversation_id, outbox_limits)?;
         merge.apply_boundary(&mut authority, 0, None).await?;
         let mut sequence = 0_u64;
         loop {
