@@ -7,7 +7,7 @@ against is Apache-2.0; the servers are AGPL-3.0-only.
 
 - **`liminal-protocol`** (crates.io) — the shared wire and lifecycle types
 - **`liminal-sdk`** (crates.io) — the application-facing client SDK
-- **`@liminal/sdk`** (npm) — the TypeScript SDK and its WASM protocol bridge
+- **`@ablative/liminal`** (npm) — the TypeScript SDK and its WASM protocol bridge
 
 These are the pieces that get compiled into *your* application. You can link
 them into closed-source, commercial, or any other software without your code
