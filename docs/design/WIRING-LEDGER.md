@@ -1,7 +1,8 @@
 # Wiring ledger — dormant machinery and its roads back
 
-- **Revision:** r1.5, 2026-07-20 (W3 closed; W1 consumer narrowed per ground
-  scout). Owner of the ledger: Waffles (coordination seat).
+- **Revision:** r1.6, 2026-07-20 (W1 PHASED into W1a/W1b per pre-review
+  finding 1; r1.5 no-new-row disposition expressly amended). Owner of the
+  ledger: Waffles (coordination seat).
   Lane owner unless stated otherwise: Hermes Crumpet (liminal seat).
 - **Why this exists:** the F-0c Unit 2 fold minted the unwired-seam sweep as a
   mandatory discipline: every entry point a branch adds either has a production
@@ -25,7 +26,49 @@
 
 ## Lanes
 
-### W1 — BindingFate observer projections
+### W1 — PHASED r1.6 into W1a (wire what exists) and W1b (fate sources)
+
+The W1 pre-review (session c769ccf3) found the ruled disposition
+UNIMPLEMENTABLE for three of the four arms, verified at the coordination
+seat: the production `StoredOperation` enum has NO Died/Ordinary/Recovered
+variants (`log.rs` — zero grep hits), the replay match has no BindingFate
+branch (`ops_session.rs`), and `BindingFateOperation` is a protocol codec
+with no production durable home. No source rows exist for those fates to
+flush at the §8 barrier, and cold replay cannot reconstruct their
+projections. The r1.5 "Advance is the only new persisted output, no new
+row shape" disposition is EXPRESSLY AMENDED: it stands for W1a and is
+superseded for the fate sources, whose creation is W1b's design scope.
+
+#### W1a — Leave survivor + reconcile validation (wireable today)
+- **Scope:** the canonical Leave producer ruling (one producer per fate,
+  single-presentation oracle, r1.5) applied to the ONLY wireable arm; PLUS
+  the §8 reconcile-conformance repair: production today silently tolerates
+  nonmonotone and disagreeing sources (`record_observer_progress_projection`
+  stores a max while queueing all values, `state.rs:267-275`; reconcile
+  continues on `current >= presented`, `handler_observer.rs:275-290`) where
+  §8 requires a loud refusal. Same species as the W3 row-R gap —
+  DISCLOSURE-CLASS on main independent of W1, severity recorded here, home
+  ruled: the validation lands WITH W1a (same reconcile path).
+- **Oracle floor:** single-presentation oracle for the surviving Leave
+  producer (fails if both arms present); refusal oracles including
+  decreasing-source and unsupported ahead-Advance arms; cold-repair oracle
+  makes `apply_observer_recovery` the FIRST touch; Leave-duplicate coverage
+  via structural-absence check + `cfg(test)` duplicate-injection seam.
+- **Owner:** Hermes (brief r2 folds findings 2, 3, 5 at his seat).
+
+#### W1b — Died/Ordinary/Recovered durable source rows (design-first)
+- **What is missing:** the three fate `StoredOperation` variants, their
+  replay transitions, and their §8 flush barriers — never built.
+- **Named consumer:** the full §8 crash-fate window repair (what W1's
+  original row wrongly presumed already had sources).
+- **Trigger:** design brief at Hermes's seat, its own review round — the
+  open decisions (schema version, migration-or-refusal rule, which live
+  paths emit Died rows at all) are design decisions, not fold riders.
+- **Oracle floor:** set by the W1b design brief; at minimum per-fate
+  append/replay/flush oracles and the cold-reconstruction path.
+- **Owner:** Hermes. (No-row-no-dormancy: this row is the road back.)
+
+#### Original W1 row (historical, premise superseded by the phasing above)
 - **What sits dormant:** the `BindingFate` observer projection arms
   (`Died` / `Ordinary` / `Recovered` / `LeaveCommit`), landed with Unit 2,
   zero production callers (declared in the Unit 2 Census A, verified at my
