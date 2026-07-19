@@ -41,6 +41,10 @@ mod registry;
 mod state;
 
 #[cfg(test)]
+mod e2e_cold_all_shapes;
+#[cfg(test)]
+mod e2e_cold_all_shapes_fixture;
+#[cfg(test)]
 mod e2e_cold_tests;
 #[cfg(test)]
 mod e2e_leave_regression;
