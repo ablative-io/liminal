@@ -1,6 +1,6 @@
 # Wiring ledger — dormant machinery and its roads back
 
-- **Revision:** r1, 2026-07-19. Owner of the ledger: Waffles (coordination seat).
+- **Revision:** r1.4, 2026-07-20 (W3 closed). Owner of the ledger: Waffles (coordination seat).
   Lane owner unless stated otherwise: Hermes Crumpet (liminal seat).
 - **Why this exists:** the F-0c Unit 2 fold minted the unwired-seam sweep as a
   mandatory discipline: every entry point a branch adds either has a production
@@ -46,11 +46,21 @@
 - **Oracle floor:** dispatch-arm tests exercising both the nonzero-debt path
   and the scalar path against the same fixture, asserting they cannot diverge.
 
-### W3 — Apply-per-page restore (row R) — SCOPE NARROWED r1.1
-- **What sits open:** `spec:570 total-restore-streaming` — `read_all`
-  materializes the full decoded stream; only the 64-row page size is enforced.
-  Disclosed in the Unit 2 declaration under its own line; disposition
-  Tom-ratified (disclose-with-teeth).
+### W3 — Apply-per-page restore (row R) — CLOSED r1.4 (landed 9dca3a3)
+- **Closure (2026-07-20, coordination-seat tear):** production restore now
+  runs the bounded validate-then-apply two-pass (`bbe25d0`), the eleven-oracle
+  census landed in `tests_w3_restore.rs` (`b31fc6d`, accounting `9dca3a3`),
+  and `read_all` survives only as a `#[cfg(test)]` frozen pre-W3 reference
+  with no production selector or fallback. Battery green at the tear
+  (fmt/check/clippy/test, oracle census 0 absent, floor files byte-identical).
+  Equivalence claim on record: stable-read durable-state equivalence (the
+  two-pass adds fallible production reads — loud-and-earlier failure as a
+  design position), expressly superseding the earlier "zero observable
+  contract change" phrasing; see the brief's supersession record.
+- **What sat open:** `spec:570 total-restore-streaming` — `read_all`
+  materialized the full decoded stream; only the 64-row page size was
+  enforced. Disclosed in the Unit 2 declaration under its own line;
+  disposition Tom-ratified (disclose-with-teeth).
 - **Scope (narrowed 2026-07-19, W3 pre-review finding 1):** W3 removes the
   duplicate aggregate materialization (the `read_all` Vec) ONLY. The brief's
   original "safe for unbounded history" claim was FALSE at the bytes — the
