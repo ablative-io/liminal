@@ -1,8 +1,8 @@
 # Wiring ledger — dormant machinery and its roads back
 
-- **Revision:** r1.6, 2026-07-20 (W1 PHASED into W1a/W1b per pre-review
-  finding 1; r1.5 no-new-row disposition expressly amended). Owner of the
-  ledger: Waffles (coordination seat).
+- **Revision:** r1.7, 2026-07-20 (W1a oracle-floor wording: per-lineage
+  regression, not "decreasing-source" — W1a round-2 finding 1). Owner of
+  the ledger: Waffles (coordination seat).
   Lane owner unless stated otherwise: Hermes Crumpet (liminal seat).
 - **Why this exists:** the F-0c Unit 2 fold minted the unwired-seam sweep as a
   mandatory discipline: every entry point a branch adds either has a production
@@ -51,7 +51,11 @@ superseded for the fate sources, whose creation is W1b's design scope.
   ruled: the validation lands WITH W1a (same reconcile path).
 - **Oracle floor:** single-presentation oracle for the surviving Leave
   producer (fails if both arms present); refusal oracles including
-  decreasing-source and unsupported ahead-Advance arms; cold-repair oracle
+  PER-LINEAGE regression and unsupported ahead-Advance arms (r1.7: a
+  globally-decreasing sequence can be legal multi-participant history —
+  per-participant cursors, no global floor, `ops_acks.rs:162-207`; the
+  W1a validation model is per-lineage monotonicity + running-maxima
+  witness, final progress = max over the witness set); cold-repair oracle
   makes `apply_observer_recovery` the FIRST touch; Leave-duplicate coverage
   via structural-absence check + `cfg(test)` duplicate-injection seam.
 - **Owner:** Hermes (brief r2 folds findings 2, 3, 5 at his seat).
