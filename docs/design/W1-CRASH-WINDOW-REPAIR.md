@@ -98,12 +98,18 @@ preflight. Independent participant cursor lineages may legally project high
 then lower values. The authoritative truth is the separately retained maximum,
 and an absent observer Track is planned as `Untracked`, not appended before
 conformance succeeds. R1.7 ratifies the coordinator wording amendment. Its
-oracle-floor rule is, verbatim: “PER-LINEAGE regression and unsupported
-ahead-Advance arms (r1.7: a globally-decreasing sequence can be legal
-multi-participant history — per-participant cursors, no global floor,
-`ops_acks.rs:162-207`; the W1a validation model is per-lineage monotonicity +
-running-maxima witness, final progress = max over the witness set)”
-(`2a41a60:docs/design/WIRING-LEDGER.md:52-60`). The brief uses that exact model.
+oracle-floor rule is quoted below with the ledger's physical line breaks
+preserved byte-for-byte (`2a41a60:docs/design/WIRING-LEDGER.md:54-58`):
+
+```
+  PER-LINEAGE regression and unsupported ahead-Advance arms (r1.7: a
+  globally-decreasing sequence can be legal multi-participant history —
+  per-participant cursors, no global floor, `ops_acks.rs:162-207`; the
+  W1a validation model is per-lineage monotonicity + running-maxima
+  witness, final progress = max over the witness set); cold-repair oracle
+```
+
+The brief uses that exact model.
 
 The corrected contracts are in §§4, 5, 6, 7, and 8.
 
