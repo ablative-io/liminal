@@ -31,6 +31,7 @@ use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
 use super::outbox::ConversationOutboxLimits;
 use super::outbox_log::{OutboxLog, OutboxLogError};
+use super::outbox_replay::RestoreError;
 use super::registry::ConversationRegistry;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
@@ -253,19 +254,21 @@ impl ProductionParticipantHandler {
         log: &OperationLog,
     ) -> Result<ConversationAuthority, ParticipantSemanticError> {
         let outbox_log = OutboxLog::new(Arc::clone(&self.store), conversation_id);
-        let extension_rows = block_on(outbox_log.read_all())
+        block_on(outbox_log.restore_cursor().validate_all())
             .map_err(|error| bridge_error(&error))?
             .map_err(|error| outbox_log_error(&error))?;
         let mut replayed = block_on(ConversationAuthority::replay(
             conversation_id,
             log,
             &outbox_log,
-            extension_rows,
             &self.config,
             self.outbox_limits,
         ))
         .map_err(|error| bridge_error(&error))?
-        .map_err(|error| state_error(&error))?;
+        .map_err(|error| match error {
+            RestoreError::Extension(error) => outbox_log_error(&error),
+            RestoreError::Semantic(error) => state_error(&error),
+        })?;
         let observer_projections = replayed.take_observer_progress_projections();
         if !replayed.tokens.is_empty() {
             self.ensure_observer_tracked(conversation_id)?;

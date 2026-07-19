@@ -7,7 +7,7 @@
 
 mod codec;
 
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use liminal::durability::{DurabilityError, DurableStore};
 use liminal_protocol::wire::{
@@ -248,6 +248,115 @@ impl OutboxRow {
     }
 }
 
+/// Move-only, one-page cursor over one conversation's Unit 2 extension stream.
+///
+/// A short nonempty store read is never EOF. The cursor advances to the checked
+/// successor and confirms EOF only when that offset returns an empty read.
+pub(super) struct OutboxRestoreCursor<'a> {
+    log: &'a OutboxLog,
+    next_expected_sequence: u64,
+    established_version: Option<u8>,
+    eof: bool,
+    page: VecDeque<(u64, OutboxRow)>,
+}
+
+impl<'a> OutboxRestoreCursor<'a> {
+    fn new(log: &'a OutboxLog) -> Self {
+        Self {
+            log,
+            next_expected_sequence: 0,
+            established_version: None,
+            eof: false,
+            page: VecDeque::new(),
+        }
+    }
+
+    async fn load_page(&mut self) -> Result<(), OutboxLogError> {
+        if self.eof || !self.page.is_empty() {
+            return Ok(());
+        }
+        let entries = self
+            .log
+            .store
+            .read_from(
+                &self.log.stream_key,
+                self.next_expected_sequence,
+                UNIT2_OUTBOX_RESTORE_BATCH_ROWS,
+            )
+            .await?;
+        if entries.is_empty() {
+            self.eof = true;
+            return Ok(());
+        }
+
+        let mut decoded = VecDeque::with_capacity(entries.len());
+        for entry in entries {
+            if entry.sequence != self.next_expected_sequence {
+                return Err(OutboxLogError::Sequence {
+                    expected: self.next_expected_sequence,
+                    actual: entry.sequence,
+                });
+            }
+            let version = entry
+                .payload
+                .first()
+                .copied()
+                .ok_or(OutboxLogError::MissingSchemaVersion)?;
+            if let Some(expected) = self.established_version {
+                if version != expected {
+                    return Err(OutboxLogError::MixedSchemaVersions {
+                        expected,
+                        actual: version,
+                    });
+                }
+            } else {
+                self.established_version = Some(version);
+            }
+            if version != OUTBOX_SCHEMA_VERSION {
+                return Err(OutboxLogError::SchemaVersion(version));
+            }
+            decoded.push_back((self.next_expected_sequence, decode_row(&entry.payload)?));
+            self.next_expected_sequence =
+                self.next_expected_sequence
+                    .checked_add(1)
+                    .ok_or(OutboxLogError::Sequence {
+                        expected: u64::MAX,
+                        actual: entry.sequence,
+                    })?;
+        }
+        self.page = decoded;
+        Ok(())
+    }
+
+    /// Borrows the current physical head, loading exactly one page when needed.
+    pub(super) async fn front(&mut self) -> Result<Option<&(u64, OutboxRow)>, OutboxLogError> {
+        self.load_page().await?;
+        Ok(self.page.front())
+    }
+
+    /// Consumes the current physical head after a successful [`Self::front`].
+    pub(super) fn pop_front(&mut self) -> Option<(u64, OutboxRow)> {
+        self.page.pop_front()
+    }
+
+    /// Streams and discards every decoded row through explicit empty-read EOF.
+    pub(super) async fn validate_all(mut self) -> Result<(), OutboxLogError> {
+        while self.front().await?.is_some() {
+            let _ = self.pop_front();
+        }
+        Ok(())
+    }
+
+    /// Returns the checked successor offset after explicit EOF confirmation.
+    pub(super) const fn confirmed_head(&self) -> Option<u64> {
+        if self.eof {
+            Some(self.next_expected_sequence)
+        } else {
+            None
+        }
+    }
+}
+
 /// Append-only handle over one conversation's Unit 2 extension stream.
 #[derive(Debug)]
 pub(super) struct OutboxLog {
@@ -261,6 +370,11 @@ impl OutboxLog {
             store,
             stream_key: format!("{OUTBOX_STREAM_PREFIX}{conversation_id}"),
         }
+    }
+
+    /// Starts a fresh bounded traversal at physical sequence zero.
+    pub(super) fn restore_cursor(&self) -> OutboxRestoreCursor<'_> {
+        OutboxRestoreCursor::new(self)
     }
 
     /// Appends one canonical row at the exact optimistic head, then flushes.
@@ -284,7 +398,12 @@ impl OutboxLog {
         Ok(())
     }
 
-    /// Reads and decodes the complete stream before any owner is published.
+    /// Frozen aggregate reader retained only as the pre-W3 test reference.
+    ///
+    /// This intentionally preserves the old short-page termination and owns
+    /// its independent decode/validation loop. Production restore has no
+    /// selector or fallback to this implementation.
+    #[cfg(test)]
     pub(super) async fn read_all(&self) -> Result<Vec<(u64, OutboxRow)>, OutboxLogError> {
         let mut rows = Vec::new();
         let mut sequence = 0_u64;
