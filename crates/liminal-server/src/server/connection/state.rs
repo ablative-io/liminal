@@ -13,9 +13,117 @@ use super::conversation::ConnectionConversation;
 use super::participant_delivery::{HeldObserverHead, HeldParticipantHead};
 use super::services::ConnectionSubscription;
 use crate::server::participant::{
-    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublicationInbox,
-    ParticipantSession,
+    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublicationError,
+    ParticipantPublicationInbox, ParticipantSession,
 };
+
+/// The one signed pool of exact encoded participant and observer heads held for
+/// current outbound pressure.
+///
+/// The maps remain separate because their payload types and replacement rules
+/// differ, but every vacant insertion passes through the same checked capacity
+/// gate. This prevents the two push classes from each consuming the full signed
+/// semantic-conversation allowance.
+#[derive(Debug, Default)]
+pub(super) struct HeldPushHeads {
+    participant: BTreeMap<u64, HeldParticipantHead>,
+    observer: BTreeMap<u64, HeldObserverHead>,
+    capacity_refused: bool,
+}
+
+impl HeldPushHeads {
+    pub(super) fn participant_keys(&self) -> impl Iterator<Item = &u64> {
+        self.participant.keys()
+    }
+
+    pub(super) fn observer_keys(&self) -> impl Iterator<Item = &u64> {
+        self.observer.keys()
+    }
+
+    pub(super) fn contains_participant(&self, conversation_id: u64) -> bool {
+        self.participant.contains_key(&conversation_id)
+    }
+
+    pub(super) fn contains_observer(&self, conversation_id: u64) -> bool {
+        self.observer.contains_key(&conversation_id)
+    }
+
+    pub(super) fn remove_participant(
+        &mut self,
+        conversation_id: u64,
+    ) -> Option<HeldParticipantHead> {
+        self.participant.remove(&conversation_id)
+    }
+
+    pub(super) fn remove_observer(&mut self, conversation_id: u64) -> Option<HeldObserverHead> {
+        self.observer.remove(&conversation_id)
+    }
+
+    pub(super) fn try_insert_participant(
+        &mut self,
+        conversation_id: u64,
+        head: HeldParticipantHead,
+        limit: u64,
+    ) -> Result<(), ParticipantPublicationError> {
+        if !self.participant.contains_key(&conversation_id) {
+            self.ensure_vacant_capacity(limit)?;
+        }
+        self.participant.insert(conversation_id, head);
+        Ok(())
+    }
+
+    pub(super) fn try_insert_observer(
+        &mut self,
+        conversation_id: u64,
+        head: HeldObserverHead,
+        limit: u64,
+    ) -> Result<(), ParticipantPublicationError> {
+        if !self.observer.contains_key(&conversation_id) {
+            self.ensure_vacant_capacity(limit)?;
+        }
+        self.observer.insert(conversation_id, head);
+        Ok(())
+    }
+
+    fn ensure_vacant_capacity(&self, limit: u64) -> Result<(), ParticipantPublicationError> {
+        let occupied = self
+            .participant
+            .len()
+            .checked_add(self.observer.len())
+            .and_then(|occupied| u64::try_from(occupied).ok())
+            .ok_or(ParticipantPublicationError::InboxCapacity { limit })?;
+        if occupied >= limit {
+            return Err(ParticipantPublicationError::InboxCapacity { limit });
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(super) fn participant_len(&self) -> usize {
+        self.participant.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn observer_len(&self) -> usize {
+        self.observer.len()
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.participant.is_empty() && self.observer.is_empty()
+    }
+
+    pub(super) const fn capacity_refused(&self) -> bool {
+        self.capacity_refused
+    }
+
+    pub(super) const fn mark_capacity_refused(&mut self) {
+        self.capacity_refused = true;
+    }
+
+    pub(super) const fn clear_capacity_refused(&mut self) {
+        self.capacity_refused = false;
+    }
+}
 
 /// State a connection process carries across scheduler slices: the resources it
 /// owns (subscriptions, conversations) plus the per-subscription delivery
@@ -54,13 +162,9 @@ pub(super) struct ConnectionProcessState {
     /// Volatile per-conversation offered progress, scoped to the exact binding
     /// epoch and advanced only after successful outbound enqueue.
     pub(super) participant_offered: BTreeMap<u64, ParticipantOfferedProgress>,
-    /// At most one exact encoded participant head per semantic conversation,
-    /// bounded by the same signed connection-conversation limit as the inbox.
-    pub(super) held_participant_pushes: BTreeMap<u64, HeldParticipantHead>,
-    /// At most one exact encoded observer wake per semantic conversation. A
-    /// later fired payload replaces it before service because only the latest
-    /// durable progress matters to recovery.
-    pub(super) held_observer_pushes: BTreeMap<u64, HeldObserverHead>,
+    /// Exact encoded participant and observer heads sharing one checked signed
+    /// connection-conversation allowance.
+    pub(super) held_pushes: HeldPushHeads,
     /// Library subscriptions owned by this connection, keyed by subscription id.
     pub(super) subscriptions: HashMap<u64, ConnectionSubscription>,
     /// Supervised conversations owned by this connection, keyed by conversation id.

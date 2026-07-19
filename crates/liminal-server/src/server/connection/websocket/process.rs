@@ -200,12 +200,15 @@ impl WebSocketConnectionProcess {
             return self.stop_crashed(pid);
         }
         if let Some(service) = self.runtime.participant_service() {
-            if let Err(error) = service_participant_publications(
+            let result = service_participant_publications(
                 &mut self.state,
                 service,
                 &mut self.outbound,
                 UNIT2_PUSH_SLICE_BUDGET,
-            ) {
+            );
+            if let Err(error) = result
+                && !error.is_capacity_refusal()
+            {
                 tracing::error!(
                     connection_pid = pid,
                     %error,
@@ -767,13 +770,21 @@ impl WebSocketConnectionProcess {
                 .subscriptions
                 .values()
                 .any(|subscription| subscription.is_overflowed() || subscription.has_pending());
-        let participant_ready = match self.state.participant_publication.as_ref() {
-            Some(inbox) => inbox
-                .has_pending()
-                .map_err(|error| ServerError::ListenerAccept {
-                    message: format!("participant publication final probe failed: {error}"),
-                })?,
-            None => false,
+        let participant_ready = if self.state.held_pushes.capacity_refused()
+            && has_held_participant_head(&self.state)
+        {
+            false
+        } else {
+            match self.state.participant_publication.as_ref() {
+                Some(inbox) => {
+                    inbox
+                        .has_pending()
+                        .map_err(|error| ServerError::ListenerAccept {
+                            message: format!("participant publication final probe failed: {error}"),
+                        })?
+                }
+                None => false,
+            }
         };
         let reply_ready = self.state.pending_replies.has_due(Instant::now())
             || self

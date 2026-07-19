@@ -291,6 +291,13 @@ impl InstalledParticipantService {
         self.frame_limit
     }
 
+    /// Returns the signed semantic-conversation allowance shared by publication
+    /// readiness and connection-held encoded heads.
+    #[must_use]
+    pub(crate) fn publication_conversation_limit(&self) -> u64 {
+        self.handler.publication_conversation_limit()
+    }
+
     /// Creates the strongly connection-owned ready inbox at process spawn.
     #[must_use]
     pub(crate) fn new_publication_inbox(&self) -> ParticipantPublicationInbox {

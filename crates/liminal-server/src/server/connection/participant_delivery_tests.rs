@@ -17,7 +17,7 @@ use crate::server::connection::websocket::outbound::WebSocketOutbound;
 use crate::server::participant::{
     InstalledParticipantService, ObserverPublication, ParticipantConnectionContext,
     ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublication,
-    ParticipantSemanticError, ParticipantSemanticHandler,
+    ParticipantPublicationError, ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
 const INCARNATION: ConnectionIncarnation = ConnectionIncarnation {
@@ -33,6 +33,7 @@ const PARTICIPANT: u64 = 7;
 #[derive(Debug)]
 struct FixtureSource {
     deliveries: BTreeMap<u64, Vec<ParticipantDelivery>>,
+    conversation_limit: u64,
     offered: Mutex<Vec<(u64, u64)>>,
 }
 
@@ -47,8 +48,18 @@ impl FixtureSource {
         }
         Self {
             deliveries: by_conversation,
+            conversation_limit: 64,
             offered: Mutex::new(Vec::new()),
         }
+    }
+
+    fn with_conversation_limit(
+        deliveries: impl IntoIterator<Item = ParticipantDelivery>,
+        conversation_limit: u64,
+    ) -> Self {
+        let mut source = Self::new(deliveries);
+        source.conversation_limit = conversation_limit;
+        source
     }
 
     fn offered(&self) -> Vec<(u64, u64)> {
@@ -60,7 +71,7 @@ impl FixtureSource {
 
 impl ParticipantSemanticHandler for FixtureSource {
     fn publication_conversation_limit(&self) -> u64 {
-        64
+        self.conversation_limit
     }
 
     fn next_publication(
@@ -254,7 +265,7 @@ fn slow_recipient_holds_only_its_head() -> Result<(), Box<dyn std::error::Error>
         service_participant_publications(&mut slow_state, &slow_service, &mut slow_sink, 1)?,
         0
     );
-    assert_eq!(slow_state.held_participant_pushes.len(), 1);
+    assert_eq!(slow_state.held_pushes.participant_len(), 1);
     assert!(slow_source.offered().is_empty());
 
     assert_eq!(
@@ -263,7 +274,7 @@ fn slow_recipient_holds_only_its_head() -> Result<(), Box<dyn std::error::Error>
     );
     assert_eq!(decoded_deliveries(&fast_sink.frames)?, vec![delivery(2, 1)]);
     assert_eq!(fast_source.offered(), vec![(2, 1)]);
-    assert!(fast_state.held_participant_pushes.is_empty());
+    assert!(fast_state.held_pushes.is_empty());
 
     slow_sink.writable();
     assert_eq!(
@@ -287,7 +298,7 @@ fn held_head_precedes_later_sequence_after_writable_ready_and_duplicate_ready_is
         service_participant_publications(&mut state, &service, &mut sink, 32)?,
         0
     );
-    assert_eq!(state.held_participant_pushes.len(), 1);
+    assert_eq!(state.held_pushes.participant_len(), 1);
     assert!(source.offered().is_empty());
 
     sink.writable();
@@ -407,13 +418,20 @@ fn held_fresh_encodes_share_the_exact_slice_budget_across_push_classes()
         service_participant_publications(&mut state, &service, &mut sink, UNIT2_PUSH_SLICE_BUDGET,)?,
         0
     );
+    let held_count = state
+        .held_pushes
+        .participant_len()
+        .checked_add(state.held_pushes.observer_len())
+        .ok_or("combined held push count overflowed")?;
     assert_eq!(
-        state.held_participant_pushes.len() + state.held_observer_pushes.len(),
-        UNIT2_PUSH_SLICE_BUDGET,
+        held_count, UNIT2_PUSH_SLICE_BUDGET,
         "fresh held encodes must stop at the shared signed slice budget"
     );
     Ok(())
 }
+
+#[path = "participant_delivery_held_cap_tests.rs"]
+mod held_cap;
 
 #[path = "participant_delivery_observer_requeue_tests.rs"]
 mod observer_requeue;
@@ -489,7 +507,7 @@ fn oversize_is_config_corruption_not_pressure_policy() -> Result<(), Box<dyn std
         return Err("an encoded participant frame fit an eight-byte sink".into());
     };
     assert!(matches!(error, ParticipantPumpError::Oversize { .. }));
-    assert!(state.held_participant_pushes.is_empty());
+    assert!(state.held_pushes.is_empty());
     assert!(state.participant_offered.is_empty());
     Ok(())
 }

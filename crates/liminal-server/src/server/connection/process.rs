@@ -251,13 +251,16 @@ impl ConnectionProcess {
     fn service_participant_pushes(&mut self, pid: u64) -> Option<NativeOutcome> {
         let service = self.runtime.participant_service()?;
         #[cfg(test)]
-        let held_before = self.state.held_participant_pushes.len();
-        if let Err(error) = service_participant_publications(
+        let held_before = self.state.held_pushes.participant_len();
+        let result = service_participant_publications(
             &mut self.state,
             service,
             &mut self.outbound,
             UNIT2_PUSH_SLICE_BUDGET,
-        ) {
+        );
+        if let Err(error) = result
+            && !error.is_capacity_refusal()
+        {
             tracing::error!(
                 connection_pid = pid,
                 %error,
@@ -269,7 +272,7 @@ impl ConnectionProcess {
             return Some(NativeOutcome::Stop(ExitReason::Error));
         }
         #[cfg(test)]
-        if self.state.held_participant_pushes.len() > held_before
+        if self.state.held_pushes.participant_len() > held_before
             && self.runtime.pause_participant_holdback(pid)
         {
             return Some(NativeOutcome::Wait);
@@ -624,9 +627,15 @@ impl ConnectionProcess {
                 .subscriptions
                 .values()
                 .any(|subscription| subscription.is_overflowed() || subscription.has_pending());
-        let participant_ready = match self.state.participant_publication.as_ref() {
-            Some(inbox) => inbox.has_pending().map_err(participant_publication_error)?,
-            None => false,
+        let participant_ready = if self.state.held_pushes.capacity_refused()
+            && has_held_participant_head(&self.state)
+        {
+            false
+        } else {
+            match self.state.participant_publication.as_ref() {
+                Some(inbox) => inbox.has_pending().map_err(participant_publication_error)?,
+                None => false,
+            }
         };
         let reply_ready = self
             .state
