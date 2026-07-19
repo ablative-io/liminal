@@ -76,6 +76,15 @@
   `all_obligations` (`outbox.rs:124-137`; inserts `:205-252`, `:298-325`,
   `:262-270`; reclamation removes live records only, `:330-395`). Restore
   memory is Θ(history) with or without W3.
+- **Route census (r1.2):** FOUR restore routes reach these indexes, not
+  three — the ObserverRecovery pre-pass on absent owner runs
+  `replay_and_repair` (`handler_observer.rs:357-364`) →
+  `ConversationAuthority::replay` (`handler.rs:250-268`) → full
+  `ConversationOutbox` reconstruction (`ops_session.rs:270-349`,
+  `outbox_replay.rs:20-33,71-95,120-136`), executing all three index
+  insertion paths. Traced at the liminal seat (W3 r2 fold @ `9875cdd`),
+  re-verification instructed in the W3 re-review before treated as
+  settled. W7's bounding design must cover all four routes.
 - **Named consumer:** any deployment with unbounded outbox history.
 - **Trigger:** HARD, SHARED WITH W3 (see W3's trigger wording verbatim).
 - **Oracle floor:** its own bounding design brief (index compaction /
