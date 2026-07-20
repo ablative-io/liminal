@@ -29,7 +29,9 @@ use super::services::{
 };
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig};
-use crate::server::participant::InstalledParticipantService;
+use crate::server::participant::{
+    ConnectionFateClass, InstalledParticipantService, ParticipantSemanticHandler,
+};
 
 const CONNECTION_SCHEDULER_THREADS: usize = 4;
 const CONNECTION_SHUTDOWN_CONTROL_ATOM: &str = "liminal_server_connection_shutdown_control";
@@ -805,7 +807,7 @@ impl PushReplyAwaiter {
 pub(super) struct SupervisorInner {
     scheduler: Arc<Scheduler>,
     runtime: Arc<ConnectionRuntime>,
-    incarnations: Option<ConnectionIncarnationAuthority>,
+    incarnations: Option<Arc<ConnectionIncarnationAuthority>>,
 }
 
 impl std::fmt::Debug for SupervisorInner {
@@ -828,14 +830,17 @@ impl SupervisorInner {
         let incarnations = installed_services
             .participant_service
             .as_ref()
-            .map(|service| {
-                ConnectionIncarnationAuthority::startup(
-                    service.durable_store(),
-                    limits.max_connections,
-                    service.publication_conversation_limit(),
-                    service,
-                )
-            })
+            .map(
+                |service| -> Result<Arc<ConnectionIncarnationAuthority>, ServerError> {
+                    ConnectionIncarnationAuthority::startup(
+                        service.durable_store(),
+                        limits.max_connections,
+                        service.publication_conversation_limit(),
+                        service,
+                    )
+                    .map(Arc::new)
+                },
+            )
             .transpose()?;
         let atoms = AtomTable::with_common_atoms();
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
@@ -860,7 +865,10 @@ impl SupervisorInner {
         // whole connection scheduler.
         Ok(Self {
             runtime: Arc::new(ConnectionRuntime::new(
-                installed_services,
+                ConnectionRuntimeInstallation {
+                    services: installed_services,
+                    incarnations: incarnations.clone(),
+                },
                 control_atom,
                 ready_atom,
                 Arc::downgrade(&scheduler),
@@ -1156,11 +1164,19 @@ impl ConnectionServiceInstallation {
 }
 
 #[derive(Debug)]
+struct ConnectionRuntimeInstallation {
+    services: ConnectionServiceInstallation,
+    incarnations: Option<Arc<ConnectionIncarnationAuthority>>,
+}
+
+#[derive(Debug)]
 pub(super) struct ConnectionRuntime {
     services: Arc<dyn ConnectionServices>,
     /// Complete participant handler/store bundle captured at supervisor startup.
     /// `Some` is paired with an incarnation authority on `SupervisorInner`.
     participant_service: Option<InstalledParticipantService>,
+    /// Same started authority used for allocation, shared for terminal Open/Complete.
+    incarnations: Option<Arc<ConnectionIncarnationAuthority>>,
     records: Mutex<HashMap<u64, ConnectionRecord>>,
     controls: Mutex<Vec<QueuedConnectionControl>>,
     control_atom: Atom,
@@ -1238,7 +1254,7 @@ pub(super) struct ConnectionRuntime {
 
 impl ConnectionRuntime {
     fn new(
-        installed_services: ConnectionServiceInstallation,
+        installation: ConnectionRuntimeInstallation,
         control_atom: Atom,
         ready_atom: Atom,
         scheduler: Weak<Scheduler>,
@@ -1246,13 +1262,18 @@ impl ConnectionRuntime {
         auth_token: Option<Vec<u8>>,
         limits: LimitsConfig,
     ) -> Self {
-        let ConnectionServiceInstallation {
-            services,
-            participant_service,
-        } = installed_services;
+        let ConnectionRuntimeInstallation {
+            services:
+                ConnectionServiceInstallation {
+                    services,
+                    participant_service,
+                },
+            incarnations,
+        } = installation;
         Self {
             services,
             participant_service,
+            incarnations,
             records: Mutex::new(HashMap::new()),
             controls: Mutex::new(Vec::new()),
             control_atom,
@@ -1294,6 +1315,7 @@ impl ConnectionRuntime {
     /// # Errors
     /// Returns [`ServerError::ConnectionLimitReached`] when every slot is taken.
     fn try_reserve_admission(&self) -> Result<(), ServerError> {
+        self.ensure_participant_service_live()?;
         let limit = self.limits.max_connections as u64;
         let mut current = self.admissions.load(Ordering::Acquire);
         loop {
@@ -1573,7 +1595,10 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            ConnectionServiceInstallation::capture(services),
+            ConnectionRuntimeInstallation {
+                services: ConnectionServiceInstallation::capture(services),
+                incarnations: None,
+            },
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1594,7 +1619,10 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            ConnectionServiceInstallation::capture(services),
+            ConnectionRuntimeInstallation {
+                services: ConnectionServiceInstallation::capture(services),
+                incarnations: None,
+            },
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1616,7 +1644,10 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            ConnectionServiceInstallation::capture(services),
+            ConnectionRuntimeInstallation {
+                services: ConnectionServiceInstallation::capture(services),
+                incarnations: None,
+            },
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1637,7 +1668,10 @@ impl ConnectionRuntime {
         let control_atom = atoms.intern(CONNECTION_SHUTDOWN_CONTROL_ATOM);
         let ready_atom = atoms.intern(CONNECTION_READY_ATOM);
         Self::new(
-            ConnectionServiceInstallation::capture(services),
+            ConnectionRuntimeInstallation {
+                services: ConnectionServiceInstallation::capture(services),
+                incarnations: None,
+            },
             control_atom,
             ready_atom,
             Weak::new(),
@@ -1654,6 +1688,79 @@ impl ConnectionRuntime {
     /// Returns the complete participant service captured at supervisor startup.
     pub(super) const fn participant_service(&self) -> Option<&InstalledParticipantService> {
         self.participant_service.as_ref()
+    }
+
+    fn ensure_participant_service_live(&self) -> Result<(), ServerError> {
+        let Some(service) = self.participant_service() else {
+            return Ok(());
+        };
+        let fatal =
+            service
+                .service_fatal()
+                .map_err(|error| ServerError::ParticipantIncarnation {
+                    phase: "participant fatal latch inspection",
+                    message: error.to_string(),
+                })?;
+        if let Some(fatal) = fatal {
+            return Err(ServerError::ParticipantIncarnation {
+                phase: "participant service fatal",
+                message: fatal.to_string(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Runs one typed terminal fold after classification and before teardown.
+    pub(super) fn complete_connection_fate(
+        &self,
+        connection_incarnation: Option<ConnectionIncarnation>,
+        class: ConnectionFateClass,
+        conversations: &[u64],
+    ) -> Result<(), ServerError> {
+        if conversations.is_empty() {
+            return Ok(());
+        }
+        self.ensure_participant_service_live()?;
+        let (Some(connection_incarnation), Some(service), Some(authority)) = (
+            connection_incarnation,
+            self.participant_service(),
+            self.incarnations.as_ref(),
+        ) else {
+            return Err(ServerError::ParticipantIncarnation {
+                phase: "connection-fate authority composition",
+                message: "tracked participant conversations lack a complete service/incarnation authority"
+                    .to_owned(),
+            });
+        };
+        let intent =
+            authority.open_connection_fate(connection_incarnation, class, conversations)?;
+        if let Err(error) = service.handle_connection_fate(intent.work_item()) {
+            let conversation_id = conversations[0];
+            let fatal = service
+                .latch_connection_fate_intent_incomplete(intent.open_sequence, conversation_id)
+                .map_err(|latch_error| ServerError::ParticipantIncarnation {
+                    phase: "connection-fate fatal latch",
+                    message: latch_error.to_string(),
+                })?;
+            return Err(ServerError::ParticipantIncarnation {
+                phase: "connection-fate handler",
+                message: format!("{fatal}: {error}"),
+            });
+        }
+        if let Err(error) = authority.complete_connection_fate(intent.open_sequence) {
+            let conversation_id = conversations[0];
+            let fatal = service
+                .latch_connection_fate_intent_incomplete(intent.open_sequence, conversation_id)
+                .map_err(|latch_error| ServerError::ParticipantIncarnation {
+                    phase: "connection-fate fatal latch",
+                    message: latch_error.to_string(),
+                })?;
+            return Err(ServerError::ParticipantIncarnation {
+                phase: "connection-fate Complete",
+                message: format!("{fatal}: {error}"),
+            });
+        }
+        Ok(())
     }
 
     /// Returns the configured connection auth token as opaque bytes, or `None` when

@@ -332,6 +332,7 @@ fn startup_completes_historical_opens_before_returning_authority()
         .lock()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     assert_eq!(restart_repairs.as_slice(), &[2]);
+    drop(restart_repairs);
     assert_eq!(authority.allocate(&[])?, ConnectionIncarnation::new(2, 0));
     let entries = block_on(store.read_from(IncarnationStream::stream_key(), 0, 8))??;
     assert_eq!(entries.len(), 6);

@@ -73,16 +73,7 @@ impl ConnectionIncarnationAuthority {
             })?;
         match startup {
             IncarnationStartup::Started(stream) => {
-                handler
-                    .repair_unclean_server_restart(stream.server_incarnation())
-                    .map_err(|error| ServerError::ParticipantIncarnation {
-                        phase: "unclean-server-restart repair",
-                        message: error.to_string(),
-                    })?;
-                Ok(Self {
-                    state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
-                    maximum_conversations,
-                })
+                Self::finish_startup(stream, maximum_conversations, handler)
             }
             IncarnationStartup::RecoveryRequired(mut recovery) => {
                 let intents = recovery.intents();
@@ -123,16 +114,7 @@ impl ConnectionIncarnationAuthority {
                     })?;
                 match resumed {
                     IncarnationStartup::Started(stream) => {
-                        handler
-                            .repair_unclean_server_restart(stream.server_incarnation())
-                            .map_err(|error| ServerError::ParticipantIncarnation {
-                                phase: "unclean-server-restart repair",
-                                message: error.to_string(),
-                            })?;
-                        Ok(Self {
-                            state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
-                            maximum_conversations,
-                        })
+                        Self::finish_startup(stream, maximum_conversations, handler)
                     }
                     IncarnationStartup::RecoveryRequired(_) => {
                         Err(ServerError::ParticipantIncarnation {
@@ -169,6 +151,23 @@ impl ConnectionIncarnationAuthority {
                 ),
             }),
         }
+    }
+
+    fn finish_startup(
+        stream: StartedIncarnationStream,
+        maximum_conversations: usize,
+        handler: &dyn ParticipantSemanticHandler,
+    ) -> Result<Self, ServerError> {
+        handler
+            .repair_unclean_server_restart(stream.server_incarnation())
+            .map_err(|error| ServerError::ParticipantIncarnation {
+                phase: "unclean-server-restart repair",
+                message: error.to_string(),
+            })?;
+        Ok(Self {
+            state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
+            maximum_conversations,
+        })
     }
 
     /// Allocates and fsyncs one collision-free connection incarnation.

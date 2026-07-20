@@ -18,9 +18,9 @@ use super::supervisor::ConnectionRuntime;
 use crate::ServerError;
 use crate::config::types::ServiceProfile;
 use crate::server::participant::{
-    PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext, ParticipantDispatch,
-    ParticipantIngress, constant_time_eq, dispatch_generic_frame, encode_server_value,
-    gate_generic_frame,
+    ConnectionFateClass, PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext,
+    ParticipantDispatch, ParticipantIngress, constant_time_eq, dispatch_generic_frame,
+    encode_server_value, gate_generic_frame,
 };
 
 const SERVER_ERROR_CODE: u16 = 0xFFFF;
@@ -55,7 +55,9 @@ pub(super) fn apply_frame(
             auth_token,
             ..
         } => connect_once(runtime, state, min_version, max_version, &auth_token),
-        Frame::Disconnect { .. } => FrameAction::Close,
+        Frame::Disconnect { .. } => {
+            FrameAction::CloseWithFate(ConnectionFateClass::CleanDisconnect)
+        }
         Frame::Ping { .. } => FrameAction::Respond(Frame::Pong { flags: 0 }),
         Frame::Publish {
             stream_id,

@@ -111,7 +111,7 @@ impl PreparedConnectionFate {
     /// non-caller-constructible target set and source authority.
     pub(super) fn complete(
         self,
-        authority: &mut ConversationAuthority,
+        authority: &ConversationAuthority,
         appender: &dyn DurableAppend,
     ) -> Result<(), StateError> {
         let _: &dyn DurableAppend = appender;

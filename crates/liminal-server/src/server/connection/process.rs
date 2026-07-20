@@ -22,6 +22,7 @@ use super::services::server_error_from_protocol;
 use super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
 use crate::ServerError;
+use crate::server::participant::ConnectionFateClass;
 
 #[cfg(test)]
 #[path = "process_teardown_tests.rs"]
@@ -204,6 +205,11 @@ impl ConnectionProcess {
                     %error,
                     "outbound drain failed; tearing down the connection"
                 );
+                if let Err(fate_error) =
+                    self.complete_connection_fate(ConnectionFateClass::ConnectionLost)
+                {
+                    tracing::error!(connection_pid = pid, %fate_error, "connection-loss fate fold failed");
+                }
                 self.release_conversations();
                 self.runtime
                     .mark_crashed(pid, ExitReason::Error, self.peer_addr);
@@ -309,6 +315,11 @@ impl ConnectionProcess {
                 // drop, mirroring the ForceClose drain. The buffered-writer refactor
                 // removed this on the EOF path; without it, queued responses are lost.
                 let _ = self.drain_outbound();
+                if let Err(error) =
+                    self.complete_connection_fate(ConnectionFateClass::ConnectionLost)
+                {
+                    return self.fail_fate(pid, &error);
+                }
                 self.release_conversations();
                 self.runtime.finish(pid);
                 return SliceStep::Stop(ExitReason::Normal);
@@ -330,6 +341,11 @@ impl ConnectionProcess {
             Ok(ReadStatus::Read) => {}
             Err(error) => {
                 tracing::warn!(connection_pid = pid, %error, "connection read failed");
+                if let Err(fate_error) =
+                    self.complete_connection_fate(ConnectionFateClass::ConnectionLost)
+                {
+                    return self.fail_fate(pid, &fate_error);
+                }
                 self.release_conversations();
                 self.runtime
                     .mark_crashed(pid, ExitReason::Error, self.peer_addr);
@@ -345,6 +361,7 @@ impl ConnectionProcess {
         ) {
             Ok(ProcessStatus::Continue) => SliceStep::Continue,
             Ok(ProcessStatus::Close) => self.finish_normal_close(pid),
+            Ok(ProcessStatus::CloseWithFate(class)) => self.finish_fate_close(pid, class),
             Err(error) => {
                 tracing::warn!(connection_pid = pid, %error, "connection process failed");
                 self.release_conversations();
@@ -414,6 +431,33 @@ impl ConnectionProcess {
     }
 
     /// Finishes a client-initiated or terminal-rejection close.
+    fn complete_connection_fate(&self, class: ConnectionFateClass) -> Result<(), ServerError> {
+        let conversations = self.state.participant_conversations.tracked_conversations();
+        self.runtime.complete_connection_fate(
+            self.state.connection_incarnation,
+            class,
+            &conversations,
+        )
+    }
+
+    fn fail_fate(&mut self, pid: u64, error: &ServerError) -> SliceStep {
+        tracing::error!(connection_pid = pid, %error, "connection fate fold failed");
+        self.release_conversations();
+        self.runtime
+            .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+        SliceStep::Stop(ExitReason::Error)
+    }
+
+    fn finish_fate_close(&mut self, pid: u64, class: ConnectionFateClass) -> SliceStep {
+        let _ = self.drain_outbound_for_close();
+        if let Err(error) = self.complete_connection_fate(class) {
+            return self.fail_fate(pid, &error);
+        }
+        self.release_conversations();
+        self.runtime.finish(pid);
+        SliceStep::Stop(ExitReason::Normal)
+    }
+
     fn finish_normal_close(&mut self, pid: u64) -> SliceStep {
         // Multiple responses may already precede the terminal frame. Make one
         // unbudgeted, nonblocking drain so the ordinary 8 KiB slice budget cannot
@@ -666,6 +710,14 @@ impl ConnectionProcess {
                 // Flush the enqueued `Disconnect` (and any residue) before the
                 // stream is dropped; best-effort, since we are stopping regardless.
                 let _ = self.drain_outbound();
+                if let Err(error) =
+                    self.complete_connection_fate(ConnectionFateClass::ServerShutdown)
+                {
+                    return Some(match self.fail_fate(pid, &error) {
+                        SliceStep::Continue => NativeOutcome::Continue,
+                        SliceStep::Stop(reason) => NativeOutcome::Stop(reason),
+                    });
+                }
                 self.release_conversations();
                 // Host removal ACKs readiness deregistration while both the
                 // process stream and record fd guard are still live.
@@ -869,7 +921,15 @@ fn process_buffer(
             ) => {
                 return Ok(ProcessStatus::Continue);
             }
-            Err(error) => return Err(server_error_from_protocol(&error)),
+            Err(error) => {
+                if state.participant_conversations.occupied() > 0 {
+                    tracing::warn!(connection_pid = pid, %error, "bound connection protocol refusal");
+                    return Ok(ProcessStatus::CloseWithFate(
+                        ConnectionFateClass::ProtocolError,
+                    ));
+                }
+                return Err(server_error_from_protocol(&error));
+            }
         };
         buffer.drain(..consumed);
         match apply_frame(pid, runtime, state, frame) {
@@ -899,6 +959,9 @@ fn process_buffer(
                 return Ok(ProcessStatus::Close);
             }
             FrameAction::Close => return Ok(ProcessStatus::Close),
+            FrameAction::CloseWithFate(class) => {
+                return Ok(ProcessStatus::CloseWithFate(class));
+            }
         }
     }
 }
