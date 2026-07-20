@@ -833,6 +833,7 @@ impl SupervisorInner {
                     service.durable_store(),
                     limits.max_connections,
                     service.publication_conversation_limit(),
+                    service,
                 )
             })
             .transpose()?;

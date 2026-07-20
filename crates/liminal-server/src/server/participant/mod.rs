@@ -48,9 +48,10 @@ mod incarnation_stream_tests;
 mod transport_tests;
 
 pub use dispatch::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantDispatch, ParticipantDispatchError, ParticipantSemanticError,
-    ParticipantSemanticHandler, ParticipantServiceFatal, dispatch_generic_frame,
+    ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
+    ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
+    ParticipantServiceFatal, dispatch_generic_frame,
 };
 pub use production::marker_source::{
     MarkerSourceRefusalReason, MarkerSourceRefused, ValidatedFencedMarkerInputs,

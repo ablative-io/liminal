@@ -11,6 +11,7 @@ use liminal::durability::{DurableStore, bridge::block_on};
 use liminal_protocol::{outcome::ConnectionIncarnationExhausted, wire::ConnectionIncarnation};
 
 use crate::ServerError;
+use crate::server::participant::ParticipantSemanticHandler;
 use crate::server::participant::incarnation_stream::{
     ConnectionFateClass, ConnectionFateIntent, IncarnationAllocation, IncarnationStartup,
     IncarnationStream, StartedIncarnationStream,
@@ -53,6 +54,7 @@ impl ConnectionIncarnationAuthority {
         store: Arc<dyn DurableStore>,
         maximum_references: usize,
         maximum_conversations: u64,
+        handler: &dyn ParticipantSemanticHandler,
     ) -> Result<Self, ServerError> {
         let maximum_conversations = usize::try_from(maximum_conversations).map_err(|error| {
             ServerError::ParticipantIncarnation {
@@ -74,18 +76,69 @@ impl ConnectionIncarnationAuthority {
                 state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
                 maximum_conversations,
             }),
-            IncarnationStartup::RecoveryRequired(recovery) => {
+            IncarnationStartup::RecoveryRequired(mut recovery) => {
                 let intents = recovery.intents();
-                let Some(first) = intents.first() else {
+                if intents.is_empty() {
                     return Err(ServerError::ParticipantIncarnation {
                         phase: "connection-fate recovery",
                         message: "recovery owner returned no unmatched Open".to_owned(),
                     });
-                };
-                Err(ServerError::ConnectionFateRecoveryRequired {
-                    open_count: intents.len(),
-                    first_open_sequence: first.open_sequence,
-                })
+                }
+                for intent in intents {
+                    handler
+                        .handle_connection_fate(intent.work_item())
+                        .map_err(|error| ServerError::ParticipantIncarnation {
+                            phase: "connection-fate handler recovery",
+                            message: format!(
+                                "Open {} failed before Complete: {error}",
+                                intent.open_sequence
+                            ),
+                        })?;
+                    block_on(recovery.complete(intent.open_sequence))
+                        .map_err(|error| ServerError::ParticipantIncarnation {
+                            phase: "connection-fate Complete bridge",
+                            message: error.to_string(),
+                        })?
+                        .map_err(|error| ServerError::ParticipantIncarnation {
+                            phase: "connection-fate Complete persistence",
+                            message: error.to_string(),
+                        })?;
+                }
+                let resumed = block_on(recovery.finish_startup())
+                    .map_err(|error| ServerError::ParticipantIncarnation {
+                        phase: "post-recovery startup bridge",
+                        message: error.to_string(),
+                    })?
+                    .map_err(|error| ServerError::ParticipantIncarnation {
+                        phase: "post-recovery startup persistence",
+                        message: error.to_string(),
+                    })?;
+                match resumed {
+                    IncarnationStartup::Started(stream) => Ok(Self {
+                        state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
+                        maximum_conversations,
+                    }),
+                    IncarnationStartup::RecoveryRequired(_) => {
+                        Err(ServerError::ParticipantIncarnation {
+                            phase: "post-recovery startup",
+                            message: "completed recovery returned another unmatched Open set"
+                                .to_owned(),
+                        })
+                    }
+                    IncarnationStartup::Exhausted(
+                        ConnectionIncarnationExhausted::ServerIncarnation,
+                    ) => Err(ServerError::ServerIncarnationExhausted),
+                    IncarnationStartup::Exhausted(
+                        ConnectionIncarnationExhausted::ConnectionOrdinal {
+                            attempted_server_incarnation,
+                        },
+                    ) => Err(ServerError::ParticipantIncarnation {
+                        phase: "post-recovery startup protocol",
+                        message: format!(
+                            "unexpected connection-ordinal exhaustion for server incarnation {attempted_server_incarnation}"
+                        ),
+                    }),
+                }
             }
             IncarnationStartup::Exhausted(ConnectionIncarnationExhausted::ServerIncarnation) => {
                 Err(ServerError::ServerIncarnationExhausted)

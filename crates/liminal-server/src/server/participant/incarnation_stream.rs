@@ -33,6 +33,9 @@ use liminal_protocol::{
     wire::ConnectionIncarnation,
 };
 
+pub(in crate::server) use super::dispatch::ConnectionFateClass;
+use super::dispatch::ConnectionFateWorkItem;
+
 const STREAM_KEY: &str = "liminal/participant/incarnation/v2";
 const REPLAY_PAGE_SIZE: usize = 256;
 const EVENT_MAGIC: [u8; 4] = *b"LPIE";
@@ -221,11 +224,9 @@ pub(in crate::server) enum IncarnationStreamError {
         open_sequence: u64,
     },
     /// Recovery tried to append a Complete for no replay-retained Open.
-    #[cfg(test)]
     #[error("connection-fate recovery names absent Open {open_sequence}")]
     RecoveryCompleteForAbsentOpen { open_sequence: u64 },
     /// Startup recovery cannot finish while durable Opens remain unmatched.
-    #[cfg(test)]
     #[error("connection-fate recovery still has {count} unmatched Opens")]
     RecoveryIncomplete { count: usize },
     /// A startup event carried a body even though its canonical body is empty.
@@ -340,19 +341,6 @@ pub(in crate::server) enum IncarnationAllocation {
     Exhausted(ConnectionIncarnationExhausted),
 }
 
-/// Exact transport/server classification retained by one durable connection-fate Open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::server) enum ConnectionFateClass {
-    /// A protocol-level clean Disconnect.
-    CleanDisconnect,
-    /// An orderly server `ForceClose`.
-    ServerShutdown,
-    /// EOF or transport loss without clean protocol evidence.
-    ConnectionLost,
-    /// A terminal protocol/decode refusal after participant binding.
-    ProtocolError,
-}
-
 impl ConnectionFateClass {
     const fn tag(self) -> u8 {
         match self {
@@ -386,6 +374,19 @@ pub(in crate::server) struct ConnectionFateIntent {
     pub(in crate::server) class: ConnectionFateClass,
     pub(in crate::server) declared_conversation_bound: usize,
     pub(in crate::server) conversations: Vec<u64>,
+}
+
+impl ConnectionFateIntent {
+    /// Projects the exact handler input while retaining replay-generation audits here.
+    #[must_use]
+    pub(in crate::server) fn work_item(&self) -> ConnectionFateWorkItem {
+        ConnectionFateWorkItem {
+            open_sequence: self.open_sequence,
+            connection_incarnation: self.connection_incarnation,
+            class: self.class,
+            tracked_conversations: self.conversations.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -608,13 +609,9 @@ impl IncarnationStream {
         if !replayed.unmatched.by_sequence.is_empty() {
             return Ok(IncarnationStartup::RecoveryRequired(
                 ConnectionFateRecovery {
-                    #[cfg(test)]
                     store: self.store,
-                    #[cfg(test)]
                     maximum_references: self.maximum_references,
-                    #[cfg(test)]
                     allocator: replayed.allocator,
-                    #[cfg(test)]
                     next_sequence: replayed.next_sequence,
                     unmatched: replayed.unmatched,
                 },
@@ -741,13 +738,9 @@ impl IncarnationStream {
 /// Exclusive startup owner while historical Opens are completed under their persisted bound.
 #[derive(Debug)]
 pub struct ConnectionFateRecovery {
-    #[cfg(test)]
     store: Arc<dyn DurableStore>,
-    #[cfg(test)]
     maximum_references: usize,
-    #[cfg(test)]
     allocator: ConnectionIncarnationAllocator,
-    #[cfg(test)]
     next_sequence: u64,
     unmatched: UnmatchedConnectionFates,
 }
@@ -758,7 +751,6 @@ impl ConnectionFateRecovery {
         self.unmatched.by_sequence.values().cloned().collect()
     }
 
-    #[cfg(test)]
     pub async fn complete(&mut self, open_sequence: u64) -> Result<(), IncarnationStreamError> {
         if !self.unmatched.by_sequence.contains_key(&open_sequence) {
             return Err(IncarnationStreamError::RecoveryCompleteForAbsentOpen { open_sequence });
@@ -772,7 +764,6 @@ impl ConnectionFateRecovery {
         Ok(())
     }
 
-    #[cfg(test)]
     pub async fn finish_startup(self) -> Result<IncarnationStartup, IncarnationStreamError> {
         if !self.unmatched.by_sequence.is_empty() {
             return Err(IncarnationStreamError::RecoveryIncomplete {
