@@ -196,7 +196,10 @@ fn marker_frontier(
 fn drained_frontier(
     target: FrontierBinding,
 ) -> Result<(LiveFrontierOwner, StoredEdge), Box<dyn Error>> {
-    let (restore, sequence, order) = marker_frontier(target, MARKER - 1)?;
+    let prior_floor = MARKER
+        .checked_sub(1)
+        .ok_or("prior marker floor underflow")?;
+    let (restore, sequence, order) = marker_frontier(target, prior_floor)?;
     let frontiers = ClaimFrontiers::restore(restore, sequence, order)
         .map_err(|error| format!("frontier restore: {error:?}"))?;
     let retained = frontiers
@@ -257,10 +260,13 @@ fn recovery() -> Result<liminal_protocol::lifecycle::DetachedCredentialRecovery,
     else {
         return Err("marker delivery did not produce progress".into());
     };
+    let prior_floor = MARKER
+        .checked_sub(1)
+        .ok_or("prior marker floor underflow")?;
     let successor = progress
         .binding_fate(
             debt,
-            Event::binding_fate_observed(PARTICIPANT, prior, MARKER - 1),
+            Event::binding_fate_observed(PARTICIPANT, prior, prior_floor),
         )
         .map_err(|error| format!("binding fate: {error:?}"))?;
     let CursorFateSuccessor::DetachedCredentialRecovery(recovery) = successor else {
@@ -356,23 +362,23 @@ fn marker_source_validation_refuses_typed_before_authority_construction()
         MarkerSourceRefusalReason::MarkerBody,
     )?;
     assert_refusal(
-        |row| row.retained_charge.delivery_seq += 1,
+        |row| row.retained_charge.delivery_seq = 99,
         MarkerSourceRefusalReason::DeliverySequence,
     )?;
     assert_refusal(
-        |row| row.retained_charge.transaction_order += 1,
+        |row| row.retained_charge.transaction_order = 99,
         MarkerSourceRefusalReason::TransactionOrder,
     )?;
     assert_refusal(
-        |row| row.retained_charge.candidate_phase += 1,
+        |row| row.retained_charge.candidate_phase = 99,
         MarkerSourceRefusalReason::CandidatePhase,
     )?;
     assert_refusal(
-        |row| row.retained_charge.participant_id += 1,
+        |row| row.retained_charge.participant_id = 99,
         MarkerSourceRefusalReason::Participant,
     )?;
     assert_refusal(
-        |row| row.retained_charge.charge.bytes += 1,
+        |row| row.retained_charge.charge.bytes = 99,
         MarkerSourceRefusalReason::RetainedCharge,
     )?;
 
