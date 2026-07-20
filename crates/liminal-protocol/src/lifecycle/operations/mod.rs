@@ -1,3 +1,4 @@
+mod binding_fate;
 mod enrollment_operation;
 mod live_frontier;
 mod marker_ack;
@@ -8,6 +9,8 @@ pub(in crate::lifecycle) mod ordinary_record_projection;
 mod participant_ack;
 mod record_admission;
 
+#[cfg(test)]
+mod binding_fate_tests;
 #[cfg(test)]
 mod enrollment_operation_tests;
 #[cfg(test)]
@@ -27,6 +30,10 @@ mod record_admission_selector_acceptance_tests;
 #[cfg(test)]
 mod record_admission_tests;
 
+pub use binding_fate::{
+    BindingFateMeasurementError, BindingFateMeasurementRefused, BindingFateTerminal,
+    MeasuredBindingFate, PreparedBindingFate,
+};
 pub use enrollment_operation::{
     InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
     InitialEnrollmentOperationDecision, InitialEnrollmentOperationFault,

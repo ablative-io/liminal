@@ -12,6 +12,7 @@ mod admission;
 mod aggregate_commit;
 mod attach;
 mod binding;
+mod binding_fate;
 mod claim_frontier;
 mod closure_accounting;
 mod conversation;
@@ -200,7 +201,8 @@ pub use operation_event::{
     EnrolledOperation, LeftOperation, NonzeroDebtAckOperation,
 };
 pub use operations::{
-    AttachFrontierCharges, CommittedOrdinaryRecord, FencedAttachMintRefusalReason,
+    AttachFrontierCharges, BindingFateMeasurementError, BindingFateMeasurementRefused,
+    BindingFateTerminal, CommittedOrdinaryRecord, FencedAttachMintRefusalReason,
     FencedMarkerSourceExpectation, FencedMarkerSourceRetentionRefused,
     InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
     InitialEnrollmentOperationDecision, InitialEnrollmentOperationFault,
@@ -208,16 +210,17 @@ pub use operations::{
     LiveFrontierOwner, LiveFrontierResult, LiveLeaveCommit, LiveLeaveError, MarkerAckCommit,
     MarkerAckCommitError, MarkerAckDecision, MarkerDeliveryProjection, MarkerDrainCommit,
     MarkerDrainError, MarkerProofDecision, MarkerProofInput, MarkerProofPermit, MarkerProofState,
-    MintFencedAttachRefused, MintFencedAttachResult, MintedFencedAttach, NonzeroAckEpisodePosition,
-    NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError, NonzeroParticipantAckDecision,
-    NonzeroParticipantAckInvariantError, OrdinaryProjectionError, OrdinaryProjectionLimits,
-    OrdinaryRecordDrainFirst, OrdinaryRecordProjectionDecision, OrdinaryRecordProjectionFailure,
-    OrdinaryRecordProjectionInput, ParticipantAckCommit, ParticipantAckCommitError,
-    ParticipantAckDecision, ProjectedOrdinaryRecord, ReceiptDeadlineError, ReceiptDeadlines,
-    RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionDrainFirst,
-    RecordAdmissionFailure, RecordAdmissionFault, RecordAdmissionPersistenceParts,
-    RecordAdmissionPrestate, RecordAdmissionRefusal, RetainedFencedMarkerSource,
-    RetainedRecordCharge, UnchangedRecordAdmission, apply_attach_frontier, apply_detach_frontier,
+    MeasuredBindingFate, MintFencedAttachRefused, MintFencedAttachResult, MintedFencedAttach,
+    NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
+    NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError, OrdinaryProjectionError,
+    OrdinaryProjectionLimits, OrdinaryRecordDrainFirst, OrdinaryRecordProjectionDecision,
+    OrdinaryRecordProjectionFailure, OrdinaryRecordProjectionInput, ParticipantAckCommit,
+    ParticipantAckCommitError, ParticipantAckDecision, PreparedBindingFate,
+    ProjectedOrdinaryRecord, ReceiptDeadlineError, ReceiptDeadlines, RecordAdmissionCommit,
+    RecordAdmissionDecision, RecordAdmissionDrainFirst, RecordAdmissionFailure,
+    RecordAdmissionFault, RecordAdmissionPersistenceParts, RecordAdmissionPrestate,
+    RecordAdmissionRefusal, RetainedFencedMarkerSource, RetainedRecordCharge,
+    UnchangedRecordAdmission, apply_attach_frontier, apply_detach_frontier,
     apply_enrollment_frontier, apply_initial_enrollment, apply_marker_ack,
     apply_marker_ack_frontier, apply_nonzero_participant_ack,
     apply_nonzero_participant_ack_frontier, apply_nonzero_participant_ack_with_obligations,

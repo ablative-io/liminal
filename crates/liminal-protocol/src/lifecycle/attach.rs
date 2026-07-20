@@ -10,7 +10,7 @@ use super::{
     CommittedDetachedTerminal, CommittedDiedTerminal, DetachCell, Event, FencedAttachCommit,
     LiveMember, MembershipInvariantError, ObserverProgressProjection, OrdinaryBindingAuthority,
     OrdinaryBindingFate, OrdinaryDetachedAttachAdmission, PendingFinalization,
-    RecoveredBindingFate, detach::validate_pending_pair, lookup::AttachSecretProof,
+    detach::validate_pending_pair, lookup::AttachSecretProof,
 };
 
 /// Result allocation owned by one successful credential-attach transaction.
@@ -136,38 +136,8 @@ pub struct InstalledAttachState<F, V> {
 /// One move-only binding-fate authority emitted by an attach commit.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SealedBindingFateToken {
-    ordinary: Option<OrdinaryBindingAuthority>,
-    recovered: Option<FencedAttachCommit>,
-}
-
-impl SealedBindingFateToken {
-    /// Reports whether this token carries recovered occurrence authority.
-    #[must_use]
-    pub const fn is_recovered(&self) -> bool {
-        self.recovered.is_some()
-    }
-
-    /// Consumes recovered authority into one fate.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same move-only token on refusal, boxed to keep the successful
-    /// return path compact.
-    pub fn recovered_binding_fate(
-        mut self,
-        event: Event,
-    ) -> Result<RecoveredBindingFate, Box<Self>> {
-        let Some(proof) = self.recovered.take() else {
-            return Err(Box::new(self));
-        };
-        match proof.recovered_binding_fate(event) {
-            Ok(fate) => Ok(fate),
-            Err(proof) => {
-                self.recovered = Some(*proof);
-                Err(Box::new(self))
-            }
-        }
-    }
+    pub(in crate::lifecycle) ordinary: Option<OrdinaryBindingAuthority>,
+    pub(in crate::lifecycle) recovered: Option<FencedAttachCommit>,
 }
 
 impl<F, V> AttachCommit<F, V> {
