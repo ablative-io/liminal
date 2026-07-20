@@ -1763,6 +1763,34 @@ impl ConnectionRuntime {
         Ok(())
     }
 
+    /// Resolves the bound-only protocol-error gate from participant authority.
+    pub(super) fn connection_has_bound_participant(
+        &self,
+        connection_incarnation: Option<ConnectionIncarnation>,
+        conversations: &[u64],
+    ) -> Result<bool, ServerError> {
+        if conversations.is_empty() {
+            return Ok(false);
+        }
+        self.ensure_participant_service_live()?;
+        let (Some(connection_incarnation), Some(service)) =
+            (connection_incarnation, self.participant_service())
+        else {
+            return Err(ServerError::ParticipantIncarnation {
+                phase: "bound participant classification",
+                message:
+                    "tracked participant conversations lack a complete service/incarnation pair"
+                        .to_owned(),
+            });
+        };
+        service
+            .connection_has_bound_participant(connection_incarnation, conversations)
+            .map_err(|error| ServerError::ParticipantIncarnation {
+                phase: "bound participant classification",
+                message: error.to_string(),
+            })
+    }
+
     /// Returns the configured connection auth token as opaque bytes, or `None` when
     /// no `[auth]` section was configured (open access).
     pub(super) fn auth_token(&self) -> Option<&[u8]> {

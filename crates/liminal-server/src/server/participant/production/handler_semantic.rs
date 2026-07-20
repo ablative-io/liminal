@@ -112,6 +112,36 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         Ok(())
     }
 
+    fn connection_has_bound_participant(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        conversations: &[ConversationId],
+    ) -> Result<bool, ParticipantSemanticError> {
+        self.ensure_service_live()?;
+        for conversation_id in conversations {
+            let cell = self.cell(*conversation_id)?;
+            let owner = cell
+                .lock()
+                .map_err(|_| publication_owner_poisoned(*conversation_id))?;
+            let Some(authority) = owner.as_ref() else {
+                drop(owner);
+                continue;
+            };
+            let bound = authority.slots.values().any(|slot| {
+                matches!(
+                    slot.binding,
+                    BindingState::Bound(active)
+                        if active.binding_epoch.connection_incarnation == connection_incarnation
+                )
+            });
+            drop(owner);
+            if bound {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         self.config.max_semantic_conversations_per_connection
     }

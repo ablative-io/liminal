@@ -234,6 +234,23 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
         Ok(())
     }
 
+    /// Reports whether any listed conversation currently contains a Bound slot
+    /// owned by this exact connection. Terminal decode funnels use this query to
+    /// distinguish bound-only `ProtocolError` from pre-auth/detached/internal paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic failure when exact bound authority cannot be inspected.
+    fn connection_has_bound_participant(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        conversations: &[ConversationId],
+    ) -> Result<bool, ParticipantSemanticError> {
+        let _ = connection_incarnation;
+        let _ = conversations;
+        Ok(false)
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         0
     }
@@ -478,6 +495,15 @@ impl ParticipantSemanticHandler for InstalledParticipantService {
     ) -> Result<(), ParticipantSemanticError> {
         self.handler
             .repair_unclean_server_restart(current_server_incarnation)
+    }
+
+    fn connection_has_bound_participant(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        conversations: &[ConversationId],
+    ) -> Result<bool, ParticipantSemanticError> {
+        self.handler
+            .connection_has_bound_participant(connection_incarnation, conversations)
     }
 
     fn handle(
