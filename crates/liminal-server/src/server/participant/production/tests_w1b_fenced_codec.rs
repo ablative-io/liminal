@@ -168,6 +168,7 @@ fn attached_v3_closed_modes_round_trip_complete_fenced_proof() -> Result<(), Box
         restored.validate_durable(30)?;
         assert_eq!(serde_json::to_vec(&restored)?, bytes);
     }
+    super::tests_w1b_marker_source::assert_exact_source_association()?;
     Ok(())
 }
 
