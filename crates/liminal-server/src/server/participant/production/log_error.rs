@@ -61,4 +61,20 @@ pub(super) enum FencedAttachProofRefusal {
     TerminalParticipantMismatch,
     #[error("terminal epoch differs from recovery")]
     TerminalEpochMismatch,
+    #[error("composed terminal kind and cause class disagree")]
+    ComposedTerminalKindCause,
+    #[error("composed terminal order differs from the enclosing Attached order")]
+    ComposedTerminalOrder,
+    #[error("composed terminal pending source does not precede Attached")]
+    ComposedPendingSourceOrder,
+    #[error("recovered reservation source does not precede Attached")]
+    ComposedRecoveredSourceOrder,
+    #[error("only Pending Died may consume a recovered finalizer reservation")]
+    ComposedRecoveredReservationKind,
+    #[error("composed terminal pending source row disagrees with its audit")]
+    ComposedPendingSourceMismatch,
+    #[error("composed terminal recovered reservation row disagrees with its audit")]
+    ComposedRecoveredReservationMismatch,
+    #[error("composed terminal disagrees with replay binding prestate")]
+    ComposedReplayStateMismatch,
 }

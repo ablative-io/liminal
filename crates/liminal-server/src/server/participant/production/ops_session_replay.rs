@@ -5,6 +5,7 @@ use liminal_protocol::wire::ParticipantDelivery;
 
 use crate::config::types::ParticipantConfig;
 
+use super::fenced_attach_terminal::ComposedTerminalValidation;
 use super::log::{
     DecodedOperation, DecodedStoredOperation, OperationLog, OperationLogError,
     OperationSchemaPhase, StoredDetached, StoredDetachedCause, StoredDetachedSource,
@@ -402,6 +403,7 @@ impl ConversationAuthority {
 pub(super) async fn validate_operation_schema(log: &OperationLog) -> Result<(), StateError> {
     let mut sequence = 0_u64;
     let mut phase = OperationSchemaPhase::V2Prefix;
+    let mut composed = ComposedTerminalValidation::default();
     loop {
         let page = log.read_page(sequence, phase).await?;
         phase = page.next_phase;
@@ -417,6 +419,7 @@ pub(super) async fn validate_operation_schema(log: &OperationLog) -> Result<(), 
                 }
                 .into());
             }
+            composed.validate(log, sequence, &decoded.operation).await?;
             sequence = sequence
                 .checked_add(1)
                 .ok_or(StateError::AllocationExhausted {

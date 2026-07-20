@@ -163,6 +163,11 @@ pub(super) fn verify_attach_mode(
                     ))
                 })
         }
+        (_, StoredAttachModeV3::Fenced { .. }) => Err(OperationLogError::FencedAttachProof {
+            sequence: source_sequence,
+            reason: super::log::FencedAttachProofRefusal::ComposedReplayStateMismatch,
+        }
+        .into()),
         (_, _) => Err(StateError::invariant(
             "attach allocation mode does not match the slot's binding authority",
         )),

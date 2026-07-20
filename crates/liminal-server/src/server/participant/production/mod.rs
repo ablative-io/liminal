@@ -17,6 +17,7 @@ mod barrier;
 mod capacity;
 mod facts;
 mod fenced_attach_codec;
+mod fenced_attach_terminal;
 mod frontier;
 mod handler;
 mod handler_observer;

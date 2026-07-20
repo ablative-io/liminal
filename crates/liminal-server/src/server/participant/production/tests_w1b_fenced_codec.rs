@@ -6,8 +6,9 @@ use super::fenced_attach_codec::{
     StoredWideResourceVector,
 };
 use super::log::{
-    FencedAttachProofRefusal, StoredAttachAllocation, StoredAttachModeV3, StoredAttachRequest,
-    StoredBindingEpoch, StoredFencedAttachProof, StoredOperation, StoredU128,
+    FencedAttachProofRefusal, OperationLogError, StoredAttachAllocation, StoredAttachModeV3,
+    StoredAttachRequest, StoredBindingEpoch, StoredComposedTerminal, StoredComposedTerminalKind,
+    StoredFencedAttachProof, StoredFinalizerPresentation, StoredOperation, StoredU128,
 };
 use super::log_v3::StoredComposedTerminalCause;
 
@@ -170,6 +171,78 @@ fn attached_v3_closed_modes_round_trip_complete_fenced_proof() -> Result<(), Box
     }
     super::tests_w1b_marker_source::assert_exact_source_association()?;
     Ok(())
+}
+
+#[test]
+fn composed_terminal_decode_validates_kind_cause_order_source_and_presentation() {
+    let mut operation = fenced_operation(proof_with(&recovery()));
+    let StoredOperation::Attached { mode, .. } = &mut operation else {
+        unreachable!("helper always constructs Attached");
+    };
+    let StoredAttachModeV3::Fenced {
+        composed_terminal, ..
+    } = mode.as_mut()
+    else {
+        unreachable!("helper always constructs Fenced");
+    };
+    *composed_terminal = Some(StoredComposedTerminal {
+        kind: StoredComposedTerminalKind::Died,
+        cause: StoredComposedTerminalCause::ConnectionLost,
+        transaction_order: 20,
+        delivery_seq: 19,
+        pending_source_sequence: 5,
+        presentation: StoredFinalizerPresentation::PresentEnclosing,
+    });
+    assert!(operation.validate_durable(30).is_ok());
+
+    let assert_refusal = |mutate: fn(&mut StoredComposedTerminal), expected| {
+        let mut candidate = operation.clone();
+        let StoredOperation::Attached { mode, .. } = &mut candidate else {
+            unreachable!("helper always constructs Attached");
+        };
+        let StoredAttachModeV3::Fenced {
+            composed_terminal: Some(terminal),
+            ..
+        } = mode.as_mut()
+        else {
+            unreachable!("helper always carries composed terminal");
+        };
+        mutate(terminal);
+        assert!(matches!(
+            candidate.validate_durable(30),
+            Err(OperationLogError::FencedAttachProof { reason, .. }) if reason == expected
+        ));
+    };
+    assert_refusal(
+        |terminal| terminal.kind = StoredComposedTerminalKind::Detached,
+        FencedAttachProofRefusal::ComposedTerminalKindCause,
+    );
+    assert_refusal(
+        |terminal| terminal.transaction_order = 21,
+        FencedAttachProofRefusal::ComposedTerminalOrder,
+    );
+    assert_refusal(
+        |terminal| terminal.pending_source_sequence = 30,
+        FencedAttachProofRefusal::ComposedPendingSourceOrder,
+    );
+    assert_refusal(
+        |terminal| {
+            terminal.presentation = StoredFinalizerPresentation::ConsumeRecoveredReservation {
+                recovered_source_sequence: 30,
+            };
+        },
+        FencedAttachProofRefusal::ComposedRecoveredSourceOrder,
+    );
+    assert_refusal(
+        |terminal| {
+            terminal.kind = StoredComposedTerminalKind::Detached;
+            terminal.cause = StoredComposedTerminalCause::CleanDeregister;
+            terminal.presentation = StoredFinalizerPresentation::ConsumeRecoveredReservation {
+                recovered_source_sequence: 6,
+            };
+        },
+        FencedAttachProofRefusal::ComposedRecoveredReservationKind,
+    );
 }
 
 #[test]
