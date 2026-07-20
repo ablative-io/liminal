@@ -478,6 +478,19 @@ impl InstalledParticipantService {
 }
 
 impl ParticipantSemanticHandler for InstalledParticipantService {
+    fn service_fatal(&self) -> Result<Option<ParticipantServiceFatal>, ParticipantSemanticError> {
+        self.handler.service_fatal()
+    }
+
+    fn latch_connection_fate_intent_incomplete(
+        &self,
+        open_sequence: u64,
+        conversation_id: ConversationId,
+    ) -> Result<ParticipantServiceFatal, ParticipantSemanticError> {
+        self.handler
+            .latch_connection_fate_intent_incomplete(open_sequence, conversation_id)
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         self.handler.publication_conversation_limit()
     }
