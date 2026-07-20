@@ -285,6 +285,10 @@ fn attached_v2_mapping_is_lossless_and_marker_rows_refuse_without_proof()
         schema_version: SCHEMA_VERSION_V2,
         operation: &ordinary_v2,
     })?;
+    assert_eq!(
+        frozen_before.as_slice(),
+        include_bytes!("fixtures/w1b_attached_v2_ordinary.json")
+    );
     let StoredOperationV2::Attached {
         request,
         secret_verified,
