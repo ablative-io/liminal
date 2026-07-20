@@ -832,6 +832,7 @@ impl SupervisorInner {
                 ConnectionIncarnationAuthority::startup(
                     service.durable_store(),
                     limits.max_connections,
+                    service.publication_conversation_limit(),
                 )
             })
             .transpose()?;
