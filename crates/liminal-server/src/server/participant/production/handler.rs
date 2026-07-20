@@ -22,7 +22,7 @@ use liminal_protocol::wire::ConversationId;
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
     ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantSemanticError,
+    ParticipantSemanticError, ParticipantServiceFatal,
 };
 
 use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
@@ -63,6 +63,8 @@ pub struct ProductionParticipantHandler {
     pub(super) config: ParticipantConfig,
     outbox_limits: ConversationOutboxLimits,
     conversations: Mutex<HashMap<ConversationId, Arc<Mutex<Option<ConversationAuthority>>>>>,
+    /// First post-Open fatal; once set, every semantic/publication entry refuses.
+    service_fatal: Mutex<Option<ParticipantServiceFatal>>,
     /// Server-wide observer-recovery aggregate paired with its durable row
     /// head (`None` until first restored).
     pub(super) observer: Mutex<Option<ObserverOwner>>,
@@ -104,12 +106,54 @@ impl ProductionParticipantHandler {
             config,
             outbox_limits,
             conversations: Mutex::new(HashMap::new()),
+            service_fatal: Mutex::new(None),
             observer: Mutex::new(None),
             capacity: ServerCapacity::default(),
             registry,
         };
         handler.restore_all_conversations()?;
         Ok(handler)
+    }
+
+    pub(super) fn current_service_fatal(
+        &self,
+    ) -> Result<Option<ParticipantServiceFatal>, ParticipantSemanticError> {
+        let fatal = self
+            .service_fatal
+            .lock()
+            .map_err(|_| ParticipantSemanticError::Internal {
+                message: "participant service fatal latch is poisoned".to_owned(),
+            })?
+            .clone();
+        Ok(fatal)
+    }
+
+    pub(super) fn ensure_service_live(&self) -> Result<(), ParticipantSemanticError> {
+        if let Some(fatal) = self.current_service_fatal()? {
+            return Err(ParticipantSemanticError::ServiceFatal(fatal));
+        }
+        Ok(())
+    }
+
+    pub(super) fn latch_connection_fate_fatal(
+        &self,
+        open_sequence: u64,
+        conversation_id: ConversationId,
+    ) -> Result<ParticipantServiceFatal, ParticipantSemanticError> {
+        let mut fatal =
+            self.service_fatal
+                .lock()
+                .map_err(|_| ParticipantSemanticError::Internal {
+                    message: "participant service fatal latch is poisoned".to_owned(),
+                })?;
+        let selected = fatal
+            .get_or_insert_with(|| ParticipantServiceFatal::ConnectionFateIntentIncomplete {
+                open_sequence,
+                conversation_id,
+            })
+            .clone();
+        drop(fatal);
+        Ok(selected)
     }
 
     /// Startup restore: enumerates every registered conversation and replays

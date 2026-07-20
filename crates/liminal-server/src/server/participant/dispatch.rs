@@ -96,6 +96,21 @@ impl ParticipantConnectionContext {
     }
 }
 
+/// Process-wide terminal participant-service latch.
+#[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ParticipantServiceFatal {
+    /// A durable Open landed but one listed conversation could not durably finish its fate.
+    #[error(
+        "connection-fate intent {open_sequence} is incomplete at conversation {conversation_id}"
+    )]
+    ConnectionFateIntentIncomplete {
+        /// Durable incarnation-stream Open sequence.
+        open_sequence: u64,
+        /// Exact conversation whose non-idempotent completion failed.
+        conversation_id: ConversationId,
+    },
+}
+
 /// Non-wire semantic service failure.
 ///
 /// A failure is terminal to the connection attempt. It is deliberately not
@@ -112,6 +127,9 @@ pub enum ParticipantSemanticError {
         /// Diagnostic text for server logs; never placed on the participant wire.
         message: String,
     },
+    /// A process-wide participant fatal has already latched.
+    #[error(transparent)]
+    ServiceFatal(ParticipantServiceFatal),
 }
 
 /// Server-owned adapter from a decoded request to a protocol-owned value.
@@ -131,6 +149,31 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     /// Production handlers override this with the signed
     /// `max_semantic_conversations_per_connection`; semantic-only fixtures own
     /// no publication conversations.
+    ///
+    /// Returns the latched fatal, when participant service must remain stopped.
+    fn service_fatal(&self) -> Result<Option<ParticipantServiceFatal>, ParticipantSemanticError> {
+        Ok(None)
+    }
+
+    /// Atomically latches the post-Open fatal selected by Decision B.
+    ///
+    /// Implementations must preserve the first fatal and return it on every later call.
+    /// The default exists only for semantic fixtures which own no durable intents.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic service error when the fatal latch cannot be inspected or updated.
+    fn latch_connection_fate_intent_incomplete(
+        &self,
+        open_sequence: u64,
+        conversation_id: ConversationId,
+    ) -> Result<ParticipantServiceFatal, ParticipantSemanticError> {
+        Ok(ParticipantServiceFatal::ConnectionFateIntentIncomplete {
+            open_sequence,
+            conversation_id,
+        })
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         0
     }
