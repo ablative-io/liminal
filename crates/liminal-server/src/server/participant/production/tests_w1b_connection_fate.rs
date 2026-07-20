@@ -1,15 +1,15 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use liminal::durability::open_ephemeral;
+use liminal::durability::{DurableStore, open_ephemeral};
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, DetachAttemptToken, DetachRequest, EnrollmentRequest,
     EnrollmentToken, Generation, ServerValue,
 };
 
 use crate::server::participant::{
-    ConnectionFateClass, ConnectionFateWorkItem, ParticipantConnectionConversations,
-    ParticipantSemanticHandler,
+    ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
+    ParticipantConnectionConversations, ParticipantSemanticHandler, ParticipantServiceFatal,
 };
 
 use super::ProductionParticipantHandler;
@@ -122,6 +122,54 @@ fn protocol_fate_classification_requires_current_bound_authority() -> Result<(),
         !handler.connection_has_bound_participant(connection_incarnation, &tracked)?,
         "tracked-but-detached state must not select ProtocolError"
     );
+    Ok(())
+}
+
+#[test]
+fn installed_participant_service_delegates_connection_fate_fatal_latch()
+-> Result<(), Box<dyn Error>> {
+    const OPEN_SEQUENCE: u64 = 11;
+    const CONVERSATION_ID: u64 = 17;
+    const LATER_OPEN_SEQUENCE: u64 = 19;
+    const LATER_CONVERSATION_ID: u64 = 23;
+
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let config = test_participant_config();
+    let handler = Arc::new(ProductionParticipantHandler::new(
+        Arc::clone(&store),
+        config,
+    )?);
+    let service = InstalledParticipantService::new(handler, store, config.wire_frame_limit)
+        .map_err(|error| format!("participant service configuration failed: {error:?}"))?;
+
+    let selected =
+        service.latch_connection_fate_intent_incomplete(OPEN_SEQUENCE, CONVERSATION_ID)?;
+    assert_eq!(
+        selected,
+        ParticipantServiceFatal::ConnectionFateIntentIncomplete {
+            open_sequence: OPEN_SEQUENCE,
+            conversation_id: CONVERSATION_ID,
+        }
+    );
+    assert_eq!(
+        service
+            .latch_connection_fate_intent_incomplete(LATER_OPEN_SEQUENCE, LATER_CONVERSATION_ID,)?,
+        selected,
+        "the installed wrapper must preserve the inner handler's first fatal"
+    );
+    assert_eq!(service.service_fatal()?, Some(selected.clone()));
+
+    let stopped = service.handle_connection_fate(ConnectionFateWorkItem {
+        open_sequence: LATER_OPEN_SEQUENCE,
+        connection_incarnation: ConnectionIncarnation::new(53, 1),
+        class: ConnectionFateClass::ConnectionLost,
+        tracked_conversations: Vec::new(),
+    });
+    assert!(matches!(
+        stopped,
+        Err(crate::server::participant::ParticipantSemanticError::ServiceFatal(fatal))
+            if fatal == selected
+    ));
     Ok(())
 }
 
