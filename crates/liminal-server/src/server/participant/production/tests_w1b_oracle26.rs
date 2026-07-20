@@ -4,10 +4,10 @@ use std::sync::Arc;
 use liminal::durability::bridge::block_on;
 use liminal_protocol::algebra::WideResourceVector;
 use liminal_protocol::lifecycle::{
-    ActiveBinding, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition, BindingState,
+    ActiveBinding, AttachCommitParameters, AttachedRecordPosition, BindingState,
     BindingTerminalDisposition, ClosureDebt, CommittedBindingTerminalPosition, DebtCompletion,
-    DetachCell, EnrollmentFingerprint, Event, FencedAttachCommit, FencedAttachMintRefusalReason,
-    LiveMember, LiveMemberRestore, MintFencedAttachResult, commit_attach,
+    DetachCell, EnrollmentFingerprint, Event, FencedAttachMintRefusalReason, LiveMember,
+    LiveMemberRestore, MintFencedAttachResult, commit_attach,
 };
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, BindingEpoch, ConnectionIncarnation, CredentialAttachRequest,
@@ -20,12 +20,14 @@ use super::fenced_attach_codec::{
     StoredWideResourceVector,
 };
 use super::log::{
-    OperationLog, STREAM_PREFIX, StoredAttachModeV3, StoredBindingEpoch, StoredFencedAttachProof,
-    StoredOperation, StoredU128,
+    DecodedStoredOperation, OperationLog, STREAM_PREFIX, StoredAttachAllocation,
+    StoredAttachModeV3, StoredBindingEpoch, StoredFencedAttachProof, StoredOperation, StoredU128,
 };
 use super::log_v3::StoredComposedTerminalCause;
 use super::marker_source::validate_marker_source;
-use super::ops_attach_verify::mint_associated_fenced_attach;
+use super::ops_attach_verify::{
+    AttachVerification, mint_associated_fenced_attach, verify_attach_mode,
+};
 use super::tests_w1b_marker_source::{CONVERSATION, MARKER, PARTICIPANT, epoch, source_fixture};
 
 const fn stored_wide(entries: u128, bytes: u128) -> StoredWideResourceVector {
@@ -89,7 +91,7 @@ fn fenced_mode() -> Result<StoredAttachModeV3, Box<dyn Error>> {
     })
 }
 
-fn chain_member() -> Result<LiveMember<Vec<u8>>, Box<dyn Error>> {
+fn chain_member() -> Result<LiveMember<[u8; 32]>, Box<dyn Error>> {
     let prior = epoch()?;
     let active = ActiveBinding {
         conversation_id: CONVERSATION,
@@ -110,107 +112,115 @@ fn chain_member() -> Result<LiveMember<Vec<u8>>, Box<dyn Error>> {
         generation: prior.capability_generation,
         attach_secret: AttachSecret::new([7; 32]),
         cursor: MARKER,
-        enrollment_fingerprint: EnrollmentFingerprint::new(vec![8]),
+        enrollment_fingerprint: EnrollmentFingerprint::new([8; 32]),
         latest_terminal: Some(terminal.into()),
     })
     .map_err(|error| format!("member restore failed: {error:?}"))?)
 }
 
-fn production_chain(cold: bool) -> Result<[u64; 5], Box<dyn Error>> {
-    let fixture = source_fixture()?;
-    let log = OperationLog::new(Arc::clone(&fixture.store), CONVERSATION);
-    block_on(log.append(&StoredOperation::MarkerDrained { row: fixture.row }, 0))??;
-    let mode = if cold {
-        let bytes = serde_json::to_vec(&fenced_mode()?)?;
-        serde_json::from_slice(&bytes)?
-    } else {
-        fenced_mode()?
-    };
-    let StoredAttachModeV3::Fenced {
-        prior_binding_epoch,
-        marker_delivery_seq,
-        marker_source_sequence,
-        proof,
-        ..
-    } = mode
-    else {
-        return Err("fixture mode was not fenced".into());
-    };
-    let new_generation = Generation::new(
-        prior_binding_epoch
-            .capability_generation
-            .checked_add(1)
-            .ok_or("new generation overflow")?,
-    )
-    .ok_or("new generation was zero")?;
-    let new_epoch = BindingEpoch::new(ConnectionIncarnation::new(1, 2), new_generation);
-    let context = super::fenced_attach_codec::FencedAttachProofContext {
-        conversation_id: CONVERSATION,
-        participant_id: PARTICIPANT,
-        request_marker_delivery_seq: Some(marker_delivery_seq),
-        prior_binding_epoch,
-        marker_delivery_seq,
-        new_binding_epoch: new_epoch.into(),
-    };
-    let inputs = proof
-        .decode(context)?
-        .into_mint_inputs(context.new_binding_epoch)?;
-    let validated = block_on(validate_marker_source(
-        Arc::clone(&fixture.store),
-        fixture.retained,
-        marker_source_sequence,
-    ))?
-    .map_err(|refused| format!("marker source association refused: {:?}", refused.reason()))?;
-    let (owner, recovery, source_sequence) = validated.into_parts();
-    let inputs = FencedAttachMintInputs { recovery, ..inputs };
-    let MintFencedAttachResult::Minted(minted) =
-        mint_associated_fenced_attach(owner, source_sequence, inputs)
-    else {
-        return Err("production proof mint refused exact inputs".into());
-    };
-    let (owner, proof) = minted.into_parts();
-    drop(owner);
-    let mut observed = finish_production_chain(proof, new_epoch)?;
-    observed[0] = observed[0].checked_add(1).ok_or("mint count overflow")?;
-    Ok(observed)
-}
-
-fn finish_production_chain(
-    proof: FencedAttachCommit,
-    new_epoch: BindingEpoch,
-) -> Result<[u64; 5], Box<dyn Error>> {
-    let mut observed = [0_u64; 5];
-    let request = CredentialAttachRequest {
+fn attach_request() -> Result<CredentialAttachRequest, Box<dyn Error>> {
+    Ok(CredentialAttachRequest {
         conversation_id: CONVERSATION,
         participant_id: PARTICIPANT,
         capability_generation: epoch()?.capability_generation,
         attach_secret: AttachSecret::new([7; 32]),
         attach_attempt_token: AttachAttemptToken::new([9; 16]),
         accept_marker_delivery_seq: Some(MARKER),
-    };
-    let verified = chain_member()?
-        .verify_fenced_attach(
-            BindingState::Detached,
-            request,
-            AttachSecretProof::Verified,
-            proof,
-            None,
-            AttachCommitParameters {
-                binding: ActiveBinding {
-                    conversation_id: CONVERSATION,
-                    participant_id: PARTICIPANT,
-                    binding_epoch: new_epoch,
-                },
-                attach_secret: AttachSecret::new([10; 32]),
-                attached_position: AttachedRecordPosition::new(
-                    2,
-                    MARKER.checked_add(3).ok_or("attached sequence overflow")?,
-                ),
-                receipt_expires_at: 1,
-                provenance_expires_at: 2,
+    })
+}
+
+fn next_epoch() -> Result<BindingEpoch, Box<dyn Error>> {
+    let prior = epoch()?;
+    let new_generation = Generation::new(
+        prior
+            .capability_generation
+            .get()
+            .checked_add(1)
+            .ok_or("new generation overflow")?,
+    )
+    .ok_or("new generation was zero")?;
+    Ok(BindingEpoch::new(
+        ConnectionIncarnation::new(1, 2),
+        new_generation,
+    ))
+}
+
+fn attach_allocation(new_epoch: BindingEpoch) -> Result<StoredAttachAllocation, Box<dyn Error>> {
+    Ok(StoredAttachAllocation {
+        binding_epoch: new_epoch.into(),
+        attach_secret: [10; 32],
+        attached_order: 2,
+        attached_seq: MARKER.checked_add(3).ok_or("attached sequence overflow")?,
+        receipt_expires_at: StoredU128(1_u128.to_be_bytes()),
+        provenance_expires_at: StoredU128(2_u128.to_be_bytes()),
+        admitted_now_ms: 0,
+    })
+}
+
+fn production_chain(cold: bool) -> Result<[u64; 5], Box<dyn Error>> {
+    let fixture = source_fixture()?;
+    let log = OperationLog::new(Arc::clone(&fixture.store), CONVERSATION);
+    block_on(log.append(&StoredOperation::MarkerDrained { row: fixture.row }, 0))??;
+    let request = attach_request()?;
+    let new_epoch = next_epoch()?;
+    let allocation = attach_allocation(new_epoch)?;
+    let mode = fenced_mode()?;
+    let (request, allocation, mode) = if cold {
+        block_on(log.append(
+            &StoredOperation::Attached {
+                request: (&request).into(),
+                secret_verified: true,
+                allocation,
+                mode: Box::new(mode),
+                event: Vec::new(),
             },
-        )
-        .map_err(|refused| format!("production verification refused: {:?}", refused.error()))?;
+            1,
+        ))??;
+        let decoded = block_on(log.read_at(1))??.ok_or("durable Attached row missing")?;
+        let DecodedStoredOperation::V3(StoredOperation::Attached {
+            request,
+            allocation,
+            mode,
+            ..
+        }) = decoded.operation
+        else {
+            return Err("cold fixture did not decode a v3 Attached row".into());
+        };
+        (request.to_request()?, allocation, *mode)
+    } else {
+        (request, allocation, mode)
+    };
+    let (frontier_owner, _) = fixture.retained.into_parts();
+    let parameters = AttachCommitParameters {
+        binding: ActiveBinding {
+            conversation_id: CONVERSATION,
+            participant_id: PARTICIPANT,
+            binding_epoch: new_epoch,
+        },
+        attach_secret: AttachSecret::new(allocation.attach_secret),
+        attached_position: AttachedRecordPosition::new(
+            allocation.attached_order,
+            allocation.attached_seq,
+        ),
+        receipt_expires_at: allocation.receipt_expires_at.get(),
+        provenance_expires_at: allocation.provenance_expires_at.get(),
+    };
+    let mut observed = [0_u64; 5];
+    let (verified, spent_owner) = verify_attach_mode(
+        chain_member()?,
+        BindingState::Detached,
+        frontier_owner,
+        AttachVerification {
+            request: &request,
+            mode: &mode,
+            parameters,
+            store: Arc::clone(&fixture.store),
+            source_sequence: 1,
+        },
+    )
+    .map_err(|error| format!("production fenced verifier refused: {error}"))?;
+    drop(spent_owner);
+    observed[0] = observed[0].checked_add(1).ok_or("mint count overflow")?;
     observed[1] = observed[1]
         .checked_add(1)
         .ok_or("verification count overflow")?;
