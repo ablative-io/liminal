@@ -25,7 +25,7 @@ use crate::server::participant::{
     ParticipantSemanticError, ParticipantServiceFatal,
 };
 
-use super::barrier::{ArmOutcome, OperationFacts, ReceiptCapacityLimits};
+use super::barrier::{OperationFacts, ReceiptCapacityLimits};
 use super::capacity::ServerCapacity;
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
@@ -217,14 +217,11 @@ impl ProductionParticipantHandler {
     /// after the operation (a refused or failed probe of a never-committed
     /// conversation id) leaves no residue: its registry cell is evicted, so
     /// wire probes grow neither durable nor in-memory state.
-    pub(super) fn with_conversation(
+    pub(super) fn with_conversation<T>(
         &self,
         conversation_id: ConversationId,
-        operation: impl FnOnce(
-            &mut ConversationAuthority,
-            &dyn DurableAppend,
-        ) -> Result<ArmOutcome, StateError>,
-    ) -> Result<ArmOutcome, ParticipantSemanticError> {
+        operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
+    ) -> Result<T, ParticipantSemanticError> {
         let cell = self.cell(conversation_id)?;
         let mut owner: MutexGuard<'_, Option<ConversationAuthority>> =
             cell.lock()
