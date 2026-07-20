@@ -35,6 +35,18 @@ pub enum ServerError {
         message: String,
     },
 
+    /// Startup found durable connection-fate work that the Decision A/C producer must complete
+    /// before listener or semantic-service publication.
+    #[error(
+        "participant startup requires recovery of {open_count} connection-fate Opens beginning at sequence {first_open_sequence}"
+    )]
+    ConnectionFateRecoveryRequired {
+        /// Number of replay-validated unmatched Opens.
+        open_count: usize,
+        /// Lowest unmatched Open sequence.
+        first_open_sequence: u64,
+    },
+
     /// The durable server-incarnation namespace has no successor.
     #[error("participant server-incarnation namespace is exhausted")]
     ServerIncarnationExhausted,

@@ -18,7 +18,7 @@
 //! Replay advances through bounded pages and stops at the first empty page. It
 //! never sleeps, retries, or treats an empty page as a polling signal.
 
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
 use liminal::durability::{DurabilityError, DurableStore};
 use liminal_protocol::{
@@ -169,6 +169,65 @@ pub(in crate::server) enum IncarnationStreamError {
         /// Supplied body bytes.
         actual: usize,
     },
+    /// Two Allocate inputs in one Startup generation persisted different bounds.
+    #[error(
+        "startup generation {startup_sequence} allocation {stored_sequence} changed declared reference bound from {expected} to {actual}"
+    )]
+    GenerationReferenceBoundConflict {
+        startup_sequence: u64,
+        expected: usize,
+        actual: usize,
+        stored_sequence: u64,
+    },
+    /// An Open names no retained Allocate output in its enclosing generation.
+    #[error(
+        "connection-fate Open {open_sequence} names unknown allocation {connection_incarnation:?}"
+    )]
+    UnknownConnectionAllocation {
+        open_sequence: u64,
+        connection_incarnation: ConnectionIncarnation,
+    },
+    /// Simultaneous Opens resolved to different Startup generations.
+    #[error(
+        "connection-fate Open {open_sequence} resolves to startup generation {actual_startup_sequence}, but unmatched Opens belong to {expected_startup_sequence}"
+    )]
+    CrossGenerationOpen {
+        open_sequence: u64,
+        expected_startup_sequence: u64,
+        actual_startup_sequence: u64,
+    },
+    /// One connection has two simultaneously unmatched Opens.
+    #[error(
+        "connection-fate Open {open_sequence} duplicates connection from unmatched Open {existing_open_sequence}"
+    )]
+    DuplicateConnectionOpen {
+        open_sequence: u64,
+        existing_open_sequence: u64,
+    },
+    /// A Complete names no currently unmatched Open.
+    #[error("connection-fate Complete {complete_sequence} names absent Open {open_sequence}")]
+    CompleteForAbsentOpen {
+        complete_sequence: u64,
+        open_sequence: u64,
+    },
+    /// An unmatched set exceeds its selected generation's persisted bound.
+    #[error(
+        "startup generation {startup_sequence} connection-fate active count {actual} exceeds persisted bound {bound} at Open {open_sequence}"
+    )]
+    HistoricalConnectionFateBoundExceeded {
+        startup_sequence: u64,
+        bound: usize,
+        actual: usize,
+        open_sequence: u64,
+    },
+    /// Recovery tried to append a Complete for no replay-retained Open.
+    #[cfg(test)]
+    #[error("connection-fate recovery names absent Open {open_sequence}")]
+    RecoveryCompleteForAbsentOpen { open_sequence: u64 },
+    /// Startup recovery cannot finish while durable Opens remain unmatched.
+    #[cfg(test)]
+    #[error("connection-fate recovery still has {count} unmatched Opens")]
+    RecoveryIncomplete { count: usize },
     /// A startup event carried a body even though its canonical body is empty.
     #[error("incarnation startup event carried {actual} body bytes")]
     StartupBodyLength {
@@ -232,6 +291,10 @@ pub(in crate::server) enum IncarnationStreamError {
     #[cfg(test)]
     #[error("incarnation event history has no startup")]
     MissingStartup,
+    /// Test-only resume refuses to discard unmatched durable work.
+    #[cfg(test)]
+    #[error("incarnation event history retains {count} unmatched connection-fate Opens")]
+    UnmatchedConnectionFates { count: usize },
     /// The protocol crate rejected a restored allocator genesis or test seed.
     #[error("protocol rejected incarnation allocator header: {0:?}")]
     AllocatorRestore(ConnectionIncarnationAllocatorRestoreError),
@@ -257,6 +320,8 @@ impl From<DurableIncarnationReferencesError> for IncarnationStreamError {
 pub(in crate::server) enum IncarnationStartup {
     /// The startup input was appended and flushed before this allocator became usable.
     Started(StartedIncarnationStream),
+    /// Unmatched historical Opens must Complete before a new Startup can append.
+    RecoveryRequired(ConnectionFateRecovery),
     /// The protocol selected terminal server-incarnation exhaustion.
     Exhausted(ConnectionIncarnationExhausted),
 }
@@ -280,7 +345,7 @@ pub(in crate::server) enum IncarnationAllocation {
 pub(in crate::server) enum ConnectionFateClass {
     /// A protocol-level clean Disconnect.
     CleanDisconnect,
-    /// An orderly server ForceClose.
+    /// An orderly server `ForceClose`.
     ServerShutdown,
     /// EOF or transport loss without clean protocol evidence.
     ConnectionLost,
@@ -298,7 +363,7 @@ impl ConnectionFateClass {
         }
     }
 
-    fn from_tag(tag: u8) -> Result<Self, IncarnationStreamError> {
+    const fn from_tag(tag: u8) -> Result<Self, IncarnationStreamError> {
         match tag {
             1 => Ok(Self::CleanDisconnect),
             2 => Ok(Self::ServerShutdown),
@@ -306,6 +371,157 @@ impl ConnectionFateClass {
             4 => Ok(Self::ProtocolError),
             unknown => Err(IncarnationStreamError::ConnectionFateClass(unknown)),
         }
+    }
+}
+
+/// One replay-validated durable connection-fate work item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::server) struct ConnectionFateIntent {
+    pub(in crate::server) open_sequence: u64,
+    pub(in crate::server) allocation_sequence: u64,
+    pub(in crate::server) startup_sequence: u64,
+    pub(in crate::server) server_incarnation: u64,
+    pub(in crate::server) declared_reference_bound: usize,
+    pub(in crate::server) connection_incarnation: ConnectionIncarnation,
+    pub(in crate::server) class: ConnectionFateClass,
+    pub(in crate::server) declared_conversation_bound: usize,
+    pub(in crate::server) conversations: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct AllocationGeneration {
+    startup_sequence: u64,
+    server_incarnation: u64,
+    declared_reference_bound: Option<usize>,
+    active_allocations: BTreeMap<ConnectionIncarnation, u64>,
+}
+
+impl AllocationGeneration {
+    const fn new(startup_sequence: u64, server_incarnation: u64) -> Self {
+        Self {
+            startup_sequence,
+            server_incarnation,
+            declared_reference_bound: None,
+            active_allocations: BTreeMap::new(),
+        }
+    }
+
+    const fn establish_bound(
+        &mut self,
+        stored_sequence: u64,
+        declared_reference_bound: usize,
+    ) -> Result<(), IncarnationStreamError> {
+        if let Some(expected) = self.declared_reference_bound
+            && expected != declared_reference_bound
+        {
+            return Err(IncarnationStreamError::GenerationReferenceBoundConflict {
+                startup_sequence: self.startup_sequence,
+                expected,
+                actual: declared_reference_bound,
+                stored_sequence,
+            });
+        }
+        self.declared_reference_bound = Some(declared_reference_bound);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct UnmatchedConnectionFates {
+    generation_startup_sequence: Option<u64>,
+    by_sequence: BTreeMap<u64, ConnectionFateIntent>,
+}
+
+impl UnmatchedConnectionFates {
+    fn open(
+        &mut self,
+        open_sequence: u64,
+        generation: &AllocationGeneration,
+        connection_incarnation: ConnectionIncarnation,
+        class: ConnectionFateClass,
+        declared_conversation_bound: usize,
+        conversations: Vec<u64>,
+    ) -> Result<(), IncarnationStreamError> {
+        let Some(&allocation_sequence) = generation.active_allocations.get(&connection_incarnation)
+        else {
+            return Err(IncarnationStreamError::UnknownConnectionAllocation {
+                open_sequence,
+                connection_incarnation,
+            });
+        };
+        if let Some(expected_startup_sequence) = self.generation_startup_sequence
+            && expected_startup_sequence != generation.startup_sequence
+        {
+            return Err(IncarnationStreamError::CrossGenerationOpen {
+                open_sequence,
+                expected_startup_sequence,
+                actual_startup_sequence: generation.startup_sequence,
+            });
+        }
+        if let Some(existing) = self
+            .by_sequence
+            .values()
+            .find(|intent| intent.connection_incarnation == connection_incarnation)
+        {
+            return Err(IncarnationStreamError::DuplicateConnectionOpen {
+                open_sequence,
+                existing_open_sequence: existing.open_sequence,
+            });
+        }
+        let declared_reference_bound = generation.declared_reference_bound.ok_or(
+            IncarnationStreamError::UnknownConnectionAllocation {
+                open_sequence,
+                connection_incarnation,
+            },
+        )?;
+        let active_count = self
+            .by_sequence
+            .len()
+            .checked_add(1)
+            .ok_or(IncarnationStreamError::EventLengthOverflow)?;
+        if active_count > declared_reference_bound {
+            return Err(
+                IncarnationStreamError::HistoricalConnectionFateBoundExceeded {
+                    startup_sequence: generation.startup_sequence,
+                    bound: declared_reference_bound,
+                    actual: active_count,
+                    open_sequence,
+                },
+            );
+        }
+        self.generation_startup_sequence = Some(generation.startup_sequence);
+        self.by_sequence.insert(
+            open_sequence,
+            ConnectionFateIntent {
+                open_sequence,
+                allocation_sequence,
+                startup_sequence: generation.startup_sequence,
+                server_incarnation: generation.server_incarnation,
+                declared_reference_bound,
+                connection_incarnation,
+                class,
+                declared_conversation_bound,
+                conversations,
+            },
+        );
+        Ok(())
+    }
+
+    fn complete(
+        &mut self,
+        complete_sequence: u64,
+        open_sequence: u64,
+    ) -> Result<(), IncarnationStreamError> {
+        if self.by_sequence.remove(&open_sequence).is_none() {
+            return Err(IncarnationStreamError::CompleteForAbsentOpen {
+                complete_sequence,
+                open_sequence,
+            });
+        }
+        if self.by_sequence.is_empty() {
+            self.generation_startup_sequence = None;
+        }
+        Ok(())
     }
 }
 
@@ -391,17 +607,38 @@ impl IncarnationStream {
         self,
     ) -> Result<IncarnationStartup, IncarnationStreamError> {
         let replayed = self.replay().await?;
+        if !replayed.unmatched.by_sequence.is_empty() {
+            return Ok(IncarnationStartup::RecoveryRequired(
+                ConnectionFateRecovery {
+                    #[cfg(test)]
+                    store: self.store,
+                    #[cfg(test)]
+                    maximum_references: self.maximum_references,
+                    #[cfg(test)]
+                    allocator: replayed.allocator,
+                    #[cfg(test)]
+                    next_sequence: replayed.next_sequence,
+                    unmatched: replayed.unmatched,
+                },
+            ));
+        }
         let payload = encode_event(&IncarnationEvent::Startup)?;
+        let startup_sequence = replayed.next_sequence;
         match prepare_server_incarnation_startup(replayed.allocator) {
             ServerIncarnationStartupDecision::Fsync(intent) => {
                 let next_sequence =
-                    append_and_flush(&self.store, replayed.next_sequence, payload).await?;
+                    append_and_flush(&self.store, startup_sequence, payload).await?;
                 let completed = intent.complete_after_fsync();
+                let header = completed.as_restore();
                 Ok(IncarnationStartup::Started(StartedIncarnationStream {
                     store: self.store,
                     maximum_references: self.maximum_references,
-                    header: completed.as_restore(),
+                    header,
                     next_sequence,
+                    generation: AllocationGeneration::new(
+                        startup_sequence,
+                        header.server_incarnation,
+                    ),
                 }))
             }
             ServerIncarnationStartupDecision::Exhausted(exhausted) => {
@@ -411,8 +648,17 @@ impl IncarnationStream {
     }
 
     async fn replay(&self) -> Result<ReplayedIncarnationState, IncarnationStreamError> {
-        let (mut allocator, mut has_started) = self.initial_replay_state()?;
+        let (allocator, has_started) = self.initial_replay_state()?;
         let mut next_sequence = 0_u64;
+        let generation = has_started.then(|| {
+            AllocationGeneration::new(next_sequence, allocator.as_restore().server_incarnation)
+        });
+        let mut replay = ReplayAccumulator {
+            allocator,
+            generation,
+            unmatched: UnmatchedConnectionFates::default(),
+            has_started,
+        };
         loop {
             let entries = self
                 .store
@@ -429,65 +675,20 @@ impl IncarnationStream {
                     });
                 }
                 let event = decode_event(&entry.payload)?;
-                match event {
-                    IncarnationEvent::Startup => {
-                        allocator = match prepare_server_incarnation_startup(allocator) {
-                            ServerIncarnationStartupDecision::Fsync(intent) => {
-                                intent.complete_after_fsync()
-                            }
-                            ServerIncarnationStartupDecision::Exhausted(_) => {
-                                return Err(IncarnationStreamError::StartupAfterServerExhaustion {
-                                    stored_sequence: entry.sequence,
-                                });
-                            }
-                        };
-                        has_started = true;
-                    }
-                    IncarnationEvent::Allocate {
-                        declared_reference_bound,
-                        referenced_incarnations,
-                    } => {
-                        if !has_started {
-                            return Err(IncarnationStreamError::AllocateBeforeStartup {
-                                stored_sequence: entry.sequence,
-                            });
-                        }
-                        let references = DurableIncarnationReferences::try_new(
-                            &referenced_incarnations,
-                            declared_reference_bound,
-                        )?;
-                        allocator = match allocate_connection_incarnation(allocator, references) {
-                            ConnectionIncarnationAllocationDecision::Allocated(allocation) => {
-                                allocation.into_resulting()
-                            }
-                            ConnectionIncarnationAllocationDecision::Exhausted(exhaustion) => {
-                                if matches!(
-                                    &exhaustion,
-                                    ConnectionOrdinalExhaustion::AlreadyExhausted(_)
-                                ) {
-                                    return Err(
-                                        IncarnationStreamError::AllocateAfterOrdinalExhaustion {
-                                            stored_sequence: entry.sequence,
-                                        },
-                                    );
-                                }
-                                exhaustion.into_resulting()
-                            }
-                        };
-                    }
-                    IncarnationEvent::OpenConnectionFate { .. }
-                    | IncarnationEvent::CompleteConnectionFate { .. } => {}
-                }
+                replay = replay.apply(event, entry.sequence)?;
                 next_sequence = next_sequence
                     .checked_add(1)
                     .ok_or(IncarnationStreamError::StreamSequenceExhausted)?;
             }
         }
         Ok(ReplayedIncarnationState {
-            allocator,
+            allocator: replay.allocator,
             next_sequence,
             #[cfg(test)]
-            has_started,
+            generation: replay.generation,
+            unmatched: replay.unmatched,
+            #[cfg(test)]
+            has_started: replay.has_started,
         })
     }
 
@@ -519,12 +720,87 @@ impl IncarnationStream {
         if !replayed.has_started {
             return Err(IncarnationStreamError::MissingStartup);
         }
+        if !replayed.unmatched.by_sequence.is_empty() {
+            return Err(IncarnationStreamError::UnmatchedConnectionFates {
+                count: replayed.unmatched.by_sequence.len(),
+            });
+        }
+        let header = replayed.allocator.as_restore();
         Ok(StartedIncarnationStream {
             store: self.store,
             maximum_references: self.maximum_references,
-            header: replayed.allocator.as_restore(),
+            header,
             next_sequence: replayed.next_sequence,
+            generation: replayed
+                .generation
+                .unwrap_or_else(|| AllocationGeneration::new(0, header.server_incarnation)),
         })
+    }
+}
+
+/// Exclusive startup owner while historical Opens are completed under their persisted bound.
+#[derive(Debug)]
+pub struct ConnectionFateRecovery {
+    #[cfg(test)]
+    store: Arc<dyn DurableStore>,
+    #[cfg(test)]
+    maximum_references: usize,
+    #[cfg(test)]
+    allocator: ConnectionIncarnationAllocator,
+    #[cfg(test)]
+    next_sequence: u64,
+    unmatched: UnmatchedConnectionFates,
+}
+
+impl ConnectionFateRecovery {
+    #[must_use]
+    pub fn intents(&self) -> Vec<ConnectionFateIntent> {
+        self.unmatched.by_sequence.values().cloned().collect()
+    }
+
+    #[cfg(test)]
+    pub async fn complete(&mut self, open_sequence: u64) -> Result<(), IncarnationStreamError> {
+        if !self.unmatched.by_sequence.contains_key(&open_sequence) {
+            return Err(IncarnationStreamError::RecoveryCompleteForAbsentOpen { open_sequence });
+        }
+        let payload = encode_event(&IncarnationEvent::CompleteConnectionFate {
+            open_event_sequence: open_sequence,
+        })?;
+        let complete_sequence = self.next_sequence;
+        self.next_sequence = append_and_flush(&self.store, complete_sequence, payload).await?;
+        self.unmatched.complete(complete_sequence, open_sequence)?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub async fn finish_startup(self) -> Result<IncarnationStartup, IncarnationStreamError> {
+        if !self.unmatched.by_sequence.is_empty() {
+            return Err(IncarnationStreamError::RecoveryIncomplete {
+                count: self.unmatched.by_sequence.len(),
+            });
+        }
+        let startup_sequence = self.next_sequence;
+        let payload = encode_event(&IncarnationEvent::Startup)?;
+        match prepare_server_incarnation_startup(self.allocator) {
+            ServerIncarnationStartupDecision::Fsync(intent) => {
+                let next_sequence =
+                    append_and_flush(&self.store, startup_sequence, payload).await?;
+                let header = intent.complete_after_fsync().as_restore();
+                Ok(IncarnationStartup::Started(StartedIncarnationStream {
+                    store: self.store,
+                    maximum_references: self.maximum_references,
+                    header,
+                    next_sequence,
+                    generation: AllocationGeneration::new(
+                        startup_sequence,
+                        header.server_incarnation,
+                    ),
+                }))
+            }
+            ServerIncarnationStartupDecision::Exhausted(exhausted) => {
+                Ok(IncarnationStartup::Exhausted(exhausted.outcome()))
+            }
+        }
     }
 }
 
@@ -535,6 +811,7 @@ pub(in crate::server) struct StartedIncarnationStream {
     maximum_references: usize,
     header: ConnectionIncarnationAllocatorRestore,
     next_sequence: u64,
+    generation: AllocationGeneration,
 }
 
 impl StartedIncarnationStream {
@@ -561,6 +838,8 @@ impl StartedIncarnationStream {
         &mut self,
         referenced_incarnations: &[ConnectionIncarnation],
     ) -> Result<IncarnationAllocation, IncarnationStreamError> {
+        self.generation
+            .establish_bound(self.next_sequence, self.maximum_references)?;
         let references = DurableIncarnationReferences::try_new(
             referenced_incarnations,
             self.maximum_references,
@@ -579,6 +858,11 @@ impl StartedIncarnationStream {
                     append_and_flush(&self.store, self.next_sequence, payload).await?;
                 let resulting = allocation.into_resulting();
                 self.header = resulting.as_restore();
+                retain_active_allocations(
+                    &mut self.generation,
+                    referenced_incarnations,
+                    Some((connection_incarnation, self.next_sequence)),
+                );
                 self.next_sequence = next_sequence;
                 Ok(IncarnationAllocation::Allocated {
                     connection_incarnation,
@@ -596,6 +880,9 @@ impl StartedIncarnationStream {
                 };
                 let resulting = exhaustion.into_resulting();
                 self.header = resulting.as_restore();
+                if must_append {
+                    retain_active_allocations(&mut self.generation, referenced_incarnations, None);
+                }
                 self.next_sequence = next_sequence;
                 Ok(IncarnationAllocation::Exhausted(outcome))
             }
@@ -604,11 +891,172 @@ impl StartedIncarnationStream {
 }
 
 #[derive(Debug)]
+struct ReplayAccumulator {
+    allocator: ConnectionIncarnationAllocator,
+    generation: Option<AllocationGeneration>,
+    unmatched: UnmatchedConnectionFates,
+    has_started: bool,
+}
+
+impl ReplayAccumulator {
+    fn apply(
+        self,
+        event: IncarnationEvent,
+        stored_sequence: u64,
+    ) -> Result<Self, IncarnationStreamError> {
+        match event {
+            IncarnationEvent::Startup => self.apply_startup(stored_sequence),
+            IncarnationEvent::Allocate {
+                declared_reference_bound,
+                referenced_incarnations,
+            } => self.apply_allocate(
+                stored_sequence,
+                declared_reference_bound,
+                &referenced_incarnations,
+            ),
+            IncarnationEvent::OpenConnectionFate {
+                connection_incarnation,
+                class,
+                declared_conversation_bound,
+                conversations,
+            } => self.apply_open(
+                stored_sequence,
+                connection_incarnation,
+                class,
+                declared_conversation_bound,
+                conversations,
+            ),
+            IncarnationEvent::CompleteConnectionFate {
+                open_event_sequence,
+            } => self.apply_complete(stored_sequence, open_event_sequence),
+        }
+    }
+
+    fn apply_startup(mut self, stored_sequence: u64) -> Result<Self, IncarnationStreamError> {
+        self.allocator = match prepare_server_incarnation_startup(self.allocator) {
+            ServerIncarnationStartupDecision::Fsync(intent) => intent.complete_after_fsync(),
+            ServerIncarnationStartupDecision::Exhausted(_) => {
+                return Err(IncarnationStreamError::StartupAfterServerExhaustion {
+                    stored_sequence,
+                });
+            }
+        };
+        self.generation = Some(AllocationGeneration::new(
+            stored_sequence,
+            self.allocator.as_restore().server_incarnation,
+        ));
+        self.has_started = true;
+        Ok(self)
+    }
+
+    fn apply_allocate(
+        mut self,
+        stored_sequence: u64,
+        declared_reference_bound: usize,
+        referenced_incarnations: &[ConnectionIncarnation],
+    ) -> Result<Self, IncarnationStreamError> {
+        if !self.has_started {
+            return Err(IncarnationStreamError::AllocateBeforeStartup { stored_sequence });
+        }
+        let Some(generation) = self.generation.as_mut() else {
+            return Err(IncarnationStreamError::AllocateBeforeStartup { stored_sequence });
+        };
+        generation.establish_bound(stored_sequence, declared_reference_bound)?;
+        let references = DurableIncarnationReferences::try_new(
+            referenced_incarnations,
+            declared_reference_bound,
+        )?;
+        let (allocator, produced) =
+            match allocate_connection_incarnation(self.allocator, references) {
+                ConnectionIncarnationAllocationDecision::Allocated(allocation) => {
+                    let produced = allocation.connection_incarnation();
+                    (allocation.into_resulting(), Some(produced))
+                }
+                ConnectionIncarnationAllocationDecision::Exhausted(exhaustion) => {
+                    if matches!(
+                        &exhaustion,
+                        ConnectionOrdinalExhaustion::AlreadyExhausted(_)
+                    ) {
+                        return Err(IncarnationStreamError::AllocateAfterOrdinalExhaustion {
+                            stored_sequence,
+                        });
+                    }
+                    (exhaustion.into_resulting(), None)
+                }
+            };
+        self.allocator = allocator;
+        retain_active_allocations(
+            generation,
+            referenced_incarnations,
+            produced.map(|connection| (connection, stored_sequence)),
+        );
+        Ok(self)
+    }
+
+    fn apply_open(
+        mut self,
+        stored_sequence: u64,
+        connection_incarnation: ConnectionIncarnation,
+        class: ConnectionFateClass,
+        declared_conversation_bound: usize,
+        conversations: Vec<u64>,
+    ) -> Result<Self, IncarnationStreamError> {
+        let Some(generation) = self.generation.as_ref() else {
+            return Err(IncarnationStreamError::UnknownConnectionAllocation {
+                open_sequence: stored_sequence,
+                connection_incarnation,
+            });
+        };
+        self.unmatched.open(
+            stored_sequence,
+            generation,
+            connection_incarnation,
+            class,
+            declared_conversation_bound,
+            conversations,
+        )?;
+        Ok(self)
+    }
+
+    fn apply_complete(
+        mut self,
+        stored_sequence: u64,
+        open_event_sequence: u64,
+    ) -> Result<Self, IncarnationStreamError> {
+        self.unmatched
+            .complete(stored_sequence, open_event_sequence)?;
+        Ok(self)
+    }
+}
+
+#[derive(Debug)]
 struct ReplayedIncarnationState {
     allocator: ConnectionIncarnationAllocator,
     next_sequence: u64,
     #[cfg(test)]
+    generation: Option<AllocationGeneration>,
+    unmatched: UnmatchedConnectionFates,
+    #[cfg(test)]
     has_started: bool,
+}
+
+fn retain_active_allocations(
+    generation: &mut AllocationGeneration,
+    referenced_incarnations: &[ConnectionIncarnation],
+    produced: Option<(ConnectionIncarnation, u64)>,
+) {
+    let prior = core::mem::take(&mut generation.active_allocations);
+    generation.active_allocations = referenced_incarnations
+        .iter()
+        .filter_map(|incarnation| {
+            prior
+                .get(incarnation)
+                .map(|sequence| (*incarnation, *sequence))
+        })
+        .collect();
+    if let Some((incarnation, sequence)) = produced {
+        generation.active_allocations.insert(incarnation, sequence);
+    }
 }
 
 async fn append_and_flush(
