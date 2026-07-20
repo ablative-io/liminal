@@ -1,10 +1,11 @@
+use haematite::{ApiError, Database, DatabaseConfig, Event, EventStore};
+
 use std::path::Path;
 use std::sync::Arc;
 
-use haematite::{ApiError, Database, DatabaseConfig, Event, EventStore};
-use tempfile::TempDir;
-
 use super::DurabilityError;
+
+use tempfile::TempDir;
 
 /// Entry read from a durable haematite stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +36,19 @@ pub trait DurableStore: std::fmt::Debug + Send + Sync {
         offset: u64,
         limit: usize,
     ) -> Result<Vec<StoredEntry>, DurabilityError>;
+
+    /// Reads exactly the event at `sequence` without traversing its suffix.
+    async fn read_at(
+        &self,
+        stream_key: &str,
+        sequence: u64,
+    ) -> Result<Option<StoredEntry>, DurabilityError> {
+        Ok(self
+            .read_from(stream_key, sequence, 1)
+            .await?
+            .into_iter()
+            .next())
+    }
 
     /// Atomically replaces a stored numeric value if it equals `old_value`.
     ///
@@ -115,6 +129,52 @@ impl DurableStore for HaematiteStore {
             .map_err(DurabilityError::from)?;
         events.truncate(limit);
         Ok(events.into_iter().map(StoredEntry::from).collect())
+    }
+
+    async fn read_at(
+        &self,
+        stream_key: &str,
+        sequence: u64,
+    ) -> Result<Option<StoredEntry>, DurabilityError> {
+        const TIMESTAMP_WIDTH: usize = std::mem::size_of::<u64>();
+
+        let engine_sequence = sequence.checked_add(1).ok_or_else(|| {
+            DurabilityError::StoreError(ApiError::CorruptEvent(format!(
+                "point read sequence overflow for stream {stream_key}"
+            )))
+        })?;
+        let event_key = haematite::encode_stream_key(stream_key.as_bytes(), engine_sequence);
+        let Some(value) = self
+            .event_store
+            .database()
+            .get_routed(stream_key.as_bytes(), &event_key)
+            .map_err(ApiError::from)
+            .map_err(DurabilityError::from)?
+        else {
+            return Ok(None);
+        };
+        let Some(timestamp_bytes) = value.get(..TIMESTAMP_WIDTH) else {
+            return Err(DurabilityError::StoreError(ApiError::CorruptEvent(
+                format!(
+                    "point-read event value is shorter than its timestamp for stream {stream_key}"
+                ),
+            )));
+        };
+        let timestamp = u64::from_be_bytes(timestamp_bytes.try_into().map_err(|_| {
+            DurabilityError::StoreError(ApiError::CorruptEvent(format!(
+                "point-read event timestamp has the wrong width for stream {stream_key}"
+            )))
+        })?);
+        let Some(payload) = value.get(TIMESTAMP_WIDTH..) else {
+            return Err(DurabilityError::StoreError(ApiError::CorruptEvent(
+                format!("point-read event has no payload boundary for stream {stream_key}"),
+            )));
+        };
+        Ok(Some(StoredEntry {
+            payload: payload.to_vec(),
+            sequence,
+            timestamp,
+        }))
     }
 
     async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {

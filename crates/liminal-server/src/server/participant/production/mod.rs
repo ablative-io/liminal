@@ -27,6 +27,7 @@ mod log_error;
 mod log_v2;
 mod log_v3;
 mod marker_progress;
+pub mod marker_source;
 mod observer;
 mod observer_progress;
 mod observer_progress_plan;
