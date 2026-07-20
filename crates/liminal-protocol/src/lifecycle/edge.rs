@@ -581,6 +581,26 @@ pub struct DetachedCredentialRecovery {
 }
 
 impl DetachedCredentialRecovery {
+    /// Rebuilds the harmless, copyable recovery description after the storage
+    /// layer has validated its complete terminal and marker-progress audit.
+    ///
+    /// Marker-occurrence authority is deliberately not part of this value; the
+    /// move-only frontier owner must still consume its private validated record
+    /// before a fenced proof can be minted.
+    pub(super) const fn from_storage_description(
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        marker_delivery_seq: DeliverySeq,
+        prior_binding_epoch: BindingEpoch,
+    ) -> Self {
+        Self {
+            conversation_id,
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+        }
+    }
+
     /// Returns the conversation inherited from the marker-backed cursor witness.
     #[must_use]
     pub const fn conversation_id(self) -> ConversationId {

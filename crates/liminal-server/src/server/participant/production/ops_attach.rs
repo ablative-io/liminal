@@ -13,13 +13,16 @@
 //! owner on error and cold-replays durable reality on the next touch — the
 //! same crash-consistency model the aggregate barrier is built for.
 
+use std::sync::Arc;
+
+use liminal::durability::DurableStore;
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, AttachCommit, AttachCommitParameters, AttachFrontierCharges,
-    AttachSecretProof, AttachTransition, AttachedRecordPosition, BindingSlotDecision, BindingState,
-    ClosureState, CommittedBindingTerminalPosition, CredentialAttachLiveReceipt,
-    CredentialAttachLookupResult, LiveFrontierOwner, PresentedIdentity, RetainedRecordCharge,
-    SemanticConnectionCapacityDecision, apply_attach_frontier, commit_attach,
-    decide_attached_operation, lookup_credential_attach, select_credential_attach_binding_slot,
+    AttachTransition, AttachedRecordPosition, BindingSlotDecision, BindingState,
+    CredentialAttachLiveReceipt, CredentialAttachLookupResult, LiveFrontierOwner,
+    PresentedIdentity, RetainedRecordCharge, SemanticConnectionCapacityDecision,
+    apply_attach_frontier, commit_attach, decide_attached_operation, lookup_credential_attach,
+    select_credential_attach_binding_slot,
 };
 use liminal_protocol::wire::{
     AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, CredentialAttachRequest,
@@ -36,6 +39,7 @@ use super::log::{
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
+use super::ops_attach_verify::verify_attach_mode;
 use super::state::{
     AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend, StateError,
 };
@@ -51,6 +55,7 @@ impl ConversationAuthority {
         request: &CredentialAttachRequest,
         operation_facts: &OperationFacts,
         server_capacity: &ServerCapacity,
+        store: Arc<dyn DurableStore>,
         appender: &dyn DurableAppend,
     ) -> Result<ArmOutcome, StateError> {
         let envelope = attach_envelope(request);
@@ -154,6 +159,7 @@ impl ConversationAuthority {
             request,
             &allocation,
             &attach_mode,
+            store,
             CommitMode::Live(appender),
         )?;
         // The durable append succeeded: the stage-8 reservation becomes
@@ -205,12 +211,14 @@ impl ConversationAuthority {
         attach_mode: &StoredAttachModeV3,
         stored_event: &[u8],
         sequence: u64,
+        store: Arc<dyn DurableStore>,
     ) -> Result<(), StateError> {
         let request = request.to_request()?;
         self.attach_commit(
             &request,
             allocation,
             attach_mode,
+            store,
             CommitMode::Replay {
                 stored_event,
                 sequence,
@@ -232,6 +240,7 @@ impl ConversationAuthority {
         request: &CredentialAttachRequest,
         allocation: &StoredAttachAllocation,
         attach_mode: &StoredAttachModeV3,
+        store: Arc<dyn DurableStore>,
         mode: CommitMode<'_>,
     ) -> Result<AttachBound, StateError> {
         let source_sequence = self.next_log_sequence;
@@ -257,14 +266,23 @@ impl ConversationAuthority {
             receipt_expires_at: allocation.receipt_expires_at.get(),
             provenance_expires_at: allocation.provenance_expires_at.get(),
         };
-        let verified =
-            verify_attach_mode(slot.member, slot.binding, request, attach_mode, parameters)?;
+        let frontier_owner = self.take_frontier()?;
+        let (verified, frontier_owner) = verify_attach_mode(
+            slot.member,
+            slot.binding,
+            request,
+            attach_mode,
+            parameters,
+            frontier_owner,
+            store,
+            source_sequence,
+        )?;
         let committed = commit_attach(verified, slot.cell).map_err(|error| {
             StateError::invariant(format!("protocol attach transition failed: {error:?}"))
         })?;
         let observer_projection = committed.observer_progress_projection();
         let (committed, frontier_owner) =
-            transition_attach_frontier(self.take_frontier()?, committed, request, allocation)?;
+            transition_attach_frontier(frontier_owner, committed, request, allocation)?;
         let shell = self.take_shell()?;
         let barrier = match decide_attached_operation(shell, committed) {
             AggregateOperationDecision::Commit(barrier) => barrier,
@@ -425,66 +443,4 @@ pub(super) const fn attach_envelope(request: &CredentialAttachRequest) -> Attach
         attach_attempt_token: request.attach_attempt_token,
         accept_marker_delivery_seq: request.accept_marker_delivery_seq,
     }
-}
-
-/// Verifies one attach transition in its allocation-derived mode.
-///
-/// A detached slot with no terminal allocation binds ordinarily; a bound
-/// slot with a terminal allocation supersedes its active epoch (contract
-/// R-C1.3's ordered handoff). Any other pairing is a drifted log and fails
-/// loudly.
-fn verify_attach_mode(
-    member: liminal_protocol::lifecycle::LiveMember<Digest>,
-    binding: BindingState,
-    request: &CredentialAttachRequest,
-    attach_mode: &StoredAttachModeV3,
-    parameters: AttachCommitParameters,
-) -> Result<liminal_protocol::lifecycle::VerifiedAttachCommit<Digest>, StateError> {
-    match (binding, attach_mode) {
-        (BindingState::Detached, StoredAttachModeV3::Ordinary) => {
-            let closure_admission = ClosureState::Clear
-                .ordinary_detached_attach_admission()
-                .map_err(|error| {
-                    StateError::invariant(format!(
-                        "clear closure refused detached attach admission: {error:?}"
-                    ))
-                })?;
-            member.verify_detached_attach(
-                BindingState::Detached,
-                closure_admission,
-                request.clone(),
-                AttachSecretProof::Verified,
-                parameters,
-            )
-        }
-        (
-            BindingState::Bound(active),
-            StoredAttachModeV3::Superseding {
-                prior_binding_epoch,
-                terminal_transaction_order,
-                terminal_delivery_seq,
-            },
-        ) if active.binding_epoch == prior_binding_epoch.to_epoch()?
-            && *terminal_transaction_order == parameters.attached_position.transaction_order() =>
-        {
-            member.verify_superseding_attach(
-                active,
-                request.clone(),
-                AttachSecretProof::Verified,
-                CommittedBindingTerminalPosition::new(
-                    *terminal_transaction_order,
-                    *terminal_delivery_seq,
-                ),
-                parameters,
-            )
-        }
-        (_, _) => {
-            return Err(StateError::invariant(
-                "attach allocation mode does not match the slot's binding authority",
-            ));
-        }
-    }
-    .map_err(|error| {
-        StateError::invariant(format!("protocol attach verification failed: {error:?}"))
-    })
 }

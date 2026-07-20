@@ -114,6 +114,12 @@ impl OperationLog {
         }
     }
 
+    /// Clones the shared store handle for bounded point-read associations that
+    /// are part of replaying one decoded operation.
+    pub(super) fn store(&self) -> Arc<dyn DurableStore> {
+        Arc::clone(&self.store)
+    }
+
     /// Reads and decodes exactly one durable operation by physical sequence.
     pub(super) async fn read_at(
         &self,
