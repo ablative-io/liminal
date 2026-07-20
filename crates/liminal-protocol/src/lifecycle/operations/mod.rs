@@ -1,4 +1,5 @@
 mod binding_fate;
+mod binding_terminal;
 mod enrollment_operation;
 mod live_frontier;
 mod marker_ack;
@@ -33,6 +34,11 @@ mod record_admission_tests;
 pub use binding_fate::{
     BindingFateMeasurementError, BindingFateMeasurementRefused, BindingFateTerminal,
     MeasuredBindingFate, PreparedBindingFate,
+};
+pub use binding_terminal::{
+    BindingTerminalCandidateCharge, BindingTerminalCauseClass, BindingTerminalEncoding,
+    BindingTerminalPrepareError, BindingTerminalPrepareRefused, CandidateTerminalKey,
+    PreparedBindingTerminal,
 };
 pub use enrollment_operation::{
     InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,
