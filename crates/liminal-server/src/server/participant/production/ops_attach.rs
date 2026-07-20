@@ -102,10 +102,13 @@ impl ConversationAuthority {
         ) {
             return Ok(ArmOutcome::respond(response.into_server_value()));
         }
-        // A marker-bearing attach is a fenced-recovery presentation: classify
-        // it through the crate's total marker-proof selector against the
-        // factual (empty) delivery state — a typed refusal, never a
-        // connection-fatal invariant.
+        // Decision D §5.3 permits the fenced mint only after an exact durable
+        // source row and the owner-held `ValidatedMarkerRecord` have both been
+        // validated; it expressly forbids a raw replacement from the request.
+        // This live binding has no participant-record delivery pump yet, so its
+        // factual delivery/source state is empty. Preserve that authority
+        // boundary by returning the total selector's typed refusal until the
+        // later delivery owner can supply those facts.
         if request.accept_marker_delivery_seq.is_some() {
             return marker_bearing_attach_refusal(request, slot, operation_facts)
                 .map(ArmOutcome::respond);
