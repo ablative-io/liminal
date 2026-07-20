@@ -101,6 +101,15 @@ impl ParticipantSemanticHandler for ReplayGatedHandler {
             .repair_unclean_server_restart(current_server_incarnation)
     }
 
+    fn connection_has_bound_participant(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        conversations: &[ConversationId],
+    ) -> Result<bool, ParticipantSemanticError> {
+        self.inner
+            .connection_has_bound_participant(connection_incarnation, conversations)
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         self.inner.publication_conversation_limit()
     }

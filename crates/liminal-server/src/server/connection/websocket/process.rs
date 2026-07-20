@@ -381,7 +381,11 @@ impl WebSocketConnectionProcess {
             Message::Text(_) => {
                 let violation = WsInboundViolation::TextMessage;
                 tracing::warn!(connection_pid = pid, %violation, "websocket contract violation");
-                if self.state.participant_conversations.occupied() > 0 {
+                let bound = match self.bound_protocol_refusal() {
+                    Ok(bound) => bound,
+                    Err(error) => return Some(self.fail_fate(pid, &error)),
+                };
+                if bound {
                     return Some(self.finish_fate_close(pid, ConnectionFateClass::ProtocolError));
                 }
                 self.close_transport_abnormal();
@@ -411,7 +415,11 @@ impl WebSocketConnectionProcess {
                     connection_pid = pid,
                     "unexpected raw websocket frame surfaced by the transport library"
                 );
-                if self.state.participant_conversations.occupied() > 0 {
+                let bound = match self.bound_protocol_refusal() {
+                    Ok(bound) => bound,
+                    Err(error) => return Some(self.fail_fate(pid, &error)),
+                };
+                if bound {
                     return Some(self.finish_fate_close(pid, ConnectionFateClass::ProtocolError));
                 }
                 self.close_transport_abnormal();
@@ -449,7 +457,12 @@ impl WebSocketConnectionProcess {
         }
         let frame = match decode_ws_binary(bytes) {
             Ok(frame) => frame,
-            Err(violation) if self.state.participant_conversations.occupied() > 0 => {
+            Err(violation)
+                if self.runtime.connection_has_bound_participant(
+                    self.state.connection_incarnation,
+                    &self.state.participant_conversations.tracked_conversations(),
+                )? =>
+            {
                 tracing::warn!(connection_pid = pid, %violation, "bound websocket protocol refusal");
                 return Ok(ProcessStatus::CloseWithFate(
                     ConnectionFateClass::ProtocolError,
@@ -497,6 +510,12 @@ impl WebSocketConnectionProcess {
             FrameAction::Close => Ok(ProcessStatus::Close),
             FrameAction::CloseWithFate(class) => Ok(ProcessStatus::CloseWithFate(class)),
         }
+    }
+
+    fn bound_protocol_refusal(&self) -> Result<bool, ServerError> {
+        let conversations = self.state.participant_conversations.tracked_conversations();
+        self.runtime
+            .connection_has_bound_participant(self.state.connection_incarnation, &conversations)
     }
 
     fn complete_connection_fate(&self, class: ConnectionFateClass) -> Result<(), ServerError> {

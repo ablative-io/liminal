@@ -922,7 +922,11 @@ fn process_buffer(
                 return Ok(ProcessStatus::Continue);
             }
             Err(error) => {
-                if state.participant_conversations.occupied() > 0 {
+                let conversations = state.participant_conversations.tracked_conversations();
+                if runtime.connection_has_bound_participant(
+                    state.connection_incarnation,
+                    &conversations,
+                )? {
                     tracing::warn!(connection_pid = pid, %error, "bound connection protocol refusal");
                     return Ok(ProcessStatus::CloseWithFate(
                         ConnectionFateClass::ProtocolError,
