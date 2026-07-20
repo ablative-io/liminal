@@ -131,6 +131,8 @@ mod tests_w1b_fenced_codec;
 #[cfg(test)]
 mod tests_w1b_marker_source;
 #[cfg(test)]
+mod tests_w1b_projection;
+#[cfg(test)]
 mod tests_w1b_substrate;
 #[cfg(test)]
 mod tests_w3_restore;
