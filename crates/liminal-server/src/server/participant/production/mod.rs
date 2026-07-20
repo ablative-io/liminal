@@ -131,6 +131,8 @@ mod tests_w1b_fenced_codec;
 #[cfg(test)]
 mod tests_w1b_marker_source;
 #[cfg(test)]
+mod tests_w1b_oracle26;
+#[cfg(test)]
 mod tests_w1b_projection;
 #[cfg(test)]
 mod tests_w1b_substrate;

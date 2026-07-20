@@ -23,6 +23,20 @@ use super::state::StateError;
 /// mode resolves and validates one exact durable marker source, consumes its
 /// owner-held marker authority into one proof, and passes that proof by value
 /// into protocol verification.
+pub(super) fn mint_associated_fenced_attach(
+    owner: LiveFrontierOwner,
+    marker_source_sequence: u64,
+    inputs: super::fenced_attach_codec::FencedAttachMintInputs,
+) -> MintFencedAttachResult {
+    owner.mint_fenced_attach(
+        marker_source_sequence,
+        inputs.recovery,
+        inputs.predecessor_debt,
+        inputs.event,
+        inputs.successor,
+    )
+}
+
 pub(super) fn verify_attach_mode(
     member: liminal_protocol::lifecycle::LiveMember<Digest>,
     binding: BindingState,
@@ -128,12 +142,14 @@ pub(super) fn verify_attach_mode(
                 ))
             })?;
             let (frontier_owner, recovery, associated_sequence) = associated.into_parts();
-            let minted = match frontier_owner.mint_fenced_attach(
-                associated_sequence,
+            let mint_inputs = super::fenced_attach_codec::FencedAttachMintInputs {
                 recovery,
-                mint_inputs.predecessor_debt,
-                mint_inputs.event,
-                mint_inputs.successor,
+                ..mint_inputs
+            };
+            let minted = match mint_associated_fenced_attach(
+                frontier_owner,
+                associated_sequence,
+                mint_inputs,
             ) {
                 MintFencedAttachResult::Minted(minted) => minted,
                 MintFencedAttachResult::MintRefused(refused) => {
