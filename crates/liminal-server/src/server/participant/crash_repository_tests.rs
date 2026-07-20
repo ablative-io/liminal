@@ -88,7 +88,6 @@ fn create_store(
     let database = Database::create(DatabaseConfig {
         data_dir: data_dir.to_path_buf(),
         shard_count: 2,
-        sweep_interval: None,
         distributed: None,
     })?;
     Ok(Arc::new(HaematiteStore::new(Arc::new(EventStore::new(

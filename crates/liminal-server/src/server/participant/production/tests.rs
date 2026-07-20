@@ -68,7 +68,6 @@ pub(super) fn open_disk_store_for_tests(
         Database::create(DatabaseConfig {
             data_dir: data_dir.to_path_buf(),
             shard_count: 2,
-            sweep_interval: None,
             distributed: None,
         })?
     };

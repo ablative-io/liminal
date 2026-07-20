@@ -402,7 +402,6 @@ fn open_ephemeral_in(
     let database = Database::create(DatabaseConfig {
         data_dir: ephemeral_dir.path().to_path_buf(),
         shard_count,
-        sweep_interval: None,
         distributed: None,
     })
     .map_err(|error| DurabilityError::EphemeralStoreOpen(error.to_string()))?;

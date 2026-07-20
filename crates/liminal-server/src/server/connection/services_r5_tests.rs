@@ -21,7 +21,6 @@ fn disk_store() -> Result<(Arc<dyn DurableStore>, TempDir), Box<dyn std::error::
     let database = Database::create(DatabaseConfig {
         data_dir: dir.path().join("db"),
         shard_count: 4,
-        sweep_interval: None,
         distributed: None,
     })?;
     let store: Arc<dyn DurableStore> =

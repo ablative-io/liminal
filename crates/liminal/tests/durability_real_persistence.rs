@@ -35,7 +35,6 @@ fn open_store(data_dir: &std::path::Path) -> Result<HaematiteStore, Box<dyn std:
         Database::create(DatabaseConfig {
             data_dir: data_dir.to_path_buf(),
             shard_count: SHARD_COUNT,
-            sweep_interval: None,
             distributed: None,
         })?
     };
