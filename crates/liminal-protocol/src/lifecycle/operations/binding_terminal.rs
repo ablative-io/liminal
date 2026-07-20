@@ -6,7 +6,8 @@ use crate::{
     wire::{BindingEpoch, ConversationId, DeliverySeq, ParticipantId, TransactionOrder},
 };
 
-use super::{LiveFrontierOwner, RetainedRecordCharge};
+use super::{LiveFrontierError, LiveFrontierOwner, RetainedRecordCharge};
+use crate::lifecycle::{CommittedBindingTerminalPosition, PendingBindingTerminalPosition};
 
 /// Canonical durability encoding required for one binding-terminal candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,10 +168,177 @@ impl PreparedBindingTerminal {
         self.hard_observer_progress
     }
 
+    /// Admits only the exact keyed v3 charge produced for this candidate.
+    #[must_use]
+    pub fn admit(self, candidate: BindingTerminalCandidateCharge) -> BindingTerminalAdmission {
+        if candidate.conversation_id != self.key.conversation_id()
+            || candidate.participant_id != self.key.participant_id()
+            || candidate.binding_epoch != self.key.binding_epoch()
+            || candidate.admission_order != self.key.admission_order()
+            || candidate.delivery_seq != self.key.delivery_seq()
+            || candidate.encoding != BindingTerminalEncoding::ParticipantLifecycleV3CanonicalJson
+            || candidate.charge.delivery_seq() != self.key.delivery_seq()
+            || candidate.charge.admission_order() != self.key.admission_order()
+            || candidate.charge.encoded_charge().entries != 1
+        {
+            return admit_refusal(self.owner, BindingTerminalAdmitError::CandidateCharge);
+        }
+
+        let retained_len = u64::try_from(self.owner.retained_charges().len());
+        let has_capacity = retained_len
+            .ok()
+            .and_then(|len| len.checked_add(1))
+            .is_some_and(|len| len <= self.owner.retained_record_limit());
+        if has_capacity {
+            return match self.owner.commit_binding_terminal_candidate(
+                self.key.active_binding,
+                self.key.admission_order,
+                self.key.delivery_seq,
+                candidate.charge,
+            ) {
+                Ok(owner) => BindingTerminalAdmission::Commit(BindingTerminalCommit {
+                    owner,
+                    position: CommittedBindingTerminalPosition::new(
+                        self.key.admission_order.transaction_order(),
+                        self.key.delivery_seq,
+                    ),
+                }),
+                Err(failure) => {
+                    let (owner, error) = *failure;
+                    admit_refusal(owner, map_live_frontier_error(error))
+                }
+            };
+        }
+        if self.hard_observer_progress < self.key.delivery_seq {
+            return match self.owner.pend_binding_terminal_candidate(
+                self.key.active_binding,
+                self.key.admission_order,
+                self.key.delivery_seq,
+            ) {
+                Ok(owner) => BindingTerminalAdmission::Pending(BindingTerminalPending {
+                    owner,
+                    position: PendingBindingTerminalPosition::new(
+                        self.key.admission_order.transaction_order(),
+                    ),
+                    blocked_at_observer: self.hard_observer_progress,
+                }),
+                Err(failure) => {
+                    let (owner, error) = *failure;
+                    admit_refusal(owner, map_live_frontier_error(error))
+                }
+            };
+        }
+        admit_refusal(self.owner, BindingTerminalAdmitError::RetainedRecordLimit)
+    }
+
     /// Recovers the unchanged owner when canonical encoding cannot produce a charge.
     #[must_use]
     pub fn into_owner(self) -> LiveFrontierOwner {
         self.owner
+    }
+}
+
+/// Successful committed terminal admission.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BindingTerminalCommit {
+    owner: LiveFrontierOwner,
+    position: CommittedBindingTerminalPosition,
+}
+
+impl BindingTerminalCommit {
+    /// Consumes the admission into its transitioned owner and committed position.
+    #[must_use]
+    pub fn into_parts(self) -> (LiveFrontierOwner, CommittedBindingTerminalPosition) {
+        (self.owner, self.position)
+    }
+}
+
+/// Successful observer-blocked pending terminal admission.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BindingTerminalPending {
+    owner: LiveFrontierOwner,
+    position: PendingBindingTerminalPosition,
+    blocked_at_observer: DeliverySeq,
+}
+
+impl BindingTerminalPending {
+    /// Returns the exact hard-observer baseline persisted with the pending source.
+    #[must_use]
+    pub const fn blocked_at_observer(&self) -> DeliverySeq {
+        self.blocked_at_observer
+    }
+
+    /// Consumes the admission into its transitioned owner and pending position.
+    #[must_use]
+    pub fn into_parts(self) -> (LiveFrontierOwner, PendingBindingTerminalPosition) {
+        (self.owner, self.position)
+    }
+}
+
+/// Typed reason the keyed candidate could not be admitted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingTerminalAdmitError {
+    /// Candidate identity, encoding, charge key, or entry count disagrees.
+    CandidateCharge,
+    /// The retained causal-row cap could not admit this candidate.
+    RetainedRecordLimit,
+    /// The selected binding no longer belongs to the coupled owner.
+    Authority,
+    /// An earlier immutable or recovery transition has precedence.
+    Precedence,
+    /// Claim arithmetic or exact owner reconstruction failed.
+    Frontier,
+    /// Resulting closure accounting exceeded its signed capacity.
+    ClosureAccounting,
+}
+
+/// Admit refusal preserving the unchanged coupled owner.
+#[derive(Debug, PartialEq, Eq)]
+pub struct BindingTerminalAdmitRefused {
+    owner: LiveFrontierOwner,
+    error: BindingTerminalAdmitError,
+}
+
+impl BindingTerminalAdmitRefused {
+    /// Returns the typed refusal reason.
+    #[must_use]
+    pub const fn error(&self) -> BindingTerminalAdmitError {
+        self.error
+    }
+
+    /// Recovers the unchanged owner.
+    #[must_use]
+    pub fn into_owner(self) -> LiveFrontierOwner {
+        self.owner
+    }
+}
+
+/// Exhaustive terminal-admission result.
+#[derive(Debug, PartialEq, Eq)]
+pub enum BindingTerminalAdmission {
+    /// The exact candidate committed and transformed the complete owner.
+    Commit(BindingTerminalCommit),
+    /// Observer progress blocked the candidate after consuming only its order.
+    Pending(BindingTerminalPending),
+    /// Candidate validation or a protocol invariant refused unchanged.
+    Refused(Box<BindingTerminalAdmitRefused>),
+}
+
+fn admit_refusal(
+    owner: LiveFrontierOwner,
+    error: BindingTerminalAdmitError,
+) -> BindingTerminalAdmission {
+    BindingTerminalAdmission::Refused(Box::new(BindingTerminalAdmitRefused { owner, error }))
+}
+
+const fn map_live_frontier_error(error: LiveFrontierError) -> BindingTerminalAdmitError {
+    match error {
+        LiveFrontierError::Authority => BindingTerminalAdmitError::Authority,
+        LiveFrontierError::Precedence => BindingTerminalAdmitError::Precedence,
+        LiveFrontierError::RetainedCharge => BindingTerminalAdmitError::CandidateCharge,
+        LiveFrontierError::RetainedRecordLimit => BindingTerminalAdmitError::RetainedRecordLimit,
+        LiveFrontierError::Frontier => BindingTerminalAdmitError::Frontier,
+        LiveFrontierError::ClosureAccounting => BindingTerminalAdmitError::ClosureAccounting,
     }
 }
 

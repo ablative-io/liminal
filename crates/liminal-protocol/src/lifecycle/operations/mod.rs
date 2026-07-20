@@ -13,6 +13,8 @@ mod record_admission;
 #[cfg(test)]
 mod binding_fate_tests;
 #[cfg(test)]
+mod binding_terminal_tests;
+#[cfg(test)]
 mod enrollment_operation_tests;
 #[cfg(test)]
 mod marker_ack_tests;
@@ -36,9 +38,10 @@ pub use binding_fate::{
     MeasuredBindingFate, PreparedBindingFate,
 };
 pub use binding_terminal::{
-    BindingTerminalCandidateCharge, BindingTerminalCauseClass, BindingTerminalEncoding,
-    BindingTerminalPrepareError, BindingTerminalPrepareRefused, CandidateTerminalKey,
-    PreparedBindingTerminal,
+    BindingTerminalAdmission, BindingTerminalAdmitError, BindingTerminalAdmitRefused,
+    BindingTerminalCandidateCharge, BindingTerminalCauseClass, BindingTerminalCommit,
+    BindingTerminalEncoding, BindingTerminalPending, BindingTerminalPrepareError,
+    BindingTerminalPrepareRefused, CandidateTerminalKey, PreparedBindingTerminal,
 };
 pub use enrollment_operation::{
     InitialEnrollmentCommitValues, InitialEnrollmentOperationCommit,

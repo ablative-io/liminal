@@ -44,6 +44,24 @@ fn frontier_owner(
     cursor: DeliverySeq,
     high_watermark: DeliverySeq,
 ) -> Result<LiveFrontierOwner, String> {
+    frontier_owner_with_limit(
+        conversation_id,
+        participant_id,
+        binding_epoch,
+        cursor,
+        high_watermark,
+        0,
+    )
+}
+
+pub(super) fn frontier_owner_with_limit(
+    conversation_id: u64,
+    participant_id: u64,
+    binding_epoch: BindingEpoch,
+    cursor: DeliverySeq,
+    high_watermark: DeliverySeq,
+    retained_record_limit: u64,
+) -> Result<LiveFrontierOwner, String> {
     let terminal = BindingTerminalOwner {
         participant_index: participant_id,
         binding_epoch,
@@ -135,7 +153,7 @@ fn frontier_owner(
         frontiers,
         clear_accounting()?,
         vec![],
-        0,
+        retained_record_limit,
     ))
 }
 
@@ -155,7 +173,8 @@ fn clear_accounting() -> Result<ClosureAccounting, String> {
     .map_err(|error| format!("fate accounting refused: {error:?}"))
 }
 
-fn ordinary_token() -> Result<(SealedBindingFateToken, ActiveBinding, DeliverySeq), String> {
+pub(super) fn ordinary_token()
+-> Result<(SealedBindingFateToken, ActiveBinding, DeliverySeq), String> {
     let commit = super::super::operation_event_tests::superseding_attach_commit();
     let binding_state = commit.binding_state;
     let cursor = commit.member.cursor();
