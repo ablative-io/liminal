@@ -1,0 +1,17 @@
+error[E0382]: use of moved value: `record`
+  --> tests/trybuild/validated_marker_record_cannot_feed_two_recoveries.rs:13:14
+   |
+11 |     with_validated_marker_record_type(|record| {
+   |                                        ------ move occurs because `record` has type `lifecycle::claim_frontier::ValidatedMarkerRecord`, which does not implement the `Copy` trait
+12 |         feed(record, recovery);
+   |              ------ value moved here
+13 |         feed(record, copied_recovery);
+   |              ^^^^^^ value used here after move
+   |
+note: consider changing this parameter type in function `feed` to borrow instead if owning the value isn't necessary
+  --> tests/trybuild/validated_marker_record_cannot_feed_two_recoveries.rs:5:20
+   |
+ 5 | fn feed<T>(record: T, recovery: DetachedCredentialRecovery) {
+   |    ----            ^ this parameter takes ownership of the value
+   |    |
+   |    in this function

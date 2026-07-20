@@ -120,7 +120,7 @@ pub use claim_frontier::{
     ReplacementTerminalProductRangeRestore, RetainedCausalRecord, RetainedCausalRecordKind,
     SequenceClaimFrontier, SequenceClaimFrontierRestore, SequenceDirectOwner, SequenceProductClass,
     SequenceProductRanges, SequenceProductRangesRestore, TerminalProductRange,
-    TerminalProductRangeRestore, TerminalProductSource,
+    TerminalProductRangeRestore, TerminalProductSource, with_validated_marker_record_type,
 };
 pub use closure_accounting::{
     ClosureAccounting, ClosureAccountingError, RecoveryFenceDecision, RecoveryFencePermit,

@@ -1545,6 +1545,19 @@ enum MarkerAuthoritySeal {
     Validated,
 }
 
+/// Supplies the private record type to a compile-time closure without ever
+/// constructing or exposing record authority at runtime.
+///
+/// This narrow type probe lets downstream workspace UI tests verify move-only
+/// behavior while the record itself remains absent from lifecycle re-exports.
+#[doc(hidden)]
+pub fn with_validated_marker_record_type<F>(probe: F)
+where
+    F: FnOnce(ValidatedMarkerRecord),
+{
+    drop(probe);
+}
+
 impl ValidatedMarkerRecord {
     /// Consumes the one-shot retained-record token after a restore attempt.
     pub(super) const fn consume(self) {
