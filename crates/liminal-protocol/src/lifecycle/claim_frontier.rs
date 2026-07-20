@@ -1354,6 +1354,7 @@ pub struct ClaimFrontiers {
     retained_floor: u128,
     retained_records: Vec<RetainedCausalRecord>,
     marker_records: Vec<RetainedCausalRecord>,
+    fenced_marker_issued: Option<(ParticipantId, DeliverySeq, BindingEpoch)>,
     sequence: SequenceClaimFrontier,
     order: OrderClaimFrontier,
 }
@@ -1894,6 +1895,7 @@ fn build_initial_enrollment_frontiers(
             },
         }],
         marker_records: Vec::new(),
+        fenced_marker_issued: None,
         sequence,
         order,
     })
@@ -2230,6 +2232,65 @@ impl ClaimFrontiers {
             .ok()
     }
 
+    /// Removes the sole retained-marker occurrence authority for one fenced
+    /// attach proof mint.
+    ///
+    /// The frontiers have already passed complete numeric, causal, participant,
+    /// and retained-row validation. This final gate binds that validation to the
+    /// exact detached recovery description and records issuance before returning
+    /// the non-cloneable token. A second take is refused until the exact token is
+    /// reinstalled after a failed private mint.
+    pub(in crate::lifecycle) fn take_fenced_marker_record(
+        &mut self,
+        recovery: super::DetachedCredentialRecovery,
+    ) -> Option<ValidatedMarkerRecord> {
+        if self.fenced_marker_issued.is_some() || recovery.conversation_id() != self.conversation_id
+        {
+            return None;
+        }
+        let marker_delivery_seq = recovery.marker_delivery_seq();
+        let participant_id = recovery.participant_id();
+        let prior_binding_epoch = recovery.prior_binding_epoch();
+        let record = self
+            .marker_records
+            .iter()
+            .find(|record| record.delivery_seq == marker_delivery_seq)
+            .copied()?;
+        let RetainedCausalRecordKind::CompactionMarker {
+            participant_index,
+            provenance,
+        } = record.kind
+        else {
+            return None;
+        };
+        let participant = active_participant(&self.active_identities, participant_id)?;
+        if participant_index != participant_id
+            || participant.binding != FrontierBinding::Detached(prior_binding_epoch)
+        {
+            return None;
+        }
+        self.fenced_marker_issued =
+            Some((participant_id, marker_delivery_seq, prior_binding_epoch));
+        Some(ValidatedMarkerRecord {
+            conversation_id: self.conversation_id,
+            record,
+            provenance,
+            target_binding: FrontierBinding::Detached(prior_binding_epoch),
+            occurrence: MarkerRecordOccurrence::Delivered,
+            seal: MarkerAuthoritySeal::Validated,
+        })
+    }
+
+    /// Reinstalls the exact occurrence authority after the private proof mint
+    /// refused without producing a proof.
+    pub(in crate::lifecycle) fn reinstall_fenced_marker_record(
+        &mut self,
+        record: ValidatedMarkerRecord,
+    ) {
+        self.fenced_marker_issued = None;
+        record.consume();
+    }
+
     /// Borrows the validated sequence frontier.
     #[must_use]
     pub const fn sequence(&self) -> &SequenceClaimFrontier {
@@ -2301,6 +2362,7 @@ impl ClaimFrontiers {
             retained_floor,
             mut retained_records,
             marker_records,
+            fenced_marker_issued,
             ..
         } = self;
         retained_records.extend_from_slice(appended_records);
@@ -2311,6 +2373,7 @@ impl ClaimFrontiers {
             retained_floor,
             retained_records,
             marker_records,
+            fenced_marker_issued,
             sequence,
             order,
         })
@@ -4007,6 +4070,7 @@ impl ClaimFrontiersPrevalidated {
             retained_floor: self.retained_floor,
             retained_records: self.retained_records,
             marker_records: self.marker_records,
+            fenced_marker_issued: None,
             sequence,
             order,
         })

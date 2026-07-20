@@ -2695,6 +2695,19 @@ impl ParticipantCursorProgress {
     }
 }
 
+/// Crate-private failed proof mint carrying the same one-use marker record back
+/// to its move-owned frontier.
+pub(super) struct FencedAttachRecordRefusal {
+    record: ValidatedMarkerRecord,
+}
+
+impl FencedAttachRecordRefusal {
+    /// Returns the exact record authority for serial reinstall and retry.
+    pub(super) fn into_record(self) -> ValidatedMarkerRecord {
+        self.record
+    }
+}
+
 impl DetachedCredentialRecovery {
     /// Validates exact-current K and exit claims for detached Leave.
     #[must_use]
@@ -2716,6 +2729,59 @@ impl DetachedCredentialRecovery {
             remaining_k,
             exit_claims,
         )
+    }
+
+    /// Consumes the sole fully validated marker occurrence and mints one fenced
+    /// attach proof.
+    ///
+    /// This is deliberately visible only inside the lifecycle module. Public
+    /// descriptive recovery values cannot invoke it without the private,
+    /// non-cloneable record removed from a move-owned frontier.
+    pub(super) fn fenced_attach_with_record(
+        self,
+        record_authority: ValidatedMarkerRecord,
+        debt: ClosureDebt,
+        event: Event,
+        successor: DebtCompletion,
+    ) -> Result<FencedAttachCommit, FencedAttachRecordRefusal> {
+        let refuse = |record| FencedAttachRecordRefusal { record };
+        if debt.value().is_zero()
+            || record_authority.conversation_id() != self.conversation_id
+            || record_authority.participant_id() != self.participant_id
+            || record_authority.delivery_seq() != self.marker_delivery_seq
+            || record_authority.target_binding()
+                != super::FrontierBinding::Detached(self.prior_binding_epoch)
+            || record_authority.occurrence()
+                != super::claim_frontier::MarkerRecordOccurrence::Delivered
+        {
+            return Err(refuse(record_authority));
+        }
+        let EventKind::FencedRecoveryCommitted {
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+            new_binding_epoch,
+            ..
+        } = event.0
+        else {
+            return Err(refuse(record_authority));
+        };
+        if participant_id != self.participant_id
+            || marker_delivery_seq != self.marker_delivery_seq
+            || prior_binding_epoch != self.prior_binding_epoch
+            || !is_next_generation(prior_binding_epoch, new_binding_epoch)
+        {
+            return Err(refuse(record_authority));
+        }
+        record_authority.consume();
+        Ok(FencedAttachCommit {
+            conversation_id: self.conversation_id,
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+            new_binding_epoch,
+            next_state: successor.into_state(),
+        })
     }
 
     /// Consumes exact fenced recovery and installs only clear/OP/PC.
