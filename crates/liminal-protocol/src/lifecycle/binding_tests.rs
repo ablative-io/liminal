@@ -81,6 +81,27 @@ fn died_fates_have_only_died_causes() {
 }
 
 #[test]
+fn died_binding_transition_projects_terminal_sequence_only_when_committed() {
+    let committed_transition = binding().connection_lost(committed());
+    let committed_terminal_seq = match committed_transition {
+        DiedBindingTransition::Committed(terminal) => terminal.delivery_seq(),
+        DiedBindingTransition::Pending(_) => {
+            panic!("committed disposition must produce a committed Died transition")
+        }
+    };
+    let committed_projection = committed_transition
+        .observer_progress_projection()
+        .expect("the committed Died transition must present observer progress");
+    assert_eq!(
+        committed_projection.new_observer_progress(),
+        committed_terminal_seq
+    );
+
+    let pending_transition = binding().protocol_error(pending());
+    assert!(pending_transition.observer_progress_projection().is_none());
+}
+
+#[test]
 fn pending_commit_preserves_identity_order_and_cause() {
     let DiedBindingTransition::Pending(pending_terminal) = binding().connection_lost(pending())
     else {
