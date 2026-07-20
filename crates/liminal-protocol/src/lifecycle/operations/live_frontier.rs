@@ -234,14 +234,14 @@ impl LiveFrontierOwner {
                 reason: FencedAttachMintRefusalReason::MarkerAuthority,
             }));
         };
-        match recovery.fenced_attach_with_record(record, debt, event, successor) {
-            Ok(proof) => MintFencedAttachResult::Minted(MintedFencedAttach {
+        match recovery.fenced_attach(record, debt, event, successor) {
+            Ok(proof) => MintFencedAttachResult::Minted(Box::new(MintedFencedAttach {
                 owner_without_marker_authority: self,
                 proof,
-            }),
+            })),
             Err(refusal) => {
                 self.frontiers
-                    .reinstall_fenced_marker_record(refusal.into_record());
+                    .reinstall_fenced_marker_record((*refusal).into_record());
                 MintFencedAttachResult::MintRefused(Box::new(MintFencedAttachRefused {
                     owner: self,
                     marker_source_sequence,
@@ -328,7 +328,7 @@ impl MintFencedAttachRefused {
 #[derive(Debug, PartialEq, Eq)]
 pub enum MintFencedAttachResult {
     /// Exactly one marker authority was spent and one proof was minted.
-    Minted(MintedFencedAttach),
+    Minted(Box<MintedFencedAttach>),
     /// No proof was minted; the same authority and inputs are serially retryable.
     MintRefused(Box<MintFencedAttachRefused>),
 }

@@ -1058,6 +1058,7 @@ fn exact_detached_dcr_is_the_only_postfate_recovery_authority() {
     let recovered_epoch = epoch(2, 2);
     let proof = dcr
         .fenced_attach(
+            super::edge::validated_marker_record_for_recovery_test(dcr),
             debt,
             Event::fenced_recovery_committed(0, 1, binding_epoch, recovered_epoch, 3),
             DebtCompletion::clear(),
@@ -1098,7 +1099,7 @@ fn exact_detached_dcr_is_the_only_postfate_recovery_authority() {
                 accept_marker_delivery_seq: Some(1),
             },
             AttachSecretProof::Verified,
-            &proof,
+            proof,
             None,
             AttachCommitParameters {
                 binding: ActiveBinding {

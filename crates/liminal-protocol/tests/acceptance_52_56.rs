@@ -52,8 +52,8 @@ use liminal_protocol::{
     },
 };
 use support::{
-    intervening_pending_leave_refusal, marker_delivery, pending_leave_authority,
-    settled_leave_authority,
+    intervening_pending_leave_refusal, marker_delivery, mint_fenced_attach,
+    pending_leave_authority, recovered_fate_from_fenced, settled_leave_authority,
 };
 
 const BM: u64 = 16;
@@ -1592,14 +1592,22 @@ fn acceptance_case_54_multi_binding_shutdown_families_and_participant_scoped_pro
         .expect("ticket-free DCR Leave clears the episode"),
         ClosureState::Clear
     );
-    let recovery_claim = dcr
-        .fenced_attach(
-            debt_two,
-            Event::fenced_recovery_committed(P0, m54, e54_2, e54_3, H + 1),
-            DebtCompletion::clear(),
-        )
-        .expect("exact delivered marker also authorizes fenced recovery");
+    let recovery_claim = mint_fenced_attach(
+        dcr,
+        debt_two,
+        Event::fenced_recovery_committed(P0, m54, e54_2, e54_3, H + 1),
+        DebtCompletion::clear(),
+    )
+    .expect("owner consumes the exact delivered marker for fenced recovery");
     assert_eq!(recovery_claim.new_binding_epoch(), e54_3);
+    assert!(
+        recovered_fate_from_fenced(
+            recovery_claim,
+            Event::binding_fate_observed(P0, e54_3, H + 1),
+        )
+        .is_err(),
+        "a fenced attach that cleared debt has no recovered cursor suffix"
+    );
     let transfer = recovery_transfer(
         WideResourceVector::new(10, 40 * u128::from(U)),
         q_bytes,
@@ -2377,13 +2385,13 @@ fn acceptance_case_56_sequence_equality_and_pcp_ordering_without_occurrence_arra
     else {
         panic!("delivered marker cannot produce DMR")
     };
-    let fenced = dcr
-        .fenced_attach(
-            debt_two,
-            Event::fenced_recovery_committed(P1, h + 1, e5, e6, h + 1),
-            DebtCompletion::clear(),
-        )
-        .expect("V56-C delivery-win recovery clears debt");
+    let fenced = mint_fenced_attach(
+        dcr,
+        debt_two,
+        Event::fenced_recovery_committed(P1, h + 1, e5, e6, h + 1),
+        DebtCompletion::clear(),
+    )
+    .expect("V56-C owner mint consumes the delivery-win marker");
     assert_eq!(fenced.new_binding_epoch(), e6);
     let dcr_leave_claim = dcr
         .validate_leave_claim(P1, uniform(1), uniform(2), 1)

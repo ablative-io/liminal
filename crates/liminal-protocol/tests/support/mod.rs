@@ -3,20 +3,164 @@ use std::vec;
 use liminal_protocol::{
     algebra::{ResourceVector, WideResourceVector},
     lifecycle::{
-        AdmissionOrder, BindingState, BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore,
-        ClosureAccounting, ClosureState, ExitProductRangeRestore, FrontierBinding,
-        FrontierParticipant, ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate,
-        LiveMember, MarkerCandidateAuthority, MarkerDelivery, MarkerProvenance,
-        MarkerSequenceOwner, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore,
+        ActiveBinding, AdmissionOrder, AttachCommitParameters, AttachSecretProof,
+        AttachedRecordPosition, BindingState, BindingTerminalOwner, ClaimFrontiers,
+        ClaimFrontiersRestore, ClosureAccounting, ClosureState, CommittedBindingTerminalPosition,
+        DetachCell, EnrollmentFingerprint, Event, ExitProductRangeRestore, FencedAttachCommit,
+        FrontierBinding, FrontierParticipant, ImmutableOrderCandidateMajorRestore,
+        ImmutableSequenceCandidate, LiveFrontierOwner, LiveMember, LiveMemberRestore,
+        MarkerCandidateAuthority, MarkerDelivery, MarkerProvenance, MarkerSequenceOwner,
+        MintFencedAttachResult, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore,
         OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, PendingFinalization,
-        PrepareLeaveAuthorityError, PreparedLeaveAuthority, RecoverySequenceReserve,
-        RetainedCausalRecord, RetainedCausalRecordKind, RetainedRecordCharge,
-        SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner, SequenceLedger,
-        SequenceProductRangesRestore, StoredEdge, TerminalProductRangeRestore, drain_next_marker,
+        PrepareLeaveAuthorityError, PreparedLeaveAuthority, RecoveredBindingFate,
+        RecoverySequenceReserve, RetainedCausalRecord, RetainedCausalRecordKind,
+        RetainedRecordCharge, SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner,
+        SequenceLedger, SequenceProductRangesRestore, StoredEdge, TerminalProductRangeRestore,
+        commit_attach, drain_next_marker,
     },
     outcome::CandidatePhase,
-    wire::{BindingEpoch, ConnectionIncarnation},
+    wire::{
+        AttachAttemptToken, AttachSecret, BindingEpoch, ConnectionIncarnation,
+        CredentialAttachRequest,
+    },
 };
+
+pub fn mint_fenced_attach(
+    recovery: liminal_protocol::lifecycle::DetachedCredentialRecovery,
+    debt: liminal_protocol::lifecycle::ClosureDebt,
+    event: Event,
+    successor: liminal_protocol::lifecycle::DebtCompletion,
+) -> Result<FencedAttachCommit, String> {
+    let marker_delivery_seq = recovery.marker_delivery_seq();
+    let cursor = marker_delivery_seq
+        .checked_sub(1)
+        .ok_or_else(|| "fenced owner fixture requires a positive marker".to_owned())?;
+    let (frontier_restore, sequence_ledger, order_ledger) = marker_frontier(
+        recovery.participant_id(),
+        FrontierBinding::Detached(recovery.prior_binding_epoch()),
+        marker_delivery_seq,
+        cursor,
+    )?;
+    let frontiers = ClaimFrontiers::restore(frontier_restore, sequence_ledger, order_ledger)
+        .map_err(|error| format!("fenced owner frontier failed to restore: {error:?}"))?;
+    let retained_charges = frontiers
+        .retained_records()
+        .iter()
+        .map(|record| {
+            RetainedRecordCharge::new(
+                record.delivery_seq,
+                record.admission_order,
+                ResourceVector::new(1, 1),
+            )
+        })
+        .collect();
+    let candidate = frontiers
+        .sequence()
+        .immutable_candidates()
+        .first()
+        .copied()
+        .ok_or_else(|| "fenced owner frontier had no marker candidate".to_owned())?;
+    let marker_charge = RetainedRecordCharge::new(
+        candidate.delivery_seq(),
+        candidate.admission_order(),
+        ResourceVector::new(1, 1),
+    );
+    let accounting = ClosureAccounting::try_new(
+        ClosureState::Clear,
+        1,
+        1,
+        0,
+        0,
+        ResourceVector::default(),
+        WideResourceVector::new(1, 1),
+        ResourceVector::new(100, 100),
+        0,
+        2,
+    )
+    .map_err(|error| format!("fenced owner accounting failed: {error:?}"))?;
+    let commit = drain_next_marker(frontiers, accounting, retained_charges, marker_charge)
+        .map_err(|error| format!("fenced owner marker failed to drain: {error:?}"))?;
+    let (owner, _, _) = LiveFrontierOwner::from_marker_drain(commit, 2);
+    match owner.mint_fenced_attach(marker_delivery_seq, recovery, debt, event, successor) {
+        MintFencedAttachResult::Minted(minted) => {
+            let (spent_owner, proof) = minted.into_parts();
+            drop(spent_owner);
+            Ok(proof)
+        }
+        MintFencedAttachResult::MintRefused(refused) => {
+            Err(format!("fenced owner mint refused: {:?}", refused.reason()))
+        }
+    }
+}
+
+pub fn recovered_fate_from_fenced(
+    proof: FencedAttachCommit,
+    event: Event,
+) -> Result<RecoveredBindingFate, String> {
+    let participant_id = proof.participant_id();
+    let conversation_id = proof.conversation_id();
+    let prior_binding_epoch = proof.prior_binding_epoch();
+    let new_binding_epoch = proof.new_binding_epoch();
+    let marker_delivery_seq = proof.marker_delivery_seq();
+    let terminal_sequence = marker_delivery_seq
+        .checked_sub(1)
+        .ok_or_else(|| "fenced fixture marker has no lower terminal position".to_owned())?;
+    let attached_sequence = marker_delivery_seq
+        .checked_add(1)
+        .ok_or_else(|| "fenced fixture marker cannot allocate Attached position".to_owned())?;
+    let active = ActiveBinding {
+        participant_id,
+        conversation_id,
+        binding_epoch: prior_binding_epoch,
+    };
+    let latest_terminal = active
+        .commit_clean_deregister(CommittedBindingTerminalPosition::new(1, terminal_sequence))
+        .into();
+    let prior_secret = AttachSecret::new([0xA5; 32]);
+    let member = LiveMember::restore(LiveMemberRestore {
+        participant_id,
+        conversation_id,
+        generation: prior_binding_epoch.capability_generation,
+        attach_secret: prior_secret,
+        cursor: marker_delivery_seq,
+        enrollment_fingerprint: EnrollmentFingerprint::new(vec![0xA5]),
+        latest_terminal: Some(latest_terminal),
+    })
+    .map_err(|error| format!("fenced fixture member restore failed: {error:?}"))?;
+    let verified = member
+        .verify_fenced_attach(
+            BindingState::Detached,
+            CredentialAttachRequest {
+                conversation_id,
+                participant_id,
+                capability_generation: prior_binding_epoch.capability_generation,
+                attach_secret: prior_secret,
+                attach_attempt_token: AttachAttemptToken::new([0xA6; 16]),
+                accept_marker_delivery_seq: Some(marker_delivery_seq),
+            },
+            AttachSecretProof::Verified,
+            proof,
+            None,
+            AttachCommitParameters {
+                binding: ActiveBinding {
+                    participant_id,
+                    conversation_id,
+                    binding_epoch: new_binding_epoch,
+                },
+                attach_secret: AttachSecret::new([0xA7; 32]),
+                attached_position: AttachedRecordPosition::new(2, attached_sequence),
+                receipt_expires_at: 1,
+                provenance_expires_at: 2,
+            },
+        )
+        .map_err(|failure| format!("fenced fixture verify failed: {:?}", failure.error()))?;
+    let committed = commit_attach(verified, DetachCell::<[u8; 32]>::default())
+        .map_err(|error| format!("fenced fixture commit failed: {error:?}"))?;
+    let (_, token) = committed.into_slot_and_fate();
+    token
+        .recovered_binding_fate(event)
+        .map_err(|_| "fenced fixture recovered token refused event".to_owned())
+}
 
 pub fn marker_delivery(
     participant_id: u64,

@@ -788,7 +788,12 @@ fn detached_recovery_fence_proof_binds_every_authority_field() {
     let fenced = Event::fenced_recovery_committed(4, 14, binding, epoch(3), 15);
     let successor = DebtCompletion::observer_projection(next_debt, ObserverProjection::new(15));
     let commit = recovery
-        .fenced_attach(original_debt, fenced, successor)
+        .fenced_attach(
+            super::edge::validated_marker_record_for_recovery_test(recovery),
+            original_debt,
+            fenced,
+            successor,
+        )
         .expect("exact DCR creates fenced marker-acceptance proof");
     assert_eq!(commit.participant_id(), 4);
     assert_eq!(commit.marker_delivery_seq(), 14);
@@ -804,6 +809,7 @@ fn detached_recovery_fence_proof_binds_every_authority_field() {
     assert!(
         recovery
             .fenced_attach(
+                super::edge::validated_marker_record_for_recovery_test(recovery),
                 original_debt,
                 Event::fenced_recovery_committed(4, 15, binding, epoch(3), 15),
                 DebtCompletion::clear(),
@@ -905,23 +911,20 @@ fn fenced_recovery_fate_preserves_op_authority_until_exact_completion() {
     let projection = ObserverProjection::new(15);
     let commit = recovery
         .fenced_attach(
+            super::edge::validated_marker_record_for_recovery_test(recovery),
             recovery_debt,
             Event::fenced_recovery_committed(4, 14, prior_epoch, recovered_epoch, 15),
             DebtCompletion::observer_projection(attached_debt, projection),
         )
         .expect("exact fenced attach installs nonzero-debt OP");
 
-    assert_eq!(
-        commit.recovered_binding_fate(Event::binding_fate_observed(5, recovered_epoch, 15,)),
-        Err(commit.next_state()),
-        "another participant cannot consume the recovered epoch's fate"
-    );
-    assert_eq!(
-        commit.recovered_binding_fate(Event::binding_fate_observed(4, epoch(4), 15)),
-        Err(commit.next_state()),
-        "only the exact newly committed epoch can derive the cursor suffix"
-    );
-
+    let commit = commit
+        .recovered_binding_fate(Event::binding_fate_observed(5, recovered_epoch, 15))
+        .expect_err("another participant cannot consume the recovered epoch's fate");
+    let commit = commit
+        .recovered_binding_fate(Event::binding_fate_observed(4, epoch(4), 15))
+        .expect_err("only the exact newly committed epoch can derive the cursor suffix");
+    let predecessor_state = commit.next_state();
     let authority = commit
         .recovered_binding_fate(Event::binding_fate_observed(4, recovered_epoch, 15))
         .expect("exact recovered-epoch fate derives suffix authority");
@@ -932,7 +935,7 @@ fn fenced_recovery_fate_preserves_op_authority_until_exact_completion() {
     );
     assert_eq!(authority.participant_id(), 4);
     assert_eq!(authority.last_dead_binding_epoch(), recovered_epoch);
-    assert_eq!(authority.predecessor_state(), commit.next_state());
+    assert_eq!(authority.predecessor_state(), predecessor_state);
 
     let authority = projection
         .apply_recovered_binding_fate(recovery_debt, fate_debt, authority)
@@ -988,11 +991,20 @@ fn fenced_recovery_fate_preserves_or_covers_pc_with_exact_cursor_authority() {
     let physical = compaction(10, 15);
     let commit = recovery
         .fenced_attach(
+            super::edge::validated_marker_record_for_recovery_test(recovery),
             recovery_debt,
             Event::fenced_recovery_committed(4, 14, prior_epoch, recovered_epoch, 10),
             DebtCompletion::physical_compaction(attached_debt, physical),
         )
         .expect("exact fenced attach installs nonzero-debt PC");
+    let covering_commit = recovery
+        .fenced_attach(
+            super::edge::validated_marker_record_for_recovery_test(recovery),
+            recovery_debt,
+            Event::fenced_recovery_committed(4, 14, prior_epoch, recovered_epoch, 10),
+            DebtCompletion::physical_compaction(attached_debt, physical),
+        )
+        .expect("independent replay fixture mints its own proof");
 
     let authority = commit
         .recovered_binding_fate(Event::binding_fate_observed(4, recovered_epoch, 15))
@@ -1025,7 +1037,7 @@ fn fenced_recovery_fate_preserves_or_covers_pc_with_exact_cursor_authority() {
     assert_eq!(release.participant_id(), 4);
     assert_eq!(release.last_dead_binding_epoch(), recovered_epoch);
 
-    let covering_authority = commit
+    let covering_authority = covering_commit
         .recovered_binding_fate(Event::binding_fate_observed(4, recovered_epoch, 16))
         .expect("covering fate derives a fresh replay-identical authority");
     let covering = physical

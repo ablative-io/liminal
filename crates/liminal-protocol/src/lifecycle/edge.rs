@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::wire::{BindingEpoch, ConversationId, DeliverySeq, ParticipantId, ParticipantIndex};
 
@@ -604,6 +606,19 @@ impl DetachedCredentialRecovery {
     }
 }
 
+#[cfg(test)]
+pub fn validated_marker_record_for_recovery_test(
+    recovery: DetachedCredentialRecovery,
+) -> ValidatedMarkerRecord {
+    validated_marker_record_for_test(
+        recovery.conversation_id(),
+        recovery.participant_id(),
+        super::claim_frontier::FrontierBinding::Detached(recovery.prior_binding_epoch()),
+        recovery.marker_delivery_seq(),
+        recovery.marker_delivery_seq(),
+    )
+}
+
 /// Leave-only undelivered-marker release witness.
 ///
 /// This state is produced only when exact binding fate consumes a marker that
@@ -954,10 +969,10 @@ impl OrdinaryBindingFate {
 
 /// Opaque proof that an exact marker-fenced attach committed.
 ///
-/// Only [`DetachedCredentialRecovery::fenced_attach`] constructs this value.
-/// Ordinary attach therefore cannot fabricate marker acceptance or advance a
-/// cursor merely by presenting a marker sequence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Only the move-consuming frontier-owner mint constructs this value. Ordinary
+/// attach therefore cannot fabricate marker acceptance or advance a cursor
+/// merely by presenting a marker sequence.
+#[derive(Debug, PartialEq, Eq)]
 pub struct FencedAttachCommit {
     conversation_id: ConversationId,
     participant_id: ParticipantId,
@@ -970,38 +985,87 @@ pub struct FencedAttachCommit {
 impl FencedAttachCommit {
     /// Returns the conversation inherited from the consumed recovery edge.
     #[must_use]
-    pub const fn conversation_id(self) -> ConversationId {
+    pub const fn conversation_id(&self) -> ConversationId {
         self.conversation_id
     }
 
     /// Returns the participant whose fenced recovery committed.
     #[must_use]
-    pub const fn participant_id(self) -> ParticipantId {
+    pub const fn participant_id(&self) -> ParticipantId {
         self.participant_id
     }
 
     /// Returns the exact delivered marker accepted by the commit.
     #[must_use]
-    pub const fn marker_delivery_seq(self) -> DeliverySeq {
+    pub const fn marker_delivery_seq(&self) -> DeliverySeq {
         self.marker_delivery_seq
     }
 
     /// Returns the exact dead binding epoch that durably received the marker.
     #[must_use]
-    pub const fn prior_binding_epoch(self) -> BindingEpoch {
+    pub const fn prior_binding_epoch(&self) -> BindingEpoch {
         self.prior_binding_epoch
     }
 
     /// Returns the exact newly committed authoritative binding epoch.
     #[must_use]
-    pub const fn new_binding_epoch(self) -> BindingEpoch {
+    pub const fn new_binding_epoch(&self) -> BindingEpoch {
         self.new_binding_epoch
     }
 
     /// Returns the measured clear, observer-projection, or compaction successor.
     #[must_use]
-    pub const fn next_state(self) -> ClosureState {
+    pub const fn next_state(&self) -> ClosureState {
         self.next_state
+    }
+
+    /// Revalidates a durable fenced proof against its retained marker record.
+    ///
+    /// This is restoration, not a proof mint: the frontier continues to own the
+    /// retained record while storage reconstructs the already-committed proof.
+    pub(super) fn restore_validated(
+        recovery: DetachedCredentialRecovery,
+        record_authority: &ValidatedMarkerRecord,
+        debt: ClosureDebt,
+        event: Event,
+        successor: DebtCompletion,
+    ) -> Option<Self> {
+        if debt.value().is_zero()
+            || record_authority.conversation_id() != recovery.conversation_id
+            || record_authority.participant_id() != recovery.participant_id
+            || record_authority.delivery_seq() != recovery.marker_delivery_seq
+            || record_authority.target_binding()
+                != super::FrontierBinding::Detached(recovery.prior_binding_epoch)
+            || record_authority.occurrence()
+                != super::claim_frontier::MarkerRecordOccurrence::Delivered
+        {
+            return None;
+        }
+        let EventKind::FencedRecoveryCommitted {
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+            new_binding_epoch,
+            ..
+        } = event.0
+        else {
+            return None;
+        };
+        if participant_id != recovery.participant_id
+            || marker_delivery_seq != recovery.marker_delivery_seq
+            || prior_binding_epoch != recovery.prior_binding_epoch
+            || !is_next_generation(prior_binding_epoch, new_binding_epoch)
+        {
+            return None;
+        }
+        Some(Self {
+            conversation_id: recovery.conversation_id,
+            participant_id,
+            marker_delivery_seq,
+            prior_binding_epoch,
+            new_binding_epoch,
+            next_state: successor.into_state(),
+        })
     }
 
     /// Validates the exact fate of this commit's recovered binding epoch.
@@ -1016,23 +1080,23 @@ impl FencedAttachCommit {
     /// Returns the unchanged post-attach state unless the event names this
     /// participant and the exact newly committed binding epoch, or when the
     /// fenced attach had already cleared debt.
-    pub fn recovered_binding_fate(
+    pub(super) fn recovered_binding_fate(
         self,
         event: Event,
-    ) -> Result<RecoveredBindingFate, ClosureState> {
+    ) -> Result<RecoveredBindingFate, Box<Self>> {
         let EventKind::BindingFateObserved {
             participant_id,
             binding_epoch,
             resulting_floor,
         } = event.0
         else {
-            return Err(self.next_state);
+            return Err(Box::new(self));
         };
         if participant_id != self.participant_id || binding_epoch != self.new_binding_epoch {
-            return Err(self.next_state);
+            return Err(Box::new(self));
         }
         let ClosureState::Owed { debt, edge } = self.next_state else {
-            return Err(self.next_state);
+            return Err(Box::new(self));
         };
         let predecessor = match edge {
             StoredEdge::ObserverProjection(value) => {
@@ -1041,7 +1105,7 @@ impl FencedAttachCommit {
             StoredEdge::PhysicalCompaction(value) => {
                 RecoveredStorageEdge::PhysicalCompaction(value)
             }
-            _ => return Err(self.next_state),
+            _ => return Err(Box::new(self)),
         };
         Ok(RecoveredBindingFate {
             conversation_id: self.conversation_id,
@@ -2701,9 +2765,15 @@ pub(super) struct FencedAttachRecordRefusal {
     record: ValidatedMarkerRecord,
 }
 
+impl core::fmt::Debug for FencedAttachRecordRefusal {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        formatter.write_str("FencedAttachRecordRefusal { record: <linear> }")
+    }
+}
+
 impl FencedAttachRecordRefusal {
     /// Returns the exact record authority for serial reinstall and retry.
-    pub(super) fn into_record(self) -> ValidatedMarkerRecord {
+    pub(super) const fn into_record(self) -> ValidatedMarkerRecord {
         self.record
     }
 }
@@ -2737,91 +2807,22 @@ impl DetachedCredentialRecovery {
     /// This is deliberately visible only inside the lifecycle module. Public
     /// descriptive recovery values cannot invoke it without the private,
     /// non-cloneable record removed from a move-owned frontier.
-    pub(super) fn fenced_attach_with_record(
+    pub(super) fn fenced_attach(
         self,
         record_authority: ValidatedMarkerRecord,
         debt: ClosureDebt,
         event: Event,
         successor: DebtCompletion,
-    ) -> Result<FencedAttachCommit, FencedAttachRecordRefusal> {
-        let refuse = |record| FencedAttachRecordRefusal { record };
-        if debt.value().is_zero()
-            || record_authority.conversation_id() != self.conversation_id
-            || record_authority.participant_id() != self.participant_id
-            || record_authority.delivery_seq() != self.marker_delivery_seq
-            || record_authority.target_binding()
-                != super::FrontierBinding::Detached(self.prior_binding_epoch)
-            || record_authority.occurrence()
-                != super::claim_frontier::MarkerRecordOccurrence::Delivered
-        {
-            return Err(refuse(record_authority));
-        }
-        let EventKind::FencedRecoveryCommitted {
-            participant_id,
-            marker_delivery_seq,
-            prior_binding_epoch,
-            new_binding_epoch,
-            ..
-        } = event.0
+    ) -> Result<FencedAttachCommit, Box<FencedAttachRecordRefusal>> {
+        let Some(proof) =
+            FencedAttachCommit::restore_validated(self, &record_authority, debt, event, successor)
         else {
-            return Err(refuse(record_authority));
+            return Err(Box::new(FencedAttachRecordRefusal {
+                record: record_authority,
+            }));
         };
-        if participant_id != self.participant_id
-            || marker_delivery_seq != self.marker_delivery_seq
-            || prior_binding_epoch != self.prior_binding_epoch
-            || !is_next_generation(prior_binding_epoch, new_binding_epoch)
-        {
-            return Err(refuse(record_authority));
-        }
         record_authority.consume();
-        Ok(FencedAttachCommit {
-            conversation_id: self.conversation_id,
-            participant_id,
-            marker_delivery_seq,
-            prior_binding_epoch,
-            new_binding_epoch,
-            next_state: successor.into_state(),
-        })
-    }
-
-    /// Consumes exact fenced recovery and installs only clear/OP/PC.
-    ///
-    /// # Errors
-    ///
-    /// Returns the unchanged owed state unless the event names the exact marker,
-    /// prior epoch, participant, and immediate next generation.
-    pub fn fenced_attach(
-        self,
-        debt: ClosureDebt,
-        event: Event,
-        successor: DebtCompletion,
-    ) -> Result<FencedAttachCommit, ClosureState> {
-        let original = owed(debt, StoredEdge::DetachedCredentialRecovery(self));
-        let EventKind::FencedRecoveryCommitted {
-            participant_id,
-            marker_delivery_seq,
-            prior_binding_epoch,
-            new_binding_epoch,
-            ..
-        } = event.0
-        else {
-            return Err(original);
-        };
-        if participant_id != self.participant_id
-            || marker_delivery_seq != self.marker_delivery_seq
-            || prior_binding_epoch != self.prior_binding_epoch
-            || !is_next_generation(prior_binding_epoch, new_binding_epoch)
-        {
-            return Err(original);
-        }
-        Ok(FencedAttachCommit {
-            conversation_id: self.conversation_id,
-            participant_id,
-            marker_delivery_seq,
-            prior_binding_epoch,
-            new_binding_epoch,
-            next_state: successor.into_state(),
-        })
+        Ok(proof)
     }
 
     /// Consumes exact K-backed detached Leave and installs only clear/OP/PC.

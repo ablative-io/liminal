@@ -94,7 +94,8 @@ pub use aggregate_commit::{
 };
 pub use attach::{
     AttachCommit, AttachCommitError, AttachCommitParameters, AttachTransition,
-    AttachVerificationError, VerifiedAttachCommit, commit_attach,
+    AttachVerificationError, FencedAttachVerificationRefusal, InstalledAttachState,
+    SealedBindingFateToken, VerifiedAttachCommit, commit_attach,
 };
 pub use binding::{
     ActiveBinding, AdmissionOrder, BindingState, BindingTerminalDisposition, BindingTerminalKind,

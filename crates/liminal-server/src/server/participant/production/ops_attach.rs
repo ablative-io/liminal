@@ -437,7 +437,7 @@ fn verify_attach_mode(
     request: &CredentialAttachRequest,
     attach_mode: &StoredAttachModeV3,
     parameters: AttachCommitParameters,
-) -> Result<liminal_protocol::lifecycle::VerifiedAttachCommit<'static, Digest>, StateError> {
+) -> Result<liminal_protocol::lifecycle::VerifiedAttachCommit<Digest>, StateError> {
     match (binding, attach_mode) {
         (BindingState::Detached, StoredAttachModeV3::Ordinary) => {
             let closure_admission = ClosureState::Clear

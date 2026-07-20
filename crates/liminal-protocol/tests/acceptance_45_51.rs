@@ -51,7 +51,9 @@ use liminal_protocol::{
         encoded_len,
     },
 };
-use support::{marker_delivery, settled_leave_authority};
+use support::{
+    marker_delivery, mint_fenced_attach, recovered_fate_from_fenced, settled_leave_authority,
+};
 
 const BM: u64 = 16;
 const P0: u64 = 0;
@@ -495,13 +497,13 @@ fn acceptance_case_45_uniform_marker_episode_and_per_participant_occurrences() {
     assert!(post_v_capacity.is_legal());
     let post_v_debt = closure_debt(1);
     let post_v_projection = ObserverProjection::new(H + 4);
-    let fenced = dcr
-        .fenced_attach(
-            debt_q,
-            Event::fenced_recovery_committed(P0, H, c2, c3, H + 1),
-            DebtCompletion::observer_projection(post_v_debt, post_v_projection),
-        )
-        .expect("V45 presents the delivered C2 marker and immediate successor C3");
+    let fenced = mint_fenced_attach(
+        dcr,
+        debt_q,
+        Event::fenced_recovery_committed(P0, H, c2, c3, H + 1),
+        DebtCompletion::observer_projection(post_v_debt, post_v_projection),
+    )
+    .expect("V45 owner mint consumes the delivered C2 marker exactly once");
     assert_eq!(fenced.marker_delivery_seq(), H);
     assert_eq!(fenced.new_binding_epoch(), c3);
     assert_eq!(
@@ -511,9 +513,10 @@ fn acceptance_case_45_uniform_marker_episode_and_per_participant_occurrences() {
             edge: StoredEdge::ObserverProjection(post_v_projection),
         }
     );
-    let recovered_fate = fenced
-        .recovered_binding_fate(Event::binding_fate_observed(P0, c3, H + 1))
-        .expect("exact recovered C3 fate is tied to post-V45 OP");
+    let recovered_fate =
+        recovered_fate_from_fenced(fenced, Event::binding_fate_observed(P0, c3, H + 1)).expect(
+            "exact recovered C3 fate traverses verify, commit, split, and token consumption",
+        );
     let pending_release = match post_v_projection
         .apply_recovered_binding_fate(post_v_debt, post_v_debt, recovered_fate)
         .expect("fate preserves the exact incomplete OP")
@@ -1571,13 +1574,13 @@ fn acceptance_case_48_marker_ack_and_fenced_recovery_converge_for_both_observer_
     let debt_one = closure_debt(1);
     for (observer_progress, recovery_floor) in [(H - 1, H), (H, H + 1)] {
         let recovered_op = ObserverProjection::new(H + 4);
-        let fenced = dcr
-            .fenced_attach(
-                debt_q,
-                Event::fenced_recovery_committed(P0, H, e6, e7, recovery_floor),
-                DebtCompletion::observer_projection(debt_one, recovered_op),
-            )
-            .expect("V48 exact marker proof commits e7");
+        let fenced = mint_fenced_attach(
+            dcr,
+            debt_q,
+            Event::fenced_recovery_committed(P0, H, e6, e7, recovery_floor),
+            DebtCompletion::observer_projection(debt_one, recovered_op),
+        )
+        .expect("V48 owner mint consumes the exact marker and commits e7 proof");
         assert_eq!(fenced.prior_binding_epoch(), e6);
         assert_eq!(fenced.new_binding_epoch(), e7);
         assert_floor(
@@ -1608,9 +1611,11 @@ fn acceptance_case_48_marker_ack_and_fenced_recovery_converge_for_both_observer_
 
         // Recovered e7 fate is tied to this arm's fenced proof and preserves
         // OP. Completion installs DCursor rather than recreating DCR.
-        let recovered_fate = fenced
-            .recovered_binding_fate(Event::binding_fate_observed(P0, e7, recovery_floor))
-            .expect("e7 fate matches the fenced result epoch and measured floor");
+        let recovered_fate = recovered_fate_from_fenced(
+            fenced,
+            Event::binding_fate_observed(P0, e7, recovery_floor),
+        )
+        .expect("e7 fate traverses the fenced attach's complete linear chain");
         let pending = match recovered_op
             .apply_recovered_binding_fate(debt_one, debt_one, recovered_fate)
             .expect("fate preserves the incomplete recovery OP")

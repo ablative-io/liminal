@@ -1590,19 +1590,20 @@ impl FencedAttachCommitRestore {
         let debt =
             ClosureDebt::new(self.predecessor_debt).ok_or(StorageRestoreError::ClosureDebt)?;
         let predecessor = self.predecessor.restore_with_debt(debt, record_authority)?;
-        predecessor
-            .fenced_attach(
-                debt,
-                Event::fenced_recovery_committed(
-                    self.participant_id,
-                    self.marker_delivery_seq,
-                    self.prior_binding_epoch,
-                    self.new_binding_epoch,
-                    self.resulting_floor,
-                ),
-                self.successor.restore()?,
-            )
-            .map_err(|_| StorageRestoreError::StoredEdgeProvenance)
+        FencedAttachCommit::restore_validated(
+            predecessor,
+            record_authority,
+            debt,
+            Event::fenced_recovery_committed(
+                self.participant_id,
+                self.marker_delivery_seq,
+                self.prior_binding_epoch,
+                self.new_binding_epoch,
+                self.resulting_floor,
+            ),
+            self.successor.restore()?,
+        )
+        .ok_or(StorageRestoreError::StoredEdgeProvenance)
     }
 }
 
