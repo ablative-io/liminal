@@ -15,6 +15,7 @@
 
 mod barrier;
 mod capacity;
+mod connection_fate;
 mod facts;
 mod fenced_attach_codec;
 mod fenced_attach_terminal;
@@ -126,6 +127,8 @@ mod tests_unit2_layer1;
 mod tests_w1a;
 #[cfg(test)]
 mod tests_w1a_leave_barrier;
+#[cfg(test)]
+mod tests_w1b_connection_fate;
 #[cfg(test)]
 mod tests_w1b_fenced_codec;
 #[cfg(test)]

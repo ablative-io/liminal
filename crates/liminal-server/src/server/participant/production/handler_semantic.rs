@@ -10,9 +10,9 @@ use liminal_protocol::wire::{
 };
 
 use crate::server::participant::{
-    ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
-    ParticipantSemanticHandler, ParticipantServiceFatal,
+    ConnectionFateWorkItem, ObserverPublicationTarget, ParticipantConnectionContext,
+    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublication,
+    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantServiceFatal,
 };
 
 use super::barrier::ArmOutcome;
@@ -74,6 +74,20 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         conversation_id: ConversationId,
     ) -> Result<ParticipantServiceFatal, ParticipantSemanticError> {
         self.latch_connection_fate_fatal(open_sequence, conversation_id)
+    }
+
+    fn handle_connection_fate(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.ensure_service_live()?;
+        for conversation_id in work_item.tracked_conversations.iter().copied() {
+            self.with_conversation(conversation_id, |authority, appender| {
+                let transaction = authority.prepare_connection_fate_transaction(&work_item);
+                transaction.complete(authority, appender)
+            })?;
+        }
+        Ok(())
     }
 
     fn publication_conversation_limit(&self) -> u64 {
