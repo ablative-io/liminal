@@ -97,7 +97,6 @@ type GeneratedWasmModule = {
 
 const textEncoder = new TextEncoder();
 const RECEIVE_PREFIX_LENGTH = 19;
-const DEFAULT_GLUE_SPECIFIER = "../../wasm/liminal_protocol_wasm.js";
 let activeBindings: Promise<WasmProtocolBindings> | undefined;
 
 export async function connect(
@@ -213,7 +212,7 @@ async function instantiateBindings(source?: WasmSource): Promise<WasmProtocolBin
 
 async function loadGeneratedModule(source?: WasmSource): Promise<GeneratedWasmModule> {
   try {
-    const module = await import(DEFAULT_GLUE_SPECIFIER) as GeneratedWasmModule;
+    const module = await import("../wasm/liminal_protocol_wasm.js") as GeneratedWasmModule;
     if (source === undefined) {
       // In browsers wasm-bindgen resolves its sibling asset relative to the
       // generated glue module. Node callers can provide bytes via `source`.

@@ -20,15 +20,17 @@ for (const [directory, extension, transform] of outputs) {
   }
 }
 
-copyWasmPackageToDist();
+copyWasmPackageTo(path.join("dist", "wasm"));
+if (fs.existsSync("dist-test")) {
+  copyWasmPackageTo(path.join("dist-test", "wasm"));
+}
 
 function rewriteCommonJsSpecifiers(content) {
   return content.replace(/require\("(\.\/.+?)\.js"\)/g, 'require("$1.cjs")');
 }
 
-function copyWasmPackageToDist() {
+function copyWasmPackageTo(targetDirectory) {
   const sourceDirectory = "wasm";
-  const targetDirectory = path.join("dist", "wasm");
   if (!fs.existsSync(sourceDirectory)) {
     return;
   }

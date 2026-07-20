@@ -27,9 +27,11 @@
   "scripts": {
     "clean": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "pretest": "npm run build:wasm",
-    "test:build": "node -e \"require('fs').rmSync('dist-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json",
+    "pretest": "npm run build",
+    "test:build": "node -e \"require('fs').rmSync('dist-test', { recursive: true, force: true })\" && tsc -p tsconfig.test.json && node scripts/copy-build-extensions.cjs",
     "test": "npm run test:build && node --test \"dist-test/tests/**/*.test.js\"",
+    "test:package": "node --test dist-test/tests/packaging.test.js",
+    "prepublishOnly": "npm run typecheck && npm test",
     "build:wasm": "wasm-pack build wasm-src --target web --out-dir ../wasm --out-name liminal_protocol_wasm",
     "build:esm": "tsc -p tsconfig.esm.json",
     "build:cjs": "tsc -p tsconfig.cjs.json",
