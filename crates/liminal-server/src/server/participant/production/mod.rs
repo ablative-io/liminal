@@ -16,12 +16,14 @@
 mod barrier;
 mod capacity;
 mod facts;
+mod fenced_attach_codec;
 mod frontier;
 mod handler;
 mod handler_observer;
 mod handler_observer_reconcile;
 mod handler_semantic;
 mod log;
+mod log_error;
 mod log_v2;
 mod log_v3;
 mod marker_progress;
@@ -121,6 +123,8 @@ mod tests_unit2_layer1;
 mod tests_w1a;
 #[cfg(test)]
 mod tests_w1a_leave_barrier;
+#[cfg(test)]
+mod tests_w1b_fenced_codec;
 #[cfg(test)]
 mod tests_w1b_substrate;
 #[cfg(test)]

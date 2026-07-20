@@ -4,10 +4,11 @@ use liminal_protocol::wire::{DeliverySeq, ParticipantId, TransactionOrder};
 use serde::{Deserialize, Serialize};
 
 use super::facts::Digest;
+use super::fenced_attach_codec::FencedAttachProofContext;
 use super::log::{
-    OperationLogError, StoredAck, StoredAttachAllocationV2, StoredAttachRequest,
-    StoredBindingEpoch, StoredDetachRequest, StoredEnrollmentAllocation, StoredEnrollmentRequest,
-    StoredLeave, StoredMarkerDrain, StoredRecordAdmission, StoredU128,
+    FencedAttachProofRefusal, OperationLogError, StoredAck, StoredAttachAllocationV2,
+    StoredAttachRequest, StoredBindingEpoch, StoredDetachRequest, StoredEnrollmentAllocation,
+    StoredEnrollmentRequest, StoredLeave, StoredMarkerDrain, StoredRecordAdmission, StoredU128,
 };
 
 /// Canonical schema-v3 operation grammar.
@@ -67,6 +68,58 @@ pub(super) enum StoredOperationV3 {
     Left {
         row: StoredLeave,
     },
+}
+
+impl StoredOperationV3 {
+    /// Validates closed v3 mode evidence immediately after decode and before
+    /// append. Fenced proof bytes never enter replay as an unvalidated shape.
+    pub(super) fn validate_durable(&self, sequence: u64) -> Result<(), OperationLogError> {
+        let Self::Attached {
+            request,
+            allocation,
+            mode,
+            ..
+        } = self
+        else {
+            return Ok(());
+        };
+        let refusal = match mode.as_ref() {
+            StoredAttachModeV3::Ordinary => request
+                .accept_marker_delivery_seq
+                .is_some()
+                .then_some(FencedAttachProofRefusal::OrdinaryRequestMarker),
+            StoredAttachModeV3::Superseding {
+                terminal_transaction_order,
+                ..
+            } => {
+                if request.accept_marker_delivery_seq.is_some() {
+                    Some(FencedAttachProofRefusal::SupersedingRequestMarker)
+                } else if *terminal_transaction_order != allocation.attached_order {
+                    Some(FencedAttachProofRefusal::SupersedingTerminalOrder)
+                } else {
+                    None
+                }
+            }
+            StoredAttachModeV3::Fenced {
+                prior_binding_epoch,
+                marker_delivery_seq,
+                proof,
+                ..
+            } => proof
+                .decode(FencedAttachProofContext {
+                    conversation_id: request.conversation_id,
+                    participant_id: request.participant_id,
+                    request_marker_delivery_seq: request.accept_marker_delivery_seq,
+                    prior_binding_epoch: *prior_binding_epoch,
+                    marker_delivery_seq: *marker_delivery_seq,
+                    new_binding_epoch: allocation.binding_epoch,
+                })
+                .err(),
+        };
+        refusal.map_or(Ok(()), |reason| {
+            Err(OperationLogError::FencedAttachProof { sequence, reason })
+        })
+    }
 }
 
 /// Common allocation shared by all schema-v3 Attached modes.

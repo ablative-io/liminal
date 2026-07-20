@@ -21,6 +21,7 @@ use liminal_protocol::wire::{
 use serde::{Deserialize, Serialize};
 
 use super::facts::Digest;
+pub(super) use super::log_error::FencedAttachProofRefusal;
 
 /// Stream-key prefix for production participant conversation logs.
 pub(super) const STREAM_PREFIX: &str = "liminal:participant-production:";
@@ -86,6 +87,12 @@ pub enum OperationLogError {
     /// Frozen v2 Attached option fields disagree with replay prestate.
     #[error("v2 Attached row at sequence {sequence} has contradictory mode evidence")]
     V2AttachedModeMismatch { sequence: u64 },
+    /// A schema-v3 Attached row carries non-canonical or contradictory fenced proof facts.
+    #[error("v3 fenced Attached proof at sequence {sequence} was refused: {reason}")]
+    FencedAttachProof {
+        sequence: u64,
+        reason: FencedAttachProofRefusal,
+    },
     /// A decoded v3 fate row reached apply before its later-leg replay owner exists.
     #[error("v3 fate row at sequence {sequence} requires the W1b fate replay leg")]
     V3FateReplayUnavailable { sequence: u64 },
@@ -135,6 +142,7 @@ impl OperationLog {
                 SCHEMA_VERSION => {
                     phase = OperationSchemaPhase::V3Suffix;
                     let stored: StoredEntryV3 = serde_json::from_slice(&entry.payload)?;
+                    stored.operation.validate_durable(entry.sequence)?;
                     DecodedStoredOperation::V3(stored.operation)
                 }
                 actual => return Err(OperationLogError::SchemaVersion(actual)),
@@ -182,6 +190,7 @@ impl OperationLog {
         operation: &StoredOperation,
         expected_sequence: u64,
     ) -> Result<(), OperationLogError> {
+        operation.validate_durable(expected_sequence)?;
         let payload = serde_json::to_vec(&StoredEntryV3 {
             schema_version: SCHEMA_VERSION,
             operation: operation.clone(),
