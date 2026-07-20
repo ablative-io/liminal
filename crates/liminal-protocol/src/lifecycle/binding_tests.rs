@@ -89,9 +89,9 @@ fn died_binding_transition_projects_terminal_sequence_only_when_committed() {
             panic!("committed disposition must produce a committed Died transition")
         }
     };
-    let committed_projection = committed_transition
-        .observer_progress_projection()
-        .expect("the committed Died transition must present observer progress");
+    let Some(committed_projection) = committed_transition.observer_progress_projection() else {
+        panic!("the committed Died transition must present observer progress");
+    };
     assert_eq!(
         committed_projection.new_observer_progress(),
         committed_terminal_seq
