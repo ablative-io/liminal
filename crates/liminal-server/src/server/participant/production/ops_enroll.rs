@@ -380,6 +380,7 @@ impl ConversationAuthority {
             Slot {
                 member: committed.member,
                 binding: committed.binding_state,
+                binding_fate: None,
                 cell: DetachCell::default(),
                 enrollment_receipt: EnrollmentLiveReceipt::from_commit(outcome.clone()),
                 enrollment_outcome: committed.outcome,
