@@ -102,6 +102,27 @@ fn died_binding_transition_projects_terminal_sequence_only_when_committed() {
 }
 
 #[test]
+fn detached_binding_transition_projects_terminal_sequence_only_when_committed() {
+    let committed_transition = binding().clean_disconnect(committed());
+    let committed_terminal_seq = match committed_transition {
+        DetachedBindingTransition::Committed(terminal) => terminal.delivery_seq(),
+        DetachedBindingTransition::Pending(_) => {
+            panic!("committed disposition must produce a committed Detached transition")
+        }
+    };
+    let Some(committed_projection) = committed_transition.observer_progress_projection() else {
+        panic!("the committed Detached transition must present observer progress");
+    };
+    assert_eq!(
+        committed_projection.new_observer_progress(),
+        committed_terminal_seq
+    );
+
+    let pending_transition = binding().server_shutdown(pending());
+    assert!(pending_transition.observer_progress_projection().is_none());
+}
+
+#[test]
 fn pending_commit_preserves_identity_order_and_cause() {
     let DiedBindingTransition::Pending(pending_terminal) = binding().connection_lost(pending())
     else {
