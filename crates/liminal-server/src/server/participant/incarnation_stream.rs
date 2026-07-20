@@ -36,14 +36,26 @@ use liminal_protocol::{
 const STREAM_KEY: &str = "liminal/participant/incarnation/v2";
 const REPLAY_PAGE_SIZE: usize = 256;
 const EVENT_MAGIC: [u8; 4] = *b"LPIE";
-const EVENT_SCHEMA_VERSION: u8 = 1;
+const FROZEN_EVENT_SCHEMA_VERSION: u8 = 1;
+const EVENT_SCHEMA_VERSION: u8 = 2;
 const STARTUP_TAG: u8 = 1;
 const ALLOCATE_TAG: u8 = 2;
+const OPEN_CONNECTION_FATE_TAG: u8 = 3;
+const COMPLETE_CONNECTION_FATE_TAG: u8 = 4;
 const EVENT_HEADER_LEN: usize = 10;
 const ALLOCATE_BOUND_LEN: usize = 8;
 const ALLOCATE_COUNT_LEN: usize = 8;
 const ALLOCATE_FIXED_LEN: usize = ALLOCATE_BOUND_LEN + ALLOCATE_COUNT_LEN;
 const CONNECTION_INCARNATION_LEN: usize = 16;
+const CONNECTION_FATE_CLASS_LEN: usize = 1;
+const CONVERSATION_BOUND_LEN: usize = 8;
+const CONVERSATION_COUNT_LEN: usize = 8;
+const CONVERSATION_ID_LEN: usize = 8;
+const OPEN_CONNECTION_FATE_FIXED_LEN: usize = CONNECTION_INCARNATION_LEN
+    + CONNECTION_FATE_CLASS_LEN
+    + CONVERSATION_BOUND_LEN
+    + CONVERSATION_COUNT_LEN;
+const COMPLETE_CONNECTION_FATE_LEN: usize = 8;
 
 const GENESIS_HEADER: ConnectionIncarnationAllocatorRestore =
     ConnectionIncarnationAllocatorRestore {
@@ -100,6 +112,61 @@ pub(in crate::server) enum IncarnationStreamError {
         /// Canonical header declaration.
         declared: u32,
         /// Supplied bytes after the fixed event header.
+        actual: usize,
+    },
+    /// A v1 event used a kind introduced by the v2 grammar.
+    #[error("incarnation event kind {kind} requires schema version 2, got {version}")]
+    EventKindSchemaVersion {
+        /// Stored schema version.
+        version: u8,
+        /// Stored event-kind tag.
+        kind: u8,
+    },
+    /// An Open's conversation count cannot be represented by this process.
+    #[error("connection-fate conversation count {count} exceeds platform usize")]
+    ConversationCountPlatformOverflow {
+        /// Canonical u64 conversation count.
+        count: u64,
+    },
+    /// An Open's declared conversation bound cannot be represented by this process.
+    #[error("connection-fate conversation bound {bound} exceeds platform usize")]
+    ConversationBoundPlatformOverflow {
+        /// Canonical u64 conversation bound.
+        bound: u64,
+    },
+    /// An Open contains more conversations than its signed declared bound.
+    #[error("connection-fate conversation count {actual} exceeds declared bound {maximum}")]
+    ConversationCountExceedsBound {
+        /// Complete conversation count.
+        actual: usize,
+        /// Immutable signed bound stored in this Open.
+        maximum: usize,
+    },
+    /// An Open's count does not select its complete fixed-width suffix.
+    #[error(
+        "connection-fate Open body length mismatch for {count} conversations: expected {expected}, actual {actual}"
+    )]
+    OpenConnectionFateBodyLength {
+        /// Declared complete-conversation count.
+        count: u64,
+        /// Exact body bytes selected by the count.
+        expected: usize,
+        /// Supplied body bytes.
+        actual: usize,
+    },
+    /// An Open's conversation ids are not canonical sorted-set bytes.
+    #[error("connection-fate Open conversation ids are not strictly increasing at index {index}")]
+    ConversationsNotStrictlyIncreasing {
+        /// Index of the duplicate or regressing id.
+        index: usize,
+    },
+    /// An Open carries an unassigned typed fate class.
+    #[error("unknown connection-fate class {0}")]
+    ConnectionFateClass(u8),
+    /// A Complete body is not its one exact u64 Open sequence.
+    #[error("connection-fate Complete body length mismatch: expected 8, actual {actual}")]
+    CompleteConnectionFateBodyLength {
+        /// Supplied body bytes.
         actual: usize,
     },
     /// A startup event carried a body even though its canonical body is empty.
@@ -208,12 +275,55 @@ pub(in crate::server) enum IncarnationAllocation {
     Exhausted(ConnectionIncarnationExhausted),
 }
 
+/// Exact transport/server classification retained by one durable connection-fate Open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::server) enum ConnectionFateClass {
+    /// A protocol-level clean Disconnect.
+    CleanDisconnect,
+    /// An orderly server ForceClose.
+    ServerShutdown,
+    /// EOF or transport loss without clean protocol evidence.
+    ConnectionLost,
+    /// A terminal protocol/decode refusal after participant binding.
+    ProtocolError,
+}
+
+impl ConnectionFateClass {
+    const fn tag(self) -> u8 {
+        match self {
+            Self::CleanDisconnect => 1,
+            Self::ServerShutdown => 2,
+            Self::ConnectionLost => 3,
+            Self::ProtocolError => 4,
+        }
+    }
+
+    fn from_tag(tag: u8) -> Result<Self, IncarnationStreamError> {
+        match tag {
+            1 => Ok(Self::CleanDisconnect),
+            2 => Ok(Self::ServerShutdown),
+            3 => Ok(Self::ConnectionLost),
+            4 => Ok(Self::ProtocolError),
+            unknown => Err(IncarnationStreamError::ConnectionFateClass(unknown)),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum IncarnationEvent {
     Startup,
     Allocate {
         declared_reference_bound: usize,
         referenced_incarnations: Vec<ConnectionIncarnation>,
+    },
+    OpenConnectionFate {
+        connection_incarnation: ConnectionIncarnation,
+        class: ConnectionFateClass,
+        declared_conversation_bound: usize,
+        conversations: Vec<u64>,
+    },
+    CompleteConnectionFate {
+        open_event_sequence: u64,
     },
 }
 
@@ -365,6 +475,8 @@ impl IncarnationStream {
                             }
                         };
                     }
+                    IncarnationEvent::OpenConnectionFate { .. }
+                    | IncarnationEvent::CompleteConnectionFate { .. } => {}
                 }
                 next_sequence = next_sequence
                     .checked_add(1)
@@ -529,6 +641,19 @@ fn encode_event(event: &IncarnationEvent) -> Result<Vec<u8>, IncarnationStreamEr
             .checked_mul(CONNECTION_INCARNATION_LEN)
             .and_then(|references| references.checked_add(ALLOCATE_FIXED_LEN))
             .ok_or(IncarnationStreamError::EventLengthOverflow)?,
+        IncarnationEvent::OpenConnectionFate {
+            declared_conversation_bound,
+            conversations,
+            ..
+        } => {
+            validate_conversations(*declared_conversation_bound, conversations)?;
+            conversations
+                .len()
+                .checked_mul(CONVERSATION_ID_LEN)
+                .and_then(|ids| ids.checked_add(OPEN_CONNECTION_FATE_FIXED_LEN))
+                .ok_or(IncarnationStreamError::EventLengthOverflow)?
+        }
+        IncarnationEvent::CompleteConnectionFate { .. } => COMPLETE_CONNECTION_FATE_LEN,
     };
     let declared_body_length =
         u32::try_from(body_length).map_err(|_| IncarnationStreamError::EventLengthOverflow)?;
@@ -541,22 +666,50 @@ fn encode_event(event: &IncarnationEvent) -> Result<Vec<u8>, IncarnationStreamEr
     encoded.push(match event {
         IncarnationEvent::Startup => STARTUP_TAG,
         IncarnationEvent::Allocate { .. } => ALLOCATE_TAG,
+        IncarnationEvent::OpenConnectionFate { .. } => OPEN_CONNECTION_FATE_TAG,
+        IncarnationEvent::CompleteConnectionFate { .. } => COMPLETE_CONNECTION_FATE_TAG,
     });
     encoded.extend_from_slice(&declared_body_length.to_be_bytes());
-    if let IncarnationEvent::Allocate {
-        declared_reference_bound,
-        referenced_incarnations,
-    } = event
-    {
-        let declared_reference_bound = u64::try_from(*declared_reference_bound)
-            .map_err(|_| IncarnationStreamError::EventLengthOverflow)?;
-        let count = u64::try_from(referenced_incarnations.len())
-            .map_err(|_| IncarnationStreamError::EventLengthOverflow)?;
-        encoded.extend_from_slice(&declared_reference_bound.to_be_bytes());
-        encoded.extend_from_slice(&count.to_be_bytes());
-        for incarnation in referenced_incarnations {
-            encoded.extend_from_slice(&incarnation.server_incarnation.to_be_bytes());
-            encoded.extend_from_slice(&incarnation.connection_ordinal.to_be_bytes());
+    match event {
+        IncarnationEvent::Startup => {}
+        IncarnationEvent::Allocate {
+            declared_reference_bound,
+            referenced_incarnations,
+        } => {
+            let declared_reference_bound = u64::try_from(*declared_reference_bound)
+                .map_err(|_| IncarnationStreamError::EventLengthOverflow)?;
+            let count = u64::try_from(referenced_incarnations.len())
+                .map_err(|_| IncarnationStreamError::EventLengthOverflow)?;
+            encoded.extend_from_slice(&declared_reference_bound.to_be_bytes());
+            encoded.extend_from_slice(&count.to_be_bytes());
+            for incarnation in referenced_incarnations {
+                encoded.extend_from_slice(&incarnation.server_incarnation.to_be_bytes());
+                encoded.extend_from_slice(&incarnation.connection_ordinal.to_be_bytes());
+            }
+        }
+        IncarnationEvent::OpenConnectionFate {
+            connection_incarnation,
+            class,
+            declared_conversation_bound,
+            conversations,
+        } => {
+            let declared_conversation_bound = u64::try_from(*declared_conversation_bound)
+                .map_err(|_| IncarnationStreamError::EventLengthOverflow)?;
+            let count = u64::try_from(conversations.len())
+                .map_err(|_| IncarnationStreamError::EventLengthOverflow)?;
+            encoded.extend_from_slice(&connection_incarnation.server_incarnation.to_be_bytes());
+            encoded.extend_from_slice(&connection_incarnation.connection_ordinal.to_be_bytes());
+            encoded.push(class.tag());
+            encoded.extend_from_slice(&declared_conversation_bound.to_be_bytes());
+            encoded.extend_from_slice(&count.to_be_bytes());
+            for conversation_id in conversations {
+                encoded.extend_from_slice(&conversation_id.to_be_bytes());
+            }
+        }
+        IncarnationEvent::CompleteConnectionFate {
+            open_event_sequence,
+        } => {
+            encoded.extend_from_slice(&open_event_sequence.to_be_bytes());
         }
     }
     Ok(encoded)
@@ -573,7 +726,7 @@ fn decode_event(bytes: &[u8]) -> Result<IncarnationEvent, IncarnationStreamError
         return Err(IncarnationStreamError::EventMagic);
     }
     let version = take_u8(bytes, 4)?;
-    if version != EVENT_SCHEMA_VERSION {
+    if version != FROZEN_EVENT_SCHEMA_VERSION && version != EVENT_SCHEMA_VERSION {
         return Err(IncarnationStreamError::EventSchemaVersion(version));
     }
     let kind = take_u8(bytes, 5)?;
@@ -597,8 +750,97 @@ fn decode_event(bytes: &[u8]) -> Result<IncarnationEvent, IncarnationStreamError
         STARTUP_TAG if body.is_empty() => Ok(IncarnationEvent::Startup),
         STARTUP_TAG => Err(IncarnationStreamError::StartupBodyLength { actual: body.len() }),
         ALLOCATE_TAG => decode_allocate_event(body),
+        OPEN_CONNECTION_FATE_TAG | COMPLETE_CONNECTION_FATE_TAG
+            if version == FROZEN_EVENT_SCHEMA_VERSION =>
+        {
+            Err(IncarnationStreamError::EventKindSchemaVersion { version, kind })
+        }
+        OPEN_CONNECTION_FATE_TAG => decode_open_connection_fate_event(body),
+        COMPLETE_CONNECTION_FATE_TAG => decode_complete_connection_fate_event(body),
         unknown => Err(IncarnationStreamError::EventKind(unknown)),
     }
+}
+
+fn validate_conversations(
+    declared_conversation_bound: usize,
+    conversations: &[u64],
+) -> Result<(), IncarnationStreamError> {
+    if conversations.len() > declared_conversation_bound {
+        return Err(IncarnationStreamError::ConversationCountExceedsBound {
+            actual: conversations.len(),
+            maximum: declared_conversation_bound,
+        });
+    }
+    for (index, pair) in conversations.windows(2).enumerate() {
+        if pair[0] >= pair[1] {
+            return Err(IncarnationStreamError::ConversationsNotStrictlyIncreasing {
+                index: index
+                    .checked_add(1)
+                    .ok_or(IncarnationStreamError::EventLengthOverflow)?,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn decode_open_connection_fate_event(
+    body: &[u8],
+) -> Result<IncarnationEvent, IncarnationStreamError> {
+    if body.len() < OPEN_CONNECTION_FATE_FIXED_LEN {
+        return Err(IncarnationStreamError::EventTruncated {
+            required: EVENT_HEADER_LEN + OPEN_CONNECTION_FATE_FIXED_LEN,
+            actual: EVENT_HEADER_LEN + body.len(),
+        });
+    }
+    let connection_incarnation = ConnectionIncarnation::new(take_u64(body, 0)?, take_u64(body, 8)?);
+    let class = ConnectionFateClass::from_tag(take_u8(body, CONNECTION_INCARNATION_LEN)?)?;
+    let bound_offset = CONNECTION_INCARNATION_LEN + CONNECTION_FATE_CLASS_LEN;
+    let bound = take_u64(body, bound_offset)?;
+    let declared_conversation_bound = usize::try_from(bound)
+        .map_err(|_| IncarnationStreamError::ConversationBoundPlatformOverflow { bound })?;
+    let count_offset = bound_offset + CONVERSATION_BOUND_LEN;
+    let count = take_u64(body, count_offset)?;
+    let count_usize = usize::try_from(count)
+        .map_err(|_| IncarnationStreamError::ConversationCountPlatformOverflow { count })?;
+    let expected = count_usize
+        .checked_mul(CONVERSATION_ID_LEN)
+        .and_then(|ids| ids.checked_add(OPEN_CONNECTION_FATE_FIXED_LEN))
+        .ok_or(IncarnationStreamError::EventLengthOverflow)?;
+    if expected != body.len() {
+        return Err(IncarnationStreamError::OpenConnectionFateBodyLength {
+            count,
+            expected,
+            actual: body.len(),
+        });
+    }
+    let mut conversations = Vec::with_capacity(count_usize);
+    let mut offset = OPEN_CONNECTION_FATE_FIXED_LEN;
+    for _ in 0..count_usize {
+        conversations.push(take_u64(body, offset)?);
+        offset = offset
+            .checked_add(CONVERSATION_ID_LEN)
+            .ok_or(IncarnationStreamError::EventLengthOverflow)?;
+    }
+    validate_conversations(declared_conversation_bound, &conversations)?;
+    Ok(IncarnationEvent::OpenConnectionFate {
+        connection_incarnation,
+        class,
+        declared_conversation_bound,
+        conversations,
+    })
+}
+
+fn decode_complete_connection_fate_event(
+    body: &[u8],
+) -> Result<IncarnationEvent, IncarnationStreamError> {
+    if body.len() != COMPLETE_CONNECTION_FATE_LEN {
+        return Err(IncarnationStreamError::CompleteConnectionFateBodyLength {
+            actual: body.len(),
+        });
+    }
+    Ok(IncarnationEvent::CompleteConnectionFate {
+        open_event_sequence: take_u64(body, 0)?,
+    })
 }
 
 fn decode_allocate_event(body: &[u8]) -> Result<IncarnationEvent, IncarnationStreamError> {
@@ -702,6 +944,14 @@ pub(in crate::server) fn encode_startup_event_fixture() -> Result<Vec<u8>, Incar
 }
 
 #[cfg(test)]
+pub(in crate::server) fn encode_frozen_v1_startup_event_fixture()
+-> Result<Vec<u8>, IncarnationStreamError> {
+    let mut encoded = encode_startup_event_fixture()?;
+    encoded[4] = FROZEN_EVENT_SCHEMA_VERSION;
+    Ok(encoded)
+}
+
+#[cfg(test)]
 pub(in crate::server) fn encode_allocate_event_fixture(
     declared_reference_bound: usize,
     referenced_incarnations: &[ConnectionIncarnation],
@@ -709,5 +959,29 @@ pub(in crate::server) fn encode_allocate_event_fixture(
     encode_event(&IncarnationEvent::Allocate {
         declared_reference_bound,
         referenced_incarnations: referenced_incarnations.to_vec(),
+    })
+}
+
+#[cfg(test)]
+pub(in crate::server) fn encode_open_connection_fate_event_fixture(
+    connection_incarnation: ConnectionIncarnation,
+    class: ConnectionFateClass,
+    declared_conversation_bound: usize,
+    conversations: &[u64],
+) -> Result<Vec<u8>, IncarnationStreamError> {
+    encode_event(&IncarnationEvent::OpenConnectionFate {
+        connection_incarnation,
+        class,
+        declared_conversation_bound,
+        conversations: conversations.to_vec(),
+    })
+}
+
+#[cfg(test)]
+pub(in crate::server) fn encode_complete_connection_fate_event_fixture(
+    open_event_sequence: u64,
+) -> Result<Vec<u8>, IncarnationStreamError> {
+    encode_event(&IncarnationEvent::CompleteConnectionFate {
+        open_event_sequence,
     })
 }
