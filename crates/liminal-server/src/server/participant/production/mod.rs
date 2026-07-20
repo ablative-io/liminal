@@ -36,6 +36,7 @@ mod ops_acks;
 mod ops_attach;
 mod ops_attach_capacity;
 mod ops_attach_lookup;
+mod ops_attach_verify;
 mod ops_enroll;
 mod ops_enroll_capacity;
 mod ops_frontier;

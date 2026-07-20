@@ -1333,6 +1333,43 @@ pub struct DetachedCredentialRecoveryRestore {
 }
 
 impl DetachedCredentialRecoveryRestore {
+    /// Validates the complete stored recovery audit and rebuilds its copyable
+    /// description without granting marker-occurrence authority.
+    ///
+    /// The resulting value cannot mint a fenced proof by itself. Production
+    /// must still pair it with the move-only frontier owner whose private
+    /// `ValidatedMarkerRecord` is consumed by `mint_fenced_attach`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageRestoreError`] when terminal, progress, delivery, or
+    /// identity fields disagree.
+    pub fn restore_description(self) -> Result<DetachedCredentialRecovery, StorageRestoreError> {
+        if self.participant_id != self.progress.participant_id
+            || self.marker_delivery_seq != self.progress.marker_delivery_seq
+            || self.prior_binding_epoch != self.progress.binding_epoch
+            || self.progress.through_seq != self.marker_delivery_seq
+            || self.progress.participant_id != self.progress.delivery.participant_id
+            || self.progress.binding_epoch != self.progress.delivery.binding_epoch
+            || self.progress.marker_delivery_seq != self.progress.delivery.marker_delivery_seq
+        {
+            return Err(StorageRestoreError::StoredEdgeProvenance);
+        }
+        let terminal = self.terminal.restore()?;
+        if terminal.participant_id() != self.participant_id
+            || terminal.binding_epoch() != self.prior_binding_epoch
+            || terminal.conversation_id() != self.progress.conversation_id
+        {
+            return Err(StorageRestoreError::StoredEdgeProvenance);
+        }
+        Ok(DetachedCredentialRecovery::from_storage_description(
+            self.progress.conversation_id,
+            self.participant_id,
+            self.marker_delivery_seq,
+            self.prior_binding_epoch,
+        ))
+    }
+
     fn restore_with_debt(
         self,
         debt: ClosureDebt,

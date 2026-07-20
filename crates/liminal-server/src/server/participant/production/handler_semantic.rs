@@ -239,6 +239,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
                             &request,
                             &operation_facts,
                             &self.capacity,
+                            self.store.clone(),
                             appender,
                         )
                     },

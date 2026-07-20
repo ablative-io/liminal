@@ -77,6 +77,7 @@ impl ConversationAuthority {
                     stored_sequence,
                     config,
                     ack_obligations,
+                    log.store(),
                 )?;
                 let expected = project_committed_source(
                     &authority,
@@ -171,6 +172,7 @@ impl ConversationAuthority {
                     stored_sequence,
                     config,
                     ack_obligations,
+                    log.store(),
                 )?;
                 let expected = project_committed_source(
                     &authority,
@@ -306,6 +308,7 @@ impl ConversationAuthority {
         sequence: u64,
         config: &ParticipantConfig,
         ack_obligations: Option<(RecipientAckObligations, u64)>,
+        store: std::sync::Arc<dyn liminal::durability::DurableStore>,
     ) -> Result<Option<ParticipantDelivery>, StateError> {
         match operation {
             StoredOperation::Genesis { event } => self.replay_genesis(&event).map(|()| None),
@@ -328,7 +331,7 @@ impl ConversationAuthority {
                         "durable attach entry recorded an unverified secret",
                     ));
                 }
-                self.replay_attached(request, &allocation, &mode, &event, sequence)
+                self.replay_attached(request, &allocation, &mode, &event, sequence, store)
                     .map(|()| None)
             }
             StoredOperation::Detached { row } => match (row.disposition, row.source) {
