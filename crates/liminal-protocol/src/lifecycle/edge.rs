@@ -372,7 +372,7 @@ pub fn marker_delivery_for_test(
 /// This witness deliberately has no public constructor. A caller outside this
 /// crate cannot turn raw participant/epoch values into executable binding-fate
 /// authority; recovered-epoch fate must instead originate from
-/// [`FencedAttachCommit::recovered_binding_fate`].
+/// `FencedAttachCommit::recovered_binding_fate`.
 ///
 /// ```compile_fail
 /// use liminal_protocol::{
@@ -935,7 +935,7 @@ impl OrdinaryBindingAuthority {
 /// Fields are private and the only public producer consumes an
 /// [`AttachCommit`](crate::lifecycle::AttachCommit) carrying ordinary
 /// provenance. A fenced attach cannot produce this type, so
-/// executing it cannot bypass [`FencedAttachCommit::recovered_binding_fate`].
+/// executing it cannot bypass `FencedAttachCommit::recovered_binding_fate`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OrdinaryBindingFate {
     conversation_id: ConversationId,
@@ -1157,7 +1157,7 @@ impl RecoveredStorageEdge {
 
 /// Exact recovered-binding fate authority derived from a fenced attach.
 ///
-/// Fields are private: only [`FencedAttachCommit::recovered_binding_fate`] can
+/// Fields are private: only `FencedAttachCommit::recovered_binding_fate` can
 /// bind a no-marker cursor release to the newly recovered epoch and the exact
 /// OP/PC state installed by that attach.
 #[derive(Debug, PartialEq, Eq)]
@@ -2687,7 +2687,7 @@ impl ParticipantCursorProgress {
     /// Continuous PCP never accepts this raw-event transition. Ordinary
     /// no-marker fate requires [`OrdinaryBindingAuthority`], while the fate of
     /// an epoch committed by fenced attach requires
-    /// [`FencedAttachCommit::recovered_binding_fate`].
+    /// `FencedAttachCommit::recovered_binding_fate`.
     ///
     /// # Errors
     ///
