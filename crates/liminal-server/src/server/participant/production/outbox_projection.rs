@@ -2,12 +2,14 @@
 
 use liminal_protocol::lifecycle::BindingState;
 use liminal_protocol::wire::{
-    BindingEpoch, DetachedCause, ParticipantDelivery, ParticipantId, ParticipantRecord,
+    BindingEpoch, DetachedCause, DiedCause, ParticipantDelivery, ParticipantId, ParticipantRecord,
 };
 
 use super::log::{
-    StoredAttachAllocation, StoredAttachModeV3, StoredBindingEpoch, StoredDetachedCause,
-    StoredDetachedSource, StoredOperation, StoredRecordAdmission, StoredTerminalDisposition,
+    StoredAttachAllocation, StoredAttachModeV3, StoredBindingEpoch, StoredComposedTerminal,
+    StoredComposedTerminalCause, StoredComposedTerminalKind, StoredDetachedCause,
+    StoredDetachedSource, StoredFinalizerPresentation, StoredOperation, StoredRecordAdmission,
+    StoredTerminalDisposition,
 };
 use super::outbox::ConversationOutboxError;
 use super::outbox_log::{OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord};
@@ -160,6 +162,23 @@ fn project_attached(
     mode: &StoredAttachModeV3,
     superseded_binding_epoch: Option<BindingEpoch>,
 ) -> Result<OutboxRow, StateError> {
+    let records =
+        project_attached_records(participant_id, allocation, mode, superseded_binding_epoch)?;
+    produced(
+        authority,
+        source_log_sequence,
+        ProducedSourceKind::Attached,
+        Some(participant_id),
+        records,
+    )
+}
+
+pub(super) fn project_attached_records(
+    participant_id: ParticipantId,
+    allocation: &StoredAttachAllocation,
+    mode: &StoredAttachModeV3,
+    superseded_binding_epoch: Option<BindingEpoch>,
+) -> Result<Vec<(u64, ParticipantRecord)>, StateError> {
     let attached = (
         allocation.attached_seq,
         ParticipantRecord::Attached {
@@ -188,19 +207,87 @@ fn project_attached(
                 attached,
             ]
         }
-        StoredAttachModeV3::Fenced { .. } => {
+        StoredAttachModeV3::Fenced {
+            prior_binding_epoch,
+            composed_terminal,
+            ..
+        } => match composed_terminal {
+            None => vec![attached],
+            Some(terminal)
+                if terminal.presentation == StoredFinalizerPresentation::PresentEnclosing =>
+            {
+                vec![
+                    project_composed_terminal(participant_id, *prior_binding_epoch, terminal)?,
+                    attached,
+                ]
+            }
+            Some(_) => vec![attached],
+        },
+    };
+    Ok(records)
+}
+
+fn project_composed_terminal(
+    participant_id: ParticipantId,
+    prior_binding_epoch: StoredBindingEpoch,
+    terminal: &StoredComposedTerminal,
+) -> Result<(u64, ParticipantRecord), StateError> {
+    let binding_epoch = prior_binding_epoch.to_epoch()?;
+    let body = match (terminal.kind, terminal.cause) {
+        (StoredComposedTerminalKind::Detached, StoredComposedTerminalCause::CleanDeregister) => {
+            ParticipantRecord::Detached {
+                affected_participant_id: participant_id,
+                binding_epoch,
+                cause: DetachedCause::CleanDeregister,
+            }
+        }
+        (StoredComposedTerminalKind::Detached, StoredComposedTerminalCause::ServerShutdown) => {
+            ParticipantRecord::Detached {
+                affected_participant_id: participant_id,
+                binding_epoch,
+                cause: DetachedCause::ServerShutdown,
+            }
+        }
+        (StoredComposedTerminalKind::Died, StoredComposedTerminalCause::ConnectionLost) => {
+            ParticipantRecord::Died {
+                affected_participant_id: participant_id,
+                binding_epoch,
+                cause: DiedCause::ConnectionLost,
+            }
+        }
+        (StoredComposedTerminalKind::Died, StoredComposedTerminalCause::ProcessKilled) => {
+            ParticipantRecord::Died {
+                affected_participant_id: participant_id,
+                binding_epoch,
+                cause: DiedCause::ProcessKilled,
+            }
+        }
+        (StoredComposedTerminalKind::Died, StoredComposedTerminalCause::ProtocolError) => {
+            ParticipantRecord::Died {
+                affected_participant_id: participant_id,
+                binding_epoch,
+                cause: DiedCause::ProtocolError,
+            }
+        }
+        (
+            StoredComposedTerminalKind::Died,
+            StoredComposedTerminalCause::UncleanServerRestart {
+                prior_server_incarnation,
+            },
+        ) => ParticipantRecord::Died {
+            affected_participant_id: participant_id,
+            binding_epoch,
+            cause: DiedCause::UncleanServerRestart {
+                prior_server_incarnation,
+            },
+        },
+        _ => {
             return Err(StateError::invariant(
-                "fenced Attached projection awaits the W1b proof-mint leg",
+                "composed terminal kind and cause disagree",
             ));
         }
     };
-    produced(
-        authority,
-        source_log_sequence,
-        ProducedSourceKind::Attached,
-        Some(participant_id),
-        records,
-    )
+    Ok((terminal.delivery_seq, body))
 }
 
 fn project_record_admission(
