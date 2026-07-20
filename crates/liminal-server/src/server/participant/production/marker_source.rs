@@ -166,7 +166,7 @@ fn validate_row(
     Ok(())
 }
 
-fn canonical_marker_bytes(expectation: FencedMarkerSourceExpectation) -> Vec<u8> {
+pub(super) fn canonical_marker_bytes(expectation: FencedMarkerSourceExpectation) -> Vec<u8> {
     format!(
         "MarkerCandidateAuthority {{ delivery_seq: {:?}, admission_order: {:?}, target_binding: {:?}, provenance: {:?}, current_owner: {:?} }}",
         expectation.marker_delivery_seq(),
