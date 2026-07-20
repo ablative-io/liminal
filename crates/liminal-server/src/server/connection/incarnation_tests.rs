@@ -242,6 +242,7 @@ fn production_connection_fate_authority_opens_and_completes_with_signed_bound()
 #[derive(Debug, Default)]
 struct RecordingFateHandler {
     work: Mutex<Vec<ConnectionFateWorkItem>>,
+    restart_repairs: Mutex<Vec<u64>>,
 }
 
 impl ParticipantSemanticHandler for RecordingFateHandler {
@@ -265,6 +266,19 @@ impl ParticipantSemanticHandler for RecordingFateHandler {
                 message: error.to_string(),
             })?
             .push(work_item);
+        Ok(())
+    }
+
+    fn repair_unclean_server_restart(
+        &self,
+        current_server_incarnation: u64,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.restart_repairs
+            .lock()
+            .map_err(|error| ParticipantSemanticError::Internal {
+                message: error.to_string(),
+            })?
+            .push(current_server_incarnation);
         Ok(())
     }
 
@@ -313,6 +327,11 @@ fn startup_completes_historical_opens_before_returning_authority()
     assert_eq!(observed[0].open_sequence, 2);
     assert_eq!(observed[0].connection_incarnation, connection_incarnation);
     assert_eq!(observed[0].tracked_conversations, conversations);
+    let restart_repairs = handler
+        .restart_repairs
+        .lock()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    assert_eq!(restart_repairs.as_slice(), &[2]);
     assert_eq!(authority.allocate(&[])?, ConnectionIncarnation::new(2, 0));
     let entries = block_on(store.read_from(IncarnationStream::stream_key(), 0, 8))??;
     assert_eq!(entries.len(), 6);

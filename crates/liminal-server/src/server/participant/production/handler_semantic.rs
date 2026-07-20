@@ -90,6 +90,21 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         Ok(())
     }
 
+    fn repair_unclean_server_restart(
+        &self,
+        current_server_incarnation: u64,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.ensure_service_live()?;
+        for conversation_id in self.registered_conversation_ids()? {
+            self.with_conversation(conversation_id, |authority, appender| {
+                let transaction = authority
+                    .prepare_unclean_server_restart_transaction(current_server_incarnation)?;
+                transaction.complete(authority, appender)
+            })?;
+        }
+        Ok(())
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         self.config.max_semantic_conversations_per_connection
     }

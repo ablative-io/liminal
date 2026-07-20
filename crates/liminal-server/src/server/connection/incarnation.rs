@@ -72,10 +72,18 @@ impl ConnectionIncarnationAuthority {
                 message: error.to_string(),
             })?;
         match startup {
-            IncarnationStartup::Started(stream) => Ok(Self {
-                state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
-                maximum_conversations,
-            }),
+            IncarnationStartup::Started(stream) => {
+                handler
+                    .repair_unclean_server_restart(stream.server_incarnation())
+                    .map_err(|error| ServerError::ParticipantIncarnation {
+                        phase: "unclean-server-restart repair",
+                        message: error.to_string(),
+                    })?;
+                Ok(Self {
+                    state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
+                    maximum_conversations,
+                })
+            }
             IncarnationStartup::RecoveryRequired(mut recovery) => {
                 let intents = recovery.intents();
                 if intents.is_empty() {
@@ -114,10 +122,18 @@ impl ConnectionIncarnationAuthority {
                         message: error.to_string(),
                     })?;
                 match resumed {
-                    IncarnationStartup::Started(stream) => Ok(Self {
-                        state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
-                        maximum_conversations,
-                    }),
+                    IncarnationStartup::Started(stream) => {
+                        handler
+                            .repair_unclean_server_restart(stream.server_incarnation())
+                            .map_err(|error| ServerError::ParticipantIncarnation {
+                                phase: "unclean-server-restart repair",
+                                message: error.to_string(),
+                            })?;
+                        Ok(Self {
+                            state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
+                            maximum_conversations,
+                        })
+                    }
                     IncarnationStartup::RecoveryRequired(_) => {
                         Err(ServerError::ParticipantIncarnation {
                             phase: "post-recovery startup",
