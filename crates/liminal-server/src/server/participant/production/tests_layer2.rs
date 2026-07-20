@@ -24,8 +24,8 @@ use crate::server::participant::{
 
 use super::ProductionParticipantHandler;
 use super::log::{
-    OperationLog, OperationLogError, SCHEMA_VERSION, STREAM_PREFIX, StoredMarkerDrain,
-    StoredOperation, StoredResourceVector, StoredRetainedCharge,
+    DecodedStoredOperation, OperationLog, OperationLogError, OperationSchemaPhase, SCHEMA_VERSION,
+    STREAM_PREFIX, StoredMarkerDrain, StoredOperation, StoredResourceVector, StoredRetainedCharge,
 };
 use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config};
 
@@ -138,9 +138,11 @@ fn drain_first_row_is_one_complete_poststate_and_contains_no_push() -> Result<()
         successor: b"complete-marker-successor".to_vec(),
     };
     block_on(log.append(&StoredOperation::MarkerDrained { row: row.clone() }, 0))??;
-    let decoded = block_on(log.read_page(0))??;
-    assert_eq!(decoded.len(), 1);
-    let StoredOperation::MarkerDrained { row: restored } = &decoded[0].1 else {
+    let decoded = block_on(log.read_page(0, OperationSchemaPhase::V2Prefix))??;
+    assert_eq!(decoded.rows.len(), 1);
+    let DecodedStoredOperation::V3(StoredOperation::MarkerDrained { row: restored }) =
+        &decoded.rows[0].operation
+    else {
         return Err("durable row was not MarkerDrained".into());
     };
     assert_eq!(restored, &row);
@@ -158,7 +160,7 @@ fn literal_same_stream_v1_five_kind_rows_are_schema_version_one() -> Result<(), 
     }
     let log = OperationLog::new(store, CONVERSATION);
     for sequence in 0..5_u64 {
-        let result = block_on(log.read_page(sequence))?;
+        let result = block_on(log.read_page(sequence, OperationSchemaPhase::V2Prefix))?;
         assert!(matches!(result, Err(OperationLogError::SchemaVersion(1))));
     }
     Ok(())

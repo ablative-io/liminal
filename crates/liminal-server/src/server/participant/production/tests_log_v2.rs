@@ -12,7 +12,10 @@ use liminal_protocol::wire::{
 };
 
 use super::ProductionParticipantHandler;
-use super::log::{OperationLog, OperationLogError, SCHEMA_VERSION, STREAM_PREFIX, StoredOperation};
+use super::log::{
+    DecodedStoredOperation, OperationLog, OperationLogError, OperationSchemaPhase, SCHEMA_VERSION,
+    STREAM_PREFIX, StoredOperation,
+};
 use super::tests::{dispatch, open_disk_store_for_tests, test_participant_config};
 
 const CONVERSATION: u64 = 0xF0C4;
@@ -94,13 +97,20 @@ fn append_literal(
 fn empty_stream_and_all_v2_stream_restore() -> Result<(), Box<dyn Error>> {
     let store = store()?;
     let log = OperationLog::new(Arc::clone(&store), CONVERSATION);
-    assert!(block_on(log.read_page(0))??.is_empty());
+    assert!(
+        block_on(log.read_page(0, OperationSchemaPhase::V2Prefix))??
+            .rows
+            .is_empty()
+    );
 
     block_on(log.append(&StoredOperation::Genesis { event: Vec::new() }, 0))??;
-    let rows = block_on(log.read_page(0))??;
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].0, 0);
-    assert!(matches!(rows[0].1, StoredOperation::Genesis { .. }));
+    let page = block_on(log.read_page(0, OperationSchemaPhase::V2Prefix))??;
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].sequence, 0);
+    assert!(matches!(
+        page.rows[0].operation,
+        DecodedStoredOperation::V3(StoredOperation::Genesis { .. })
+    ));
 
     let raw = block_on(store.read_from(&format!("{STREAM_PREFIX}{CONVERSATION}"), 0, 1))??;
     let json: serde_json::Value = serde_json::from_slice(&raw[0].payload)?;
@@ -118,7 +128,7 @@ fn literal_v1_row_is_rejected_as_schema_version_one() -> Result<(), Box<dyn Erro
         br#"{"schema_version":1,"operation":{"operation":"genesis","event":[]}}"#,
     )?;
     let log = OperationLog::new(store, CONVERSATION);
-    let result = block_on(log.read_page(0))?;
+    let result = block_on(log.read_page(0, OperationSchemaPhase::V2Prefix))?;
     assert!(matches!(result, Err(OperationLogError::SchemaVersion(1))));
     Ok(())
 }
@@ -135,7 +145,7 @@ fn mixed_v2_then_v1_page_is_rejected_before_returning_any_rows() -> Result<(), B
         br#"{"schema_version":1,"operation":{"operation":"genesis","event":[]}}"#,
     )?;
 
-    let result = block_on(log.read_page(0))?;
+    let result = block_on(log.read_page(0, OperationSchemaPhase::V2Prefix))?;
     assert!(matches!(result, Err(OperationLogError::SchemaVersion(1))));
     Ok(())
 }

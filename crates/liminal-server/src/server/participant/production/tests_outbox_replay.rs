@@ -18,7 +18,7 @@ use crate::server::participant::{
 };
 
 use super::ProductionParticipantHandler;
-use super::log::OperationLog;
+use super::log::{OperationLog, OperationSchemaPhase};
 use super::outbox_log::{OUTBOX_STREAM_PREFIX, OutboxLog, OutboxRow};
 use super::tests::{dispatch, test_participant_config};
 
@@ -123,7 +123,12 @@ fn exercise_second_barrier_cut(
     assert!(result.is_err(), "second-barrier fault published a response");
 
     let base = OperationLog::new(Arc::clone(&store), CONVERSATION);
-    assert_eq!(block_on(base.read_page(0))??.len(), 2);
+    assert_eq!(
+        block_on(base.read_page(0, OperationSchemaPhase::V2Prefix))??
+            .rows
+            .len(),
+        2
+    );
     assert_eq!(extension_count(&store)?, expected_rows_after_fault);
     drop(handler);
 
@@ -306,7 +311,9 @@ fn exercise_repair_and_retry(
 
     let base = OperationLog::new(Arc::clone(&store), CONVERSATION);
     assert_eq!(
-        block_on(base.read_page(0))??.len(),
+        block_on(base.read_page(0, OperationSchemaPhase::V2Prefix))??
+            .rows
+            .len(),
         3,
         "both enrollments plus genesis remain durable after barrier-2 failure"
     );

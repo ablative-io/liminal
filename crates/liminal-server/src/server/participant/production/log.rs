@@ -27,7 +27,9 @@ pub(super) const STREAM_PREFIX: &str = "liminal:participant-production:";
 /// Durable page size used during replay reads.
 pub(super) const READ_BATCH_SIZE: usize = 64;
 /// Stored-entry schema version.
-pub(super) const SCHEMA_VERSION: u8 = 2;
+pub(super) const SCHEMA_VERSION: u8 = 3;
+/// Frozen historical schema version accepted only in the contiguous prefix.
+pub(super) const SCHEMA_VERSION_V2: u8 = 2;
 
 /// Failure to encode, decode, append, or read one durable log entry.
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +46,15 @@ pub enum OperationLogError {
     /// A durable entry uses an unsupported schema version.
     #[error("unsupported participant production log schema version {0}")]
     SchemaVersion(u8),
+    /// A durable stream regressed from its v3 suffix back to v2.
+    #[error(
+        "participant production log schema regressed at sequence {sequence}: previous {previous}, actual {actual}"
+    )]
+    SchemaVersionTransition {
+        sequence: u64,
+        previous: u8,
+        actual: u8,
+    },
     /// The durable stream was not contiguous at the expected sequence.
     #[error("participant production log expected sequence {expected}, found {actual}")]
     Sequence {
@@ -69,6 +80,15 @@ pub enum OperationLogError {
         /// Durable sequence of the refused row.
         sequence: u64,
     },
+    /// Frozen v2 marker-bearing Attached bytes cannot supply a fenced proof.
+    #[error("v2 Attached row at sequence {sequence} has no durable fenced proof")]
+    V2AttachedFencedProofUnavailable { sequence: u64 },
+    /// Frozen v2 Attached option fields disagree with replay prestate.
+    #[error("v2 Attached row at sequence {sequence} has contradictory mode evidence")]
+    V2AttachedModeMismatch { sequence: u64 },
+    /// A decoded v3 fate row reached apply before its later-leg replay owner exists.
+    #[error("v3 fate row at sequence {sequence} requires the W1b fate replay leg")]
+    V3FateReplayUnavailable { sequence: u64 },
 }
 
 /// Append-only handle over one conversation's production operation stream.
@@ -87,11 +107,56 @@ impl OperationLog {
         }
     }
 
-    /// Reads one replay page starting at `from_sequence`.
+    /// Reads one replay page while carrying the one-way schema phase.
     pub(super) async fn read_page(
         &self,
         from_sequence: u64,
-    ) -> Result<Vec<(u64, StoredOperation)>, OperationLogError> {
+        mut phase: OperationSchemaPhase,
+    ) -> Result<DecodedOperationPage, OperationLogError> {
+        let entries = self
+            .store
+            .read_from(&self.stream_key, from_sequence, READ_BATCH_SIZE)
+            .await?;
+        let mut rows = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let version: StoredEntryVersion = serde_json::from_slice(&entry.payload)?;
+            let operation = match version.schema_version {
+                SCHEMA_VERSION_V2 if phase == OperationSchemaPhase::V2Prefix => {
+                    let stored: StoredEntryV2 = serde_json::from_slice(&entry.payload)?;
+                    DecodedStoredOperation::V2(stored.operation)
+                }
+                SCHEMA_VERSION_V2 => {
+                    return Err(OperationLogError::SchemaVersionTransition {
+                        sequence: entry.sequence,
+                        previous: SCHEMA_VERSION,
+                        actual: SCHEMA_VERSION_V2,
+                    });
+                }
+                SCHEMA_VERSION => {
+                    phase = OperationSchemaPhase::V3Suffix;
+                    let stored: StoredEntryV3 = serde_json::from_slice(&entry.payload)?;
+                    DecodedStoredOperation::V3(stored.operation)
+                }
+                actual => return Err(OperationLogError::SchemaVersion(actual)),
+            };
+            rows.push(DecodedOperation {
+                sequence: entry.sequence,
+                schema_version: version.schema_version,
+                operation,
+            });
+        }
+        Ok(DecodedOperationPage {
+            rows,
+            next_phase: phase,
+        })
+    }
+
+    /// Reads one replay page starting at `from_sequence`.
+    #[cfg(test)]
+    pub(super) async fn read_v2_page(
+        &self,
+        from_sequence: u64,
+    ) -> Result<Vec<(u64, StoredOperationV2)>, OperationLogError> {
         let entries = self
             .store
             .read_from(&self.stream_key, from_sequence, READ_BATCH_SIZE)
@@ -99,10 +164,10 @@ impl OperationLog {
         let mut decoded = Vec::with_capacity(entries.len());
         for entry in entries {
             let version: StoredEntryVersion = serde_json::from_slice(&entry.payload)?;
-            if version.schema_version != SCHEMA_VERSION {
+            if version.schema_version != SCHEMA_VERSION_V2 {
                 return Err(OperationLogError::SchemaVersion(version.schema_version));
             }
-            let stored: StoredEntry = serde_json::from_slice(&entry.payload)?;
+            let stored: StoredEntryV2 = serde_json::from_slice(&entry.payload)?;
             decoded.push((entry.sequence, stored.operation));
         }
         Ok(decoded)
@@ -117,7 +182,7 @@ impl OperationLog {
         operation: &StoredOperation,
         expected_sequence: u64,
     ) -> Result<(), OperationLogError> {
-        let payload = serde_json::to_vec(&StoredEntry {
+        let payload = serde_json::to_vec(&StoredEntryV3 {
             schema_version: SCHEMA_VERSION,
             operation: operation.clone(),
         })?;
@@ -136,90 +201,60 @@ impl OperationLog {
     }
 }
 
+/// One-way schema phase carried across every bounded replay page.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum OperationSchemaPhase {
+    #[default]
+    V2Prefix,
+    V3Suffix,
+}
+
+/// One decoded versioned operation row.
+#[derive(Clone, Debug)]
+pub(super) struct DecodedOperation {
+    pub(super) sequence: u64,
+    pub(super) schema_version: u8,
+    pub(super) operation: DecodedStoredOperation,
+}
+
+/// One bounded decoded page plus the phase supplied to the next page.
+#[derive(Clone, Debug)]
+pub(super) struct DecodedOperationPage {
+    pub(super) rows: Vec<DecodedOperation>,
+    pub(super) next_phase: OperationSchemaPhase,
+}
+
+/// Version-specific operation payload retained until contextual v2 migration.
+#[derive(Clone, Debug)]
+pub(super) enum DecodedStoredOperation {
+    V2(StoredOperationV2),
+    V3(StoredOperationV3),
+}
+
 #[derive(Clone, Copy, Debug, Deserialize)]
 struct StoredEntryVersion {
     schema_version: u8,
 }
 
+/// Frozen v2 entry envelope. Its field names and representation never change.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-struct StoredEntry {
+struct StoredEntryV2 {
     schema_version: u8,
-    operation: StoredOperation,
+    operation: StoredOperationV2,
 }
 
-/// Complete replayable inputs of one committed operation.
-///
-/// `event` fields carry the exact canonical shell-event bytes appended for
-/// the six shell-event lifecycle operations; operations that mint no shell
-/// event (zero-debt cursor updates) carry none.
+/// Canonical v3 entry envelope used for every new append.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case", tag = "operation")]
-pub(super) enum StoredOperation {
-    /// Shell genesis validation (event ordinal zero).
-    Genesis {
-        /// Canonical genesis event bytes.
-        event: Vec<u8>,
-    },
-    /// Committed initial enrollment for one fresh participant slot.
-    Enrolled {
-        /// Wire request inputs.
-        request: StoredEnrollmentRequest,
-        /// Server allocations consumed by the transition.
-        allocation: StoredEnrollmentAllocation,
-        /// Canonical `Enrolled` shell event bytes.
-        event: Vec<u8>,
-    },
-    /// Committed ordinary detached attach (Fix 1 terminalization inside).
-    Attached {
-        /// Wire request inputs.
-        request: StoredAttachRequest,
-        /// Whether the presented secret verified at receive time.
-        secret_verified: bool,
-        /// Server allocations consumed by the transition.
-        allocation: StoredAttachAllocation,
-        /// Canonical `Attached` shell event bytes.
-        event: Vec<u8>,
-    },
-    /// Committed immediate detach (one non-decomposable transaction).
-    Detached {
-        /// Wire request inputs.
-        request: StoredDetachRequest,
-        /// Canonical non-secret request verifier.
-        verifier: Digest,
-        /// Binding epoch of the receiving connection.
-        receiving_epoch: StoredBindingEpoch,
-        /// Assigned terminal transaction order.
-        terminal_order: TransactionOrder,
-        /// Assigned terminal delivery sequence.
-        terminal_seq: DeliverySeq,
-        /// Canonical `Detached` shell event bytes.
-        event: Vec<u8>,
-    },
-    /// Committed zero-debt cumulative acknowledgement (no shell event).
-    ZeroDebtAck {
-        /// Wire request inputs.
-        request: StoredAck,
-        /// Binding epoch of the receiving connection.
-        receiving_epoch: StoredBindingEpoch,
-        /// Contiguously available sequence fact at commit time.
-        contiguously_available_through: DeliverySeq,
-    },
-    /// One mandatory marker-drain poststate, durable before admission retry.
-    MarkerDrained {
-        /// Exact canonical marker row and resulting successor audit.
-        row: StoredMarkerDrain,
-    },
-    /// One atomically committed payload-bearing ordinary record.
-    RecordAdmission {
-        /// Exact request, allocation, charge, and resulting retention audit.
-        row: StoredRecordAdmission,
-    },
-    /// One authorized Leave commit and its exact tombstone replay facts.
-    Left {
-        /// Exact request, verifier, allocation, and binding-fate audit.
-        row: StoredLeave,
-    },
+struct StoredEntryV3 {
+    schema_version: u8,
+    operation: StoredOperationV3,
 }
+
+pub(super) use super::log_v2::*;
+pub(super) use super::log_v3::*;
+
+/// Canonical operation type accepted by all production append entry points.
+pub(super) type StoredOperation = StoredOperationV3;
 
 /// Scalar resource vector in the canonical v2 row schema.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -342,7 +377,7 @@ pub(super) struct StoredLeave {
 }
 
 /// Stored enrollment request fields.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredEnrollmentRequest {
     pub(super) conversation_id: u64,
     pub(super) token: [u8; 16],
@@ -367,7 +402,7 @@ impl StoredEnrollmentRequest {
 }
 
 /// Server allocations committed with one enrollment transition.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredEnrollmentAllocation {
     pub(super) participant_id: ParticipantId,
     pub(super) identity_limit: u64,
@@ -381,7 +416,7 @@ pub(super) struct StoredEnrollmentAllocation {
 }
 
 /// Stored credential-attach request fields.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredAttachRequest {
     pub(super) conversation_id: u64,
     pub(super) participant_id: ParticipantId,
@@ -417,28 +452,8 @@ impl StoredAttachRequest {
     }
 }
 
-/// Server allocations committed with one credential attach.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
-pub(super) struct StoredAttachAllocation {
-    pub(super) binding_epoch: StoredBindingEpoch,
-    pub(super) attach_secret: [u8; 32],
-    pub(super) attached_order: TransactionOrder,
-    pub(super) attached_seq: DeliverySeq,
-    pub(super) receipt_expires_at: StoredU128,
-    pub(super) provenance_expires_at: StoredU128,
-    /// Admitted wall-clock read of the committing operation. Replay derives
-    /// the replaced receipt's exact terminal reason (`Superseded` vs
-    /// `Deadline`) from this stored fact, never from replay-time clocks.
-    pub(super) admitted_now_ms: u64,
-    /// `Some` exactly when this attach superseded an active binding: the
-    /// delivery sequence assigned to the `Detached(Superseded)` terminal of
-    /// the ordered handoff (sharing `attached_order` as its transaction
-    /// major). `None` for an ordinary detached attach.
-    pub(super) superseded_terminal_seq: Option<DeliverySeq>,
-}
-
 /// Stored detach request fields.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredDetachRequest {
     pub(super) conversation_id: u64,
     pub(super) participant_id: ParticipantId,
@@ -469,7 +484,7 @@ impl StoredDetachRequest {
 }
 
 /// Stored cumulative-ack request fields.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredAck {
     pub(super) conversation_id: u64,
     pub(super) participant_id: ParticipantId,
@@ -527,7 +542,7 @@ impl StoredBindingEpoch {
 }
 
 /// Big-endian byte capsule for `u128` deadlines.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredU128(pub(super) [u8; 16]);
 
 impl StoredU128 {

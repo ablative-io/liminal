@@ -30,7 +30,9 @@ use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barr
 use super::capacity::ServerCapacity;
 use super::facts::{self, Digest};
 use super::frontier;
-use super::log::{StoredAttachAllocation, StoredAttachRequest, StoredOperation};
+use super::log::{
+    StoredAttachAllocation, StoredAttachModeV3, StoredAttachRequest, StoredOperation,
+};
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
@@ -123,20 +125,6 @@ impl ConversationAuthority {
                 retire,
             } => (reservation, retire),
         };
-        // Attach mode from binding authority (contract R-C1.3): a bound slot
-        // for the SAME participant supersedes — one ordered
-        // Detached(Superseded)/Attached handoff, even on this connection
-        // incarnation; a detached slot binds ordinarily.
-        let superseding = match &slot.binding {
-            BindingState::Detached => false,
-            BindingState::Bound(_) => true,
-            BindingState::PendingFinalization(_) => {
-                return Err(StateError::invariant(
-                    "pending finalization observed in a binding that commits detaches immediately",
-                ));
-            }
-        };
-
         // The rotation result: the new binding epoch carries the successor of
         // the verified current generation (the crate's ResultGeneration law).
         let next_generation = request
@@ -147,13 +135,8 @@ impl ConversationAuthority {
             .ok_or(StateError::AllocationExhausted {
                 domain: "capability generation",
             })?;
-        let (attached_order, superseded_terminal_seq, attached_seq) = if superseding {
-            let (order, terminal_seq, attached_seq) = self.allocate_supersession_position()?;
-            (order, Some(terminal_seq), attached_seq)
-        } else {
-            let (order, seq) = self.allocate_position()?;
-            (order, None, seq)
-        };
+        let (attached_order, attached_seq, attach_mode) =
+            self.allocate_attach_mode(slot.binding)?;
         let allocation = StoredAttachAllocation {
             binding_epoch: BindingEpoch::new(
                 operation_facts.receiving_incarnation,
@@ -166,9 +149,13 @@ impl ConversationAuthority {
             receipt_expires_at: deadlines.receipt_expires_at().into(),
             provenance_expires_at: deadlines.provenance_expires_at().into(),
             admitted_now_ms: operation_facts.now_ms,
-            superseded_terminal_seq,
         };
-        let outcome = self.attach_commit(request, &allocation, CommitMode::Live(appender))?;
+        let outcome = self.attach_commit(
+            request,
+            &allocation,
+            &attach_mode,
+            CommitMode::Live(appender),
+        )?;
         // The durable append succeeded: the stage-8 reservation becomes
         // permanent and the receipts this rotation retired early (the
         // superseded attach receipt and, on the first rotation, the ended
@@ -180,11 +167,42 @@ impl ConversationAuthority {
         ))
     }
 
+    /// Selects the mandatory v3 Attached mode from exact binding authority and
+    /// consumes only the matching checked order/sequence allocation.
+    fn allocate_attach_mode(
+        &mut self,
+        binding: BindingState,
+    ) -> Result<(u64, u64, StoredAttachModeV3), StateError> {
+        match binding {
+            BindingState::Detached => {
+                let (order, sequence) = self.allocate_position()?;
+                Ok((order, sequence, StoredAttachModeV3::Ordinary))
+            }
+            BindingState::Bound(active) => {
+                let (order, terminal_sequence, attached_sequence) =
+                    self.allocate_supersession_position()?;
+                Ok((
+                    order,
+                    attached_sequence,
+                    StoredAttachModeV3::Superseding {
+                        prior_binding_epoch: active.binding_epoch.into(),
+                        terminal_transaction_order: order,
+                        terminal_delivery_seq: terminal_sequence,
+                    },
+                ))
+            }
+            BindingState::PendingFinalization(_) => Err(StateError::invariant(
+                "pending finalization observed in a binding that commits detaches immediately",
+            )),
+        }
+    }
+
     /// Replays one committed attach entry from its stored inputs.
     pub(super) fn replay_attached(
         &mut self,
         request: StoredAttachRequest,
         allocation: &StoredAttachAllocation,
+        attach_mode: &StoredAttachModeV3,
         stored_event: &[u8],
         sequence: u64,
     ) -> Result<(), StateError> {
@@ -192,6 +210,7 @@ impl ConversationAuthority {
         self.attach_commit(
             &request,
             allocation,
+            attach_mode,
             CommitMode::Replay {
                 stored_event,
                 sequence,
@@ -212,6 +231,7 @@ impl ConversationAuthority {
         &mut self,
         request: &CredentialAttachRequest,
         allocation: &StoredAttachAllocation,
+        attach_mode: &StoredAttachModeV3,
         mode: CommitMode<'_>,
     ) -> Result<AttachBound, StateError> {
         let source_sequence = self.next_log_sequence;
@@ -238,7 +258,7 @@ impl ConversationAuthority {
             provenance_expires_at: allocation.provenance_expires_at.get(),
         };
         let verified =
-            verify_attach_mode(slot.member, slot.binding, request, allocation, parameters)?;
+            verify_attach_mode(slot.member, slot.binding, request, attach_mode, parameters)?;
         let committed = commit_attach(verified, slot.cell).map_err(|error| {
             StateError::invariant(format!("protocol attach transition failed: {error:?}"))
         })?;
@@ -258,6 +278,7 @@ impl ConversationAuthority {
             request: request.into(),
             secret_verified: true,
             allocation: *allocation,
+            mode: Box::new(attach_mode.clone()),
             event,
         };
         let (shell, committed) =
@@ -414,11 +435,11 @@ fn verify_attach_mode(
     member: liminal_protocol::lifecycle::LiveMember<Digest>,
     binding: BindingState,
     request: &CredentialAttachRequest,
-    allocation: &StoredAttachAllocation,
+    attach_mode: &StoredAttachModeV3,
     parameters: AttachCommitParameters,
 ) -> Result<liminal_protocol::lifecycle::VerifiedAttachCommit<'static, Digest>, StateError> {
-    match (binding, allocation.superseded_terminal_seq) {
-        (BindingState::Detached, None) => {
+    match (binding, attach_mode) {
+        (BindingState::Detached, StoredAttachModeV3::Ordinary) => {
             let closure_admission = ClosureState::Clear
                 .ordinary_detached_attach_admission()
                 .map_err(|error| {
@@ -434,13 +455,27 @@ fn verify_attach_mode(
                 parameters,
             )
         }
-        (BindingState::Bound(active), Some(terminal_seq)) => member.verify_superseding_attach(
-            active,
-            request.clone(),
-            AttachSecretProof::Verified,
-            CommittedBindingTerminalPosition::new(allocation.attached_order, terminal_seq),
-            parameters,
-        ),
+        (
+            BindingState::Bound(active),
+            StoredAttachModeV3::Superseding {
+                prior_binding_epoch,
+                terminal_transaction_order,
+                terminal_delivery_seq,
+            },
+        ) if active.binding_epoch == prior_binding_epoch.to_epoch()?
+            && *terminal_transaction_order == parameters.attached_position.transaction_order() =>
+        {
+            member.verify_superseding_attach(
+                active,
+                request.clone(),
+                AttachSecretProof::Verified,
+                CommittedBindingTerminalPosition::new(
+                    *terminal_transaction_order,
+                    *terminal_delivery_seq,
+                ),
+                parameters,
+            )
+        }
         (_, _) => {
             return Err(StateError::invariant(
                 "attach allocation mode does not match the slot's binding authority",

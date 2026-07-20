@@ -22,6 +22,8 @@ mod handler_observer;
 mod handler_observer_reconcile;
 mod handler_semantic;
 mod log;
+mod log_v2;
+mod log_v3;
 mod marker_progress;
 mod observer;
 mod observer_progress;
@@ -36,6 +38,7 @@ mod ops_enroll_capacity;
 mod ops_frontier;
 mod ops_leave;
 mod ops_session;
+mod ops_session_replay;
 mod outbox;
 mod outbox_log;
 mod outbox_projection;
@@ -118,6 +121,8 @@ mod tests_unit2_layer1;
 mod tests_w1a;
 #[cfg(test)]
 mod tests_w1a_leave_barrier;
+#[cfg(test)]
+mod tests_w1b_substrate;
 #[cfg(test)]
 mod tests_w3_restore;
 #[cfg(test)]

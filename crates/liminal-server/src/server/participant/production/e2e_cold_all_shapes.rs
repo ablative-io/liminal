@@ -17,7 +17,7 @@ use super::e2e_cold_all_shapes_fixture::{
     assert_decoded_source_census, decoded_history, expect_enrolled, expected_live_deliveries,
 };
 use super::e2e_tests::{SocketFixture, SocketPeer};
-use super::log::StoredOperation;
+use super::log::{StoredAttachModeV3, StoredOperation};
 use super::outbox_log::OutboxRow;
 use super::tests_marker_ack_fixture::marker_fixture_config;
 
@@ -308,13 +308,13 @@ fn decoded_expectations(
     }));
     assert!(main_base.iter().any(|(_, row)| matches!(
         row,
-        StoredOperation::Attached { allocation, .. }
-            if allocation.superseded_terminal_seq.is_none()
+        StoredOperation::Attached { mode, .. }
+            if matches!(mode.as_ref(), StoredAttachModeV3::Ordinary)
     )));
     assert!(main_base.iter().any(|(_, row)| matches!(
         row,
-        StoredOperation::Attached { allocation, .. }
-            if allocation.superseded_terminal_seq.is_some()
+        StoredOperation::Attached { mode, .. }
+            if matches!(mode.as_ref(), StoredAttachModeV3::Superseding { .. })
     )));
     assert!(
         marker_base

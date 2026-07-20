@@ -12,7 +12,10 @@ use liminal_protocol::wire::{
 };
 
 use super::ProductionParticipantHandler;
-use super::log::{OperationLog, StoredOperation};
+use super::log::{
+    DecodedStoredOperation, OperationLog, OperationSchemaPhase, StoredAttachModeV3,
+    StoredDetachedSource, StoredOperation, StoredTerminalDisposition,
+};
 use super::outbox_log::{OutboxLog, OutboxRow, ProducedBatch, ProducedSourceKind};
 use super::tests::{dispatch, test_participant_config};
 use super::tests_marker_ack::{commit_exact_marker_ack, record_exact_marker_offer};
@@ -20,7 +23,7 @@ use super::tests_marker_ack_fixture::prepare_marker_fixture;
 
 #[path = "tests_unit2_log_rows.rs"]
 mod log_rows;
-use log_rows::{base_rows, extension_rows};
+use log_rows::{assert_primary_delivery_mapping, base_rows, extension_rows};
 #[derive(Clone, Copy)]
 struct Member {
     connection: ConnectionIncarnation,
@@ -257,12 +260,13 @@ fn assert_primary_membership_mapping(
             StoredOperation::Attached {
                 request,
                 allocation,
+                mode,
                 ..
             } => {
                 let batch = only_produced(&by_source, *source)?;
                 assert_eq!(batch.source_kind(), ProducedSourceKind::Attached);
-                match (allocation.superseded_terminal_seq, batch.ordered_records()) {
-                    (None, [attached]) => {
+                match (mode.as_ref(), batch.ordered_records()) {
+                    (StoredAttachModeV3::Ordinary, [attached]) => {
                         ordinary_attach += 1;
                         assert_eq!(attached.delivery_seq(), allocation.attached_seq);
                         assert_eq!(
@@ -273,9 +277,15 @@ fn assert_primary_membership_mapping(
                             }
                         );
                     }
-                    (Some(terminal_seq), [terminal, attached]) => {
+                    (
+                        StoredAttachModeV3::Superseding {
+                            terminal_delivery_seq,
+                            ..
+                        },
+                        [terminal, attached],
+                    ) => {
                         superseding_attach += 1;
-                        assert_eq!(terminal.delivery_seq(), terminal_seq);
+                        assert_eq!(terminal.delivery_seq(), *terminal_delivery_seq);
                         assert!(matches!(
                             terminal.body(),
                             ParticipantRecord::Detached {
@@ -315,95 +325,6 @@ fn assert_primary_membership_mapping(
     assert_eq!(ordinary_attach, 1);
     assert_eq!(superseding_attach, 1);
     assert_eq!(seen, BTreeSet::from(["attached", "enrolled", "genesis"]));
-    Ok(())
-}
-
-fn assert_primary_delivery_mapping(
-    base: &[(u64, StoredOperation)],
-    extension: &[(u64, OutboxRow)],
-) -> Result<(), Box<dyn Error>> {
-    let by_source = rows_by_source(extension);
-    let mut seen = BTreeSet::new();
-    for (source, operation) in base {
-        match operation {
-            StoredOperation::Detached {
-                request,
-                receiving_epoch,
-                terminal_seq,
-                ..
-            } => {
-                let batch = only_produced(&by_source, *source)?;
-                assert_eq!(batch.source_kind(), ProducedSourceKind::Detached);
-                let [record] = batch.ordered_records() else {
-                    return Err("detach did not map to one record".into());
-                };
-                assert_eq!(record.delivery_seq(), *terminal_seq);
-                assert_eq!(
-                    record.body(),
-                    &ParticipantRecord::Detached {
-                        affected_participant_id: request.participant_id,
-                        binding_epoch: receiving_epoch.to_epoch()?,
-                        cause: DetachedCause::CleanDeregister,
-                    }
-                );
-                seen.insert("detached");
-            }
-            StoredOperation::ZeroDebtAck { request, .. } => {
-                let rows = by_source
-                    .get(source)
-                    .ok_or("ack source had no extension row")?;
-                assert!(matches!(
-                    rows.as_slice(),
-                    [OutboxRow::AckAdvanced {
-                        participant_id,
-                        through_seq,
-                        ..
-                    }] if *participant_id == request.participant_id && *through_seq == request.through_seq
-                ));
-                seen.insert("zero_debt_ack");
-            }
-            StoredOperation::RecordAdmission { row } => {
-                let batch = only_produced(&by_source, *source)?;
-                assert_eq!(batch.source_kind(), ProducedSourceKind::RecordAdmission);
-                let [record] = batch.ordered_records() else {
-                    return Err("record admission did not map to one record".into());
-                };
-                assert_eq!(record.delivery_seq(), row.delivery_seq);
-                assert_eq!(
-                    record.body(),
-                    &ParticipantRecord::OrdinaryRecord {
-                        sender_participant_id: row.request.participant_id,
-                        payload: row.request.payload.clone(),
-                    }
-                );
-                seen.insert("record_admission");
-            }
-            StoredOperation::Left { row } => {
-                let batch = only_produced(&by_source, *source)?;
-                assert_eq!(batch.source_kind(), ProducedSourceKind::Left);
-                let [record] = batch.ordered_records() else {
-                    return Err("leave did not map to one record".into());
-                };
-                assert_eq!(record.delivery_seq(), row.left_delivery_seq);
-                assert_eq!(
-                    record.body(),
-                    &ParticipantRecord::Left {
-                        affected_participant_id: row.request.participant_id,
-                        ended_binding_epoch: row
-                            .ended_binding_epoch
-                            .map(super::log::StoredBindingEpoch::to_epoch)
-                            .transpose()?,
-                    }
-                );
-                seen.insert("left");
-            }
-            _ => {}
-        }
-    }
-    assert_eq!(
-        seen,
-        BTreeSet::from(["detached", "left", "record_admission", "zero_debt_ack"])
-    );
     Ok(())
 }
 
