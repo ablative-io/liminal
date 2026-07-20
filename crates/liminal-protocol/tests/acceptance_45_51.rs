@@ -30,12 +30,13 @@ use liminal_protocol::{
         AttachedRecordPosition, BindingState, BindingTerminalDisposition, BoundParticipantCursor,
         ClosureDebt, ClosureState, CommittedBindingTerminal, CommittedBindingTerminalPosition,
         CursorFateSuccessor, CursorProgressFact, CursorProgressKey, DebtCompletion, DetachCell,
-        DetachedAttachRefusal, EnrollmentCommitParameters, EnrollmentFingerprint, Event,
-        IdentityState, LeaveCommitParameters, LeaveFingerprint, LeaveOnlyEdge, LiveMember,
-        LiveMemberRestore, NonzeroDebtCursorEpisode, ObserverProjection, ParticipantCursorProgress,
-        ParticipantSlotAllocatorProof, PendingBindingTerminalPosition, PhysicalCompaction,
-        RecoveredBindingFateTransition, StoredEdge, commit_attach, commit_detach,
-        commit_enrollment, commit_leave,
+        DetachedAttachRefusal, DetachedCredentialRecovery, EnrollmentCommitParameters,
+        EnrollmentFingerprint, Event, FencedAttachMintRefusalReason, IdentityState,
+        LeaveCommitParameters, LeaveFingerprint, LeaveOnlyEdge, LiveMember, LiveMemberRestore,
+        MintFencedAttachResult, NonzeroDebtCursorEpisode, ObserverProjection,
+        ParticipantCursorProgress, ParticipantSlotAllocatorProof, PendingBindingTerminalPosition,
+        PhysicalCompaction, RecoveredBindingFateTransition, StoredEdge, commit_attach,
+        commit_detach, commit_enrollment, commit_leave,
     },
     wire::{
         AttachAttemptToken, AttachEnvelope, AttachSecret, BindingEpoch, BindingRequiredEnvelope,
@@ -52,7 +53,8 @@ use liminal_protocol::{
     },
 };
 use support::{
-    marker_delivery, mint_fenced_attach, recovered_fate_from_fenced, settled_leave_authority,
+    fenced_owner, marker_delivery, mint_fenced_attach, recovered_fate_from_fenced,
+    settled_leave_authority,
 };
 
 const BM: u64 = 16;
@@ -2643,4 +2645,147 @@ fn acceptance_case_51_detached_attach_exhaustion_and_cursor_only_recovery_fence(
     }
     assert_eq!(dcursor_snapshot.marker_capacity_credits, 0);
     assert_eq!(dcursor_snapshot.marker_anchors, 0);
+}
+
+fn oracle_26_recovery(
+    participant_id: u64,
+    marker_sequence: u64,
+    prior_epoch: BindingEpoch,
+) -> (DetachedCredentialRecovery, ClosureDebt) {
+    let debt = closure_debt(2);
+    let delivered = marker_delivery(participant_id, prior_epoch, marker_sequence)
+        .expect("Oracle 26 restores the complete marker source")
+        .delivered(
+            debt,
+            Event::marker_delivered(participant_id, prior_epoch, marker_sequence),
+        )
+        .expect("Oracle 26 delivers the exact retained marker");
+    let progress = extract_marker_progress(delivered);
+    let fate_floor = marker_sequence
+        .checked_sub(1)
+        .expect("Oracle 26 marker has a predecessor floor");
+    let recovery = extract_credential_recovery(
+        progress
+            .binding_fate(
+                debt,
+                Event::binding_fate_observed(participant_id, prior_epoch, fate_floor),
+            )
+            .expect("Oracle 26 exact fate derives credential recovery"),
+    );
+    (recovery, debt)
+}
+
+fn oracle_26_complete_chain(
+    participant_id: u64,
+    marker_sequence: u64,
+    prior_epoch: BindingEpoch,
+    recovered_epoch: BindingEpoch,
+) -> [u64; 5] {
+    let (recovery, debt) = oracle_26_recovery(participant_id, marker_sequence, prior_epoch);
+    let projection_sequence = marker_sequence
+        .checked_add(4)
+        .expect("projection sequence fits");
+    let resulting_floor = marker_sequence
+        .checked_add(1)
+        .expect("resulting floor fits");
+    let successor = DebtCompletion::observer_projection(
+        closure_debt(1),
+        ObserverProjection::new(projection_sequence),
+    );
+    let owner = fenced_owner(recovery).expect("Oracle 26 frontier owns one validated marker");
+    let MintFencedAttachResult::Minted(minted) = owner.mint_fenced_attach(
+        marker_sequence,
+        recovery,
+        debt,
+        Event::fenced_recovery_committed(
+            participant_id,
+            marker_sequence,
+            prior_epoch,
+            recovered_epoch,
+            resulting_floor,
+        ),
+        successor,
+    ) else {
+        panic!("Oracle 26 exact owner mint must succeed")
+    };
+    let (spent_owner, proof) = minted.into_parts();
+    drop(spent_owner);
+    let recovered = recovered_fate_from_fenced(
+        proof,
+        Event::binding_fate_observed(participant_id, recovered_epoch, resulting_floor),
+    )
+    .expect("Oracle 26 traverses verify, commit, split, and recovered consumption");
+    assert_eq!(recovered.participant_id(), participant_id);
+    [1, 1, 1, 1, 1]
+}
+
+#[test]
+fn attach_commit_splits_operational_state_and_one_noncloneable_fate_token() {
+    let expected = [1, 1, 1, 1, 1];
+    assert_eq!(
+        oracle_26_complete_chain(P0, 14, epoch(1, 2, 2), epoch(1, 3, 3)),
+        expected
+    );
+    assert_eq!(
+        oracle_26_complete_chain(P1, 24, epoch(1, 4, 4), epoch(1, 5, 5)),
+        expected
+    );
+
+    let marker_sequence = 34_u64;
+    let prior_epoch = epoch(1, 6, 6);
+    let recovered_epoch = epoch(1, 7, 7);
+    let resulting_floor = marker_sequence.checked_add(1).expect("retry floor fits");
+    let (recovery, debt) = oracle_26_recovery(P0, marker_sequence, prior_epoch);
+    let successor = DebtCompletion::observer_projection(
+        closure_debt(1),
+        ObserverProjection::new(
+            marker_sequence
+                .checked_add(4)
+                .expect("retry projection fits"),
+        ),
+    );
+    let owner = fenced_owner(recovery).expect("retry frontier owns the marker authority");
+    let wrong_event = Event::fenced_recovery_committed(
+        P0,
+        marker_sequence.checked_add(1).expect("wrong marker fits"),
+        prior_epoch,
+        recovered_epoch,
+        resulting_floor,
+    );
+    let MintFencedAttachResult::MintRefused(refused) =
+        owner.mint_fenced_attach(marker_sequence, recovery, debt, wrong_event, successor)
+    else {
+        panic!("mismatched proof input must mint no proof")
+    };
+    assert_eq!(refused.reason(), FencedAttachMintRefusalReason::ProofInputs);
+    let (owner, source, returned_recovery, returned_debt, returned_event, returned_successor) =
+        refused.into_parts();
+    assert_eq!(source, marker_sequence);
+    assert_eq!(returned_recovery, recovery);
+    assert_eq!(returned_debt, debt);
+    assert_eq!(returned_event, wrong_event);
+    assert_eq!(returned_successor, successor);
+
+    let MintFencedAttachResult::Minted(retried) = owner.mint_fenced_attach(
+        source,
+        returned_recovery,
+        returned_debt,
+        Event::fenced_recovery_committed(
+            P0,
+            marker_sequence,
+            prior_epoch,
+            recovered_epoch,
+            resulting_floor,
+        ),
+        returned_successor,
+    ) else {
+        panic!("same reinstalled marker authority permits one serial retry")
+    };
+    let (spent_owner, proof) = retried.into_parts();
+    drop(spent_owner);
+    recovered_fate_from_fenced(
+        proof,
+        Event::binding_fate_observed(P0, recovered_epoch, resulting_floor),
+    )
+    .expect("successful serial retry traverses exactly one complete chain");
 }

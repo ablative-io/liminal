@@ -25,12 +25,9 @@ use liminal_protocol::{
     },
 };
 
-pub fn mint_fenced_attach(
+pub fn fenced_owner(
     recovery: liminal_protocol::lifecycle::DetachedCredentialRecovery,
-    debt: liminal_protocol::lifecycle::ClosureDebt,
-    event: Event,
-    successor: liminal_protocol::lifecycle::DebtCompletion,
-) -> Result<FencedAttachCommit, String> {
+) -> Result<LiveFrontierOwner, String> {
     let marker_delivery_seq = recovery.marker_delivery_seq();
     let cursor = marker_delivery_seq
         .checked_sub(1)
@@ -81,6 +78,17 @@ pub fn mint_fenced_attach(
     let commit = drain_next_marker(frontiers, accounting, retained_charges, marker_charge)
         .map_err(|error| format!("fenced owner marker failed to drain: {error:?}"))?;
     let (owner, _, _) = LiveFrontierOwner::from_marker_drain(commit, 2);
+    Ok(owner)
+}
+
+pub fn mint_fenced_attach(
+    recovery: liminal_protocol::lifecycle::DetachedCredentialRecovery,
+    debt: liminal_protocol::lifecycle::ClosureDebt,
+    event: Event,
+    successor: liminal_protocol::lifecycle::DebtCompletion,
+) -> Result<FencedAttachCommit, String> {
+    let marker_delivery_seq = recovery.marker_delivery_seq();
+    let owner = fenced_owner(recovery)?;
     match owner.mint_fenced_attach(marker_delivery_seq, recovery, debt, event, successor) {
         MintFencedAttachResult::Minted(minted) => {
             let (spent_owner, proof) = minted.into_parts();
