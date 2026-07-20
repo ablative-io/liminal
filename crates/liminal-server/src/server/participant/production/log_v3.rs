@@ -104,17 +104,25 @@ impl StoredOperationV3 {
                 prior_binding_epoch,
                 marker_delivery_seq,
                 proof,
+                composed_terminal,
                 ..
-            } => proof
-                .decode(FencedAttachProofContext {
+            } => {
+                let context = FencedAttachProofContext {
                     conversation_id: request.conversation_id,
                     participant_id: request.participant_id,
                     request_marker_delivery_seq: request.accept_marker_delivery_seq,
                     prior_binding_epoch: *prior_binding_epoch,
                     marker_delivery_seq: *marker_delivery_seq,
                     new_binding_epoch: allocation.binding_epoch,
+                };
+                proof.decode(context).err().or_else(|| {
+                    composed_terminal.as_ref().and_then(|terminal| {
+                        terminal
+                            .validate_local(sequence, allocation.attached_order)
+                            .err()
+                    })
                 })
-                .err(),
+            }
         };
         refusal.map_or(Ok(()), |reason| {
             Err(OperationLogError::FencedAttachProof { sequence, reason })
@@ -241,6 +249,50 @@ pub(super) struct StoredComposedTerminal {
     pub(super) delivery_seq: DeliverySeq,
     pub(super) pending_source_sequence: u64,
     pub(super) presentation: StoredFinalizerPresentation,
+}
+
+impl StoredComposedTerminal {
+    fn validate_local(
+        &self,
+        attached_source_sequence: u64,
+        attached_order: TransactionOrder,
+    ) -> Result<(), FencedAttachProofRefusal> {
+        let cause_matches = matches!(
+            (self.kind, self.cause),
+            (
+                StoredComposedTerminalKind::Detached,
+                StoredComposedTerminalCause::CleanDeregister
+                    | StoredComposedTerminalCause::ServerShutdown
+            ) | (
+                StoredComposedTerminalKind::Died,
+                StoredComposedTerminalCause::ConnectionLost
+                    | StoredComposedTerminalCause::ProcessKilled
+                    | StoredComposedTerminalCause::ProtocolError
+                    | StoredComposedTerminalCause::UncleanServerRestart { .. }
+            )
+        );
+        if !cause_matches {
+            return Err(FencedAttachProofRefusal::ComposedTerminalKindCause);
+        }
+        if self.transaction_order != attached_order {
+            return Err(FencedAttachProofRefusal::ComposedTerminalOrder);
+        }
+        if self.pending_source_sequence >= attached_source_sequence {
+            return Err(FencedAttachProofRefusal::ComposedPendingSourceOrder);
+        }
+        if let StoredFinalizerPresentation::ConsumeRecoveredReservation {
+            recovered_source_sequence,
+        } = self.presentation
+        {
+            if self.kind != StoredComposedTerminalKind::Died {
+                return Err(FencedAttachProofRefusal::ComposedRecoveredReservationKind);
+            }
+            if recovered_source_sequence >= attached_source_sequence {
+                return Err(FencedAttachProofRefusal::ComposedRecoveredSourceOrder);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Cause audit whose class must agree with `StoredComposedTerminal::kind`.
