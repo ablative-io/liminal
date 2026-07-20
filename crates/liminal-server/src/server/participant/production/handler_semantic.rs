@@ -12,7 +12,7 @@ use liminal_protocol::wire::{
 use crate::server::participant::{
     ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
     ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
-    ParticipantSemanticHandler,
+    ParticipantSemanticHandler, ParticipantServiceFatal,
 };
 
 use super::barrier::ArmOutcome;
@@ -64,6 +64,18 @@ impl ProductionParticipantHandler {
 }
 
 impl ParticipantSemanticHandler for ProductionParticipantHandler {
+    fn service_fatal(&self) -> Result<Option<ParticipantServiceFatal>, ParticipantSemanticError> {
+        self.current_service_fatal()
+    }
+
+    fn latch_connection_fate_intent_incomplete(
+        &self,
+        open_sequence: u64,
+        conversation_id: ConversationId,
+    ) -> Result<ParticipantServiceFatal, ParticipantSemanticError> {
+        self.latch_connection_fate_fatal(open_sequence, conversation_id)
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         self.config.max_semantic_conversations_per_connection
     }
@@ -72,6 +84,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         &self,
         conversation_id: ConversationId,
     ) -> Result<Vec<ConnectionIncarnation>, ParticipantSemanticError> {
+        self.ensure_service_live()?;
         let cell = self.cell(conversation_id)?;
         let owner = cell
             .lock()
@@ -102,6 +115,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         conversation_id: ConversationId,
         offered: Option<ParticipantOfferedProgress>,
     ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
+        self.ensure_service_live()?;
         let cell = self.cell(conversation_id)?;
         let owner = cell
             .lock()
@@ -145,6 +159,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         participant_id: ParticipantId,
         binding_epoch: BindingEpoch,
     ) -> Result<bool, ParticipantSemanticError> {
+        self.ensure_service_live()?;
         let cell = self.cell(conversation_id)?;
         let owner = cell
             .lock()
@@ -166,6 +181,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         &self,
         publication: &ParticipantPublication,
     ) -> Result<(), ParticipantSemanticError> {
+        self.ensure_service_live()?;
         if !matches!(
             publication.delivery.record,
             ParticipantRecord::HistoryCompacted { .. }
@@ -215,6 +231,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         request: ObserverRecoveryHandshake,
         target: Option<ObserverPublicationTarget>,
     ) -> Result<ServerValue, ParticipantSemanticError> {
+        self.ensure_service_live()?;
         self.apply_observer_recovery(context, conversations, &request, target.as_ref())
     }
 
@@ -224,6 +241,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
+        self.ensure_service_live()?;
         match request {
             ClientRequest::Enrollment(request) => {
                 self.handle_enrollment(context, conversations, &request)

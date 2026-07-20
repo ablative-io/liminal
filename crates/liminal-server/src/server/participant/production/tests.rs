@@ -11,18 +11,19 @@ use std::path::Path;
 use std::sync::Arc;
 
 use haematite::{Database, DatabaseConfig, EventStore};
-use liminal::durability::{DurableStore, HaematiteStore};
+use liminal::durability::{DurableStore, HaematiteStore, open_ephemeral};
 use liminal::protocol::{Frame, decode as decode_generic};
 use liminal_protocol::wire::{
     AttachAttemptToken, BindingEpoch, ClientRequest, ConnectionIncarnation,
     CredentialAttachRequest, DetachAttemptToken, DetachRequest, DetachStaleAuthority,
-    EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck, ParticipantFrame,
-    ReceiverDirection, ServerValue, StaleAuthority, decode, encode, encoded_len,
+    EnrollmentRequest, EnrollmentToken, Generation, ObserverRecoveryHandshake, ParticipantAck,
+    ParticipantFrame, ReceiverDirection, ServerValue, StaleAuthority, decode, encode, encoded_len,
 };
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
+    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantServiceFatal,
     ParticipantSession, dispatch_generic_frame, normalize_configured_frame_limit,
 };
 
@@ -536,5 +537,59 @@ fn observer_recovery_classifies_exact_rows_over_durable_tracking() -> Result<(),
     };
     assert_eq!(conversation_id, unknown_id);
     assert_eq!(presented_epoch, 1);
+    Ok(())
+}
+
+#[test]
+fn connection_fate_intent_incomplete_latches_first_fatal_before_semantic_or_publication_entry()
+-> Result<(), Box<dyn Error>> {
+    const OPEN_SEQUENCE: u64 = 17;
+    const CONVERSATION: u64 = 23;
+    const LATER_OPEN_SEQUENCE: u64 = 29;
+    const LATER_CONVERSATION: u64 = 31;
+
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    assert_eq!(handler.service_fatal()?, None);
+
+    let selected = handler.latch_connection_fate_intent_incomplete(OPEN_SEQUENCE, CONVERSATION)?;
+    assert_eq!(
+        selected,
+        ParticipantServiceFatal::ConnectionFateIntentIncomplete {
+            open_sequence: OPEN_SEQUENCE,
+            conversation_id: CONVERSATION,
+        }
+    );
+    let repeated =
+        handler.latch_connection_fate_intent_incomplete(LATER_OPEN_SEQUENCE, LATER_CONVERSATION)?;
+    assert_eq!(repeated, selected, "the first post-Open fatal must win");
+    assert_eq!(handler.service_fatal()?, Some(selected.clone()));
+
+    let ready = handler.ready_connection_incarnations(CONVERSATION);
+    assert!(matches!(
+        ready,
+        Err(ParticipantSemanticError::ServiceFatal(fatal)) if fatal == selected
+    ));
+    let publication =
+        handler.next_publication(ConnectionIncarnation::new(1, 0), CONVERSATION, None);
+    assert!(matches!(
+        publication,
+        Err(ParticipantSemanticError::ServiceFatal(fatal)) if fatal == selected
+    ));
+
+    let mut conversations = ParticipantConnectionConversations::default();
+    let request = ClientRequest::ObserverRecovery(ObserverRecoveryHandshake {
+        observer_refusals: Vec::new(),
+    });
+    let semantic_result = handler.handle(
+        ParticipantConnectionContext::new(ConnectionIncarnation::new(1, 0)),
+        &mut conversations,
+        request,
+    );
+    assert!(matches!(
+        semantic_result,
+        Err(ParticipantSemanticError::ServiceFatal(fatal)) if fatal == selected
+    ));
+    assert_eq!(conversations.occupied(), 0);
     Ok(())
 }

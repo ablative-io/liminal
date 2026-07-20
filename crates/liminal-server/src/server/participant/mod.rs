@@ -50,7 +50,7 @@ mod transport_tests;
 pub use dispatch::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
     ParticipantDispatch, ParticipantDispatchError, ParticipantSemanticError,
-    ParticipantSemanticHandler, dispatch_generic_frame,
+    ParticipantSemanticHandler, ParticipantServiceFatal, dispatch_generic_frame,
 };
 pub use production::marker_source::{
     MarkerSourceRefusalReason, MarkerSourceRefused, ValidatedFencedMarkerInputs,
