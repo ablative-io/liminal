@@ -78,3 +78,9 @@ fn production_connection_fate_handler_completes_listed_conversation_without_matc
     assert_eq!(handler.registry_len(), 0);
     Ok(())
 }
+
+#[test]
+fn process_killed_has_no_production_participant_binding_emitter() {
+    let cases = trybuild::TestCases::new();
+    cases.compile_fail("tests/trybuild/production_connection_fate_cannot_select_process_killed.rs");
+}
