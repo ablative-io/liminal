@@ -12,8 +12,10 @@ use liminal_protocol::{
 };
 
 use super::incarnation_stream::{
-    IncarnationAllocation, IncarnationStartup, IncarnationStream, IncarnationStreamError,
-    StartedIncarnationStream, encode_allocate_event_fixture, encode_startup_event_fixture,
+    ConnectionFateClass, IncarnationAllocation, IncarnationStartup, IncarnationStream,
+    IncarnationStreamError, StartedIncarnationStream, encode_allocate_event_fixture,
+    encode_complete_connection_fate_event_fixture, encode_frozen_v1_startup_event_fixture,
+    encode_open_connection_fate_event_fixture, encode_startup_event_fixture,
 };
 
 #[derive(Debug)]
@@ -117,14 +119,19 @@ fn event_codec_pins_exact_startup_and_allocate_bytes() -> Result<(), Box<dyn std
     );
     assert_eq!(
         encode_startup_event_fixture()?,
-        [b'L', b'P', b'I', b'E', 1, 1, 0, 0, 0, 0]
+        [b'L', b'P', b'I', b'E', 2, 1, 0, 0, 0, 0]
+    );
+    assert_eq!(
+        encode_frozen_v1_startup_event_fixture()?,
+        [b'L', b'P', b'I', b'E', 1, 1, 0, 0, 0, 0],
+        "the v2 writer must not alter the frozen-v1 prefix decoder fixture"
     );
 
     let references = [
         ConnectionIncarnation::new(7, 11),
         ConnectionIncarnation::new(7, 11),
     ];
-    let mut expected = vec![b'L', b'P', b'I', b'E', 1, 2, 0, 0, 0, 48];
+    let mut expected = vec![b'L', b'P', b'I', b'E', 2, 2, 0, 0, 0, 48];
     expected.extend_from_slice(&4_u64.to_be_bytes());
     expected.extend_from_slice(&2_u64.to_be_bytes());
     for incarnation in references {
@@ -132,6 +139,95 @@ fn event_codec_pins_exact_startup_and_allocate_bytes() -> Result<(), Box<dyn std
         expected.extend_from_slice(&incarnation.connection_ordinal.to_be_bytes());
     }
     assert_eq!(encode_allocate_event_fixture(4, &references)?, expected);
+    Ok(())
+}
+
+#[test]
+fn connection_fate_intent_rows_pin_exact_v2_bytes_and_frozen_v1_decode()
+-> Result<(), Box<dyn std::error::Error>> {
+    const SERVER_INCARNATION: u64 = 7;
+    const CONNECTION_ORDINAL: u64 = 11;
+    const DECLARED_CONVERSATION_BOUND: usize = 3;
+    const FIRST_CONVERSATION: u64 = 13;
+    const SECOND_CONVERSATION: u64 = 17;
+    const OPEN_SEQUENCE: u64 = 19;
+
+    let incarnation = ConnectionIncarnation::new(SERVER_INCARNATION, CONNECTION_ORDINAL);
+    let conversations = [FIRST_CONVERSATION, SECOND_CONVERSATION];
+    let open = encode_open_connection_fate_event_fixture(
+        incarnation,
+        ConnectionFateClass::ConnectionLost,
+        DECLARED_CONVERSATION_BOUND,
+        &conversations,
+    )?;
+    let open_body_length = 16_u32 + 1 + 8 + 8 + 2 * 8;
+    let mut expected_open = vec![b'L', b'P', b'I', b'E', 2, 3];
+    expected_open.extend_from_slice(&open_body_length.to_be_bytes());
+    expected_open.extend_from_slice(&SERVER_INCARNATION.to_be_bytes());
+    expected_open.extend_from_slice(&CONNECTION_ORDINAL.to_be_bytes());
+    expected_open.push(3);
+    expected_open.extend_from_slice(&u64::try_from(DECLARED_CONVERSATION_BOUND)?.to_be_bytes());
+    expected_open.extend_from_slice(&u64::try_from(conversations.len())?.to_be_bytes());
+    for conversation_id in conversations {
+        expected_open.extend_from_slice(&conversation_id.to_be_bytes());
+    }
+    assert_eq!(open, expected_open);
+
+    let complete = encode_complete_connection_fate_event_fixture(OPEN_SEQUENCE)?;
+    let mut expected_complete = vec![b'L', b'P', b'I', b'E', 2, 4, 0, 0, 0, 8];
+    expected_complete.extend_from_slice(&OPEN_SEQUENCE.to_be_bytes());
+    assert_eq!(complete, expected_complete);
+
+    let store = store()?;
+    append_event(&store, 0, encode_frozen_v1_startup_event_fixture()?)?;
+    append_event(&store, 1, encode_allocate_event_fixture(3, &[])?)?;
+    append_event(&store, 2, expected_open)?;
+    append_event(&store, 3, expected_complete)?;
+    let replayed = liminal::durability::bridge::block_on(
+        IncarnationStream::new(store, 3).resume_started_for_test(),
+    )??;
+    assert_eq!(replayed.header().server_incarnation, 1);
+    Ok(())
+}
+
+#[test]
+fn connection_fate_open_codec_refuses_noncanonical_or_overbound_conversations()
+-> Result<(), Box<dyn std::error::Error>> {
+    const BOUND: usize = 2;
+    const FIRST: u64 = 5;
+    const SECOND: u64 = 7;
+    let incarnation = ConnectionIncarnation::new(1, 0);
+
+    assert!(matches!(
+        encode_open_connection_fate_event_fixture(
+            incarnation,
+            ConnectionFateClass::CleanDisconnect,
+            BOUND,
+            &[FIRST, FIRST],
+        ),
+        Err(IncarnationStreamError::ConversationsNotStrictlyIncreasing { index: 1 })
+    ));
+    assert!(matches!(
+        encode_open_connection_fate_event_fixture(
+            incarnation,
+            ConnectionFateClass::ServerShutdown,
+            BOUND,
+            &[SECOND, FIRST],
+        ),
+        Err(IncarnationStreamError::ConversationsNotStrictlyIncreasing { index: 1 })
+    ));
+    assert!(matches!(
+        encode_open_connection_fate_event_fixture(
+            incarnation,
+            ConnectionFateClass::ProtocolError,
+            BOUND,
+            &[FIRST, SECOND, SECOND + 1],
+        ),
+        Err(IncarnationStreamError::ConversationCountExceedsBound {
+            actual: 3,
+            maximum: BOUND,
+        })
+    ));
     Ok(())
 }
 
@@ -441,11 +537,11 @@ fn malformed_event_codec_is_rejected_before_protocol_replay()
 
     let version_store = store()?;
     let mut bad_version = encode_startup_event_fixture()?;
-    bad_version[4] = 2;
+    bad_version[4] = 3;
     append_event(&version_store, 0, bad_version)?;
     assert!(matches!(
         liminal::durability::bridge::block_on(IncarnationStream::new(version_store, 1).startup())?,
-        Err(IncarnationStreamError::EventSchemaVersion(2))
+        Err(IncarnationStreamError::EventSchemaVersion(3))
     ));
 
     let tag_store = store()?;
