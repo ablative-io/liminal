@@ -9,8 +9,9 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use crate::{algebra::ResourceVector, wire::RecordAdmission};
 
 use super::super::{
-    AttachCommit, AttachTransition, BindingState, ClaimFrontiers, ClosureAccounting,
-    CommittedDetachTransition, DetachCell, FrontierBinding, FrontierParticipant, IdentityState,
+    AttachCommit, AttachTransition, BindingState, ClaimFrontiers, ClosureAccounting, ClosureDebt,
+    CommittedDetachTransition, DebtCompletion, DetachCell, DetachedCredentialRecovery, Event,
+    FencedAttachCommit, FrontierBinding, FrontierParticipant, IdentityState,
     InitialEnrollmentFrontierCommit, LeaveCommitError, LeaveCommitParameters, LiveMember,
     MarkerAckCommit, NonzeroParticipantAckCommit, ObserverProgressProjection, OrderLedger,
     ParticipantAckCommit, PendingFinalization, PendingLeaveCommitParameters,
@@ -205,6 +206,131 @@ impl LiveFrontierOwner {
             projection,
         )
     }
+
+    /// Consumes the complete owner and the exact descriptive inputs to mint one
+    /// fenced attach proof from the selected retained marker occurrence.
+    ///
+    /// This is the sole public production mint. The caller cannot supply a raw
+    /// marker token: the owner removes it from its fully validated frontiers.
+    /// Refusal returns this owner and every input unchanged after reinstalling
+    /// that same occurrence authority, allowing serial retry but no fork.
+    #[must_use]
+    pub fn mint_fenced_attach(
+        mut self,
+        marker_source_sequence: u64,
+        recovery: DetachedCredentialRecovery,
+        debt: ClosureDebt,
+        event: Event,
+        successor: DebtCompletion,
+    ) -> MintFencedAttachResult {
+        let Some(record) = self.frontiers.take_fenced_marker_record(recovery) else {
+            return MintFencedAttachResult::MintRefused(Box::new(MintFencedAttachRefused {
+                owner: self,
+                marker_source_sequence,
+                recovery,
+                debt,
+                event,
+                successor,
+                reason: FencedAttachMintRefusalReason::MarkerAuthority,
+            }));
+        };
+        match recovery.fenced_attach_with_record(record, debt, event, successor) {
+            Ok(proof) => MintFencedAttachResult::Minted(MintedFencedAttach {
+                owner_without_marker_authority: self,
+                proof,
+            }),
+            Err(refusal) => {
+                self.frontiers
+                    .reinstall_fenced_marker_record(refusal.into_record());
+                MintFencedAttachResult::MintRefused(Box::new(MintFencedAttachRefused {
+                    owner: self,
+                    marker_source_sequence,
+                    recovery,
+                    debt,
+                    event,
+                    successor,
+                    reason: FencedAttachMintRefusalReason::ProofInputs,
+                }))
+            }
+        }
+    }
+}
+
+/// Exact reason the owner could not mint a fenced attach proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FencedAttachMintRefusalReason {
+    /// The validated frontier did not own the selected delivered marker record,
+    /// or that record authority was already consumed.
+    MarkerAuthority,
+    /// Marker authority existed, but recovery/event/successor inputs disagreed.
+    ProofInputs,
+}
+
+/// Successful one-use fenced proof mint.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MintedFencedAttach {
+    owner_without_marker_authority: LiveFrontierOwner,
+    proof: FencedAttachCommit,
+}
+
+impl MintedFencedAttach {
+    /// Consumes the result into the owner with spent marker authority and the
+    /// sole proof admitted to the downstream by-value chain.
+    #[must_use]
+    pub fn into_parts(self) -> (LiveFrontierOwner, FencedAttachCommit) {
+        (self.owner_without_marker_authority, self.proof)
+    }
+}
+
+/// Failed one-use fenced proof mint with unchanged retry authority and inputs.
+#[derive(Debug, PartialEq, Eq)]
+pub struct MintFencedAttachRefused {
+    owner: LiveFrontierOwner,
+    marker_source_sequence: u64,
+    recovery: DetachedCredentialRecovery,
+    debt: ClosureDebt,
+    event: Event,
+    successor: DebtCompletion,
+    reason: FencedAttachMintRefusalReason,
+}
+
+impl MintFencedAttachRefused {
+    /// Returns the typed refusal cause.
+    #[must_use]
+    pub const fn reason(&self) -> FencedAttachMintRefusalReason {
+        self.reason
+    }
+
+    /// Consumes the refusal into the unchanged owner and all original inputs.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        LiveFrontierOwner,
+        u64,
+        DetachedCredentialRecovery,
+        ClosureDebt,
+        Event,
+        DebtCompletion,
+    ) {
+        (
+            self.owner,
+            self.marker_source_sequence,
+            self.recovery,
+            self.debt,
+            self.event,
+            self.successor,
+        )
+    }
+}
+
+/// Complete result of the sole production fenced proof mint.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MintFencedAttachResult {
+    /// Exactly one marker authority was spent and one proof was minted.
+    Minted(MintedFencedAttach),
+    /// No proof was minted; the same authority and inputs are serially retryable.
+    MintRefused(Box<MintFencedAttachRefused>),
 }
 
 /// Complete move-only settled Leave result: tombstone and executable owner.
