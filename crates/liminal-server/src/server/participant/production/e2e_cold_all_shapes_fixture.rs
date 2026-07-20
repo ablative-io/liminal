@@ -13,7 +13,9 @@ use liminal_protocol::wire::{
 };
 
 use super::e2e_tests::SocketFixture;
-use super::log::{OperationLog, StoredOperation};
+use super::log::{
+    DecodedStoredOperation, OperationLog, OperationSchemaPhase, StoredAttachModeV3, StoredOperation,
+};
 use super::outbox_log::{OutboxLog, OutboxRow, ProducedSourceKind};
 use super::tests::open_disk_store_for_tests;
 
@@ -57,16 +59,24 @@ pub(super) fn decoded_history(
     let log = OperationLog::new(Arc::clone(&store), conversation_id);
     let mut base = Vec::new();
     let mut next = 0_u64;
+    let mut phase = OperationSchemaPhase::V2Prefix;
     loop {
-        let page = block_on(log.read_page(next))??;
-        if page.is_empty() {
+        let page = block_on(log.read_page(next, phase))??;
+        phase = page.next_phase;
+        if page.rows.is_empty() {
             break;
         }
         next = page
+            .rows
             .last()
-            .and_then(|(sequence, _)| sequence.checked_add(1))
+            .and_then(|decoded| decoded.sequence.checked_add(1))
             .ok_or("base history sequence overflowed")?;
-        base.extend(page);
+        for decoded in page.rows {
+            let DecodedStoredOperation::V3(operation) = decoded.operation else {
+                return Err("new all-shapes fixture unexpectedly decoded a v2 row".into());
+            };
+            base.push((decoded.sequence, operation));
+        }
     }
     let extension = block_on(OutboxLog::new(store, conversation_id).read_all())??;
     Ok((base, extension))
@@ -130,8 +140,8 @@ pub(super) fn assert_decoded_source_census(
         base_shapes.insert(match row {
             StoredOperation::Genesis { .. } => "genesis",
             StoredOperation::Enrolled { .. } => "enrolled",
-            StoredOperation::Attached { allocation, .. }
-                if allocation.superseded_terminal_seq.is_some() =>
+            StoredOperation::Attached { mode, .. }
+                if matches!(mode.as_ref(), StoredAttachModeV3::Superseding { .. }) =>
             {
                 "superseding_attach"
             }
@@ -141,6 +151,9 @@ pub(super) fn assert_decoded_source_census(
             StoredOperation::MarkerDrained { .. } => "marker_drained",
             StoredOperation::RecordAdmission { .. } => "record_admission",
             StoredOperation::Left { .. } => "left",
+            StoredOperation::Died { .. }
+            | StoredOperation::Ordinary { .. }
+            | StoredOperation::Recovered { .. } => "w1b_fate",
         });
     }
     assert!(base_shapes.contains("genesis"));

@@ -9,27 +9,20 @@
 
 use liminal_protocol::lifecycle::{
     AggregateOperationDecision, CommittedBindingTerminalPosition, DetachCell, DetachLookupContext,
-    DetachLookupResult, DetachTokenResolution, PresentedIdentity, RecipientAckObligations,
-    ResolvedIdentity, RetainedRecordCharge, SemanticConnectionCapacityDecision,
-    apply_detach_frontier, commit_detach, decide_detached_operation, lookup_detach,
+    DetachLookupResult, DetachTokenResolution, PresentedIdentity, ResolvedIdentity,
+    RetainedRecordCharge, SemanticConnectionCapacityDecision, apply_detach_frontier, commit_detach,
+    decide_detached_operation, lookup_detach,
 };
-use liminal_protocol::wire::{
-    BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse, ParticipantDelivery,
-};
-
-use crate::config::types::ParticipantConfig;
+use liminal_protocol::wire::{BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse};
 
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
 use super::frontier;
-use super::log::{OperationLog, StoredBindingEpoch, StoredDetachRequest, StoredOperation};
+use super::log::{
+    StoredBindingEpoch, StoredDetachRequest, StoredDetached, StoredDetachedCause,
+    StoredDetachedSource, StoredOperation, StoredTerminalDisposition,
+};
 use super::observer_progress::ObserverProgressSourceMetadata;
-use super::outbox::ConversationOutboxLimits;
-use super::outbox_log::OutboxLog;
-use super::outbox_projection::{capture_projection_prestate, project_committed_source};
-#[cfg(test)]
-use super::outbox_replay::AggregateExtensionMerge;
-use super::outbox_replay::{ExtensionMerge, RestoreError};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
@@ -121,9 +114,11 @@ impl ConversationAuthority {
         let outcome = self.detach_commit(
             request,
             verifier,
-            receiving_epoch.into(),
-            terminal_order,
-            terminal_seq,
+            DetachCommitPosition {
+                receiving_epoch: receiving_epoch.into(),
+                terminal_order,
+                terminal_seq,
+            },
             CommitMode::Live(appender),
         )?;
         Ok(ArmOutcome::committed(
@@ -143,9 +138,11 @@ impl ConversationAuthority {
         self.detach_commit(
             &request,
             inputs.verifier,
-            inputs.receiving_epoch,
-            inputs.terminal_order,
-            inputs.terminal_seq,
+            DetachCommitPosition {
+                receiving_epoch: inputs.receiving_epoch,
+                terminal_order: inputs.terminal_order,
+                terminal_seq: inputs.terminal_seq,
+            },
             CommitMode::Replay {
                 stored_event,
                 sequence,
@@ -159,16 +156,18 @@ impl ConversationAuthority {
     /// Detach is ONE event: the consumed transition carries the terminal
     /// append, floor transition, cell replacement, and binding release as one
     /// non-decomposable value through the A3 barrier.
-    #[allow(clippy::too_many_arguments)]
     fn detach_commit(
         &mut self,
         request: &DetachRequest,
         verifier: Digest,
-        receiving_epoch: StoredBindingEpoch,
-        terminal_order: u64,
-        terminal_seq: u64,
+        position: DetachCommitPosition,
         mode: CommitMode<'_>,
     ) -> Result<liminal_protocol::wire::DetachCommitted, StateError> {
+        let DetachCommitPosition {
+            receiving_epoch,
+            terminal_order,
+            terminal_seq,
+        } = position;
         let source_sequence = self.next_log_sequence;
         let (participant_id, mut slot) = self
             .slots
@@ -246,14 +245,8 @@ impl ConversationAuthority {
                 )));
             }
         };
-        let make_operation = |event: Vec<u8>| StoredOperation::Detached {
-            request: request.into(),
-            verifier,
-            receiving_epoch,
-            terminal_order,
-            terminal_seq,
-            event,
-        };
+        let make_operation =
+            |event: Vec<u8>| stored_detached_operation(request, verifier, position, event);
         let (shell, committed) =
             commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
         self.shell = Some(shell);
@@ -270,257 +263,38 @@ impl ConversationAuthority {
         self.observe_replayed_position(terminal_order, terminal_seq)?;
         Ok(outcome)
     }
+}
 
-    /// Cold-replays one conversation's complete durable log.
-    pub(super) async fn replay(
-        conversation_id: u64,
-        log: &OperationLog,
-        outbox_log: &OutboxLog,
-        config: &ParticipantConfig,
-        outbox_limits: ConversationOutboxLimits,
-    ) -> Result<Self, RestoreError> {
-        let mut authority = Self::empty(conversation_id);
-        let mut merge = ExtensionMerge::new(outbox_log, conversation_id, outbox_limits)?;
-        merge.apply_boundary(&mut authority, 0, None).await?;
-        let mut sequence = 0_u64;
-        loop {
-            let page = log.read_page(sequence).await.map_err(StateError::from)?;
-            if page.is_empty() {
-                break;
-            }
-            let page_len = page.len();
-            for (stored_sequence, operation) in page {
-                if stored_sequence != sequence {
-                    return Err(RestoreError::Semantic(StateError::Log(
-                        super::log::OperationLogError::Sequence {
-                            expected: sequence,
-                            actual: stored_sequence,
-                        },
-                    )));
-                }
-                let operation_for_projection = operation.clone();
-                let ack_obligations = match &operation {
-                    StoredOperation::ZeroDebtAck { request, .. } => {
-                        let acknowledged_through = authority
-                            .slots
-                            .get(&request.participant_id)
-                            .map_or(0, |slot| slot.member.cursor());
-                        Some(merge.recipient_ack_obligations(
-                            request.participant_id,
-                            acknowledged_through,
-                        )?)
-                    }
-                    _ => None,
-                };
-                authority.begin_observer_progress_source()?;
-                let mut facts = capture_projection_prestate(&authority, &operation_for_projection);
-                facts.marker_delivery = authority.replay_operation(
-                    operation,
-                    stored_sequence,
-                    config,
-                    ack_obligations,
-                )?;
-                let expected = project_committed_source(
-                    &authority,
-                    stored_sequence,
-                    &operation_for_projection,
-                    facts,
-                )?;
-                authority.end_observer_progress_source()?;
-                sequence = sequence
-                    .checked_add(1)
-                    .ok_or(StateError::AllocationExhausted {
-                        domain: "log sequence",
-                    })?;
-                merge
-                    .apply_boundary(&mut authority, sequence, expected.as_ref())
-                    .await?;
-            }
-            if page_len < super::log::READ_BATCH_SIZE {
-                break;
-            }
-        }
-        if authority.tokens.is_empty() {
-            if authority.frontier.is_some() {
-                return Err(RestoreError::Semantic(StateError::invariant(
-                    "durably empty conversation rebuilt an executable frontier",
-                )));
-            }
-        } else if authority.frontier.is_none() {
-            return Err(RestoreError::Semantic(StateError::invariant(
-                "enrolled conversation replay completed without executable frontier ownership",
-            )));
-        }
-        merge.finish(&mut authority, sequence)?;
-        Ok(authority)
-    }
+#[derive(Clone, Copy)]
+struct DetachCommitPosition {
+    receiving_epoch: StoredBindingEpoch,
+    terminal_order: u64,
+    terminal_seq: u64,
+}
 
-    /// Frozen pre-W3 complete-vector replay used only by equivalence oracles.
-    #[cfg(test)]
-    pub(super) async fn replay_aggregate_reference(
-        conversation_id: u64,
-        log: &OperationLog,
-        outbox_log: &OutboxLog,
-        extension_rows: Vec<(u64, super::outbox_log::OutboxRow)>,
-        config: &ParticipantConfig,
-        outbox_limits: ConversationOutboxLimits,
-    ) -> Result<Self, StateError> {
-        let mut authority = Self::empty(conversation_id);
-        let mut merge = AggregateExtensionMerge::new(
-            outbox_log,
-            extension_rows,
-            conversation_id,
-            outbox_limits,
-        )?;
-        merge.apply_boundary(&mut authority, 0, None).await?;
-        let mut sequence = 0_u64;
-        loop {
-            let page = log.read_page(sequence).await?;
-            if page.is_empty() {
-                break;
-            }
-            let page_len = page.len();
-            for (stored_sequence, operation) in page {
-                if stored_sequence != sequence {
-                    return Err(StateError::Log(super::log::OperationLogError::Sequence {
-                        expected: sequence,
-                        actual: stored_sequence,
-                    }));
-                }
-                let operation_for_projection = operation.clone();
-                let ack_obligations = match &operation {
-                    StoredOperation::ZeroDebtAck { request, .. } => {
-                        let acknowledged_through = authority
-                            .slots
-                            .get(&request.participant_id)
-                            .map_or(0, |slot| slot.member.cursor());
-                        Some(merge.recipient_ack_obligations(
-                            request.participant_id,
-                            acknowledged_through,
-                        )?)
-                    }
-                    _ => None,
-                };
-                authority.begin_observer_progress_source()?;
-                let mut facts = capture_projection_prestate(&authority, &operation_for_projection);
-                facts.marker_delivery = authority.replay_operation(
-                    operation,
-                    stored_sequence,
-                    config,
-                    ack_obligations,
-                )?;
-                let expected = project_committed_source(
-                    &authority,
-                    stored_sequence,
-                    &operation_for_projection,
-                    facts,
-                )?;
-                authority.end_observer_progress_source()?;
-                sequence = sequence
-                    .checked_add(1)
-                    .ok_or(StateError::AllocationExhausted {
-                        domain: "log sequence",
-                    })?;
-                merge
-                    .apply_boundary(&mut authority, sequence, expected.as_ref())
-                    .await?;
-            }
-            if page_len < super::log::READ_BATCH_SIZE {
-                break;
-            }
-        }
-        if authority.tokens.is_empty() {
-            if authority.frontier.is_some() {
-                return Err(StateError::invariant(
-                    "durably empty conversation rebuilt an executable frontier",
-                ));
-            }
-        } else if authority.frontier.is_none() {
-            return Err(StateError::invariant(
-                "enrolled conversation replay completed without executable frontier ownership",
-            ));
-        }
-        merge.finish(&mut authority, sequence)?;
-        Ok(authority)
-    }
-
-    /// Replays one durable entry through the exact live transition cores.
-    fn replay_operation(
-        &mut self,
-        operation: StoredOperation,
-        sequence: u64,
-        config: &ParticipantConfig,
-        ack_obligations: Option<(RecipientAckObligations, u64)>,
-    ) -> Result<Option<ParticipantDelivery>, StateError> {
-        match operation {
-            StoredOperation::Genesis { event } => self.replay_genesis(&event).map(|()| None),
-            StoredOperation::Enrolled {
-                request,
-                allocation,
-                event,
-            } => self
-                .replay_enrolled(request, &allocation, &event, sequence, config)
-                .map(|()| None),
-            StoredOperation::Attached {
-                request,
-                secret_verified,
-                allocation,
-                event,
-            } => {
-                if !secret_verified {
-                    return Err(StateError::invariant(
-                        "durable attach entry recorded an unverified secret",
-                    ));
-                }
-                self.replay_attached(request, &allocation, &event, sequence)
-                    .map(|()| None)
-            }
-            StoredOperation::Detached {
-                request,
+fn stored_detached_operation(
+    request: &DetachRequest,
+    verifier: Digest,
+    position: DetachCommitPosition,
+    event: Vec<u8>,
+) -> StoredOperation {
+    StoredOperation::Detached {
+        row: StoredDetached {
+            participant_id: request.participant_id,
+            binding_epoch: position.receiving_epoch,
+            cause: StoredDetachedCause::CleanDeregister,
+            terminal_order: position.terminal_order,
+            disposition: StoredTerminalDisposition::Committed {
+                terminal_seq: position.terminal_seq,
+            },
+            source: StoredDetachedSource::ExplicitRequestCommitted {
+                request: request.into(),
+                secret_verified: true,
                 verifier,
-                receiving_epoch,
-                terminal_order,
-                terminal_seq,
+                receiving_epoch: position.receiving_epoch,
                 event,
-            } => self
-                .replay_detached(
-                    DetachReplayInputs {
-                        request,
-                        verifier,
-                        receiving_epoch,
-                        terminal_order,
-                        terminal_seq,
-                    },
-                    &event,
-                    sequence,
-                )
-                .map(|()| None),
-            StoredOperation::ZeroDebtAck {
-                request,
-                receiving_epoch,
-                contiguously_available_through,
-            } => {
-                let (obligations, reconciled_available_through) =
-                    ack_obligations.ok_or_else(|| {
-                        StateError::invariant(
-                            "zero-debt ack replay is missing recipient obligations",
-                        )
-                    })?;
-                self.replay_zero_debt_ack(
-                    request,
-                    receiving_epoch,
-                    contiguously_available_through,
-                    reconciled_available_through,
-                    &obligations,
-                )
-                .map(|()| None)
-            }
-            StoredOperation::RecordAdmission { row } => {
-                self.replay_record_admission(&row, config).map(|()| None)
-            }
-            StoredOperation::MarkerDrained { row } => self.replay_marker_drain(&row).map(Some),
-            StoredOperation::Left { row } => self.replay_leave(&row).map(|()| None),
-        }
+            },
+        },
     }
 }
 

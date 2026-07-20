@@ -6,7 +6,8 @@ use liminal_protocol::wire::{
 };
 
 use super::log::{
-    StoredAttachAllocation, StoredBindingEpoch, StoredOperation, StoredRecordAdmission,
+    StoredAttachAllocation, StoredAttachModeV3, StoredBindingEpoch, StoredDetachedCause,
+    StoredDetachedSource, StoredOperation, StoredRecordAdmission, StoredTerminalDisposition,
 };
 use super::outbox::ConversationOutboxError;
 use super::outbox_log::{OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord};
@@ -24,17 +25,17 @@ pub(super) fn capture_projection_prestate(
     operation: &StoredOperation,
 ) -> ReplayedProjectionFacts {
     let superseded_binding_epoch = match operation {
-        StoredOperation::Attached {
-            request,
-            allocation,
-            ..
-        } if allocation.superseded_terminal_seq.is_some() => authority
-            .slots
-            .get(&request.participant_id)
-            .and_then(|slot| match slot.binding {
-                BindingState::Bound(binding) => Some(binding.binding_epoch),
-                BindingState::Detached | BindingState::PendingFinalization(_) => None,
-            }),
+        StoredOperation::Attached { request, mode, .. }
+            if matches!(mode.as_ref(), StoredAttachModeV3::Superseding { .. }) =>
+        {
+            authority
+                .slots
+                .get(&request.participant_id)
+                .and_then(|slot| match slot.binding {
+                    BindingState::Bound(binding) => Some(binding.binding_epoch),
+                    BindingState::Detached | BindingState::PendingFinalization(_) => None,
+                })
+        }
         _ => None,
     };
     ReplayedProjectionFacts {
@@ -68,33 +69,40 @@ pub(super) fn project_committed_source(
         StoredOperation::Attached {
             request,
             allocation,
+            mode,
             ..
         } => Some(project_attached(
             authority,
             source_log_sequence,
             request.participant_id,
             allocation,
+            mode,
             facts.superseded_binding_epoch,
         )?),
-        StoredOperation::Detached {
-            request,
-            receiving_epoch,
-            terminal_seq,
-            ..
-        } => Some(produced(
-            authority,
-            source_log_sequence,
-            ProducedSourceKind::Detached,
-            Some(request.participant_id),
-            vec![(
-                *terminal_seq,
-                ParticipantRecord::Detached {
-                    affected_participant_id: request.participant_id,
-                    binding_epoch: receiving_epoch.to_epoch()?,
-                    cause: DetachedCause::CleanDeregister,
-                },
-            )],
-        )?),
+        StoredOperation::Detached { row } => match (&row.disposition, &row.source) {
+            (
+                StoredTerminalDisposition::Committed { terminal_seq },
+                StoredDetachedSource::ExplicitRequestCommitted { .. }
+                | StoredDetachedSource::ConnectionClose { .. },
+            ) => Some(produced(
+                authority,
+                source_log_sequence,
+                ProducedSourceKind::Detached,
+                Some(row.participant_id),
+                vec![(
+                    *terminal_seq,
+                    ParticipantRecord::Detached {
+                        affected_participant_id: row.participant_id,
+                        binding_epoch: row.binding_epoch.to_epoch()?,
+                        cause: match row.cause {
+                            StoredDetachedCause::CleanDeregister => DetachedCause::CleanDeregister,
+                            StoredDetachedCause::ServerShutdown => DetachedCause::ServerShutdown,
+                        },
+                    },
+                )],
+            )?),
+            _ => None,
+        },
         StoredOperation::ZeroDebtAck { request, .. } => Some(OutboxRow::AckAdvanced {
             source_log_sequence,
             participant_id: request.participant_id,
@@ -133,6 +141,13 @@ pub(super) fn project_committed_source(
                 },
             )],
         )?),
+        StoredOperation::Died { .. }
+        | StoredOperation::Ordinary { .. }
+        | StoredOperation::Recovered { .. } => {
+            return Err(StateError::invariant(
+                "v3 fate projection awaits the W1b producer leg",
+            ));
+        }
     };
     Ok(projected)
 }
@@ -142,6 +157,7 @@ fn project_attached(
     source_log_sequence: u64,
     participant_id: ParticipantId,
     allocation: &StoredAttachAllocation,
+    mode: &StoredAttachModeV3,
     superseded_binding_epoch: Option<BindingEpoch>,
 ) -> Result<OutboxRow, StateError> {
     let attached = (
@@ -151,23 +167,32 @@ fn project_attached(
             binding_epoch: allocation.binding_epoch.to_epoch()?,
         },
     );
-    let records = if let Some(terminal_seq) = allocation.superseded_terminal_seq {
-        let prior_epoch = superseded_binding_epoch.ok_or_else(|| {
-            StateError::invariant("superseding attach projection lost its prior binding epoch")
-        })?;
-        vec![
-            (
-                terminal_seq,
-                ParticipantRecord::Detached {
-                    affected_participant_id: participant_id,
-                    binding_epoch: prior_epoch,
-                    cause: DetachedCause::Superseded,
-                },
-            ),
-            attached,
-        ]
-    } else {
-        vec![attached]
+    let records = match mode {
+        StoredAttachModeV3::Ordinary => vec![attached],
+        StoredAttachModeV3::Superseding {
+            terminal_delivery_seq,
+            ..
+        } => {
+            let prior_epoch = superseded_binding_epoch.ok_or_else(|| {
+                StateError::invariant("superseding attach projection lost its prior binding epoch")
+            })?;
+            vec![
+                (
+                    *terminal_delivery_seq,
+                    ParticipantRecord::Detached {
+                        affected_participant_id: participant_id,
+                        binding_epoch: prior_epoch,
+                        cause: DetachedCause::Superseded,
+                    },
+                ),
+                attached,
+            ]
+        }
+        StoredAttachModeV3::Fenced { .. } => {
+            return Err(StateError::invariant(
+                "fenced Attached projection awaits the W1b proof-mint leg",
+            ));
+        }
     };
     produced(
         authority,
