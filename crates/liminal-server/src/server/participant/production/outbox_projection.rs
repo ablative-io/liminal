@@ -212,7 +212,6 @@ pub(super) fn project_attached_records(
             composed_terminal,
             ..
         } => match composed_terminal {
-            None => vec![attached],
             Some(terminal)
                 if terminal.presentation == StoredFinalizerPresentation::PresentEnclosing =>
             {
@@ -221,7 +220,7 @@ pub(super) fn project_attached_records(
                     attached,
                 ]
             }
-            Some(_) => vec![attached],
+            None | Some(_) => vec![attached],
         },
     };
     Ok(records)

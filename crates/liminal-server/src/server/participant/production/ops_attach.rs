@@ -39,9 +39,10 @@ use super::log::{
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
-use super::ops_attach_verify::verify_attach_mode;
+use super::ops_attach_verify::{AttachVerification, verify_attach_mode};
 use super::state::{
-    AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend, StateError,
+    AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend, Slot,
+    StateError,
 };
 
 impl ConversationAuthority {
@@ -270,12 +271,14 @@ impl ConversationAuthority {
         let (verified, frontier_owner) = verify_attach_mode(
             slot.member,
             slot.binding,
-            request,
-            attach_mode,
-            parameters,
             frontier_owner,
-            store,
-            source_sequence,
+            AttachVerification {
+                request,
+                mode: attach_mode,
+                parameters,
+                store,
+                source_sequence,
+            },
         )?;
         let committed = commit_attach(verified, slot.cell).map_err(|error| {
             StateError::invariant(format!("protocol attach transition failed: {error:?}"))
@@ -311,50 +314,14 @@ impl ConversationAuthority {
         slot.binding_fate = Some(fate_token);
         slot.cell = installed.detach_cell;
         slot.attach_secret = AttachSecret::new(allocation.attach_secret);
-        // Retire the previous receipt into its bounded provenance record with
-        // the exact terminal reason: `Superseded` when the newer generation
-        // ended a still-live receipt, `Deadline` when its own deadline had
-        // already ended it. Derived from the committing operation's ADMITTED
-        // clock read, so replay reproduces the identical record.
-        if let Some(previous) = slot.attach.take() {
-            let reason = if u128::from(allocation.admitted_now_ms) < previous.receipt_expires_at {
-                ReceiptExpiryReason::Superseded
-            } else {
-                ReceiptExpiryReason::Deadline
-            };
-            slot.attach_provenance.insert(
-                previous.token.into_bytes(),
-                AttachProvenanceRecord {
-                    result_generation: previous.result_generation,
-                    reason,
-                    provenance_expires_at: previous.provenance_expires_at,
-                },
-            );
-        }
-        // The FIRST rotation also ends the enrollment receipt's secret body
-        // (contract R-C0: a newer generation ends every older secret-bearing
-        // receipt): `Superseded` when the enrollment receipt was still live
-        // at the admitted commit clock, `Deadline` when its own deadline had
-        // already ended it. Set once and never rewritten, so the retained
-        // enrollment provenance reason is the exact end-of-body fact.
-        if slot.enrollment_receipt_ended.is_none() {
-            slot.enrollment_receipt_ended = Some(
-                if u128::from(allocation.admitted_now_ms) < slot.enrollment_receipt_expires_at {
-                    ReceiptExpiryReason::Superseded
-                } else {
-                    ReceiptExpiryReason::Deadline
-                },
-            );
-        }
-        slot.attach = Some(AttachReceiptState {
-            token: request.attach_attempt_token,
-            receipt: CredentialAttachLiveReceipt::from_commit(outcome.clone()),
-            outcome: installed.outcome,
-            verifier: request.attach_secret.into_bytes(),
+        install_attach_receipt(
+            &mut slot,
+            request,
+            allocation,
+            &outcome,
+            installed.outcome,
             result_generation,
-            receipt_expires_at: allocation.receipt_expires_at.get(),
-            provenance_expires_at: allocation.provenance_expires_at.get(),
-        });
+        );
         self.slots.insert(participant_id, slot);
         if let Some(projection) = observer_projection {
             let terminal_delivery_seq = projection.new_observer_progress();
@@ -364,6 +331,55 @@ impl ConversationAuthority {
         self.observe_replayed_position(allocation.attached_order, allocation.attached_seq)?;
         Ok(outcome)
     }
+}
+
+fn install_attach_receipt(
+    slot: &mut Slot,
+    request: &CredentialAttachRequest,
+    allocation: &StoredAttachAllocation,
+    outcome: &AttachBound,
+    installed_outcome: AttachBound,
+    result_generation: Generation,
+) {
+    // Retire the previous receipt into its bounded provenance record with the
+    // exact terminal reason: `Superseded` when the newer generation ended a
+    // still-live receipt, `Deadline` when its own deadline had already ended
+    // it. The admitted clock makes replay reproduce the identical record.
+    if let Some(previous) = slot.attach.take() {
+        let reason = if u128::from(allocation.admitted_now_ms) < previous.receipt_expires_at {
+            ReceiptExpiryReason::Superseded
+        } else {
+            ReceiptExpiryReason::Deadline
+        };
+        slot.attach_provenance.insert(
+            previous.token.into_bytes(),
+            AttachProvenanceRecord {
+                result_generation: previous.result_generation,
+                reason,
+                provenance_expires_at: previous.provenance_expires_at,
+            },
+        );
+    }
+    // The first rotation also ends the enrollment receipt's secret body. Set
+    // once and never rewrite it, preserving the exact end-of-body fact.
+    if slot.enrollment_receipt_ended.is_none() {
+        slot.enrollment_receipt_ended = Some(
+            if u128::from(allocation.admitted_now_ms) < slot.enrollment_receipt_expires_at {
+                ReceiptExpiryReason::Superseded
+            } else {
+                ReceiptExpiryReason::Deadline
+            },
+        );
+    }
+    slot.attach = Some(AttachReceiptState {
+        token: request.attach_attempt_token,
+        receipt: CredentialAttachLiveReceipt::from_commit(outcome.clone()),
+        outcome: installed_outcome,
+        verifier: request.attach_secret.into_bytes(),
+        result_generation,
+        receipt_expires_at: allocation.receipt_expires_at.get(),
+        provenance_expires_at: allocation.provenance_expires_at.get(),
+    });
 }
 
 const fn attach_metadata(
