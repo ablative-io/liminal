@@ -16,8 +16,9 @@ use super::super::{
     MarkerAckCommit, NonzeroParticipantAckCommit, ObserverProgressProjection, OrderLedger,
     ParticipantAckCommit, PendingFinalization, PendingLeaveCommitParameters,
     PrepareLeaveAuthorityError, RetainedCausalRecord, RetainedCausalRecordKind, SequenceLedger,
-    StoredEdge, VerifiedLeaveRequest, claim_frontier::LiveFrontierTransitionError, commit_leave,
-    commit_pending_leave,
+    StoredEdge, VerifiedLeaveRequest,
+    claim_frontier::{FencedMarkerSourceRecord, LiveFrontierTransitionError},
+    commit_leave, commit_pending_leave,
 };
 use super::{
     InitialEnrollmentOperationCommit, MarkerDeliveryProjection, MarkerDrainCommit,
@@ -207,6 +208,29 @@ impl LiveFrontierOwner {
         )
     }
 
+    /// Retains this move-only owner and the exact recovery while its durable
+    /// marker source row is read and validated.
+    ///
+    /// # Errors
+    /// Returns the unchanged owner and recovery when the fully restored frontier
+    /// does not contain their exact delivered marker occurrence.
+    pub fn retain_fenced_marker_source(
+        self,
+        recovery: DetachedCredentialRecovery,
+    ) -> Result<RetainedFencedMarkerSource, Box<FencedMarkerSourceRetentionRefused>> {
+        let Some(source) = self.frontiers.fenced_marker_source(recovery) else {
+            return Err(Box::new(FencedMarkerSourceRetentionRefused {
+                owner: self,
+                recovery,
+            }));
+        };
+        Ok(RetainedFencedMarkerSource {
+            owner: self,
+            recovery,
+            expectation: FencedMarkerSourceExpectation { source },
+        })
+    }
+
     /// Consumes the complete owner and the exact descriptive inputs to mint one
     /// fenced attach proof from the selected retained marker occurrence.
     ///
@@ -253,6 +277,87 @@ impl LiveFrontierOwner {
                 }))
             }
         }
+    }
+}
+
+/// Exact protocol-recomputed marker facts a durable source row must match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FencedMarkerSourceExpectation {
+    source: FencedMarkerSourceRecord,
+}
+
+impl FencedMarkerSourceExpectation {
+    /// Returns the conversation owning the durable marker source.
+    #[must_use]
+    pub const fn conversation_id(self) -> u64 {
+        self.source.conversation_id
+    }
+
+    /// Returns the marker's durable delivery sequence.
+    #[must_use]
+    pub const fn marker_delivery_seq(self) -> u64 {
+        self.source.delivery_seq
+    }
+
+    /// Returns the marker's immutable causal key.
+    #[must_use]
+    pub const fn admission_order(self) -> super::super::AdmissionOrder {
+        self.source.admission_order
+    }
+
+    /// Returns the permanent marker owner.
+    #[must_use]
+    pub const fn participant_id(self) -> u64 {
+        self.source.participant_id
+    }
+
+    /// Returns the marker's immutable provenance.
+    #[must_use]
+    pub const fn provenance(self) -> super::super::MarkerProvenance {
+        self.source.provenance
+    }
+
+    /// Returns the historically validated delivery target.
+    #[must_use]
+    pub const fn target_binding(self) -> FrontierBinding {
+        self.source.target_binding
+    }
+}
+
+/// Move-only owner/recovery pair held across one bounded durable source read.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RetainedFencedMarkerSource {
+    owner: LiveFrontierOwner,
+    recovery: DetachedCredentialRecovery,
+    expectation: FencedMarkerSourceExpectation,
+}
+
+impl RetainedFencedMarkerSource {
+    /// Returns the protocol-recomputed facts the durable row must match.
+    #[must_use]
+    pub const fn expectation(&self) -> FencedMarkerSourceExpectation {
+        self.expectation
+    }
+
+    /// Returns the unchanged owner and recovery after source validation.
+    #[must_use]
+    pub fn into_parts(self) -> (LiveFrontierOwner, DetachedCredentialRecovery) {
+        (self.owner, self.recovery)
+    }
+}
+
+/// Refused source retention with the owner and recovery unchanged.
+#[derive(Debug, PartialEq, Eq)]
+pub struct FencedMarkerSourceRetentionRefused {
+    owner: LiveFrontierOwner,
+    recovery: DetachedCredentialRecovery,
+}
+
+impl FencedMarkerSourceRetentionRefused {
+    /// Returns the unchanged owner and recovery after retention refusal.
+    #[must_use]
+    pub fn into_parts(self) -> (LiveFrontierOwner, DetachedCredentialRecovery) {
+        (self.owner, self.recovery)
     }
 }
 

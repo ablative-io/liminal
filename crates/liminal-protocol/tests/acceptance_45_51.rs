@@ -31,9 +31,9 @@ use liminal_protocol::{
         ClosureDebt, ClosureState, CommittedBindingTerminal, CommittedBindingTerminalPosition,
         CursorFateSuccessor, CursorProgressFact, CursorProgressKey, DebtCompletion, DetachCell,
         DetachedAttachRefusal, DetachedCredentialRecovery, EnrollmentCommitParameters,
-        EnrollmentFingerprint, Event, FencedAttachMintRefusalReason, IdentityState,
-        LeaveCommitParameters, LeaveFingerprint, LeaveOnlyEdge, LiveMember, LiveMemberRestore,
-        MintFencedAttachResult, NonzeroDebtCursorEpisode, ObserverProjection,
+        EnrollmentFingerprint, Event, FencedAttachMintRefusalReason, FrontierBinding,
+        IdentityState, LeaveCommitParameters, LeaveFingerprint, LeaveOnlyEdge, LiveMember,
+        LiveMemberRestore, MintFencedAttachResult, NonzeroDebtCursorEpisode, ObserverProjection,
         ParticipantCursorProgress, ParticipantSlotAllocatorProof, PendingBindingTerminalPosition,
         PhysicalCompaction, RecoveredBindingFateTransition, StoredEdge, commit_attach,
         commit_detach, commit_enrollment, commit_leave,
@@ -2673,6 +2673,36 @@ fn oracle_26_recovery(
             .expect("Oracle 26 exact fate derives credential recovery"),
     );
     (recovery, debt)
+}
+
+#[test]
+fn fenced_marker_source_retains_exact_frontier_facts_without_minting() {
+    let marker_sequence = 12_u64;
+    let prior_epoch = epoch(1, 2, 3);
+    let (recovery, _) = oracle_26_recovery(P0, marker_sequence, prior_epoch);
+    let owner = fenced_owner(recovery).expect("frontier owns the delivered marker record");
+
+    let retained = owner
+        .retain_fenced_marker_source(recovery)
+        .expect("exact recovery retains its source expectation");
+    let expectation = retained.expectation();
+    assert_eq!(expectation.conversation_id(), recovery.conversation_id());
+    assert_eq!(expectation.participant_id(), P0);
+    assert_eq!(expectation.marker_delivery_seq(), marker_sequence);
+    assert_eq!(
+        expectation.target_binding(),
+        FrontierBinding::Detached(prior_epoch)
+    );
+    assert_eq!(expectation.admission_order().participant_index(), P0);
+
+    let (owner, returned_recovery) = retained.into_parts();
+    assert_eq!(returned_recovery, recovery);
+    let wrong_recovery = oracle_26_recovery(P1, marker_sequence, prior_epoch).0;
+    let refused = owner
+        .retain_fenced_marker_source(wrong_recovery)
+        .expect_err("another participant cannot retain this marker source");
+    let (_, returned_wrong_recovery) = (*refused).into_parts();
+    assert_eq!(returned_wrong_recovery, wrong_recovery);
 }
 
 fn oracle_26_complete_chain(

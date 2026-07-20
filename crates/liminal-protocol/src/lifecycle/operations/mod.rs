@@ -34,12 +34,13 @@ pub use enrollment_operation::{
     apply_initial_enrollment,
 };
 pub use live_frontier::{
-    AttachFrontierCharges, FencedAttachMintRefusalReason, LiveFrontierCommit, LiveFrontierError,
-    LiveFrontierFailure, LiveFrontierOwner, LiveFrontierResult, LiveLeaveCommit, LiveLeaveError,
-    MintFencedAttachRefused, MintFencedAttachResult, MintedFencedAttach, apply_attach_frontier,
-    apply_detach_frontier, apply_enrollment_frontier, apply_marker_ack_frontier,
-    apply_nonzero_participant_ack_frontier, apply_participant_ack_frontier,
-    commit_pending_leave_frontier, commit_settled_leave_frontier,
+    AttachFrontierCharges, FencedAttachMintRefusalReason, FencedMarkerSourceExpectation,
+    FencedMarkerSourceRetentionRefused, LiveFrontierCommit, LiveFrontierError, LiveFrontierFailure,
+    LiveFrontierOwner, LiveFrontierResult, LiveLeaveCommit, LiveLeaveError,
+    MintFencedAttachRefused, MintFencedAttachResult, MintedFencedAttach,
+    RetainedFencedMarkerSource, apply_attach_frontier, apply_detach_frontier,
+    apply_enrollment_frontier, apply_marker_ack_frontier, apply_nonzero_participant_ack_frontier,
+    apply_participant_ack_frontier, commit_pending_leave_frontier, commit_settled_leave_frontier,
 };
 pub use marker_ack::{MarkerAckCommit, MarkerAckCommitError, MarkerAckDecision, apply_marker_ack};
 pub use marker_drain::{

@@ -1500,6 +1500,18 @@ pub struct ValidatedMarkerCandidate {
     seal: MarkerAuthoritySeal,
 }
 
+/// Descriptive retained-marker facts checked before a durable source read may
+/// proceed to the one-use authority mint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FencedMarkerSourceRecord {
+    pub(super) conversation_id: ConversationId,
+    pub(super) delivery_seq: DeliverySeq,
+    pub(super) admission_order: super::AdmissionOrder,
+    pub(super) participant_id: ParticipantId,
+    pub(super) provenance: MarkerProvenance,
+    pub(super) target_binding: FrontierBinding,
+}
+
 /// Sealed retained marker record paired with its exact current authority.
 ///
 /// Cold restoration of marker-derived edges consumes this token so raw storage
@@ -2232,18 +2244,12 @@ impl ClaimFrontiers {
             .ok()
     }
 
-    /// Removes the sole retained-marker occurrence authority for one fenced
-    /// attach proof mint.
-    ///
-    /// The frontiers have already passed complete numeric, causal, participant,
-    /// and retained-row validation. This final gate binds that validation to the
-    /// exact detached recovery description and records issuance before returning
-    /// the non-cloneable token. A second take is refused until the exact token is
-    /// reinstalled after a failed private mint.
-    pub(in crate::lifecycle) fn take_fenced_marker_record(
-        &mut self,
+    /// Recomputes the exact delivered marker record that a fenced recovery may
+    /// name without constructing its one-use authority.
+    pub(super) fn fenced_marker_source(
+        &self,
         recovery: super::DetachedCredentialRecovery,
-    ) -> Option<ValidatedMarkerRecord> {
+    ) -> Option<FencedMarkerSourceRecord> {
         if self.fenced_marker_issued.is_some() || recovery.conversation_id() != self.conversation_id
         {
             return None;
@@ -2264,18 +2270,50 @@ impl ClaimFrontiers {
             return None;
         };
         let participant = active_participant(&self.active_identities, participant_id)?;
-        if participant_index != participant_id
-            || participant.binding != FrontierBinding::Detached(prior_binding_epoch)
-        {
+        let target_binding = FrontierBinding::Detached(prior_binding_epoch);
+        if participant_index != participant_id || participant.binding != target_binding {
             return None;
         }
-        self.fenced_marker_issued =
-            Some((participant_id, marker_delivery_seq, prior_binding_epoch));
-        Some(ValidatedMarkerRecord {
+        Some(FencedMarkerSourceRecord {
             conversation_id: self.conversation_id,
-            record,
+            delivery_seq: record.delivery_seq,
+            admission_order: record.admission_order,
+            participant_id,
             provenance,
-            target_binding: FrontierBinding::Detached(prior_binding_epoch),
+            target_binding,
+        })
+    }
+
+    /// Removes the sole retained-marker occurrence authority for one fenced
+    /// attach proof mint.
+    ///
+    /// The frontiers have already passed complete numeric, causal, participant,
+    /// and retained-row validation. This final gate binds that validation to the
+    /// exact detached recovery description and records issuance before returning
+    /// the non-cloneable token. A second take is refused until the exact token is
+    /// reinstalled after a failed private mint.
+    pub(in crate::lifecycle) fn take_fenced_marker_record(
+        &mut self,
+        recovery: super::DetachedCredentialRecovery,
+    ) -> Option<ValidatedMarkerRecord> {
+        let source = self.fenced_marker_source(recovery)?;
+        self.fenced_marker_issued = Some((
+            source.participant_id,
+            source.delivery_seq,
+            recovery.prior_binding_epoch(),
+        ));
+        Some(ValidatedMarkerRecord {
+            conversation_id: source.conversation_id,
+            record: RetainedCausalRecord {
+                delivery_seq: source.delivery_seq,
+                admission_order: source.admission_order,
+                kind: RetainedCausalRecordKind::CompactionMarker {
+                    participant_index: source.participant_id,
+                    provenance: source.provenance,
+                },
+            },
+            provenance: source.provenance,
+            target_binding: source.target_binding,
             occurrence: MarkerRecordOccurrence::Delivered,
             seal: MarkerAuthoritySeal::Validated,
         })
