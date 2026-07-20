@@ -37,13 +37,12 @@ fn debt(entries: u128, bytes: u128) -> Result<ClosureDebt, String> {
         .ok_or_else(|| "test closure debt must be nonzero".to_string())
 }
 
-pub(super) fn frontier_owner(
+fn frontier_owner(
     conversation_id: u64,
     participant_id: u64,
     binding_epoch: BindingEpoch,
     cursor: DeliverySeq,
     high_watermark: DeliverySeq,
-    retained_record_limit: u64,
 ) -> Result<LiveFrontierOwner, String> {
     let terminal = BindingTerminalOwner {
         participant_index: participant_id,
@@ -136,7 +135,7 @@ pub(super) fn frontier_owner(
         frontiers,
         clear_accounting()?,
         vec![],
-        retained_record_limit,
+        0,
     ))
 }
 
@@ -156,8 +155,7 @@ fn clear_accounting() -> Result<ClosureAccounting, String> {
     .map_err(|error| format!("fate accounting refused: {error:?}"))
 }
 
-pub(super) fn ordinary_token()
--> Result<(SealedBindingFateToken, ActiveBinding, DeliverySeq), String> {
+fn ordinary_token() -> Result<(SealedBindingFateToken, ActiveBinding, DeliverySeq), String> {
     let commit = super::super::operation_event_tests::superseding_attach_commit();
     let binding_state = commit.binding_state;
     let cursor = commit.member.cursor();
@@ -249,7 +247,6 @@ fn ordinary_binding_fate_projects_measured_resulting_floor() -> Result<(), Strin
         binding.binding_epoch,
         cursor,
         high_watermark,
-        0,
     )?;
     let observed_floor = DeliverySeq::try_from(owner.frontiers().retained_floor())
         .map_err(|_| "observed ordinary floor exceeds delivery domain".to_string())?;
@@ -289,7 +286,7 @@ fn recovered_binding_fate_projects_measured_resulting_floor() -> Result<(), Stri
     let high_watermark = cursor
         .checked_add(1)
         .ok_or_else(|| "recovered high watermark overflow".to_string())?;
-    let owner = frontier_owner(1, participant_id, binding_epoch, cursor, high_watermark, 0)?;
+    let owner = frontier_owner(1, participant_id, binding_epoch, cursor, high_watermark)?;
     let observed_floor = DeliverySeq::try_from(owner.frontiers().retained_floor())
         .map_err(|_| "observed recovered floor exceeds delivery domain".to_string())?;
     let prepared = owner
