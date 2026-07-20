@@ -96,6 +96,32 @@ impl ParticipantConnectionContext {
     }
 }
 
+/// Exact terminal classification preserved from a connection's close trigger.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionFateClass {
+    /// A protocol-level clean Disconnect.
+    CleanDisconnect,
+    /// An orderly server `ForceClose`.
+    ServerShutdown,
+    /// EOF or transport loss without clean protocol evidence.
+    ConnectionLost,
+    /// A terminal protocol/decode refusal after participant binding.
+    ProtocolError,
+}
+
+/// One durable bounded connection-fate intent delivered to participant semantics.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConnectionFateWorkItem {
+    /// Durable incarnation-stream Open sequence used by participant source rows.
+    pub open_sequence: u64,
+    /// Exact connection whose current Bound slots are eligible.
+    pub connection_incarnation: ConnectionIncarnation,
+    /// Preserved close classification.
+    pub class: ConnectionFateClass,
+    /// Canonical sorted tracked-conversation snapshot owned by the Open.
+    pub tracked_conversations: Vec<ConversationId>,
+}
+
 /// Process-wide terminal participant-service latch.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ParticipantServiceFatal {
@@ -172,6 +198,24 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
             open_sequence,
             conversation_id,
         })
+    }
+
+    /// Applies every matching participant binding named by one durable Open.
+    ///
+    /// The incarnation-stream lock is not held while this method runs. Each
+    /// implementation serializes conversations independently and must return
+    /// only after every source and immediately executable specific fate flushes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic failure without consuming the Open; startup or the
+    /// live fatal path retains it for exact replay.
+    fn handle_connection_fate(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> Result<(), ParticipantSemanticError> {
+        drop(work_item);
+        Err(ParticipantSemanticError::Unavailable)
     }
 
     fn publication_conversation_limit(&self) -> u64 {
@@ -403,6 +447,13 @@ impl InstalledParticipantService {
 impl ParticipantSemanticHandler for InstalledParticipantService {
     fn publication_conversation_limit(&self) -> u64 {
         self.handler.publication_conversation_limit()
+    }
+
+    fn handle_connection_fate(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.handler.handle_connection_fate(work_item)
     }
 
     fn handle(

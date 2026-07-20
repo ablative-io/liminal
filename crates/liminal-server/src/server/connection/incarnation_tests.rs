@@ -1,6 +1,6 @@
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use liminal::durability::{
     DurabilityError, DurableStore, StoredEntry, bridge::block_on, open_ephemeral,
@@ -18,12 +18,13 @@ use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
 use crate::server::listener::ServerListener;
 use crate::server::participant::incarnation_stream::{
-    ConnectionFateClass, IncarnationStream, encode_complete_connection_fate_event_fixture,
-    encode_open_connection_fate_event_fixture,
+    ConnectionFateClass, IncarnationStream, encode_allocate_event_fixture,
+    encode_complete_connection_fate_event_fixture, encode_open_connection_fate_event_fixture,
+    encode_startup_event_fixture,
 };
 use crate::server::participant::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantSemanticError, ParticipantSemanticHandler,
+    ConnectionFateWorkItem, InstalledParticipantService, ParticipantConnectionContext,
+    ParticipantConnectionConversations, ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
 fn store() -> Result<Arc<dyn DurableStore>, Box<dyn std::error::Error>> {
@@ -235,6 +236,91 @@ fn production_connection_fate_authority_opens_and_completes_with_signed_bound()
         entries[3].payload,
         encode_complete_connection_fate_event_fixture(intent.open_sequence)?
     );
+    Ok(())
+}
+
+#[derive(Debug, Default)]
+struct RecordingFateHandler {
+    work: Mutex<Vec<ConnectionFateWorkItem>>,
+}
+
+impl ParticipantSemanticHandler for RecordingFateHandler {
+    fn handle(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ClientRequest,
+    ) -> Result<ServerValue, ParticipantSemanticError> {
+        drop((context, conversations, request));
+        Err(ParticipantSemanticError::Unavailable)
+    }
+
+    fn handle_connection_fate(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.work
+            .lock()
+            .map_err(|error| ParticipantSemanticError::Internal {
+                message: error.to_string(),
+            })?
+            .push(work_item);
+        Ok(())
+    }
+
+    fn publication_conversation_limit(&self) -> u64 {
+        3
+    }
+}
+
+#[test]
+fn startup_completes_historical_opens_before_returning_authority()
+-> Result<(), Box<dyn std::error::Error>> {
+    let store = store()?;
+    let connection_incarnation = ConnectionIncarnation::new(1, 0);
+    let conversations = vec![5, 8];
+    let payloads = [
+        encode_startup_event_fixture()?,
+        encode_allocate_event_fixture(4, &[])?,
+        encode_open_connection_fate_event_fixture(
+            connection_incarnation,
+            ConnectionFateClass::ConnectionLost,
+            3,
+            &conversations,
+        )?,
+    ];
+    for (sequence, payload) in payloads.into_iter().enumerate() {
+        let sequence = u64::try_from(sequence)?;
+        let assigned = block_on(store.append(IncarnationStream::stream_key(), payload, sequence))??;
+        assert_eq!(assigned, sequence);
+    }
+    block_on(store.flush())??;
+    let handler = RecordingFateHandler::default();
+
+    let authority = ConnectionIncarnationAuthority::startup(
+        Arc::clone(&store),
+        4,
+        handler.publication_conversation_limit(),
+        &handler,
+    )?;
+
+    let observed = handler
+        .work
+        .lock()
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+        .clone();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].open_sequence, 2);
+    assert_eq!(observed[0].connection_incarnation, connection_incarnation);
+    assert_eq!(observed[0].tracked_conversations, conversations);
+    assert_eq!(authority.allocate(&[])?, ConnectionIncarnation::new(2, 0));
+    let entries = block_on(store.read_from(IncarnationStream::stream_key(), 0, 8))??;
+    assert_eq!(entries.len(), 6);
+    assert_eq!(
+        entries[3].payload,
+        encode_complete_connection_fate_event_fixture(2)?
+    );
+    assert_eq!(entries[4].payload, encode_startup_event_fixture()?);
     Ok(())
 }
 
