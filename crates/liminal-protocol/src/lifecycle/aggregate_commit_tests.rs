@@ -111,6 +111,7 @@ pub(super) fn recovered_fate() -> RecoveredBindingFate {
     };
     let fenced = recovery
         .fenced_attach(
+            super::edge::validated_marker_record_for_recovery_test(recovery),
             recovery_debt,
             Event::fenced_recovery_committed(4, 14, prior_epoch, recovered_epoch, 15),
             DebtCompletion::observer_projection(attached_debt, ObserverProjection::new(15)),

@@ -2283,7 +2283,7 @@ impl ClaimFrontiers {
 
     /// Reinstalls the exact occurrence authority after the private proof mint
     /// refused without producing a proof.
-    pub(in crate::lifecycle) fn reinstall_fenced_marker_record(
+    pub(in crate::lifecycle) const fn reinstall_fenced_marker_record(
         &mut self,
         record: ValidatedMarkerRecord,
     ) {

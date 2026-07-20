@@ -1449,7 +1449,7 @@ fn recovered_origin() -> BindingOrigin {
                 accept_marker_delivery_seq: Some(12),
             },
             AttachSecretProof::Verified,
-            &proof,
+            proof,
             None,
             AttachCommitParameters {
                 binding: binding(PARTICIPANT_ID, recovered_epoch),

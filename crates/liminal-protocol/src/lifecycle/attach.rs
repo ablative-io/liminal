@@ -10,7 +10,7 @@ use super::{
     CommittedDetachedTerminal, CommittedDiedTerminal, DetachCell, Event, FencedAttachCommit,
     LiveMember, MembershipInvariantError, ObserverProgressProjection, OrdinaryBindingAuthority,
     OrdinaryBindingFate, OrdinaryDetachedAttachAdmission, PendingFinalization,
-    detach::validate_pending_pair, lookup::AttachSecretProof,
+    RecoveredBindingFate, detach::validate_pending_pair, lookup::AttachSecretProof,
 };
 
 /// Result allocation owned by one successful credential-attach transaction.
@@ -96,7 +96,7 @@ pub enum AttachTransition {
 }
 
 /// Complete atomic result of a credential attach.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct AttachCommit<F, V> {
     /// Rotated membership with preserved or replaced terminal history.
     pub member: LiveMember<F>,
@@ -112,9 +112,96 @@ pub struct AttachCommit<F, V> {
     pub transition: AttachTransition,
     binding_origin: BindingOrigin,
     ordinary_binding_authority: Option<OrdinaryBindingAuthority>,
+    recovered_binding_authority: Option<FencedAttachCommit>,
+}
+
+/// Operational attach state separated from occurrence authority exactly once.
+#[derive(Debug, PartialEq, Eq)]
+pub struct InstalledAttachState<F, V> {
+    /// Rotated membership state.
+    pub member: LiveMember<F>,
+    /// Newly authoritative binding state.
+    pub binding_state: BindingState,
+    /// Detach-cell state after attach.
+    pub detach_cell: DetachCell<V>,
+    /// Committed Attached lifecycle record.
+    pub attached: AttachedLifecycleRecord,
+    /// Wire success payload.
+    pub outcome: AttachBound,
+    /// Typed terminal/attach transition audit.
+    pub transition: AttachTransition,
+    binding_origin: BindingOrigin,
+}
+
+/// One move-only binding-fate authority emitted by an attach commit.
+#[derive(Debug, PartialEq, Eq)]
+pub struct SealedBindingFateToken {
+    ordinary: Option<OrdinaryBindingAuthority>,
+    recovered: Option<FencedAttachCommit>,
+}
+
+impl SealedBindingFateToken {
+    /// Reports whether this token carries recovered occurrence authority.
+    #[must_use]
+    pub const fn is_recovered(&self) -> bool {
+        self.recovered.is_some()
+    }
+
+    /// Consumes recovered authority into one fate.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same move-only token on refusal, boxed to keep the successful
+    /// return path compact.
+    pub fn recovered_binding_fate(
+        mut self,
+        event: Event,
+    ) -> Result<RecoveredBindingFate, Box<Self>> {
+        let Some(proof) = self.recovered.take() else {
+            return Err(Box::new(self));
+        };
+        match proof.recovered_binding_fate(event) {
+            Ok(fate) => Ok(fate),
+            Err(proof) => {
+                self.recovered = Some(*proof);
+                Err(Box::new(self))
+            }
+        }
+    }
 }
 
 impl<F, V> AttachCommit<F, V> {
+    /// Consumes this commit into operational state and exactly one fate token.
+    #[must_use]
+    pub fn into_slot_and_fate(self) -> (InstalledAttachState<F, V>, SealedBindingFateToken) {
+        let Self {
+            member,
+            binding_state,
+            detach_cell,
+            attached,
+            outcome,
+            transition,
+            binding_origin,
+            ordinary_binding_authority,
+            recovered_binding_authority,
+        } = self;
+        (
+            InstalledAttachState {
+                member,
+                binding_state,
+                detach_cell,
+                attached,
+                outcome,
+                transition,
+                binding_origin,
+            },
+            SealedBindingFateToken {
+                ordinary: ordinary_binding_authority,
+                recovered: recovered_binding_authority,
+            },
+        )
+    }
+
     /// Projects the binding-ending terminal committed by this attach, if any.
     #[must_use]
     pub fn observer_progress_projection(&self) -> Option<ObserverProgressProjection> {
@@ -212,23 +299,45 @@ impl<F, V> AttachCommit<F, V> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum AttachMode<'a> {
+#[derive(Debug)]
+enum AttachMode {
     Detached(OrdinaryDetachedAttachAdmission),
     Superseded(CommittedDetachedTerminal),
     Fenced {
-        proof: &'a FencedAttachCommit,
+        proof: FencedAttachCommit,
         pending: Option<(PendingFinalization, DeliverySeq)>,
     },
 }
 
 /// Successful attach proof; fields are private so only mode verification mints it.
-#[derive(Clone, Debug)]
-pub struct VerifiedAttachCommit<'a, F> {
+#[derive(Debug)]
+pub struct VerifiedAttachCommit<F> {
     member: LiveMember<F>,
     request: CredentialAttachRequest,
     parameters: AttachCommitParameters,
-    mode: AttachMode<'a>,
+    mode: AttachMode,
+}
+
+/// Fenced verification refusal that preserves both consumed authorities.
+#[derive(Debug)]
+pub struct FencedAttachVerificationRefusal<F> {
+    member: LiveMember<F>,
+    proof: FencedAttachCommit,
+    error: AttachVerificationError,
+}
+
+impl<F> FencedAttachVerificationRefusal<F> {
+    /// Returns the typed verification error.
+    #[must_use]
+    pub const fn error(&self) -> AttachVerificationError {
+        self.error
+    }
+
+    /// Returns the unchanged member and proof for same-lock serial retry.
+    #[must_use]
+    pub fn into_parts(self) -> (LiveMember<F>, FencedAttachCommit) {
+        (self.member, self.proof)
+    }
 }
 
 impl<F> LiveMember<F> {
@@ -244,7 +353,7 @@ impl<F> LiveMember<F> {
         request: CredentialAttachRequest,
         secret_proof: AttachSecretProof,
         parameters: AttachCommitParameters,
-    ) -> Result<VerifiedAttachCommit<'static, F>, AttachVerificationError> {
+    ) -> Result<VerifiedAttachCommit<F>, AttachVerificationError> {
         self.verify_attach_common(&request, secret_proof, &parameters)?;
         if binding_state != BindingState::Detached {
             return Err(AttachVerificationError::BindingState);
@@ -273,7 +382,7 @@ impl<F> LiveMember<F> {
         secret_proof: AttachSecretProof,
         terminal_position: CommittedBindingTerminalPosition,
         parameters: AttachCommitParameters,
-    ) -> Result<VerifiedAttachCommit<'static, F>, AttachVerificationError> {
+    ) -> Result<VerifiedAttachCommit<F>, AttachVerificationError> {
         self.verify_attach_common(&request, secret_proof, &parameters)?;
         if active_binding.conversation_id != self.conversation_id()
             || active_binding.participant_id != self.participant_id()
@@ -308,11 +417,45 @@ impl<F> LiveMember<F> {
         binding_state: BindingState,
         request: CredentialAttachRequest,
         secret_proof: AttachSecretProof,
-        proof: &FencedAttachCommit,
+        proof: FencedAttachCommit,
         pending_terminal_delivery_seq: Option<DeliverySeq>,
         parameters: AttachCommitParameters,
-    ) -> Result<VerifiedAttachCommit<'_, F>, AttachVerificationError> {
-        self.verify_attach_common(&request, secret_proof, &parameters)?;
+    ) -> Result<VerifiedAttachCommit<F>, Box<FencedAttachVerificationRefusal<F>>> {
+        let pending = match self.validate_fenced_attach(
+            binding_state,
+            &request,
+            secret_proof,
+            &proof,
+            pending_terminal_delivery_seq,
+            &parameters,
+        ) {
+            Ok(pending) => pending,
+            Err(error) => {
+                return Err(Box::new(FencedAttachVerificationRefusal {
+                    member: self,
+                    proof,
+                    error,
+                }));
+            }
+        };
+        Ok(VerifiedAttachCommit {
+            member: self,
+            request,
+            parameters,
+            mode: AttachMode::Fenced { proof, pending },
+        })
+    }
+
+    fn validate_fenced_attach(
+        &self,
+        binding_state: BindingState,
+        request: &CredentialAttachRequest,
+        secret_proof: AttachSecretProof,
+        proof: &FencedAttachCommit,
+        pending_terminal_delivery_seq: Option<DeliverySeq>,
+        parameters: &AttachCommitParameters,
+    ) -> Result<Option<(PendingFinalization, DeliverySeq)>, AttachVerificationError> {
+        self.verify_attach_common(request, secret_proof, parameters)?;
         if request.accept_marker_delivery_seq != Some(proof.marker_delivery_seq()) {
             return Err(AttachVerificationError::MarkerProof);
         }
@@ -322,7 +465,7 @@ impl<F> LiveMember<F> {
         {
             return Err(AttachVerificationError::RecoveryAuthority);
         }
-        let pending = match (binding_state, pending_terminal_delivery_seq) {
+        match (binding_state, pending_terminal_delivery_seq) {
             (BindingState::Detached, None) => {
                 if self
                     .latest_terminal()
@@ -330,7 +473,7 @@ impl<F> LiveMember<F> {
                 {
                     return Err(AttachVerificationError::TerminalHistory);
                 }
-                None
+                Ok(None)
             }
             (BindingState::PendingFinalization(finalization), Some(sequence)) => {
                 let same_conversation = finalization.conversation_id() == self.conversation_id();
@@ -339,21 +482,13 @@ impl<F> LiveMember<F> {
                 if !(same_conversation && same_participant && same_prior_epoch) {
                     return Err(AttachVerificationError::BindingState);
                 }
-                Some((finalization, sequence))
+                Ok(Some((finalization, sequence)))
             }
             (BindingState::PendingFinalization(_), None) | (BindingState::Detached, Some(_)) => {
-                return Err(AttachVerificationError::PendingTerminalSequence);
+                Err(AttachVerificationError::PendingTerminalSequence)
             }
-            (BindingState::Bound(_), _) => {
-                return Err(AttachVerificationError::BindingState);
-            }
-        };
-        Ok(VerifiedAttachCommit {
-            member: self,
-            request,
-            parameters,
-            mode: AttachMode::Fenced { proof, pending },
-        })
+            (BindingState::Bound(_), _) => Err(AttachVerificationError::BindingState),
+        }
     }
 
     fn verify_attach_common(
@@ -399,7 +534,7 @@ impl<F> LiveMember<F> {
 /// Returns [`AttachCommitError`] for cell/history mismatch, invalid rotation,
 /// or a canonical receipt invariant rejected after verification.
 pub fn commit_attach<F, V>(
-    verified: VerifiedAttachCommit<'_, F>,
+    verified: VerifiedAttachCommit<F>,
     detach_cell: DetachCell<V>,
 ) -> Result<AttachCommit<F, V>, AttachCommitError>
 where
@@ -414,40 +549,43 @@ where
     let next_cell = transition_detach_cell(&mode, &previous_member, detach_cell)?;
     let attached =
         AttachedLifecycleRecord::from_binding(parameters.binding, parameters.attached_position);
-    let (persisted_cursor, terminal, transition, binding_origin) = match mode {
-        AttachMode::Detached(_) => (
-            previous_member.cursor(),
-            None,
-            AttachTransition::Detached,
-            BindingOrigin::unfenced(attached),
-        ),
-        AttachMode::Superseded(committed) => (
-            previous_member.cursor(),
-            Some(CommittedBindingTerminal::from(committed)),
-            AttachTransition::Superseded {
-                terminal: committed,
-            },
-            BindingOrigin::unfenced(attached),
-        ),
-        AttachMode::Fenced { proof, pending } => {
-            let composed_terminal =
-                pending.map(|(finalization, sequence)| finalization.commit(sequence));
-            (
-                proof.marker_delivery_seq(),
-                composed_terminal,
-                AttachTransition::FencedRecovery {
-                    prior_binding_epoch: proof.prior_binding_epoch(),
-                    composed_terminal,
-                    next_closure_state: proof.next_state(),
+    let (persisted_cursor, terminal, transition, binding_origin, recovered_binding_authority) =
+        match mode {
+            AttachMode::Detached(_) => (
+                previous_member.cursor(),
+                None,
+                AttachTransition::Detached,
+                BindingOrigin::unfenced(attached),
+                None,
+            ),
+            AttachMode::Superseded(committed) => (
+                previous_member.cursor(),
+                Some(CommittedBindingTerminal::from(committed)),
+                AttachTransition::Superseded {
+                    terminal: committed,
                 },
-                BindingOrigin::recovered(
-                    attached,
-                    proof.marker_delivery_seq(),
-                    proof.prior_binding_epoch(),
-                ),
-            )
-        }
-    };
+                BindingOrigin::unfenced(attached),
+                None,
+            ),
+            AttachMode::Fenced { proof, pending } => {
+                let composed_terminal =
+                    pending.map(|(finalization, sequence)| finalization.commit(sequence));
+                let marker_delivery_seq = proof.marker_delivery_seq();
+                let prior_binding_epoch = proof.prior_binding_epoch();
+                let next_closure_state = proof.next_state();
+                (
+                    marker_delivery_seq,
+                    composed_terminal,
+                    AttachTransition::FencedRecovery {
+                        prior_binding_epoch,
+                        composed_terminal,
+                        next_closure_state,
+                    },
+                    BindingOrigin::recovered(attached, marker_delivery_seq, prior_binding_epoch),
+                    Some(proof),
+                )
+            }
+        };
     let result_generation = parameters.binding.binding_epoch.capability_generation;
     let member = previous_member
         .rotate(
@@ -497,11 +635,12 @@ where
         transition,
         binding_origin,
         ordinary_binding_authority,
+        recovered_binding_authority,
     })
 }
 
 fn transition_detach_cell<F, V>(
-    mode: &AttachMode<'_>,
+    mode: &AttachMode,
     member: &LiveMember<F>,
     detach_cell: DetachCell<V>,
 ) -> Result<DetachCell<V>, AttachCommitError>

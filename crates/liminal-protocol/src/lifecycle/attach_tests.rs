@@ -201,6 +201,7 @@ fn fenced_recovery_composes_pending_detach_and_sets_both_marker_fields() {
     };
     let proof = recovery
         .fenced_attach(
+            super::edge::validated_marker_record_for_recovery_test(recovery),
             closure_debt,
             Event::fenced_recovery_committed(
                 3,
@@ -218,7 +219,7 @@ fn fenced_recovery_composes_pending_detach_and_sets_both_marker_fields() {
             pending_state,
             request(Some(14)),
             AttachSecretProof::Verified,
-            &proof,
+            proof,
             Some(13),
             parameters(),
         )
