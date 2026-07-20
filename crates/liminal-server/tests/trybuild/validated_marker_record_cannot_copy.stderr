@@ -1,0 +1,23 @@
+error[E0277]: the trait bound `lifecycle::claim_frontier::ValidatedMarkerRecord: Copy` is not satisfied
+  --> tests/trybuild/validated_marker_record_cannot_copy.rs:10:5
+   |
+10 |     with_validated_marker_record_type(require_copy);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Copy` is not implemented for `lifecycle::claim_frontier::ValidatedMarkerRecord`
+   |
+note: required by a bound in `require_copy`
+  --> tests/trybuild/validated_marker_record_cannot_copy.rs:3:20
+   |
+ 3 | fn require_copy<T: Copy>(value: T) {
+   |                    ^^^^ required by this bound in `require_copy`
+
+error[E0277]: the trait bound `lifecycle::claim_frontier::ValidatedMarkerRecord: Copy` is not satisfied
+  --> tests/trybuild/validated_marker_record_cannot_copy.rs:10:39
+   |
+10 |     with_validated_marker_record_type(require_copy);
+   |                                       ^^^^^^^^^^^^ the trait `Copy` is not implemented for `lifecycle::claim_frontier::ValidatedMarkerRecord`
+   |
+note: required by a bound in `require_copy`
+  --> tests/trybuild/validated_marker_record_cannot_copy.rs:3:20
+   |
+ 3 | fn require_copy<T: Copy>(value: T) {
+   |                    ^^^^ required by this bound in `require_copy`

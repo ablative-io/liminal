@@ -428,6 +428,9 @@ fn fenced_attach_linearity_ui_contract() {
     cases.compile_fail("tests/trybuild/fenced_proof_cannot_reuse_after_verify.rs");
     cases.compile_fail("tests/trybuild/fenced_proof_fate_method_is_private.rs");
     cases.compile_fail("tests/trybuild/fenced_attach_commit_cannot_split_twice.rs");
+    cases.compile_fail("tests/trybuild/validated_marker_record_cannot_clone.rs");
+    cases.compile_fail("tests/trybuild/validated_marker_record_cannot_copy.rs");
+    cases.compile_fail("tests/trybuild/validated_marker_record_cannot_feed_two_recoveries.rs");
 }
 
 #[test]
