@@ -1,0 +1,5 @@
+error[E0599]: no variant or associated item named `ProcessKilled` found for enum `ConnectionFateClass` in the current scope
+ --> tests/trybuild/production_connection_fate_cannot_select_process_killed.rs:4:42
+  |
+4 |     matches!(class, ConnectionFateClass::ProcessKilled)
+  |                                          ^^^^^^^^^^^^^ variant or associated item not found in `ConnectionFateClass`
