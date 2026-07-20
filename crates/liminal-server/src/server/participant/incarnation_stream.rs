@@ -388,7 +388,7 @@ pub(in crate::server) struct ConnectionFateIntent {
     pub(in crate::server) conversations: Vec<u64>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct AllocationGeneration {
     startup_sequence: u64,
     server_incarnation: u64,
@@ -426,7 +426,7 @@ impl AllocationGeneration {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct UnmatchedConnectionFates {
     generation_startup_sequence: Option<u64>,
     by_sequence: BTreeMap<u64, ConnectionFateIntent>,
@@ -441,7 +441,7 @@ impl UnmatchedConnectionFates {
         class: ConnectionFateClass,
         declared_conversation_bound: usize,
         conversations: Vec<u64>,
-    ) -> Result<(), IncarnationStreamError> {
+    ) -> Result<ConnectionFateIntent, IncarnationStreamError> {
         let Some(&allocation_sequence) = generation.active_allocations.get(&connection_incarnation)
         else {
             return Err(IncarnationStreamError::UnknownConnectionAllocation {
@@ -490,21 +490,19 @@ impl UnmatchedConnectionFates {
             );
         }
         self.generation_startup_sequence = Some(generation.startup_sequence);
-        self.by_sequence.insert(
+        let intent = ConnectionFateIntent {
             open_sequence,
-            ConnectionFateIntent {
-                open_sequence,
-                allocation_sequence,
-                startup_sequence: generation.startup_sequence,
-                server_incarnation: generation.server_incarnation,
-                declared_reference_bound,
-                connection_incarnation,
-                class,
-                declared_conversation_bound,
-                conversations,
-            },
-        );
-        Ok(())
+            allocation_sequence,
+            startup_sequence: generation.startup_sequence,
+            server_incarnation: generation.server_incarnation,
+            declared_reference_bound,
+            connection_incarnation,
+            class,
+            declared_conversation_bound,
+            conversations,
+        };
+        self.by_sequence.insert(open_sequence, intent.clone());
+        Ok(intent)
     }
 
     fn complete(
@@ -639,6 +637,7 @@ impl IncarnationStream {
                         startup_sequence,
                         header.server_incarnation,
                     ),
+                    unmatched: UnmatchedConnectionFates::default(),
                 }))
             }
             ServerIncarnationStartupDecision::Exhausted(exhausted) => {
@@ -734,6 +733,7 @@ impl IncarnationStream {
             generation: replayed
                 .generation
                 .unwrap_or_else(|| AllocationGeneration::new(0, header.server_incarnation)),
+            unmatched: UnmatchedConnectionFates::default(),
         })
     }
 }
@@ -795,6 +795,7 @@ impl ConnectionFateRecovery {
                         startup_sequence,
                         header.server_incarnation,
                     ),
+                    unmatched: UnmatchedConnectionFates::default(),
                 }))
             }
             ServerIncarnationStartupDecision::Exhausted(exhausted) => {
@@ -812,6 +813,7 @@ pub(in crate::server) struct StartedIncarnationStream {
     header: ConnectionIncarnationAllocatorRestore,
     next_sequence: u64,
     generation: AllocationGeneration,
+    unmatched: UnmatchedConnectionFates,
 }
 
 impl StartedIncarnationStream {
@@ -887,6 +889,67 @@ impl StartedIncarnationStream {
                 Ok(IncarnationAllocation::Exhausted(outcome))
             }
         }
+    }
+
+    /// Validates, appends, and flushes one bounded connection-fate Open.
+    ///
+    /// The caller supplies the signed semantic-conversation limit, not the
+    /// observed set length. The Open is staged through the same generation and
+    /// unmatched-set validation used by cold replay before any bytes append.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed validation, encoding, append, or flush failure. Append or
+    /// flush ambiguity requires process recovery; callers must consume this
+    /// started authority rather than retrying it.
+    pub(in crate::server) async fn open_connection_fate(
+        &mut self,
+        connection_incarnation: ConnectionIncarnation,
+        class: ConnectionFateClass,
+        declared_conversation_bound: usize,
+        conversations: &[u64],
+    ) -> Result<ConnectionFateIntent, IncarnationStreamError> {
+        let event = IncarnationEvent::OpenConnectionFate {
+            connection_incarnation,
+            class,
+            declared_conversation_bound,
+            conversations: conversations.to_vec(),
+        };
+        let payload = encode_event(&event)?;
+        let open_sequence = self.next_sequence;
+        let mut staged_unmatched = self.unmatched.clone();
+        let intent = staged_unmatched.open(
+            open_sequence,
+            &self.generation,
+            connection_incarnation,
+            class,
+            declared_conversation_bound,
+            conversations.to_vec(),
+        )?;
+        self.next_sequence = append_and_flush(&self.store, open_sequence, payload).await?;
+        self.unmatched = staged_unmatched;
+        Ok(intent)
+    }
+
+    /// Appends and flushes Complete for one live Open after all targets finish.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed absent-Open, encoding, append, or flush failure. As with
+    /// Open, ambiguous durable results consume the outer authority.
+    pub(in crate::server) async fn complete_connection_fate(
+        &mut self,
+        open_sequence: u64,
+    ) -> Result<(), IncarnationStreamError> {
+        let payload = encode_event(&IncarnationEvent::CompleteConnectionFate {
+            open_event_sequence: open_sequence,
+        })?;
+        let complete_sequence = self.next_sequence;
+        let mut staged_unmatched = self.unmatched.clone();
+        staged_unmatched.complete(complete_sequence, open_sequence)?;
+        self.next_sequence = append_and_flush(&self.store, complete_sequence, payload).await?;
+        self.unmatched = staged_unmatched;
+        Ok(())
     }
 }
 
@@ -1007,14 +1070,14 @@ impl ReplayAccumulator {
                 connection_incarnation,
             });
         };
-        self.unmatched.open(
+        drop(self.unmatched.open(
             stored_sequence,
             generation,
             connection_incarnation,
             class,
             declared_conversation_bound,
             conversations,
-        )?;
+        )?);
         Ok(self)
     }
 

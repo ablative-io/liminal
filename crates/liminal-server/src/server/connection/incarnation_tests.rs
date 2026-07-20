@@ -17,7 +17,10 @@ use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
 use crate::server::listener::ServerListener;
-use crate::server::participant::incarnation_stream::IncarnationStream;
+use crate::server::participant::incarnation_stream::{
+    ConnectionFateClass, IncarnationStream, encode_complete_connection_fate_event_fixture,
+    encode_open_connection_fate_event_fixture,
+};
 use crate::server::participant::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
     ParticipantSemanticError, ParticipantSemanticHandler,
@@ -178,7 +181,7 @@ fn connection_ordinal_exhaustion_is_a_typed_admission_failure()
         )?
         .resume_started_for_test(),
     )??;
-    let authority = ConnectionIncarnationAuthority::from_started_for_test(started);
+    let authority = ConnectionIncarnationAuthority::from_started_for_test(started, 4);
 
     assert!(matches!(
         authority.allocate(&[]),
@@ -186,6 +189,52 @@ fn connection_ordinal_exhaustion_is_a_typed_admission_failure()
             attempted_server_incarnation: 9,
         })
     ));
+    Ok(())
+}
+
+#[test]
+fn production_connection_fate_authority_opens_and_completes_with_signed_bound()
+-> Result<(), Box<dyn std::error::Error>> {
+    const MAXIMUM_REFERENCES: usize = 4;
+    const MAXIMUM_CONVERSATIONS: usize = 3;
+    let store = store()?;
+    let startup =
+        block_on(IncarnationStream::new(Arc::clone(&store), MAXIMUM_REFERENCES).startup())??;
+    let crate::server::participant::incarnation_stream::IncarnationStartup::Started(started) =
+        startup
+    else {
+        return Err("fresh stream unexpectedly required recovery".into());
+    };
+    let authority =
+        ConnectionIncarnationAuthority::from_started_for_test(started, MAXIMUM_CONVERSATIONS);
+    let connection_incarnation = authority.allocate(&[])?;
+    let conversations = vec![13, 21];
+
+    let intent = authority.open_connection_fate(
+        connection_incarnation,
+        ConnectionFateClass::ConnectionLost,
+        &conversations,
+    )?;
+    authority.complete_connection_fate(intent.open_sequence)?;
+
+    assert_eq!(intent.connection_incarnation, connection_incarnation);
+    assert_eq!(intent.conversations, conversations);
+    assert_eq!(intent.declared_conversation_bound, MAXIMUM_CONVERSATIONS);
+    let entries = block_on(store.read_from(IncarnationStream::stream_key(), 0, 8))??;
+    assert_eq!(entries.len(), 4);
+    assert_eq!(
+        entries[2].payload,
+        encode_open_connection_fate_event_fixture(
+            connection_incarnation,
+            ConnectionFateClass::ConnectionLost,
+            MAXIMUM_CONVERSATIONS,
+            &intent.conversations,
+        )?
+    );
+    assert_eq!(
+        entries[3].payload,
+        encode_complete_connection_fate_event_fixture(intent.open_sequence)?
+    );
     Ok(())
 }
 

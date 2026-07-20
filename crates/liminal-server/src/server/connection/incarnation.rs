@@ -12,13 +12,15 @@ use liminal_protocol::{outcome::ConnectionIncarnationExhausted, wire::Connection
 
 use crate::ServerError;
 use crate::server::participant::incarnation_stream::{
-    IncarnationAllocation, IncarnationStartup, IncarnationStream, StartedIncarnationStream,
+    ConnectionFateClass, ConnectionFateIntent, IncarnationAllocation, IncarnationStartup,
+    IncarnationStream, StartedIncarnationStream,
 };
 
 /// Started, fsynced, and serialized server-wide connection-incarnation source.
 #[derive(Debug)]
 pub(super) struct ConnectionIncarnationAuthority {
     state: Mutex<ConnectionIncarnationAuthorityState>,
+    maximum_conversations: usize,
 }
 
 #[derive(Debug)]
@@ -31,9 +33,13 @@ enum ConnectionIncarnationAuthorityState {
 impl ConnectionIncarnationAuthority {
     /// Wraps an already replayed stream for deterministic admission tests.
     #[cfg(test)]
-    pub(super) const fn from_started_for_test(stream: StartedIncarnationStream) -> Self {
+    pub(super) const fn from_started_for_test(
+        stream: StartedIncarnationStream,
+        maximum_conversations: usize,
+    ) -> Self {
         Self {
             state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
+            maximum_conversations,
         }
     }
 
@@ -46,7 +52,14 @@ impl ConnectionIncarnationAuthority {
     pub(super) fn startup(
         store: Arc<dyn DurableStore>,
         maximum_references: usize,
+        maximum_conversations: u64,
     ) -> Result<Self, ServerError> {
+        let maximum_conversations = usize::try_from(maximum_conversations).map_err(|error| {
+            ServerError::ParticipantIncarnation {
+                phase: "connection-fate conversation bound",
+                message: error.to_string(),
+            }
+        })?;
         let startup = block_on(IncarnationStream::new(store, maximum_references).startup())
             .map_err(|error| ServerError::ParticipantIncarnation {
                 phase: "server startup bridge",
@@ -59,6 +72,7 @@ impl ConnectionIncarnationAuthority {
         match startup {
             IncarnationStartup::Started(stream) => Ok(Self {
                 state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
+                maximum_conversations,
             }),
             IncarnationStartup::RecoveryRequired(recovery) => {
                 let intents = recovery.intents();
@@ -160,6 +174,127 @@ impl ConnectionIncarnationAuthority {
                 Err(ServerError::ParticipantIncarnation {
                     phase: "connection allocation unavailable",
                     message: "a prior allocation had an ambiguous durable result; process recovery is required"
+                        .to_owned(),
+                })
+            }
+        };
+        drop(state);
+        result
+    }
+
+    /// Opens and flushes one bounded connection-fate intent before teardown work.
+    ///
+    /// The declared bound is always the signed participant configuration captured
+    /// at authority construction; callers can supply only the observed sorted set.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lock, validation, append, or flush failure. Any ambiguous
+    /// durable result permanently fails this process-local authority.
+    pub(super) fn open_connection_fate(
+        &self,
+        connection_incarnation: ConnectionIncarnation,
+        class: ConnectionFateClass,
+        conversations: &[u64],
+    ) -> Result<ConnectionFateIntent, ServerError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| ServerError::ParticipantIncarnation {
+                phase: "connection-fate Open lock",
+                message: error.to_string(),
+            })?;
+        let current = core::mem::replace(&mut *state, ConnectionIncarnationAuthorityState::Failed);
+        let result = match current {
+            ConnectionIncarnationAuthorityState::Ready(mut stream) => {
+                match block_on(stream.open_connection_fate(
+                    connection_incarnation,
+                    class,
+                    self.maximum_conversations,
+                    conversations,
+                )) {
+                    Err(error) => Err(ServerError::ParticipantIncarnation {
+                        phase: "connection-fate Open bridge",
+                        message: error.to_string(),
+                    }),
+                    Ok(Err(error)) => Err(ServerError::ParticipantIncarnation {
+                        phase: "connection-fate Open persistence",
+                        message: error.to_string(),
+                    }),
+                    Ok(Ok(intent)) => {
+                        *state = ConnectionIncarnationAuthorityState::Ready(stream);
+                        Ok(intent)
+                    }
+                }
+            }
+            ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
+                attempted_server_incarnation,
+            } => {
+                *state = ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
+                    attempted_server_incarnation,
+                };
+                Err(ServerError::ConnectionIncarnationExhausted {
+                    attempted_server_incarnation,
+                })
+            }
+            ConnectionIncarnationAuthorityState::Failed => {
+                Err(ServerError::ParticipantIncarnation {
+                    phase: "connection-fate Open unavailable",
+                    message: "a prior incarnation-stream operation had an ambiguous durable result; process recovery is required"
+                        .to_owned(),
+                })
+            }
+        };
+        drop(state);
+        result
+    }
+
+    /// Appends and flushes Complete after every Open target has durably finished.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed lock, absent-Open, append, or flush failure. Any ambiguous
+    /// durable result permanently fails this process-local authority.
+    pub(super) fn complete_connection_fate(&self, open_sequence: u64) -> Result<(), ServerError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|error| ServerError::ParticipantIncarnation {
+                phase: "connection-fate Complete lock",
+                message: error.to_string(),
+            })?;
+        let current = core::mem::replace(&mut *state, ConnectionIncarnationAuthorityState::Failed);
+        let result = match current {
+            ConnectionIncarnationAuthorityState::Ready(mut stream) => {
+                match block_on(stream.complete_connection_fate(open_sequence)) {
+                    Err(error) => Err(ServerError::ParticipantIncarnation {
+                        phase: "connection-fate Complete bridge",
+                        message: error.to_string(),
+                    }),
+                    Ok(Err(error)) => Err(ServerError::ParticipantIncarnation {
+                        phase: "connection-fate Complete persistence",
+                        message: error.to_string(),
+                    }),
+                    Ok(Ok(())) => {
+                        *state = ConnectionIncarnationAuthorityState::Ready(stream);
+                        Ok(())
+                    }
+                }
+            }
+            ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
+                attempted_server_incarnation,
+            } => {
+                *state = ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
+                    attempted_server_incarnation,
+                };
+                Err(ServerError::ConnectionIncarnationExhausted {
+                    attempted_server_incarnation,
+                })
+            }
+            ConnectionIncarnationAuthorityState::Failed => {
+                Err(ServerError::ParticipantIncarnation {
+                    phase: "connection-fate Complete unavailable",
+                    message: "a prior incarnation-stream operation had an ambiguous durable result; process recovery is required"
                         .to_owned(),
                 })
             }
