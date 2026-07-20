@@ -26,9 +26,9 @@ use super::marker_source::{
     MarkerSourceRefusalReason, canonical_marker_bytes, validate_marker_source,
 };
 
-const CONVERSATION: u64 = 1;
-const PARTICIPANT: u64 = 0;
-const MARKER: u64 = 5;
+pub(super) const CONVERSATION: u64 = 1;
+pub(super) const PARTICIPANT: u64 = 0;
+pub(super) const MARKER: u64 = 5;
 
 struct MarkerClaims {
     sequence: SequenceClaims,
@@ -38,13 +38,13 @@ struct MarkerClaims {
     movable_order: Vec<MovableOrderClaim>,
 }
 
-struct SourceFixture {
-    store: Arc<dyn DurableStore>,
-    retained: RetainedFencedMarkerSource,
-    row: StoredMarkerDrain,
+pub(super) struct SourceFixture {
+    pub(super) store: Arc<dyn DurableStore>,
+    pub(super) retained: RetainedFencedMarkerSource,
+    pub(super) row: StoredMarkerDrain,
 }
 
-fn epoch() -> Result<BindingEpoch, Box<dyn Error>> {
+pub(super) fn epoch() -> Result<BindingEpoch, Box<dyn Error>> {
     let generation = Generation::new(2).ok_or("fixture generation must be nonzero")?;
     Ok(BindingEpoch::new(
         ConnectionIncarnation::new(1, 1),
@@ -275,7 +275,7 @@ fn recovery() -> Result<liminal_protocol::lifecycle::DetachedCredentialRecovery,
     Ok(recovery)
 }
 
-fn source_fixture() -> Result<SourceFixture, Box<dyn Error>> {
+pub(super) fn source_fixture() -> Result<SourceFixture, Box<dyn Error>> {
     let recovery = recovery()?;
     let (owner, _) = drained_frontier(FrontierBinding::Detached(epoch()?))?;
     let retained = owner
