@@ -52,6 +52,10 @@ pub use dispatch::{
     ParticipantDispatch, ParticipantDispatchError, ParticipantSemanticError,
     ParticipantSemanticHandler, dispatch_generic_frame,
 };
+pub use production::marker_source::{
+    MarkerSourceRefusalReason, MarkerSourceRefused, ValidatedFencedMarkerInputs,
+    validate_marker_source,
+};
 pub(crate) use production::{ProductionParticipantHandler, constant_time_eq};
 pub(crate) use publication::{
     ObserverPublication, ParticipantPublicationError, ParticipantPublicationInbox,

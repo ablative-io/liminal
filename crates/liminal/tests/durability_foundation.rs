@@ -187,6 +187,31 @@ fn haematite_store_delegates_append_read_scan_and_maps_sequence_conflict()
 }
 
 #[test]
+fn haematite_store_point_read_returns_only_the_exact_physical_event()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (store, _dir) = disk_store()?;
+    for (expected, payload) in [b"first".as_slice(), b"selected", b"tail"]
+        .into_iter()
+        .enumerate()
+    {
+        let expected = u64::try_from(expected)?;
+        assert_eq!(
+            block_on_ready(store.append("point-stream", payload.to_vec(), expected))?,
+            expected
+        );
+    }
+
+    let selected = block_on_durability(store.read_at("point-stream", 1))?
+        .ok_or("point read did not return the selected durable event")?;
+    assert_eq!(selected.sequence, 1);
+    assert_eq!(selected.payload, b"selected".to_vec());
+    assert!(selected.timestamp > 0);
+    assert!(block_on_durability(store.read_at("point-stream", 3))?.is_none());
+
+    Ok(())
+}
+
+#[test]
 fn haematite_store_delegates_cas_and_maps_mismatch_to_cursor_regression()
 -> Result<(), Box<dyn std::error::Error>> {
     let (store, _dir) = disk_store()?;

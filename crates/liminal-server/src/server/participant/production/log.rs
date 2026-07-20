@@ -114,6 +114,40 @@ impl OperationLog {
         }
     }
 
+    /// Reads and decodes exactly one durable operation by physical sequence.
+    pub(super) async fn read_at(
+        &self,
+        sequence: u64,
+    ) -> Result<Option<DecodedOperation>, OperationLogError> {
+        let Some(entry) = self.store.read_at(&self.stream_key, sequence).await? else {
+            return Ok(None);
+        };
+        if entry.sequence != sequence {
+            return Err(OperationLogError::Sequence {
+                expected: sequence,
+                actual: entry.sequence,
+            });
+        }
+        let version: StoredEntryVersion = serde_json::from_slice(&entry.payload)?;
+        let operation = match version.schema_version {
+            SCHEMA_VERSION_V2 => {
+                let stored: StoredEntryV2 = serde_json::from_slice(&entry.payload)?;
+                DecodedStoredOperation::V2(stored.operation)
+            }
+            SCHEMA_VERSION => {
+                let stored: StoredEntryV3 = serde_json::from_slice(&entry.payload)?;
+                stored.operation.validate_durable(sequence)?;
+                DecodedStoredOperation::V3(stored.operation)
+            }
+            actual => return Err(OperationLogError::SchemaVersion(actual)),
+        };
+        Ok(Some(DecodedOperation {
+            sequence,
+            schema_version: version.schema_version,
+            operation,
+        }))
+    }
+
     /// Reads one replay page while carrying the one-way schema phase.
     pub(super) async fn read_page(
         &self,
