@@ -28,18 +28,17 @@ impl ComposedTerminalValidation {
             return Ok(());
         };
         if let StoredOperationV3::Recovered { row, .. } = operation {
-            if row.presentation == StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer {
-                if row.died_source_sequence >= sequence
+            if row.presentation == StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer
+                && (row.died_source_sequence >= sequence
                     || self
                         .recovered_reservations
                         .insert(row.died_source_sequence, sequence)
-                        .is_some()
-                {
-                    return Err(composed_error(
-                        sequence,
-                        FencedAttachProofRefusal::ComposedRecoveredReservationMismatch,
-                    ));
-                }
+                        .is_some())
+            {
+                return Err(composed_error(
+                    sequence,
+                    FencedAttachProofRefusal::ComposedRecoveredReservationMismatch,
+                ));
             }
             return Ok(());
         }

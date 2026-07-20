@@ -6,8 +6,8 @@ use liminal_protocol::algebra::WideResourceVector;
 use liminal_protocol::lifecycle::{
     ActiveBinding, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition, BindingState,
     BindingTerminalDisposition, ClosureDebt, CommittedBindingTerminalPosition, DebtCompletion,
-    DetachCell, EnrollmentFingerprint, Event, FencedAttachMintRefusalReason, LiveMember,
-    LiveMemberRestore, MintFencedAttachResult, commit_attach,
+    DetachCell, EnrollmentFingerprint, Event, FencedAttachCommit, FencedAttachMintRefusalReason,
+    LiveMember, LiveMemberRestore, MintFencedAttachResult, commit_attach,
 };
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, BindingEpoch, ConnectionIncarnation, CredentialAttachRequest,
@@ -163,15 +163,23 @@ fn production_chain(cold: bool) -> Result<[u64; 5], Box<dyn Error>> {
     .map_err(|refused| format!("marker source association refused: {:?}", refused.reason()))?;
     let (owner, recovery, source_sequence) = validated.into_parts();
     let inputs = FencedAttachMintInputs { recovery, ..inputs };
-    let mut observed = [0_u64; 5];
     let MintFencedAttachResult::Minted(minted) =
         mint_associated_fenced_attach(owner, source_sequence, inputs)
     else {
         return Err("production proof mint refused exact inputs".into());
     };
-    observed[0] = observed[0].checked_add(1).ok_or("mint count overflow")?;
     let (owner, proof) = minted.into_parts();
     drop(owner);
+    let mut observed = finish_production_chain(proof, new_epoch)?;
+    observed[0] = observed[0].checked_add(1).ok_or("mint count overflow")?;
+    Ok(observed)
+}
+
+fn finish_production_chain(
+    proof: FencedAttachCommit,
+    new_epoch: BindingEpoch,
+) -> Result<[u64; 5], Box<dyn Error>> {
+    let mut observed = [0_u64; 5];
     let request = CredentialAttachRequest {
         conversation_id: CONVERSATION,
         participant_id: PARTICIPANT,
