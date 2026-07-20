@@ -58,10 +58,11 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         ServiceProfile::Full => {
             let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
             let channel_cluster = services.channel_cluster().clone();
-            let connection_supervisor = ConnectionSupervisor::with_services_auth_and_limits(
+            let connection_supervisor = ConnectionSupervisor::with_fatal_shutdown(
                 services,
                 auth_token,
                 config.limits,
+                shutdown_handle.clone(),
             )?;
 
             // SRV-005: start clustering on the channel-supervisor scheduler when a
@@ -79,10 +80,11 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         }
         ServiceProfile::WorkerFrontDoor => {
             let services = build_connection_services(&config)?;
-            let connection_supervisor = ConnectionSupervisor::with_services_auth_and_limits(
+            let connection_supervisor = ConnectionSupervisor::with_fatal_shutdown(
                 services,
                 auth_token,
                 config.limits,
+                shutdown_handle.clone(),
             )?;
             readiness.set_cluster_configured(false);
             (connection_supervisor, None)
@@ -134,10 +136,14 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         &supervisor,
         config.drain_timeout(),
     );
+    let participant_fatal = supervisor.participant_service_fatal();
     drop(websocket_listener);
     drop(signal_registration);
     health_server.shutdown()?;
-    shutdown_result
+    shutdown_result?;
+    participant_fatal?.map_or(Ok(()), |fatal| {
+        Err(ServerError::ParticipantServiceFatal { fatal })
+    })
 }
 
 /// Starts clustering on the shared channel supervisor's scheduler (SRV-005).

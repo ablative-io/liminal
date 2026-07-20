@@ -31,7 +31,9 @@ use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig};
 use crate::server::participant::{
     ConnectionFateClass, InstalledParticipantService, ParticipantSemanticHandler,
+    ParticipantServiceFatal,
 };
+use crate::server::shutdown::ShutdownHandle;
 
 const CONNECTION_SCHEDULER_THREADS: usize = 4;
 const CONNECTION_SHUTDOWN_CONTROL_ATOM: &str = "liminal_server_connection_shutdown_control";
@@ -39,6 +41,9 @@ const CONNECTION_SHUTDOWN_CONTROL_ATOM: &str = "liminal_server_connection_shutdo
 /// any marker (or N coalesced) triggers one full slice servicing all sources.
 const CONNECTION_READY_ATOM: &str = "liminal_server_connection_ready";
 
+#[cfg(test)]
+#[path = "supervisor_fate_tests.rs"]
+mod fate_tests;
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
 mod tests;
@@ -81,7 +86,7 @@ impl ConnectionSupervisor {
             .auth
             .as_ref()
             .map(|auth| auth.token.clone().into_bytes());
-        SupervisorInner::new(services, None, auth_token, config.limits).map(|inner| Self {
+        SupervisorInner::new(services, None, auth_token, config.limits, None).map(|inner| Self {
             inner: Arc::new(inner),
         })
     }
@@ -99,8 +104,10 @@ impl ConnectionSupervisor {
     /// # Errors
     /// Returns [`ServerError`] when scheduler startup fails.
     pub fn with_services(services: Arc<dyn ConnectionServices>) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, None, None, LimitsConfig::default()).map(|inner| Self {
-            inner: Arc::new(inner),
+        SupervisorInner::new(services, None, None, LimitsConfig::default(), None).map(|inner| {
+            Self {
+                inner: Arc::new(inner),
+            }
         })
     }
 
@@ -136,7 +143,32 @@ impl ConnectionSupervisor {
         auth_token: Option<Vec<u8>>,
         limits: LimitsConfig,
     ) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, None, auth_token, limits).map(|inner| Self {
+        Self::with_services_auth_limits_and_fatal_shutdown(services, auth_token, limits, None)
+    }
+
+    /// Production composition with the process-wide shutdown activation that a
+    /// post-Open participant fatal must join.
+    pub(crate) fn with_fatal_shutdown(
+        services: Arc<dyn ConnectionServices>,
+        auth_token: Option<Vec<u8>>,
+        limits: LimitsConfig,
+        fatal_shutdown: ShutdownHandle,
+    ) -> Result<Self, ServerError> {
+        Self::with_services_auth_limits_and_fatal_shutdown(
+            services,
+            auth_token,
+            limits,
+            Some(fatal_shutdown),
+        )
+    }
+
+    fn with_services_auth_limits_and_fatal_shutdown(
+        services: Arc<dyn ConnectionServices>,
+        auth_token: Option<Vec<u8>>,
+        limits: LimitsConfig,
+        fatal_shutdown: Option<ShutdownHandle>,
+    ) -> Result<Self, ServerError> {
+        SupervisorInner::new(services, None, auth_token, limits, fatal_shutdown).map(|inner| Self {
             inner: Arc::new(inner),
         })
     }
@@ -156,10 +188,15 @@ impl ConnectionSupervisor {
         services: Arc<dyn ConnectionServices>,
         notifier: Arc<dyn ConnectionNotifier>,
     ) -> Result<Self, ServerError> {
-        SupervisorInner::new(services, Some(notifier), None, LimitsConfig::default()).map(|inner| {
-            Self {
-                inner: Arc::new(inner),
-            }
+        SupervisorInner::new(
+            services,
+            Some(notifier),
+            None,
+            LimitsConfig::default(),
+            None,
+        )
+        .map(|inner| Self {
+            inner: Arc::new(inner),
         })
     }
 
@@ -193,6 +230,16 @@ impl ConnectionSupervisor {
     #[must_use]
     pub fn active_connection_count(&self) -> usize {
         self.inner.runtime.active_count()
+    }
+
+    /// Returns the first latched post-Open participant fatal, if any.
+    ///
+    /// The production runtime reads this after its existing shutdown handle wakes,
+    /// then returns the typed fatal after the ordinary drain and durable flush.
+    pub(crate) fn participant_service_fatal(
+        &self,
+    ) -> Result<Option<ParticipantServiceFatal>, ServerError> {
+        self.inner.runtime.participant_service_fatal()
     }
 
     /// Returns the beamr process ids of the currently tracked live connections.
@@ -825,6 +872,7 @@ impl SupervisorInner {
         notifier: Option<Arc<dyn ConnectionNotifier>>,
         auth_token: Option<Vec<u8>>,
         limits: LimitsConfig,
+        fatal_shutdown: Option<ShutdownHandle>,
     ) -> Result<Self, ServerError> {
         let installed_services = ConnectionServiceInstallation::capture(services);
         let incarnations = installed_services
@@ -868,6 +916,7 @@ impl SupervisorInner {
                 ConnectionRuntimeInstallation {
                     services: installed_services,
                     incarnations: incarnations.clone(),
+                    fatal_shutdown,
                 },
                 control_atom,
                 ready_atom,
@@ -1167,6 +1216,7 @@ impl ConnectionServiceInstallation {
 struct ConnectionRuntimeInstallation {
     services: ConnectionServiceInstallation,
     incarnations: Option<Arc<ConnectionIncarnationAuthority>>,
+    fatal_shutdown: Option<ShutdownHandle>,
 }
 
 #[derive(Debug)]
@@ -1177,6 +1227,9 @@ pub(super) struct ConnectionRuntime {
     participant_service: Option<InstalledParticipantService>,
     /// Same started authority used for allocation, shared for terminal Open/Complete.
     incarnations: Option<Arc<ConnectionIncarnationAuthority>>,
+    /// Existing runtime shutdown activation notified by the first post-Open fatal.
+    /// Test-only/runtime-less constructors intentionally carry `None`.
+    fatal_shutdown: Option<ShutdownHandle>,
     records: Mutex<HashMap<u64, ConnectionRecord>>,
     controls: Mutex<Vec<QueuedConnectionControl>>,
     control_atom: Atom,
@@ -1269,11 +1322,13 @@ impl ConnectionRuntime {
                     participant_service,
                 },
             incarnations,
+            fatal_shutdown,
         } = installation;
         Self {
             services,
             participant_service,
             incarnations,
+            fatal_shutdown,
             records: Mutex::new(HashMap::new()),
             controls: Mutex::new(Vec::new()),
             control_atom,
@@ -1598,6 +1653,7 @@ impl ConnectionRuntime {
             ConnectionRuntimeInstallation {
                 services: ConnectionServiceInstallation::capture(services),
                 incarnations: None,
+                fatal_shutdown: None,
             },
             control_atom,
             ready_atom,
@@ -1622,6 +1678,7 @@ impl ConnectionRuntime {
             ConnectionRuntimeInstallation {
                 services: ConnectionServiceInstallation::capture(services),
                 incarnations: None,
+                fatal_shutdown: None,
             },
             control_atom,
             ready_atom,
@@ -1647,6 +1704,7 @@ impl ConnectionRuntime {
             ConnectionRuntimeInstallation {
                 services: ConnectionServiceInstallation::capture(services),
                 incarnations: None,
+                fatal_shutdown: None,
             },
             control_atom,
             ready_atom,
@@ -1671,6 +1729,7 @@ impl ConnectionRuntime {
             ConnectionRuntimeInstallation {
                 services: ConnectionServiceInstallation::capture(services),
                 incarnations: None,
+                fatal_shutdown: None,
             },
             control_atom,
             ready_atom,
@@ -1690,24 +1749,71 @@ impl ConnectionRuntime {
         self.participant_service.as_ref()
     }
 
-    fn ensure_participant_service_live(&self) -> Result<(), ServerError> {
+    fn participant_service_fatal(&self) -> Result<Option<ParticipantServiceFatal>, ServerError> {
         let Some(service) = self.participant_service() else {
+            return Ok(None);
+        };
+        service
+            .service_fatal()
+            .map_err(|error| ServerError::ParticipantIncarnation {
+                phase: "participant fatal latch inspection",
+                message: error.to_string(),
+            })
+    }
+
+    fn activate_fatal_shutdown(&self) {
+        if let Some(shutdown) = self.fatal_shutdown.as_ref() {
+            shutdown.initiate();
+        }
+    }
+
+    fn ensure_participant_service_live(&self) -> Result<(), ServerError> {
+        let Some(fatal) = self.participant_service_fatal()? else {
             return Ok(());
         };
-        let fatal =
-            service
-                .service_fatal()
-                .map_err(|error| ServerError::ParticipantIncarnation {
-                    phase: "participant fatal latch inspection",
-                    message: error.to_string(),
-                })?;
-        if let Some(fatal) = fatal {
+        self.activate_fatal_shutdown();
+        Err(ServerError::ParticipantServiceFatal { fatal })
+    }
+
+    fn latch_connection_fate_intent_incomplete(
+        &self,
+        open_sequence: u64,
+        conversation_id: u64,
+    ) -> Result<ParticipantServiceFatal, ServerError> {
+        let Some(service) = self.participant_service() else {
             return Err(ServerError::ParticipantIncarnation {
-                phase: "participant service fatal",
-                message: fatal.to_string(),
+                phase: "connection-fate fatal latch",
+                message: "a durable Open lacks its installed participant service".to_owned(),
             });
+        };
+        let fatal = service
+            .latch_connection_fate_intent_incomplete(open_sequence, conversation_id)
+            .map_err(|error| ServerError::ParticipantIncarnation {
+                phase: "connection-fate fatal latch",
+                message: error.to_string(),
+            })?;
+        self.activate_fatal_shutdown();
+        Ok(fatal)
+    }
+
+    fn complete_connection_fate_fatal(
+        &self,
+        open_sequence: u64,
+        conversations: &[u64],
+        phase: &'static str,
+        error: &impl std::fmt::Display,
+    ) -> ServerError {
+        tracing::error!(open_sequence, phase, %error, "durable connection-fate intent is incomplete");
+        let Some(&conversation_id) = conversations.first() else {
+            return ServerError::ParticipantIncarnation {
+                phase: "connection-fate fatal target",
+                message: "a durable Open has no tracked conversation target".to_owned(),
+            };
+        };
+        match self.latch_connection_fate_intent_incomplete(open_sequence, conversation_id) {
+            Ok(fatal) => ServerError::ParticipantServiceFatal { fatal },
+            Err(latch_error) => latch_error,
         }
-        Ok(())
     }
 
     /// Runs one typed terminal fold after classification and before teardown.
@@ -1735,30 +1841,20 @@ impl ConnectionRuntime {
         let intent =
             authority.open_connection_fate(connection_incarnation, class, conversations)?;
         if let Err(error) = service.handle_connection_fate(intent.work_item()) {
-            let conversation_id = conversations[0];
-            let fatal = service
-                .latch_connection_fate_intent_incomplete(intent.open_sequence, conversation_id)
-                .map_err(|latch_error| ServerError::ParticipantIncarnation {
-                    phase: "connection-fate fatal latch",
-                    message: latch_error.to_string(),
-                })?;
-            return Err(ServerError::ParticipantIncarnation {
-                phase: "connection-fate handler",
-                message: format!("{fatal}: {error}"),
-            });
+            return Err(self.complete_connection_fate_fatal(
+                intent.open_sequence,
+                conversations,
+                "handler",
+                &error,
+            ));
         }
         if let Err(error) = authority.complete_connection_fate(intent.open_sequence) {
-            let conversation_id = conversations[0];
-            let fatal = service
-                .latch_connection_fate_intent_incomplete(intent.open_sequence, conversation_id)
-                .map_err(|latch_error| ServerError::ParticipantIncarnation {
-                    phase: "connection-fate fatal latch",
-                    message: latch_error.to_string(),
-                })?;
-            return Err(ServerError::ParticipantIncarnation {
-                phase: "connection-fate Complete",
-                message: format!("{fatal}: {error}"),
-            });
+            return Err(self.complete_connection_fate_fatal(
+                intent.open_sequence,
+                conversations,
+                "Complete",
+                &error,
+            ));
         }
         Ok(())
     }

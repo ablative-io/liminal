@@ -1,5 +1,7 @@
 use std::net::SocketAddr;
 
+use crate::server::participant::ParticipantServiceFatal;
+
 /// Error taxonomy for standalone liminal server deployment failures.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
@@ -33,6 +35,16 @@ pub enum ServerError {
         phase: &'static str,
         /// Underlying durable or bounded-bridge diagnostic.
         message: String,
+    },
+
+    /// A durable connection-fate Open could not be completed in this process.
+    ///
+    /// The normal runtime shutdown path returns this typed fatal only after it has
+    /// stopped both listeners and run the ordinary connection drain/flush sequence.
+    #[error("participant service fatal: {fatal}")]
+    ParticipantServiceFatal {
+        /// First process-wide post-Open failure; later failures cannot replace it.
+        fatal: ParticipantServiceFatal,
     },
 
     /// Startup found durable connection-fate work that the Decision A/C producer must complete
