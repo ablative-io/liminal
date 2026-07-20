@@ -45,6 +45,7 @@ use super::super::supervisor::{ConnectionControl, ConnectionRuntime};
 use super::outbound::WebSocketOutbound;
 use super::{AcceptorSettings, WsInboundViolation, decode_ws_binary};
 use crate::ServerError;
+use crate::server::participant::ConnectionFateClass;
 
 #[cfg(test)]
 #[path = "process_tests.rs"]
@@ -323,6 +324,11 @@ impl WebSocketConnectionProcess {
                     // The close handshake completed: the WS-clean equivalent of
                     // a TCP FIN. Mirror the TCP EOF path exactly.
                     let _ = self.drain_outbound(None);
+                    if let Err(error) =
+                        self.complete_connection_fate(ConnectionFateClass::ConnectionLost)
+                    {
+                        return self.fail_fate(pid, &error);
+                    }
                     self.release_conversations();
                     self.runtime.finish(pid);
                     return SliceStep::Stop(ExitReason::Normal);
@@ -338,6 +344,11 @@ impl WebSocketConnectionProcess {
                         error = %error,
                         "websocket connection read failed"
                     );
+                    if let Err(fate_error) =
+                        self.complete_connection_fate(ConnectionFateClass::ConnectionLost)
+                    {
+                        return self.fail_fate(pid, &fate_error);
+                    }
                     self.close_transport_abnormal();
                     self.release_conversations();
                     self.runtime
@@ -346,63 +357,68 @@ impl WebSocketConnectionProcess {
                 }
             };
             processed = processed.saturating_add(1);
-            match message {
-                Message::Binary(bytes) => match self.apply_binary(pid, &bytes) {
-                    Ok(ProcessStatus::Continue) => {}
-                    Ok(ProcessStatus::Close) => return self.finish_normal_close(pid),
-                    Err(error) => {
-                        tracing::warn!(connection_pid = pid, %error, "connection process failed");
-                        self.close_transport_abnormal();
-                        self.release_conversations();
-                        self.runtime
-                            .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-                        return SliceStep::Stop(ExitReason::Error);
-                    }
-                },
-                Message::Text(_) => {
-                    let violation = WsInboundViolation::TextMessage;
-                    tracing::warn!(connection_pid = pid, %violation, "websocket contract violation");
+            if let Some(step) = self.handle_inbound_message(pid, message) {
+                return step;
+            }
+        }
+    }
+
+    fn handle_inbound_message(&mut self, pid: u64, message: Message) -> Option<SliceStep> {
+        match message {
+            Message::Binary(bytes) => match self.apply_binary(pid, &bytes) {
+                Ok(ProcessStatus::Continue) => None,
+                Ok(ProcessStatus::Close) => Some(self.finish_normal_close(pid)),
+                Ok(ProcessStatus::CloseWithFate(class)) => Some(self.finish_fate_close(pid, class)),
+                Err(error) => {
+                    tracing::warn!(connection_pid = pid, %error, "connection process failed");
                     self.close_transport_abnormal();
                     self.release_conversations();
                     self.runtime
                         .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-                    return SliceStep::Stop(ExitReason::Error);
+                    Some(SliceStep::Stop(ExitReason::Error))
                 }
-                Message::Ping(_) => {
-                    // tungstenite queued the pong reply internally (RFC 6455
-                    // transport control); it rides out with the next flush and
-                    // is never surfaced as a liminal frame.
-                    self.outbound.note_transport_write_pending();
+            },
+            Message::Text(_) => {
+                let violation = WsInboundViolation::TextMessage;
+                tracing::warn!(connection_pid = pid, %violation, "websocket contract violation");
+                if self.state.participant_conversations.occupied() > 0 {
+                    return Some(self.finish_fate_close(pid, ConnectionFateClass::ProtocolError));
                 }
-                Message::Pong(_) => {
-                    // Transport liveness answer to the Q-A schedule (or
-                    // unsolicited); deliberately mints nothing.
+                self.close_transport_abnormal();
+                self.release_conversations();
+                self.runtime
+                    .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+                Some(SliceStep::Stop(ExitReason::Error))
+            }
+            Message::Ping(_) => {
+                // tungstenite queued the pong reply internally (RFC 6455
+                // transport control); it rides out with the next flush.
+                self.outbound.note_transport_write_pending();
+                None
+            }
+            Message::Pong(_) => None,
+            Message::Close(close_frame) => {
+                tracing::debug!(
+                    connection_pid = pid,
+                    close_frame = ?close_frame,
+                    "websocket peer initiated close"
+                );
+                self.outbound.note_transport_write_pending();
+                Some(self.finish_fate_close(pid, ConnectionFateClass::ConnectionLost))
+            }
+            Message::Frame(_) => {
+                tracing::warn!(
+                    connection_pid = pid,
+                    "unexpected raw websocket frame surfaced by the transport library"
+                );
+                if self.state.participant_conversations.occupied() > 0 {
+                    return Some(self.finish_fate_close(pid, ConnectionFateClass::ProtocolError));
                 }
-                Message::Close(close_frame) => {
-                    // Client-initiated close: tungstenite queued the echo.
-                    // Diagnostics only, then the TCP client-close discipline.
-                    tracing::debug!(
-                        connection_pid = pid,
-                        close_frame = ?close_frame,
-                        "websocket peer initiated close"
-                    );
-                    self.outbound.note_transport_write_pending();
-                    return self.finish_normal_close(pid);
-                }
-                Message::Frame(_) => {
-                    // Unreachable outside tungstenite's raw-frame read mode,
-                    // which this process never enables; refuse loudly rather
-                    // than silently treating it as data.
-                    tracing::warn!(
-                        connection_pid = pid,
-                        "unexpected raw websocket frame surfaced by the transport library"
-                    );
-                    self.close_transport_abnormal();
-                    self.release_conversations();
-                    self.runtime
-                        .mark_crashed(pid, ExitReason::Error, self.peer_addr);
-                    return SliceStep::Stop(ExitReason::Error);
-                }
+                self.close_transport_abnormal();
+                self.release_conversations();
+                self.runtime
+                    .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+                Some(SliceStep::Stop(ExitReason::Error))
             }
         }
     }
@@ -431,25 +447,33 @@ impl WebSocketConnectionProcess {
             })?;
             return Ok(ProcessStatus::Close);
         }
-        let frame = decode_ws_binary(bytes).map_err(|violation| match violation {
-            WsInboundViolation::MalformedFrame(
+        let frame = match decode_ws_binary(bytes) {
+            Ok(frame) => frame,
+            Err(violation) if self.state.participant_conversations.occupied() > 0 => {
+                tracing::warn!(connection_pid = pid, %violation, "bound websocket protocol refusal");
+                return Ok(ProcessStatus::CloseWithFate(
+                    ConnectionFateClass::ProtocolError,
+                ));
+            }
+            Err(WsInboundViolation::MalformedFrame(
                 error @ (liminal::protocol::ProtocolError::IncompleteHeader { .. }
                 | liminal::protocol::ProtocolError::TruncatedPayload { .. }),
-            ) => {
-                // On the stream transport these mean "wait for more bytes"; a
-                // complete message makes them terminal truncation violations.
-                ServerError::ListenerAccept {
+            )) => {
+                return Err(ServerError::ListenerAccept {
                     message: format!(
-                        "websocket contract violation: binary message is not one complete \
-                         canonical liminal frame: {error}"
+                        "websocket contract violation: binary message is not one complete canonical liminal frame: {error}"
                     ),
-                }
+                });
             }
-            WsInboundViolation::MalformedFrame(error) => server_error_from_protocol(&error),
-            other => ServerError::ListenerAccept {
-                message: format!("websocket contract violation: {other}"),
-            },
-        })?;
+            Err(WsInboundViolation::MalformedFrame(error)) => {
+                return Err(server_error_from_protocol(&error));
+            }
+            Err(other) => {
+                return Err(ServerError::ListenerAccept {
+                    message: format!("websocket contract violation: {other}"),
+                });
+            }
+        };
         match apply_frame(pid, &self.runtime, &mut self.state, frame) {
             FrameAction::Respond(response) => {
                 self.outbound.enqueue_frame(&response).map_err(|error| {
@@ -471,7 +495,34 @@ impl WebSocketConnectionProcess {
                 Ok(ProcessStatus::Close)
             }
             FrameAction::Close => Ok(ProcessStatus::Close),
+            FrameAction::CloseWithFate(class) => Ok(ProcessStatus::CloseWithFate(class)),
         }
+    }
+
+    fn complete_connection_fate(&self, class: ConnectionFateClass) -> Result<(), ServerError> {
+        let conversations = self.state.participant_conversations.tracked_conversations();
+        self.runtime.complete_connection_fate(
+            self.state.connection_incarnation,
+            class,
+            &conversations,
+        )
+    }
+
+    fn fail_fate(&mut self, pid: u64, error: &ServerError) -> SliceStep {
+        tracing::error!(connection_pid = pid, %error, "websocket connection fate fold failed");
+        self.close_transport_abnormal();
+        self.release_conversations();
+        self.runtime
+            .mark_crashed(pid, ExitReason::Error, self.peer_addr);
+        SliceStep::Stop(ExitReason::Error)
+    }
+
+    fn finish_fate_close(&mut self, pid: u64, class: ConnectionFateClass) -> SliceStep {
+        let _ = self.drain_outbound(None);
+        if let Err(error) = self.complete_connection_fate(class) {
+            return self.fail_fate(pid, &error);
+        }
+        self.finish_normal_close(pid)
     }
 
     /// Finishes a client-initiated or terminal-rejection close: one unbudgeted
@@ -812,6 +863,14 @@ impl WebSocketConnectionProcess {
             ConnectionControl::ForceClose => {
                 self.notify_shutdown(pid, false);
                 let _ = self.drain_outbound(None);
+                if let Err(error) =
+                    self.complete_connection_fate(ConnectionFateClass::ServerShutdown)
+                {
+                    return Some(match self.fail_fate(pid, &error) {
+                        SliceStep::Continue => NativeOutcome::Continue,
+                        SliceStep::Stop(reason) => NativeOutcome::Stop(reason),
+                    });
+                }
                 if let Some(socket) = self.socket.as_mut() {
                     let _ = socket.close(Some(CloseFrame {
                         code: CloseCode::Away,

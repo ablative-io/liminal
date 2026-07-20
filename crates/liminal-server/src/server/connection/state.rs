@@ -13,8 +13,8 @@ use super::conversation::ConnectionConversation;
 use super::participant_delivery::{HeldObserverHead, HeldParticipantHead};
 use super::services::ConnectionSubscription;
 use crate::server::participant::{
-    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublicationError,
-    ParticipantPublicationInbox, ParticipantSession,
+    ConnectionFateClass, ParticipantConnectionConversations, ParticipantOfferedProgress,
+    ParticipantPublicationError, ParticipantPublicationInbox, ParticipantSession,
 };
 
 /// The one signed pool of exact encoded participant and observer heads held for
@@ -201,6 +201,7 @@ pub(super) struct ConnectionProcessState {
 pub(super) enum ProcessStatus {
     Continue,
     Close,
+    CloseWithFate(ConnectionFateClass),
 }
 
 /// The connection's response to one applied inbound frame.
@@ -217,4 +218,6 @@ pub(super) enum FrameAction {
     RespondThenClose(Frame),
     /// Close the connection.
     Close,
+    /// Close after durably folding the exact participant fate class.
+    CloseWithFate(ConnectionFateClass),
 }

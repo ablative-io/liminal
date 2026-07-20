@@ -15,6 +15,7 @@ use super::super::super::state::ProcessStatus;
 use super::super::super::supervisor::ConnectionRuntime;
 use super::super::{WsInboundViolation, decode_ws_binary};
 use super::WebSocketConnectionProcess;
+use crate::server::participant::ConnectionFateClass;
 
 const TEST_PID: u64 = 1;
 
@@ -350,7 +351,10 @@ fn ws_apply_binary_disconnect_closes() -> Result<(), String> {
     let status = process
         .apply_binary(TEST_PID, &disconnect)
         .map_err(|error| format!("apply disconnect: {error}"))?;
-    assert_eq!(status, ProcessStatus::Close);
+    assert_eq!(
+        status,
+        ProcessStatus::CloseWithFate(ConnectionFateClass::CleanDisconnect)
+    );
     Ok(())
 }
 

@@ -28,9 +28,10 @@ use crate::server::connection::{
 };
 use crate::server::listener::ServerListener;
 use crate::server::participant::{
-    InstalledParticipantService, ObserverPublicationTarget, PARTICIPANT_CAPABILITY_BIT,
-    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
-    ParticipantPublication, ParticipantSemanticError, ParticipantSemanticHandler,
+    ConnectionFateWorkItem, InstalledParticipantService, ObserverPublicationTarget,
+    PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
+    ParticipantSemanticHandler, ParticipantServiceFatal,
 };
 
 use super::super::ProductionParticipantHandler;
@@ -72,6 +73,34 @@ struct ReplayGatedHandler {
 }
 
 impl ParticipantSemanticHandler for ReplayGatedHandler {
+    fn service_fatal(&self) -> Result<Option<ParticipantServiceFatal>, ParticipantSemanticError> {
+        self.inner.service_fatal()
+    }
+
+    fn latch_connection_fate_intent_incomplete(
+        &self,
+        open_sequence: u64,
+        conversation_id: ConversationId,
+    ) -> Result<ParticipantServiceFatal, ParticipantSemanticError> {
+        self.inner
+            .latch_connection_fate_intent_incomplete(open_sequence, conversation_id)
+    }
+
+    fn handle_connection_fate(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.inner.handle_connection_fate(work_item)
+    }
+
+    fn repair_unclean_server_restart(
+        &self,
+        current_server_incarnation: u64,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.inner
+            .repair_unclean_server_restart(current_server_incarnation)
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         self.inner.publication_conversation_limit()
     }
