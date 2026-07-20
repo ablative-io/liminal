@@ -1,8 +1,11 @@
 use std::error::Error;
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use liminal::durability::{DurableStore, bridge::block_on, open_ephemeral};
+use liminal::durability::{
+    DurabilityError, DurableStore, StoredEntry, bridge::block_on, open_ephemeral,
+};
 use liminal_protocol::wire::{ClientRequest, ServerValue};
 
 use super::{ConnectionSupervisor, ParticipantSemanticHandler};
@@ -18,12 +21,29 @@ use crate::server::shutdown::ShutdownHandle;
 
 const FIXTURE_CONVERSATION_LIMIT: u64 = 1;
 
-#[derive(Debug, Default)]
-struct FailingFateHandler {
+#[derive(Debug)]
+struct FateHandler {
     fatal: Mutex<Option<ParticipantServiceFatal>>,
+    fail_handler: bool,
 }
 
-impl ParticipantSemanticHandler for FailingFateHandler {
+impl FateHandler {
+    fn failing() -> Self {
+        Self {
+            fatal: Mutex::new(None),
+            fail_handler: true,
+        }
+    }
+
+    fn completing() -> Self {
+        Self {
+            fatal: Mutex::new(None),
+            fail_handler: false,
+        }
+    }
+}
+
+impl ParticipantSemanticHandler for FateHandler {
     fn service_fatal(&self) -> Result<Option<ParticipantServiceFatal>, ParticipantSemanticError> {
         self.fatal.lock().map(|fatal| fatal.clone()).map_err(|_| {
             ParticipantSemanticError::Internal {
@@ -55,12 +75,15 @@ impl ParticipantSemanticHandler for FailingFateHandler {
         &self,
         work_item: ConnectionFateWorkItem,
     ) -> Result<(), ParticipantSemanticError> {
-        Err(ParticipantSemanticError::Internal {
-            message: format!(
-                "injected failure while completing Open {}",
-                work_item.open_sequence
-            ),
-        })
+        if self.fail_handler {
+            return Err(ParticipantSemanticError::Internal {
+                message: format!(
+                    "injected failure while completing Open {}",
+                    work_item.open_sequence
+                ),
+            });
+        }
+        Ok(())
     }
 
     fn publication_conversation_limit(&self) -> u64 {
@@ -75,6 +98,76 @@ impl ParticipantSemanticHandler for FailingFateHandler {
     ) -> Result<ServerValue, ParticipantSemanticError> {
         let _ = (context, conversations, request);
         Err(ParticipantSemanticError::Unavailable)
+    }
+}
+
+#[derive(Debug)]
+struct FailNthFlush {
+    inner: Arc<dyn DurableStore>,
+    flush_count: AtomicUsize,
+    fail_at: usize,
+}
+
+impl FailNthFlush {
+    fn new(inner: Arc<dyn DurableStore>, fail_at: usize) -> Self {
+        Self {
+            inner,
+            flush_count: AtomicUsize::new(0),
+            fail_at,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DurableStore for FailNthFlush {
+    async fn append(
+        &self,
+        stream_key: &str,
+        payload: Vec<u8>,
+        expected_seq: u64,
+    ) -> Result<u64, DurabilityError> {
+        self.inner.append(stream_key, payload, expected_seq).await
+    }
+
+    async fn read_from(
+        &self,
+        stream_key: &str,
+        offset: u64,
+        limit: usize,
+    ) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner.read_from(stream_key, offset, limit).await
+    }
+
+    async fn cas(&self, key: &str, old_value: u64, new_value: u64) -> Result<(), DurabilityError> {
+        self.inner.cas(key, old_value, new_value).await
+    }
+
+    async fn read_value(&self, key: &str) -> Result<Option<u64>, DurabilityError> {
+        self.inner.read_value(key).await
+    }
+
+    async fn scan(&self, prefix: &str) -> Result<Vec<StoredEntry>, DurabilityError> {
+        self.inner.scan(prefix).await
+    }
+
+    async fn flush(&self) -> Result<(), DurabilityError> {
+        let previous = self
+            .flush_count
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_add(1)
+            })
+            .map_err(|_| {
+                DurabilityError::ConfigError("fixture flush counter exhausted".to_owned())
+            })?;
+        let flush = previous.checked_add(1).ok_or_else(|| {
+            DurabilityError::ConfigError("fixture flush counter exhausted".to_owned())
+        })?;
+        if flush == self.fail_at {
+            return Err(DurabilityError::ConfigError(format!(
+                "injected incarnation flush failure {flush}"
+            )));
+        }
+        self.inner.flush().await
     }
 }
 
@@ -101,7 +194,7 @@ fn post_open_fatal_stops_new_opens_and_admission_and_activates_normal_shutdown()
     const CONVERSATION_ID: u64 = 31;
 
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
-    let handler = Arc::new(FailingFateHandler::default());
+    let handler = Arc::new(FateHandler::failing());
     let participant_service =
         InstalledParticipantService::new(handler, Arc::clone(&store), u64::MAX)
             .map_err(|error| format!("participant service configuration failed: {error:?}"))?;
@@ -178,6 +271,80 @@ fn post_open_fatal_stops_new_opens_and_admission_and_activates_normal_shutdown()
         *open_sequence > 0,
         "the fatal must name the durable Open sequence"
     );
+
+    drop(refused_client);
+    drop(client);
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[test]
+fn complete_flush_failure_latches_fatal_and_activates_normal_shutdown() -> Result<(), Box<dyn Error>>
+{
+    const CONVERSATION_ID: u64 = 37;
+    const COMPLETE_FLUSH_NUMBER: usize = 4;
+
+    let inner: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let store: Arc<dyn DurableStore> =
+        Arc::new(FailNthFlush::new(Arc::clone(&inner), COMPLETE_FLUSH_NUMBER));
+    let handler = Arc::new(FateHandler::completing());
+    let participant_service =
+        InstalledParticipantService::new(handler, Arc::clone(&store), u64::MAX)
+            .map_err(|error| format!("participant service configuration failed: {error:?}"))?;
+    let services: Arc<dyn ConnectionServices> =
+        Arc::new(LiminalConnectionServices::empty()?.with_participant_service(participant_service));
+    let shutdown = ShutdownHandle::new();
+    let supervisor = ConnectionSupervisor::with_fatal_shutdown(
+        services,
+        None,
+        LimitsConfig::default(),
+        shutdown.clone(),
+    )?;
+    let (client, server) = tcp_pair()?;
+    let connection = supervisor.spawn_connection(server)?;
+    let incarnation = connection
+        .connection_incarnation()
+        .ok_or("participant connection lacks a durable incarnation")?;
+    let entries_before_open = stream_len(&inner)?;
+
+    let failed = supervisor.inner.runtime.complete_connection_fate(
+        Some(incarnation),
+        ConnectionFateClass::ServerShutdown,
+        &[CONVERSATION_ID],
+    );
+    let failure = match failed {
+        Ok(()) => return Err("injected Complete flush failure unexpectedly completed".into()),
+        Err(error) => error,
+    };
+    let ServerError::ParticipantServiceFatal { fatal } = failure else {
+        return Err(format!("Complete failure returned the wrong server error: {failure}").into());
+    };
+    let ParticipantServiceFatal::ConnectionFateIntentIncomplete {
+        open_sequence,
+        conversation_id,
+    } = &fatal;
+    assert_eq!(*conversation_id, CONVERSATION_ID);
+    assert!(*open_sequence > 0);
+    assert!(shutdown.is_initiated());
+    let observed_fatal = supervisor.participant_service_fatal()?;
+    assert_eq!(observed_fatal.as_ref(), Some(&fatal));
+
+    let entries_after_failure = stream_len(&inner)?;
+    assert_eq!(
+        entries_after_failure,
+        entries_before_open
+            .checked_add(2)
+            .ok_or("incarnation-stream fixture length overflow")?,
+        "Open and the ambiguously flushed Complete must both reach the wrapped store"
+    );
+
+    let (refused_client, refused_server) = tcp_pair()?;
+    let refused = supervisor.spawn_connection(refused_server);
+    assert!(matches!(
+        refused,
+        Err(ServerError::ParticipantServiceFatal { fatal: observed }) if observed == fatal
+    ));
+    assert_eq!(stream_len(&inner)?, entries_after_failure);
 
     drop(refused_client);
     drop(client);
