@@ -1,0 +1,13 @@
+error[E0624]: method `recovered_binding_fate` is private
+ --> tests/trybuild/fenced_proof_fate_method_is_private.rs:4:22
+  |
+4 |       let fate = proof.recovered_binding_fate(event);
+  |                        ^^^^^^^^^^^^^^^^^^^^^^ private method
+  |
+ ::: $WORKSPACE/crates/liminal-protocol/src/lifecycle/edge.rs
+  |
+  | /     pub(super) fn recovered_binding_fate(
+  | |         self,
+  | |         event: Event,
+  | |     ) -> Result<RecoveredBindingFate, Box<Self>> {
+  | |________________________________________________- private method defined here

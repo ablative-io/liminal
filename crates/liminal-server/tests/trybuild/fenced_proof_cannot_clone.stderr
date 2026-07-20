@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `FencedAttachCommit` in the current scope
+ --> tests/trybuild/fenced_proof_cannot_clone.rs:4:24
+  |
+4 |     let cloned = proof.clone();
+  |                        ^^^^^ method not found in `FencedAttachCommit`
