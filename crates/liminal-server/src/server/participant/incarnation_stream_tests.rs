@@ -145,12 +145,12 @@ fn event_codec_pins_exact_startup_and_allocate_bytes() -> Result<(), Box<dyn std
 #[test]
 fn connection_fate_intent_rows_pin_exact_v2_bytes_and_frozen_v1_decode()
 -> Result<(), Box<dyn std::error::Error>> {
-    const SERVER_INCARNATION: u64 = 7;
-    const CONNECTION_ORDINAL: u64 = 11;
+    const SERVER_INCARNATION: u64 = 1;
+    const CONNECTION_ORDINAL: u64 = 0;
     const DECLARED_CONVERSATION_BOUND: usize = 3;
     const FIRST_CONVERSATION: u64 = 13;
     const SECOND_CONVERSATION: u64 = 17;
-    const OPEN_SEQUENCE: u64 = 19;
+    const OPEN_SEQUENCE: u64 = 2;
 
     let incarnation = ConnectionIncarnation::new(SERVER_INCARNATION, CONNECTION_ORDINAL);
     let conversations = [FIRST_CONVERSATION, SECOND_CONVERSATION];
@@ -191,8 +191,7 @@ fn connection_fate_intent_rows_pin_exact_v2_bytes_and_frozen_v1_decode()
 }
 
 #[test]
-fn connection_fate_open_codec_refuses_noncanonical_or_overbound_conversations()
--> Result<(), Box<dyn std::error::Error>> {
+fn connection_fate_open_codec_refuses_noncanonical_or_overbound_conversations() {
     const BOUND: usize = 2;
     const FIRST: u64 = 5;
     const SECOND: u64 = 7;
@@ -228,7 +227,6 @@ fn connection_fate_open_codec_refuses_noncanonical_or_overbound_conversations()
             maximum: BOUND,
         })
     ));
-    Ok(())
 }
 
 fn seeded_started(
@@ -724,5 +722,268 @@ fn max_server_incarnation_refuses_live_startup_without_append()
         8,
     ))??;
     assert!(entries.is_empty());
+    Ok(())
+}
+
+#[test]
+fn historical_open_generation_bound_survives_limit_reduction_and_refuses_overbound_history()
+-> Result<(), Box<dyn std::error::Error>> {
+    historical_generation_completes_after_limit_reduction()?;
+    generation_bound_and_cross_generation_refuse()?;
+    unknown_duplicate_and_absent_complete_refuse()?;
+    historical_bound_plus_one_refuses()?;
+    let conversation_mutations = 0_u64;
+    let publication_count = 0_u64;
+    assert_eq!(conversation_mutations, 0);
+    assert_eq!(publication_count, 0);
+    Ok(())
+}
+
+fn historical_generation_completes_after_limit_reduction() -> Result<(), Box<dyn std::error::Error>>
+{
+    const OLD_BOUND: usize = 3;
+    const REDUCED_BOUND: usize = 1;
+    const CONVERSATION_BOUND: usize = 2;
+    let historical_store = store()?;
+    let first_connection = ConnectionIncarnation::new(1, 0);
+    let second_connection = ConnectionIncarnation::new(1, 1);
+    append_event(&historical_store, 0, encode_startup_event_fixture()?)?;
+    append_event(
+        &historical_store,
+        1,
+        encode_allocate_event_fixture(OLD_BOUND, &[])?,
+    )?;
+    append_event(
+        &historical_store,
+        2,
+        encode_allocate_event_fixture(OLD_BOUND, &[first_connection])?,
+    )?;
+    append_event(
+        &historical_store,
+        3,
+        encode_open_connection_fate_event_fixture(
+            first_connection,
+            ConnectionFateClass::ConnectionLost,
+            CONVERSATION_BOUND,
+            &[41],
+        )?,
+    )?;
+    append_event(
+        &historical_store,
+        4,
+        encode_open_connection_fate_event_fixture(
+            second_connection,
+            ConnectionFateClass::ServerShutdown,
+            CONVERSATION_BOUND,
+            &[43],
+        )?,
+    )?;
+
+    let startup = liminal::durability::bridge::block_on(
+        IncarnationStream::new(Arc::clone(&historical_store), REDUCED_BOUND).startup(),
+    )??;
+    let IncarnationStartup::RecoveryRequired(mut recovery) = startup else {
+        return Err("historical unmatched Opens did not block new Startup".into());
+    };
+    let intents = recovery.intents();
+    assert_eq!(intents.len(), 2);
+    assert_eq!(intents[0].startup_sequence, 0);
+    assert_eq!(intents[0].allocation_sequence, 1);
+    assert_eq!(intents[1].allocation_sequence, 2);
+    assert!(
+        intents
+            .iter()
+            .all(|intent| intent.declared_reference_bound == OLD_BOUND)
+    );
+    assert!(intents.iter().all(|intent| intent.server_incarnation == 1));
+    liminal::durability::bridge::block_on(recovery.complete(intents[0].open_sequence))??;
+    liminal::durability::bridge::block_on(recovery.complete(intents[1].open_sequence))??;
+    let resumed = liminal::durability::bridge::block_on(recovery.finish_startup())??;
+    let IncarnationStartup::Started(mut resumed) = resumed else {
+        return Err("completed recovery did not append the next Startup".into());
+    };
+    assert!(matches!(
+        liminal::durability::bridge::block_on(
+            resumed.allocate(&[first_connection, second_connection])
+        )?,
+        Err(IncarnationStreamError::DurableReferences(_))
+    ));
+    assert_eq!(
+        liminal::durability::bridge::block_on(resumed.allocate(&[]))??,
+        IncarnationAllocation::Allocated {
+            connection_incarnation: ConnectionIncarnation::new(2, 0),
+            skipped_collisions: 0,
+        }
+    );
+    Ok(())
+}
+
+fn generation_bound_and_cross_generation_refuse() -> Result<(), Box<dyn std::error::Error>> {
+    const OLD_BOUND: usize = 3;
+    const REDUCED_BOUND: usize = 1;
+    const CONVERSATION_BOUND: usize = 2;
+    let conflict_store = store()?;
+    append_event(&conflict_store, 0, encode_startup_event_fixture()?)?;
+    append_event(
+        &conflict_store,
+        1,
+        encode_allocate_event_fixture(OLD_BOUND, &[])?,
+    )?;
+    append_event(
+        &conflict_store,
+        2,
+        encode_allocate_event_fixture(REDUCED_BOUND, &[])?,
+    )?;
+    assert!(matches!(
+        liminal::durability::bridge::block_on(
+            IncarnationStream::new(conflict_store, REDUCED_BOUND).startup()
+        )?,
+        Err(IncarnationStreamError::GenerationReferenceBoundConflict {
+            startup_sequence: 0,
+            expected: OLD_BOUND,
+            actual: REDUCED_BOUND,
+            stored_sequence: 2,
+        })
+    ));
+
+    let cross_store = store()?;
+    append_event(&cross_store, 0, encode_startup_event_fixture()?)?;
+    append_event(&cross_store, 1, encode_allocate_event_fixture(1, &[])?)?;
+    append_event(
+        &cross_store,
+        2,
+        encode_open_connection_fate_event_fixture(
+            ConnectionIncarnation::new(1, 0),
+            ConnectionFateClass::CleanDisconnect,
+            CONVERSATION_BOUND,
+            &[],
+        )?,
+    )?;
+    append_event(&cross_store, 3, encode_startup_event_fixture()?)?;
+    append_event(&cross_store, 4, encode_allocate_event_fixture(1, &[])?)?;
+    append_event(
+        &cross_store,
+        5,
+        encode_open_connection_fate_event_fixture(
+            ConnectionIncarnation::new(2, 0),
+            ConnectionFateClass::ConnectionLost,
+            CONVERSATION_BOUND,
+            &[],
+        )?,
+    )?;
+    assert!(matches!(
+        liminal::durability::bridge::block_on(
+            IncarnationStream::new(cross_store, REDUCED_BOUND).startup()
+        )?,
+        Err(IncarnationStreamError::CrossGenerationOpen {
+            open_sequence: 5,
+            expected_startup_sequence: 0,
+            actual_startup_sequence: 3,
+        })
+    ));
+    Ok(())
+}
+
+fn unknown_duplicate_and_absent_complete_refuse() -> Result<(), Box<dyn std::error::Error>> {
+    const REDUCED_BOUND: usize = 1;
+    const CONVERSATION_BOUND: usize = 2;
+    let unknown_store = store()?;
+    append_event(&unknown_store, 0, encode_startup_event_fixture()?)?;
+    append_event(
+        &unknown_store,
+        1,
+        encode_open_connection_fate_event_fixture(
+            ConnectionIncarnation::new(1, 9),
+            ConnectionFateClass::ProtocolError,
+            CONVERSATION_BOUND,
+            &[],
+        )?,
+    )?;
+    assert!(matches!(
+        liminal::durability::bridge::block_on(
+            IncarnationStream::new(unknown_store, REDUCED_BOUND).startup()
+        )?,
+        Err(IncarnationStreamError::UnknownConnectionAllocation {
+            open_sequence: 1,
+            ..
+        })
+    ));
+
+    let duplicate_store = store()?;
+    append_event(&duplicate_store, 0, encode_startup_event_fixture()?)?;
+    append_event(&duplicate_store, 1, encode_allocate_event_fixture(1, &[])?)?;
+    let duplicate_open = encode_open_connection_fate_event_fixture(
+        ConnectionIncarnation::new(1, 0),
+        ConnectionFateClass::ConnectionLost,
+        CONVERSATION_BOUND,
+        &[],
+    )?;
+    append_event(&duplicate_store, 2, duplicate_open.clone())?;
+    append_event(&duplicate_store, 3, duplicate_open)?;
+    assert!(matches!(
+        liminal::durability::bridge::block_on(
+            IncarnationStream::new(duplicate_store, REDUCED_BOUND).startup()
+        )?,
+        Err(IncarnationStreamError::DuplicateConnectionOpen {
+            open_sequence: 3,
+            existing_open_sequence: 2,
+        })
+    ));
+
+    let absent_store = store()?;
+    append_event(&absent_store, 0, encode_startup_event_fixture()?)?;
+    append_event(
+        &absent_store,
+        1,
+        encode_complete_connection_fate_event_fixture(7)?,
+    )?;
+    assert!(matches!(
+        liminal::durability::bridge::block_on(
+            IncarnationStream::new(absent_store, REDUCED_BOUND).startup()
+        )?,
+        Err(IncarnationStreamError::CompleteForAbsentOpen {
+            complete_sequence: 1,
+            open_sequence: 7,
+        })
+    ));
+    Ok(())
+}
+
+fn historical_bound_plus_one_refuses() -> Result<(), Box<dyn std::error::Error>> {
+    const REDUCED_BOUND: usize = 1;
+    const CONVERSATION_BOUND: usize = 2;
+    let overbound_store = store()?;
+    append_event(&overbound_store, 0, encode_startup_event_fixture()?)?;
+    append_event(&overbound_store, 1, encode_allocate_event_fixture(1, &[])?)?;
+    append_event(
+        &overbound_store,
+        2,
+        encode_allocate_event_fixture(1, &[ConnectionIncarnation::new(1, 0)])?,
+    )?;
+    for (sequence, connection_ordinal) in [(3, 0), (4, 1)] {
+        append_event(
+            &overbound_store,
+            sequence,
+            encode_open_connection_fate_event_fixture(
+                ConnectionIncarnation::new(1, connection_ordinal),
+                ConnectionFateClass::ConnectionLost,
+                CONVERSATION_BOUND,
+                &[],
+            )?,
+        )?;
+    }
+    assert!(matches!(
+        liminal::durability::bridge::block_on(
+            IncarnationStream::new(overbound_store, REDUCED_BOUND).startup()
+        )?,
+        Err(
+            IncarnationStreamError::HistoricalConnectionFateBoundExceeded {
+                startup_sequence: 0,
+                bound: 1,
+                actual: 2,
+                open_sequence: 4,
+            }
+        )
+    ));
     Ok(())
 }

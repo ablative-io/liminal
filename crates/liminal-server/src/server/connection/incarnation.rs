@@ -60,6 +60,19 @@ impl ConnectionIncarnationAuthority {
             IncarnationStartup::Started(stream) => Ok(Self {
                 state: Mutex::new(ConnectionIncarnationAuthorityState::Ready(stream)),
             }),
+            IncarnationStartup::RecoveryRequired(recovery) => {
+                let intents = recovery.intents();
+                let Some(first) = intents.first() else {
+                    return Err(ServerError::ParticipantIncarnation {
+                        phase: "connection-fate recovery",
+                        message: "recovery owner returned no unmatched Open".to_owned(),
+                    });
+                };
+                Err(ServerError::ConnectionFateRecoveryRequired {
+                    open_count: intents.len(),
+                    first_open_sequence: first.open_sequence,
+                })
+            }
             IncarnationStartup::Exhausted(ConnectionIncarnationExhausted::ServerIncarnation) => {
                 Err(ServerError::ServerIncarnationExhausted)
             }
