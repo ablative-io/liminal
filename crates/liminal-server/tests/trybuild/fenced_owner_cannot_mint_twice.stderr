@@ -1,0 +1,24 @@
+error[E0382]: use of moved value: `owner`
+  --> tests/trybuild/fenced_owner_cannot_mint_twice.rs:21:18
+   |
+ 6 |       owner: LiveFrontierOwner,
+   |       ----- move occurs because `owner` has type `LiveFrontierOwner`, which does not implement the `Copy` trait
+...
+13 |       let first = owner.mint_fenced_attach(
+   |  _______________________-
+14 | |         marker_source_sequence,
+15 | |         recovery,
+16 | |         debt,
+17 | |         event,
+18 | |         successor,
+19 | |     );
+   | |_____- `owner` moved due to this method call
+20 |       drop(first);
+21 |       let second = owner.mint_fenced_attach(
+   |                    ^^^^^ value used here after move
+   |
+note: `LiveFrontierOwner::mint_fenced_attach` takes ownership of the receiver `self`, which moves `owner`
+  --> $WORKSPACE/crates/liminal-protocol/src/lifecycle/operations/live_frontier.rs
+   |
+   |         mut self,
+   |             ^^^^

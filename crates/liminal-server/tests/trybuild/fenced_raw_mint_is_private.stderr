@@ -1,0 +1,16 @@
+error[E0624]: method `fenced_attach` is private
+  --> tests/trybuild/fenced_raw_mint_is_private.rs:11:22
+   |
+11 |       let _ = recovery.fenced_attach(debt, event, successor);
+   |                        ^^^^^^^^^^^^^ private method
+   |
+  ::: $WORKSPACE/crates/liminal-protocol/src/lifecycle/edge.rs
+   |
+   | /     pub(super) fn fenced_attach(
+   | |         self,
+   | |         record_authority: ValidatedMarkerRecord,
+   | |         debt: ClosureDebt,
+   | |         event: Event,
+   | |         successor: DebtCompletion,
+   | |     ) -> Result<FencedAttachCommit, Box<FencedAttachRecordRefusal>> {
+   | |___________________________________________________________________- private method defined here

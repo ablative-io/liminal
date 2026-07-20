@@ -1,0 +1,11 @@
+error[E0382]: borrow of moved value: `proof`
+  --> tests/trybuild/fenced_proof_cannot_reuse_after_verify.rs:22:26
+   |
+10 |     proof: FencedAttachCommit,
+   |     ----- move occurs because `proof` has type `FencedAttachCommit`, which does not implement the `Copy` trait
+...
+17 |         proof,
+   |         ----- value moved here
+...
+22 |     let participant_id = proof.participant_id();
+   |                          ^^^^^ value borrowed here after move

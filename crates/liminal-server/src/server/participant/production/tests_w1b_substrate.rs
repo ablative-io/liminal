@@ -418,6 +418,19 @@ fn v3_reader_accepts_v2_prefix_and_refuses_v2_after_v3() -> Result<(), Box<dyn E
 }
 
 #[test]
+fn fenced_attach_linearity_ui_contract() {
+    let cases = trybuild::TestCases::new();
+    cases.pass("tests/trybuild/fenced_descriptions_remain_copy.rs");
+    cases.compile_fail("tests/trybuild/fenced_raw_mint_is_private.rs");
+    cases.compile_fail("tests/trybuild/fenced_owner_cannot_mint_twice.rs");
+    cases.compile_fail("tests/trybuild/fenced_proof_cannot_clone.rs");
+    cases.compile_fail("tests/trybuild/fenced_proof_cannot_copy.rs");
+    cases.compile_fail("tests/trybuild/fenced_proof_cannot_reuse_after_verify.rs");
+    cases.compile_fail("tests/trybuild/fenced_proof_fate_method_is_private.rs");
+    cases.compile_fail("tests/trybuild/fenced_attach_commit_cannot_split_twice.rs");
+}
+
+#[test]
 fn v2_after_v3_across_operation_page_boundary_refuses_before_apply() -> Result<(), Box<dyn Error>> {
     let store = store()?;
     let final_slot = u64::try_from(

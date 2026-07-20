@@ -1,0 +1,16 @@
+error[E0382]: use of moved value: `commit`
+ --> tests/trybuild/fenced_attach_commit_cannot_split_twice.rs:6:18
+  |
+3 | fn split_twice(commit: AttachCommit<Vec<u8>, Vec<u8>>) {
+  |                ------ move occurs because `commit` has type `AttachCommit<Vec<u8>, Vec<u8>>`, which does not implement the `Copy` trait
+4 |     let first = commit.into_slot_and_fate();
+  |                        -------------------- `commit` moved due to this method call
+5 |     drop(first);
+6 |     let second = commit.into_slot_and_fate();
+  |                  ^^^^^^ value used here after move
+  |
+note: `AttachCommit::<F, V>::into_slot_and_fate` takes ownership of the receiver `self`, which moves `commit`
+ --> $WORKSPACE/crates/liminal-protocol/src/lifecycle/attach.rs
+  |
+  |     pub fn into_slot_and_fate(self) -> (InstalledAttachState<F, V>, SealedBindingFateToken) {
+  |                               ^^^^
