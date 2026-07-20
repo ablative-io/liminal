@@ -287,9 +287,11 @@ impl ConversationAuthority {
         self.install_frontier(frontier_owner);
         self.advance_log_head()?;
         let outcome = committed.outcome.clone();
-        slot.member = committed.member;
-        slot.binding = committed.binding_state;
-        slot.cell = committed.detach_cell;
+        let (installed, fate_token) = committed.into_slot_and_fate();
+        slot.member = installed.member;
+        slot.binding = installed.binding_state;
+        slot.binding_fate = Some(fate_token);
+        slot.cell = installed.detach_cell;
         slot.attach_secret = AttachSecret::new(allocation.attach_secret);
         // Retire the previous receipt into its bounded provenance record with
         // the exact terminal reason: `Superseded` when the newer generation
@@ -329,7 +331,7 @@ impl ConversationAuthority {
         slot.attach = Some(AttachReceiptState {
             token: request.attach_attempt_token,
             receipt: CredentialAttachLiveReceipt::from_commit(outcome.clone()),
-            outcome: committed.outcome,
+            outcome: installed.outcome,
             verifier: request.attach_secret.into_bytes(),
             result_generation,
             receipt_expires_at: allocation.receipt_expires_at.get(),

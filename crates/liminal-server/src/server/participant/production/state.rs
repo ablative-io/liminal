@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use liminal_protocol::lifecycle::{
     BindingState, ConversationDecision, ConversationGenesis, ConversationRefusalReason,
     CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveFrontierOwner, LiveMember,
-    ObserverProgressProjection, ParticipantConversation, RetiredIdentity,
+    ObserverProgressProjection, ParticipantConversation, RetiredIdentity, SealedBindingFateToken,
 };
 #[cfg(test)]
 use liminal_protocol::wire::ParticipantDelivery;
@@ -82,6 +82,9 @@ pub(super) struct Slot {
     pub(super) member: LiveMember<Digest>,
     /// Current binding authority.
     pub(super) binding: BindingState,
+    /// Sole move-only fate authority emitted by the most recent attach split.
+    /// Operational slot state never contains or duplicates this authority.
+    pub(super) binding_fate: Option<SealedBindingFateToken>,
     /// Four-variant detach replay cell.
     pub(super) cell: DetachCell<Digest>,
     /// Exact committed enrollment receipt held for lookup-phase resolution.
