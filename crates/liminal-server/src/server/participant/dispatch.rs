@@ -218,6 +218,22 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
         Err(ParticipantSemanticError::Unavailable)
     }
 
+    /// Repairs every remaining binding owned by a prior server incarnation.
+    ///
+    /// Startup calls this after all retained Opens complete and before publishing
+    /// the incarnation authority, scheduler, listener, or new admission.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic failure while startup still owns all publication seams.
+    fn repair_unclean_server_restart(
+        &self,
+        current_server_incarnation: u64,
+    ) -> Result<(), ParticipantSemanticError> {
+        let _ = current_server_incarnation;
+        Ok(())
+    }
+
     fn publication_conversation_limit(&self) -> u64 {
         0
     }
@@ -454,6 +470,14 @@ impl ParticipantSemanticHandler for InstalledParticipantService {
         work_item: ConnectionFateWorkItem,
     ) -> Result<(), ParticipantSemanticError> {
         self.handler.handle_connection_fate(work_item)
+    }
+
+    fn repair_unclean_server_restart(
+        &self,
+        current_server_incarnation: u64,
+    ) -> Result<(), ParticipantSemanticError> {
+        self.handler
+            .repair_unclean_server_restart(current_server_incarnation)
     }
 
     fn handle(

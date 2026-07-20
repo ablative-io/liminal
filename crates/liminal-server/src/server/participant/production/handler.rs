@@ -190,6 +190,12 @@ impl ProductionParticipantHandler {
         Ok(())
     }
 
+    pub(super) fn registered_conversation_ids(
+        &self,
+    ) -> Result<Vec<ConversationId>, ParticipantSemanticError> {
+        self.registry.restore().map_err(|error| log_error(&error))
+    }
+
     pub(super) fn cell(
         &self,
         conversation_id: ConversationId,

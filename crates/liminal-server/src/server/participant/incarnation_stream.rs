@@ -808,6 +808,12 @@ pub(in crate::server) struct StartedIncarnationStream {
 }
 
 impl StartedIncarnationStream {
+    /// Current server incarnation durably fsynced by this stream's Startup row.
+    #[must_use]
+    pub(in crate::server) const fn server_incarnation(&self) -> u64 {
+        self.header.server_incarnation
+    }
+
     /// Returns the current protocol-derived scalar state for assertions only.
     #[must_use]
     #[cfg(test)]
