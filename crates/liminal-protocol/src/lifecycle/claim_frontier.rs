@@ -2430,6 +2430,67 @@ impl ClaimFrontiers {
         })
     }
 
+    /// Ends one exact active binding while retaining its terminal as the first
+    /// immutable sequence candidate. The transaction-order major is consumed,
+    /// but the candidate delivery sequence remains unconsumed.
+    pub(in crate::lifecycle) fn apply_pending_binding_terminal(
+        mut self,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        delivery_seq: DeliverySeq,
+        admission_order: super::AdmissionOrder,
+        order_ledger: OrderLedger,
+    ) -> Result<Self, Box<(Self, LiveFrontierTransitionError)>> {
+        if !self.sequence.immutable_candidates.is_empty()
+            || self.sequence.recovery.is_some()
+            || !self.order.immutable_candidates.is_empty()
+            || self.order.recovery.is_some()
+        {
+            return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
+        }
+        let mut participants = self.active_identities.participants().to_vec();
+        let Some(participant) = participants
+            .iter_mut()
+            .find(|participant| participant.participant_index() == participant_id)
+        else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        if participant.binding() != FrontierBinding::Bound(binding_epoch) {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        }
+        *participant = FrontierParticipant::new(
+            participant_id,
+            participant.cursor(),
+            FrontierBinding::Detached(binding_epoch),
+        );
+        let Ok(active) = ActiveIdentityRanks::try_new(
+            participants,
+            self.sequence.ledger.high_watermark(),
+            self.identity_slot_limit,
+        ) else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        let pending_owner = BindingTerminalOwner {
+            participant_index: participant_id,
+            binding_epoch,
+        };
+        let (sequence, order) = match rebuild_pending_terminal_frontiers(
+            &active,
+            pending_owner,
+            delivery_seq,
+            admission_order,
+            self.sequence.ledger,
+            order_ledger,
+        ) {
+            Ok(frontiers) => frontiers,
+            Err(error) => return Err(Box::new((self, error))),
+        };
+        self.active_identities = active;
+        self.sequence = sequence;
+        self.order = order;
+        Ok(self)
+    }
+
     /// Consumes the exact coupled DCR blocks into one fenced attach.
     ///
     /// This seam is lifecycle-private: its participant and rows are derived from
@@ -3478,6 +3539,181 @@ fn rebuild_unreserved_order(
         ledger: order_ledger,
         movable_claims: movable_order,
         immutable_candidates: Vec::new(),
+        recovery: None,
+    })
+}
+
+fn rebuild_pending_terminal_frontiers(
+    active: &ActiveIdentityRanks,
+    pending_owner: BindingTerminalOwner,
+    delivery_seq: DeliverySeq,
+    admission_order: super::AdmissionOrder,
+    sequence_ledger: SequenceLedger,
+    order_ledger: OrderLedger,
+) -> Result<(SequenceClaimFrontier, OrderClaimFrontier), LiveFrontierTransitionError> {
+    if admission_order.candidate_phase() != CandidatePhase::BindingTerminal
+        || admission_order.participant_index() != pending_owner.participant_index
+        || admission_order.transaction_order()
+            != match order_ledger.high() {
+                OrderHigh::Allocated(high) => high,
+                OrderHigh::Empty => return Err(LiveFrontierTransitionError::RecordPosition),
+            }
+        || sequence_ledger.high_watermark().checked_add(1) != Some(delivery_seq)
+    {
+        return Err(LiveFrontierTransitionError::RecordPosition);
+    }
+    let bound_owners: Vec<_> = active
+        .participants()
+        .iter()
+        .filter_map(|participant| match participant.binding() {
+            FrontierBinding::Bound(binding_epoch) => Some(BindingTerminalOwner {
+                participant_index: participant.participant_index(),
+                binding_epoch,
+            }),
+            FrontierBinding::Detached(_) => None,
+        })
+        .collect();
+    let mut all_terminal_owners = bound_owners.clone();
+    all_terminal_owners.push(pending_owner);
+    all_terminal_owners.sort_unstable_by_key(|owner| owner.participant_index);
+    let live_count = active.len();
+    let bound_count =
+        u64::try_from(bound_owners.len()).map_err(|_| LiveFrontierTransitionError::Exhausted)?;
+    let terminal_count = u64::try_from(all_terminal_owners.len())
+        .map_err(|_| LiveFrontierTransitionError::Exhausted)?;
+    let sequence_claims = sequence_ledger.claims();
+    let order_claims = order_ledger.claims();
+    if sequence_claims.live_members() != live_count
+        || sequence_claims.binding_terminals() != terminal_count
+        || sequence_claims.markers() != 0
+        || sequence_claims.recovery() != RecoverySequenceReserve::None
+        || order_claims.active_binding_terminals() != bound_count
+        || order_claims.membership_exits() != live_count
+        || order_claims.recovery_operation()
+        || order_claims.recovery_replacement_terminal()
+    {
+        return Err(LiveFrontierTransitionError::ResultingFrontier);
+    }
+
+    let sequence = rebuild_pending_terminal_sequence(
+        active,
+        pending_owner,
+        delivery_seq,
+        admission_order,
+        sequence_ledger,
+        &bound_owners,
+        &all_terminal_owners,
+    )?;
+    let order =
+        rebuild_pending_terminal_order(active, admission_order, order_ledger, bound_owners)?;
+    validate_cross_counter(&sequence, &order)
+        .map_err(|_| LiveFrontierTransitionError::ResultingFrontier)?;
+    Ok((sequence, order))
+}
+
+fn rebuild_pending_terminal_sequence(
+    active: &ActiveIdentityRanks,
+    pending_owner: BindingTerminalOwner,
+    delivery_seq: DeliverySeq,
+    admission_order: super::AdmissionOrder,
+    sequence_ledger: SequenceLedger,
+    bound_owners: &[BindingTerminalOwner],
+    all_terminal_owners: &[BindingTerminalOwner],
+) -> Result<SequenceClaimFrontier, LiveFrontierTransitionError> {
+    let live_count = active.len();
+    let mut sequence_cursor = delivery_seq;
+    let candidate_sequence = take_live_sequence(&mut sequence_cursor, 1)?;
+    let mut movable_sequence = Vec::new();
+    for terminal in bound_owners {
+        movable_sequence.push(MovableSequenceClaim {
+            delivery_seq: take_live_sequence(&mut sequence_cursor, 1)?,
+            owner: SequenceDirectOwner::BindingTerminal(*terminal),
+        });
+    }
+    for participant in active.participants() {
+        movable_sequence.push(MovableSequenceClaim {
+            delivery_seq: take_live_sequence(&mut sequence_cursor, 1)?,
+            owner: SequenceDirectOwner::MembershipExit {
+                participant_index: participant.participant_index(),
+            },
+        });
+    }
+    let mut terminal_products = Vec::new();
+    for terminal in all_terminal_owners {
+        terminal_products.push(TerminalProductRange {
+            start: take_live_sequence(&mut sequence_cursor, live_count)?,
+            length: live_count,
+            terminal: *terminal,
+        });
+    }
+    let exit_product_length = live_count.saturating_sub(1);
+    let mut exit_products = Vec::new();
+    for participant in active.participants() {
+        exit_products.push(ExitProductRange {
+            start: take_live_sequence(&mut sequence_cursor, exit_product_length)?,
+            length: exit_product_length,
+            exit_participant: participant.participant_index(),
+        });
+    }
+    let sequence_end = u128::from(sequence_ledger.high_watermark())
+        .checked_add(sequence_ledger.required_reserve())
+        .and_then(|value| value.checked_add(1))
+        .ok_or(LiveFrontierTransitionError::Exhausted)?;
+    if u128::from(sequence_cursor) != sequence_end {
+        return Err(LiveFrontierTransitionError::ResultingFrontier);
+    }
+    Ok(SequenceClaimFrontier {
+        ledger: sequence_ledger,
+        movable_claims: movable_sequence,
+        immutable_candidates: alloc::vec![ImmutableSequenceCandidate::BindingTerminal {
+            delivery_seq: candidate_sequence,
+            admission_order,
+            owner: pending_owner,
+        }],
+        products: SequenceProductRanges {
+            live_times_terminal: terminal_products,
+            live_times_replacement_terminal: None,
+            other_live_times_exit: exit_products,
+        },
+        recovery: None,
+    })
+}
+
+fn rebuild_pending_terminal_order(
+    active: &ActiveIdentityRanks,
+    admission_order: super::AdmissionOrder,
+    order_ledger: OrderLedger,
+    bound_owners: Vec<BindingTerminalOwner>,
+) -> Result<OrderClaimFrontier, LiveFrontierTransitionError> {
+    let order_claims = order_ledger.claims();
+    let order_start = order_frontier_start(order_ledger.high());
+    let mut order_cursor =
+        u64::try_from(order_start).map_err(|_| LiveFrontierTransitionError::Exhausted)?;
+    let mut movable_order = Vec::new();
+    for terminal in bound_owners {
+        movable_order.push(MovableOrderClaim {
+            transaction_order: take_live_order(&mut order_cursor)?,
+            owner: OrderDirectOwner::ActiveBindingTerminal(terminal),
+        });
+    }
+    for participant in active.participants() {
+        movable_order.push(MovableOrderClaim {
+            transaction_order: take_live_order(&mut order_cursor)?,
+            owner: OrderDirectOwner::MembershipExit {
+                participant_index: participant.participant_index(),
+            },
+        });
+    }
+    if u128::from(order_cursor) != order_start + order_claims.total() {
+        return Err(LiveFrontierTransitionError::ResultingFrontier);
+    }
+    Ok(OrderClaimFrontier {
+        ledger: order_ledger,
+        movable_claims: movable_order,
+        immutable_candidates: alloc::vec![ImmutableOrderCandidateMajor {
+            transaction_order: admission_order.transaction_order(),
+            candidate_keys: alloc::vec![admission_order],
+        }],
         recovery: None,
     })
 }

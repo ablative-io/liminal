@@ -208,6 +208,105 @@ impl LiveFrontierOwner {
         )
     }
 
+    pub(super) fn commit_binding_terminal_candidate(
+        self,
+        active_binding: super::super::ActiveBinding,
+        admission_order: super::super::AdmissionOrder,
+        delivery_seq: crate::wire::DeliverySeq,
+        charge: RetainedRecordCharge,
+    ) -> Result<Self, Box<(Self, LiveFrontierError)>> {
+        let mut active = self.frontiers.active_identities().participants().to_vec();
+        let Some(participant) = active
+            .iter_mut()
+            .find(|participant| participant.participant_index() == active_binding.participant_id)
+        else {
+            return Err(Box::new((self, LiveFrontierError::Authority)));
+        };
+        if participant.binding() != FrontierBinding::Bound(active_binding.binding_epoch) {
+            return Err(Box::new((self, LiveFrontierError::Authority)));
+        }
+        *participant = FrontierParticipant::new(
+            participant.participant_index(),
+            participant.cursor(),
+            FrontierBinding::Detached(active_binding.binding_epoch),
+        );
+        let row = RetainedCausalRecord {
+            delivery_seq,
+            admission_order,
+            kind: RetainedCausalRecordKind::BindingTerminal(super::super::BindingTerminalOwner {
+                participant_index: active_binding.participant_id,
+                binding_epoch: active_binding.binding_epoch,
+            }),
+        };
+        let Some(sequence) = detach_sequence(self.frontiers.sequence().ledger(), delivery_seq)
+        else {
+            return Err(Box::new((self, LiveFrontierError::Frontier)));
+        };
+        let Some(order) = detach_order(
+            self.frontiers.order().ledger(),
+            admission_order.transaction_order(),
+        ) else {
+            return Err(Box::new((self, LiveFrontierError::Frontier)));
+        };
+        match transition(self, (), active, &[row], vec![charge], sequence, order) {
+            Ok(committed) => {
+                let ((), owner) = committed.into_parts();
+                Ok(owner)
+            }
+            Err(failure) => {
+                let error = failure.error();
+                let ((), owner) = failure.into_parts();
+                Err(Box::new((owner, error)))
+            }
+        }
+    }
+
+    pub(super) fn pend_binding_terminal_candidate(
+        self,
+        active_binding: super::super::ActiveBinding,
+        admission_order: super::super::AdmissionOrder,
+        delivery_seq: crate::wire::DeliverySeq,
+    ) -> Result<Self, Box<(Self, LiveFrontierError)>> {
+        let Some(order) = detach_order(
+            self.frontiers.order().ledger(),
+            admission_order.transaction_order(),
+        ) else {
+            return Err(Box::new((self, LiveFrontierError::Frontier)));
+        };
+        let Self {
+            frontiers,
+            closure_accounting,
+            retained_charges,
+            retained_record_limit,
+        } = self;
+        match frontiers.apply_pending_binding_terminal(
+            active_binding.participant_id,
+            active_binding.binding_epoch,
+            delivery_seq,
+            admission_order,
+            order,
+        ) {
+            Ok(frontiers) => Ok(Self {
+                frontiers,
+                closure_accounting,
+                retained_charges,
+                retained_record_limit,
+            }),
+            Err(failure) => {
+                let (frontiers, error) = *failure;
+                Err(Box::new((
+                    Self {
+                        frontiers,
+                        closure_accounting,
+                        retained_charges,
+                        retained_record_limit,
+                    },
+                    map_frontier_error(error),
+                )))
+            }
+        }
+    }
+
     /// Retains this move-only owner and the exact recovery while its durable
     /// marker source row is read and validated.
     ///
