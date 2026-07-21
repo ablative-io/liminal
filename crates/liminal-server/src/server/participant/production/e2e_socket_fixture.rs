@@ -609,8 +609,12 @@ impl SocketFixture {
         Arc::clone(&self.store)
     }
 
-    pub(in crate::server::participant::production) fn force_close_and_wait(&self) {
+    pub(in crate::server::participant::production) fn request_force_close(&self) {
         self.supervisor.force_close_active_connections();
+    }
+
+    pub(in crate::server::participant::production) fn force_close_and_wait(&self) {
+        self.request_force_close();
         wait_after_force_close(&self.supervisor);
     }
 
