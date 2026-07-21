@@ -17,32 +17,30 @@ use std::sync::Arc;
 
 use liminal::durability::DurableStore;
 use liminal_protocol::lifecycle::{
-    AggregateOperationDecision, AttachCommit, AttachCommitParameters, AttachFrontierCharges,
-    AttachTransition, AttachedRecordPosition, BindingSlotDecision, BindingState,
-    CredentialAttachLiveReceipt, CredentialAttachLookupResult, LiveFrontierOwner,
-    PendingFinalization, PresentedIdentity, RetainedRecordCharge,
-    SemanticConnectionCapacityDecision, apply_attach_frontier, commit_attach,
-    decide_attached_operation, lookup_credential_attach, select_credential_attach_binding_slot,
+    AggregateOperationDecision, AttachCommit, AttachFrontierCharges, AttachTransition,
+    BindingSlotDecision, BindingState, CredentialAttachLiveReceipt, CredentialAttachLookupResult,
+    LiveFrontierOwner, PresentedIdentity, RetainedRecordCharge, SemanticConnectionCapacityDecision,
+    apply_attach_frontier, commit_attach, decide_attached_operation, lookup_credential_attach,
+    select_credential_attach_binding_slot,
 };
 use liminal_protocol::wire::{
-    AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, CloseCause, CredentialAttachRequest,
+    AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, CredentialAttachRequest,
     CredentialAttachResponse, Generation, ReceiptExpiryReason,
 };
 
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::capacity::ServerCapacity;
 use super::facts::{self, Digest};
-use super::fate_occurrence::FateOccurrenceKey;
 use super::frontier;
 use super::log::{
-    StoredAttachAllocation, StoredAttachModeV3, StoredAttachRequest, StoredComposedTerminalCause,
-    StoredComposedTerminalKind, StoredFinalizerPresentation, StoredOperation,
+    StoredAttachAllocation, StoredAttachModeV3, StoredAttachRequest, StoredOperation,
 };
 use super::non_presenting_finalizer::NonPresentingFinalizerCommit;
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::ops_attach_capacity::AttachStage8;
+use super::ops_attach_finalizer::SelectedFencedFinalizer;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
-use super::ops_attach_verify::{AttachVerification, verify_attach_mode};
+use super::ops_attach_verify::{AttachVerification, stored_attach_parameters, verify_attach_mode};
 use super::state::{
     AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend,
     PendingBindingFate, Slot, StateError,
@@ -257,23 +255,13 @@ impl ConversationAuthority {
             .ok_or_else(|| {
                 StateError::invariant("attach commit requires an enrolled participant slot")
             })?;
-        let non_presenting = self.select_fenced_finalizer(slot.binding, attach_mode, request)?;
-        let binding_epoch = allocation.binding_epoch.to_epoch()?;
-        let result_generation = binding_epoch.capability_generation;
-        let parameters = AttachCommitParameters {
-            binding: liminal_protocol::lifecycle::ActiveBinding {
-                participant_id: request.participant_id,
-                conversation_id: request.conversation_id,
-                binding_epoch,
-            },
-            attach_secret: AttachSecret::new(allocation.attach_secret),
-            attached_position: AttachedRecordPosition::new(
-                allocation.attached_order,
-                allocation.attached_seq,
-            ),
-            receipt_expires_at: allocation.receipt_expires_at.get(),
-            provenance_expires_at: allocation.provenance_expires_at.get(),
+        let finalizer = self.select_fenced_finalizer(slot.binding, attach_mode, request)?;
+        let non_presenting = finalizer.is_some_and(SelectedFencedFinalizer::is_non_presenting);
+        let live_appender = match mode {
+            CommitMode::Live(appender) => Some(appender),
+            CommitMode::Replay { .. } => None,
         };
+        let (result_generation, parameters) = stored_attach_parameters(request, allocation)?;
         let frontier_owner = self.take_frontier()?;
         let (verified, frontier_owner) = verify_attach_mode(
             slot.member,
@@ -286,6 +274,12 @@ impl ConversationAuthority {
                 store,
                 source_sequence,
             },
+        )?;
+        let (frontier_owner, completes_ordinary) = self.prepare_selected_fenced_finalizer(
+            request.participant_id,
+            source_sequence,
+            finalizer,
+            frontier_owner,
         )?;
         let committed = commit_attach(verified, slot.cell).map_err(|error| {
             StateError::invariant(format!("protocol attach transition failed: {error:?}"))
@@ -348,69 +342,10 @@ impl ConversationAuthority {
             self.record_observer_progress_projection(projection, metadata)?;
         }
         self.observe_replayed_position(allocation.attached_order, allocation.attached_seq)?;
-        Ok(outcome)
-    }
-
-    fn select_fenced_finalizer(
-        &mut self,
-        binding: BindingState,
-        mode: &StoredAttachModeV3,
-        request: &CredentialAttachRequest,
-    ) -> Result<bool, StateError> {
-        let BindingState::PendingFinalization(pending) = binding else {
-            return Ok(false);
-        };
-        let StoredAttachModeV3::Fenced {
-            composed_terminal: Some(terminal),
-            ..
-        } = mode
-        else {
-            return Err(StateError::invariant(
-                "pending attach finalizer requires a composed fenced terminal",
-            ));
-        };
-        let route = self.fate_occurrences.select_finalizer(FateOccurrenceKey {
-            conversation_id: request.conversation_id,
-            participant_id: request.participant_id,
-            binding_epoch: pending.binding_epoch(),
-        })?;
-        let expected_kind = match pending {
-            PendingFinalization::Died(_) => StoredComposedTerminalKind::Died,
-            PendingFinalization::Detached(_) => StoredComposedTerminalKind::Detached,
-        };
-        let expected_cause = stored_composed_cause(pending.close_cause())?;
-        if terminal.kind != expected_kind
-            || terminal.cause != expected_cause
-            || terminal.transaction_order != pending.admission_order().transaction_order()
-            || terminal.pending_source_sequence != route.pending_source_sequence
-            || terminal.presentation != route.presentation
-        {
-            return Err(StateError::invariant(
-                "fenced attach composed terminal differs from selected pending finalizer",
-            ));
+        if completes_ordinary && let Some(appender) = live_appender {
+            self.complete_prepared_ordinary_finalizer(request.participant_id, appender)?;
         }
-        Ok(matches!(
-            route.presentation,
-            StoredFinalizerPresentation::ConsumeRecoveredReservation { .. }
-        ))
-    }
-}
-
-fn stored_composed_cause(cause: CloseCause) -> Result<StoredComposedTerminalCause, StateError> {
-    match cause {
-        CloseCause::CleanDeregister => Ok(StoredComposedTerminalCause::CleanDeregister),
-        CloseCause::ConnectionLost => Ok(StoredComposedTerminalCause::ConnectionLost),
-        CloseCause::ProcessKilled => Ok(StoredComposedTerminalCause::ProcessKilled),
-        CloseCause::ProtocolError => Ok(StoredComposedTerminalCause::ProtocolError),
-        CloseCause::ServerShutdown => Ok(StoredComposedTerminalCause::ServerShutdown),
-        CloseCause::UncleanServerRestart {
-            prior_server_incarnation,
-        } => Ok(StoredComposedTerminalCause::UncleanServerRestart {
-            prior_server_incarnation,
-        }),
-        CloseCause::Superseded => Err(StateError::invariant(
-            "superseded terminal cannot be a pending fenced finalizer",
-        )),
+        Ok(outcome)
     }
 }
 

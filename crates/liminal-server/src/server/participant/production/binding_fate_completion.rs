@@ -16,7 +16,7 @@ use super::log::{
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::state::{
     ConversationAuthority, DurableAppend, PendingBindingFate, PendingSpecificFate,
-    PendingSpecificFateTerminal, PreparedOrdinaryFinalizer, StateError,
+    PendingSpecificFateTerminal, StateError,
 };
 
 #[derive(Clone, Copy)]
@@ -320,83 +320,6 @@ impl ConversationAuthority {
         Ok(())
     }
 
-    /// Measures Ordinary before an enclosing finalizer removes its participant frontier.
-    pub(super) fn prepare_pending_died_finalizer(
-        &mut self,
-        participant_id: ParticipantId,
-        died_source_sequence: u64,
-        terminal: CommittedDiedTerminal,
-        source: StoredOrdinaryTerminalSource,
-        owner: LiveFrontierOwner,
-    ) -> Result<(LiveFrontierOwner, bool), StateError> {
-        let Some(pending) = self.pending_specific_fates.remove(&participant_id) else {
-            return Ok((owner, false));
-        };
-        if pending.died_source_sequence != died_source_sequence
-            || !matches!(pending.intent, StoredSpecificFateIntent::Ordinary { .. })
-            || pending.terminal.is_some()
-        {
-            return Err(StateError::invariant(
-                "pending Died finalizer disagrees with its open Ordinary intent",
-            ));
-        }
-        let attached_source_sequence = pending.binding_fate.attached_source_sequence;
-        if attached_source_sequence != pending.intent.attached_source_sequence()
-            || !intent_matches_token(pending.intent, &pending.binding_fate)
-        {
-            return Err(StateError::invariant(
-                "pending Died finalizer lost its sealed Ordinary authority",
-            ));
-        }
-        let prepared = match owner.prepare_pending_died_ordinary_finalizer(
-            pending.binding_fate.token,
-            terminal,
-            self.observer_progress,
-        ) {
-            Ok(prepared) => prepared,
-            Err(refused) => {
-                let error = refused.error();
-                let (owner, token, _) = refused.into_parts();
-                self.pending_specific_fates.insert(
-                    participant_id,
-                    PendingSpecificFate {
-                        died_source_sequence,
-                        intent: pending.intent,
-                        terminal: None,
-                        binding_fate: PendingBindingFate {
-                            attached_source_sequence,
-                            token,
-                        },
-                    },
-                );
-                self.install_frontier(owner);
-                return Err(StateError::invariant(format!(
-                    "pending Died finalizer measurement refused: {error:?}"
-                )));
-            }
-        };
-        let (owner, fate, finalizer) = prepared.into_parts();
-        if self
-            .prepared_ordinary_finalizers
-            .insert(
-                participant_id,
-                PreparedOrdinaryFinalizer {
-                    attached_source_sequence,
-                    terminal,
-                    terminal_source: source,
-                    fate,
-                    finalizer,
-                },
-            )
-            .is_some()
-        {
-            return Err(StateError::invariant(
-                "pending Died finalizer replaced prepared Ordinary authority",
-            ));
-        }
-        Ok((owner, true))
-    }
-
     /// Appends one already-measured Ordinary row after its enclosing source is durable.
     pub(super) fn complete_prepared_ordinary_finalizer(
         &mut self,
@@ -468,7 +391,7 @@ impl ConversationAuthority {
     }
 }
 
-trait StoredSpecificFateIntentExt {
+pub(super) trait StoredSpecificFateIntentExt {
     fn attached_source_sequence(self) -> u64;
 }
 
@@ -486,7 +409,10 @@ impl StoredSpecificFateIntentExt for StoredSpecificFateIntent {
     }
 }
 
-fn intent_matches_token(intent: StoredSpecificFateIntent, pending: &PendingBindingFate) -> bool {
+pub(super) fn intent_matches_token(
+    intent: StoredSpecificFateIntent,
+    pending: &PendingBindingFate,
+) -> bool {
     match (intent, pending.token.intent()) {
         (StoredSpecificFateIntent::Ordinary { .. }, Some(SealedBindingFateIntent::Ordinary)) => {
             true
