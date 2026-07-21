@@ -310,7 +310,7 @@ impl ConversationAuthority {
             },
             StoredOperationV2::MarkerDrained { row } => StoredOperation::MarkerDrained { row },
             StoredOperationV2::RecordAdmission { row } => StoredOperation::RecordAdmission { row },
-            StoredOperationV2::Left { row } => StoredOperation::Left { row },
+            StoredOperationV2::Left { row } => StoredOperation::Left { row: row.into() },
         })
     }
 
