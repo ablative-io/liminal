@@ -399,6 +399,37 @@ impl SequenceLedger {
         })
     }
 
+    /// Applies fenced recovery while atomically materializing one separately
+    /// pending terminal. The old `T` claim is consumed and `RT` transfers into
+    /// the recovered binding's new `T`, so the terminal count is conserved.
+    /// Both terminal and Attached records advance the high watermark.
+    pub(in crate::lifecycle) fn apply_fenced_recovery_finalizing_pending(
+        self,
+    ) -> Result<Self, SequenceAdmissionError> {
+        if self.claims.recovery != RecoverySequenceReserve::DetachedCredentialRecovery {
+            return Err(SequenceAdmissionError::RecoverySequenceReserveMissing);
+        }
+        if self.claims.binding_terminals == 0 {
+            return Err(SequenceAdmissionError::RecoverySequenceInvariantViolation);
+        }
+        let high_watermark = self.checked_high_watermark(2)?;
+        let claims = SequenceClaims {
+            recovery: RecoverySequenceReserve::None,
+            ..self.claims
+        };
+        let budget = claims.budget(high_watermark);
+        let required_reserve = checked_required_reserve(&budget)
+            .ok_or(SequenceAdmissionError::RecoverySequenceInvariantViolation)?;
+        if required_reserve > u128::from(budget.remaining) {
+            return Err(SequenceAdmissionError::RecoverySequenceInvariantViolation);
+        }
+        Ok(Self {
+            high_watermark,
+            claims,
+            required_reserve,
+        })
+    }
+
     fn checked_high_watermark(self, required_values: u64) -> Result<u64, SequenceAdmissionError> {
         self.high_watermark.checked_add(required_values).ok_or(
             SequenceAdmissionError::HighWatermarkOverflow {

@@ -293,6 +293,15 @@ impl OrderLedger {
             },
         })
     }
+
+    /// Applies fenced recovery while atomically materializing a pending
+    /// immutable terminal candidate. That candidate owns no `A` claim, so `RA`
+    /// still transfers into the recovered binding's new active-terminal claim.
+    pub(in crate::lifecycle) fn apply_fenced_recovery_finalizing_pending(
+        self,
+    ) -> Result<Self, OrderAdmissionError> {
+        self.apply_fenced_recovery()
+    }
 }
 
 /// Protocol-produced post-operation order claims.

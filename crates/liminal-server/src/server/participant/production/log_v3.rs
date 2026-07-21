@@ -305,7 +305,7 @@ impl StoredComposedTerminal {
         if !cause_matches {
             return Err(FencedAttachProofRefusal::ComposedTerminalKindCause);
         }
-        if self.transaction_order != attached_order {
+        if self.transaction_order.checked_add(1) != Some(attached_order) {
             return Err(FencedAttachProofRefusal::ComposedTerminalOrder);
         }
         if self.pending_source_sequence >= attached_source_sequence {
