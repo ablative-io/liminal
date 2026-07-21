@@ -159,7 +159,7 @@ fn prepare_barrier_harness() -> Result<BarrierHarness, Box<dyn Error>> {
 }
 
 #[test]
-fn outbox_row_is_impossible_before_producing_flush() -> Result<(), Box<dyn Error>> {
+fn published_obligation_tells_exact_live_dispatch_once() -> Result<(), Box<dyn Error>> {
     let BarrierHarness {
         inner,
         barriers,
