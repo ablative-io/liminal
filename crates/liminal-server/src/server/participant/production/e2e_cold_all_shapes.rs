@@ -199,6 +199,9 @@ fn fill_marker_history(
     )?;
     let mut latest_record = 0_u64;
     for token in [0x35, 0x36, 0x37, 0x38] {
+        if token == 0x38 {
+            first.open_publication_replay()?;
+        }
         let outcome = first.request(ClientRequest::RecordAdmission(RecordAdmission {
             conversation_id: MARKER_INTERLEAVING_CONVERSATION,
             participant_id: marker_a.participant_id,
@@ -229,15 +232,6 @@ fn finish_marker_history(
     marker_b: ColdMember,
     latest_record: u64,
 ) -> Result<(), Box<dyn Error>> {
-    first.open_publication_replay()?;
-    let mut marker_wake = first.spawn_peer()?;
-    let _ = marker_wake.request(ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: MARKER_INTERLEAVING_CONVERSATION,
-        participant_id: u64::MAX,
-        capability_generation: Generation::ONE,
-        record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x3C; 16]),
-        payload: Vec::new(),
-    }))?;
     let ServerPush::ParticipantDelivery(marker_on_a) = first.read_push()? else {
         return Err("marker A did not receive the generated marker".into());
     };
@@ -359,7 +353,7 @@ fn replay_expected_deliveries(
     expected: ExpectedDeliveries,
 ) -> Result<(), Box<dyn Error>> {
     let mut reopened = SocketFixture::start_replay_gated_with_config(data_dir, config)?;
-    let main_attach =
+    let first_main_attach =
         reopened.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
             conversation_id: ALL_SHAPES_CONVERSATION,
             participant_id: replay_recipient.participant_id,
@@ -368,7 +362,24 @@ fn replay_expected_deliveries(
             attach_attempt_token: AttachAttemptToken::new([0x3A; 16]),
             accept_marker_delivery_seq: None,
         }))?;
-    assert!(matches!(main_attach, ServerValue::AttachBound(_)));
+    let ServerValue::AttachBound(first_main_attach) = first_main_attach else {
+        return Err(format!("initial main cold attach did not bind: {first_main_attach:?}").into());
+    };
+    assert!(reopened.blocked_publication_scans()? > 0);
+    reopened.open_publication_replay()?;
+    let mut main_replay = reopened.spawn_peer()?;
+    let main_rebind =
+        main_replay.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id: ALL_SHAPES_CONVERSATION,
+            participant_id: replay_recipient.participant_id,
+            capability_generation: first_main_attach.capability_generation(),
+            attach_secret: first_main_attach.attach_secret(),
+            attach_attempt_token: AttachAttemptToken::new([0x3C; 16]),
+            accept_marker_delivery_seq: None,
+        }))?;
+    if !matches!(main_rebind, ServerValue::AttachBound(_)) {
+        return Err(format!("committed main cold rebind did not bind: {main_rebind:?}").into());
+    }
     let mut marker_replay = reopened.spawn_peer()?;
     let marker_attach =
         marker_replay.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
@@ -379,19 +390,11 @@ fn replay_expected_deliveries(
             attach_attempt_token: AttachAttemptToken::new([0x3B; 16]),
             accept_marker_delivery_seq: None,
         }))?;
-    assert!(matches!(marker_attach, ServerValue::AttachBound(_)));
-    assert!(reopened.blocked_publication_scans()? > 0);
-    reopened.open_publication_replay()?;
-    let mut replay_wake = reopened.spawn_peer()?;
-    let _ = replay_wake.request(ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: ALL_SHAPES_CONVERSATION,
-        participant_id: u64::MAX,
-        capability_generation: Generation::ONE,
-        record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x3D; 16]),
-        payload: Vec::new(),
-    }))?;
+    if !matches!(marker_attach, ServerValue::AttachBound(_)) {
+        return Err(format!("committed marker cold bind did not bind: {marker_attach:?}").into());
+    }
     for (index, expected_delivery) in expected.main.into_iter().enumerate() {
-        let delivered = reopened.read_push().map_err(|error| {
+        let delivered = main_replay.read_push().map_err(|error| {
             format!(
                 "main cold replay stopped before decoded obligation {index} at sequence {}: {error}",
                 expected_delivery.delivery_seq
@@ -402,13 +405,6 @@ fn replay_expected_deliveries(
             ServerPush::ParticipantDelivery(expected_delivery)
         );
     }
-    let _ = marker_replay.request(ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: MARKER_INTERLEAVING_CONVERSATION,
-        participant_id: u64::MAX,
-        capability_generation: Generation::ONE,
-        record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x3E; 16]),
-        payload: Vec::new(),
-    }))?;
     for (index, expected_delivery) in expected.marker.into_iter().enumerate() {
         let delivered = marker_replay.read_push().map_err(|error| {
             format!(
