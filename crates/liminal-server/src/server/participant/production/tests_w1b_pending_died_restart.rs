@@ -61,14 +61,14 @@ impl DurableAppend for LogAppender<'_> {
     }
 }
 
-struct BoundDebtFixture {
-    handler: ProductionParticipantHandler,
-    conversations: ParticipantConnectionConversations,
-    connection: ConnectionIncarnation,
-    conversation_id: u64,
-    participant_id: u64,
-    binding_epoch: BindingEpoch,
-    attach_secret: AttachSecret,
+pub(super) struct BoundDebtFixture {
+    pub(super) handler: ProductionParticipantHandler,
+    pub(super) conversations: ParticipantConnectionConversations,
+    pub(super) connection: ConnectionIncarnation,
+    pub(super) conversation_id: u64,
+    pub(super) participant_id: u64,
+    pub(super) binding_epoch: BindingEpoch,
+    pub(super) attach_secret: AttachSecret,
 }
 
 pub(super) struct PendingRestartFixture {
@@ -85,7 +85,7 @@ pub(super) struct PendingRestartFixture {
     attach_secret: AttachSecret,
 }
 
-fn bound_debt_fixture(
+pub(super) fn bound_debt_fixture(
     conversation_id: u64,
     connection: ConnectionIncarnation,
     peer_connection: ConnectionIncarnation,
@@ -268,7 +268,9 @@ fn pending_restart_fixture_with_shape(
     })
 }
 
-fn operation_facts(connection: ConnectionIncarnation) -> Result<OperationFacts, Box<dyn Error>> {
+pub(super) fn operation_facts(
+    connection: ConnectionIncarnation,
+) -> Result<OperationFacts, Box<dyn Error>> {
     let config = test_participant_config();
     Ok(OperationFacts {
         receiving_incarnation: connection,
@@ -293,7 +295,7 @@ fn operation_facts(connection: ConnectionIncarnation) -> Result<OperationFacts, 
     })
 }
 
-fn extend_leave_capacity(
+pub(super) fn extend_leave_capacity(
     authority: &mut ConversationAuthority,
     pending: PendingFinalization,
 ) -> Result<(), Box<dyn Error>> {
