@@ -762,6 +762,30 @@ Provenance: proposed at the liminal coordination seat on the worker's STOP;
 approved GREEN at the tear seat, 2026-07-22 (bridge message e5e207e8,
 ts 2026-07-21T15:51Z), recorded there for the lead's veto — one-hop trail.
 
+**Class record — instances amended under the standing ruling:**
+
+1. (§6.4's own instance) `e2e_cold_all_shapes` — refusal-as-wake
+   (participant-unknown `u64::MAX` RecordAdmission); wake amended to committed
+   impacts: the already-required committed RecordAdmission (conversation
+   `0x24_02`, exact `marker_a`, `RecordCommitted`) for the live gate, a
+   committed exact rebind on a new peer (`AttachBound`) for cold main replay,
+   and the committed marker attach for cold marker replay. Pins kept verbatim
+   per the rider.
+2. (leg 1f, standing ruling, no escalation) `e2e_leave_regression::
+   leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_reopens`
+   — refusal-as-wake (RecordAdmission conversation 527, participant `u64::MAX`,
+   `ParticipantUnknown`); wake amended to the test's own existing committed
+   RecordAdmission (conversation 527, exact sender, `RecordCommitted`). Pins
+   retained: delivered sequence equals committed sequence; exact
+   `OrdinaryRecord` sender/payload; live obligation present before Leave;
+   immutable-candidate count `(3, 1)`; Leave commits and permanently
+   discharges; live/cold owner facts and classified fate suffix exact.
+
+Post-amendment sweep (leg 1f): targeted grep found no remaining
+refusal/no-op/replay wake helper; surviving `u64::MAX` request bytes are
+measurement/log fixtures or the explicit no-tell oracle. No fourth distinct
+shape observed.
+
 ## 7. Acceptance oracle census
 
 The build is not accepted unless every row below exists under its exact name.
