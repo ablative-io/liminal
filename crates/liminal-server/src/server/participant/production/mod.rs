@@ -149,6 +149,8 @@ mod tests_w1b_occurrence;
 #[cfg(test)]
 mod tests_w1b_oracle26;
 #[cfg(test)]
+mod tests_w1b_pending_died_restart;
+#[cfg(test)]
 mod tests_w1b_pending_finalizer;
 #[cfg(test)]
 mod tests_w1b_projection;
