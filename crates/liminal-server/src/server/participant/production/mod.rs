@@ -133,6 +133,8 @@ mod tests_w1a;
 #[cfg(test)]
 mod tests_w1a_leave_barrier;
 #[cfg(test)]
+mod tests_w1b_census;
+#[cfg(test)]
 mod tests_w1b_connection_fate;
 #[cfg(test)]
 mod tests_w1b_fate_completion;
