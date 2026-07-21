@@ -144,7 +144,8 @@ The term has two related but non-interchangeable byte representations:
   `NonzeroDebtCursorEpisode`; its exact value is readable through `debt`, and
   the episode also owns participant cursors, retained suffix, floor, and cursor
   facts (`crates/liminal-protocol/src/lifecycle/cursor_facts.rs:580-611` and
-  `:552-556`). A server `CursorEpisodeRepository` can durably record a start
+  `crates/liminal-protocol/src/lifecycle/cursor_facts.rs:552-556`). A server
+  `CursorEpisodeRepository` can durably record a start
   containing that debt and replay scalar ack commands
   (`crates/liminal-server/src/server/participant/cursor_repository.rs:20-65,98-221`).
   Exact-name grep finds `CursorEpisodeRepository`, `CursorEpisodeStart`, and
@@ -548,8 +549,8 @@ catches it nor translates it to a participant wire response.
 ## 7. Acceptance oracle census
 
 The build is not accepted unless every row below exists under its exact name.
-This is the single census table: each name originates in a decision table or
-named pin in §§1–6, and each appears exactly once here. No ignored test,
+This is the single census table: **every name derives from a design-table row
+in §§1–6**, and each appears exactly once in this census. No ignored test,
 sleep-based test, log-only assertion, or mock that bypasses the production
 `next_publication`/ack call graph satisfies a row.
 
@@ -597,8 +598,9 @@ The tear SHALL perform all of the following:
    `apply_nonzero_participant_ack_with_obligations` and
    `apply_nonzero_participant_ack` have a non-test call in the W2 ack arm, while
    item 28 remains on `apply_participant_ack_with_obligations`;
-3. absence grep plus runtime quiescence: no W2 timer/sweep/poll entry and stable
-   counters under the named idle workload;
+3. absence grep plus both idle fixtures: no W2 timer/sweep/poll/register entry;
+   W2 counters stay flat with keepalive disabled and enabled, while the enabled
+   fixture proves total WebSocket slice/Ping counters grow;
 4. narrow W2 tests, then repository-standard formatting, check, clippy, and
    workspace tests; and
 5. crash matrix and both transports: every §6 cut and TCP/WebSocket final-probe
@@ -628,29 +630,32 @@ stand unless the lens answers **no** with contradicting bytes; a no blocks build
 dispatch and returns the brief for revision rather than licensing an
 implementation guess.
 
-1. Does the installed live frontier contain enough typed state to construct one
-   `NonzeroDebtCursorEpisode` without retaining a second independent repository,
-   and does every W1b fate transition preserve that coupling?
-2. Is §3's `BeyondDebtHighWatermark` the only legitimate debt deferral, with a
-   below-floor/outbox-cursor mismatch correctly classified as invariant rather
-   than recoverable delay?
+1. Does §1.1.1's move-coupled owner cover every production take/install site,
+   with binding-tagged episode participants preserving facts across temporary
+   fate and removing them only on permanent Left?
+2. Does the concrete §3 fixture (`H'=100`, floor/cap=25, cursor=0,
+   obligation=10) permit dispatch and commit through exact testimony, while
+   only an endpoint above `H'` defers?
 3. Does §4's production scalar domain—exact committed endpoints and common
    pre-availability refusals—satisfy the ledger's same-fixture non-divergence
    floor without weakening sparse endpoint membership?
-4. Is the post-flush producer list exhaustive for every byte path that can add,
-   discharge, or change dispatch permission, including marker progression and
-   each Died/Detached/Ordinary/Recovered finalizer route?
-5. Can `RecoveryReady` plus connection registration avoid both a lost wake and
-   pre-admission publication without introducing a startup sweep outside normal
-   replay/reconciliation?
-6. Do TCP and WebSocket have equivalent final-probe and held-head freshness
-   barriers after the arm is inserted, with no transport-specific debt logic?
-7. Does `ExpiredOrRetired` remain truthfully named while W2 has no wall-clock
-   expiry producer, or should the implemented closed enum name only
-   `Retired` until a separately durable expiry operation exists?
+4. Does every committed producer return exactly one truthful
+   `DispatchImpact`, including marker ack and every W1b floor/finalizer change
+   that preserves `ClosureState`, while refusals/no-ops/unchanged commits emit
+   none?
+5. Does passive replay plus register-before-socket and committed-bind-after-
+   register close every restart cut without a conversation sweep, reverse
+   index, registration lookup, or pre-admission tell?
+6. Do TCP and WebSocket retain equivalent final-probe and held-head freshness
+   barriers, and does the configured-keepalive idle fixture show growing
+   transport slice/Ping counters alongside flat W2 counters?
+7. Is the closed cause vocabulary exactly `Published`, `Acknowledged`,
+   `BindingChanged`, `EpisodeChanged`, and `Retired`, with no expiry branch or
+   unconditional successful-request notification left in production?
 
 ## 9. Revision record
 
 | revision | date | byte/ledger pin | record |
 |---|---|---|---|
 | r1 | 2026-07-21 | liminal `23acdea0c390d4238a9ad1dcdd02cd60a85ffcbd`; `WIRING-LEDGER.md` r1.9, 2026-07-20 | Initial design-first ruling for the W2 obligation-debt dispatch arm: exact existing seam and single owner; TOLD-only wake producers; debt permit/defer/invariant semantics; production disposition of both nonzero selectors with same-fixture oracle floor; idle-cost refusal; W1b crash/fate composition; 26-oracle census; scope walls and lens questions. |
+| r2 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-2 **5 MAJOR + 2 minor** array. **Major — Adjudication 2 NO, below-floor arm rejects a landed-legal endpoint:** §3 separates physical retention floor from exact testified endpoint eligibility and pins the H=100/floor=25/cursor=0/obligation=10 commit. **Major — Adjudication 1 NO, W1b has no coupled episode transition:** §§1.1–1.1.1 replace the bare frontier with a protocol move-coupled owner, widen episode binding state, and exhaustively rule Died/Detached/Ordinary/Recovered/finalizer/marker/ack/Left transitions. **Major — Adjudication 4 NO, wake vocabulary is neither exhaustive nor exclusive:** §§2.1–2.2 replace successful-request notification with operation-owned `DispatchImpact`, cover state-preserving marker/W1b changes, and require `Unchanged` for refusal/no-op/unchanged commits. **Major — Adjudication 5 NO, registration cannot exact-tell without sweep/index:** §§2.3 and 6 select passive registration plus register-before-socket and committed-bind tells; no reverse index, sweep, or recovery tell. **Major — permanent zero-slice bound false under WebSocket keepalive:** §5.1 narrows permanently to zero debt-attributable work and requires growing transport slice/Ping counters in the keepalive fixture. **Minor — Adjudication 7 NO, cause must be Retired:** §§2.1 and 5.2 close vocabulary on `Retired`; expiry requires a future durable operation and brief revision. **Minor — two census names lacked table origins:** §§4.2 and 5.1 give the sparse-gap and idle names table rows; §7 requires all 31 names to be table-derived. |
