@@ -161,8 +161,8 @@ pub enum DebtDispatchDeferral {
     NoObligation,
     /// The participant has no exact current binding.
     NoCurrentBinding,
-    /// The least testified endpoint is beyond the active candidate watermark.
-    BeyondCandidateHighWatermark,
+    /// The least testified endpoint is beyond the active debt high watermark.
+    BeyondDebtHighWatermark,
 }
 
 /// Typed disagreement that must fail dispatch rather than fabricate a wire value.
@@ -189,26 +189,141 @@ pub enum ObligationDebtDispatchDecision<T> {
     Invariant(DebtDispatchInvariant),
 }
 
-/// Executes the protocol-owned dispatch seam under the conversation owner.
+/// Executes the protocol-owned dispatch decision under the conversation owner.
 ///
-/// Leg 1 deliberately installs the typed seam as record-and-permit: the
-/// operation records the complete locked inputs in its type boundary and invokes
-/// the existing least-obligation selection exactly once. Leg 2 fills the
-/// decision body with the ruled debt selector without moving this call site.
+/// The caller supplies the already-reconciled cursor and a one-shot read of the
+/// least durable recipient obligation strictly after it. Clear authority permits
+/// any advancing selection. Owed authority additionally requires exact agreement
+/// between frontier and episode participant state, then treats endpoint testimony
+/// and the episode high watermark as the complete eligibility domain: the
+/// physical retention floor is deliberately not consulted.
 pub fn decide_obligation_debt_dispatch<T>(
     state: &ObligationDebtDispatchState,
     participant_id: ParticipantId,
     binding_epoch: BindingEpoch,
     dispatch_after: DeliverySeq,
-    select_next: impl FnOnce(ParticipantId, BindingEpoch, DeliverySeq) -> Option<T>,
-) -> ObligationDebtDispatchDecision<Option<T>> {
-    match state {
-        ObligationDebtDispatchState::Clear(_) | ObligationDebtDispatchState::Owed(_) => {
-            ObligationDebtDispatchDecision::Permit(select_next(
-                participant_id,
-                binding_epoch,
-                dispatch_after,
-            ))
+    select_next: impl FnOnce(ParticipantId, BindingEpoch, DeliverySeq) -> Option<(DeliverySeq, T)>,
+) -> ObligationDebtDispatchDecision<T> {
+    let frontier_participant = state
+        .frontier()
+        .frontiers()
+        .active_identities()
+        .participants()
+        .iter()
+        .find(|participant| participant.participant_index() == participant_id)
+        .copied();
+    let Some(frontier_participant) = frontier_participant else {
+        return ObligationDebtDispatchDecision::Invariant(
+            DebtDispatchInvariant::ParticipantAuthority,
+        );
+    };
+    let FrontierBinding::Bound(frontier_epoch) = frontier_participant.binding() else {
+        return ObligationDebtDispatchDecision::Defer(DebtDispatchDeferral::NoCurrentBinding);
+    };
+    if frontier_epoch != binding_epoch || frontier_participant.cursor() > dispatch_after {
+        return ObligationDebtDispatchDecision::Invariant(
+            DebtDispatchInvariant::ParticipantAuthority,
+        );
+    }
+
+    let owed_high_watermark = match state {
+        ObligationDebtDispatchState::Clear(frontier) => {
+            if !matches!(frontier.closure_accounting().state(), ClosureState::Clear) {
+                return ObligationDebtDispatchDecision::Invariant(
+                    DebtDispatchInvariant::CoupledState,
+                );
+            }
+            None
         }
+        ObligationDebtDispatchState::Owed(coupled) => {
+            let ClosureState::Owed { debt, .. } = coupled.frontier.closure_accounting().state()
+            else {
+                return ObligationDebtDispatchDecision::Invariant(
+                    DebtDispatchInvariant::CoupledState,
+                );
+            };
+            if coupled.episode.debt() != debt {
+                return ObligationDebtDispatchDecision::Invariant(
+                    DebtDispatchInvariant::CoupledState,
+                );
+            }
+            if coupled.episode.participant_binding(participant_id)
+                != Some((
+                    FrontierBinding::Bound(binding_epoch),
+                    frontier_participant.cursor(),
+                ))
+            {
+                return ObligationDebtDispatchDecision::Invariant(
+                    DebtDispatchInvariant::ParticipantAuthority,
+                );
+            }
+            Some(coupled.episode.candidate_high_watermark())
+        }
+    };
+
+    classify_selected_obligation(
+        dispatch_after,
+        owed_high_watermark,
+        select_next(participant_id, binding_epoch, dispatch_after),
+    )
+}
+
+fn classify_selected_obligation<T>(
+    dispatch_after: DeliverySeq,
+    owed_high_watermark: Option<DeliverySeq>,
+    selected: Option<(DeliverySeq, T)>,
+) -> ObligationDebtDispatchDecision<T> {
+    let Some((delivery_seq, selected)) = selected else {
+        return ObligationDebtDispatchDecision::Defer(DebtDispatchDeferral::NoObligation);
+    };
+    if delivery_seq <= dispatch_after {
+        return ObligationDebtDispatchDecision::Invariant(DebtDispatchInvariant::OutboxSelection);
+    }
+    if owed_high_watermark.is_some_and(|high_watermark| delivery_seq > high_watermark) {
+        return ObligationDebtDispatchDecision::Defer(
+            DebtDispatchDeferral::BeyondDebtHighWatermark,
+        );
+    }
+    ObligationDebtDispatchDecision::Permit(selected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        DebtDispatchDeferral, DebtDispatchInvariant, ObligationDebtDispatchDecision,
+        classify_selected_obligation,
+    };
+
+    #[test]
+    fn selection_is_total_without_using_the_retention_floor() {
+        let cursor = 0;
+        let high_watermark = 100;
+        let below_floor_endpoint = 10;
+        let above_high_watermark = high_watermark + 1;
+
+        assert_eq!(
+            classify_selected_obligation(
+                cursor,
+                Some(high_watermark),
+                Some((below_floor_endpoint, below_floor_endpoint)),
+            ),
+            ObligationDebtDispatchDecision::Permit(below_floor_endpoint)
+        );
+        assert_eq!(
+            classify_selected_obligation(
+                cursor,
+                Some(high_watermark),
+                Some((above_high_watermark, above_high_watermark)),
+            ),
+            ObligationDebtDispatchDecision::Defer(DebtDispatchDeferral::BeyondDebtHighWatermark)
+        );
+        assert_eq!(
+            classify_selected_obligation::<u64>(cursor, Some(high_watermark), None),
+            ObligationDebtDispatchDecision::Defer(DebtDispatchDeferral::NoObligation)
+        );
+        assert_eq!(
+            classify_selected_obligation(cursor, Some(high_watermark), Some((cursor, cursor)),),
+            ObligationDebtDispatchDecision::Invariant(DebtDispatchInvariant::OutboxSelection)
+        );
     }
 }

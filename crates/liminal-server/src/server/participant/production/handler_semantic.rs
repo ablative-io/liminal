@@ -331,15 +331,20 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
             |participant_id, binding_epoch, dispatch_after| {
                 outbox
                     .delivery_after(participant_id, dispatch_after)
-                    .map(|delivery| ParticipantPublication {
-                        participant_id,
-                        binding_epoch,
-                        delivery,
+                    .map(|delivery| {
+                        (
+                            delivery.delivery_seq,
+                            ParticipantPublication {
+                                participant_id,
+                                binding_epoch,
+                                delivery,
+                            },
+                        )
                     })
             },
         );
         let publication = match decision {
-            ObligationDebtDispatchDecision::Permit(publication) => publication,
+            ObligationDebtDispatchDecision::Permit(publication) => Some(publication),
             ObligationDebtDispatchDecision::Defer(_) => None,
             ObligationDebtDispatchDecision::Invariant(invariant) => {
                 return Err(ParticipantSemanticError::Internal {
