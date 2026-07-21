@@ -30,7 +30,7 @@ impl ConversationAuthority {
         config: &ParticipantConfig,
         outbox_limits: ConversationOutboxLimits,
     ) -> Result<Self, RestoreError> {
-        validate_operation_schema(log).await?;
+        validate_operation_schema(log, config.identity_slots).await?;
         let mut authority = Self::empty(conversation_id);
         let mut merge = ExtensionMerge::new(outbox_log, conversation_id, outbox_limits)?;
         merge.apply_boundary(&mut authority, 0, None).await?;
@@ -135,7 +135,7 @@ impl ConversationAuthority {
             conversation_id,
             outbox_limits,
         )?;
-        validate_operation_schema(log).await?;
+        validate_operation_schema(log, config.identity_slots).await?;
         merge.apply_boundary(&mut authority, 0, None).await?;
         let mut sequence = 0_u64;
         let mut phase = OperationSchemaPhase::V2Prefix;
@@ -413,12 +413,49 @@ impl ConversationAuthority {
     }
 }
 
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct ValidationMemoryHighWater {
+    pub(super) maximum_page_rows: usize,
+    pub(super) maximum_active_reservations: usize,
+}
+
 /// Completes a bounded-page schema and contiguity pass before replay mutates
 /// authority or reconciles any extension row. The apply pass rereads pages.
-pub(super) async fn validate_operation_schema(log: &OperationLog) -> Result<(), StateError> {
+pub(super) async fn validate_operation_schema(
+    log: &OperationLog,
+    maximum_active_reservations: u64,
+) -> Result<(), StateError> {
+    validate_operation_schema_inner(log, maximum_active_reservations, |_, _| {}).await
+}
+
+#[cfg(test)]
+pub(super) async fn validate_operation_schema_measured(
+    log: &OperationLog,
+    maximum_active_reservations: u64,
+    high_water: &mut ValidationMemoryHighWater,
+) -> Result<(), StateError> {
+    validate_operation_schema_inner(log, maximum_active_reservations, |page_rows, active| {
+        high_water.maximum_page_rows = high_water.maximum_page_rows.max(page_rows);
+        high_water.maximum_active_reservations = high_water.maximum_active_reservations.max(active);
+    })
+    .await
+}
+
+async fn validate_operation_schema_inner(
+    log: &OperationLog,
+    maximum_active_reservations: u64,
+    mut observe_memory: impl FnMut(usize, usize),
+) -> Result<(), StateError> {
+    let maximum_active_reservations =
+        usize::try_from(maximum_active_reservations).map_err(|_| {
+            StateError::AllocationExhausted {
+                domain: "active recovered reservation count",
+            }
+        })?;
     let mut sequence = 0_u64;
     let mut phase = OperationSchemaPhase::V2Prefix;
-    let mut composed = ComposedTerminalValidation::default();
+    let mut composed = ComposedTerminalValidation::new(maximum_active_reservations);
     loop {
         let page = log.read_page(sequence, phase).await?;
         phase = page.next_phase;
@@ -426,6 +463,7 @@ pub(super) async fn validate_operation_schema(log: &OperationLog) -> Result<(), 
             return Ok(());
         }
         let page_len = page.rows.len();
+        observe_memory(page_len, composed.active_reservation_count());
         for decoded in page.rows {
             if decoded.sequence != sequence {
                 return Err(OperationLogError::Sequence {
@@ -435,6 +473,7 @@ pub(super) async fn validate_operation_schema(log: &OperationLog) -> Result<(), 
                 .into());
             }
             composed.validate(log, sequence, &decoded.operation).await?;
+            observe_memory(page_len, composed.active_reservation_count());
             sequence = sequence
                 .checked_add(1)
                 .ok_or(StateError::AllocationExhausted {

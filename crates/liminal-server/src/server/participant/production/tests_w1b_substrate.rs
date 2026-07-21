@@ -10,6 +10,7 @@ use serde::Serialize;
 use super::log::*;
 use super::ops_session_replay::validate_operation_schema;
 use super::state::StateError;
+use super::tests::test_participant_config;
 
 const CONVERSATION: u64 = 0xF1_B1;
 const V2_GENESIS: &[u8] = br#"{"schema_version":2,"operation":{"operation":"genesis","event":[]}}"#;
@@ -488,7 +489,7 @@ fn v2_after_v3_across_operation_page_boundary_refuses_before_apply() -> Result<(
         })) if sequence == next_page
     ));
     assert!(matches!(
-        block_on(validate_operation_schema(&log)),
+        block_on(validate_operation_schema(&log, test_participant_config().identity_slots)),
         Ok(Err(StateError::Log(OperationLogError::SchemaVersionTransition {
             sequence,
             previous: 3,
