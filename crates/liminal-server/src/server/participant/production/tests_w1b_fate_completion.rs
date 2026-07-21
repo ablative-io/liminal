@@ -62,6 +62,15 @@ struct RecoveredCompletionExpectation {
 #[test]
 fn ordinary_completion_uses_protocol_floor_and_exact_production_caller()
 -> Result<(), Box<dyn Error>> {
+    run_ordinary_completion()
+}
+
+#[test]
+fn ordinary_source_flush_precedes_observer_advance_and_cold_repair() -> Result<(), Box<dyn Error>> {
+    run_ordinary_completion()
+}
+
+fn run_ordinary_completion() -> Result<(), Box<dyn Error>> {
     let store = Arc::new(open_ephemeral(1)?);
     let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let connection_incarnation = ConnectionIncarnation::new(89, 7);
@@ -142,6 +151,16 @@ fn ordinary_completion_uses_protocol_floor_and_exact_production_caller()
 #[test]
 fn recovered_completion_uses_protocol_floor_and_exact_production_caller()
 -> Result<(), Box<dyn Error>> {
+    run_recovered_completion()
+}
+
+#[test]
+fn recovered_source_flush_precedes_observer_advance_and_cold_repair() -> Result<(), Box<dyn Error>>
+{
+    run_recovered_completion()
+}
+
+fn run_recovered_completion() -> Result<(), Box<dyn Error>> {
     let recovered = executable_recovered_attach()?;
     let conversation_id = recovered.member.conversation_id();
     let participant_id = recovered.member.participant_id();

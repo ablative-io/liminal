@@ -224,20 +224,47 @@ fn recovered_rows() -> Vec<StoredOperation> {
     .collect()
 }
 
-#[test]
-fn stored_operation_v3_fate_rows_round_trip_canonically_without_marker_digest()
--> Result<(), Box<dyn Error>> {
-    let rows = died_rows()
-        .into_iter()
-        .chain(detached_rows())
-        .chain(ordinary_rows())
-        .chain(recovered_rows());
+fn round_trip_fate_rows(rows: Vec<StoredOperation>) -> Result<(), Box<dyn Error>> {
     for row in rows {
         let encoded = serde_json::to_vec(&row)?;
         assert!(!String::from_utf8_lossy(&encoded).contains("digest"));
         let decoded: StoredOperation = serde_json::from_slice(&encoded)?;
         assert_eq!(decoded, row);
         assert_eq!(serde_json::to_vec(&decoded)?, encoded);
+    }
+    Ok(())
+}
+
+#[test]
+fn died_stored_operation_round_trips_and_replays_committed_and_pending()
+-> Result<(), Box<dyn Error>> {
+    round_trip_fate_rows(died_rows())
+}
+
+#[test]
+fn detached_stored_operation_round_trips_request_disconnect_and_shutdown()
+-> Result<(), Box<dyn Error>> {
+    round_trip_fate_rows(detached_rows())
+}
+
+#[test]
+fn ordinary_stored_operation_round_trips_and_replays_measured_fate() -> Result<(), Box<dyn Error>> {
+    round_trip_fate_rows(ordinary_rows())
+}
+
+#[test]
+fn recovered_stored_operation_round_trips_without_died_terminal() -> Result<(), Box<dyn Error>> {
+    for row in recovered_rows() {
+        let StoredOperation::Recovered { row: recovered, .. } = &row else {
+            return Err("Recovered fixture emitted another operation".into());
+        };
+        assert_eq!(recovered.died_source_sequence, 6);
+        assert!(matches!(
+            recovered.presentation,
+            StoredRecoveredPresentation::DiedCommittedOwns
+                | StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer
+        ));
+        round_trip_fate_rows(vec![row])?;
     }
     Ok(())
 }
