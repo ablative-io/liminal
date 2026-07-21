@@ -5,12 +5,18 @@ use std::path::Path;
 
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, ClientRequest, CredentialAttachRequest, DetachAttemptToken,
-    DetachRequest, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest,
-    ParticipantAck, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
+    DetachRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken,
+    LeaveRequest, ParticipantAck, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
     RecordCommitted, ServerPush, ServerValue,
 };
 
-use super::e2e_tests::SocketFixture;
+use super::e2e_cold_all_shapes_fixture::{
+    BoundClosePath, decoded_history_from_store, expected_bound_close_fate,
+    semantic_rows_and_typed_fate_suffix,
+};
+use super::e2e_tests::{SocketFixture, SocketPeer};
+use super::outbox_log::{OutboxRow, ProducedSourceKind};
+use super::tests_outbox_barrier_fixture::OutboxBarrierKind;
 
 struct ColdSocketState {
     participant_id: u64,
@@ -176,10 +182,91 @@ struct RestartAckState {
     participant_id: u64,
     attach_secret: AttachSecret,
     delivered_seq: u64,
+    fate_delivery_seqs: Vec<u64>,
+}
+
+fn fate_delivery_seqs(extension: &[(u64, OutboxRow)], participant_id: u64) -> Vec<u64> {
+    let mut sequences = Vec::new();
+    for (_, row) in extension {
+        let OutboxRow::Produced(batch) = row else {
+            continue;
+        };
+        if !matches!(
+            batch.source_kind(),
+            ProducedSourceKind::Died | ProducedSourceKind::Detached
+        ) {
+            continue;
+        }
+        for record in batch.ordered_records() {
+            if record.recipients().contains(&participant_id) {
+                sequences.push(record.delivery_seq());
+            }
+        }
+    }
+    sequences
+}
+
+fn census_restart_teardown(
+    server: &SocketFixture,
+    sender_socket: &SocketPeer,
+    sender: &EnrollBound,
+    recipient: &EnrollBound,
+    semantic_next_obligation: Option<u64>,
+) -> Result<Vec<u64>, Box<dyn Error>> {
+    let (base_before_teardown, _) =
+        decoded_history_from_store(server.durable_store(), ACK_BASIS_CONVERSATION)?;
+    let (semantic_rows, pre_teardown_fate_suffix) =
+        semantic_rows_and_typed_fate_suffix(base_before_teardown)?;
+    assert!(pre_teardown_fate_suffix.is_empty());
+    let expected_fate_suffix = [
+        expected_bound_close_fate(
+            sender.participant_id(),
+            sender.origin_binding_epoch(),
+            BoundClosePath::DroppedSocket,
+        ),
+        expected_bound_close_fate(
+            recipient.participant_id(),
+            recipient.origin_binding_epoch(),
+            BoundClosePath::ServerStop,
+        ),
+    ];
+
+    server.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    sender_socket.shutdown_transport()?;
+    server.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    server.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    let after_sender_close =
+        server.participant_owner_facts(ACK_BASIS_CONVERSATION, recipient.participant_id())?;
+    assert_eq!(
+        after_sender_close.next_live_obligation,
+        semantic_next_obligation
+    );
+
+    server.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    server.request_force_close();
+    server.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    server.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    let after_recipient_close =
+        server.participant_owner_facts(ACK_BASIS_CONVERSATION, recipient.participant_id())?;
+    assert_eq!(
+        after_recipient_close.next_live_obligation,
+        semantic_next_obligation
+    );
+
+    server.force_close_and_wait();
+    let (base_after_teardown, extension) =
+        decoded_history_from_store(server.durable_store(), ACK_BASIS_CONVERSATION)?;
+    let (teardown_semantic_rows, fate_suffix) =
+        semantic_rows_and_typed_fate_suffix(base_after_teardown)?;
+    assert_eq!(teardown_semantic_rows, semantic_rows);
+    assert_eq!(fate_suffix, expected_fate_suffix);
+    let sequences = fate_delivery_seqs(&extension, recipient.participant_id());
+    assert!(!sequences.is_empty());
+    Ok(sequences)
 }
 
 fn offer_ack_basis_then_stop(data_dir: &Path) -> Result<RestartAckState, Box<dyn Error>> {
-    let mut first_server = SocketFixture::start(data_dir)?;
+    let mut first_server = SocketFixture::start_with_barriers(data_dir)?;
     let mut sender_socket = first_server.spawn_peer()?;
     let enrolled = first_server.request(ClientRequest::Enrollment(EnrollmentRequest {
         conversation_id: ACK_BASIS_CONVERSATION,
@@ -242,15 +329,24 @@ fn offer_ack_basis_then_stop(data_dir: &Path) -> Result<RestartAckState, Box<dyn
     assert_eq!(offered_facts.live_record_count, 1);
     assert!(offered_facts.charged_bytes > 0);
 
+    let fate_delivery_seqs = census_restart_teardown(
+        &first_server,
+        &sender_socket,
+        &sender,
+        &recipient,
+        offered_facts.next_live_obligation,
+    )?;
+    drop(sender_socket);
+
     // `stop` drops the client, synchronously shuts down and joins the
     // supervisor, then drops the connection, handler, service, and disk-store
     // owners before this same directory is reopened.
-    drop(sender_socket);
     first_server.stop();
     Ok(RestartAckState {
         participant_id: recipient.participant_id(),
         attach_secret: recipient.attach_secret(),
         delivered_seq,
+        fate_delivery_seqs,
     })
 }
 
@@ -306,7 +402,14 @@ fn restart_between_delivery_and_ack_accepts() -> Result<(), Box<dyn Error>> {
         reopened.participant_owner_facts(ACK_BASIS_CONVERSATION, state.participant_id)?;
     assert_eq!(after_ack.frontier_cursor, state.delivered_seq);
     assert_eq!(after_ack.outbox_ack_through, state.delivered_seq);
-    assert_eq!(after_ack.next_live_obligation, None);
+    let next_semantic_obligation = after_ack
+        .next_live_obligation
+        .filter(|sequence| !state.fate_delivery_seqs.contains(sequence));
+    assert_eq!(next_semantic_obligation, None);
+    assert_eq!(
+        after_ack.next_live_obligation,
+        state.fate_delivery_seqs.first().copied()
+    );
     assert_eq!(
         after_ack.live_record_count + 1,
         before_ack.live_record_count
