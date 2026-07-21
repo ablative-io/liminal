@@ -17,7 +17,10 @@ use liminal_protocol::wire::{BindingEpoch, LeaveEnvelope, LeaveRequest, LeaveRes
 use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::{self, Digest};
 use super::frontier::{left_record_charge, terminal_charge as terminal_record_charge};
-use super::log::{StoredBindingEpoch, StoredLeave, StoredLeaveRequest, StoredOperation};
+use super::log::{
+    StoredBindingEpoch, StoredFinalizerPresentation, StoredLeaveRequest, StoredLeaveV3,
+    StoredOperation,
+};
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
@@ -196,7 +199,7 @@ impl ConversationAuthority {
         let source_sequence = self.next_log_sequence;
         let prepared = self.prepare_leave_transition(request, request_verifier)?;
         let outcome = prepared.tombstone.committed_result().clone();
-        let row = StoredLeave {
+        let row = StoredLeaveV3 {
             request: StoredLeaveRequest::from(request),
             request_verifier,
             receiving_epoch: StoredBindingEpoch::from(receiving_epoch),
@@ -204,6 +207,8 @@ impl ConversationAuthority {
             left_delivery_seq: prepared.left_seq,
             ended_binding_epoch: outcome.ended_binding_epoch().map(StoredBindingEpoch::from),
             prior_terminal_delivery_seq: outcome.prior_terminal_delivery_seq(),
+            pending_source_sequence: None,
+            finalizer_presentation: StoredFinalizerPresentation::PresentEnclosing,
         };
         appender.append(&StoredOperation::Left { row }, self.next_log_sequence)?;
         self.install_frontier(prepared.owner);
@@ -266,7 +271,7 @@ impl ConversationAuthority {
 
     /// Replays one v2 Left row through the same protocol-owned Leave
     /// transition and validates every persisted tombstone allocation.
-    pub(super) fn replay_leave(&mut self, row: &StoredLeave) -> Result<(), StateError> {
+    pub(super) fn replay_leave(&mut self, row: &StoredLeaveV3) -> Result<(), StateError> {
         let source_sequence = self.next_log_sequence;
         let request = row.request.into_request()?;
         let request_verifier = facts::leave_request_verifier(&request);

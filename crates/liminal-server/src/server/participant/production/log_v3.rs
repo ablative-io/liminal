@@ -8,7 +8,8 @@ use super::fenced_attach_codec::FencedAttachProofContext;
 use super::log::{
     FencedAttachProofRefusal, OperationLogError, StoredAck, StoredAttachAllocationV2,
     StoredAttachRequest, StoredBindingEpoch, StoredDetachRequest, StoredEnrollmentAllocation,
-    StoredEnrollmentRequest, StoredLeave, StoredMarkerDrain, StoredRecordAdmission, StoredU128,
+    StoredEnrollmentRequest, StoredLeave, StoredLeaveRequest, StoredMarkerDrain,
+    StoredRecordAdmission, StoredU128,
 };
 
 /// Canonical schema-v3 operation grammar.
@@ -66,7 +67,7 @@ pub(super) enum StoredOperationV3 {
         row: StoredRecordAdmission,
     },
     Left {
-        row: StoredLeave,
+        row: StoredLeaveV3,
     },
 }
 
@@ -230,6 +231,36 @@ pub(super) struct StoredFencedAttachProof {
 pub(super) enum StoredComposedTerminalKind {
     Died,
     Detached,
+}
+
+/// Exact v3 Leave tombstone inputs plus closed pending-finalizer ownership.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredLeaveV3 {
+    pub(super) request: StoredLeaveRequest,
+    pub(super) request_verifier: Digest,
+    pub(super) receiving_epoch: StoredBindingEpoch,
+    pub(super) left_transaction_order: TransactionOrder,
+    pub(super) left_delivery_seq: DeliverySeq,
+    pub(super) ended_binding_epoch: Option<StoredBindingEpoch>,
+    pub(super) prior_terminal_delivery_seq: Option<DeliverySeq>,
+    pub(super) pending_source_sequence: Option<u64>,
+    pub(super) finalizer_presentation: StoredFinalizerPresentation,
+}
+
+impl From<StoredLeave> for StoredLeaveV3 {
+    fn from(row: StoredLeave) -> Self {
+        Self {
+            request: row.request,
+            request_verifier: row.request_verifier,
+            receiving_epoch: row.receiving_epoch,
+            left_transaction_order: row.left_transaction_order,
+            left_delivery_seq: row.left_delivery_seq,
+            ended_binding_epoch: row.ended_binding_epoch,
+            prior_terminal_delivery_seq: row.prior_terminal_delivery_seq,
+            pending_source_sequence: None,
+            finalizer_presentation: StoredFinalizerPresentation::PresentEnclosing,
+        }
+    }
 }
 
 /// Explicit occurrence-presentation ownership of a composed finalizer.
