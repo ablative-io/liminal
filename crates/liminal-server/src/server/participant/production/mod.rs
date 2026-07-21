@@ -174,6 +174,8 @@ mod tests_w1b_umbrella;
 #[cfg(test)]
 mod tests_w1b_validation_memory;
 #[cfg(test)]
+mod tests_w2_leg1_census;
+#[cfg(test)]
 mod tests_w3_restore;
 #[cfg(test)]
 mod tests_w3_restore_fixture;

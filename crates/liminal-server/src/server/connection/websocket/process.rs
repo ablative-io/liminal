@@ -265,8 +265,16 @@ impl WebSocketConnectionProcess {
         if let Err(error) = self.arm_readiness(pid, ctx, interest) {
             return self.fail_slice(pid, &error);
         }
+        #[cfg(test)]
+        let barrier_staged = self.runtime.run_pre_wait_barrier();
         match self.final_probe(pid, ctx) {
-            Ok(true) => NativeOutcome::Continue,
+            Ok(true) => {
+                #[cfg(test)]
+                if barrier_staged {
+                    self.runtime.record_pre_wait_probe_hit();
+                }
+                NativeOutcome::Continue
+            }
             Ok(false) => {
                 #[cfg(test)]
                 self.runtime.record_park(pid);
