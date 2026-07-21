@@ -380,7 +380,8 @@ fn pending_died_restart_restores_cause_epoch_order_without_refinish() -> Result<
 }
 
 #[test]
-fn pending_died_finalized_by_leave_presents_only_live_leave_commit() -> Result<(), Box<dyn Error>> {
+pub(super) fn pending_died_finalized_by_leave_presents_only_live_leave_commit()
+-> Result<(), Box<dyn Error>> {
     let fixture = pending_restart_fixture()?;
     let left_source_sequence = fixture.specific_sequence;
     let ordinary_source_sequence = left_source_sequence

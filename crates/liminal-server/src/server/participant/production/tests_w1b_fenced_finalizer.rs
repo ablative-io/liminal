@@ -66,7 +66,7 @@ pub(super) struct FencedInputs {
 }
 
 #[test]
-fn pending_died_recovered_reservation_makes_fenced_attach_finalizer_non_presenting()
+pub(super) fn pending_died_recovered_reservation_makes_fenced_attach_finalizer_non_presenting()
 -> Result<(), Box<dyn Error>> {
     let setup = reserved_setup()?;
     commit_fenced_finalizer(&setup)

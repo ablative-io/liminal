@@ -26,8 +26,8 @@ struct CommittedPresentingFenced {
 }
 
 #[test]
-fn pending_terminal_composed_by_attach_presents_only_attached_source() -> Result<(), Box<dyn Error>>
-{
+pub(super) fn pending_terminal_composed_by_attach_presents_only_attached_source()
+-> Result<(), Box<dyn Error>> {
     let fixture = executable_pending_fenced_attach_after_ordinary_setup()?;
     let setup = pending_restart_fixture_acked(fixture.marker_delivery_seq)?;
     assert_eq!(fixture.member.conversation_id(), setup.conversation_id);

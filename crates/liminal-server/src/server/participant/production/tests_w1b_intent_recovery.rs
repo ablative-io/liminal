@@ -346,7 +346,7 @@ fn recover_interrupted_tail(interrupted: &InterruptedFold) -> Result<(), Box<dyn
     Ok(())
 }
 
-fn run_post_middle_failure_recovery() -> Result<(), Box<dyn Error>> {
+pub(super) fn run_post_middle_failure_recovery() -> Result<(), Box<dyn Error>> {
     let interrupted = interrupt_after_middle()?;
     recover_interrupted_tail(&interrupted)
 }

@@ -65,7 +65,7 @@ struct ReservationProof {
 }
 
 #[test]
-fn pending_died_recovered_reservation_makes_leave_finalizer_non_presenting()
+pub(super) fn pending_died_recovered_reservation_makes_leave_finalizer_non_presenting()
 -> Result<(), Box<dyn Error>> {
     let proof = run_live_reservation()?;
     replay_cold_reservation(&proof)
