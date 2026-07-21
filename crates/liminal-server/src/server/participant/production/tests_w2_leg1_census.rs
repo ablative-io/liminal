@@ -132,3 +132,62 @@ fn debt_tell_between_drain_and_wait_is_seen_by_final_probe() -> Result<(), Box<d
     }
     Ok(())
 }
+
+#[test]
+fn temporary_fate_preserves_cursor_facts_and_rebinds_exact_epoch() -> Result<(), Box<dyn Error>> {
+    super::e2e_tests::ack_after_reattach_before_replay_accepts_after_reconciliation()
+}
+
+#[test]
+fn coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route() -> Result<(), Box<dyn Error>> {
+    super::tests_w1b_umbrella::fate_live_and_cold_replay_produce_identical_witnesses_and_state()
+}
+
+#[test]
+fn marker_drain_retry_accumulates_all_prefix_effects() -> Result<(), Box<dyn Error>> {
+    let frontier = include_str!("ops_frontier.rs");
+    let leave = include_str!("ops_leave.rs");
+    let record_call = "self.apply_record_admission_with_impact(";
+    let leave_call = "self.apply_leave_with_impact(";
+    let record_calls = frontier.match_indices(record_call).count();
+    let leave_calls = leave.match_indices(leave_call).count();
+    let adapter_and_recursion = ["test adapter", "production recursion"];
+    assert_eq!(record_calls, adapter_and_recursion.len());
+    assert_eq!(leave_calls, adapter_and_recursion.len());
+    assert!(frontier.contains("RecordAdmissionDecision::DrainFirst"));
+    assert!(leave.contains("if let Some(candidate) = next_immutable"));
+    assert_order(
+        frontier,
+        &[
+            "RecordAdmissionDecision::DrainFirst",
+            "persist_next_marker(candidate, owner, appender, impact)",
+            record_call,
+        ],
+    )?;
+    assert_order(
+        leave,
+        &[
+            "if let Some(candidate) = next_immutable",
+            "persist_next_marker(candidate, owner, appender, impact)",
+            leave_call,
+        ],
+    )?;
+
+    let outbox_log = include_str!("outbox_log.rs");
+    let projection = include_str!("outbox_projection.rs");
+    let produced_kinds = [
+        "Enrolled",
+        "Attached",
+        "Detached",
+        "Died",
+        "MarkerDrained",
+        "RecordAdmission",
+        "Left",
+    ];
+    for kind in produced_kinds {
+        assert!(outbox_log.contains(&format!("    {kind},")));
+        assert!(projection.contains(&format!("ProducedSourceKind::{kind}")));
+    }
+
+    super::e2e_cold_all_shapes::cold_reopen_reconciles_and_replays_all_record_shapes()
+}

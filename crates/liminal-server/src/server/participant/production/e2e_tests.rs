@@ -329,7 +329,8 @@ fn parked_tcp_and_websocket_processes_wake_on_outbox_without_polling() -> Result
 }
 
 #[test]
-fn ack_after_reattach_before_replay_accepts_after_reconciliation() -> Result<(), Box<dyn Error>> {
+pub(super) fn ack_after_reattach_before_replay_accepts_after_reconciliation()
+-> Result<(), Box<dyn Error>> {
     const CONVERSATION: u64 = 527;
 
     let home = tempfile::tempdir()?;

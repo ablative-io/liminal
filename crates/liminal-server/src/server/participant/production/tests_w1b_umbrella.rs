@@ -9,7 +9,8 @@ use super::tests_w1b_pending_died_restart::pending_died_finalized_by_leave_prese
 use super::tests_w1b_pending_finalizer::pending_died_recovered_reservation_makes_leave_finalizer_non_presenting;
 
 #[test]
-fn fate_live_and_cold_replay_produce_identical_witnesses_and_state() -> Result<(), Box<dyn Error>> {
+pub(super) fn fate_live_and_cold_replay_produce_identical_witnesses_and_state()
+-> Result<(), Box<dyn Error>> {
     // Historical Open recovery proves failure-tail bounds and startup repair.
     run_post_middle_failure_recovery()?;
 
