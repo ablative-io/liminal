@@ -1,6 +1,6 @@
 # W2 — obligation-debt dispatch arm
 
-**Revision r4 — design-first brief, 2026-07-21**
+**Revision r5 — design-first brief, 2026-07-22 (build-time ruled rider §6.3)**
 
 This brief rules the first production arm that makes participant-delivery
 scheduling conditional on protocol-owned obligation debt. It is a docs-only
@@ -686,6 +686,48 @@ catches it nor translates it to a participant wire response.
 | Died/Detached plus Ordinary/Recovered replay completes before service publication; no replay tell fires, and the later committed bind cannot double-present a delivery | `w1b_fate_replay_precedes_bind_triggered_dispatch` |
 | latched participant fatal blocks dispatch and is never downgraded | `participant_service_fatal_blocks_obligation_dispatch` |
 
+### 6.3 Ruled rider (2026-07-22, build-time): the post-repair exact-token replay test
+
+Build-time conflict, found by a worker's conflict-rule STOP during leg 1 and
+ruled at the tear seat: the landed test
+`tests_outbox_replay.rs:336-357` (postcommit outbox failure repaired at
+restart, then an exact-token enrollment replay) requires ONE READY from the
+replay itself. **Why the landed expectation is amended:** that READY was never
+a design guarantee — it was satisfiable only by the unconditional
+`notify_ready` at `dispatch.rs:522-558` that §2 of this brief removes as a
+defect class (notify-on-any-success is a false tell). No honest tell exists
+for the test's current shape: the exact-token replay path commits nothing
+(`ops_enroll.rs:83-89` borrows `&Slot` immutably and returns a wire response —
+no append, no binding install, no impact), and the test retries on the same
+pre-crash incarnation while the inbox is registered for a different one. §6.1
+row 2 already rules this restart shape: no startup or registration tell; the
+next connection's committed rebind impact selects the least obligation after
+the reconciled cursor.
+
+**Pins kept VERBATIM in the amended test:** the exact-token retry returns its
+correlated terminal answer (`ReceiptReplay::Enrollment`, exact
+`EnrollmentToken`, exact conversation); the repaired obligation survives
+restart and is dispatched EXACTLY once; no unconditional tell fires (a wake
+count of zero is asserted through registration and replay). **Amendment:** the
+wake expectation moves to a NEW exact `ConnectionIncarnation` performing a
+committed rebind after the replay; that rebind's `BindingChanged` impact fires
+the single READY selecting the least obligation strictly after §3.1's
+reconciled cursor — the amended test thereby proves §6.1 row-2 semantics and
+asserts what the old test never could: the wake is an honest committed-impact
+tell, not a wrapper side effect. Strictly more coverage, not less.
+
+Census discipline: if the amended test and
+`crash_after_debt_flush_before_tell_rebind_replays_ready_work` converge on
+overlapping shapes, both names stay distinct per the census rule; they are not
+merged.
+
+Provenance: proposed at the liminal coordination seat after the worker's STOP
+(a first coordination-seat ruling — replay-as-rebind — was proven empirically
+wrong by the worker's mandated fallback STOP and nothing landed on it; the
+conflict rule caught both sides). Approved GREEN at the tear seat, 2026-07-22
+(bridge message 1430293c, ts 2026-07-21T15:06Z), recorded there for the lead's
+veto — one-hop trail.
+
 ## 7. Acceptance oracle census
 
 The build is not accepted unless every row below exists under its exact name.
@@ -821,3 +863,4 @@ implementation guess.
 | r2 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-2 **5 MAJOR + 2 minor** array. **Major — Adjudication 2 NO, below-floor arm rejects a landed-legal endpoint:** §3 separates physical retention floor from exact testified endpoint eligibility and pins the H=100/floor=25/cursor=0/obligation=10 commit. **Major — Adjudication 1 NO, W1b has no coupled episode transition:** §§1.1–1.1.1 replace the bare frontier with a protocol move-coupled owner, widen episode binding state, and exhaustively rule Died/Detached/Ordinary/Recovered/finalizer/marker/ack/Left transitions. **Major — Adjudication 4 NO, wake vocabulary is neither exhaustive nor exclusive:** §§2.1–2.2 replace successful-request notification with operation-owned `DispatchImpact`, cover state-preserving marker/W1b changes, and require `Unchanged` for refusal/no-op/unchanged commits. **Major — Adjudication 5 NO, registration cannot exact-tell without sweep/index:** §§2.3 and 6 select passive registration plus register-before-socket and committed-bind tells; no reverse index, sweep, or recovery tell. **Major — permanent zero-slice bound false under WebSocket keepalive:** §5.1 narrows permanently to zero debt-attributable work and requires growing transport slice/Ping counters in the keepalive fixture. **Minor — Adjudication 7 NO, cause must be Retired:** §§2.1 and 5.2 close vocabulary on `Retired`; expiry requires a future durable operation and brief revision. **Minor — two census names lacked table origins:** §§4.2 and 5.1 give the sparse-gap and idle names table rows; §7 requires all 31 names to be table-derived. |
 | r3 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-3 **2 MAJOR + 1 minor** array. **Major — coupled bridge has no coherent Clear/Owed result for enrollment and marker commits:** §§1.1–1.1.1 derive every owner variant from the operation's resulting closure, keep Clear episode-free, preserve marker's input variant, and explicitly permit first Owed enrollment with no recipient obligation; §3.1 makes that real state `Defer(NoObligation)` and adds `enrollment_clear_or_owed_and_no_obligation_are_total`. **Major — Owed marker ack creates the outbox/cursor disagreement declared fatal:** §§1.1.1 and 3.1 advance the Owed protocol cursor while leaving durable outbox ack unchanged, compute `dispatch_after` from durable ack/protocol/current-offer cursors after validating marker provenance, retain fatal treatment for non-marker splits, and require live/cold/post-fate equivalence; §§6.1–6.2 resume after that reconciled cursor, with `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` and the renamed fate oracle. **Minor — scalar DispatchImpact cause cannot represent multi-effect commits:** §§2.1–2.3 replace the scalar with a nonempty `DispatchEffect -> Set<DispatchTarget>` map built under lock, enumerate overlapping enrollment/attach, marker/normal ack, W1b finalizer, and Left effects, and notify the deduplicated exact-target union with no precedence or poststate reconstruction; §§5.2 and 6.2 compose that rule through coalescing/fate, and §7 closes a 33-oracle table-derived census including `dispatch_impact_unions_multi_effect_targets`. |
 | r4 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-4 **2 MAJOR** array. **Major — read-time marker reconciliation suppresses delivery but never reconciles live outbox accounting:** §3.1 keeps the sound `dispatch_after` eligibility read, states it writes and consumes nothing, removes the promised ordinary catch-up because equal-cursor ack is `AckNoOp`, and permits only real later advancing `AckAdvanced` or retirement discharge; §§5.1–5.2 choose legal bounded accounting divergence, disclose retained records/obligations/count/bytes, the `max_retained_record_rows × identity_slots` bound, earlier capacity failure, and zero active idle work, pinned by `marker_covered_outbox_accounting_stays_bounded_until_real_discharge`. **Major — lossless effect matrix omits the multi-row marker-drain/record-admission path:** §§2.1–2.2 add a request-scoped prefix accumulator, independently merge every MarkerDrained `Published` and Owed `EpisodeChanged` target set, preserve prefixes through final refusal/backpressure/error, and merge final RecordAdmission or Left effects. §2.1.1 derives the complete seven-kind Produced census and finds exactly two recursive multi-source-row request paths—record admission and Leave—while distinguishing Attached's multi-record single batch; §7 closes a 35-oracle table-derived census with `marker_drain_retry_accumulates_all_prefix_effects`. |
+| r5 | 2026-07-22 | same liminal/ledger pin | Docs-only build-time ruled rider §6.3: amends the landed post-repair exact-token replay test — its READY was satisfiable only by the removed unconditional `notify_ready` (`dispatch.rs:522-558`); no honest tell exists for a no-commit same-incarnation replay (`ops_enroll.rs:83-89`). Pins kept verbatim (correlated terminal, exactly-once dispatch of the repaired obligation, no unconditional tell); wake moved to a NEW incarnation's committed rebind per §6.1 row 2. Overlapping census names stay distinct. Proposed at the coordination seat (after a first coordination ruling died to the worker's mandated fallback STOP), approved GREEN at the tear seat 2026-07-22 (msg 1430293c), recorded for the lead's veto. |
