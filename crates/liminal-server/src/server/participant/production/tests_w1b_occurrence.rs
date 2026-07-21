@@ -1,5 +1,6 @@
 use std::error::Error;
 
+use liminal_protocol::lifecycle::{ObserverProgressAdvanceDecision, ObserverRecoveryAggregate};
 use liminal_protocol::wire::{BindingEpoch, ConnectionIncarnation, Generation, ParticipantId};
 
 use super::fate_occurrence::{
@@ -259,6 +260,63 @@ fn recovered_then_died_same_epoch_refuses_before_observer_mutation() {
             })
             .is_none()
     );
+}
+
+#[test]
+fn recovered_then_died_same_epoch_after_advance_flush_refuses_without_second_presentation()
+-> Result<(), Box<dyn Error>> {
+    let conversation_id = 57;
+    let participant_id = 8;
+    let binding_epoch = epoch(9, Generation::ONE);
+    let recovered = recovered(
+        participant_id,
+        binding_epoch,
+        1,
+        StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer,
+    );
+    let StoredOperation::Recovered { row, .. } = &recovered else {
+        return Err("reversed fixture did not build Recovered".into());
+    };
+    let prior_progress = row
+        .resulting_floor
+        .checked_sub(1)
+        .ok_or("Recovered progress must have a predecessor")?;
+    let aggregate = ObserverRecoveryAggregate::restore(&[(conversation_id, prior_progress)], &[])
+        .map_err(|error| format!("observer baseline restore failed: {error:?}"))?;
+    let ObserverProgressAdvanceDecision::Commit(advance) =
+        aggregate.decide_progress_advance(conversation_id, row.resulting_floor)
+    else {
+        return Err("real Recovered Advance did not commit".into());
+    };
+    let (aggregate, fired) = advance.commit();
+    assert!(fired.is_none());
+    let durable_advance = aggregate.progress_rows();
+
+    let reversed = vec![
+        recovered,
+        died(
+            participant_id,
+            binding_epoch,
+            StoredTerminalDisposition::Committed { terminal_seq: 43 },
+            None,
+        ),
+    ];
+    let durable_rows = reversed.clone();
+    let mut router = FateOccurrenceRouter::new();
+    let refusal = router.route(conversation_id, &reversed[0], 0);
+    assert_eq!(refusal, Err(FateOccurrenceConflict::MissingDied));
+    assert!(
+        router
+            .state(FateOccurrenceKey {
+                conversation_id,
+                participant_id,
+                binding_epoch,
+            })
+            .is_none()
+    );
+    assert_eq!(reversed, durable_rows);
+    assert_eq!(aggregate.progress_rows(), durable_advance);
+    Ok(())
 }
 
 #[test]
