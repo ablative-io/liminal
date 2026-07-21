@@ -20,6 +20,7 @@ use super::e2e_tests::{SocketFixture, SocketPeer};
 use super::log::{StoredAttachModeV3, StoredOperation};
 use super::outbox_log::OutboxRow;
 use super::tests_marker_ack_fixture::marker_fixture_config;
+use super::tests_outbox_barrier_fixture::OutboxBarrierKind;
 
 struct ExpectedDeliveries {
     main: Vec<ParticipantDelivery>,
@@ -424,12 +425,42 @@ fn replay_expected_deliveries(
     Ok(())
 }
 
+fn synchronize_dropped_connection_fold(
+    server: &SocketFixture,
+    peer: &SocketPeer,
+    conversation_id: u64,
+    participant_id: u64,
+) -> Result<(), Box<dyn Error>> {
+    server.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    peer.shutdown_transport()?;
+    server.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    server.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    server
+        .outbox_owner_facts(conversation_id, participant_id)
+        .map(|_| ())
+}
+
+fn synchronize_server_stop_folds(
+    server: &SocketFixture,
+    folds: &[(u64, u64)],
+) -> Result<(), Box<dyn Error>> {
+    server.arm_outbox_barriers(folds.iter().map(|_| OutboxBarrierKind::OperationFlush))?;
+    server.request_force_close();
+    for &(conversation_id, participant_id) in folds {
+        server.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+        server.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+        server.outbox_owner_facts(conversation_id, participant_id)?;
+    }
+    server.force_close_and_wait();
+    Ok(())
+}
+
 #[test]
 fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let config = marker_fixture_config();
-    let mut first = SocketFixture::start_replay_gated_with_config(&data_dir, config)?;
+    let mut first = SocketFixture::start_replay_gated_with_barriers(&data_dir, config)?;
     let mut second = first.spawn_peer()?;
     let mut observer = first.spawn_peer()?;
     let mut transient = first.spawn_peer()?;
@@ -441,9 +472,28 @@ fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn 
         fill_marker_history(&mut first, &mut second, &mut transient)?;
     finish_marker_history(&mut first, &mut second, marker_a, marker_b, latest_record)?;
 
+    synchronize_dropped_connection_fold(
+        &first,
+        &second,
+        MARKER_INTERLEAVING_CONVERSATION,
+        marker_b.participant_id,
+    )?;
+    synchronize_dropped_connection_fold(
+        &first,
+        &observer,
+        ALL_SHAPES_CONVERSATION,
+        replay_recipient.participant_id,
+    )?;
     drop(second);
     drop(observer);
     drop(transient);
+    synchronize_server_stop_folds(
+        &first,
+        &[
+            (ALL_SHAPES_CONVERSATION, primary.participant_id),
+            (MARKER_INTERLEAVING_CONVERSATION, marker_a.participant_id),
+        ],
+    )?;
     first.stop();
 
     let expected = decoded_expectations(&data_dir, replay_recipient, marker_a)?;
