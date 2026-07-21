@@ -30,6 +30,34 @@ pub(super) fn accounting_after_rows(
     )
 }
 
+pub(super) fn accounting_after_floor(
+    accounting: ClosureAccounting,
+    released: &[RetainedRecordCharge],
+) -> Option<ClosureAccounting> {
+    let baseline = released
+        .iter()
+        .try_fold(accounting.baseline(), |current, charge| {
+            let charge = charge.encoded_charge();
+            Some(WideResourceVector::new(
+                current.entries.checked_sub(u128::from(charge.entries))?,
+                current.bytes.checked_sub(u128::from(charge.bytes))?,
+            ))
+        })?;
+    ClosureAccounting::try_new(
+        accounting.state(),
+        accounting.marker_capacity_credits(),
+        accounting.marker_anchors(),
+        accounting.edge_sequence_claims(),
+        accounting.edge_order_position_claims(),
+        accounting.edge_k_remaining(),
+        baseline,
+        accounting.configured_cap(),
+        accounting.episode_churn_used(),
+        accounting.episode_churn_limit(),
+    )
+    .ok()
+}
+
 pub(super) fn accounting_after_marker_ack(
     accounting: ClosureAccounting,
 ) -> Option<ClosureAccounting> {

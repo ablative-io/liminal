@@ -8,6 +8,9 @@
 
 use alloc::{boxed::Box, vec::Vec};
 
+mod binding_fate_transition;
+pub(in crate::lifecycle) use binding_fate_transition::BindingFateFrontierPlan;
+
 use crate::{
     algebra::ResourceVector,
     outcome::{CandidatePhase, ClaimCounter, ParticipantStateCorruptReason},

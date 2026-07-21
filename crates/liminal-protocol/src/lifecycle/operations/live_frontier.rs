@@ -25,8 +25,10 @@ use super::{
     RecordAdmissionPersistenceParts, RetainedRecordCharge, UnchangedRecordAdmission,
 };
 
+mod binding_fate_transition;
 mod ledger;
 mod state;
+pub(super) use binding_fate_transition::BindingFateOwnerPlan;
 use ledger::{
     detach_order, detach_sequence, detached_attach_order, detached_attach_sequence,
     enrollment_order, enrollment_sequence, superseding_attach_order, superseding_attach_sequence,

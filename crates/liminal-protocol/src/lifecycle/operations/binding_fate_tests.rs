@@ -9,16 +9,18 @@ use crate::{
     wire::{BindingEpoch, ConnectionIncarnation, DeliverySeq, Generation},
 };
 
-use super::{BindingFateTerminal, LiveFrontierOwner, MeasuredBindingFate};
+use super::{
+    BindingFateTerminal, BindingTerminalAdmission, BindingTerminalCauseClass, LiveFrontierOwner,
+    MeasuredBindingFate,
+};
 use crate::lifecycle::{
     ActiveBinding, BindingState, BindingTerminalDisposition, BindingTerminalOwner, ClaimFrontiers,
-    ClaimFrontiersRestore, ClosureAccounting, ClosureDebt, ClosureState,
-    CommittedBindingTerminalPosition, DebtCompletion, DiedBindingTransition, Event,
-    FrontierBinding, FrontierParticipant, MovableOrderClaim, MovableSequenceClaim,
-    ObserverProjection, OrderClaimFrontierRestore, OrderClaims, OrderDirectOwner, OrderHigh,
-    OrderLedger, RecoverySequenceReserve, SealedBindingFateToken, SequenceClaimFrontierRestore,
-    SequenceClaims, SequenceDirectOwner, SequenceLedger, SequenceProductRangesRestore,
-    TerminalProductRangeRestore,
+    ClaimFrontiersRestore, ClosureAccounting, ClosureDebt, ClosureState, CommittedDiedTerminal,
+    DebtCompletion, DiedBindingTransition, Event, FrontierBinding, FrontierParticipant,
+    MovableOrderClaim, MovableSequenceClaim, ObserverProjection, OrderClaimFrontierRestore,
+    OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, RecoverySequenceReserve,
+    SealedBindingFateToken, SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner,
+    SequenceLedger, SequenceProductRangesRestore, TerminalProductRangeRestore,
 };
 
 fn generation(value: u64) -> Result<Generation, String> {
@@ -35,23 +37,6 @@ fn epoch(server: u64, ordinal: u64, generation_value: u64) -> Result<BindingEpoc
 fn debt(entries: u128, bytes: u128) -> Result<ClosureDebt, String> {
     ClosureDebt::new(WideResourceVector::new(entries, bytes))
         .ok_or_else(|| "test closure debt must be nonzero".to_string())
-}
-
-fn frontier_owner(
-    conversation_id: u64,
-    participant_id: u64,
-    binding_epoch: BindingEpoch,
-    cursor: DeliverySeq,
-    high_watermark: DeliverySeq,
-) -> Result<LiveFrontierOwner, String> {
-    frontier_owner_with_limit(
-        conversation_id,
-        participant_id,
-        binding_epoch,
-        cursor,
-        high_watermark,
-        0,
-    )
 }
 
 pub(super) fn frontier_owner_with_limit(
@@ -173,6 +158,81 @@ fn clear_accounting() -> Result<ClosureAccounting, String> {
     .map_err(|error| format!("fate accounting refused: {error:?}"))
 }
 
+fn committed_died_owner(
+    active: ActiveBinding,
+    cursor: DeliverySeq,
+    high_watermark: DeliverySeq,
+) -> Result<(LiveFrontierOwner, CommittedDiedTerminal), String> {
+    let candidate_sequence = high_watermark
+        .checked_add(1)
+        .ok_or_else(|| "committed terminal sequence overflow".to_string())?;
+    let owner = frontier_owner_with_limit(
+        active.conversation_id,
+        active.participant_id,
+        active.binding_epoch,
+        cursor,
+        high_watermark,
+        1,
+    )?;
+    let prepared = owner
+        .prepare_binding_terminal(
+            active,
+            BindingTerminalCauseClass::Died,
+            0,
+            candidate_sequence,
+            high_watermark,
+        )
+        .map_err(|refused| format!("committed terminal prepare refused: {:?}", refused.error()))?;
+    let key = prepared.candidate_key();
+    let BindingTerminalAdmission::Commit(committed) =
+        prepared.admit(key.bind_v3_charge(ResourceVector::new(1, 73)))
+    else {
+        return Err("Died selector did not commit the ordinary terminal".to_string());
+    };
+    let (owner, position) = committed.into_parts();
+    let DiedBindingTransition::Committed(terminal) =
+        active.connection_lost(BindingTerminalDisposition::Committed(position))
+    else {
+        return Err("committed selector position did not produce committed Died".to_string());
+    };
+    Ok((owner, terminal))
+}
+
+fn pending_died_owner(
+    active: ActiveBinding,
+    cursor: DeliverySeq,
+    high_watermark: DeliverySeq,
+) -> Result<LiveFrontierOwner, String> {
+    let candidate_sequence = high_watermark
+        .checked_add(1)
+        .ok_or_else(|| "pending terminal sequence overflow".to_string())?;
+    let owner = frontier_owner_with_limit(
+        active.conversation_id,
+        active.participant_id,
+        active.binding_epoch,
+        cursor,
+        high_watermark,
+        0,
+    )?;
+    let prepared = owner
+        .prepare_binding_terminal(
+            active,
+            BindingTerminalCauseClass::Died,
+            0,
+            candidate_sequence,
+            high_watermark,
+        )
+        .map_err(|refused| format!("pending terminal prepare refused: {:?}", refused.error()))?;
+    let key = prepared.candidate_key();
+    let BindingTerminalAdmission::Pending(pending) =
+        prepared.admit(key.bind_v3_charge(ResourceVector::new(1, 73)))
+    else {
+        return Err("Died selector did not pend the recovered terminal".to_string());
+    };
+    let (owner, _) = pending.into_parts();
+    Ok(owner)
+}
+
 pub(super) fn ordinary_token()
 -> Result<(SealedBindingFateToken, ActiveBinding, DeliverySeq), String> {
     let commit = super::super::operation_event_tests::superseding_attach_commit();
@@ -260,25 +320,17 @@ fn ordinary_binding_fate_projects_measured_resulting_floor() -> Result<(), Strin
     let high_watermark = cursor
         .checked_add(1)
         .ok_or_else(|| "ordinary high watermark overflow".to_string())?;
-    let owner = frontier_owner(
-        binding.conversation_id,
-        binding.participant_id,
-        binding.binding_epoch,
-        cursor,
-        high_watermark,
-    )?;
-    let observed_floor = DeliverySeq::try_from(owner.frontiers().retained_floor())
-        .map_err(|_| "observed ordinary floor exceeds delivery domain".to_string())?;
-    let died = match binding.connection_lost(BindingTerminalDisposition::Committed(
-        CommittedBindingTerminalPosition::new(0, high_watermark),
-    )) {
-        DiedBindingTransition::Committed(terminal) => terminal,
-        DiedBindingTransition::Pending(_) => {
-            return Err("ordinary fixture selected Pending Died".to_string());
-        }
-    };
+    let (owner, died) = committed_died_owner(binding, cursor, high_watermark)?;
+    let candidate_high_watermark = owner.frontiers().sequence().ledger().high_watermark();
+    let observed_floor = candidate_high_watermark
+        .checked_add(1)
+        .ok_or_else(|| "ordinary observed floor overflow".to_string())?;
     let prepared = owner
-        .prepare_binding_fate(token, BindingFateTerminal::Ordinary(died), high_watermark)
+        .prepare_binding_fate(
+            token,
+            BindingFateTerminal::Ordinary(died),
+            candidate_high_watermark,
+        )
         .map_err(|refused| format!("ordinary measurement refused: {:?}", refused.error()))?;
     let MeasuredBindingFate::Ordinary(fate) = prepared.fate() else {
         return Err("ordinary token produced recovered fate".to_string());
@@ -296,6 +348,19 @@ fn ordinary_binding_fate_projects_measured_resulting_floor() -> Result<(), Strin
             observed_floor,
         )
     );
+    let (owner, _, _) = prepared.into_parts();
+    assert_eq!(
+        owner.frontiers().retained_floor(),
+        u128::from(observed_floor)
+    );
+    assert!(owner.frontiers().retained_records().is_empty());
+    assert!(owner.retained_charges().is_empty());
+    let participant = owner.frontiers().active_identities().participants()[0];
+    assert_eq!(participant.cursor(), candidate_high_watermark);
+    assert_eq!(
+        participant.binding(),
+        FrontierBinding::Detached(binding.binding_epoch)
+    );
     Ok(())
 }
 
@@ -305,11 +370,22 @@ fn recovered_binding_fate_projects_measured_resulting_floor() -> Result<(), Stri
     let high_watermark = cursor
         .checked_add(1)
         .ok_or_else(|| "recovered high watermark overflow".to_string())?;
-    let owner = frontier_owner(1, participant_id, binding_epoch, cursor, high_watermark)?;
-    let observed_floor = DeliverySeq::try_from(owner.frontiers().retained_floor())
-        .map_err(|_| "observed recovered floor exceeds delivery domain".to_string())?;
+    let active = ActiveBinding {
+        participant_id,
+        conversation_id: 1,
+        binding_epoch,
+    };
+    let owner = pending_died_owner(active, cursor, high_watermark)?;
+    let candidate_high_watermark = owner.frontiers().sequence().ledger().high_watermark();
+    let observed_floor = candidate_high_watermark
+        .checked_add(1)
+        .ok_or_else(|| "recovered observed floor overflow".to_string())?;
     let prepared = owner
-        .prepare_binding_fate(token, BindingFateTerminal::Recovered, high_watermark)
+        .prepare_binding_fate(
+            token,
+            BindingFateTerminal::Recovered,
+            candidate_high_watermark,
+        )
         .map_err(|refused| format!("recovered measurement refused: {:?}", refused.error()))?;
     let MeasuredBindingFate::Recovered(fate) = prepared.fate() else {
         return Err("recovered token produced ordinary fate".to_string());
@@ -322,6 +398,17 @@ fn recovered_binding_fate_projects_measured_resulting_floor() -> Result<(), Stri
     assert_eq!(
         prepared.event(),
         Event::binding_fate_observed(participant_id, binding_epoch, observed_floor,)
+    );
+    let (owner, _, _) = prepared.into_parts();
+    assert_eq!(
+        owner.frontiers().retained_floor(),
+        u128::from(observed_floor)
+    );
+    let participant = owner.frontiers().active_identities().participants()[0];
+    assert_eq!(participant.cursor(), candidate_high_watermark);
+    assert_eq!(
+        participant.binding(),
+        FrontierBinding::Detached(binding_epoch)
     );
     Ok(())
 }
