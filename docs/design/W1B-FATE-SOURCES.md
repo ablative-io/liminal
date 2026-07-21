@@ -1,6 +1,6 @@
 # W1b — durable Died / Ordinary / Recovered / Detached fate sources
 
-Revision: r5, 2026-07-21. Design-first lane; this revision is docs-only (ruled rider §10.1).
+Revision: r6, 2026-07-21. Design-first lane; this revision is docs-only (ruled riders §10.1, §10.2).
 
 Normative ledger: `docs/design/WIRING-LEDGER.md` r1.9 at `c77ce31`. Source pin:
 `c77ce31`. The only repository change from the r1 source pin to this pin is the
@@ -881,6 +881,36 @@ amendment is enumerated in the implementing leg's report and the coordinator's
 boundary record. An oracle whose failure is NOT solely the fate suffix is
 outside this rider and remains a defect to fix in the new code.
 
+### 10.2 Second ruled rider (2026-07-21): setup amendments for scenarios the
+fold makes unreachable
+
+Individual adjudication of `terminal_answer_precedes_independent_push_work`
+under §10.1 found it is NOT a suffix-only failure: its setup drops the peer
+connection BEFORE the priming RecordAdmission. Under ruled §2.2 that drop folds
+a ConnectionLost Died fate row, and the frozen F-0c Unit 2 D3-2 contract then
+correctly excludes the terminalized binding from the record's recipient
+snapshot (diagnostic observation: recipient list exactly `[]` after the fold).
+The landed setup therefore manufactures a state this brief forbids from
+existing; making it pass in production code would violate §2.2 or D3-2.
+
+**Ruling (proposed at the coordination seat; approved as proposed by the tear
+seat 2026-07-21):** the oracle's semantic pin — terminal answer precedes
+independent push work — is scenario-independent and stays VERBATIM. Only the
+setup is amended: the holdback is created with a LIVE unacked peer, with no
+pre-record drop. A test whose setup violates the contract it is testing proves
+nothing about its pin; amending the setup to the scenario the pin was actually
+guarding preserves all intent. The drop was incidental setup machinery made
+unreachable by the ruled fold.
+
+Application: this rider governs setup-level conflicts of the same class — a
+landed oracle whose SETUP (not assertion) manufactures a state ruled impossible
+by this brief, where the pin itself is scenario-independent. Each case is
+adjudicated individually with the firing bytes characterized before amendment;
+pins stay verbatim; amendments are enumerated in the implementing leg's report
+and the coordinator's boundary record. Record note from the tear seat: two
+worker STOPs under the conflict rule produced two clean adjudications and zero
+improvised workarounds — the conflict rule working exactly as designed.
+
 ## 11. Ordering, crash cuts, and integration
 
 For a connection fold:
@@ -1175,3 +1205,4 @@ Ordinary/Recovered callers are **not** deferred.
 | r3 | 2026-07-20 | Keeps pin `c77ce31` and folds the complete round-2 six-element findings array (**5 NEW MAJOR + 1 minor**): immutable Pending-Died Ordinary finalizer sources and Recovered-owned reservation/non-presenting Leave+Fenced finalizers; by-value non-Clone/non-Copy `FencedAttachCommit` with private recovered authority and 0.3.0 next-publish semver flag; sealed two-stage terminal prepare/admit with exact v3 keyed candidate charge; event-free ExplicitRequestPending Detached; post-Open participant/server-fatal policy with `max_connections` unmatched bound and non-crash recovery; and source-row/full-validation marker identity with no digest. Extends the census from 45 to 48. |
 | r4 | 2026-07-20 | Keeps pin `c77ce31` and folds the complete round-3 two-element findings array (**2 MAJOR**): moves proof linearity to a non-public fenced mint that consumes the one fully validated non-Clone/non-Copy marker record before the r3 by-value chain; and binds simultaneous unmatched Opens to their lower Allocate/startup generation's persisted `declared_reference_bound`, allowing exact recovery after a current-limit reduction and refusing fabricated over-bound/cross-generation history. Names all three implementation-review carries (startup composition sequencing, charge constructor/error-path ownership, validate-pass memory proof), extends Oracle 26, and extends/renumbers the census from 48 to 49. |
 | r5 | 2026-07-21 | Docs-only ruled rider §10.1 (build-time): amends the landed F-0c crash-cut oracle — the final semantic row remains the last SEMANTIC row; the crash suffix must be EXACTLY the §2-classified fate-source rows of the teardown (typed suffix census, not tolerance). Governs sibling oracles failing solely on the fate suffix, each adjudicated individually; original semantic pins kept verbatim. Proposed at the coordination seat, approved as written by the tear seat 2026-07-21, recorded for the lead's veto. |
+| r6 | 2026-07-21 | Docs-only second ruled rider §10.2 (build-time): setup amendments for scenarios the ruled fold makes unreachable. The G2 holdback oracle's pre-record drop now folds Died and D3-2 correctly empties the recipient snapshot — the landed setup manufactures a forbidden state. Pin stays verbatim; setup amended to a LIVE unacked peer holdback. Class clause: setup-level conflicts where the pin is scenario-independent, each adjudicated individually with firing bytes characterized. Proposed at the coordination seat, approved as proposed by the tear seat 2026-07-21. |
