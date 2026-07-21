@@ -444,6 +444,7 @@ fn assert_g2_fault_arm_is_typed() -> Result<(), Box<dyn Error>> {
 struct HeldG2 {
     sender: SdkParticipant,
     sender_id: u64,
+    original_peer: Arc<SdkParticipant>,
     held_peer: SdkParticipant,
     held_pid: u64,
     priming_seq: u64,
@@ -457,7 +458,6 @@ fn engage_g2_holdback(server: &SdkSocketFixture, pair: G2Pair) -> Result<HeldG2,
         sender_id,
         peer_bound,
     } = pair;
-    drop(peer);
     let priming_payload = vec![0xA5; 400];
     let priming = expect_applied(exchange(
         &sender,
@@ -500,6 +500,7 @@ fn engage_g2_holdback(server: &SdkSocketFixture, pair: G2Pair) -> Result<HeldG2,
     Ok(HeldG2 {
         sender,
         sender_id,
+        original_peer: peer,
         held_peer,
         held_pid,
         priming_seq: priming.delivery_seq(),
@@ -555,6 +556,7 @@ fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>
     let HeldG2 {
         sender,
         sender_id,
+        original_peer,
         held_peer,
         held_pid,
         priming_seq,
@@ -642,6 +644,7 @@ fn terminal_answer_precedes_independent_push_work() -> Result<(), Box<dyn Error>
     )?;
 
     drop(held_peer);
+    drop(original_peer);
     drop(sender);
     server.stop()?;
 
