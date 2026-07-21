@@ -75,6 +75,8 @@ pub(super) enum FencedAttachProofRefusal {
     ComposedPendingSourceMismatch,
     #[error("composed terminal recovered reservation row disagrees with its audit")]
     ComposedRecoveredReservationMismatch,
+    #[error("open recovered finalizer reservations exceed the signed identity-slot bound")]
+    ComposedRecoveredReservationCapacity,
     #[error("composed terminal disagrees with replay binding prestate")]
     ComposedReplayStateMismatch,
 }

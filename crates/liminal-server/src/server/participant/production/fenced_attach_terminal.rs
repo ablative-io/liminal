@@ -6,17 +6,28 @@ use super::log::{
     DecodedStoredOperation, FencedAttachProofRefusal, OperationLog, OperationLogError,
     StoredAttachModeV3, StoredComposedTerminal, StoredComposedTerminalCause,
     StoredComposedTerminalKind, StoredDetachedCause, StoredDiedCause, StoredFinalizerPresentation,
-    StoredOperationV3, StoredRecoveredPresentation, StoredTerminalDisposition,
+    StoredOperationV3, StoredRecoveredFate, StoredRecoveredPresentation, StoredTerminalDisposition,
 };
 use super::state::StateError;
 
-/// Page-bounded replay state for open recovered finalizer reservations.
-#[derive(Default)]
+/// Config-bounded replay state for open recovered finalizer reservations.
 pub(super) struct ComposedTerminalValidation {
     recovered_reservations: BTreeMap<u64, u64>,
+    maximum_recovered_reservations: usize,
 }
 
 impl ComposedTerminalValidation {
+    pub(super) const fn new(maximum_recovered_reservations: usize) -> Self {
+        Self {
+            recovered_reservations: BTreeMap::new(),
+            maximum_recovered_reservations,
+        }
+    }
+
+    pub(super) fn active_reservation_count(&self) -> usize {
+        self.recovered_reservations.len()
+    }
+
     /// Validates one decoded operation without mutating conversation authority.
     pub(super) async fn validate(
         &mut self,
@@ -28,19 +39,7 @@ impl ComposedTerminalValidation {
             return Ok(());
         };
         if let StoredOperationV3::Recovered { row, .. } = operation {
-            if row.presentation == StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer
-                && (row.died_source_sequence >= sequence
-                    || self
-                        .recovered_reservations
-                        .insert(row.died_source_sequence, sequence)
-                        .is_some())
-            {
-                return Err(composed_error(
-                    sequence,
-                    FencedAttachProofRefusal::ComposedRecoveredReservationMismatch,
-                ));
-            }
-            return Ok(());
+            return self.validate_recovered_reservation(sequence, row);
         }
         let StoredOperationV3::Attached { request, mode, .. } = operation else {
             return Ok(());
@@ -114,6 +113,35 @@ impl ComposedTerminalValidation {
                 }
             }
         }
+        Ok(())
+    }
+
+    fn validate_recovered_reservation(
+        &mut self,
+        sequence: u64,
+        row: &StoredRecoveredFate,
+    ) -> Result<(), StateError> {
+        if row.presentation != StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer {
+            return Ok(());
+        }
+        if row.died_source_sequence >= sequence
+            || self
+                .recovered_reservations
+                .contains_key(&row.died_source_sequence)
+        {
+            return Err(composed_error(
+                sequence,
+                FencedAttachProofRefusal::ComposedRecoveredReservationMismatch,
+            ));
+        }
+        if self.recovered_reservations.len() >= self.maximum_recovered_reservations {
+            return Err(composed_error(
+                sequence,
+                FencedAttachProofRefusal::ComposedRecoveredReservationCapacity,
+            ));
+        }
+        self.recovered_reservations
+            .insert(row.died_source_sequence, sequence);
         Ok(())
     }
 
