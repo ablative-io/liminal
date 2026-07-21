@@ -73,4 +73,28 @@ impl ClaimFrontiers {
             .retain(|record| u128::from(record.delivery_seq) >= plan.resulting_floor);
         self
     }
+
+    pub(in crate::lifecycle) fn install_finalized_binding_fate_floor(
+        mut self,
+        resulting_floor: DeliverySeq,
+    ) -> Result<Self, LiveFrontierTransitionError> {
+        let resulting_floor = u128::from(resulting_floor);
+        let retained_end = u128::from(self.sequence.ledger().high_watermark()) + 1;
+        if resulting_floor < self.retained_floor || resulting_floor > retained_end {
+            return Err(LiveFrontierTransitionError::ResultingFrontier);
+        }
+        if self
+            .marker_records
+            .iter()
+            .any(|record| u128::from(record.delivery_seq) < resulting_floor)
+        {
+            return Err(LiveFrontierTransitionError::Precedence);
+        }
+        self.retained_floor = resulting_floor;
+        self.retained_records
+            .retain(|record| u128::from(record.delivery_seq) >= resulting_floor);
+        self.marker_records
+            .retain(|record| u128::from(record.delivery_seq) >= resulting_floor);
+        Ok(self)
+    }
 }

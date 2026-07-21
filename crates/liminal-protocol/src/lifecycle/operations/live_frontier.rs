@@ -756,10 +756,11 @@ pub fn commit_pending_leave_frontier<EF, V, LF, D>(
     retained_charges.sort_unstable_by_key(|charge| charge.delivery_seq());
     let retained_len = u64::try_from(frontiers.retained_records().len())
         .map_err(|_| LiveLeaveError::RetainedRecordLimit)?;
-    if retained_len > retained_record_limit
-        || retained_charges.len() != frontiers.retained_records().len()
-    {
+    if retained_len > retained_record_limit {
         return Err(LiveLeaveError::RetainedRecordLimit);
+    }
+    if retained_charges.len() != frontiers.retained_records().len() {
+        return Err(LiveLeaveError::RetainedCharge);
     }
     let closure_accounting = accounting_after_leave(
         closure_accounting,

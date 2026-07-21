@@ -70,4 +70,39 @@ impl LiveFrontierOwner {
         self.closure_accounting = plan.accounting;
         self
     }
+
+    pub(in crate::lifecycle::operations) fn install_finalized_binding_fate_floor(
+        mut self,
+        resulting_floor: DeliverySeq,
+    ) -> Result<Self, LiveFrontierError> {
+        if self.frontiers.retained_records().len() != self.retained_charges.len()
+            || self
+                .frontiers
+                .retained_records()
+                .iter()
+                .zip(&self.retained_charges)
+                .any(|(record, charge)| {
+                    record.delivery_seq != charge.delivery_seq()
+                        || record.admission_order != charge.admission_order()
+                })
+        {
+            return Err(LiveFrontierError::RetainedCharge);
+        }
+        let released = self
+            .retained_charges
+            .iter()
+            .copied()
+            .take_while(|charge| charge.delivery_seq() < resulting_floor)
+            .collect::<Vec<_>>();
+        let accounting = accounting_after_floor(self.closure_accounting, &released)
+            .ok_or(LiveFrontierError::ClosureAccounting)?;
+        self.frontiers = self
+            .frontiers
+            .install_finalized_binding_fate_floor(resulting_floor)
+            .map_err(map_frontier_error)?;
+        self.retained_charges
+            .retain(|charge| charge.delivery_seq() >= resulting_floor);
+        self.closure_accounting = accounting;
+        Ok(self)
+    }
 }

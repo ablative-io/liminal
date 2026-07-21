@@ -16,7 +16,7 @@ use super::fate_occurrence::{FateOccurrenceKey, PendingFinalizerRoute};
 use super::frontier::{left_record_charge, terminal_charge as terminal_record_charge};
 use super::log::{
     StoredBindingEpoch, StoredFinalizerPresentation, StoredLeaveRequest, StoredLeaveV3,
-    StoredOperation,
+    StoredOperation, StoredOrdinaryTerminalSource, StoredPendingDiedFinalizer,
 };
 use super::non_presenting_finalizer::NonPresentingFinalizerCommit;
 use super::observer_progress::ObserverProgressSourceMetadata;
@@ -39,6 +39,7 @@ struct PreparedLeaveCommit {
     tombstone: RetiredIdentity<Digest, Digest, Digest>,
     observer_projection: Option<ObserverProgressProjection>,
     finalizer: Option<PendingFinalizerRoute>,
+    completes_ordinary: bool,
     left_order: u64,
     left_seq: u64,
 }
@@ -238,6 +239,9 @@ impl ConversationAuthority {
         }
         self.observe_replayed_position(prepared.left_order, prepared.left_seq)?;
         self.advance_log_head()?;
+        if prepared.completes_ordinary {
+            self.complete_prepared_ordinary_finalizer(request.participant_id, appender)?;
+        }
         Ok(ArmOutcome::committed(
             LeaveResponse::leave_committed(outcome).into_server_value(),
             capacity,
@@ -272,9 +276,38 @@ impl ConversationAuthority {
             .map_err(|error| {
                 StateError::invariant(format!("authorized Leave verification failed: {error:?}"))
             })?;
-        transition_leave(
+        let owner = self.take_frontier()?;
+        let (owner, completes_ordinary) = match (slot.binding, finalizer) {
+            (BindingState::PendingFinalization(PendingFinalization::Died(died)), Some(route)) => {
+                self.prepare_pending_died_finalizer(
+                    request.participant_id,
+                    route.pending_source_sequence,
+                    died.commit(self.next_seq),
+                    StoredOrdinaryTerminalSource::PendingDiedFinalized {
+                        died_source_sequence: route.pending_source_sequence,
+                        finalizer: StoredPendingDiedFinalizer::Left {
+                            source_sequence: self.next_log_sequence,
+                        },
+                    },
+                    owner,
+                )?
+            }
+            (BindingState::PendingFinalization(_), None) => {
+                return Err(StateError::invariant(
+                    "pending Leave lost its finalizer route",
+                ));
+            }
+            (BindingState::Bound(_) | BindingState::Detached, Some(_)) => {
+                return Err(StateError::invariant(
+                    "settled Leave gained a finalizer route",
+                ));
+            }
+            (BindingState::PendingFinalization(PendingFinalization::Detached(_)), Some(_))
+            | (BindingState::Bound(_) | BindingState::Detached, None) => (owner, false),
+        };
+        let mut prepared = transition_leave(
             LeaveTransitionInput {
-                owner: self.take_frontier()?,
+                owner,
                 member: slot.member,
                 binding: slot.binding,
                 cell: slot.cell,
@@ -283,7 +316,9 @@ impl ConversationAuthority {
                 next_seq: self.next_seq,
             },
             finalizer,
-        )
+        )?;
+        prepared.completes_ordinary = completes_ordinary;
+        Ok(prepared)
     }
 
     /// Replays one v2 Left row through the same protocol-owned Leave
@@ -523,6 +558,7 @@ fn finish_leave_transition(
         tombstone,
         observer_projection,
         finalizer,
+        completes_ordinary: false,
         left_order,
         left_seq,
     })

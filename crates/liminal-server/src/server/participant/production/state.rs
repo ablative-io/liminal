@@ -13,8 +13,8 @@ use std::collections::BTreeMap;
 use liminal_protocol::lifecycle::{
     BindingState, CommittedDiedTerminal, ConversationDecision, ConversationGenesis,
     ConversationRefusalReason, CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt,
-    LiveFrontierOwner, LiveMember, ObserverProgressProjection, ParticipantConversation,
-    RetiredIdentity, SealedBindingFateToken,
+    LiveFrontierOwner, LiveMember, ObserverProgressProjection, OrdinaryBindingFate,
+    ParticipantConversation, PendingDiedOrdinaryFinalizer, RetiredIdentity, SealedBindingFateToken,
 };
 #[cfg(test)]
 use liminal_protocol::wire::ParticipantDelivery;
@@ -25,7 +25,9 @@ use liminal_protocol::wire::{
 
 use super::facts::{Digest, FactsError};
 use super::fate_occurrence::{FateOccurrenceConflict, FateOccurrenceRouter};
-use super::log::{OperationLogError, StoredOperation, StoredSpecificFateIntent};
+use super::log::{
+    OperationLogError, StoredOperation, StoredOrdinaryTerminalSource, StoredSpecificFateIntent,
+};
 use super::observer_progress::{
     ObserverProgressConformanceError, ObserverProgressSourceMetadata,
     ObserverProgressSourceWitness, ObserverProgressWitnessState,
@@ -86,11 +88,30 @@ pub(super) struct PendingBindingFate {
     pub(super) token: SealedBindingFateToken,
 }
 
+/// Exact terminal and durable enclosing source that unlock an Ordinary intent.
 #[derive(Clone, Copy, Debug)]
+pub(super) struct PendingSpecificFateTerminal {
+    pub(super) terminal: CommittedDiedTerminal,
+    pub(super) source: StoredOrdinaryTerminalSource,
+}
+
+/// Durable Died intent coupled to the sole move-only authority that consumes it.
+#[derive(Debug)]
 pub(super) struct PendingSpecificFate {
     pub(super) died_source_sequence: u64,
     pub(super) intent: StoredSpecificFateIntent,
-    pub(super) terminal: Option<CommittedDiedTerminal>,
+    pub(super) terminal: Option<PendingSpecificFateTerminal>,
+    pub(super) binding_fate: PendingBindingFate,
+}
+
+/// Ordinary fate measured before its enclosing finalizer removes the participant frontier.
+#[derive(Debug)]
+pub(super) struct PreparedOrdinaryFinalizer {
+    pub(super) attached_source_sequence: u64,
+    pub(super) terminal: CommittedDiedTerminal,
+    pub(super) terminal_source: StoredOrdinaryTerminalSource,
+    pub(super) fate: OrdinaryBindingFate,
+    pub(super) finalizer: PendingDiedOrdinaryFinalizer,
 }
 
 /// One enrolled participant's live authority and replay facts.
@@ -171,6 +192,8 @@ pub(super) struct ConversationAuthority {
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
     /// Durable Died intents awaiting their exact Ordinary/Recovered consumer.
     pub(super) pending_specific_fates: BTreeMap<ParticipantId, PendingSpecificFate>,
+    /// Ordinary fates measured immediately before an enclosing finalizer commit.
+    pub(super) prepared_ordinary_finalizers: BTreeMap<ParticipantId, PreparedOrdinaryFinalizer>,
     /// Four-class occurrence ownership rebuilt from durable rows before any
     /// observer mutation. This retains active keys, never a copy of history.
     pub(super) fate_occurrences: FateOccurrenceRouter,
@@ -290,6 +313,7 @@ impl ConversationAuthority {
             last_marker_projection: None,
             slots: BTreeMap::new(),
             pending_specific_fates: BTreeMap::new(),
+            prepared_ordinary_finalizers: BTreeMap::new(),
             fate_occurrences: FateOccurrenceRouter::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),
