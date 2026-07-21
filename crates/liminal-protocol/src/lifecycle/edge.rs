@@ -183,7 +183,7 @@ impl MarkerDelivery {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::expect_used, clippy::too_many_lines)]
 pub fn validated_marker_record_for_test(
     conversation_id: crate::wire::ConversationId,
@@ -346,7 +346,7 @@ pub fn validated_marker_record_for_test(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn marker_delivery_for_test(
     participant_id: ParticipantId,
     binding_epoch: BindingEpoch,
@@ -626,7 +626,7 @@ impl DetachedCredentialRecovery {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn validated_marker_record_for_recovery_test(
     recovery: DetachedCredentialRecovery,
 ) -> ValidatedMarkerRecord {

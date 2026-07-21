@@ -8,6 +8,9 @@ repository.workspace = true
 authors.workspace = true
 description = "Shared participant-lifecycle protocol types for liminal"
 
+[features]
+test-support = []
+
 [lints]
 workspace = true
 

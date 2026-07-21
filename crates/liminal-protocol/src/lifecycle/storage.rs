@@ -1127,7 +1127,7 @@ impl MarkerDeliveryRestore {
     /// Returns [`StorageRestoreError::StoredEdgeProvenance`] when the authority
     /// belongs to another conversation, names a detached target, or disagrees
     /// with any raw edge field.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn restore_bound(
         self,
         conversation_id: ConversationId,
