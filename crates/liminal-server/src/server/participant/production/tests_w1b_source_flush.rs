@@ -15,7 +15,7 @@ use crate::server::participant::{
 use super::ProductionParticipantHandler;
 use super::log::{
     DecodedStoredOperation, OperationLog, OperationLogError, StoredOperation,
-    StoredTerminalDisposition,
+    StoredOrdinaryTerminalSource, StoredTerminalDisposition,
 };
 use super::state::DurableAppend;
 use super::tests::{dispatch_tracked, test_participant_config};
@@ -91,6 +91,33 @@ fn committed_source_progress(
             Err("source-cut unexpectedly selected Pending".into())
         }
     }
+}
+
+fn assert_single_ordinary_completion(
+    log: &OperationLog,
+    died_source_sequence: u64,
+) -> Result<(), Box<dyn Error>> {
+    let ordinary_sequence = died_source_sequence
+        .checked_add(1)
+        .ok_or("ordinary source sequence overflow")?;
+    let Some(specific) = block_on(log.read_at(ordinary_sequence))?? else {
+        return Err("cold repair omitted the named Ordinary completion".into());
+    };
+    let DecodedStoredOperation::V3(StoredOperation::Ordinary { row, .. }) = specific.operation
+    else {
+        return Err("cold repair appended the wrong specific fate class".into());
+    };
+    assert!(matches!(
+        row.terminal_source,
+        StoredOrdinaryTerminalSource::DiedCommitted {
+            died_source_sequence: source
+        } if source == died_source_sequence
+    ));
+    let after_specific = ordinary_sequence
+        .checked_add(1)
+        .ok_or("post-specific sequence overflow")?;
+    assert!(block_on(log.read_at(after_specific))??.is_none());
+    Ok(())
 }
 
 fn source_flush_precedes_advance(
@@ -174,6 +201,9 @@ fn source_flush_precedes_advance(
         .as_ref()
         .and_then(|observer| observer.aggregate.observer_progress(conversation_id));
     assert_eq!(repaired_progress, Some(projected_progress));
+    if class == ConnectionFateClass::ConnectionLost {
+        assert_single_ordinary_completion(&log, source_sequence)?;
+    }
     let rows_after_repair = observer_row_count(&store)?;
     assert_eq!(
         rows_after_repair,
@@ -196,4 +226,9 @@ fn died_source_flush_precedes_observer_advance_and_cold_repair() -> Result<(), B
 #[test]
 fn detached_source_flush_precedes_observer_advance_and_cold_repair() -> Result<(), Box<dyn Error>> {
     source_flush_precedes_advance(ConnectionFateClass::CleanDisconnect, 6, 33, 42)
+}
+
+#[test]
+fn died_specific_fate_intent_completes_after_source_only_crash() -> Result<(), Box<dyn Error>> {
+    source_flush_precedes_advance(ConnectionFateClass::ConnectionLost, 7, 35, 43)
 }
