@@ -57,6 +57,7 @@ impl ConversationAuthority {
                     )));
                 }
                 let operation = authority.decode_operation(decoded)?;
+                authority.route_fate_occurrence(&operation, stored_sequence)?;
                 let operation_for_projection = operation.clone();
                 let ack_obligations = match &operation {
                     StoredOperation::ZeroDebtAck { request, .. } => {
@@ -152,6 +153,7 @@ impl ConversationAuthority {
                     }));
                 }
                 let operation = authority.decode_operation(decoded)?;
+                authority.route_fate_occurrence(&operation, stored_sequence)?;
                 let operation_for_projection = operation.clone();
                 let ack_obligations = match &operation {
                     StoredOperation::ZeroDebtAck { request, .. } => {
