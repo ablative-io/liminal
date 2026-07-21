@@ -17,6 +17,7 @@ mod barrier;
 mod binding_fate_completion;
 mod capacity;
 mod connection_fate;
+mod connection_fate_replay;
 mod connection_fate_rows;
 mod facts;
 mod fenced_attach_codec;

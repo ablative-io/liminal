@@ -8,8 +8,8 @@ use liminal_protocol::wire::{
 use super::log::{
     StoredAttachAllocation, StoredAttachModeV3, StoredBindingEpoch, StoredComposedTerminal,
     StoredComposedTerminalCause, StoredComposedTerminalKind, StoredDetachedCause,
-    StoredDetachedSource, StoredFinalizerPresentation, StoredOperation, StoredRecordAdmission,
-    StoredTerminalDisposition,
+    StoredDetachedSource, StoredDied, StoredDiedCause, StoredFinalizerPresentation,
+    StoredOperation, StoredRecordAdmission, StoredTerminalDisposition,
 };
 use super::outbox::ConversationOutboxError;
 use super::outbox_log::{OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord};
@@ -54,7 +54,9 @@ pub(super) fn project_committed_source(
     facts: ReplayedProjectionFacts,
 ) -> Result<Option<OutboxRow>, StateError> {
     let projected = match operation {
-        StoredOperation::Genesis { .. } => None,
+        StoredOperation::Genesis { .. }
+        | StoredOperation::Ordinary { .. }
+        | StoredOperation::Recovered { .. } => None,
         StoredOperation::Enrolled { allocation, .. } => Some(produced(
             authority,
             source_log_sequence,
@@ -143,15 +145,44 @@ pub(super) fn project_committed_source(
                 },
             )],
         )?),
-        StoredOperation::Died { .. }
-        | StoredOperation::Ordinary { .. }
-        | StoredOperation::Recovered { .. } => {
-            return Err(StateError::invariant(
-                "v3 fate projection awaits the W1b producer leg",
-            ));
-        }
+        StoredOperation::Died { row } => project_died(authority, source_log_sequence, row)?,
     };
     Ok(projected)
+}
+
+fn project_died(
+    authority: &ConversationAuthority,
+    source_log_sequence: u64,
+    row: &StoredDied,
+) -> Result<Option<OutboxRow>, StateError> {
+    let StoredTerminalDisposition::Committed { terminal_seq } = row.disposition else {
+        return Ok(None);
+    };
+    let cause = match row.cause {
+        StoredDiedCause::ConnectionLost => DiedCause::ConnectionLost,
+        StoredDiedCause::ProcessKilled => DiedCause::ProcessKilled,
+        StoredDiedCause::ProtocolError => DiedCause::ProtocolError,
+        StoredDiedCause::UncleanServerRestart {
+            prior_server_incarnation,
+        } => DiedCause::UncleanServerRestart {
+            prior_server_incarnation,
+        },
+    };
+    produced(
+        authority,
+        source_log_sequence,
+        ProducedSourceKind::Died,
+        Some(row.participant_id),
+        vec![(
+            terminal_seq,
+            ParticipantRecord::Died {
+                affected_participant_id: row.participant_id,
+                binding_epoch: row.binding_epoch.to_epoch()?,
+                cause,
+            },
+        )],
+    )
+    .map(Some)
 }
 
 fn project_attached(

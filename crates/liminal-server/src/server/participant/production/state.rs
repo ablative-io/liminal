@@ -11,9 +11,10 @@
 use std::collections::BTreeMap;
 
 use liminal_protocol::lifecycle::{
-    BindingState, ConversationDecision, ConversationGenesis, ConversationRefusalReason,
-    CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveFrontierOwner, LiveMember,
-    ObserverProgressProjection, ParticipantConversation, RetiredIdentity, SealedBindingFateToken,
+    BindingState, CommittedDiedTerminal, ConversationDecision, ConversationGenesis,
+    ConversationRefusalReason, CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt,
+    LiveFrontierOwner, LiveMember, ObserverProgressProjection, ParticipantConversation,
+    RetiredIdentity, SealedBindingFateToken,
 };
 #[cfg(test)]
 use liminal_protocol::wire::ParticipantDelivery;
@@ -23,7 +24,7 @@ use liminal_protocol::wire::{
 };
 
 use super::facts::{Digest, FactsError};
-use super::log::{OperationLogError, StoredOperation};
+use super::log::{OperationLogError, StoredOperation, StoredSpecificFateIntent};
 use super::observer_progress::{
     ObserverProgressConformanceError, ObserverProgressSourceMetadata,
     ObserverProgressSourceWitness, ObserverProgressWitnessState,
@@ -82,6 +83,13 @@ pub(super) struct PendingBindingFate {
     pub(super) attached_source_sequence: u64,
     /// Sole protocol authority consumed by measured Ordinary/Recovered completion.
     pub(super) token: SealedBindingFateToken,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct PendingSpecificFate {
+    pub(super) died_source_sequence: u64,
+    pub(super) intent: StoredSpecificFateIntent,
+    pub(super) terminal: Option<CommittedDiedTerminal>,
 }
 
 /// One enrolled participant's live authority and replay facts.
@@ -160,6 +168,8 @@ pub(super) struct ConversationAuthority {
     pub(super) last_marker_projection: Option<ParticipantDelivery>,
     /// Live participant slots keyed by permanent participant id.
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
+    /// Durable Died intents awaiting their exact Ordinary/Recovered consumer.
+    pub(super) pending_specific_fates: BTreeMap<ParticipantId, PendingSpecificFate>,
     /// Permanent retired identity tombstones keyed by participant id.
     pub(super) retired: BTreeMap<ParticipantId, RetiredIdentity<Digest, Digest, Digest>>,
     /// Permanent enrollment-token index.
@@ -272,6 +282,7 @@ impl ConversationAuthority {
             #[cfg(test)]
             last_marker_projection: None,
             slots: BTreeMap::new(),
+            pending_specific_fates: BTreeMap::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),
             next_order: 0,

@@ -96,6 +96,9 @@ pub enum OperationLogError {
     /// A decoded v3 fate row reached apply before its later-leg replay owner exists.
     #[error("v3 fate row at sequence {sequence} requires the W1b fate replay leg")]
     V3FateReplayUnavailable { sequence: u64 },
+    /// Reconstructed fate operation disagreed with the complete durable row.
+    #[error("reconstructed fate operation drifted from durable sequence {sequence}")]
+    FateReplayDrift { sequence: u64 },
 }
 
 /// Append-only handle over one conversation's production operation stream.

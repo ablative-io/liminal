@@ -9,8 +9,8 @@ use liminal_protocol::wire::{DiedCause, ParticipantId};
 
 use super::barrier::{CommitMode, commit_through_barrier};
 use super::log::{
-    StoredBindingEpoch, StoredCommittedTerminalAudit, StoredDiedCause, StoredOperation,
-    StoredOrdinaryFate, StoredOrdinaryTerminalSource, StoredRecoveredFate,
+    OperationLogError, StoredBindingEpoch, StoredCommittedTerminalAudit, StoredDiedCause,
+    StoredOperation, StoredOrdinaryFate, StoredOrdinaryTerminalSource, StoredRecoveredFate,
     StoredRecoveredPresentation, StoredSpecificFateIntent,
 };
 use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, StateError};
@@ -232,6 +232,76 @@ impl ConversationAuthority {
         Ok(())
     }
 
+    pub(super) fn repair_pending_specific_fates(
+        &mut self,
+        appender: &dyn DurableAppend,
+    ) -> Result<(), StateError> {
+        let pending = self
+            .pending_specific_fates
+            .iter()
+            .map(|(participant_id, pending)| (*participant_id, *pending))
+            .collect::<Vec<_>>();
+        for (participant_id, pending) in pending {
+            let ready = pending.terminal.is_some()
+                || matches!(pending.intent, StoredSpecificFateIntent::Recovered { .. });
+            if !ready {
+                continue;
+            }
+            self.complete_binding_fate_intent(
+                participant_id,
+                pending.died_source_sequence,
+                pending.intent,
+                pending.terminal,
+                appender,
+            )?;
+            self.pending_specific_fates.remove(&participant_id);
+        }
+        Ok(())
+    }
+
+    pub(super) fn replay_specific_fate(
+        &mut self,
+        operation: &StoredOperation,
+        sequence: u64,
+    ) -> Result<(), StateError> {
+        let participant_id = match &operation {
+            StoredOperation::Ordinary { row, .. } => row.participant_id,
+            StoredOperation::Recovered { row, .. } => row.participant_id,
+            _ => {
+                return Err(StateError::invariant(
+                    "specific-fate replay received a non-specific operation",
+                ));
+            }
+        };
+        let pending = self
+            .pending_specific_fates
+            .get(&participant_id)
+            .copied()
+            .ok_or_else(|| {
+                StateError::invariant(
+                    "specific-fate row has no earlier unconsumed durable Died intent",
+                )
+            })?;
+        if self.next_log_sequence != sequence {
+            return Err(StateError::invariant(
+                "specific-fate replay sequence disagrees with the checked log head",
+            ));
+        }
+        let appender = ReplayFateAppender {
+            expected: operation,
+            sequence,
+        };
+        self.complete_binding_fate_intent(
+            participant_id,
+            pending.died_source_sequence,
+            pending.intent,
+            pending.terminal,
+            &appender,
+        )?;
+        self.pending_specific_fates.remove(&participant_id);
+        Ok(())
+    }
+
     fn take_pending_binding_fate(
         &mut self,
         participant_id: ParticipantId,
@@ -325,5 +395,25 @@ const fn stored_died_cause(cause: DiedCause) -> StoredDiedCause {
         } => StoredDiedCause::UncleanServerRestart {
             prior_server_incarnation,
         },
+    }
+}
+
+struct ReplayFateAppender<'a> {
+    expected: &'a StoredOperation,
+    sequence: u64,
+}
+
+impl DurableAppend for ReplayFateAppender<'_> {
+    fn append(
+        &self,
+        operation: &StoredOperation,
+        expected_sequence: u64,
+    ) -> Result<(), OperationLogError> {
+        if operation != self.expected || expected_sequence != self.sequence {
+            return Err(OperationLogError::FateReplayDrift {
+                sequence: self.sequence,
+            });
+        }
+        Ok(())
     }
 }

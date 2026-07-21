@@ -255,14 +255,14 @@ fn complete_target(
     Ok(())
 }
 
-struct AdmittedTerminal {
-    owner: LiveFrontierOwner,
-    disposition: BindingTerminalDisposition,
-    stored_disposition: StoredTerminalDisposition,
-    committed: bool,
+pub(super) struct AdmittedTerminal {
+    pub(super) owner: LiveFrontierOwner,
+    pub(super) disposition: BindingTerminalDisposition,
+    pub(super) stored_disposition: StoredTerminalDisposition,
+    pub(super) committed: bool,
 }
 
-fn admit_terminal(
+pub(super) fn admit_terminal(
     authority: &mut ConversationAuthority,
     active: ActiveBinding,
     cause_class: BindingTerminalCauseClass,
@@ -329,7 +329,7 @@ fn admit_terminal(
     }
 }
 
-fn stored_specific_fate_intent(
+pub(super) fn stored_specific_fate_intent(
     pending: &PendingBindingFate,
 ) -> Result<StoredSpecificFateIntent, StateError> {
     match pending.token.intent() {
