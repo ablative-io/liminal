@@ -68,6 +68,8 @@ mod operation_event_tests;
 mod storage_tests;
 #[cfg(test)]
 mod test_support;
+#[cfg(feature = "test-support")]
+pub mod test_support_external;
 
 pub use admission::{
     BindingSlotDecision, BindingSlotOccupancy, CapacityCounter, CapacityCounterInvariantError,

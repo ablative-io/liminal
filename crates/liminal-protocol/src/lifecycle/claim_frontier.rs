@@ -1618,7 +1618,7 @@ impl ValidatedMarkerRecord {
     }
 
     /// Marks a synthetic crate-test token as delivered.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) const fn delivered_for_test(mut self) -> Self {
         self.occurrence = MarkerRecordOccurrence::Delivered;
         self
@@ -2066,7 +2066,7 @@ impl ClaimFrontiers {
 
     /// Validates numeric frontiers and durable marker history before a stored
     /// edge is reconstructed from the resulting sealed authority.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn prevalidate(
         restore: ClaimFrontiersRestore,
         sequence_ledger: SequenceLedger,

@@ -96,7 +96,7 @@ impl LiveFrontierOwner {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::lifecycle) const fn from_test_parts(
         frontiers: ClaimFrontiers,
         closure_accounting: ClosureAccounting,

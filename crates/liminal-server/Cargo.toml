@@ -32,6 +32,7 @@ futures-core = { workspace = true, features = ["std"] }
 # dependency entry above stays feature-free so the production graph never
 # carries them.
 liminal = { workspace = true, features = ["test-support"] }
+liminal-protocol = { workspace = true, features = ["test-support"] }
 liminal-sdk = { workspace = true }
 # Test-only: shrink the client socket's SO_RCVBUF so a never-reading subscriber
 # caps the in-flight TCP window far below an oversize frame, making the server's
