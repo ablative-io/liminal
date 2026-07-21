@@ -160,7 +160,7 @@ fn recovered_source_flush_precedes_observer_advance_and_cold_repair() -> Result<
     run_recovered_completion()
 }
 
-fn run_recovered_completion() -> Result<(), Box<dyn Error>> {
+pub(super) fn run_recovered_completion() -> Result<(), Box<dyn Error>> {
     let recovered = executable_recovered_attach()?;
     let conversation_id = recovered.member.conversation_id();
     let participant_id = recovered.member.participant_id();

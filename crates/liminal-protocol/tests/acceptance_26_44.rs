@@ -1,6 +1,6 @@
 mod support;
 
-use support::{mint_fenced_attach, recovered_fate_from_fenced, settled_leave_authority};
+use support::{mint_fenced_attach_with_owner, recovered_fate_from_fenced, settled_leave_authority};
 
 use std::boxed::Box;
 
@@ -1840,13 +1840,14 @@ fn case_44_dcr_leave_fence_and_typed_cursor_release_suffix() -> TestResult {
     ));
 
     let fenced_recovery = credential_recovery(44, prior_epoch, h, original_debt)?;
-    let fenced = mint_fenced_attach(
+    let (unused_owner, fenced) = mint_fenced_attach_with_owner(
         fenced_recovery,
         original_debt,
         Event::fenced_recovery_committed(44, h, prior_epoch, recovered_epoch, h + 1),
         DebtCompletion::clear(),
     )
     .map_err(|error| format!("DCR owner mint failed: {error}"))?;
+    drop(unused_owner);
     assert_eq!(fenced.marker_delivery_seq(), h);
     assert_eq!(fenced.prior_binding_epoch(), prior_epoch);
     assert_eq!(fenced.new_binding_epoch(), recovered_epoch);
@@ -1855,18 +1856,18 @@ fn case_44_dcr_leave_fence_and_typed_cursor_release_suffix() -> TestResult {
     let op_recovery = credential_recovery(44, prior_epoch, h, original_debt)?;
     let projection = ObserverProjection::new(h + 2);
     let attached_debt = debt(1, 80)?;
-    let commit = mint_fenced_attach(
+    let (owner, commit) = mint_fenced_attach_with_owner(
         op_recovery,
         original_debt,
         Event::fenced_recovery_committed(44, h, prior_epoch, recovered_epoch, h + 1),
         DebtCompletion::observer_projection(attached_debt, projection),
     )
     .map_err(|error| format!("nonzero DCR owner mint failed: {error}"))?;
-    let authority = recovered_fate_from_fenced(
-        commit,
-        Event::binding_fate_observed(44, recovered_epoch, h + 2),
-    )
-    .map_err(|error| format!("exact recovered fate chain failed: {error}"))?;
+    let expected_floor = h
+        .checked_add(2)
+        .ok_or_else(|| "recovered fate fixture floor overflow".to_owned())?;
+    let authority = recovered_fate_from_fenced(owner, commit, expected_floor)
+        .map_err(|error| format!("exact recovered fate chain failed: {error}"))?;
     let pending = projection
         .apply_recovered_binding_fate(attached_debt, debt(1, 70)?, authority)
         .map_err(|_| "projection rejected exact recovered fate".to_owned())?;
