@@ -16,7 +16,7 @@ use super::e2e_cold_all_shapes_fixture::{
     BoundClosePath, decoded_history_from_store, expected_bound_close_fate,
     semantic_rows_and_typed_fate_suffix,
 };
-use super::e2e_tests::{SocketFixture, SocketPeer};
+use super::e2e_tests::{OutboxOwnerFacts, SocketFixture, SocketPeer};
 use super::tests::test_participant_config;
 use super::tests_marker_ack_fixture::marker_fixture_config;
 use super::tests_outbox_barrier_fixture::OutboxBarrierKind;
@@ -138,6 +138,51 @@ fn reopened_fixture(data_dir: &Path) -> Result<SocketFixture, Box<dyn Error>> {
     SocketFixture::start_replay_gated_with_barriers(data_dir, marker_fixture_config())
 }
 
+fn synchronize_classified_close_folds(
+    primary: &SocketFixture,
+    peer: &SocketPeer,
+    sender: &EnrollBound,
+    observer: &EnrollBound,
+) -> Result<(OutboxOwnerFacts, OutboxOwnerFacts), Box<dyn Error>> {
+    primary.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    peer.shutdown_transport()?;
+    primary.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    primary.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    let observer_fold = primary.outbox_owner_facts(CONVERSATION, observer.participant_id())?;
+
+    primary.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    primary.request_force_close();
+    primary.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    primary.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    let sender_fold = primary.outbox_owner_facts(CONVERSATION, sender.participant_id())?;
+    Ok((sender_fold, observer_fold))
+}
+
+fn assert_fold_semantics_reach_census(
+    sender_fold: &OutboxOwnerFacts,
+    observer_fold: &OutboxOwnerFacts,
+    durable: &[OutboxOwnerFacts; 3],
+) {
+    let [durable_sender, durable_observer, ..] = durable;
+    assert_eq!(
+        (sender_fold.ack_through, sender_fold.next_live_obligation),
+        (
+            durable_sender.ack_through,
+            durable_sender.next_live_obligation
+        )
+    );
+    assert_eq!(
+        (
+            observer_fold.ack_through,
+            observer_fold.next_live_obligation
+        ),
+        (
+            durable_observer.ack_through,
+            durable_observer.next_live_obligation
+        )
+    );
+}
+
 #[test]
 fn leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_reopens()
 -> Result<(), Box<dyn Error>> {
@@ -198,10 +243,9 @@ fn leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_re
             BoundClosePath::ServerStop,
         ),
     ];
-    primary.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
-    peer.shutdown_transport()?;
-    primary.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
-    primary.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    let (sender_fold_complete, observer_fold_complete) =
+        synchronize_classified_close_folds(&primary, &peer, &sender, &observer)?;
+
     drop(peer);
     drop(original);
     drop(replacement);
@@ -212,6 +256,7 @@ fn leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_re
         primary.outbox_owner_facts(CONVERSATION, ids[1])?,
         primary.outbox_owner_facts(CONVERSATION, ids[2])?,
     ];
+    assert_fold_semantics_reach_census(&sender_fold_complete, &observer_fold_complete, &durable);
     for (before, after) in semantic_durable.iter().zip(&durable) {
         assert_eq!(after.ack_through, before.ack_through);
         assert_eq!(after.next_live_obligation, before.next_live_obligation);
