@@ -297,13 +297,25 @@ fn perform_ruled_teardown(
     observer_socket.shutdown_transport()?;
     server.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
     server.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    let after_observer_fold = server.outbox_owner_facts(CONVERSATION, leaver_id)?;
+
+    server.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    server.request_force_close();
+    server.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    server.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    let after_sender_fold = server.outbox_owner_facts(CONVERSATION, leaver_id)?;
+    assert_eq!(
+        after_sender_fold.ack_through,
+        after_observer_fold.ack_through
+    );
+    assert_eq!(
+        after_sender_fold.next_live_obligation,
+        after_observer_fold.next_live_obligation
+    );
+
     drop(observer_socket);
     server.force_close_and_wait();
-    let live_owner = if capture_live_owner {
-        Some(server.outbox_owner_facts(CONVERSATION, leaver_id)?)
-    } else {
-        None
-    };
+    let live_owner = capture_live_owner.then_some(after_sender_fold);
     server.stop();
     let teardown = durable_history_bytes(data_dir)?;
     assert_left_source_and_audit_rows(data_dir, &expected_fate_suffix, 1)?;
