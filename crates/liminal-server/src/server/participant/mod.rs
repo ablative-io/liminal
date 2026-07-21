@@ -52,9 +52,10 @@ mod transport_tests;
 
 pub use dispatch::{
     ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
-    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
-    ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
-    ParticipantSemanticOutcome, ParticipantServiceFatal, dispatch_generic_frame,
+    ParticipantConnectionContext, ParticipantConnectionConversations,
+    ParticipantConnectionFateOutcome, ParticipantDispatch, ParticipantDispatchError,
+    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSemanticOutcome,
+    ParticipantServiceFatal, dispatch_generic_frame,
 };
 pub use production::marker_source::{
     MarkerSourceRefusalReason, MarkerSourceRefused, ValidatedFencedMarkerInputs,

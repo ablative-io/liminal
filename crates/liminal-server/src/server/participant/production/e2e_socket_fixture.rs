@@ -30,8 +30,9 @@ use crate::server::listener::ServerListener;
 use crate::server::participant::{
     ConnectionFateWorkItem, InstalledParticipantService, ObserverPublicationTarget,
     PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
-    ParticipantSemanticHandler, ParticipantServiceFatal,
+    ParticipantConnectionFateOutcome, ParticipantOfferedProgress, ParticipantPublication,
+    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSemanticOutcome,
+    ParticipantServiceFatal,
 };
 use crate::server::shutdown::wait_after_force_close;
 
@@ -92,6 +93,13 @@ impl ParticipantSemanticHandler for ReplayGatedHandler {
         work_item: ConnectionFateWorkItem,
     ) -> Result<(), ParticipantSemanticError> {
         self.inner.handle_connection_fate(work_item)
+    }
+
+    fn handle_connection_fate_with_impact(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> ParticipantConnectionFateOutcome {
+        self.inner.handle_connection_fate_with_impact(work_item)
     }
 
     fn repair_unclean_server_restart(
@@ -162,6 +170,16 @@ impl ParticipantSemanticHandler for ReplayGatedHandler {
     ) -> Result<ServerValue, ParticipantSemanticError> {
         self.inner
             .handle_observer_recovery(context, conversations, request, target)
+    }
+
+    fn handle_with_impact(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ClientRequest,
+    ) -> ParticipantSemanticOutcome<ServerValue> {
+        self.inner
+            .handle_with_impact(context, conversations, request)
     }
 
     fn handle(

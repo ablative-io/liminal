@@ -265,7 +265,7 @@ impl WebSocketConnectionProcess {
         if let Err(error) = self.arm_readiness(pid, ctx, interest) {
             return self.fail_slice(pid, &error);
         }
-        match self.final_probe(pid) {
+        match self.final_probe(pid, ctx) {
             Ok(true) => NativeOutcome::Continue,
             Ok(false) => {
                 #[cfg(test)]
@@ -816,9 +816,9 @@ impl WebSocketConnectionProcess {
     }
 
     /// Post-arm barrier probe: socket bytes, budget-stranded inbound, pumped
-    /// sources, and queued controls — the TCP probe plus the inbound-budget
-    /// flag that covers tungstenite's internal reassembly buffer.
-    fn final_probe(&self, pid: u64) -> Result<bool, ServerError> {
+    /// sources, queued controls, and native mail — the TCP probe plus the
+    /// inbound-budget flag that covers tungstenite's internal reassembly buffer.
+    fn final_probe(&self, pid: u64, ctx: &NativeContext<'_>) -> Result<bool, ServerError> {
         let socket_ready = if let Some(socket) = self.socket.as_ref() {
             let mut byte = [0_u8; 1];
             match socket.get_ref().peek(&mut byte) {
@@ -869,7 +869,9 @@ impl WebSocketConnectionProcess {
             || subscription_ready
             || participant_ready
             || reply_ready
-            || self.runtime.has_control(pid))
+            || self.runtime.has_control(pid)
+            || self.runtime.ready_pending(pid)
+            || ctx.has_messages())
     }
 
     /// The TCP process's control handling against the WebSocket transport.
@@ -1016,6 +1018,7 @@ impl NativeHandler for WebSocketConnectionProcess {
                 return outcome;
             }
         }
+        self.runtime.acknowledge_ready(pid);
         self.handle_slice(pid, ctx)
     }
 }

@@ -245,21 +245,14 @@ impl ProductionParticipantHandler {
     pub(super) fn with_conversation_fate_source<T>(
         &self,
         conversation_id: ConversationId,
-        operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
+        impact: Option<&mut DispatchImpactAccumulator>,
+        operation: impl FnOnce(
+            &mut ConversationAuthority,
+            &dyn DurableAppend,
+            Option<&mut DispatchImpactAccumulator>,
+        ) -> Result<T, StateError>,
     ) -> Result<T, ParticipantSemanticError> {
-        self.with_conversation_reconciliation(
-            conversation_id,
-            true,
-            None,
-            |authority, appender, impact| {
-                if impact.is_some() {
-                    return Err(StateError::invariant(
-                        "fate source unexpectedly received a request impact owner",
-                    ));
-                }
-                operation(authority, appender)
-            },
-        )
+        self.with_conversation_reconciliation(conversation_id, true, impact, operation)
     }
 
     fn with_conversation_reconciliation<T>(

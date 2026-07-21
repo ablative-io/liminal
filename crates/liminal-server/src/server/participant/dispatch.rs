@@ -199,6 +199,42 @@ impl<T> ParticipantSemanticOutcome<T> {
     }
 }
 
+/// One connection-fate result paired with every conversation impact committed
+/// before the fate operation returned.
+#[derive(Debug)]
+pub struct ParticipantConnectionFateOutcome {
+    result: Result<(), ParticipantSemanticError>,
+    impacts: Vec<DispatchImpact>,
+}
+
+impl ParticipantConnectionFateOutcome {
+    /// Wraps a fixture fate handler which committed no dispatch impact.
+    #[must_use]
+    pub const fn unchanged(result: Result<(), ParticipantSemanticError>) -> Self {
+        Self {
+            result,
+            impacts: Vec::new(),
+        }
+    }
+
+    /// Carries a fate result and every committed per-conversation impact.
+    #[must_use]
+    pub const fn new(
+        result: Result<(), ParticipantSemanticError>,
+        impacts: Vec<DispatchImpact>,
+    ) -> Self {
+        Self { result, impacts }
+    }
+
+    pub(crate) fn into_parts(self) -> (Result<(), ParticipantSemanticError>, Vec<DispatchImpact>) {
+        (self.result, self.impacts)
+    }
+
+    pub(crate) fn into_result(self) -> Result<(), ParticipantSemanticError> {
+        self.result
+    }
+}
+
 /// Server-owned adapter from a decoded request to a protocol-owned value.
 pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     /// Applies one already authenticated and capability-gated request.
@@ -257,6 +293,15 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     ) -> Result<(), ParticipantSemanticError> {
         drop(work_item);
         Err(ParticipantSemanticError::Unavailable)
+    }
+
+    /// Applies connection fate while preserving every committed conversation's
+    /// post-flush dispatch effects on both success and failure exits.
+    fn handle_connection_fate_with_impact(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> ParticipantConnectionFateOutcome {
+        ParticipantConnectionFateOutcome::unchanged(self.handle_connection_fate(work_item))
     }
 
     /// Repairs every remaining binding owned by a prior server incarnation.
@@ -553,7 +598,20 @@ impl ParticipantSemanticHandler for InstalledParticipantService {
         &self,
         work_item: ConnectionFateWorkItem,
     ) -> Result<(), ParticipantSemanticError> {
-        self.handler.handle_connection_fate(work_item)
+        let outcome = self.handler.handle_connection_fate_with_impact(work_item);
+        let (result, impacts) = outcome.into_parts();
+        for impact in &impacts {
+            self.notify_impact(impact)?;
+        }
+        result
+    }
+
+    fn handle_connection_fate_with_impact(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> ParticipantConnectionFateOutcome {
+        let result = self.handle_connection_fate(work_item);
+        ParticipantConnectionFateOutcome::unchanged(result)
     }
 
     fn repair_unclean_server_restart(

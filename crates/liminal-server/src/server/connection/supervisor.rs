@@ -5,7 +5,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::os::fd::RawFd;
 #[cfg(test)]
 use std::sync::Barrier;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
@@ -1429,11 +1429,40 @@ impl ConnectionRuntime {
     /// notifier through (R3/R1(vi)).
     pub(super) fn ready_waker(&self, pid: u64) -> Option<super::wake::ReadyWaker> {
         let scheduler = self.scheduler.upgrade()?;
+        let ready_pending = self
+            .records
+            .lock()
+            .ok()?
+            .get(&pid)
+            .map(|record| Arc::clone(&record.ready_pending))?;
         Some(super::wake::ReadyWaker::new(
             &scheduler,
             pid,
             self.ready_atom,
+            ready_pending,
         ))
+    }
+
+    /// Acknowledges READY edges whose mailbox atoms were drained before this slice.
+    pub(super) fn acknowledge_ready(&self, pid: u64) {
+        if let Ok(records) = self.records.lock()
+            && let Some(record) = records.get(&pid)
+        {
+            record.ready_pending.store(false, Ordering::Release);
+        }
+    }
+
+    /// Reports a READY edge queued while the current process snapshot is executing.
+    pub(super) fn ready_pending(&self, pid: u64) -> bool {
+        self.records
+            .lock()
+            .ok()
+            .and_then(|records| {
+                records
+                    .get(&pid)
+                    .map(|record| record.ready_pending.load(Ordering::Acquire))
+            })
+            .unwrap_or(false)
     }
 
     /// R7: records one serviced slice for `pid`. Bumped at the head of every
@@ -2171,6 +2200,7 @@ impl ConnectionRuntime {
                 connection_incarnation,
                 registration: None,
                 readiness: None,
+                ready_pending: Arc::new(AtomicBool::new(false)),
                 fd_guard,
             },
         );
@@ -2499,6 +2529,9 @@ struct ConnectionRecord {
     registration: Option<WorkerRegistration>,
     /// Host-reachable identity for ACK'd deregistration after external death.
     readiness: Option<ReadinessRegistration>,
+    /// Shared edge set before READY enters beamr's process-table pending queue;
+    /// the executing process reads it at its final probe.
+    ready_pending: Arc<AtomicBool>,
     /// Keeps the fd alive until deregistration has been acknowledged, preventing
     /// stale registration delivery to a subsequently reused descriptor number.
     fd_guard: Option<TcpStream>,

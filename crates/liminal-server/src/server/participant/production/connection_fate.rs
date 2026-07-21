@@ -6,13 +6,15 @@
 
 use liminal_protocol::lifecycle::{
     ActiveBinding, BindingState, BindingTerminalAdmission, BindingTerminalCauseClass,
-    BindingTerminalDisposition, LiveFrontierOwner, ObserverProgressProjection,
-    SealedBindingFateIntent,
+    BindingTerminalDisposition, CommittedDiedTerminal, LiveFrontierOwner,
+    ObserverProgressProjection, SealedBindingFateIntent,
 };
 use liminal_protocol::wire::{BindingEpoch, ParticipantId};
 
+use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 
+use super::connection_fate_allocation::checked_fate_allocations;
 use super::connection_fate_rows::source_operation;
 use super::frontier;
 use super::log::{
@@ -20,6 +22,9 @@ use super::log::{
     StoredTerminalDisposition,
 };
 use super::observer_progress::ObserverProgressSourceMetadata;
+use super::outbox_projection::{
+    ReplayedProjectionFacts, capture_projection_prestate, project_committed_source,
+};
 use super::state::{
     ConversationAuthority, DurableAppend, PendingBindingFate, PendingSpecificFate,
     PendingSpecificFateTerminal, StateError,
@@ -50,6 +55,14 @@ pub(super) struct ConnectionFateTarget {
 pub(super) struct PreparedConnectionFate {
     source: ConnectionFateSource,
     targets: Vec<ConnectionFateTarget>,
+}
+
+struct SpecificFateOpen {
+    participant_id: ParticipantId,
+    source_sequence: u64,
+    intent: StoredSpecificFateIntent,
+    committed_terminal: Option<CommittedDiedTerminal>,
+    binding_fate: PendingBindingFate,
 }
 
 impl ConversationAuthority {
@@ -127,6 +140,25 @@ impl PreparedConnectionFate {
         authority: &mut ConversationAuthority,
         appender: &dyn DurableAppend,
     ) -> Result<(), StateError> {
+        self.complete_inner(authority, appender, None)
+    }
+
+    /// Completes live fate while staging every installed source/finalizer effect.
+    pub(super) fn complete_with_impact(
+        self,
+        authority: &mut ConversationAuthority,
+        appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
+    ) -> Result<(), StateError> {
+        self.complete_inner(authority, appender, Some(impact))
+    }
+
+    fn complete_inner(
+        self,
+        authority: &mut ConversationAuthority,
+        appender: &dyn DurableAppend,
+        mut impact: Option<&mut DispatchImpactAccumulator>,
+    ) -> Result<(), StateError> {
         for target in &self.targets {
             let Some(slot) = authority.slots.get(&target.participant_id) else {
                 return Err(StateError::invariant(
@@ -160,7 +192,13 @@ impl PreparedConnectionFate {
             }
         }
         for target in self.targets {
-            complete_target(self.source, target, authority, appender)?;
+            complete_target(
+                self.source,
+                target,
+                authority,
+                appender,
+                impact.as_deref_mut(),
+            )?;
         }
         Ok(())
     }
@@ -176,6 +214,7 @@ fn complete_target(
     target: ConnectionFateTarget,
     authority: &mut ConversationAuthority,
     appender: &dyn DurableAppend,
+    mut impact: Option<&mut DispatchImpactAccumulator>,
 ) -> Result<(), StateError> {
     let active = match authority.slots.get(&target.participant_id) {
         Some(slot) => match slot.binding {
@@ -201,27 +240,8 @@ fn complete_target(
             .transpose()?,
         BindingTerminalCauseClass::Detached => None,
     };
-    let next_order = authority.next_order;
-    let next_seq = authority.next_seq;
-    let source_sequence = authority.next_log_sequence;
-    let next_order_after = next_order
-        .checked_add(1)
-        .ok_or(StateError::AllocationExhausted {
-            domain: "transaction order",
-        })?;
-    let next_seq_after = next_seq
-        .checked_add(1)
-        .ok_or(StateError::AllocationExhausted {
-            domain: "delivery sequence",
-        })?;
-    let next_log_sequence_after =
-        authority
-            .next_log_sequence
-            .checked_add(1)
-            .ok_or(StateError::AllocationExhausted {
-                domain: "log sequence",
-            })?;
-
+    let allocations = checked_fate_allocations(authority)?;
+    let source_sequence = allocations.source_sequence;
     let admitted = admit_terminal(authority, active, source_row_class(source))?;
 
     let completed = source_operation(
@@ -231,14 +251,15 @@ fn complete_target(
         admitted.stored_disposition,
         specific_fate_intent,
     );
+    let projection_facts = capture_projection_prestate(authority, &completed.operation);
     authority.route_fate_occurrence(&completed.operation, source_sequence)?;
     appender.append(&completed.operation, authority.next_log_sequence)?;
     authority.install_frontier(admitted.owner)?;
-    authority.next_order = next_order_after;
+    authority.next_order = allocations.next_order;
     if admitted.committed {
-        authority.next_seq = next_seq_after;
+        authority.next_seq = allocations.next_sequence;
     }
-    authority.next_log_sequence = next_log_sequence_after;
+    authority.next_log_sequence = allocations.next_log_sequence;
     let Some(slot) = authority.slots.get_mut(&target.participant_id) else {
         return Err(StateError::invariant(
             "connection-fate target disappeared after durable source append",
@@ -258,32 +279,67 @@ fn complete_target(
     if let Some(projection) = completed.observer_projection {
         record_source_projection(authority, &completed.operation, source_sequence, projection)?;
     }
+    if let Some(impact) = impact.as_deref_mut() {
+        record_terminal_impact(
+            authority,
+            source_sequence,
+            &completed.operation,
+            projection_facts,
+            target.participant_id,
+            impact,
+        )?;
+    }
     if let Some(intent) = specific_fate_intent {
         let binding_fate = binding_fate.ok_or_else(|| {
             StateError::invariant("durable Died intent has no binding-fate authority")
         })?;
         open_specific_fate(
             authority,
-            target.participant_id,
-            source_sequence,
-            intent,
-            completed.committed_died_terminal,
-            binding_fate,
+            SpecificFateOpen {
+                participant_id: target.participant_id,
+                source_sequence,
+                intent,
+                committed_terminal: completed.committed_died_terminal,
+                binding_fate,
+            },
             appender,
+            impact,
         )?;
     }
     Ok(())
 }
 
+fn record_terminal_impact(
+    authority: &ConversationAuthority,
+    source_sequence: u64,
+    operation: &StoredOperation,
+    projection_facts: ReplayedProjectionFacts,
+    participant_id: ParticipantId,
+    impact: &mut DispatchImpactAccumulator,
+) -> Result<(), StateError> {
+    if let Some(projection) =
+        project_committed_source(authority, source_sequence, operation, projection_facts)?
+    {
+        authority.record_published_projection(&projection, impact)?;
+    }
+    authority.record_binding_changed(participant_id, impact);
+    authority.record_episode_changed(impact);
+    Ok(())
+}
+
 fn open_specific_fate(
     authority: &mut ConversationAuthority,
-    participant_id: ParticipantId,
-    source_sequence: u64,
-    intent: StoredSpecificFateIntent,
-    committed_terminal: Option<liminal_protocol::lifecycle::CommittedDiedTerminal>,
-    binding_fate: PendingBindingFate,
+    prepared: SpecificFateOpen,
     appender: &dyn DurableAppend,
+    impact: Option<&mut DispatchImpactAccumulator>,
 ) -> Result<(), StateError> {
+    let SpecificFateOpen {
+        participant_id,
+        source_sequence,
+        intent,
+        committed_terminal,
+        binding_fate,
+    } = prepared;
     let terminal = committed_terminal.map(|terminal| PendingSpecificFateTerminal {
         terminal,
         source: StoredOrdinaryTerminalSource::DiedCommitted {
@@ -310,6 +366,9 @@ fn open_specific_fate(
     let completes_without_terminal = matches!(intent, StoredSpecificFateIntent::Recovered { .. });
     if committed_terminal.is_some() || completes_without_terminal {
         authority.complete_pending_specific_fate(participant_id, appender)?;
+        if let Some(impact) = impact {
+            authority.record_episode_changed(impact);
+        }
     }
     Ok(())
 }

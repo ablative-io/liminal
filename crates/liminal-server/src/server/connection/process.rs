@@ -237,7 +237,7 @@ impl ConnectionProcess {
         }
         #[cfg(test)]
         let barrier_staged = self.runtime.run_pre_wait_barrier();
-        match self.final_probe(pid) {
+        match self.final_probe(pid, ctx) {
             Ok(true) => {
                 #[cfg(test)]
                 if barrier_staged {
@@ -648,8 +648,10 @@ impl ConnectionProcess {
         Ok(())
     }
 
-    /// Post-arm C1/C4 barrier. Each query is nonblocking and non-consuming.
-    fn final_probe(&self, pid: u64) -> Result<bool, ServerError> {
+    /// Post-arm C1/C4 barrier. Each query is nonblocking and non-consuming,
+    /// including the native mailbox so READY enqueued by this slice cannot be
+    /// mistaken for quiescence after its inbox work was already consumed.
+    fn final_probe(&self, pid: u64, ctx: &NativeContext<'_>) -> Result<bool, ServerError> {
         let socket_ready = if let Some(stream) = self.stream.as_ref() {
             let mut byte = [0_u8; 1];
             match stream.peek(&mut byte) {
@@ -696,7 +698,9 @@ impl ConnectionProcess {
             || subscription_ready
             || participant_ready
             || reply_ready
-            || self.runtime.has_control(pid))
+            || self.runtime.has_control(pid)
+            || self.runtime.ready_pending(pid)
+            || ctx.has_messages())
     }
 
     fn handle_control(&mut self, pid: u64, control: ConnectionControl) -> Option<NativeOutcome> {
@@ -858,6 +862,7 @@ impl NativeHandler for ConnectionProcess {
                 return outcome;
             }
         }
+        self.runtime.acknowledge_ready(pid);
         self.handle_slice(pid, ctx)
     }
 }

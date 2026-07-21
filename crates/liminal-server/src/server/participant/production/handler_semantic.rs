@@ -13,9 +13,10 @@ use liminal_protocol::wire::{
 
 use crate::server::participant::{
     ConnectionFateWorkItem, ObserverPublicationTarget, ParticipantConnectionContext,
-    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublication,
-    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSemanticOutcome,
-    ParticipantServiceFatal, dispatch_impact::DispatchImpactAccumulator,
+    ParticipantConnectionConversations, ParticipantConnectionFateOutcome,
+    ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
+    ParticipantSemanticHandler, ParticipantSemanticOutcome, ParticipantServiceFatal,
+    dispatch_impact::DispatchImpactAccumulator,
 };
 
 use super::barrier::{ArmOutcome, OperationFacts};
@@ -188,22 +189,15 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         &self,
         work_item: ConnectionFateWorkItem,
     ) -> Result<(), ParticipantSemanticError> {
-        self.ensure_service_live()?;
-        for conversation_id in work_item.tracked_conversations.iter().copied() {
-            let result =
-                self.with_conversation_fate_source(conversation_id, |authority, appender| {
-                    let transaction = authority.prepare_connection_fate_transaction(&work_item);
-                    transaction.complete(authority, appender)
-                });
-            if let Err(error) = result {
-                let fatal =
-                    self.latch_connection_fate_fatal(work_item.open_sequence, conversation_id)?;
-                return Err(ParticipantSemanticError::Internal {
-                    message: format!("{fatal}: {error}"),
-                });
-            }
-        }
-        Ok(())
+        self.apply_connection_fate_with_impacts(&work_item)
+            .into_result()
+    }
+
+    fn handle_connection_fate_with_impact(
+        &self,
+        work_item: ConnectionFateWorkItem,
+    ) -> ParticipantConnectionFateOutcome {
+        self.apply_connection_fate_with_impacts(&work_item)
     }
 
     fn repair_unclean_server_restart(
@@ -212,11 +206,20 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
     ) -> Result<(), ParticipantSemanticError> {
         self.ensure_service_live()?;
         for conversation_id in self.registered_conversation_ids()? {
-            self.with_conversation_fate_source(conversation_id, |authority, appender| {
-                let transaction = authority
-                    .prepare_unclean_server_restart_transaction(current_server_incarnation)?;
-                transaction.complete(authority, appender)
-            })?;
+            self.with_conversation_fate_source(
+                conversation_id,
+                None,
+                |authority, appender, impact| {
+                    if impact.is_some() {
+                        return Err(StateError::invariant(
+                            "startup connection-fate repair gained a dispatch impact owner",
+                        ));
+                    }
+                    let transaction = authority
+                        .prepare_unclean_server_restart_transaction(current_server_incarnation)?;
+                    transaction.complete(authority, appender)
+                },
+            )?;
         }
         Ok(())
     }

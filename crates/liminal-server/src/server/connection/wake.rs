@@ -19,7 +19,8 @@
 //! lost wake. Capturing the connection scheduler handle here, once, at install,
 //! is what closes that hazard.
 
-use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 use beamr::atom::Atom;
 use beamr::scheduler::Scheduler;
@@ -42,6 +43,7 @@ pub struct ReadyWaker {
     scheduler: Weak<Scheduler>,
     pid: u64,
     ready_atom: Atom,
+    ready_pending: Arc<AtomicBool>,
     #[cfg(test)]
     fire_probe: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
@@ -60,11 +62,17 @@ impl ReadyWaker {
     /// Captures the connection scheduler's enqueue handle for `pid`. Called at
     /// notifier-install time on the connection's own slice, so the handle is the
     /// connection scheduler's, not the firing caller's ambient one (§1.2(2)).
-    pub(crate) fn new(scheduler: &std::sync::Arc<Scheduler>, pid: u64, ready_atom: Atom) -> Self {
+    pub(crate) fn new(
+        scheduler: &Arc<Scheduler>,
+        pid: u64,
+        ready_atom: Atom,
+        ready_pending: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             scheduler: std::sync::Arc::downgrade(scheduler),
             pid,
             ready_atom,
+            ready_pending,
             #[cfg(test)]
             fire_probe: None,
         }
@@ -72,11 +80,12 @@ impl ReadyWaker {
 
     /// Creates an event-counting waker without a scheduler for readiness tests.
     #[cfg(test)]
-    pub(crate) const fn for_test(probe: std::sync::Arc<std::sync::atomic::AtomicU64>) -> Self {
+    pub(crate) fn for_test(probe: Arc<std::sync::atomic::AtomicU64>) -> Self {
         Self {
             scheduler: Weak::new(),
             pid: 0,
             ready_atom: Atom::OK,
+            ready_pending: Arc::new(AtomicBool::new(false)),
             fire_probe: Some(probe),
         }
     }
@@ -97,6 +106,7 @@ impl ReadyWaker {
         let Some(scheduler) = self.scheduler.upgrade() else {
             return false;
         };
+        self.ready_pending.store(true, Ordering::Release);
         scheduler.enqueue_atom_message(self.pid, self.ready_atom)
     }
 }
