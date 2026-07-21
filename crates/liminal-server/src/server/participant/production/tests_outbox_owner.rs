@@ -7,12 +7,16 @@ use liminal::protocol::{encode, encoded_len};
 use liminal_protocol::lifecycle::{
     LiveFrontierOwner, RecipientAckObligations, RecordAdmissionCommit,
 };
-use liminal_protocol::wire::{ParticipantRecord, ServerPush};
+use liminal_protocol::wire::{
+    BindingEpoch, ConnectionIncarnation, Generation, MarkerAck, ParticipantRecord, ServerPush,
+};
 
 use crate::server::participant::encode_server_push;
 
 use super::outbox::{ConversationOutbox, ConversationOutboxError, ConversationOutboxLimits};
-use super::outbox_log::{OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord};
+use super::outbox_log::{
+    OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord, StoredMarkerAckCommitted,
+};
 use super::outbox_projection::ReplayedProjectionFacts;
 use super::outbox_replay::ExtensionMerge;
 
@@ -341,6 +345,63 @@ fn live_recipient_obligation_bound_rejects_checked_product_overflow() {
             name: "UNIT2_MAX_LIVE_RECIPIENT_OBLIGATIONS"
         })
     ));
+}
+
+#[test]
+fn marker_cursor_provenance_reconciles_without_consuming_outbox_state() -> Result<(), Box<dyn Error>>
+{
+    let marker_cursor = 10;
+    let offered_cursor = marker_cursor + 2;
+    let binding_epoch = BindingEpoch::new(ConnectionIncarnation::new(4, 2), Generation::ONE);
+    let marker = OutboxRow::MarkerAckCommitted(StoredMarkerAckCommitted {
+        request: MarkerAck {
+            conversation_id: CONVERSATION,
+            participant_id: RECIPIENT,
+            capability_generation: Generation::ONE,
+            marker_delivery_seq: marker_cursor,
+        },
+        receiving_binding_epoch: binding_epoch,
+        offered_marker_delivery_seq: marker_cursor,
+        delivered_binding_epoch: binding_epoch,
+        from_cursor: 0,
+        resulting_cursor: marker_cursor,
+        base_log_head: 0,
+        extension_sequence: 0,
+    });
+    let rows = vec![(0, marker)];
+    let live = restore_owner(rows.clone())?;
+    let cold = restore_owner(rows)?;
+    let before = (
+        live.next_extension_sequence(),
+        live.ack_through(RECIPIENT),
+        live.live_record_count(),
+        live.live_recipient_obligation_count(),
+        live.charged_bytes(),
+    );
+
+    assert_eq!(
+        live.dispatch_after(RECIPIENT, marker_cursor, Some(offered_cursor))?,
+        offered_cursor
+    );
+    assert_eq!(
+        cold.dispatch_after(RECIPIENT, marker_cursor, None)?,
+        marker_cursor
+    );
+    assert!(matches!(
+        live.dispatch_after(RECIPIENT, marker_cursor + 1, None),
+        Err(ConversationOutboxError::ProtocolCursorProvenance { .. })
+    ));
+    assert_eq!(
+        (
+            live.next_extension_sequence(),
+            live.ack_through(RECIPIENT),
+            live.live_record_count(),
+            live.live_recipient_obligation_count(),
+            live.charged_bytes(),
+        ),
+        before
+    );
+    Ok(())
 }
 
 macro_rules! assert_not_impl {

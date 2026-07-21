@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use liminal_protocol::lifecycle::{
-    BindingState, ObligationDebtDispatchDecision, decide_obligation_debt_dispatch,
+    BindingState, FrontierBinding, ObligationDebtDispatchDecision, decide_obligation_debt_dispatch,
 };
 use liminal_protocol::wire::{
     BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, ObserverRecoveryHandshake,
@@ -317,17 +317,31 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         let Some(dispatch_state) = authority.obligation_debt_dispatch() else {
             return Err(publication_owner_missing(conversation_id));
         };
-        let offered_through = offered
+        let Some((FrontierBinding::Bound(protocol_epoch), protocol_cursor)) =
+            dispatch_state.frontier_participant(participant_id)
+        else {
+            return Err(dispatch_invariant(
+                "current binding is absent from protocol authority",
+            ));
+        };
+        if protocol_epoch != binding_epoch {
+            return Err(dispatch_invariant(
+                "server binding differs from protocol authority",
+            ));
+        }
+        let offered_cursor = offered
             .filter(|progress| progress.binding_epoch == binding_epoch)
-            .map_or_else(
-                || outbox.durable_ack_through(participant_id),
-                |progress| progress.through_seq,
-            );
+            .map(|progress| progress.through_seq);
+        let dispatch_after = outbox
+            .dispatch_after(participant_id, protocol_cursor, offered_cursor)
+            .map_err(|error| {
+                dispatch_invariant(format!("cursor reconciliation failed: {error}"))
+            })?;
         let decision = decide_obligation_debt_dispatch(
             dispatch_state,
             participant_id,
             binding_epoch,
-            offered_through,
+            dispatch_after,
             |participant_id, binding_epoch, dispatch_after| {
                 outbox
                     .delivery_after(participant_id, dispatch_after)
@@ -463,6 +477,12 @@ fn publication_owner_poisoned(conversation_id: ConversationId) -> ParticipantSem
         message: format!(
             "participant conversation {conversation_id} owner lock is poisoned during publication"
         ),
+    }
+}
+
+fn dispatch_invariant(message: impl Into<String>) -> ParticipantSemanticError {
+    ParticipantSemanticError::Internal {
+        message: format!("obligation-debt dispatch invariant: {}", message.into()),
     }
 }
 

@@ -80,6 +80,22 @@ impl ObligationDebtDispatchState {
         }
     }
 
+    /// Returns one participant's binding-tagged protocol cursor from the live
+    /// frontier on both owner variants.
+    #[must_use]
+    pub fn frontier_participant(
+        &self,
+        participant_id: ParticipantId,
+    ) -> Option<(FrontierBinding, DeliverySeq)> {
+        self.frontier()
+            .frontiers()
+            .active_identities()
+            .participants()
+            .iter()
+            .find(|participant| participant.participant_index() == participant_id)
+            .map(|participant| (participant.binding(), participant.cursor()))
+    }
+
     /// Returns one participant's binding-tagged episode cursor on Owed.
     #[must_use]
     pub fn participant(

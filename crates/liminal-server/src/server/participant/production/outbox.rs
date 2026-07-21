@@ -1,12 +1,13 @@
 //! Move-only in-memory owner rebuilt from the Unit 2 extension stream.
 
 mod limits;
+mod selection;
 mod validation;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use liminal_protocol::lifecycle::{RecipientAckObligations, RecipientAckObligationsError};
-use liminal_protocol::wire::{ParticipantDelivery, ParticipantId, ParticipantRecord};
+use liminal_protocol::lifecycle::RecipientAckObligationsError;
+use liminal_protocol::wire::{ParticipantDelivery, ParticipantId};
 
 use super::outbox_log::{
     OutboxLogError, OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord, encode_row,
@@ -91,6 +92,31 @@ pub(super) enum ConversationOutboxError {
         outbox_ack_through: u64,
         acknowledged_through: u64,
     },
+    /// A protocol cursor lead was not justified by the exact marker-ack chain.
+    #[error(
+        "Unit 2 protocol cursor {protocol_cursor} for participant {participant_id} is not the marker-reconciled cursor {marker_reconciled_cursor} after outbox ack {outbox_ack_through}"
+    )]
+    ProtocolCursorProvenance {
+        participant_id: ParticipantId,
+        outbox_ack_through: u64,
+        marker_reconciled_cursor: u64,
+        protocol_cursor: u64,
+    },
+    /// A marker row did not continue the exact durable cursor chain.
+    #[error(
+        "Unit 2 marker cursor for participant {participant_id} started at {actual}, expected {expected}"
+    )]
+    MarkerCursorPrestate {
+        participant_id: ParticipantId,
+        expected: u64,
+        actual: u64,
+    },
+    /// A marker row did not advance its participant cursor.
+    #[error("Unit 2 marker cursor for participant {participant_id} did not advance from {from}")]
+    MarkerCursorNonadvancing {
+        participant_id: ParticipantId,
+        from: u64,
+    },
     /// Checked live charge arithmetic overflowed.
     #[error("Unit 2 live outbox charge overflowed")]
     ChargeOverflow,
@@ -141,6 +167,7 @@ pub(super) struct ConversationOutbox {
     ack_sources: BTreeMap<u64, (ParticipantId, u64)>,
     all_obligations: BTreeMap<ParticipantId, BTreeSet<u64>>,
     ack_frontiers: BTreeMap<ParticipantId, u64>,
+    marker_ack_frontiers: BTreeMap<ParticipantId, u64>,
     next_live_obligations: BTreeMap<ParticipantId, u64>,
     retired: BTreeSet<ParticipantId>,
     highest_delivery_seq: u64,
@@ -164,6 +191,7 @@ impl ConversationOutbox {
             ack_sources: BTreeMap::new(),
             all_obligations: BTreeMap::new(),
             ack_frontiers: BTreeMap::new(),
+            marker_ack_frontiers: BTreeMap::new(),
             next_live_obligations: BTreeMap::new(),
             retired: BTreeSet::new(),
             highest_delivery_seq: 0,
@@ -203,7 +231,7 @@ impl ConversationOutbox {
                 participant_id,
                 through_seq,
             } => self.apply_ack(source_log_sequence, participant_id, through_seq)?,
-            OutboxRow::MarkerAckCommitted(_) => {}
+            OutboxRow::MarkerAckCommitted(marker) => self.apply_marker_ack(&marker)?,
         }
         self.next_extension_sequence = self.next_extension_sequence.checked_add(1).ok_or(
             ConversationOutboxError::ExtensionSequence {
@@ -339,6 +367,36 @@ impl ConversationOutbox {
         Ok(())
     }
 
+    fn apply_marker_ack(
+        &mut self,
+        marker: &super::outbox_log::StoredMarkerAckCommitted,
+    ) -> Result<(), ConversationOutboxError> {
+        let participant_id = marker.request.participant_id;
+        let durable_ack = self.durable_ack_through(participant_id);
+        let marker_cursor = self
+            .marker_ack_frontiers
+            .get(&participant_id)
+            .copied()
+            .unwrap_or(durable_ack);
+        let expected = durable_ack.max(marker_cursor);
+        if marker.from_cursor != expected {
+            return Err(ConversationOutboxError::MarkerCursorPrestate {
+                participant_id,
+                expected,
+                actual: marker.from_cursor,
+            });
+        }
+        if marker.resulting_cursor <= marker.from_cursor {
+            return Err(ConversationOutboxError::MarkerCursorNonadvancing {
+                participant_id,
+                from: marker.from_cursor,
+            });
+        }
+        self.marker_ack_frontiers
+            .insert(participant_id, marker.resulting_cursor);
+        Ok(())
+    }
+
     fn discharge_through(
         &mut self,
         participant_id: ParticipantId,
@@ -416,181 +474,5 @@ impl ConversationOutbox {
                     .or_insert(*sequence);
             }
         }
-    }
-
-    /// Sorted participants that still own at least one durable obligation.
-    pub(super) fn live_recipients(&self) -> impl Iterator<Item = ParticipantId> + '_ {
-        self.next_live_obligations.keys().copied()
-    }
-
-    /// Selects the least live durable obligation strictly after `offered_through`
-    /// for one participant. Acked obligations have already been removed from each
-    /// live record, so this simultaneously enforces the durable ack frontier.
-    pub(super) fn delivery_after(
-        &self,
-        participant_id: ParticipantId,
-        offered_through: u64,
-    ) -> Option<ParticipantDelivery> {
-        self.records
-            .range((
-                std::ops::Bound::Excluded(offered_through),
-                std::ops::Bound::Unbounded,
-            ))
-            .find_map(|(_, record)| {
-                record
-                    .recipients
-                    .contains(&participant_id)
-                    .then(|| record.delivery.clone())
-            })
-    }
-
-    /// Seals one participant's current durable-obligation index for protocol
-    /// ack selection and returns the corresponding reconciled scalar audit.
-    pub(super) fn recipient_ack_obligations(
-        &self,
-        participant_id: ParticipantId,
-        acknowledged_through: u64,
-    ) -> Result<(RecipientAckObligations, u64), ConversationOutboxError> {
-        let outbox_ack_through = self.durable_ack_through(participant_id);
-        if outbox_ack_through > acknowledged_through {
-            return Err(ConversationOutboxError::AckFrontierAhead {
-                participant_id,
-                outbox_ack_through,
-                acknowledged_through,
-            });
-        }
-        let delivery_sequences: Vec<_> = self
-            .all_obligations
-            .get(&participant_id)
-            .into_iter()
-            .flat_map(BTreeSet::iter)
-            .copied()
-            .filter(|delivery_seq| *delivery_seq > acknowledged_through)
-            .collect();
-        let contiguously_available_through = delivery_sequences
-            .last()
-            .copied()
-            .unwrap_or(acknowledged_through);
-        let obligations = RecipientAckObligations::try_new(
-            participant_id,
-            acknowledged_through,
-            delivery_sequences,
-        )
-        .map_err(|error| ConversationOutboxError::AckObligations {
-            participant_id,
-            error,
-        })?;
-        Ok((obligations, contiguously_available_through))
-    }
-
-    /// Durable cumulative ack cursor used when a new binding discards an old
-    /// connection's volatile offered progress.
-    pub(super) fn durable_ack_through(&self, participant_id: ParticipantId) -> u64 {
-        self.ack_frontiers
-            .get(&participant_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    /// Whether this exact participant still owns the named marker obligation.
-    pub(super) fn is_marker_obligation(
-        &self,
-        participant_id: ParticipantId,
-        delivery_seq: u64,
-    ) -> bool {
-        self.records.get(&delivery_seq).is_some_and(|record| {
-            record.recipients.contains(&participant_id)
-                && matches!(
-                    record.delivery.record,
-                    ParticipantRecord::HistoryCompacted { .. }
-                )
-        })
-    }
-
-    pub(super) const fn next_extension_sequence(&self) -> u64 {
-        self.next_extension_sequence
-    }
-
-    #[cfg(test)]
-    pub(super) const fn charged_bytes(&self) -> u64 {
-        self.charged_bytes
-    }
-
-    #[cfg(test)]
-    pub(super) fn ack_through(&self, participant_id: ParticipantId) -> u64 {
-        self.ack_frontiers
-            .get(&participant_id)
-            .copied()
-            .unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    pub(super) fn next_live(&self, participant_id: ParticipantId) -> Option<u64> {
-        self.next_live_obligations.get(&participant_id).copied()
-    }
-
-    #[cfg(test)]
-    pub(super) fn live_record_count(&self) -> usize {
-        self.records.len()
-    }
-
-    #[cfg(test)]
-    pub(super) const fn live_recipient_obligation_count(&self) -> u64 {
-        self.live_recipient_obligations
-    }
-
-    #[cfg(test)]
-    pub(super) fn source_batch_count(&self) -> usize {
-        self.source_batches.len()
-    }
-
-    #[cfg(test)]
-    pub(super) fn retained_authority_measurements(
-        &self,
-    ) -> Result<RetainedAuthorityMeasurements, ConversationOutboxError> {
-        let source_batch_owned_bytes =
-            self.source_batches
-                .iter()
-                .try_fold(0_usize, |bytes, (_source_sequence, canonical)| {
-                    bytes
-                        .checked_add(std::mem::size_of::<u64>())
-                        .and_then(|bytes| bytes.checked_add(canonical.len()))
-                });
-        let ack_source_owned_bytes = self.ack_sources.len().checked_mul(
-            std::mem::size_of::<u64>()
-                .checked_add(std::mem::size_of::<ParticipantId>())
-                .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u64>()))
-                .ok_or(ConversationOutboxError::ChargeOverflow)?,
-        );
-        let obligation_sequence_count = self
-            .all_obligations
-            .values()
-            .try_fold(0_usize, |count, sequences| {
-                count.checked_add(sequences.len())
-            });
-        let all_obligations_owned_bytes = self
-            .all_obligations
-            .len()
-            .checked_mul(std::mem::size_of::<ParticipantId>())
-            .and_then(|participant_bytes| {
-                obligation_sequence_count.and_then(|count| {
-                    count
-                        .checked_mul(std::mem::size_of::<u64>())
-                        .and_then(|sequence_bytes| participant_bytes.checked_add(sequence_bytes))
-                })
-            });
-        Ok(RetainedAuthorityMeasurements {
-            source_batch_count: self.source_batches.len(),
-            source_batch_owned_bytes: source_batch_owned_bytes
-                .ok_or(ConversationOutboxError::ChargeOverflow)?,
-            ack_source_count: self.ack_sources.len(),
-            ack_source_owned_bytes: ack_source_owned_bytes
-                .ok_or(ConversationOutboxError::ChargeOverflow)?,
-            obligation_participant_count: self.all_obligations.len(),
-            obligation_sequence_count: obligation_sequence_count
-                .ok_or(ConversationOutboxError::ChargeOverflow)?,
-            all_obligations_owned_bytes: all_obligations_owned_bytes
-                .ok_or(ConversationOutboxError::ChargeOverflow)?,
-        })
     }
 }
