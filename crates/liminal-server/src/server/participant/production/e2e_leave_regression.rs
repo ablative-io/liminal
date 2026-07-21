@@ -12,9 +12,14 @@ use liminal_protocol::wire::{
     encoded_len,
 };
 
+use super::e2e_cold_all_shapes_fixture::{
+    BoundClosePath, decoded_history_from_store, expected_bound_close_fate,
+    semantic_rows_and_typed_fate_suffix,
+};
 use super::e2e_tests::{SocketFixture, SocketPeer};
 use super::tests::test_participant_config;
 use super::tests_marker_ack_fixture::marker_fixture_config;
+use super::tests_outbox_barrier_fixture::OutboxBarrierKind;
 use super::tests_outbox_log::measured_fixed_outbox_overhead;
 
 pub(super) const CONVERSATION: u64 = 527;
@@ -130,7 +135,7 @@ fn commit_and_deliver_record(
 }
 
 fn reopened_fixture(data_dir: &Path) -> Result<SocketFixture, Box<dyn Error>> {
-    SocketFixture::start_replay_gated_with_config(data_dir, marker_fixture_config())
+    SocketFixture::start_replay_gated_with_barriers(data_dir, marker_fixture_config())
 }
 
 #[test]
@@ -167,15 +172,57 @@ fn leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_re
         observer.participant_id(),
         leaver.participant_id(),
     ];
-    let durable = [
+    let semantic_durable = [
         primary.outbox_owner_facts(CONVERSATION, ids[0])?,
         primary.outbox_owner_facts(CONVERSATION, ids[1])?,
         after,
     ];
+    let (base_before_teardown, _) =
+        decoded_history_from_store(primary.durable_store(), CONVERSATION)?;
+    let (semantic_rows, pre_teardown_fate_suffix) =
+        semantic_rows_and_typed_fate_suffix(base_before_teardown)?;
+    assert!(pre_teardown_fate_suffix.is_empty());
 
+    // Derive §10.1's exact suffix from this test's observed Bound receipts and
+    // the two classified close paths, then serialize those paths for an ordered
+    // census after the final semantic Left row.
+    let expected_fate_suffix = [
+        expected_bound_close_fate(
+            observer.participant_id(),
+            observer.origin_binding_epoch(),
+            BoundClosePath::DroppedSocket,
+        ),
+        expected_bound_close_fate(
+            sender.participant_id(),
+            sender.origin_binding_epoch(),
+            BoundClosePath::ServerStop,
+        ),
+    ];
+    primary.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    peer.shutdown_transport()?;
+    primary.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    primary.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
     drop(peer);
     drop(original);
     drop(replacement);
+    primary.force_close_and_wait();
+
+    let durable = [
+        primary.outbox_owner_facts(CONVERSATION, ids[0])?,
+        primary.outbox_owner_facts(CONVERSATION, ids[1])?,
+        primary.outbox_owner_facts(CONVERSATION, ids[2])?,
+    ];
+    for (before, after) in semantic_durable.iter().zip(&durable) {
+        assert_eq!(after.ack_through, before.ack_through);
+        assert_eq!(after.next_live_obligation, before.next_live_obligation);
+    }
+    let (base_after_teardown, _) =
+        decoded_history_from_store(primary.durable_store(), CONVERSATION)?;
+    let (teardown_semantic_rows, fate_suffix) =
+        semantic_rows_and_typed_fate_suffix(base_after_teardown)?;
+    assert_eq!(teardown_semantic_rows, semantic_rows);
+    assert_eq!(fate_suffix, expected_fate_suffix);
+
     primary.stop();
     let mut reopened = reopened_fixture(&data_dir)?;
     for (participant_id, expected) in ids.into_iter().zip(durable) {
