@@ -139,6 +139,8 @@ mod tests_w1b_fate_completion;
 #[cfg(test)]
 mod tests_w1b_fenced_codec;
 #[cfg(test)]
+mod tests_w1b_fenced_finalizer;
+#[cfg(test)]
 mod tests_w1b_marker_source;
 #[cfg(test)]
 mod tests_w1b_occurrence;

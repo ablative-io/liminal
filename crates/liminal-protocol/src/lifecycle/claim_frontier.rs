@@ -2123,8 +2123,11 @@ impl ClaimFrontiers {
             restore.historical_marker_deliveries,
             restore.conversation_id,
             &active_identities,
-            &retained_records,
-            &historical_causal_authorities,
+            &MarkerDeliverySources {
+                retained: &retained_records,
+                historical: &historical_causal_authorities,
+                candidates: &restore.sequence.immutable_candidates,
+            },
             restore.retained_record_limit,
             sequence_ledger,
         )
@@ -2531,9 +2534,11 @@ impl ClaimFrontiers {
         ) {
             return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
         }
-        if !self.sequence.immutable_candidates.is_empty()
-            || !self.order.immutable_candidates.is_empty()
-        {
+        let finalizes_pending = appended_records.len() == 2;
+        let pending_terminal_matches = self.pending_fenced_terminal_matches(appended_records);
+        let candidates_empty = self.sequence.immutable_candidates.is_empty()
+            && self.order.immutable_candidates.is_empty();
+        if !(candidates_empty || finalizes_pending && pending_terminal_matches) {
             return Err(Box::new((self, LiveFrontierTransitionError::Precedence)));
         }
         if !Self::fenced_records_match(
@@ -2541,6 +2546,7 @@ impl ClaimFrontiers {
             sequence_recovery,
             order_recovery,
             appended_records,
+            pending_terminal_matches,
         ) {
             return Err(Box::new((
                 self,
@@ -2556,13 +2562,9 @@ impl ClaimFrontiers {
                 LiveFrontierTransitionError::RecordPosition,
             )));
         }
-        let Ok(sequence_ledger) = self.sequence.ledger.apply_fenced_recovery() else {
-            return Err(Box::new((
-                self,
-                LiveFrontierTransitionError::ResultingFrontier,
-            )));
-        };
-        let Ok(order_ledger) = self.order.ledger.apply_fenced_recovery() else {
+        let Some((sequence_ledger, order_ledger)) =
+            apply_fenced_ledgers(self.sequence.ledger, self.order.ledger, finalizes_pending)
+        else {
             return Err(Box::new((
                 self,
                 LiveFrontierTransitionError::ResultingFrontier,
@@ -2635,6 +2637,7 @@ impl ClaimFrontiers {
         sequence_recovery: RecoverySequenceBlock,
         order_recovery: RecoveryOrderBlock,
         appended_records: &[RetainedCausalRecord],
+        pending_terminal_matches: bool,
     ) -> bool {
         let Some(attached) = appended_records.last().copied() else {
             return false;
@@ -2660,6 +2663,7 @@ impl ClaimFrontiers {
             prefix,
         ) {
             (None, None, []) => true,
+            (None, None, [_]) => pending_terminal_matches,
             (Some(sequence_terminal), Some(order_terminal), [terminal]) => {
                 sequence_terminal.owner == order_terminal.owner
                     && terminal.delivery_seq == sequence_terminal.delivery_seq
@@ -2670,6 +2674,32 @@ impl ClaimFrontiers {
             }
             _ => false,
         }
+    }
+
+    fn pending_fenced_terminal_matches(&self, appended_records: &[RetainedCausalRecord]) -> bool {
+        let [terminal, _] = appended_records else {
+            return false;
+        };
+        let RetainedCausalRecordKind::BindingTerminal(owner) = terminal.kind else {
+            return false;
+        };
+        let sequence_matches = self.sequence.immutable_candidates.iter().any(|candidate| {
+            matches!(
+                candidate,
+                ImmutableSequenceCandidate::BindingTerminal {
+                    delivery_seq,
+                    admission_order,
+                    owner: candidate_owner,
+                } if *delivery_seq == terminal.delivery_seq
+                    && *admission_order == terminal.admission_order
+                    && *candidate_owner == owner
+            )
+        });
+        let order_matches = self.order.immutable_candidates.iter().any(|candidate| {
+            candidate.transaction_order == terminal.admission_order.transaction_order()
+                && candidate.candidate_keys.as_slice() == [terminal.admission_order]
+        });
+        sequence_matches && order_matches
     }
 
     fn has_recovery_marker(&self, participant: FrontierParticipant) -> bool {
@@ -3407,6 +3437,26 @@ impl ClaimFrontiers {
             frontiers: self,
         })
     }
+}
+
+fn apply_fenced_ledgers(
+    sequence: SequenceLedger,
+    order: OrderLedger,
+    finalizes_pending: bool,
+) -> Option<(SequenceLedger, OrderLedger)> {
+    let sequence = if finalizes_pending {
+        sequence.apply_fenced_recovery_finalizing_pending()
+    } else {
+        sequence.apply_fenced_recovery()
+    }
+    .ok()?;
+    let order = if finalizes_pending {
+        order.apply_fenced_recovery_finalizing_pending()
+    } else {
+        order.apply_fenced_recovery()
+    }
+    .ok()?;
+    Some((sequence, order))
 }
 
 fn rebuild_unreserved_frontiers(
@@ -4890,11 +4940,15 @@ fn validated_historical_marker_deliveries(
     mut facts: Vec<HistoricalMarkerDeliveryFactRestore>,
     conversation_id: ConversationId,
     active: &ActiveIdentityRanks,
-    retained_records: &[RetainedCausalRecord],
-    historical_causal_authorities: &[HistoricalCausalAuthority],
+    sources: &MarkerDeliverySources<'_>,
     retained_record_limit: u64,
     ledger: SequenceLedger,
 ) -> Result<Vec<HistoricalMarkerDeliveryAuthority>, ClaimFrontierError> {
+    let MarkerDeliverySources {
+        retained: retained_records,
+        historical: historical_causal_authorities,
+        candidates: immutable_candidates,
+    } = *sources;
     if usize_to_u128(facts.len()) > u128::from(retained_record_limit) {
         return Err(sequence_error(
             ledger.required_reserve(),
@@ -4945,6 +4999,21 @@ fn validated_historical_marker_deliveries(
                         | RetainedCausalRecordKind::OrdinaryRecord { .. }
                         | RetainedCausalRecordKind::CompactionMarker { .. } => None,
                     })
+            })
+            .or_else(|| {
+                immutable_candidates
+                    .iter()
+                    .find_map(|candidate| match candidate {
+                        ImmutableSequenceCandidate::BindingTerminal {
+                            admission_order,
+                            owner,
+                            ..
+                        } if binding_terminal_matches_delivery(*owner, fact) => {
+                            Some(*admission_order)
+                        }
+                        ImmutableSequenceCandidate::BindingTerminal { .. }
+                        | ImmutableSequenceCandidate::Marker(_) => None,
+                    })
             });
         let historical_epoch_is_backed = matching_record.is_some_and(|marker_record| {
             current_bound
@@ -4976,6 +5045,12 @@ fn binding_terminal_matches_delivery(
 ) -> bool {
     (owner.participant_index, owner.binding_epoch)
         == (fact.participant_index, fact.delivered_binding_epoch)
+}
+
+struct MarkerDeliverySources<'a> {
+    retained: &'a [RetainedCausalRecord],
+    historical: &'a [HistoricalCausalAuthority],
+    candidates: &'a [ImmutableSequenceCandidate],
 }
 
 struct BindingOriginValidation<'a> {

@@ -22,7 +22,7 @@ pub(super) struct AppliedDcrAttach {
     pub(super) next_terminal_order: u64,
 }
 
-fn frontier_owner(
+pub(super) fn frontier_owner(
     context: DcrContext,
     recovery: DetachedCredentialRecovery,
     fixture: DcrFrontiers,
