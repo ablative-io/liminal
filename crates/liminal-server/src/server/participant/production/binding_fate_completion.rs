@@ -14,13 +14,16 @@ use super::log::{
     StoredRecoveredPresentation, StoredSpecificFateIntent,
 };
 use super::observer_progress::ObserverProgressSourceMetadata;
-use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, StateError};
+use super::state::{
+    ConversationAuthority, DurableAppend, PendingBindingFate, PendingSpecificFate,
+    PendingSpecificFateTerminal, PreparedOrdinaryFinalizer, StateError,
+};
 
 #[derive(Clone, Copy)]
 struct OrdinaryCompletion {
-    died_source_sequence: u64,
     attached_source_sequence: u64,
     terminal: CommittedDiedTerminal,
+    terminal_source: StoredOrdinaryTerminalSource,
 }
 
 #[derive(Clone, Copy)]
@@ -33,21 +36,53 @@ struct RecoveredCompletion {
 }
 
 impl ConversationAuthority {
-    /// Consumes the sole sealed fate token through protocol measurement and
-    /// appends its exact specific row after the owning Died source is durable.
-    pub(super) fn complete_binding_fate_intent(
+    /// Completes one open durable Died intent from its owner-held move-only token.
+    pub(super) fn complete_pending_specific_fate(
         &mut self,
         participant_id: ParticipantId,
-        died_source_sequence: u64,
-        intent: StoredSpecificFateIntent,
-        terminal: Option<CommittedDiedTerminal>,
         appender: &dyn DurableAppend,
     ) -> Result<(), StateError> {
+        let pending = self
+            .pending_specific_fates
+            .remove(&participant_id)
+            .ok_or_else(|| StateError::invariant("binding-fate completion intent is absent"))?;
+        self.complete_binding_fate_intent(participant_id, pending, appender)
+    }
+
+    /// Consumes the sole sealed fate token through protocol measurement and
+    /// appends its exact specific row after the owning Died source is durable.
+    fn complete_binding_fate_intent(
+        &mut self,
+        participant_id: ParticipantId,
+        pending_specific: PendingSpecificFate,
+        appender: &dyn DurableAppend,
+    ) -> Result<(), StateError> {
+        let PendingSpecificFate {
+            died_source_sequence,
+            intent,
+            terminal,
+            binding_fate: pending,
+        } = pending_specific;
         if matches!(intent, StoredSpecificFateIntent::Ordinary { .. }) && terminal.is_none() {
+            self.pending_specific_fates.insert(
+                participant_id,
+                PendingSpecificFate {
+                    died_source_sequence,
+                    intent,
+                    terminal,
+                    binding_fate: pending,
+                },
+            );
             return Ok(());
         }
-        let pending = self.take_pending_binding_fate(participant_id, intent)?;
         let attached_source_sequence = pending.attached_source_sequence;
+        if attached_source_sequence != intent.attached_source_sequence()
+            || !intent_matches_token(intent, &pending)
+        {
+            return Err(StateError::invariant(
+                "durable Died intent disagrees with sealed binding-fate authority",
+            ));
+        }
         let terminal_input = completion_terminal(intent, terminal)?;
         let owner = self.take_frontier()?;
         let prepared =
@@ -58,19 +93,43 @@ impl ConversationAuthority {
                     let error = refused.error();
                     let (owner, token, _) = refused.into_parts();
                     self.install_frontier(owner);
-                    self.restore_pending_binding_fate(
+                    self.pending_specific_fates.insert(
                         participant_id,
-                        PendingBindingFate {
-                            attached_source_sequence,
-                            token,
+                        PendingSpecificFate {
+                            died_source_sequence,
+                            intent,
+                            terminal,
+                            binding_fate: PendingBindingFate {
+                                attached_source_sequence,
+                                token,
+                            },
                         },
-                    )?;
+                    );
                     return Err(StateError::invariant(format!(
                         "binding-fate measurement refused: {error:?}"
                     )));
                 }
             };
         let (owner, fate, _) = prepared.into_parts();
+        self.append_measured_binding_fate(
+            owner,
+            fate,
+            died_source_sequence,
+            intent,
+            terminal,
+            appender,
+        )
+    }
+
+    fn append_measured_binding_fate(
+        &mut self,
+        owner: LiveFrontierOwner,
+        fate: MeasuredBindingFate,
+        died_source_sequence: u64,
+        intent: StoredSpecificFateIntent,
+        terminal: Option<PendingSpecificFateTerminal>,
+        appender: &dyn DurableAppend,
+    ) -> Result<(), StateError> {
         match (intent, fate) {
             (
                 StoredSpecificFateIntent::Ordinary {
@@ -78,22 +137,22 @@ impl ConversationAuthority {
                 },
                 MeasuredBindingFate::Ordinary(fate),
             ) => {
-                let Some(terminal) = terminal else {
+                let Some(finalized) = terminal else {
                     self.install_frontier(owner);
                     return Err(StateError::invariant(
-                        "measured ordinary fate lost its committed Died terminal",
+                        "measured ordinary fate lost its finalized Died terminal",
                     ));
                 };
                 self.append_ordinary_binding_fate(
                     owner,
                     fate,
                     OrdinaryCompletion {
-                        died_source_sequence,
                         attached_source_sequence,
-                        terminal,
+                        terminal: finalized.terminal,
+                        terminal_source: finalized.source,
                     },
                     appender,
-                )?;
+                )
             }
             (
                 StoredSpecificFateIntent::Recovered {
@@ -119,16 +178,15 @@ impl ConversationAuthority {
                         presentation,
                     },
                     appender,
-                )?;
+                )
             }
             _ => {
                 self.install_frontier(owner);
-                return Err(StateError::invariant(
+                Err(StateError::invariant(
                     "measured binding fate class disagrees with durable Died intent",
-                ));
+                ))
             }
         }
-        Ok(())
     }
 
     fn append_ordinary_binding_fate(
@@ -142,9 +200,7 @@ impl ConversationAuthority {
             participant_id: fate.participant_id(),
             last_dead_binding_epoch: fate.last_dead_binding_epoch().into(),
             ordinary_attached_source_sequence: completion.attached_source_sequence,
-            terminal_source: StoredOrdinaryTerminalSource::DiedCommitted {
-                died_source_sequence: completion.died_source_sequence,
-            },
+            terminal_source: completion.terminal_source,
             committed_terminal_audit: StoredCommittedTerminalAudit {
                 cause: stored_died_cause(completion.terminal.cause()),
                 transaction_order: completion.terminal.admission_order().transaction_order(),
@@ -241,27 +297,132 @@ impl ConversationAuthority {
         &mut self,
         appender: &dyn DurableAppend,
     ) -> Result<(), StateError> {
-        let pending = self
+        let prepared = self
+            .prepared_ordinary_finalizers
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for participant_id in prepared {
+            self.complete_prepared_ordinary_finalizer(participant_id, appender)?;
+        }
+        let ready = self
             .pending_specific_fates
             .iter()
-            .map(|(participant_id, pending)| (*participant_id, *pending))
+            .filter_map(|(participant_id, pending)| {
+                (pending.terminal.is_some()
+                    || matches!(pending.intent, StoredSpecificFateIntent::Recovered { .. }))
+                .then_some(*participant_id)
+            })
             .collect::<Vec<_>>();
-        for (participant_id, pending) in pending {
-            let ready = pending.terminal.is_some()
-                || matches!(pending.intent, StoredSpecificFateIntent::Recovered { .. });
-            if !ready {
-                continue;
-            }
-            self.complete_binding_fate_intent(
-                participant_id,
-                pending.died_source_sequence,
-                pending.intent,
-                pending.terminal,
-                appender,
-            )?;
-            self.pending_specific_fates.remove(&participant_id);
+        for participant_id in ready {
+            self.complete_pending_specific_fate(participant_id, appender)?;
         }
         Ok(())
+    }
+
+    /// Measures Ordinary before an enclosing finalizer removes its participant frontier.
+    pub(super) fn prepare_pending_died_finalizer(
+        &mut self,
+        participant_id: ParticipantId,
+        died_source_sequence: u64,
+        terminal: CommittedDiedTerminal,
+        source: StoredOrdinaryTerminalSource,
+        owner: LiveFrontierOwner,
+    ) -> Result<(LiveFrontierOwner, bool), StateError> {
+        let Some(pending) = self.pending_specific_fates.remove(&participant_id) else {
+            return Ok((owner, false));
+        };
+        if pending.died_source_sequence != died_source_sequence
+            || !matches!(pending.intent, StoredSpecificFateIntent::Ordinary { .. })
+            || pending.terminal.is_some()
+        {
+            return Err(StateError::invariant(
+                "pending Died finalizer disagrees with its open Ordinary intent",
+            ));
+        }
+        let attached_source_sequence = pending.binding_fate.attached_source_sequence;
+        if attached_source_sequence != pending.intent.attached_source_sequence()
+            || !intent_matches_token(pending.intent, &pending.binding_fate)
+        {
+            return Err(StateError::invariant(
+                "pending Died finalizer lost its sealed Ordinary authority",
+            ));
+        }
+        let prepared = match owner.prepare_pending_died_ordinary_finalizer(
+            pending.binding_fate.token,
+            terminal,
+            self.observer_progress,
+        ) {
+            Ok(prepared) => prepared,
+            Err(refused) => {
+                let error = refused.error();
+                let (owner, token, _) = refused.into_parts();
+                self.pending_specific_fates.insert(
+                    participant_id,
+                    PendingSpecificFate {
+                        died_source_sequence,
+                        intent: pending.intent,
+                        terminal: None,
+                        binding_fate: PendingBindingFate {
+                            attached_source_sequence,
+                            token,
+                        },
+                    },
+                );
+                self.install_frontier(owner);
+                return Err(StateError::invariant(format!(
+                    "pending Died finalizer measurement refused: {error:?}"
+                )));
+            }
+        };
+        let (owner, fate, finalizer) = prepared.into_parts();
+        if self
+            .prepared_ordinary_finalizers
+            .insert(
+                participant_id,
+                PreparedOrdinaryFinalizer {
+                    attached_source_sequence,
+                    terminal,
+                    terminal_source: source,
+                    fate,
+                    finalizer,
+                },
+            )
+            .is_some()
+        {
+            return Err(StateError::invariant(
+                "pending Died finalizer replaced prepared Ordinary authority",
+            ));
+        }
+        Ok((owner, true))
+    }
+
+    /// Appends one already-measured Ordinary row after its enclosing source is durable.
+    pub(super) fn complete_prepared_ordinary_finalizer(
+        &mut self,
+        participant_id: ParticipantId,
+        appender: &dyn DurableAppend,
+    ) -> Result<(), StateError> {
+        let prepared = self
+            .prepared_ordinary_finalizers
+            .remove(&participant_id)
+            .ok_or_else(|| StateError::invariant("prepared Ordinary finalizer is absent"))?;
+        let owner = self
+            .take_frontier()?
+            .complete_pending_died_ordinary_finalizer(prepared.finalizer)
+            .map_err(|error| {
+                StateError::invariant(format!("Ordinary finalizer floor failed: {error:?}"))
+            })?;
+        self.append_ordinary_binding_fate(
+            owner,
+            prepared.fate,
+            OrdinaryCompletion {
+                attached_source_sequence: prepared.attached_source_sequence,
+                terminal: prepared.terminal,
+                terminal_source: prepared.terminal_source,
+            },
+            appender,
+        )
     }
 
     pub(super) fn replay_specific_fate(
@@ -278,15 +439,22 @@ impl ConversationAuthority {
                 ));
             }
         };
-        let pending = self
-            .pending_specific_fates
-            .get(&participant_id)
-            .copied()
-            .ok_or_else(|| {
-                StateError::invariant(
-                    "specific-fate row has no earlier unconsumed durable Died intent",
-                )
-            })?;
+        if matches!(operation, StoredOperation::Ordinary { .. })
+            && self
+                .prepared_ordinary_finalizers
+                .contains_key(&participant_id)
+        {
+            let appender = ReplayFateAppender {
+                expected: operation,
+                sequence,
+            };
+            return self.complete_prepared_ordinary_finalizer(participant_id, &appender);
+        }
+        if !self.pending_specific_fates.contains_key(&participant_id) {
+            return Err(StateError::invariant(
+                "specific-fate row has no earlier unconsumed durable Died intent",
+            ));
+        }
         if self.next_log_sequence != sequence {
             return Err(StateError::invariant(
                 "specific-fate replay sequence disagrees with the checked log head",
@@ -296,59 +464,7 @@ impl ConversationAuthority {
             expected: operation,
             sequence,
         };
-        self.complete_binding_fate_intent(
-            participant_id,
-            pending.died_source_sequence,
-            pending.intent,
-            pending.terminal,
-            &appender,
-        )?;
-        self.pending_specific_fates.remove(&participant_id);
-        Ok(())
-    }
-
-    fn take_pending_binding_fate(
-        &mut self,
-        participant_id: ParticipantId,
-        intent: StoredSpecificFateIntent,
-    ) -> Result<PendingBindingFate, StateError> {
-        let Some(slot) = self.slots.get_mut(&participant_id) else {
-            return Err(StateError::invariant(
-                "binding-fate completion participant slot is absent",
-            ));
-        };
-        let Some(pending) = slot.binding_fate.take() else {
-            return Err(StateError::invariant(
-                "durable Died intent has no sealed binding-fate authority",
-            ));
-        };
-        if pending.attached_source_sequence != intent.attached_source_sequence()
-            || !intent_matches_token(intent, &pending)
-        {
-            slot.binding_fate = Some(pending);
-            return Err(StateError::invariant(
-                "durable Died intent disagrees with sealed binding-fate authority",
-            ));
-        }
-        Ok(pending)
-    }
-
-    fn restore_pending_binding_fate(
-        &mut self,
-        participant_id: ParticipantId,
-        pending: PendingBindingFate,
-    ) -> Result<(), StateError> {
-        let Some(slot) = self.slots.get_mut(&participant_id) else {
-            return Err(StateError::invariant(
-                "binding-fate refusal participant slot is absent",
-            ));
-        };
-        if slot.binding_fate.replace(pending).is_some() {
-            return Err(StateError::invariant(
-                "binding-fate refusal would overwrite sealed authority",
-            ));
-        }
-        Ok(())
+        self.complete_pending_specific_fate(participant_id, &appender)
     }
 }
 
@@ -405,16 +521,14 @@ const fn stored_died_cause(cause: DiedCause) -> StoredDiedCause {
 
 fn completion_terminal(
     intent: StoredSpecificFateIntent,
-    terminal: Option<CommittedDiedTerminal>,
+    terminal: Option<PendingSpecificFateTerminal>,
 ) -> Result<BindingFateTerminal, StateError> {
     match intent {
-        StoredSpecificFateIntent::Ordinary { .. } => {
-            terminal.map(BindingFateTerminal::Ordinary).ok_or_else(|| {
-                StateError::invariant(
-                    "ordinary binding fate completion has no committed Died terminal",
-                )
-            })
-        }
+        StoredSpecificFateIntent::Ordinary { .. } => terminal
+            .map(|finalized| BindingFateTerminal::Ordinary(finalized.terminal))
+            .ok_or_else(|| {
+                StateError::invariant("ordinary binding fate completion has no finalized terminal")
+            }),
         StoredSpecificFateIntent::Recovered { .. } if terminal.is_some() => {
             Ok(BindingFateTerminal::Recovered)
         }

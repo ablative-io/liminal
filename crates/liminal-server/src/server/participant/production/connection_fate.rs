@@ -15,9 +15,15 @@ use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 
 use super::connection_fate_rows::source_operation;
 use super::frontier;
-use super::log::{StoredOperation, StoredSpecificFateIntent, StoredTerminalDisposition};
+use super::log::{
+    StoredOperation, StoredOrdinaryTerminalSource, StoredSpecificFateIntent,
+    StoredTerminalDisposition,
+};
 use super::observer_progress::ObserverProgressSourceMetadata;
-use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, StateError};
+use super::state::{
+    ConversationAuthority, DurableAppend, PendingBindingFate, PendingSpecificFate,
+    PendingSpecificFateTerminal, StateError,
+};
 
 /// Exact source authority copied from one durable server-wide Open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,24 +245,71 @@ fn complete_target(
         ));
     };
     slot.binding = completed.binding_state;
-    if completed.clear_fate_token {
+    let binding_fate = if specific_fate_intent.is_some() {
+        Some(slot.binding_fate.take().ok_or_else(|| {
+            StateError::invariant("durable Died intent lost its sealed binding-fate authority")
+        })?)
+    } else {
+        None
+    };
+    if completed.clear_fate_token && binding_fate.is_none() {
         slot.binding_fate = None;
     }
     if let Some(projection) = completed.observer_projection {
         record_source_projection(authority, &completed.operation, source_sequence, projection)?;
     }
     if let Some(intent) = specific_fate_intent {
-        let completes_without_terminal =
-            matches!(intent, StoredSpecificFateIntent::Recovered { .. });
-        if completed.committed_died_terminal.is_some() || completes_without_terminal {
-            authority.complete_binding_fate_intent(
-                target.participant_id,
-                source_sequence,
+        let binding_fate = binding_fate.ok_or_else(|| {
+            StateError::invariant("durable Died intent has no binding-fate authority")
+        })?;
+        open_specific_fate(
+            authority,
+            target.participant_id,
+            source_sequence,
+            intent,
+            completed.committed_died_terminal,
+            binding_fate,
+            appender,
+        )?;
+    }
+    Ok(())
+}
+
+fn open_specific_fate(
+    authority: &mut ConversationAuthority,
+    participant_id: ParticipantId,
+    source_sequence: u64,
+    intent: StoredSpecificFateIntent,
+    committed_terminal: Option<liminal_protocol::lifecycle::CommittedDiedTerminal>,
+    binding_fate: PendingBindingFate,
+    appender: &dyn DurableAppend,
+) -> Result<(), StateError> {
+    let terminal = committed_terminal.map(|terminal| PendingSpecificFateTerminal {
+        terminal,
+        source: StoredOrdinaryTerminalSource::DiedCommitted {
+            died_source_sequence: source_sequence,
+        },
+    });
+    if authority
+        .pending_specific_fates
+        .insert(
+            participant_id,
+            PendingSpecificFate {
+                died_source_sequence: source_sequence,
                 intent,
-                completed.committed_died_terminal,
-                appender,
-            )?;
-        }
+                terminal,
+                binding_fate,
+            },
+        )
+        .is_some()
+    {
+        return Err(StateError::invariant(
+            "durable Died opened a second participant-specific fate intent",
+        ));
+    }
+    let completes_without_terminal = matches!(intent, StoredSpecificFateIntent::Recovered { .. });
+    if committed_terminal.is_some() || completes_without_terminal {
+        authority.complete_pending_specific_fate(participant_id, appender)?;
     }
     Ok(())
 }

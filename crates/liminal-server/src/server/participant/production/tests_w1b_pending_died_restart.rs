@@ -3,11 +3,14 @@ use std::error::Error;
 use std::sync::Arc;
 
 use liminal::durability::{DurableStore, bridge::block_on, open_ephemeral};
-use liminal_protocol::lifecycle::{BindingState, PendingFinalization};
+use liminal_protocol::algebra::ResourceVector;
+use liminal_protocol::lifecycle::{
+    BindingState, CapacityCounter, ConnectionConversationTracking, PendingFinalization,
+};
 use liminal_protocol::wire::{
-    AttachAttemptToken, BindingEpoch, ClientRequest, ConnectionIncarnation,
-    CredentialAttachRequest, EnrollmentRequest, EnrollmentToken, Generation, RecordAdmission,
-    RecordAdmissionAttemptToken, ServerValue,
+    AttachAttemptToken, AttachSecret, BindingEpoch, ClientRequest, ConnectionIncarnation,
+    CredentialAttachRequest, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken,
+    LeaveRequest, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
 };
 
 use crate::server::participant::{
@@ -15,11 +18,13 @@ use crate::server::participant::{
 };
 
 use super::ProductionParticipantHandler;
+use super::barrier::{OperationFacts, ReceiptCapacityLimits};
 use super::log::{
-    DecodedStoredOperation, OperationLog, OperationLogError, StoredDiedCause, StoredOperation,
-    StoredSpecificFateIntent, StoredTerminalDisposition,
+    DecodedStoredOperation, OperationLog, OperationLogError, StoredDiedCause,
+    StoredFinalizerPresentation, StoredOperation, StoredOrdinaryTerminalSource,
+    StoredPendingDiedFinalizer, StoredSpecificFateIntent, StoredTerminalDisposition,
 };
-use super::state::DurableAppend;
+use super::state::{ConversationAuthority, DurableAppend};
 use super::tests::{dispatch_tracked, test_participant_config};
 
 struct SourceOnlyAppender<'a> {
@@ -42,6 +47,20 @@ impl DurableAppend for SourceOnlyAppender<'_> {
     }
 }
 
+struct LogAppender<'a> {
+    log: &'a OperationLog,
+}
+
+impl DurableAppend for LogAppender<'_> {
+    fn append(
+        &self,
+        operation: &StoredOperation,
+        expected_sequence: u64,
+    ) -> Result<(), OperationLogError> {
+        block_on(self.log.append(operation, expected_sequence))?
+    }
+}
+
 struct BoundDebtFixture {
     handler: ProductionParticipantHandler,
     conversations: ParticipantConnectionConversations,
@@ -49,6 +68,7 @@ struct BoundDebtFixture {
     conversation_id: u64,
     participant_id: u64,
     binding_epoch: BindingEpoch,
+    attach_secret: AttachSecret,
 }
 
 struct PendingRestartFixture {
@@ -61,6 +81,8 @@ struct PendingRestartFixture {
     specific_sequence: u64,
     terminal_order: u64,
     next_terminal_sequence: u64,
+    connection: ConnectionIncarnation,
+    attach_secret: AttachSecret,
 }
 
 fn bound_debt_fixture() -> Result<BoundDebtFixture, Box<dyn Error>> {
@@ -136,6 +158,7 @@ fn bound_debt_fixture() -> Result<BoundDebtFixture, Box<dyn Error>> {
         conversation_id,
         participant_id: receipt.participant_id(),
         binding_epoch: attached.origin_binding_epoch(),
+        attach_secret: attached.attach_secret(),
     })
 }
 
@@ -192,7 +215,67 @@ fn pending_restart_fixture() -> Result<PendingRestartFixture, Box<dyn Error>> {
         specific_sequence,
         terminal_order: row.terminal_order,
         next_terminal_sequence,
+        connection: setup.connection,
+        attach_secret: setup.attach_secret,
     })
+}
+
+fn operation_facts(connection: ConnectionIncarnation) -> Result<OperationFacts, Box<dyn Error>> {
+    let config = test_participant_config();
+    Ok(OperationFacts {
+        receiving_incarnation: connection,
+        now_ms: 0,
+        identity_slots: config.identity_slots,
+        attach_receipt_ttl_ms: config.attach_receipt_ttl_ms,
+        receipt_provenance_ttl_ms: config.receipt_provenance_ttl_ms,
+        receipt_limits: ReceiptCapacityLimits {
+            identity_server: config.max_retired_identity_slots_server,
+            live_receipts_server: config.max_live_attach_receipts_server,
+            live_receipts_per_participant: config.max_live_attach_receipts_per_participant,
+            provenance_server: config.max_receipt_provenance_server,
+            provenance_per_conversation: config.max_receipt_provenance_per_conversation,
+            provenance_per_participant: config.max_receipt_provenance_per_participant,
+        },
+        connection_tracking: ConnectionConversationTracking::Untracked,
+        connection_capacity: CapacityCounter::try_new(
+            config.max_semantic_conversations_per_connection,
+            0,
+        )
+        .map_err(|error| format!("pending Leave connection capacity is invalid: {error:?}"))?,
+    })
+}
+
+fn extend_leave_capacity(
+    authority: &mut ConversationAuthority,
+    pending: PendingFinalization,
+) -> Result<(), Box<dyn Error>> {
+    let terminal_charge = super::frontier::terminal_charge(
+        pending.conversation_id(),
+        pending.participant_id(),
+        pending.binding_epoch(),
+        pending.admission_order().transaction_order(),
+        authority.next_seq,
+    )?;
+    let left_charge = super::frontier::left_record_charge();
+    let charge = ResourceVector::new(
+        terminal_charge
+            .entries
+            .checked_add(left_charge.entries)
+            .ok_or("pending Leave finalizer entry charge overflow")?,
+        terminal_charge
+            .bytes
+            .checked_add(left_charge.bytes)
+            .ok_or("pending Leave finalizer byte charge overflow")?,
+    );
+    let added_rows = test_participant_config().max_semantic_conversations_per_connection;
+    authority.frontier = Some(
+        authority
+            .frontier
+            .take()
+            .ok_or("pending Leave frontier disappeared")?
+            .with_pending_finalizer_test_capacity(added_rows, charge)?,
+    );
+    Ok(())
 }
 
 #[test]
@@ -230,7 +313,11 @@ fn pending_died_restart_restores_cause_epoch_order_without_refinish() -> Result<
         fixture.died_source_sequence
     );
     assert!(open_intent.terminal.is_none());
-    assert!(replayed_slot.binding_fate.is_some());
+    assert!(matches!(
+        open_intent.binding_fate.token.intent(),
+        Some(liminal_protocol::lifecycle::SealedBindingFateIntent::Ordinary)
+    ));
+    assert!(replayed_slot.binding_fate.is_none());
 
     let repeated = fixture
         .handler
@@ -239,5 +326,105 @@ fn pending_died_restart_restores_cause_epoch_order_without_refinish() -> Result<
     assert_eq!(repeated.next_order, replayed.next_order);
     assert_eq!(repeated.next_log_sequence, replayed.next_log_sequence);
     assert!(block_on(fixture.log.read_at(fixture.specific_sequence))??.is_none());
+    Ok(())
+}
+
+#[test]
+fn pending_died_finalized_by_leave_presents_only_live_leave_commit() -> Result<(), Box<dyn Error>> {
+    let fixture = pending_restart_fixture()?;
+    let left_source_sequence = fixture.specific_sequence;
+    let ordinary_source_sequence = left_source_sequence
+        .checked_add(1)
+        .ok_or("pending Leave Ordinary source sequence overflow")?;
+    let cell = fixture.handler.cell(fixture.conversation_id)?;
+    let live_progress = {
+        let mut owner = cell
+            .lock()
+            .map_err(|_| "pending Leave owner lock was poisoned")?;
+        let authority = owner
+            .as_mut()
+            .ok_or("pending Leave owner was unavailable")?;
+        let pending = authority
+            .slots
+            .get(&fixture.participant_id)
+            .and_then(|slot| match slot.binding {
+                BindingState::PendingFinalization(pending) => Some(pending),
+                BindingState::Bound(_) | BindingState::Detached => None,
+            })
+            .ok_or("pending Leave fixture lost Pending Died")?;
+        extend_leave_capacity(authority, pending)?;
+        drop(authority.take_observer_progress_witnesses());
+        authority.apply_leave(
+            &LeaveRequest {
+                conversation_id: fixture.conversation_id,
+                participant_id: fixture.participant_id,
+                capability_generation: fixture.binding_epoch.capability_generation,
+                attach_secret: fixture.attach_secret,
+                leave_attempt_token: LeaveAttemptToken::new([93; 16]),
+            },
+            &operation_facts(fixture.connection)?,
+            &LogAppender { log: &fixture.log },
+        )?;
+        assert!(authority.retired.contains_key(&fixture.participant_id));
+        assert!(
+            !authority
+                .pending_specific_fates
+                .contains_key(&fixture.participant_id)
+        );
+        let witnesses = authority.take_observer_progress_witnesses();
+        let [leave_witness] = witnesses.as_slice() else {
+            return Err(format!("pending Leave presented witnesses: {witnesses:?}").into());
+        };
+        assert_eq!(leave_witness.progress(), authority.observer_progress);
+        let observer_progress = authority.observer_progress;
+        drop(owner);
+        observer_progress
+    };
+
+    let left = block_on(fixture.log.read_at(left_source_sequence))??
+        .ok_or("pending Leave Left row is absent")?;
+    let DecodedStoredOperation::V3(StoredOperation::Left { row: left }) = left.operation else {
+        return Err("pending Leave finalizer did not append Left".into());
+    };
+    assert_eq!(
+        left.pending_source_sequence,
+        Some(fixture.died_source_sequence)
+    );
+    assert_eq!(
+        left.finalizer_presentation,
+        StoredFinalizerPresentation::PresentEnclosing
+    );
+    assert_eq!(live_progress, left.left_delivery_seq);
+
+    let ordinary = block_on(fixture.log.read_at(ordinary_source_sequence))??
+        .ok_or("pending Leave Ordinary row is absent")?;
+    let DecodedStoredOperation::V3(StoredOperation::Ordinary { row: ordinary, .. }) =
+        ordinary.operation
+    else {
+        return Err("pending Leave finalizer did not append Ordinary".into());
+    };
+    assert_eq!(
+        ordinary.terminal_source,
+        StoredOrdinaryTerminalSource::PendingDiedFinalized {
+            died_source_sequence: fixture.died_source_sequence,
+            finalizer: StoredPendingDiedFinalizer::Left {
+                source_sequence: left_source_sequence,
+            },
+        }
+    );
+    assert_eq!(
+        ordinary.committed_terminal_audit.cause,
+        StoredDiedCause::ConnectionLost
+    );
+    assert_eq!(
+        ordinary.committed_terminal_audit.transaction_order,
+        fixture.terminal_order
+    );
+    assert_eq!(
+        ordinary.committed_terminal_audit.terminal_seq,
+        left.prior_terminal_delivery_seq
+            .ok_or("pending Leave omitted committed terminal sequence")?
+    );
+
     Ok(())
 }

@@ -35,7 +35,8 @@ mod record_admission_tests;
 
 pub use binding_fate::{
     BindingFateMeasurementError, BindingFateMeasurementRefused, BindingFateTerminal,
-    MeasuredBindingFate, PreparedBindingFate,
+    MeasuredBindingFate, PendingDiedOrdinaryFinalizer, PreparedBindingFate,
+    PreparedPendingDiedOrdinaryFinalizer,
 };
 pub use binding_terminal::{
     BindingTerminalAdmission, BindingTerminalAdmitError, BindingTerminalAdmitRefused,

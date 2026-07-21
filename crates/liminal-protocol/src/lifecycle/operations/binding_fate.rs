@@ -2,7 +2,7 @@ use alloc::boxed::Box;
 
 use crate::{algebra::floor_transition, wire::DeliverySeq};
 
-use super::{LiveFrontierOwner, live_frontier::BindingFateOwnerPlan};
+use super::{LiveFrontierError, LiveFrontierOwner, live_frontier::BindingFateOwnerPlan};
 use crate::lifecycle::{
     CommittedDiedTerminal, Event, FrontierBinding, ObserverProgressProjection, OrdinaryBindingFate,
     RecoveredBindingFate, SealedBindingFateIntent, SealedBindingFateToken,
@@ -73,6 +73,58 @@ impl PreparedBindingFate {
     #[must_use]
     pub fn into_parts(self) -> (LiveFrontierOwner, MeasuredBindingFate, Event) {
         (self.owner, self.fate, self.event)
+    }
+}
+
+/// Floor authority measured before a Pending-Died enclosing finalizer commits.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingDiedOrdinaryFinalizer {
+    resulting_floor: DeliverySeq,
+    authority: FinalizerAuthority,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FinalizerAuthority;
+
+/// Ordinary fate and unchanged owner prepared for an enclosing finalizer.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PreparedPendingDiedOrdinaryFinalizer {
+    owner: LiveFrontierOwner,
+    fate: OrdinaryBindingFate,
+    finalizer: PendingDiedOrdinaryFinalizer,
+}
+
+impl PreparedPendingDiedOrdinaryFinalizer {
+    /// Returns the unchanged owner, measured fate, and one-use floor authority.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        LiveFrontierOwner,
+        OrdinaryBindingFate,
+        PendingDiedOrdinaryFinalizer,
+    ) {
+        (self.owner, self.fate, self.finalizer)
+    }
+}
+
+impl LiveFrontierOwner {
+    /// Applies a measured Ordinary floor after its enclosing finalizer transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiveFrontierError`] if retained charges, the measured floor,
+    /// marker precedence, or closure accounting disagree with the post-finalizer owner.
+    pub fn complete_pending_died_ordinary_finalizer(
+        self,
+        finalizer: PendingDiedOrdinaryFinalizer,
+    ) -> Result<Self, LiveFrontierError> {
+        let PendingDiedOrdinaryFinalizer {
+            resulting_floor,
+            authority,
+        } = finalizer;
+        let FinalizerAuthority = authority;
+        self.install_finalized_binding_fate_floor(resulting_floor)
     }
 }
 
@@ -187,6 +239,55 @@ impl LiveFrontierOwner {
                 owner: self,
                 token: *token,
                 terminal,
+                error: BindingFateMeasurementError::Terminal,
+            })),
+        }
+    }
+
+    /// Measures Ordinary without installing its owner transition before an enclosing finalizer.
+    ///
+    /// # Errors
+    ///
+    /// Returns every move-only input unchanged when the token, terminal,
+    /// observer progress, measured floor, or pre-finalizer owner transition
+    /// is inconsistent.
+    pub fn prepare_pending_died_ordinary_finalizer(
+        self,
+        token: SealedBindingFateToken,
+        terminal: CommittedDiedTerminal,
+        hard_observer_progress: DeliverySeq,
+    ) -> Result<PreparedPendingDiedOrdinaryFinalizer, Box<BindingFateMeasurementRefused>> {
+        let terminal_input = BindingFateTerminal::Ordinary(terminal);
+        let measurement = match validate_binding_fate_measurement(
+            &self,
+            &token,
+            terminal_input,
+            hard_observer_progress,
+        ) {
+            Ok(measurement) => measurement,
+            Err(error) => {
+                return Err(Box::new(BindingFateMeasurementRefused {
+                    owner: self,
+                    token,
+                    terminal: terminal_input,
+                    error,
+                }));
+            }
+        };
+        let resulting_floor = measurement.resulting_floor;
+        match token.ordinary_binding_fate(terminal, resulting_floor) {
+            Ok(fate) => Ok(PreparedPendingDiedOrdinaryFinalizer {
+                owner: self,
+                fate,
+                finalizer: PendingDiedOrdinaryFinalizer {
+                    resulting_floor,
+                    authority: FinalizerAuthority,
+                },
+            }),
+            Err(token) => Err(Box::new(BindingFateMeasurementRefused {
+                owner: self,
+                token: *token,
+                terminal: terminal_input,
                 error: BindingFateMeasurementError::Terminal,
             })),
         }

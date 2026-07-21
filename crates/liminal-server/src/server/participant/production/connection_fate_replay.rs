@@ -8,9 +8,12 @@ use liminal_protocol::lifecycle::{
 use super::connection_fate::{admit_terminal, stored_specific_fate_intent};
 use super::log::{
     StoredDetached, StoredDetachedCause, StoredDetachedSource, StoredDied, StoredDiedCause,
+    StoredOrdinaryTerminalSource,
 };
 use super::observer_progress::ObserverProgressSourceMetadata;
-use super::state::{ConversationAuthority, PendingSpecificFate, StateError};
+use super::state::{
+    ConversationAuthority, PendingSpecificFate, PendingSpecificFateTerminal, StateError,
+};
 
 impl ConversationAuthority {
     pub(super) fn replay_connection_detached(
@@ -157,7 +160,12 @@ impl ConversationAuthority {
         let transition = died_transition(active, row.cause, admitted.disposition);
         let projection = transition.observer_progress_projection();
         let terminal = match transition {
-            DiedBindingTransition::Committed(terminal) => Some(terminal),
+            DiedBindingTransition::Committed(terminal) => Some(PendingSpecificFateTerminal {
+                terminal,
+                source: StoredOrdinaryTerminalSource::DiedCommitted {
+                    died_source_sequence: sequence,
+                },
+            }),
             DiedBindingTransition::Pending(_) => None,
         };
         let binding = transition.binding_state();
@@ -176,6 +184,15 @@ impl ConversationAuthority {
             self.record_observer_progress_projection(projection, metadata)?;
         }
         if let Some(intent) = row.specific_fate_intent {
+            let binding_fate = self
+                .slots
+                .get_mut(&row.participant_id)
+                .and_then(|slot| slot.binding_fate.take())
+                .ok_or_else(|| {
+                    StateError::invariant(
+                        "durable Died replay lost its sealed binding-fate authority",
+                    )
+                })?;
             if self
                 .pending_specific_fates
                 .insert(
@@ -184,6 +201,7 @@ impl ConversationAuthority {
                         died_source_sequence: sequence,
                         intent,
                         terminal,
+                        binding_fate,
                     },
                 )
                 .is_some()
