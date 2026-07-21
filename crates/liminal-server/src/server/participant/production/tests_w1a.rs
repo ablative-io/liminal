@@ -329,14 +329,6 @@ fn same_participant_ack_lineage_regression_refuses_before_observer_mutation()
         before,
         "refusal appended Track or Advance"
     );
-    let arm_removals = 0_u64;
-    let wakes = 0_u64;
-    let owner_publications = 0_u64;
-    let classifications = 0_u64;
-    assert_eq!(
-        (arm_removals, wakes, owner_publications, classifications),
-        (0, 0, 0, 0)
-    );
     Ok(())
 }
 
