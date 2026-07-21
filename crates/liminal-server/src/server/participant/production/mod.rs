@@ -167,6 +167,8 @@ mod tests_w1b_source_flush;
 #[cfg(test)]
 mod tests_w1b_substrate;
 #[cfg(test)]
+mod tests_w1b_umbrella;
+#[cfg(test)]
 mod tests_w1b_validation_memory;
 #[cfg(test)]
 mod tests_w3_restore;

@@ -456,7 +456,7 @@ fn synchronize_server_stop_folds(
 }
 
 #[test]
-fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn Error>> {
+pub(super) fn cold_reopen_reconciles_and_replays_all_record_shapes() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let config = marker_fixture_config();

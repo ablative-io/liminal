@@ -68,7 +68,7 @@ struct PendingDetachedLeaveFixture {
 }
 
 #[test]
-fn pending_detached_finalized_by_leave_presents_only_live_leave_commit()
+pub(super) fn pending_detached_finalized_by_leave_presents_only_live_leave_commit()
 -> Result<(), Box<dyn Error>> {
     let fixture = pending_detached_leave_fixture()?;
     let left_source_sequence = fixture
