@@ -12,11 +12,9 @@ use liminal_protocol::wire::{BindingEpoch, ParticipantId};
 
 use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 
+use super::connection_fate_rows::source_operation;
 use super::frontier;
-use super::log::{
-    StoredDetached, StoredDetachedCause, StoredDetachedSource, StoredDied, StoredDiedCause,
-    StoredOperation, StoredSpecificFateIntent, StoredTerminalDisposition,
-};
+use super::log::{StoredSpecificFateIntent, StoredTerminalDisposition};
 use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, StateError};
 
 /// Exact source authority copied from one durable server-wide Open.
@@ -197,6 +195,7 @@ fn complete_target(
     };
     let next_order = authority.next_order;
     let next_seq = authority.next_seq;
+    let source_sequence = authority.next_log_sequence;
     let next_order_after = next_order
         .checked_add(1)
         .ok_or(StateError::AllocationExhausted {
@@ -217,14 +216,14 @@ fn complete_target(
 
     let admitted = admit_terminal(authority, active, source_row_class(source))?;
 
-    let (operation, binding_state, clear_fate_token) = source_operation(
+    let completed = source_operation(
         source,
         active,
         admitted.disposition,
         admitted.stored_disposition,
         specific_fate_intent,
     );
-    appender.append(&operation, authority.next_log_sequence)?;
+    appender.append(&completed.operation, authority.next_log_sequence)?;
     authority.install_frontier(admitted.owner);
     authority.next_order = next_order_after;
     if admitted.committed {
@@ -236,9 +235,22 @@ fn complete_target(
             "connection-fate target disappeared after durable source append",
         ));
     };
-    slot.binding = binding_state;
-    if clear_fate_token {
+    slot.binding = completed.binding_state;
+    if completed.clear_fate_token {
         slot.binding_fate = None;
+    }
+    if let Some(intent) = specific_fate_intent {
+        let completes_without_terminal =
+            matches!(intent, StoredSpecificFateIntent::Recovered { .. });
+        if completed.committed_died_terminal.is_some() || completes_without_terminal {
+            authority.complete_binding_fate_intent(
+                target.participant_id,
+                source_sequence,
+                intent,
+                completed.committed_died_terminal,
+                appender,
+            )?;
+        }
     }
     Ok(())
 }
@@ -349,145 +361,5 @@ const fn source_row_class(source: ConnectionFateSource) -> BindingTerminalCauseC
             ..
         }
         | ConnectionFateSource::UncleanServerRestart { .. } => BindingTerminalCauseClass::Died,
-    }
-}
-
-fn source_operation(
-    source: ConnectionFateSource,
-    active: ActiveBinding,
-    disposition: BindingTerminalDisposition,
-    stored_disposition: StoredTerminalDisposition,
-    specific_fate_intent: Option<StoredSpecificFateIntent>,
-) -> (StoredOperation, BindingState, bool) {
-    let binding_epoch = active.binding_epoch.into();
-    match source {
-        ConnectionFateSource::Open {
-            open_sequence,
-            class: ConnectionFateClass::CleanDisconnect,
-            ..
-        } => {
-            let transition = active.clean_disconnect(disposition);
-            (
-                StoredOperation::Detached {
-                    row: StoredDetached {
-                        participant_id: active.participant_id,
-                        binding_epoch,
-                        cause: StoredDetachedCause::CleanDeregister,
-                        terminal_order: disposition_order(disposition),
-                        disposition: stored_disposition,
-                        source: StoredDetachedSource::ConnectionClose {
-                            connection_intent_sequence: open_sequence,
-                        },
-                    },
-                },
-                transition.binding_state(),
-                true,
-            )
-        }
-        ConnectionFateSource::Open {
-            open_sequence,
-            class: ConnectionFateClass::ServerShutdown,
-            ..
-        } => {
-            let transition = active.server_shutdown(disposition);
-            (
-                StoredOperation::Detached {
-                    row: StoredDetached {
-                        participant_id: active.participant_id,
-                        binding_epoch,
-                        cause: StoredDetachedCause::ServerShutdown,
-                        terminal_order: disposition_order(disposition),
-                        disposition: stored_disposition,
-                        source: StoredDetachedSource::ConnectionClose {
-                            connection_intent_sequence: open_sequence,
-                        },
-                    },
-                },
-                transition.binding_state(),
-                true,
-            )
-        }
-        ConnectionFateSource::Open {
-            open_sequence,
-            class: ConnectionFateClass::ConnectionLost,
-            ..
-        } => {
-            let binding_state = active.connection_lost(disposition).binding_state();
-            died_source_operation(
-                active,
-                StoredDiedCause::ConnectionLost,
-                disposition_order(disposition),
-                stored_disposition,
-                Some(open_sequence),
-                specific_fate_intent,
-                binding_state,
-            )
-        }
-        ConnectionFateSource::Open {
-            open_sequence,
-            class: ConnectionFateClass::ProtocolError,
-            ..
-        } => {
-            let binding_state = active.protocol_error(disposition).binding_state();
-            died_source_operation(
-                active,
-                StoredDiedCause::ProtocolError,
-                disposition_order(disposition),
-                stored_disposition,
-                Some(open_sequence),
-                specific_fate_intent,
-                binding_state,
-            )
-        }
-        ConnectionFateSource::UncleanServerRestart { .. } => {
-            let binding_state = active.unclean_server_restart(disposition).binding_state();
-            died_source_operation(
-                active,
-                StoredDiedCause::UncleanServerRestart {
-                    prior_server_incarnation: active
-                        .binding_epoch
-                        .connection_incarnation
-                        .server_incarnation,
-                },
-                disposition_order(disposition),
-                stored_disposition,
-                None,
-                specific_fate_intent,
-                binding_state,
-            )
-        }
-    }
-}
-
-fn died_source_operation(
-    active: ActiveBinding,
-    cause: StoredDiedCause,
-    terminal_order: u64,
-    disposition: StoredTerminalDisposition,
-    connection_intent_sequence: Option<u64>,
-    specific_fate_intent: Option<StoredSpecificFateIntent>,
-    binding_state: BindingState,
-) -> (StoredOperation, BindingState, bool) {
-    (
-        StoredOperation::Died {
-            row: StoredDied {
-                participant_id: active.participant_id,
-                binding_epoch: active.binding_epoch.into(),
-                cause,
-                terminal_order,
-                disposition,
-                connection_intent_sequence,
-                specific_fate_intent,
-            },
-        },
-        binding_state,
-        false,
-    )
-}
-
-const fn disposition_order(disposition: BindingTerminalDisposition) -> u64 {
-    match disposition {
-        BindingTerminalDisposition::Committed(position) => position.transaction_order(),
-        BindingTerminalDisposition::Pending(position) => position.transaction_order(),
     }
 }

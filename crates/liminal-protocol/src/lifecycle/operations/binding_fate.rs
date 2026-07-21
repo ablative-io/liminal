@@ -2,10 +2,10 @@ use alloc::boxed::Box;
 
 use crate::{algebra::floor_transition, wire::DeliverySeq};
 
-use super::LiveFrontierOwner;
+use super::{LiveFrontierOwner, live_frontier::BindingFateOwnerPlan};
 use crate::lifecycle::{
     CommittedDiedTerminal, Event, FrontierBinding, ObserverProgressProjection, OrdinaryBindingFate,
-    RecoveredBindingFate, SealedBindingFateToken,
+    RecoveredBindingFate, SealedBindingFateIntent, SealedBindingFateToken,
 };
 
 /// Closed terminal input accepted by protocol-owned binding-fate measurement.
@@ -67,7 +67,7 @@ impl PreparedBindingFate {
         self.event
     }
 
-    /// Consumes the prepared transition into the unchanged coupled owner and fate.
+    /// Consumes the prepared transition into the measured next owner and fate.
     #[must_use]
     pub fn into_parts(self) -> (LiveFrontierOwner, MeasuredBindingFate, Event) {
         (self.owner, self.fate, self.event)
@@ -91,6 +91,8 @@ pub enum BindingFateMeasurementError {
     ObserverProgress,
     /// The measured checked floor is outside the delivery-sequence domain.
     ResultingFloor,
+    /// The coupled frontier, retained charges, or closure baseline refused installation.
+    OwnerTransition,
 }
 
 /// Refused measurement preserving every move-only input for serial retry.
@@ -122,6 +124,13 @@ impl BindingFateMeasurementRefused {
     }
 }
 
+struct ValidatedBindingFateMeasurement {
+    participant_id: crate::wire::ParticipantId,
+    binding_epoch: crate::wire::BindingEpoch,
+    resulting_floor: DeliverySeq,
+    owner_plan: BindingFateOwnerPlan,
+}
+
 impl LiveFrontierOwner {
     /// Consumes one sealed fate token after measuring its real post-release floor.
     ///
@@ -140,88 +149,36 @@ impl LiveFrontierOwner {
         terminal: BindingFateTerminal,
         hard_observer_progress: DeliverySeq,
     ) -> Result<PreparedBindingFate, Box<BindingFateMeasurementRefused>> {
-        let Some(context) = token.measurement_context() else {
-            return refusal(self, token, terminal, BindingFateMeasurementError::Token);
-        };
-        if context.conversation_id != self.frontiers().conversation_id() {
-            return refusal(
-                self,
-                token,
-                terminal,
-                BindingFateMeasurementError::Conversation,
-            );
-        }
-        let Some(participant) = self
-            .frontiers()
-            .active_identities()
-            .participants()
-            .iter()
-            .find(|participant| participant.participant_index() == context.participant_id)
-        else {
-            return refusal(
-                self,
-                token,
-                terminal,
-                BindingFateMeasurementError::Participant,
-            );
-        };
-        if participant.cursor() != context.cursor
-            || participant.binding() != FrontierBinding::Bound(context.binding_epoch)
-                && participant.binding() != FrontierBinding::Detached(context.binding_epoch)
-        {
-            return refusal(self, token, terminal, BindingFateMeasurementError::Binding);
-        }
-        let candidate_high_watermark = self.frontiers().sequence().ledger().high_watermark();
-        if hard_observer_progress > candidate_high_watermark {
-            return refusal(
-                self,
-                token,
-                terminal,
-                BindingFateMeasurementError::ObserverProgress,
-            );
-        }
-        let minimum_remaining_cursor = self
-            .frontiers()
-            .active_identities()
-            .participants()
-            .iter()
-            .filter(|participant| participant.participant_index() != context.participant_id)
-            .map(|participant| participant.cursor())
-            .min();
-        let measured = floor_transition(
-            self.frontiers().retained_floor(),
-            minimum_remaining_cursor,
-            candidate_high_watermark,
+        let measurement = match validate_binding_fate_measurement(
+            &self,
+            &token,
+            terminal,
             hard_observer_progress,
-            self.frontiers().retained_floor(),
-        );
-        let Ok(resulting_floor) = DeliverySeq::try_from(measured.resulting_floor) else {
-            return refusal(
-                self,
-                token,
-                terminal,
-                BindingFateMeasurementError::ResultingFloor,
-            );
+        ) {
+            Ok(measurement) => measurement,
+            Err(error) => return refusal(self, token, terminal, error),
         };
         let event = Event::binding_fate_observed(
-            context.participant_id,
-            context.binding_epoch,
-            resulting_floor,
+            measurement.participant_id,
+            measurement.binding_epoch,
+            measurement.resulting_floor,
         );
         let fate = match terminal {
             BindingFateTerminal::Ordinary(terminal) => token
-                .ordinary_binding_fate(terminal, resulting_floor)
+                .ordinary_binding_fate(terminal, measurement.resulting_floor)
                 .map(MeasuredBindingFate::Ordinary),
             BindingFateTerminal::Recovered => token
-                .recovered_binding_fate_measured(resulting_floor)
+                .recovered_binding_fate_measured(measurement.resulting_floor)
                 .map(MeasuredBindingFate::Recovered),
         };
         match fate {
-            Ok(fate) => Ok(PreparedBindingFate {
-                owner: self,
-                fate,
-                event,
-            }),
+            Ok(fate) => {
+                let owner = self.install_binding_fate_transition(
+                    measurement.owner_plan,
+                    measurement.resulting_floor,
+                );
+                Ok(PreparedBindingFate { owner, fate, event })
+            }
             Err(token) => Err(Box::new(BindingFateMeasurementRefused {
                 owner: self,
                 token: *token,
@@ -230,6 +187,83 @@ impl LiveFrontierOwner {
             })),
         }
     }
+}
+
+fn validate_binding_fate_measurement(
+    owner: &LiveFrontierOwner,
+    token: &SealedBindingFateToken,
+    terminal: BindingFateTerminal,
+    hard_observer_progress: DeliverySeq,
+) -> Result<ValidatedBindingFateMeasurement, BindingFateMeasurementError> {
+    let Some(context) = token.measurement_context() else {
+        return Err(BindingFateMeasurementError::Token);
+    };
+    if context.conversation_id != owner.frontiers().conversation_id() {
+        return Err(BindingFateMeasurementError::Conversation);
+    }
+    let Some(participant) = owner
+        .frontiers()
+        .active_identities()
+        .participants()
+        .iter()
+        .find(|participant| participant.participant_index() == context.participant_id)
+    else {
+        return Err(BindingFateMeasurementError::Participant);
+    };
+    if participant.cursor() != context.cursor
+        || participant.binding() != FrontierBinding::Bound(context.binding_epoch)
+            && participant.binding() != FrontierBinding::Detached(context.binding_epoch)
+    {
+        return Err(BindingFateMeasurementError::Binding);
+    }
+    let terminal_matches = match (token.intent(), terminal) {
+        (Some(SealedBindingFateIntent::Ordinary), BindingFateTerminal::Ordinary(died)) => {
+            died.conversation_id() == context.conversation_id
+                && died.participant_id() == context.participant_id
+                && died.binding_epoch() == context.binding_epoch
+        }
+        (Some(SealedBindingFateIntent::Recovered { .. }), BindingFateTerminal::Recovered) => true,
+        _ => false,
+    };
+    if !terminal_matches {
+        return Err(BindingFateMeasurementError::Terminal);
+    }
+    let candidate_high_watermark = owner.frontiers().sequence().ledger().high_watermark();
+    if hard_observer_progress > candidate_high_watermark {
+        return Err(BindingFateMeasurementError::ObserverProgress);
+    }
+    let minimum_remaining_cursor = owner
+        .frontiers()
+        .active_identities()
+        .participants()
+        .iter()
+        .filter(|participant| participant.participant_index() != context.participant_id)
+        .map(|participant| participant.cursor())
+        .min();
+    let measured = floor_transition(
+        owner.frontiers().retained_floor(),
+        minimum_remaining_cursor,
+        candidate_high_watermark,
+        hard_observer_progress,
+        owner.frontiers().retained_floor(),
+    );
+    let Ok(resulting_floor) = DeliverySeq::try_from(measured.resulting_floor) else {
+        return Err(BindingFateMeasurementError::ResultingFloor);
+    };
+    let owner_plan = owner
+        .prepare_binding_fate_transition(
+            context.participant_id,
+            context.binding_epoch,
+            context.cursor,
+            resulting_floor,
+        )
+        .map_err(|_| BindingFateMeasurementError::OwnerTransition)?;
+    Ok(ValidatedBindingFateMeasurement {
+        participant_id: context.participant_id,
+        binding_epoch: context.binding_epoch,
+        resulting_floor,
+        owner_plan,
+    })
 }
 
 fn refusal(

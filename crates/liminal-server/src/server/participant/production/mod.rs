@@ -14,8 +14,10 @@
 //! implementation of lifecycle rules.
 
 mod barrier;
+mod binding_fate_completion;
 mod capacity;
 mod connection_fate;
+mod connection_fate_rows;
 mod facts;
 mod fenced_attach_codec;
 mod fenced_attach_terminal;
@@ -129,6 +131,8 @@ mod tests_w1a;
 mod tests_w1a_leave_barrier;
 #[cfg(test)]
 mod tests_w1b_connection_fate;
+#[cfg(test)]
+mod tests_w1b_fate_completion;
 #[cfg(test)]
 mod tests_w1b_fenced_codec;
 #[cfg(test)]
