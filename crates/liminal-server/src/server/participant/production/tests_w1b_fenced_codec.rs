@@ -176,8 +176,14 @@ fn attached_v3_closed_modes_round_trip_complete_fenced_proof() -> Result<(), Box
 #[test]
 fn composed_terminal_decode_validates_kind_cause_order_source_and_presentation() {
     let mut operation = fenced_operation(proof_with(&recovery()));
-    let StoredOperation::Attached { mode, .. } = &mut operation else {
+    let StoredOperation::Attached {
+        allocation, mode, ..
+    } = &mut operation
+    else {
         unreachable!("helper always constructs Attached");
+    };
+    let Some(pending_terminal_order) = allocation.attached_order.checked_sub(1) else {
+        unreachable!("fixture Attached order has a predecessor");
     };
     let StoredAttachModeV3::Fenced {
         composed_terminal, ..
@@ -188,7 +194,7 @@ fn composed_terminal_decode_validates_kind_cause_order_source_and_presentation()
     *composed_terminal = Some(StoredComposedTerminal {
         kind: StoredComposedTerminalKind::Died,
         cause: StoredComposedTerminalCause::ConnectionLost,
-        transaction_order: 20,
+        transaction_order: pending_terminal_order,
         delivery_seq: 19,
         pending_source_sequence: 5,
         presentation: StoredFinalizerPresentation::PresentEnclosing,
@@ -218,7 +224,12 @@ fn composed_terminal_decode_validates_kind_cause_order_source_and_presentation()
         FencedAttachProofRefusal::ComposedTerminalKindCause,
     );
     assert_refusal(
-        |terminal| terminal.transaction_order = 21,
+        |terminal| {
+            let Some(attached_order) = terminal.transaction_order.checked_add(1) else {
+                unreachable!("fixture pending terminal order has a successor");
+            };
+            terminal.transaction_order = attached_order;
+        },
         FencedAttachProofRefusal::ComposedTerminalOrder,
     );
     assert_refusal(
