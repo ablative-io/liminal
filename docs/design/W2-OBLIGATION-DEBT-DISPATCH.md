@@ -1,6 +1,6 @@
 # W2 — obligation-debt dispatch arm
 
-**Revision r5 — design-first brief, 2026-07-22 (build-time ruled rider §6.3)**
+**Revision r6 — design-first brief, 2026-07-22 (build-time ruled riders §6.3, §6.4 + standing wake-artifact class ruling)**
 
 This brief rules the first production arm that makes participant-delivery
 scheduling conditional on protocol-owned obligation debt. It is a docs-only
@@ -728,6 +728,40 @@ conflict rule caught both sides). Approved GREEN at the tear seat, 2026-07-22
 (bridge message 1430293c, ts 2026-07-21T15:06Z), recorded there for the lead's
 veto — one-hop trail.
 
+### 6.4 Ruled rider (2026-07-22, build-time): refusal-as-wake, and the
+wake-artifact class record
+
+Second instance of the §6.3 class, found by a worker's conflict-rule STOP at
+commit `14787f8` (kept referenced here for the auditable lineage; server suite
+stood at 507 passed / 2 failed with both failures this one oracle).
+`e2e_cold_all_shapes.rs:232-249` (and the same shapes at `:384-413`) uses a
+participant-unknown `u64::MAX` RecordAdmission — a REFUSAL — solely as a wake
+for its replay gate. **Why the landed expectation is amended:** production
+truthfully returns `Unchanged` for that refusal with an empty accumulator —
+this brief's ruled behavior (§2.2 row 5, oracle 31); `ops_frontier.rs:84-87`
+returns before `DrainFirst`, so the refusal cannot truthfully wake previously
+consumed replay readiness. The old wake worked only through the removed
+unconditional `notify_ready` (`dispatch.rs:522-558`). The two escape hatches —
+a refusal tell, or moving marker drain ahead of binding authorization — are
+both expressly forbidden by this brief.
+
+**Pins kept VERBATIM in the amended test:** cold replay reconciles and replays
+all record shapes; the exact record census; no assertion weakened. The wake
+mechanism alone is amended from the refusal to a COMMITTED impact.
+
+**Standing class ruling (tear seat, 2026-07-22):** a landed test whose green
+depended on the unconditional notify via wake-by-refusal, wake-by-noop, or
+wake-by-replay receives THIS SAME RULING without further escalation — amend
+the wake to a committed impact, pins verbatim, and extend this class record
+with the instance (test, bytes, pins). A FOURTH distinct wake-artifact shape
+(not refusal/noop/replay) returns to the tear seat before amendment. The build
+tear's census sweep includes a targeted grep for remaining
+unconditional-notify-dependent tests across these three shapes.
+
+Provenance: proposed at the liminal coordination seat on the worker's STOP;
+approved GREEN at the tear seat, 2026-07-22 (bridge message e5e207e8,
+ts 2026-07-21T15:51Z), recorded there for the lead's veto — one-hop trail.
+
 ## 7. Acceptance oracle census
 
 The build is not accepted unless every row below exists under its exact name.
@@ -864,3 +898,4 @@ implementation guess.
 | r3 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-3 **2 MAJOR + 1 minor** array. **Major — coupled bridge has no coherent Clear/Owed result for enrollment and marker commits:** §§1.1–1.1.1 derive every owner variant from the operation's resulting closure, keep Clear episode-free, preserve marker's input variant, and explicitly permit first Owed enrollment with no recipient obligation; §3.1 makes that real state `Defer(NoObligation)` and adds `enrollment_clear_or_owed_and_no_obligation_are_total`. **Major — Owed marker ack creates the outbox/cursor disagreement declared fatal:** §§1.1.1 and 3.1 advance the Owed protocol cursor while leaving durable outbox ack unchanged, compute `dispatch_after` from durable ack/protocol/current-offer cursors after validating marker provenance, retain fatal treatment for non-marker splits, and require live/cold/post-fate equivalence; §§6.1–6.2 resume after that reconciled cursor, with `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` and the renamed fate oracle. **Minor — scalar DispatchImpact cause cannot represent multi-effect commits:** §§2.1–2.3 replace the scalar with a nonempty `DispatchEffect -> Set<DispatchTarget>` map built under lock, enumerate overlapping enrollment/attach, marker/normal ack, W1b finalizer, and Left effects, and notify the deduplicated exact-target union with no precedence or poststate reconstruction; §§5.2 and 6.2 compose that rule through coalescing/fate, and §7 closes a 33-oracle table-derived census including `dispatch_impact_unions_multi_effect_targets`. |
 | r4 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-4 **2 MAJOR** array. **Major — read-time marker reconciliation suppresses delivery but never reconciles live outbox accounting:** §3.1 keeps the sound `dispatch_after` eligibility read, states it writes and consumes nothing, removes the promised ordinary catch-up because equal-cursor ack is `AckNoOp`, and permits only real later advancing `AckAdvanced` or retirement discharge; §§5.1–5.2 choose legal bounded accounting divergence, disclose retained records/obligations/count/bytes, the `max_retained_record_rows × identity_slots` bound, earlier capacity failure, and zero active idle work, pinned by `marker_covered_outbox_accounting_stays_bounded_until_real_discharge`. **Major — lossless effect matrix omits the multi-row marker-drain/record-admission path:** §§2.1–2.2 add a request-scoped prefix accumulator, independently merge every MarkerDrained `Published` and Owed `EpisodeChanged` target set, preserve prefixes through final refusal/backpressure/error, and merge final RecordAdmission or Left effects. §2.1.1 derives the complete seven-kind Produced census and finds exactly two recursive multi-source-row request paths—record admission and Leave—while distinguishing Attached's multi-record single batch; §7 closes a 35-oracle table-derived census with `marker_drain_retry_accumulates_all_prefix_effects`. |
 | r5 | 2026-07-22 | same liminal/ledger pin | Docs-only build-time ruled rider §6.3: amends the landed post-repair exact-token replay test — its READY was satisfiable only by the removed unconditional `notify_ready` (`dispatch.rs:522-558`); no honest tell exists for a no-commit same-incarnation replay (`ops_enroll.rs:83-89`). Pins kept verbatim (correlated terminal, exactly-once dispatch of the repaired obligation, no unconditional tell); wake moved to a NEW incarnation's committed rebind per §6.1 row 2. Overlapping census names stay distinct. Proposed at the coordination seat (after a first coordination ruling died to the worker's mandated fallback STOP), approved GREEN at the tear seat 2026-07-22 (msg 1430293c), recorded for the lead's veto. |
+| r6 | 2026-07-22 | same liminal/ledger pin | Docs-only build-time ruled rider §6.4: second §6.3-class instance — e2e_cold_all_shapes' participant-unknown RecordAdmission refusal-as-wake (production truthfully Unchanged per §2.2 row 5 / oracle 31; ops_frontier.rs:84-87 pre-DrainFirst); wake amended to a committed impact, pins verbatim, STOP commit 14787f8 referenced. Adds the STANDING CLASS RULING: wake-by-refusal/noop/replay instances receive the same ruling without escalation (extend this record); a fourth distinct shape returns to the tear seat; build-tear census includes the three-shape grep. Approved GREEN at the tear seat 2026-07-22 (msg e5e207e8), recorded for the lead's veto. |
