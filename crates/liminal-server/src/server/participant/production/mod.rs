@@ -34,6 +34,7 @@ mod log_v2;
 mod log_v3;
 mod marker_progress;
 pub mod marker_source;
+mod non_presenting_finalizer;
 mod observer;
 mod observer_progress;
 mod observer_progress_plan;
@@ -143,6 +144,8 @@ mod tests_w1b_marker_source;
 mod tests_w1b_occurrence;
 #[cfg(test)]
 mod tests_w1b_oracle26;
+#[cfg(test)]
+mod tests_w1b_pending_finalizer;
 #[cfg(test)]
 mod tests_w1b_projection;
 #[cfg(test)]

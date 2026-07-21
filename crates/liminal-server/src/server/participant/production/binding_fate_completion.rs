@@ -13,6 +13,7 @@ use super::log::{
     StoredOperation, StoredOrdinaryFate, StoredOrdinaryTerminalSource, StoredRecoveredFate,
     StoredRecoveredPresentation, StoredSpecificFateIntent,
 };
+use super::observer_progress::ObserverProgressSourceMetadata;
 use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, StateError};
 
 #[derive(Clone, Copy)]
@@ -47,17 +48,7 @@ impl ConversationAuthority {
         }
         let pending = self.take_pending_binding_fate(participant_id, intent)?;
         let attached_source_sequence = pending.attached_source_sequence;
-        let terminal_input = match intent {
-            StoredSpecificFateIntent::Ordinary { .. } => {
-                let Some(terminal) = terminal else {
-                    return Err(StateError::invariant(
-                        "ordinary binding fate completion has no committed Died terminal",
-                    ));
-                };
-                BindingFateTerminal::Ordinary(terminal)
-            }
-            StoredSpecificFateIntent::Recovered { .. } => BindingFateTerminal::Recovered,
-        };
+        let terminal_input = completion_terminal(intent, terminal)?;
         let owner = self.take_frontier()?;
         let prepared =
             match owner.prepare_binding_fate(pending.token, terminal_input, self.observer_progress)
@@ -206,6 +197,7 @@ impl ConversationAuthority {
             resulting_floor: fate.resulting_floor(),
             presentation: completion.presentation,
         };
+        let observer_projection = fate.observer_progress_projection();
         let shell = self.take_shell()?;
         let barrier = match decide_recovered_binding_fate_operation(shell, fate) {
             AggregateOperationDecision::Commit(barrier) => barrier,
@@ -230,6 +222,17 @@ impl ConversationAuthority {
         )?;
         self.shell = Some(shell);
         self.install_frontier(owner);
+        if completion.presentation == StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer
+        {
+            let metadata = ObserverProgressSourceMetadata::recovered_binding_fate(
+                self.next_log_sequence,
+                self.conversation_id,
+                row.participant_id,
+                row.last_dead_binding_epoch.to_epoch()?,
+                row.resulting_floor,
+            );
+            self.record_observer_progress_projection(observer_projection, metadata)?;
+        }
         self.advance_log_head()?;
         Ok(())
     }
@@ -397,6 +400,27 @@ const fn stored_died_cause(cause: DiedCause) -> StoredDiedCause {
         } => StoredDiedCause::UncleanServerRestart {
             prior_server_incarnation,
         },
+    }
+}
+
+fn completion_terminal(
+    intent: StoredSpecificFateIntent,
+    terminal: Option<CommittedDiedTerminal>,
+) -> Result<BindingFateTerminal, StateError> {
+    match intent {
+        StoredSpecificFateIntent::Ordinary { .. } => {
+            terminal.map(BindingFateTerminal::Ordinary).ok_or_else(|| {
+                StateError::invariant(
+                    "ordinary binding fate completion has no committed Died terminal",
+                )
+            })
+        }
+        StoredSpecificFateIntent::Recovered { .. } if terminal.is_some() => {
+            Ok(BindingFateTerminal::Recovered)
+        }
+        StoredSpecificFateIntent::Recovered { .. } => {
+            Ok(BindingFateTerminal::RecoveredAndReserveFinalizer)
+        }
     }
 }
 

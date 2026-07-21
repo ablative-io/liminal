@@ -111,6 +111,52 @@ impl LiveFrontierOwner {
         }
     }
 
+    /// Test-support-only checked capacity extension applied after a real
+    /// terminal selector has already chosen Pending. It cannot affect that
+    /// disposition; the caller supplies the exact encoded finalizer charges.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if exact capacity arithmetic or reconstruction fails.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_pending_finalizer_test_capacity(
+        mut self,
+        finalizer_rows: u64,
+        finalizer_charge: ResourceVector,
+    ) -> Result<Self, &'static str> {
+        let retained_count = u64::try_from(self.retained_charges.len())
+            .map_err(|_| "retained record count exceeds u64")?;
+        self.retained_record_limit = retained_count
+            .checked_add(finalizer_rows)
+            .ok_or("pending finalizer retained-record capacity overflow")?;
+        let current = self.closure_accounting;
+        let configured = current.configured_cap();
+        let configured = ResourceVector::new(
+            configured
+                .entries
+                .checked_add(finalizer_charge.entries)
+                .ok_or("pending finalizer entry capacity overflow")?,
+            configured
+                .bytes
+                .checked_add(finalizer_charge.bytes)
+                .ok_or("pending finalizer byte capacity overflow")?,
+        );
+        self.closure_accounting = ClosureAccounting::try_new(
+            current.state(),
+            current.marker_capacity_credits(),
+            current.marker_anchors(),
+            current.edge_sequence_claims(),
+            current.edge_order_position_claims(),
+            current.edge_k_remaining(),
+            current.baseline(),
+            configured,
+            current.episode_churn_used(),
+            current.episode_churn_limit(),
+        )
+        .map_err(|_| "pending finalizer closure capacity extension refused")?;
+        Ok(self)
+    }
+
     /// Borrows the coupled claim frontiers.
     #[must_use]
     pub const fn frontiers(&self) -> &ClaimFrontiers {

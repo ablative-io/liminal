@@ -11,7 +11,7 @@ use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use liminal_protocol::lifecycle::ObserverProgressProjection;
-use liminal_protocol::wire::{ConversationId, DeliverySeq, ParticipantId};
+use liminal_protocol::wire::{BindingEpoch, ConversationId, DeliverySeq, ParticipantId};
 
 /// Closed refusal sum for observer-progress source and durable-prefix drift.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -49,6 +49,7 @@ enum BaseSourceKind {
     Detached,
     ParticipantAck,
     Left,
+    Recovered,
 }
 
 /// Durable extension kind that surrendered one projection.
@@ -103,6 +104,12 @@ enum ObserverProgressOccurrence {
         participant_id: ParticipantId,
         left_delivery_seq: DeliverySeq,
     },
+    RecoveredFate {
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        resulting_floor: DeliverySeq,
+    },
 }
 
 impl ObserverProgressOccurrence {
@@ -122,6 +129,9 @@ impl ObserverProgressOccurrence {
             }
             | Self::Leave {
                 conversation_id, ..
+            }
+            | Self::RecoveredFate {
+                conversation_id, ..
             } => conversation_id,
         }
     }
@@ -132,7 +142,8 @@ impl ObserverProgressOccurrence {
             | Self::DetachedTerminal { participant_id, .. }
             | Self::ParticipantAck { participant_id, .. }
             | Self::MarkerAck { participant_id, .. }
-            | Self::Leave { participant_id, .. } => participant_id,
+            | Self::Leave { participant_id, .. }
+            | Self::RecoveredFate { participant_id, .. } => participant_id,
         }
     }
 
@@ -153,6 +164,9 @@ impl ObserverProgressOccurrence {
             Self::Leave {
                 left_delivery_seq, ..
             } => left_delivery_seq,
+            Self::RecoveredFate {
+                resulting_floor, ..
+            } => resulting_floor,
         }
     }
 }
@@ -162,6 +176,7 @@ impl ObserverProgressOccurrence {
 enum ObserverProgressLineage {
     ParticipantCursor(ParticipantId),
     ParticipantTerminal(ParticipantId),
+    BindingFateFloor(ParticipantId),
 }
 
 /// Canonical producer that surrendered a sealed projection.
@@ -172,6 +187,7 @@ pub(super) enum ObserverProgressProducer {
     ParticipantAck,
     MarkerAck,
     LiveLeaveCommit,
+    RecoveredBindingFate,
     #[cfg(test)]
     InjectedDuplicate,
 }
@@ -295,6 +311,29 @@ impl ObserverProgressSourceMetadata {
             },
             lineage: ObserverProgressLineage::ParticipantTerminal(participant_id),
             producer: ObserverProgressProducer::LiveLeaveCommit,
+        }
+    }
+
+    pub(super) const fn recovered_binding_fate(
+        source_sequence: u64,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        resulting_floor: DeliverySeq,
+    ) -> Self {
+        Self {
+            source: ObserverProgressSourceIdentity::Base {
+                sequence: source_sequence,
+                kind: BaseSourceKind::Recovered,
+            },
+            occurrence: ObserverProgressOccurrence::RecoveredFate {
+                conversation_id,
+                participant_id,
+                binding_epoch,
+                resulting_floor,
+            },
+            lineage: ObserverProgressLineage::BindingFateFloor(participant_id),
+            producer: ObserverProgressProducer::RecoveredBindingFate,
         }
     }
 
@@ -506,6 +545,15 @@ const fn validate_metadata(
                 ObserverProgressOccurrence::Leave { .. },
                 ObserverProgressLineage::ParticipantTerminal(lineage_participant),
                 ObserverProgressProducer::LiveLeaveCommit,
+            )
+            | (
+                ObserverProgressSourceIdentity::Base {
+                    kind: BaseSourceKind::Recovered,
+                    ..
+                },
+                ObserverProgressOccurrence::RecoveredFate { .. },
+                ObserverProgressLineage::BindingFateFloor(lineage_participant),
+                ObserverProgressProducer::RecoveredBindingFate,
             ) => lineage_participant == participant_id,
             (
                 ObserverProgressSourceIdentity::Base {

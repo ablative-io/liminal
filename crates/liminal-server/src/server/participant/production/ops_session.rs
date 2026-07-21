@@ -247,6 +247,7 @@ impl ConversationAuthority {
         };
         let make_operation =
             |event: Vec<u8>| stored_detached_operation(request, verifier, position, event);
+        self.route_fate_occurrence(&make_operation(Vec::new()), self.next_log_sequence)?;
         let (shell, committed) =
             commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
         self.shell = Some(shell);

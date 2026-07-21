@@ -13,8 +13,10 @@ use crate::lifecycle::{
 pub enum BindingFateTerminal {
     /// Ordinary fate consumes the exact committed Died terminal.
     Ordinary(CommittedDiedTerminal),
-    /// Recovered fate deliberately receives no Died terminal.
+    /// Recovered fate after committed Died receives no Died terminal.
     Recovered,
+    /// Recovered fate after pending Died preserves exact finalizer authority.
+    RecoveredAndReserveFinalizer,
 }
 
 /// Protocol-produced binding fate after measuring the post-release floor.
@@ -167,9 +169,11 @@ impl LiveFrontierOwner {
             BindingFateTerminal::Ordinary(terminal) => token
                 .ordinary_binding_fate(terminal, measurement.resulting_floor)
                 .map(MeasuredBindingFate::Ordinary),
-            BindingFateTerminal::Recovered => token
-                .recovered_binding_fate_measured(measurement.resulting_floor)
-                .map(MeasuredBindingFate::Recovered),
+            BindingFateTerminal::Recovered | BindingFateTerminal::RecoveredAndReserveFinalizer => {
+                token
+                    .recovered_binding_fate_measured(measurement.resulting_floor)
+                    .map(MeasuredBindingFate::Recovered)
+            }
         };
         match fate {
             Ok(fate) => {
@@ -222,7 +226,10 @@ fn validate_binding_fate_measurement(
                 && died.participant_id() == context.participant_id
                 && died.binding_epoch() == context.binding_epoch
         }
-        (Some(SealedBindingFateIntent::Recovered { .. }), BindingFateTerminal::Recovered) => true,
+        (
+            Some(SealedBindingFateIntent::Recovered { .. }),
+            BindingFateTerminal::Recovered | BindingFateTerminal::RecoveredAndReserveFinalizer,
+        ) => true,
         _ => false,
     };
     if !terminal_matches {
@@ -256,6 +263,7 @@ fn validate_binding_fate_measurement(
             context.binding_epoch,
             context.cursor,
             resulting_floor,
+            terminal == BindingFateTerminal::RecoveredAndReserveFinalizer,
         )
         .map_err(|_| BindingFateMeasurementError::OwnerTransition)?;
     Ok(ValidatedBindingFateMeasurement {

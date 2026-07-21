@@ -57,10 +57,7 @@ impl ConversationAuthority {
                     )));
                 }
                 let operation = authority.decode_operation(decoded)?;
-                if !matches!(
-                    operation,
-                    StoredOperation::Ordinary { .. } | StoredOperation::Recovered { .. }
-                ) {
+                if route_in_replay_dispatch(&operation) {
                     authority.route_fate_occurrence(&operation, stored_sequence)?;
                 }
                 let operation_for_projection = operation.clone();
@@ -158,10 +155,7 @@ impl ConversationAuthority {
                     }));
                 }
                 let operation = authority.decode_operation(decoded)?;
-                if !matches!(
-                    operation,
-                    StoredOperation::Ordinary { .. } | StoredOperation::Recovered { .. }
-                ) {
+                if route_in_replay_dispatch(&operation) {
                     authority.route_fate_occurrence(&operation, stored_sequence)?;
                 }
                 let operation_for_projection = operation.clone();
@@ -445,4 +439,21 @@ pub(super) async fn validate_operation_schema(log: &OperationLog) -> Result<(), 
             return Ok(());
         }
     }
+}
+
+/// Rows whose replay transition does not share its live append core route in
+/// the dispatcher. Explicit committed Detached and both specific classes route
+/// inside their shared core, exactly once.
+const fn route_in_replay_dispatch(operation: &StoredOperation) -> bool {
+    matches!(operation, StoredOperation::Died { .. })
+        || matches!(
+            operation,
+            StoredOperation::Detached {
+                row: StoredDetached {
+                    source: StoredDetachedSource::ConnectionClose { .. }
+                        | StoredDetachedSource::ExplicitRequestPending { .. },
+                    ..
+                }
+            }
+        )
 }

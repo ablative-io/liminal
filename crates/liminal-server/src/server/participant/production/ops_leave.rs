@@ -1,8 +1,4 @@
-//! Durable production Leave routing and cold replay.
-//!
-//! Lookup remains protocol-owned; an authorized transition consumes the live
-//! frontier owner, appends one complete v2 `Left` row, and only then publishes
-//! the permanent tombstone and replacement frontier.
+//! Durable production Leave routing and cold replay through protocol-owned transitions.
 
 use liminal_protocol::lifecycle::{
     AttachSecretProof, BindingState, ConnectionConversationCapacityCommit, DetachCell,
@@ -16,11 +12,13 @@ use liminal_protocol::wire::{BindingEpoch, LeaveEnvelope, LeaveRequest, LeaveRes
 
 use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::{self, Digest};
+use super::fate_occurrence::{FateOccurrenceKey, PendingFinalizerRoute};
 use super::frontier::{left_record_charge, terminal_charge as terminal_record_charge};
 use super::log::{
     StoredBindingEpoch, StoredFinalizerPresentation, StoredLeaveRequest, StoredLeaveV3,
     StoredOperation,
 };
+use super::non_presenting_finalizer::NonPresentingFinalizerCommit;
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
@@ -39,7 +37,8 @@ struct LeaveTransitionInput {
 struct PreparedLeaveCommit {
     owner: LiveFrontierOwner,
     tombstone: RetiredIdentity<Digest, Digest, Digest>,
-    observer_projection: ObserverProgressProjection,
+    observer_projection: Option<ObserverProgressProjection>,
+    finalizer: Option<PendingFinalizerRoute>,
     left_order: u64,
     left_seq: u64,
 }
@@ -72,14 +71,21 @@ impl ConversationAuthority {
             }
             SemanticConnectionCapacityDecision::Commit(capacity) => capacity,
         };
-        let next_immutable = self.frontier.as_ref().and_then(|owner| {
-            owner
-                .frontiers()
-                .sequence()
-                .immutable_candidates()
-                .first()
-                .copied()
-        });
+        let finalizes_pending = self
+            .slots
+            .get(&request.participant_id)
+            .is_some_and(|slot| matches!(slot.binding, BindingState::PendingFinalization(_)));
+        let next_immutable = (!finalizes_pending)
+            .then_some(self.frontier.as_ref())
+            .flatten()
+            .and_then(|owner| {
+                owner
+                    .frontiers()
+                    .sequence()
+                    .immutable_candidates()
+                    .first()
+                    .copied()
+            });
         if let Some(candidate) = next_immutable {
             let owner = self.take_frontier()?;
             self.persist_next_marker(candidate, owner, appender)?;
@@ -197,7 +203,8 @@ impl ConversationAuthority {
         appender: &dyn DurableAppend,
     ) -> Result<ArmOutcome, StateError> {
         let source_sequence = self.next_log_sequence;
-        let prepared = self.prepare_leave_transition(request, request_verifier)?;
+        let finalizer = self.select_leave_finalizer(request.participant_id)?;
+        let prepared = self.prepare_leave_transition(request, request_verifier, finalizer)?;
         let outcome = prepared.tombstone.committed_result().clone();
         let row = StoredLeaveV3 {
             request: StoredLeaveRequest::from(request),
@@ -207,22 +214,28 @@ impl ConversationAuthority {
             left_delivery_seq: prepared.left_seq,
             ended_binding_epoch: outcome.ended_binding_epoch().map(StoredBindingEpoch::from),
             prior_terminal_delivery_seq: outcome.prior_terminal_delivery_seq(),
-            pending_source_sequence: None,
-            finalizer_presentation: StoredFinalizerPresentation::PresentEnclosing,
+            pending_source_sequence: prepared
+                .finalizer
+                .map(|route| route.pending_source_sequence),
+            finalizer_presentation: prepared
+                .finalizer
+                .map_or(StoredFinalizerPresentation::PresentEnclosing, |route| {
+                    route.presentation
+                }),
         };
         appender.append(&StoredOperation::Left { row }, self.next_log_sequence)?;
         self.install_frontier(prepared.owner);
         self.retired
             .insert(request.participant_id, prepared.tombstone);
-        self.record_observer_progress_projection(
-            prepared.observer_projection,
-            ObserverProgressSourceMetadata::leave(
+        if let Some(projection) = prepared.observer_projection {
+            let metadata = ObserverProgressSourceMetadata::leave(
                 source_sequence,
                 request.conversation_id,
                 request.participant_id,
                 prepared.left_seq,
-            ),
-        )?;
+            );
+            self.record_observer_progress_projection(projection, metadata)?;
+        }
         self.observe_replayed_position(prepared.left_order, prepared.left_seq)?;
         self.advance_log_head()?;
         Ok(ArmOutcome::committed(
@@ -235,6 +248,7 @@ impl ConversationAuthority {
         &mut self,
         request: &LeaveRequest,
         request_verifier: Digest,
+        finalizer: Option<PendingFinalizerRoute>,
     ) -> Result<PreparedLeaveCommit, StateError> {
         let slot = self.slots.remove(&request.participant_id).ok_or_else(|| {
             StateError::invariant("authorized Leave slot disappeared before commit")
@@ -258,15 +272,18 @@ impl ConversationAuthority {
             .map_err(|error| {
                 StateError::invariant(format!("authorized Leave verification failed: {error:?}"))
             })?;
-        transition_leave(LeaveTransitionInput {
-            owner: self.take_frontier()?,
-            member: slot.member,
-            binding: slot.binding,
-            cell: slot.cell,
-            verified,
-            next_order: self.next_order,
-            next_seq: self.next_seq,
-        })
+        transition_leave(
+            LeaveTransitionInput {
+                owner: self.take_frontier()?,
+                member: slot.member,
+                binding: slot.binding,
+                cell: slot.cell,
+                verified,
+                next_order: self.next_order,
+                next_seq: self.next_seq,
+            },
+            finalizer,
+        )
     }
 
     /// Replays one v2 Left row through the same protocol-owned Leave
@@ -291,7 +308,20 @@ impl ConversationAuthority {
                 "durable Leave order is below the next authority allocation",
             ));
         }
-        let prepared = self.prepare_leave_transition(&request, request_verifier)?;
+        let finalizer = self.select_leave_finalizer(request.participant_id)?;
+        let expected_source = finalizer.map(|route| route.pending_source_sequence);
+        let expected_presentation = finalizer
+            .map_or(StoredFinalizerPresentation::PresentEnclosing, |route| {
+                route.presentation
+            });
+        if row.pending_source_sequence != expected_source
+            || row.finalizer_presentation != expected_presentation
+        {
+            return Err(StateError::invariant(
+                "durable Leave finalizer source or presentation drifted",
+            ));
+        }
+        let prepared = self.prepare_leave_transition(&request, request_verifier, finalizer)?;
         let outcome = prepared.tombstone.committed_result();
         let ended_binding_epoch = row
             .ended_binding_epoch
@@ -309,24 +339,62 @@ impl ConversationAuthority {
         self.install_frontier(prepared.owner);
         self.retired
             .insert(request.participant_id, prepared.tombstone);
-        self.record_observer_progress_projection(
-            prepared.observer_projection,
-            ObserverProgressSourceMetadata::leave(
+        if let Some(projection) = prepared.observer_projection {
+            let metadata = ObserverProgressSourceMetadata::leave(
                 source_sequence,
                 request.conversation_id,
                 request.participant_id,
                 row.left_delivery_seq,
-            ),
-        )?;
+            );
+            self.record_observer_progress_projection(projection, metadata)?;
+        }
         self.observe_replayed_position(row.left_transaction_order, row.left_delivery_seq)?;
         self.advance_log_head()
     }
+
+    fn select_leave_finalizer(
+        &mut self,
+        participant_id: u64,
+    ) -> Result<Option<PendingFinalizerRoute>, StateError> {
+        let Some(slot) = self.slots.get(&participant_id) else {
+            return Err(StateError::invariant(
+                "Leave finalizer participant slot is absent",
+            ));
+        };
+        let BindingState::PendingFinalization(pending) = slot.binding else {
+            return Ok(None);
+        };
+        let key = FateOccurrenceKey {
+            conversation_id: pending.conversation_id(),
+            participant_id: pending.participant_id(),
+            binding_epoch: pending.binding_epoch(),
+        };
+        self.fate_occurrences
+            .select_finalizer(key)
+            .map(Some)
+            .map_err(StateError::from)
+    }
 }
 
-fn transition_leave(input: LeaveTransitionInput) -> Result<PreparedLeaveCommit, StateError> {
+fn transition_leave(
+    input: LeaveTransitionInput,
+    finalizer: Option<PendingFinalizerRoute>,
+) -> Result<PreparedLeaveCommit, StateError> {
     match input.binding {
-        BindingState::PendingFinalization(pending) => transition_pending_leave(input, pending),
-        BindingState::Bound(_) | BindingState::Detached => transition_settled_leave(input),
+        BindingState::PendingFinalization(pending) => {
+            let finalizer = finalizer.ok_or_else(|| {
+                StateError::invariant("pending Leave omitted its durable finalizer source")
+            })?;
+            transition_pending_leave(input, pending, finalizer)
+        }
+        BindingState::Bound(_) | BindingState::Detached => {
+            if finalizer.is_some() {
+                return Err(StateError::invariant(
+                    "settled Leave carried pending-finalizer authority",
+                ));
+            }
+            transition_settled_leave(input)
+        }
     }
 }
 
@@ -358,12 +426,13 @@ fn transition_settled_leave(
         left_charge,
     )
     .map_err(|error| StateError::invariant(format!("settled Leave failed: {error:?}")))?;
-    finish_leave_transition(commit, left_order, input.next_seq)
+    finish_leave_transition(commit, None, left_order, input.next_seq)
 }
 
 fn transition_pending_leave(
     input: LeaveTransitionInput,
     pending: PendingFinalization,
+    finalizer: PendingFinalizerRoute,
 ) -> Result<PreparedLeaveCommit, StateError> {
     let left_admission_order = input
         .owner
@@ -421,18 +490,31 @@ fn transition_pending_leave(
         [terminal_charge, left_charge],
     )
     .map_err(|error| StateError::invariant(format!("pending Leave failed: {error:?}")))?;
-    finish_leave_transition(commit, left_order, left_seq)
+    finish_leave_transition(commit, Some(finalizer), left_order, left_seq)
 }
 
 fn finish_leave_transition(
     commit: LiveLeaveCommit<Digest, Digest, Digest>,
+    finalizer: Option<PendingFinalizerRoute>,
     left_order: u64,
     left_seq: u64,
 ) -> Result<PreparedLeaveCommit, StateError> {
-    let observer_projection = commit
-        .observer_progress_projection()
-        .ok_or_else(|| StateError::invariant("Leave commit did not retire its identity"))?;
-    let (identity, owner) = commit.into_parts();
+    let non_presenting = matches!(
+        finalizer.map(|route| route.presentation),
+        Some(StoredFinalizerPresentation::ConsumeRecoveredReservation { .. })
+    );
+    let (identity, owner, observer_projection) = if non_presenting {
+        let (identity, owner) = commit.into_parts();
+        let commit = NonPresentingFinalizerCommit::new(identity, owner);
+        let (identity, owner) = commit.into_parts();
+        (identity, owner, None)
+    } else {
+        let projection = commit
+            .observer_progress_projection()
+            .ok_or_else(|| StateError::invariant("Leave commit did not retire its identity"))?;
+        let (identity, owner) = commit.into_parts();
+        (identity, owner, Some(projection))
+    };
     let IdentityState::Retired(tombstone) = identity else {
         return Err(StateError::invariant("Leave retained a live identity"));
     };
@@ -440,6 +522,7 @@ fn finish_leave_transition(
         owner,
         tombstone,
         observer_projection,
+        finalizer,
         left_order,
         left_seq,
     })

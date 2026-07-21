@@ -18,6 +18,7 @@ impl LiveFrontierOwner {
         binding_epoch: BindingEpoch,
         cursor: DeliverySeq,
         resulting_floor: DeliverySeq,
+        reserve_finalizer: bool,
     ) -> Result<BindingFateOwnerPlan, LiveFrontierError> {
         if self.frontiers.retained_records().len() != self.retained_charges.len()
             || self
@@ -34,7 +35,13 @@ impl LiveFrontierOwner {
         }
         let frontiers = self
             .frontiers
-            .prepare_binding_fate_transition(participant_id, binding_epoch, cursor, resulting_floor)
+            .prepare_binding_fate_transition(
+                participant_id,
+                binding_epoch,
+                cursor,
+                resulting_floor,
+                reserve_finalizer,
+            )
             .map_err(map_frontier_error)?;
         let released = self
             .retained_charges
