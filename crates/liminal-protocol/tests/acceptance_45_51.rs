@@ -53,7 +53,7 @@ use liminal_protocol::{
     },
 };
 use support::{
-    fenced_owner, marker_delivery, mint_fenced_attach, recovered_fate_from_fenced,
+    fenced_owner, marker_delivery, mint_fenced_attach_with_owner, recovered_fate_from_fenced,
     settled_leave_authority,
 };
 
@@ -499,7 +499,7 @@ fn acceptance_case_45_uniform_marker_episode_and_per_participant_occurrences() {
     assert!(post_v_capacity.is_legal());
     let post_v_debt = closure_debt(1);
     let post_v_projection = ObserverProjection::new(H + 4);
-    let fenced = mint_fenced_attach(
+    let (fate_owner, fenced) = mint_fenced_attach_with_owner(
         dcr,
         debt_q,
         Event::fenced_recovery_committed(P0, H, c2, c3, H + 1),
@@ -515,10 +515,9 @@ fn acceptance_case_45_uniform_marker_episode_and_per_participant_occurrences() {
             edge: StoredEdge::ObserverProjection(post_v_projection),
         }
     );
-    let recovered_fate =
-        recovered_fate_from_fenced(fenced, Event::binding_fate_observed(P0, c3, H + 1)).expect(
-            "exact recovered C3 fate traverses verify, commit, split, and token consumption",
-        );
+    let recovered_fate = recovered_fate_from_fenced(fate_owner, fenced, H + 1).expect(
+        "exact recovered C3 fate traverses verify, commit, split, and measured token consumption",
+    );
     let pending_release = match post_v_projection
         .apply_recovered_binding_fate(post_v_debt, post_v_debt, recovered_fate)
         .expect("fate preserves the exact incomplete OP")
@@ -1576,7 +1575,7 @@ fn acceptance_case_48_marker_ack_and_fenced_recovery_converge_for_both_observer_
     let debt_one = closure_debt(1);
     for (observer_progress, recovery_floor) in [(H - 1, H), (H, H + 1)] {
         let recovered_op = ObserverProjection::new(H + 4);
-        let fenced = mint_fenced_attach(
+        let (fate_owner, fenced) = mint_fenced_attach_with_owner(
             dcr,
             debt_q,
             Event::fenced_recovery_committed(P0, H, e6, e7, recovery_floor),
@@ -1613,11 +1612,8 @@ fn acceptance_case_48_marker_ack_and_fenced_recovery_converge_for_both_observer_
 
         // Recovered e7 fate is tied to this arm's fenced proof and preserves
         // OP. Completion installs DCursor rather than recreating DCR.
-        let recovered_fate = recovered_fate_from_fenced(
-            fenced,
-            Event::binding_fate_observed(P0, e7, recovery_floor),
-        )
-        .expect("e7 fate traverses the fenced attach's complete linear chain");
+        let recovered_fate = recovered_fate_from_fenced(fate_owner, fenced, recovery_floor)
+            .expect("e7 fate traverses the fenced attach's measured linear chain");
         let pending = match recovered_op
             .apply_recovered_binding_fate(debt_one, debt_one, recovered_fate)
             .expect("fate preserves the incomplete recovery OP")
@@ -2739,12 +2735,8 @@ fn oracle_26_complete_chain(
         panic!("Oracle 26 exact owner mint must succeed")
     };
     let (spent_owner, proof) = minted.into_parts();
-    drop(spent_owner);
-    let recovered = recovered_fate_from_fenced(
-        proof,
-        Event::binding_fate_observed(participant_id, recovered_epoch, resulting_floor),
-    )
-    .expect("Oracle 26 traverses verify, commit, split, and recovered consumption");
+    let recovered = recovered_fate_from_fenced(spent_owner, proof, resulting_floor)
+        .expect("Oracle 26 traverses verify, commit, split, and measured recovered consumption");
     assert_eq!(recovered.participant_id(), participant_id);
     [1, 1, 1, 1, 1]
 }
@@ -2812,10 +2804,6 @@ fn attach_commit_splits_operational_state_and_one_noncloneable_fate_token() {
         panic!("same reinstalled marker authority permits one serial retry")
     };
     let (spent_owner, proof) = retried.into_parts();
-    drop(spent_owner);
-    recovered_fate_from_fenced(
-        proof,
-        Event::binding_fate_observed(P0, recovered_epoch, resulting_floor),
-    )
-    .expect("successful serial retry traverses exactly one complete chain");
+    recovered_fate_from_fenced(spent_owner, proof, resulting_floor)
+        .expect("successful serial retry traverses exactly one measured complete chain");
 }

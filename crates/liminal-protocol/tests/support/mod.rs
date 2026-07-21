@@ -4,19 +4,19 @@ use liminal_protocol::{
     algebra::{ResourceVector, WideResourceVector},
     lifecycle::{
         ActiveBinding, AdmissionOrder, AttachCommitParameters, AttachSecretProof,
-        AttachedRecordPosition, BindingState, BindingTerminalOwner, ClaimFrontiers,
-        ClaimFrontiersRestore, ClosureAccounting, ClosureState, CommittedBindingTerminalPosition,
-        DetachCell, EnrollmentFingerprint, Event, ExitProductRangeRestore, FencedAttachCommit,
-        FrontierBinding, FrontierParticipant, ImmutableOrderCandidateMajorRestore,
-        ImmutableSequenceCandidate, LiveFrontierOwner, LiveMember, LiveMemberRestore,
-        MarkerCandidateAuthority, MarkerDelivery, MarkerProvenance, MarkerSequenceOwner,
-        MintFencedAttachResult, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore,
-        OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, PendingFinalization,
-        PrepareLeaveAuthorityError, PreparedLeaveAuthority, RecoveredBindingFate,
-        RecoverySequenceReserve, RetainedCausalRecord, RetainedCausalRecordKind,
-        RetainedRecordCharge, SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner,
-        SequenceLedger, SequenceProductRangesRestore, StoredEdge, TerminalProductRangeRestore,
-        commit_attach, drain_next_marker,
+        AttachedRecordPosition, BindingFateTerminal, BindingState, BindingTerminalOwner,
+        ClaimFrontiers, ClaimFrontiersRestore, ClosureAccounting, ClosureState,
+        CommittedBindingTerminalPosition, DetachCell, EnrollmentFingerprint, Event,
+        ExitProductRangeRestore, FencedAttachCommit, FrontierBinding, FrontierParticipant,
+        ImmutableOrderCandidateMajorRestore, ImmutableSequenceCandidate, LiveFrontierOwner,
+        LiveMember, LiveMemberRestore, MarkerCandidateAuthority, MarkerDelivery, MarkerProvenance,
+        MarkerSequenceOwner, MeasuredBindingFate, MintFencedAttachResult, MovableOrderClaim,
+        MovableSequenceClaim, OrderClaimFrontierRestore, OrderClaims, OrderDirectOwner, OrderHigh,
+        OrderLedger, PendingFinalization, PrepareLeaveAuthorityError, PreparedLeaveAuthority,
+        RecoveredBindingFate, RecoverySequenceReserve, RetainedCausalRecord,
+        RetainedCausalRecordKind, RetainedRecordCharge, SequenceClaimFrontierRestore,
+        SequenceClaims, SequenceDirectOwner, SequenceLedger, SequenceProductRangesRestore,
+        StoredEdge, TerminalProductRangeRestore, commit_attach, drain_next_marker,
     },
     outcome::CandidatePhase,
     wire::{
@@ -32,14 +32,24 @@ pub fn fenced_owner(
     let cursor = marker_delivery_seq
         .checked_sub(1)
         .ok_or_else(|| "fenced owner fixture requires a positive marker".to_owned())?;
-    let (frontier_restore, sequence_ledger, order_ledger) = marker_frontier(
+    restored_marker_owner(
         recovery.participant_id(),
         FrontierBinding::Detached(recovery.prior_binding_epoch()),
         marker_delivery_seq,
         cursor,
-    )?;
+    )
+}
+
+fn restored_marker_owner(
+    participant_id: u64,
+    binding: FrontierBinding,
+    marker_delivery_seq: u64,
+    cursor: u64,
+) -> Result<LiveFrontierOwner, String> {
+    let (frontier_restore, sequence_ledger, order_ledger) =
+        marker_frontier(participant_id, binding, marker_delivery_seq, cursor)?;
     let frontiers = ClaimFrontiers::restore(frontier_restore, sequence_ledger, order_ledger)
-        .map_err(|error| format!("fenced owner frontier failed to restore: {error:?}"))?;
+        .map_err(|error| format!("marker owner frontier failed to restore: {error:?}"))?;
     let retained_charges = frontiers
         .retained_records()
         .iter()
@@ -56,7 +66,7 @@ pub fn fenced_owner(
         .immutable_candidates()
         .first()
         .copied()
-        .ok_or_else(|| "fenced owner frontier had no marker candidate".to_owned())?;
+        .ok_or_else(|| "marker owner frontier had no marker candidate".to_owned())?;
     let marker_charge = RetainedRecordCharge::new(
         candidate.delivery_seq(),
         candidate.admission_order(),
@@ -74,26 +84,30 @@ pub fn fenced_owner(
         0,
         2,
     )
-    .map_err(|error| format!("fenced owner accounting failed: {error:?}"))?;
+    .map_err(|error| format!("marker owner accounting failed: {error:?}"))?;
+    let existing_retained = u64::try_from(frontiers.retained_records().len())
+        .map_err(|_| "marker owner retained-row count exceeds u64".to_owned())?;
+    let retained_record_limit = existing_retained
+        .checked_add(2)
+        .ok_or_else(|| "marker owner retained-row limit overflow".to_owned())?;
     let commit = drain_next_marker(frontiers, accounting, retained_charges, marker_charge)
-        .map_err(|error| format!("fenced owner marker failed to drain: {error:?}"))?;
-    let (owner, _, _) = LiveFrontierOwner::from_marker_drain(commit, 2);
+        .map_err(|error| format!("marker owner failed to drain: {error:?}"))?;
+    let (owner, _, _) = LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
     Ok(owner)
 }
 
-pub fn mint_fenced_attach(
+pub fn mint_fenced_attach_with_owner(
     recovery: liminal_protocol::lifecycle::DetachedCredentialRecovery,
     debt: liminal_protocol::lifecycle::ClosureDebt,
     event: Event,
     successor: liminal_protocol::lifecycle::DebtCompletion,
-) -> Result<FencedAttachCommit, String> {
+) -> Result<(LiveFrontierOwner, FencedAttachCommit), String> {
     let marker_delivery_seq = recovery.marker_delivery_seq();
     let owner = fenced_owner(recovery)?;
     match owner.mint_fenced_attach(marker_delivery_seq, recovery, debt, event, successor) {
         MintFencedAttachResult::Minted(minted) => {
             let (spent_owner, proof) = minted.into_parts();
-            drop(spent_owner);
-            Ok(proof)
+            Ok((spent_owner, proof))
         }
         MintFencedAttachResult::MintRefused(refused) => {
             Err(format!("fenced owner mint refused: {:?}", refused.reason()))
@@ -102,8 +116,9 @@ pub fn mint_fenced_attach(
 }
 
 pub fn recovered_fate_from_fenced(
+    owner: LiveFrontierOwner,
     proof: FencedAttachCommit,
-    event: Event,
+    expected_resulting_floor: u64,
 ) -> Result<RecoveredBindingFate, String> {
     let participant_id = proof.participant_id();
     let conversation_id = proof.conversation_id();
@@ -164,10 +179,46 @@ pub fn recovered_fate_from_fenced(
         .map_err(|failure| format!("fenced fixture verify failed: {:?}", failure.error()))?;
     let committed = commit_attach(verified, DetachCell::<[u8; 32]>::default())
         .map_err(|error| format!("fenced fixture commit failed: {error:?}"))?;
+    drop(owner);
     let (_, token) = committed.into_slot_and_fate();
-    token
-        .recovered_binding_fate(event)
-        .map_err(|_| "fenced fixture recovered token refused event".to_owned())
+    let next_marker = marker_delivery_seq
+        .checked_add(1)
+        .ok_or_else(|| "recovered fixture owner marker overflow".to_owned())?;
+    let owner_marker = next_marker.max(expected_resulting_floor);
+    let owner = restored_marker_owner(
+        participant_id,
+        FrontierBinding::Detached(new_binding_epoch),
+        owner_marker,
+        marker_delivery_seq,
+    )?;
+    let hard_observer_progress = expected_resulting_floor
+        .checked_sub(1)
+        .ok_or_else(|| "recovered fixture resulting floor has no predecessor".to_owned())?;
+    let prepared = owner
+        .prepare_binding_fate(
+            token,
+            BindingFateTerminal::Recovered,
+            hard_observer_progress,
+        )
+        .map_err(|refused| {
+            format!(
+                "fenced fixture measured selector refused: {:?}",
+                refused.error()
+            )
+        })?;
+    let (owner, fate, event) = prepared.into_parts();
+    drop(owner);
+    let _ = event;
+    match fate {
+        MeasuredBindingFate::Recovered(fate)
+            if fate.resulting_floor() == expected_resulting_floor =>
+        {
+            Ok(fate)
+        }
+        MeasuredBindingFate::Recovered(_) | MeasuredBindingFate::Ordinary(_) => {
+            Err("fenced fixture selector returned the wrong measured fate".to_owned())
+        }
+    }
 }
 
 pub fn marker_delivery(

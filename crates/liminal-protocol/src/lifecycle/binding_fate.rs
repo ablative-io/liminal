@@ -165,13 +165,7 @@ impl SealedBindingFateToken {
         ))
     }
 
-    /// Consumes recovered authority into one fate event.
-    ///
-    /// # Errors
-    ///
-    /// Returns the same move-only token on refusal, boxed to keep the successful
-    /// return path compact.
-    pub fn recovered_binding_fate(
+    pub(in crate::lifecycle) fn recovered_binding_fate(
         mut self,
         event: Event,
     ) -> Result<RecoveredBindingFate, Box<Self>> {

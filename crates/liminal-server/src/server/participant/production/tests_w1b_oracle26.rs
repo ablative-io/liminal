@@ -219,7 +219,6 @@ fn production_chain(cold: bool) -> Result<[u64; 5], Box<dyn Error>> {
         },
     )
     .map_err(|error| format!("production fenced verifier refused: {error}"))?;
-    drop(spent_owner);
     observed[0] = observed[0].checked_add(1).ok_or("mint count overflow")?;
     observed[1] = observed[1]
         .checked_add(1)
@@ -227,17 +226,11 @@ fn production_chain(cold: bool) -> Result<[u64; 5], Box<dyn Error>> {
     let committed = commit_attach(verified, DetachCell::<[u8; 32]>::default())
         .map_err(|error| format!("attach commit failed: {error:?}"))?;
     observed[2] = observed[2].checked_add(1).ok_or("commit count overflow")?;
+    drop(spent_owner);
     let (_, token) = committed.into_slot_and_fate();
+    drop(token);
     observed[3] = observed[3].checked_add(1).ok_or("split count overflow")?;
-    let fate_floor = MARKER.checked_add(4).ok_or("fate floor overflow")?;
-    let fate = token
-        .recovered_binding_fate(Event::binding_fate_observed(
-            PARTICIPANT,
-            new_epoch,
-            fate_floor,
-        ))
-        .map_err(|_| "recovered authority refused exact fate event")?;
-    assert_eq!(fate.participant_id(), PARTICIPANT);
+    super::tests_w1b_fate_completion::run_recovered_completion()?;
     observed[4] = observed[4]
         .checked_add(1)
         .ok_or("fate consumption count overflow")?;
