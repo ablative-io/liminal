@@ -101,6 +101,7 @@ fn commit_and_deliver_record(
     recipient: &mut SocketPeer,
     sender: ParticipantId,
 ) -> Result<RecordCommitted, Box<dyn Error>> {
+    primary.open_publication_replay()?;
     let outcome = primary.request(ClientRequest::RecordAdmission(RecordAdmission {
         conversation_id: CONVERSATION,
         participant_id: sender,
@@ -112,16 +113,6 @@ fn commit_and_deliver_record(
         return Err(format!("participant A's ordinary record did not commit: {outcome:?}").into());
     };
 
-    primary.open_publication_replay()?;
-    let mut wake_peer = primary.spawn_peer()?;
-    let wake = wake_peer.request(ClientRequest::RecordAdmission(RecordAdmission {
-        conversation_id: CONVERSATION,
-        participant_id: u64::MAX,
-        capability_generation: Generation::ONE,
-        record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xD1; 16]),
-        payload: Vec::new(),
-    }))?;
-    assert!(matches!(wake, ServerValue::ParticipantUnknown(_)));
     let ServerPush::ParticipantDelivery(delivery) = recipient.read_push()? else {
         return Err("participant C did not receive the ordinary record".into());
     };
