@@ -3,6 +3,24 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## liminal-protocol 0.3.0 — 2026-07-21
+
+W1b durable connection-fate sources land: every participant binding now
+records an exact Died / Ordinary / Recovered / Detached fate row, flushed
+before transport teardown and replayed identically live and cold.
+
+Breaking API changes (the reason this is 0.3.0, not 0.2.2):
+
+- Public `Clone`/`Copy` removed from the fenced-attach proof surface, the
+  public recovered-fate method is now private, and
+  `DetachedCredentialRecovery::fenced_attach` is no longer public — attach
+  commit now splits operational state from a single non-cloneable fate
+  token, so a proof cannot be minted, reused, or forked twice
+  (compile-fail-tested via trybuild).
+- `VerifiedAttachCommit<F>` is lifetime-free.
+- New public `ServerError::ParticipantServiceFatal`.
+- New sealed fate/finalizer authority surface and marker-source APIs.
+
 ## 0.2.4 — 2026-07-13
 
 The release that retires the idle-CPU burn. Three payloads, one publish.
