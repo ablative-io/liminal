@@ -13,7 +13,7 @@ use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 use super::ProductionParticipantHandler;
 use super::log::{
     DecodedStoredOperation, OperationLog, OperationLogError, StoredDetachedCause,
-    StoredFinalizerPresentation, StoredOperation, StoredTerminalDisposition,
+    StoredFinalizerPresentation, StoredLeaveV3, StoredOperation, StoredTerminalDisposition,
 };
 use super::state::DurableAppend;
 use super::tests_w1b_pending_died_restart::{
@@ -106,6 +106,61 @@ fn pending_detached_finalized_by_leave_presents_only_live_leave_commit()
         Some(fixture.terminal_delivery_seq)
     );
     assert!(block_on(fixture.log.read_at(left_source_sequence + 1))??.is_none());
+    Ok(())
+}
+
+#[test]
+fn leave_finalizer_resolves_pending_source_without_claiming_stored_cause()
+-> Result<(), Box<dyn Error>> {
+    let fixture = pending_detached_leave_fixture()?;
+    commit_pending_detached_leave(&fixture)?;
+    let left_source_sequence = fixture
+        .detached_source_sequence
+        .checked_add(1)
+        .ok_or("cause-honest Left source overflow")?;
+
+    let detached = block_on(fixture.log.read_at(fixture.detached_source_sequence))??
+        .ok_or("cause-honest pending source is absent")?;
+    let DecodedStoredOperation::V3(StoredOperation::Detached { row: detached }) =
+        detached.operation
+    else {
+        return Err("cause-honest fixture expected Detached source".into());
+    };
+    assert_eq!(detached.binding_epoch, fixture.binding_epoch.into());
+    assert_eq!(detached.cause, StoredDetachedCause::ServerShutdown);
+    assert_eq!(detached.terminal_order, fixture.terminal_order);
+    assert_eq!(detached.disposition, StoredTerminalDisposition::Pending);
+
+    let left = block_on(fixture.log.read_at(left_source_sequence))??
+        .ok_or("cause-honest Left source is absent")?;
+    let DecodedStoredOperation::V3(StoredOperation::Left { row: left }) = left.operation else {
+        return Err("cause-honest fixture expected Left finalizer".into());
+    };
+    assert_eq!(left.ended_binding_epoch, None);
+    assert_eq!(
+        left.pending_source_sequence,
+        Some(fixture.detached_source_sequence)
+    );
+    assert_eq!(
+        left.prior_terminal_delivery_seq,
+        Some(fixture.terminal_delivery_seq)
+    );
+    assert_eq!(
+        left.finalizer_presentation,
+        StoredFinalizerPresentation::PresentEnclosing
+    );
+
+    let StoredLeaveV3 {
+        request: _,
+        request_verifier: _,
+        receiving_epoch: _,
+        left_transaction_order: _,
+        left_delivery_seq: _,
+        ended_binding_epoch: _,
+        prior_terminal_delivery_seq: _,
+        pending_source_sequence: _,
+        finalizer_presentation: _,
+    } = left;
     Ok(())
 }
 
