@@ -8,10 +8,10 @@
 use liminal::durability::bridge::block_on;
 
 use liminal_protocol::lifecycle::{
-    BindingState, MarkerAckCommit, MarkerAckDecision, MarkerProofState, ParticipantAckDecision,
-    PresentedIdentity, RecipientAckObligations, SemanticConnectionCapacityDecision,
-    apply_marker_ack, apply_marker_ack_frontier, apply_participant_ack_frontier,
-    apply_participant_ack_with_obligations,
+    BindingState, MarkerAckCommit, MarkerAckDecision, MarkerProofState, ParticipantAckCommit,
+    ParticipantAckDecision, PresentedIdentity, RecipientAckObligations,
+    SemanticConnectionCapacityDecision, apply_marker_ack, apply_marker_ack_frontier,
+    apply_participant_ack_frontier, apply_participant_ack_with_obligations,
 };
 use liminal_protocol::wire::{
     BindingEpoch, MarkerAck, MarkerAckEnvelope, MarkerAckResponse, ParticipantAck,
@@ -24,7 +24,7 @@ use super::log::{StoredAck, StoredBindingEpoch, StoredOperation};
 use super::marker_progress::{marker_delivery_progress, marker_replay_progress};
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::outbox_log::{OutboxLog, OutboxRow, StoredMarkerAckCommitted};
-use super::state::{ConversationAuthority, DurableAppend, StateError};
+use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, Slot, StateError};
 
 impl ConversationAuthority {
     /// Applies one cumulative acknowledgement over the zero-debt selector.
@@ -202,6 +202,7 @@ impl ConversationAuthority {
                 let slot = self.slots.get_mut(&request.participant_id).ok_or_else(|| {
                     StateError::invariant("committed ack lost its participant slot")
                 })?;
+                progress_pending_binding_fate(slot, &commit)?;
                 let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
                     StateError::invariant(format!("ack cursor commit rejected: {error:?}"))
                 })?;
@@ -500,5 +501,36 @@ const fn marker_ack_envelope(request: &MarkerAck) -> MarkerAckEnvelope {
         participant_id: request.participant_id,
         capability_generation: request.capability_generation,
         marker_delivery_seq: request.marker_delivery_seq,
+    }
+}
+
+fn progress_pending_binding_fate(
+    slot: &mut Slot,
+    commit: &ParticipantAckCommit,
+) -> Result<(), StateError> {
+    let Some(pending) = slot.binding_fate.take() else {
+        return Ok(());
+    };
+    let PendingBindingFate {
+        attached_source_sequence,
+        token,
+    } = pending;
+    match commit.progress_binding_fate_token(token) {
+        Ok(token) => {
+            slot.binding_fate = Some(PendingBindingFate {
+                attached_source_sequence,
+                token,
+            });
+            Ok(())
+        }
+        Err(token) => {
+            slot.binding_fate = Some(PendingBindingFate {
+                attached_source_sequence,
+                token: *token,
+            });
+            Err(StateError::invariant(
+                "ack cursor commit disagrees with sealed binding-fate authority",
+            ))
+        }
     }
 }

@@ -58,10 +58,51 @@ impl SealedBindingFateToken {
     pub(in crate::lifecycle) const fn from_recovered_for_test(
         recovered: FencedAttachCommit,
     ) -> Self {
+        let cursor = recovered.marker_delivery_seq();
         Self {
             ordinary: None,
             recovered: Some(recovered),
+            cursor,
         }
+    }
+
+    /// Replays one protocol-selected normal acknowledgement into this token.
+    pub(in crate::lifecycle) fn participant_ack_progressed(
+        mut self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        previous_cursor: DeliverySeq,
+        through_seq: DeliverySeq,
+    ) -> Result<Self, Box<Self>> {
+        if previous_cursor != self.cursor || through_seq <= previous_cursor {
+            return Err(Box::new(self));
+        }
+        match (self.ordinary.take(), self.recovered.as_ref()) {
+            (Some(authority), None) => match authority.participant_ack_progressed(
+                conversation_id,
+                participant_id,
+                binding_epoch,
+                previous_cursor,
+                through_seq,
+            ) {
+                Ok(authority) => self.ordinary = Some(authority),
+                Err(authority) => {
+                    self.ordinary = Some(authority);
+                    return Err(Box::new(self));
+                }
+            },
+            (None, Some(proof))
+                if proof.conversation_id() == conversation_id
+                    && proof.participant_id() == participant_id
+                    && proof.new_binding_epoch() == binding_epoch => {}
+            (ordinary, _) => {
+                self.ordinary = ordinary;
+                return Err(Box::new(self));
+            }
+        }
+        self.cursor = through_seq;
+        Ok(self)
     }
 
     /// Returns the exact protocol-owned identity whose floor must be measured.
@@ -69,22 +110,22 @@ impl SealedBindingFateToken {
         &self,
     ) -> Option<BindingFateMeasurementContext> {
         match (&self.ordinary, &self.recovered) {
-            (Some(authority), None) => {
+            (Some(authority), None) if authority.through_seq() == self.cursor => {
                 let binding = authority.binding();
                 Some(BindingFateMeasurementContext {
                     conversation_id: binding.conversation_id,
                     participant_id: binding.participant_id,
                     binding_epoch: binding.binding_epoch,
-                    cursor: authority.through_seq(),
+                    cursor: self.cursor,
                 })
             }
             (None, Some(proof)) => Some(BindingFateMeasurementContext {
                 conversation_id: proof.conversation_id(),
                 participant_id: proof.participant_id(),
                 binding_epoch: proof.new_binding_epoch(),
-                cursor: proof.marker_delivery_seq(),
+                cursor: self.cursor,
             }),
-            (None, None) | (Some(_), Some(_)) => None,
+            (None | Some(_), None) | (Some(_), Some(_)) => None,
         }
     }
 

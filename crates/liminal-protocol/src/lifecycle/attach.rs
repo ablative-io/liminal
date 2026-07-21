@@ -138,6 +138,7 @@ pub struct InstalledAttachState<F, V> {
 pub struct SealedBindingFateToken {
     pub(in crate::lifecycle) ordinary: Option<OrdinaryBindingAuthority>,
     pub(in crate::lifecycle) recovered: Option<FencedAttachCommit>,
+    pub(in crate::lifecycle) cursor: DeliverySeq,
 }
 
 impl<F, V> AttachCommit<F, V> {
@@ -155,6 +156,7 @@ impl<F, V> AttachCommit<F, V> {
             ordinary_binding_authority,
             recovered_binding_authority,
         } = self;
+        let cursor = member.cursor();
         (
             InstalledAttachState {
                 member,
@@ -168,6 +170,7 @@ impl<F, V> AttachCommit<F, V> {
             SealedBindingFateToken {
                 ordinary: ordinary_binding_authority,
                 recovered: recovered_binding_authority,
+                cursor,
             },
         )
     }
