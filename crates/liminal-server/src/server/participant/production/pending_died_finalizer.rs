@@ -111,7 +111,7 @@ impl ConversationAuthority {
                         },
                     },
                 );
-                self.install_frontier(owner);
+                self.install_frontier(owner)?;
                 return Err(StateError::invariant(format!(
                     "pending Died finalizer measurement refused: {error:?}"
                 )));

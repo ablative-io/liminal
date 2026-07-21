@@ -92,7 +92,7 @@ impl ConversationAuthority {
                 Err(refused) => {
                     let error = refused.error();
                     let (owner, token, _) = refused.into_parts();
-                    self.install_frontier(owner);
+                    self.install_frontier(owner)?;
                     self.pending_specific_fates.insert(
                         participant_id,
                         PendingSpecificFate {
@@ -138,7 +138,7 @@ impl ConversationAuthority {
                 MeasuredBindingFate::Ordinary(fate),
             ) => {
                 let Some(finalized) = terminal else {
-                    self.install_frontier(owner);
+                    self.install_frontier(owner)?;
                     return Err(StateError::invariant(
                         "measured ordinary fate lost its finalized Died terminal",
                     ));
@@ -181,7 +181,7 @@ impl ConversationAuthority {
                 )
             }
             _ => {
-                self.install_frontier(owner);
+                self.install_frontier(owner)?;
                 Err(StateError::invariant(
                     "measured binding fate class disagrees with durable Died intent",
                 ))
@@ -215,7 +215,7 @@ impl ConversationAuthority {
                 let reason = refused.reason();
                 let (shell, _) = refused.into_parts();
                 self.shell = Some(shell);
-                self.install_frontier(owner);
+                self.install_frontier(owner)?;
                 return Err(StateError::ShellRefused { reason });
             }
         };
@@ -231,7 +231,7 @@ impl ConversationAuthority {
             &make_operation,
         )?;
         self.shell = Some(shell);
-        self.install_frontier(owner);
+        self.install_frontier(owner)?;
         self.advance_log_head()?;
         Ok(())
     }
@@ -261,7 +261,7 @@ impl ConversationAuthority {
                 let reason = refused.reason();
                 let (shell, _) = refused.into_parts();
                 self.shell = Some(shell);
-                self.install_frontier(owner);
+                self.install_frontier(owner)?;
                 return Err(StateError::ShellRefused { reason });
             }
         };
@@ -277,7 +277,7 @@ impl ConversationAuthority {
             &make_operation,
         )?;
         self.shell = Some(shell);
-        self.install_frontier(owner);
+        self.install_frontier(owner)?;
         if completion.presentation == StoredRecoveredPresentation::RecoveredOwnsAndReservesFinalizer
         {
             let metadata = ObserverProgressSourceMetadata::recovered_binding_fate(

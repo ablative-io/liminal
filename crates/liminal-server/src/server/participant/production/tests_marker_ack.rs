@@ -256,7 +256,7 @@ fn complete_marker_snapshot(
         next_seq: authority.next_seq,
         next_log_sequence: authority.next_log_sequence,
         observer_progress: authority.observer_progress,
-        frontier: format!("{:?}", authority.frontier),
+        frontier: format!("{:?}", authority.obligation_debt_dispatch),
         outbox: format!("{:?}", authority.outbox),
     };
     drop(owner);

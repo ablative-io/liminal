@@ -101,7 +101,7 @@ fn install_recovered_fixture(
     attached_source_sequence: u64,
     attach_secret: AttachSecret,
 ) -> Result<(), Box<dyn Error>> {
-    authority.frontier = Some(recovered.owner);
+    authority.replace_frontier_for_test(recovered.owner)?;
     authority.next_seq = recovered.next_terminal_sequence;
     authority.next_order = recovered.next_terminal_order;
     let slot = authority
@@ -151,11 +151,9 @@ fn extend_finalizer_capacity(
     );
     let finalizer_rows = u64::try_from([terminal_charge, left_charge].len())?;
     let frontier = authority
-        .frontier
-        .take()
-        .ok_or("reservation fixture lost its frontier after Recovered")?
+        .take_frontier()?
         .with_pending_finalizer_test_capacity(finalizer_rows, finalizer_charge)?;
-    authority.frontier = Some(frontier);
+    authority.install_frontier(frontier)?;
     Ok(())
 }
 

@@ -3,7 +3,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use liminal_protocol::lifecycle::BindingState;
+use liminal_protocol::lifecycle::{
+    BindingState, ObligationDebtDispatchDecision, decide_obligation_debt_dispatch,
+};
 use liminal_protocol::wire::{
     BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, EnrollmentRequest,
     ObserverRecoveryHandshake, ParticipantId, ParticipantRecord, ServerValue,
@@ -203,19 +205,39 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         let Some(outbox) = authority.outbox.as_ref() else {
             return Err(publication_owner_missing(conversation_id));
         };
+        let Some(dispatch_state) = authority.obligation_debt_dispatch() else {
+            return Err(publication_owner_missing(conversation_id));
+        };
         let offered_through = offered
             .filter(|progress| progress.binding_epoch == binding_epoch)
             .map_or_else(
                 || outbox.durable_ack_through(participant_id),
                 |progress| progress.through_seq,
             );
-        let publication = outbox
-            .delivery_after(participant_id, offered_through)
-            .map(|delivery| ParticipantPublication {
-                participant_id,
-                binding_epoch,
-                delivery,
-            });
+        let decision = decide_obligation_debt_dispatch(
+            dispatch_state,
+            participant_id,
+            binding_epoch,
+            offered_through,
+            |participant_id, binding_epoch, dispatch_after| {
+                outbox
+                    .delivery_after(participant_id, dispatch_after)
+                    .map(|delivery| ParticipantPublication {
+                        participant_id,
+                        binding_epoch,
+                        delivery,
+                    })
+            },
+        );
+        let publication = match decision {
+            ObligationDebtDispatchDecision::Permit(publication) => publication,
+            ObligationDebtDispatchDecision::Defer(_) => None,
+            ObligationDebtDispatchDecision::Invariant(invariant) => {
+                return Err(ParticipantSemanticError::Internal {
+                    message: format!("obligation-debt dispatch invariant: {invariant:?}"),
+                });
+            }
+        };
         drop(owner);
         Ok(publication)
     }

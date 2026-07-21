@@ -524,8 +524,7 @@ impl SocketFixture {
             .as_ref()
             .ok_or("conversation authority was not restored")?;
         let frontier = authority
-            .frontier
-            .as_ref()
+            .frontier()
             .ok_or("conversation frontier owner was absent")?;
         let frontier_cursor = frontier
             .frontiers()
@@ -589,8 +588,7 @@ impl SocketFixture {
             .as_ref()
             .ok_or("conversation authority was not restored")?;
         let frontier = authority
-            .frontier
-            .as_ref()
+            .frontier()
             .ok_or("conversation frontier owner was absent")?;
         let counts = (
             frontier.frontiers().sequence().immutable_candidates().len(),

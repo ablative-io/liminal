@@ -116,7 +116,7 @@ impl ConversationAuthority {
             ))
         })?;
         let (member, binding, cell, _outcome) = transition.into_parts();
-        self.install_frontier(admitted.owner);
+        self.install_frontier(admitted.owner)?;
         self.next_order =
             self.next_order
                 .checked_add(1)
@@ -245,7 +245,7 @@ impl ConversationAuthority {
         sequence: u64,
         clear_fate_token: bool,
     ) -> Result<(), StateError> {
-        self.install_frontier(admitted.owner);
+        self.install_frontier(admitted.owner)?;
         self.next_order =
             self.next_order
                 .checked_add(1)

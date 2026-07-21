@@ -460,7 +460,7 @@ pub(super) fn marker_protocol_snapshot(
         .ok_or("marker snapshot participant was absent")?
         .member
         .cursor();
-    let frontier = format!("{:?}", authority.frontier);
+    let frontier = format!("{:?}", authority.obligation_debt_dispatch);
     drop(owner);
     Ok((cursor, frontier))
 }

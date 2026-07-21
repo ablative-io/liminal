@@ -77,7 +77,7 @@ impl ConversationAuthority {
             .get(&request.participant_id)
             .is_some_and(|slot| matches!(slot.binding, BindingState::PendingFinalization(_)));
         let next_immutable = (!finalizes_pending)
-            .then_some(self.frontier.as_ref())
+            .then_some(self.frontier())
             .flatten()
             .and_then(|owner| {
                 owner
@@ -225,7 +225,7 @@ impl ConversationAuthority {
                 }),
         };
         appender.append(&StoredOperation::Left { row }, self.next_log_sequence)?;
-        self.install_frontier(prepared.owner);
+        self.install_frontier(prepared.owner)?;
         self.retired
             .insert(request.participant_id, prepared.tombstone);
         if let Some(projection) = prepared.observer_projection {
@@ -371,7 +371,7 @@ impl ConversationAuthority {
                 "durable Leave tombstone allocation drifted",
             ));
         }
-        self.install_frontier(prepared.owner);
+        self.install_frontier(prepared.owner)?;
         self.retired
             .insert(request.participant_id, prepared.tombstone);
         if let Some(projection) = prepared.observer_projection {

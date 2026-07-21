@@ -146,7 +146,7 @@ fn reserved_setup() -> Result<ReservedSetup, Box<dyn Error>> {
             .next_log_sequence
             .checked_sub(1)
             .ok_or("fenced reservation Attached source underflow")?;
-        authority.frontier = Some(recovered.owner);
+        authority.replace_frontier_for_test(recovered.owner)?;
         authority.next_seq = recovered.next_terminal_sequence;
         authority.next_order = recovered.next_terminal_order;
         let slot = authority
@@ -306,11 +306,9 @@ pub(super) fn extend_finalizer_capacity(
             .ok_or("fenced finalizer byte charge overflow")?,
     );
     let frontier = authority
-        .frontier
-        .take()
-        .ok_or("fenced finalizer frontier disappeared")?
+        .take_frontier()?
         .with_pending_finalizer_test_capacity(2, charge)?;
-    authority.frontier = Some(frontier);
+    authority.install_frontier(frontier)?;
     Ok(())
 }
 
@@ -342,7 +340,7 @@ fn commit_fenced_finalizer(setup: &ReservedSetup) -> Result<(), Box<dyn Error>> 
         let authority = owner
             .as_mut()
             .ok_or("fenced finalizer owner was unavailable")?;
-        authority.frontier = Some(frontier);
+        authority.replace_frontier_for_test(frontier)?;
         authority.next_seq = fixture.terminal_delivery_seq;
         authority.next_order = fixture.terminal_order;
         authority.next_log_sequence = marker_source_sequence

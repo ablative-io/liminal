@@ -192,7 +192,7 @@ fn pending_detached_restart_restores_disconnect_or_shutdown_without_refinish()
     let authority = owner
         .as_mut()
         .ok_or("pending Detached owner was unavailable")?;
-    authority.frontier = Some(recovered.owner);
+    authority.replace_frontier_for_test(recovered.owner)?;
     authority.next_seq = recovered.next_terminal_sequence;
     authority.next_order = recovered.next_terminal_order;
     let slot = authority
@@ -293,7 +293,7 @@ pub(super) fn run_recovered_completion() -> Result<(), Box<dyn Error>> {
         .checked_add(1)
         .ok_or("recovered source sequence overflow")?;
     let observer_before = authority.observer_progress;
-    authority.frontier = Some(recovered.owner);
+    authority.replace_frontier_for_test(recovered.owner)?;
     authority.next_seq = recovered.next_terminal_sequence;
     authority.next_order = recovered.next_terminal_order;
     let slot = authority
@@ -392,8 +392,7 @@ fn assert_recovered_completion(
         .as_ref()
         .ok_or("recovered completion owner was unavailable after completion")?;
     let frontier = authority
-        .frontier
-        .as_ref()
+        .frontier()
         .ok_or("recovered completion did not reinstall its frontier owner")?;
     assert_eq!(
         frontier.frontiers().retained_floor(),
@@ -470,8 +469,7 @@ fn assert_ordinary_completion(
         .ok_or("ordinary participant slot disappeared after completion")?;
     assert!(slot.binding_fate.is_none());
     let frontier = authority
-        .frontier
-        .as_ref()
+        .frontier()
         .ok_or("measured frontier owner was not installed after completion")?;
     assert_eq!(
         frontier.frontiers().retained_floor(),
@@ -483,8 +481,7 @@ fn assert_ordinary_completion(
         ProductionParticipantHandler::new(Arc::clone(&handler.store), test_participant_config())?;
     let replayed = cold.replay_and_repair(expected.conversation_id, &log)?;
     let replayed_frontier = replayed
-        .frontier
-        .as_ref()
+        .frontier()
         .ok_or("cold replay omitted the measured frontier owner")?;
     assert_eq!(
         replayed_frontier.frontiers().retained_floor(),

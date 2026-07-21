@@ -6,7 +6,7 @@ use crate::wire::{
     ParticipantAck, ParticipantAckEnvelope, ParticipantId, ParticipantIndex,
 };
 
-use super::edge::ClosureDebt;
+use super::{ClaimFrontiers, FrontierBinding, edge::ClosureDebt};
 
 /// Participant-scoped cursor progress key mandated by extraction Fix 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -202,10 +202,36 @@ impl BoundParticipantCursor {
     pub const fn cursor(self) -> DeliverySeq {
         self.cursor
     }
+}
 
+/// Private binding-tagged participant state for one coupled debt episode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct DebtParticipantCursor {
+    participant_id: ParticipantId,
+    binding: FrontierBinding,
+    cursor: DeliverySeq,
+}
+
+impl From<BoundParticipantCursor> for DebtParticipantCursor {
+    fn from(participant: BoundParticipantCursor) -> Self {
+        Self {
+            participant_id: participant.participant_id,
+            binding: FrontierBinding::Bound(participant.active_binding_epoch),
+            cursor: participant.cursor,
+        }
+    }
+}
+
+impl DebtParticipantCursor {
     const fn advance_to(&mut self, boundary: DeliverySeq) {
         if boundary > self.cursor {
             self.cursor = boundary;
+        }
+    }
+
+    const fn binding_epoch(self) -> BindingEpoch {
+        match self.binding {
+            FrontierBinding::Bound(epoch) | FrontierBinding::Detached(epoch) => epoch,
         }
     }
 }
@@ -309,7 +335,7 @@ pub struct NonzeroDebtCursorEpisode {
     candidate_high_watermark: DeliverySeq,
     cap_floor: u128,
     floor: FloorComputation,
-    participants: BTreeMap<ParticipantIndex, BoundParticipantCursor>,
+    participants: BTreeMap<ParticipantIndex, DebtParticipantCursor>,
     facts: CursorProgressFacts,
 }
 
@@ -468,7 +494,10 @@ impl NonzeroDebtCursorEpisode {
                     participant_id: participant.participant_id,
                 });
             }
-            indexed.insert(participant.participant_id, participant);
+            indexed.insert(
+                participant.participant_id,
+                DebtParticipantCursor::from(participant),
+            );
         }
 
         let minimum_member_cursor = indexed.values().map(|participant| participant.cursor).min();
@@ -543,6 +572,110 @@ impl NonzeroDebtCursorEpisode {
         Some(episode)
     }
 
+    pub(super) fn from_claim_frontiers(
+        frontiers: &ClaimFrontiers,
+        debt: ClosureDebt,
+        observer_progress: DeliverySeq,
+    ) -> Result<Self, CursorEpisodeBuildError> {
+        let candidate_high_watermark = frontiers.sequence().ledger().high_watermark();
+        if observer_progress > candidate_high_watermark {
+            return Err(CursorEpisodeBuildError::ObserverBeyondHighWatermark {
+                observer_progress,
+                candidate_high_watermark,
+            });
+        }
+        let current_floor = frontiers.retained_floor();
+        let retained_end = u128::from(candidate_high_watermark) + 1;
+        if current_floor > retained_end {
+            return Err(CursorEpisodeBuildError::FloorBeyondRetainedEnd {
+                current_floor,
+                retained_end,
+            });
+        }
+        let participants = frontiers
+            .active_identities()
+            .participants()
+            .iter()
+            .map(|participant| {
+                (
+                    participant.participant_index(),
+                    DebtParticipantCursor {
+                        participant_id: participant.participant_index(),
+                        binding: participant.binding(),
+                        cursor: participant.cursor(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let minimum_member_cursor = participants
+            .values()
+            .map(|participant| participant.cursor)
+            .min();
+        let preferred = floor_transition(
+            current_floor,
+            minimum_member_cursor,
+            candidate_high_watermark,
+            observer_progress,
+            current_floor,
+        );
+        let cap_floor = current_floor.max(preferred.preferred_floor);
+        let floor = floor_transition(
+            current_floor,
+            minimum_member_cursor,
+            candidate_high_watermark,
+            observer_progress,
+            cap_floor,
+        );
+        Ok(Self {
+            conversation_id: frontiers.conversation_id(),
+            debt,
+            observer_progress,
+            candidate_high_watermark,
+            cap_floor,
+            floor,
+            participants,
+            facts: CursorProgressFacts::new(),
+        })
+    }
+
+    pub(super) fn reconcile_claim_frontiers(
+        mut self,
+        frontiers: &ClaimFrontiers,
+        debt: ClosureDebt,
+        observer_progress: DeliverySeq,
+    ) -> Result<Self, CursorEpisodeBuildError> {
+        let mut next = Self::from_claim_frontiers(frontiers, debt, observer_progress)?;
+        for (key, fact) in self.facts.facts {
+            let Some(participant) = next.participants.get(&key.participant_index) else {
+                continue;
+            };
+            if key.boundary <= next.candidate_high_watermark {
+                let reconciled = if key.boundary <= participant.cursor {
+                    CursorProgressFact::Consumed
+                } else {
+                    fact
+                };
+                next.facts.facts.insert(key, reconciled);
+            }
+        }
+        for participant in next.participants.values() {
+            let _ = next
+                .facts
+                .consume_through(participant.participant_id, participant.cursor);
+        }
+        self.participants.clear();
+        Ok(next)
+    }
+
+    pub(super) fn participant_binding(
+        &self,
+        participant_index: ParticipantIndex,
+    ) -> Option<(FrontierBinding, DeliverySeq)> {
+        self.participants
+            .get(&participant_index)
+            .map(|participant| (participant.binding, participant.cursor))
+    }
+
     /// Returns the conversation owning this aggregate for internal operation
     /// prestate validation.
     pub(super) const fn conversation_id(&self) -> ConversationId {
@@ -601,7 +734,15 @@ impl NonzeroDebtCursorEpisode {
         &self,
         participant_index: ParticipantIndex,
     ) -> Option<BoundParticipantCursor> {
-        self.participants.get(&participant_index).copied()
+        let participant = self.participants.get(&participant_index).copied()?;
+        let FrontierBinding::Bound(epoch) = participant.binding else {
+            return None;
+        };
+        Some(BoundParticipantCursor::new(
+            participant.participant_id,
+            epoch,
+            participant.cursor,
+        ))
     }
 
     /// Returns the participant-scoped cursor fact map.
@@ -698,10 +839,13 @@ impl NonzeroDebtCursorEpisode {
         if request.participant_id != participant.participant_id {
             return Err(CumulativeAckAuthorizationError::ParticipantMismatch);
         }
-        if request.capability_generation != participant.active_binding_epoch.capability_generation {
+        let FrontierBinding::Bound(active_binding_epoch) = participant.binding else {
+            return Err(CumulativeAckAuthorizationError::BindingEpochMismatch);
+        };
+        if request.capability_generation != active_binding_epoch.capability_generation {
             return Err(CumulativeAckAuthorizationError::GenerationMismatch);
         }
-        if receiving_binding_epoch != participant.active_binding_epoch {
+        if receiving_binding_epoch != active_binding_epoch {
             return Err(CumulativeAckAuthorizationError::BindingEpochMismatch);
         }
 
@@ -762,15 +906,15 @@ impl NonzeroDebtCursorEpisode {
         Ok(CumulativeAckOutcome::Committed(AckCommitted::new(envelope)))
     }
 
-    /// Deterministically serializes the active debt, bound cursors, and facts.
+    /// Deterministically serializes the active debt, binding-tagged cursors, and facts.
     ///
     /// Format: conversation id, debt entries/bytes as two u128 values, observer
     /// progress and `H'` as two u64 values, current `F'` and `cap_floor` as two
     /// u128 values, participant count as u32, participants in index order, then
     /// fact count as u32 and facts in `(participant_index, boundary)` order. The
     /// retained suffix is reproduced exactly by `[F', H']`. A participant is
-    /// five u64 values: its one canonical identifier/index, server incarnation,
-    /// connection ordinal, generation, and cursor. A fact retains the 17-byte
+    /// one binding tag plus five u64 values: its canonical identifier/index,
+    /// server incarnation, connection ordinal, generation, and cursor. A fact retains the 17-byte
     /// format documented by [`CursorProgressFacts::encode`]. This is lifecycle
     /// storage, not the participant network frame format.
     ///
@@ -786,7 +930,7 @@ impl NonzeroDebtCursorEpisode {
         let participant_bytes = self
             .participants
             .len()
-            .checked_mul(40)
+            .checked_mul(41)
             .ok_or(CursorFactEncodeError::LengthOverflow)?;
         let fact_bytes = self
             .facts
@@ -809,28 +953,25 @@ impl NonzeroDebtCursorEpisode {
         bytes.extend_from_slice(&self.cap_floor.to_be_bytes());
         bytes.extend_from_slice(&participant_count.to_be_bytes());
         for participant in self.participants.values() {
+            bytes.push(match participant.binding {
+                FrontierBinding::Bound(_) => 0,
+                FrontierBinding::Detached(_) => 1,
+            });
             bytes.extend_from_slice(&participant.participant_id.to_be_bytes());
+            let binding_epoch = participant.binding_epoch();
             bytes.extend_from_slice(
-                &participant
-                    .active_binding_epoch
+                &binding_epoch
                     .connection_incarnation
                     .server_incarnation
                     .to_be_bytes(),
             );
             bytes.extend_from_slice(
-                &participant
-                    .active_binding_epoch
+                &binding_epoch
                     .connection_incarnation
                     .connection_ordinal
                     .to_be_bytes(),
             );
-            bytes.extend_from_slice(
-                &participant
-                    .active_binding_epoch
-                    .capability_generation
-                    .get()
-                    .to_be_bytes(),
-            );
+            bytes.extend_from_slice(&binding_epoch.capability_generation.get().to_be_bytes());
             bytes.extend_from_slice(&participant.cursor.to_be_bytes());
         }
         bytes.extend_from_slice(&fact_count.to_be_bytes());

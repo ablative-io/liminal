@@ -25,8 +25,7 @@ pub(super) fn marker_delivery_progress(
     offered_marker_delivery_seq: u64,
 ) -> Result<ParticipantCursorProgress, StateError> {
     let frontier = authority
-        .frontier
-        .as_ref()
+        .frontier()
         .ok_or(StateError::FrontierUnavailable)?;
     let delivered_event = || {
         Event::marker_delivered(

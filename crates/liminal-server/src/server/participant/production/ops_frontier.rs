@@ -109,7 +109,7 @@ impl ConversationAuthority {
                     unchanged,
                     retained_record_limit,
                 );
-                self.install_frontier(owner);
+                self.install_frontier(owner)?;
                 Ok(ArmOutcome::respond(response.into_server_value()))
             }
             RecordAdmissionDecision::DrainFirst(drain) => {
@@ -203,7 +203,7 @@ impl ConversationAuthority {
             &StoredOperation::MarkerDrained { row },
             self.next_log_sequence,
         )?;
-        self.install_frontier(owner);
+        self.install_frontier(owner)?;
         self.next_seq = self.next_seq.max(next_seq);
         self.advance_log_head()?;
         Ok(())
@@ -248,7 +248,7 @@ impl ConversationAuthority {
             persistence,
             retained_record_limit,
         );
-        self.install_frontier(owner);
+        self.install_frontier(owner)?;
         self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()?;
         Ok(ArmOutcome::committed(
@@ -313,7 +313,7 @@ impl ConversationAuthority {
         let (owner, _, projection) =
             LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
         validate_marker_projection(self.conversation_id, &projection)?;
-        self.install_frontier(owner);
+        self.install_frontier(owner)?;
         self.next_seq = self.next_seq.max(next_seq);
         self.advance_log_head()?;
         Ok(projection.into_delivery())
@@ -413,7 +413,7 @@ impl ConversationAuthority {
             persistence,
             retained_record_limit,
         );
-        self.install_frontier(owner);
+        self.install_frontier(owner)?;
         self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()
     }

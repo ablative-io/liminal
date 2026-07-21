@@ -233,7 +233,7 @@ fn complete_target(
     );
     authority.route_fate_occurrence(&completed.operation, source_sequence)?;
     appender.append(&completed.operation, authority.next_log_sequence)?;
-    authority.install_frontier(admitted.owner);
+    authority.install_frontier(admitted.owner)?;
     authority.next_order = next_order_after;
     if admitted.committed {
         authority.next_seq = next_seq_after;
@@ -365,7 +365,7 @@ pub(super) fn admit_terminal(
         Ok(prepared) => prepared,
         Err(refused) => {
             let error = refused.error();
-            authority.install_frontier(refused.into_owner());
+            authority.install_frontier(refused.into_owner())?;
             return Err(StateError::invariant(format!(
                 "binding-terminal prepare refused: {error:?}"
             )));
@@ -381,7 +381,7 @@ pub(super) fn admit_terminal(
     ) {
         Ok(charge) => charge,
         Err(error) => {
-            authority.install_frontier(prepared.into_owner());
+            authority.install_frontier(prepared.into_owner())?;
             return Err(error);
         }
     };
@@ -408,7 +408,7 @@ pub(super) fn admit_terminal(
         }
         BindingTerminalAdmission::Refused(refused) => {
             let error = refused.error();
-            authority.install_frontier(refused.into_owner());
+            authority.install_frontier(refused.into_owner())?;
             Err(StateError::invariant(format!(
                 "binding-terminal admission refused: {error:?}"
             )))

@@ -72,7 +72,7 @@ fn commit_presenting_fenced(
         let authority = owner
             .as_mut()
             .ok_or("presenting fenced finalizer owner was unavailable")?;
-        authority.frontier = Some(frontier);
+        authority.replace_frontier_for_test(frontier)?;
         authority.next_seq = fixture.terminal_delivery_seq;
         authority.next_order = fixture.terminal_order;
         authority.next_log_sequence = attached_source_sequence;

@@ -141,7 +141,7 @@ impl ConversationAuthority {
             provenance_expires_at: deadlines.provenance_expires_at().into(),
             enrollment_fingerprint: facts::enrollment_fingerprint(request.enrollment_token),
         };
-        let outcome = if self.frontier.is_none() {
+        let outcome = if self.frontier().is_none() {
             match self.initial_enrollment_operation(
                 request,
                 &allocation,
@@ -274,7 +274,7 @@ impl ConversationAuthority {
             stored_event,
             sequence,
         };
-        if self.frontier.is_none() {
+        if self.frontier().is_none() {
             let decision = self.initial_enrollment_operation(
                 &request,
                 allocation,
@@ -373,7 +373,7 @@ impl ConversationAuthority {
             commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
         let outcome = committed.outcome.clone();
         self.shell = Some(shell);
-        self.install_frontier(owner);
+        self.install_frontier(owner)?;
         self.advance_log_head()?;
         self.slots.insert(
             allocation.participant_id,

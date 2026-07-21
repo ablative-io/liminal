@@ -104,12 +104,12 @@ impl ConversationAuthority {
             }
         }
         if authority.tokens.is_empty() {
-            if authority.frontier.is_some() {
+            if authority.frontier().is_some() {
                 return Err(RestoreError::Semantic(StateError::invariant(
                     "durably empty conversation rebuilt an executable frontier",
                 )));
             }
-        } else if authority.frontier.is_none() {
+        } else if authority.frontier().is_none() {
             return Err(RestoreError::Semantic(StateError::invariant(
                 "enrolled conversation replay completed without executable frontier ownership",
             )));
@@ -202,12 +202,12 @@ impl ConversationAuthority {
             }
         }
         if authority.tokens.is_empty() {
-            if authority.frontier.is_some() {
+            if authority.frontier().is_some() {
                 return Err(StateError::invariant(
                     "durably empty conversation rebuilt an executable frontier",
                 ));
             }
-        } else if authority.frontier.is_none() {
+        } else if authority.frontier().is_none() {
             return Err(StateError::invariant(
                 "enrolled conversation replay completed without executable frontier ownership",
             ));

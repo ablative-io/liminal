@@ -206,7 +206,7 @@ impl ConversationAuthority {
                 let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
                     StateError::invariant(format!("ack cursor commit rejected: {error:?}"))
                 })?;
-                self.install_frontier(frontier_owner);
+                self.install_frontier(frontier_owner)?;
                 let metadata = participant_ack_metadata(source_sequence, request);
                 self.record_observer_progress_projection(observer_projection, metadata)?;
                 Ok(ArmOutcome {
@@ -364,7 +364,7 @@ impl ConversationAuthority {
         let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
             StateError::invariant(format!("marker ack cursor commit rejected: {error:?}"))
         })?;
-        self.install_frontier(frontier);
+        self.install_frontier(frontier)?;
         self.offered_markers
             .remove(&(request.participant_id, request.marker_delivery_seq));
         self.record_observer_progress_projection(observer_projection, metadata)?;
@@ -467,7 +467,7 @@ impl ConversationAuthority {
                 "stored MarkerAck outcome request drifted",
             ));
         }
-        self.install_frontier(frontier);
+        self.install_frontier(frontier)?;
         self.record_observer_progress_projection(observer_projection, metadata)?;
         Ok(())
     }

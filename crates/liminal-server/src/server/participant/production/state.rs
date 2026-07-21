@@ -13,7 +13,8 @@ use std::collections::BTreeMap;
 use liminal_protocol::lifecycle::{
     BindingState, CommittedDiedTerminal, ConversationDecision, ConversationGenesis,
     ConversationRefusalReason, CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt,
-    LiveFrontierOwner, LiveMember, ObserverProgressProjection, OrdinaryBindingFate,
+    LiveFrontierOwner, LiveMember, ObligationDebtDispatchState, ObligationDebtDispatchTransition,
+    ObligationDebtOwnerError, ObserverProgressProjection, OrdinaryBindingFate,
     ParticipantConversation, PendingDiedOrdinaryFinalizer, RetiredIdentity, SealedBindingFateToken,
 };
 #[cfg(test)]
@@ -173,10 +174,13 @@ pub(super) struct ConversationAuthority {
     /// Shell aggregate; `Some` from genesis onward. Temporarily taken while a
     /// pending aggregate barrier owns it.
     pub(super) shell: Option<ParticipantConversation>,
-    /// Move-only executable frontier/closure/retention authority. Absent only
-    /// before the first enrollment has durably committed, or while a
-    /// consuming protocol transition owns it.
-    pub(super) frontier: Option<LiveFrontierOwner>,
+    /// Move-coupled frontier and obligation-debt episode authority. Absent only
+    /// before first enrollment commits or while one protocol transition owns
+    /// it together with its completion token.
+    pub(super) obligation_debt_dispatch: Option<ObligationDebtDispatchState>,
+    /// Protocol-owned completion authority present only while
+    /// `obligation_debt_dispatch` is absent inside one synchronous transition.
+    pending_debt_dispatch_transition: Option<ObligationDebtDispatchTransition>,
     /// Move-only durable delivery and recipient-obligation owner. It is absent
     /// only while cold restore is still validating the extension stream.
     pub(super) outbox: Option<ConversationOutbox>,
@@ -253,6 +257,9 @@ pub(super) enum StateError {
     /// The executable frontier was unavailable or absent after enrollment.
     #[error("conversation executable frontier authority is unavailable")]
     FrontierUnavailable,
+    /// The protocol could not couple the exact resulting frontier and episode.
+    #[error("conversation obligation-debt owner invariant failed: {error:?}")]
+    ObligationDebtOwner { error: ObligationDebtOwnerError },
     /// A replayed decision minted different canonical bytes than stored.
     #[error("replayed event bytes diverge from durable event bytes at log sequence {sequence}")]
     ReplayedEventDrift {
@@ -306,7 +313,8 @@ impl ConversationAuthority {
         Self {
             conversation_id,
             shell: None,
-            frontier: None,
+            obligation_debt_dispatch: None,
+            pending_debt_dispatch_transition: None,
             outbox: None,
             offered_markers: BTreeMap::new(),
             #[cfg(test)]
@@ -372,14 +380,66 @@ impl ConversationAuthority {
         self.shell.take().ok_or(StateError::ShellUnavailable)
     }
 
-    /// Takes the complete executable frontier for one consuming transition.
-    pub(super) fn take_frontier(&mut self) -> Result<LiveFrontierOwner, StateError> {
-        self.frontier.take().ok_or(StateError::FrontierUnavailable)
+    /// Borrows the executable frontier through the sole coupled owner.
+    pub(super) fn frontier(&self) -> Option<&LiveFrontierOwner> {
+        self.obligation_debt_dispatch
+            .as_ref()
+            .map(ObligationDebtDispatchState::frontier)
     }
 
-    /// Installs the complete protocol-produced post-transition frontier.
-    pub(super) fn install_frontier(&mut self, frontier: LiveFrontierOwner) {
-        self.frontier = Some(frontier);
+    /// Borrows the complete coupled state at the delivery-decision seam.
+    pub(super) const fn obligation_debt_dispatch(&self) -> Option<&ObligationDebtDispatchState> {
+        self.obligation_debt_dispatch.as_ref()
+    }
+
+    /// Takes the complete coupled owner and begins one consuming transition.
+    pub(super) fn take_frontier(&mut self) -> Result<LiveFrontierOwner, StateError> {
+        if self.pending_debt_dispatch_transition.is_some() {
+            return Err(StateError::invariant(
+                "obligation-debt transition authority is already active",
+            ));
+        }
+        let (frontier, transition) = self
+            .obligation_debt_dispatch
+            .take()
+            .map(ObligationDebtDispatchState::begin_transition)
+            .ok_or(StateError::FrontierUnavailable)?;
+        self.pending_debt_dispatch_transition = Some(transition);
+        Ok(frontier)
+    }
+
+    /// Completes and installs one protocol-produced coupled poststate.
+    pub(super) fn install_frontier(
+        &mut self,
+        frontier: LiveFrontierOwner,
+    ) -> Result<(), StateError> {
+        let state = match self.pending_debt_dispatch_transition.take() {
+            Some(transition) => transition
+                .complete(frontier, self.observer_progress)
+                .map_err(|error| StateError::ObligationDebtOwner { error })?,
+            None if self.obligation_debt_dispatch.is_none() => {
+                ObligationDebtDispatchState::from_frontier(frontier, self.observer_progress)
+                    .map_err(|error| StateError::ObligationDebtOwner { error })?
+            }
+            None => {
+                return Err(StateError::invariant(
+                    "obligation-debt transition authority is unavailable",
+                ));
+            }
+        };
+        self.obligation_debt_dispatch = Some(state);
+        Ok(())
+    }
+
+    /// Replaces a fixture's synthetic frontier with a newly coupled owner.
+    #[cfg(test)]
+    pub(super) fn replace_frontier_for_test(
+        &mut self,
+        frontier: LiveFrontierOwner,
+    ) -> Result<(), StateError> {
+        self.pending_debt_dispatch_transition = None;
+        self.obligation_debt_dispatch = None;
+        self.install_frontier(frontier)
     }
 
     /// Allocates the next transaction order and delivery sequence pair.

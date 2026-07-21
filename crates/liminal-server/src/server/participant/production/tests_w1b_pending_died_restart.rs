@@ -318,13 +318,10 @@ pub(super) fn extend_leave_capacity(
             .ok_or("pending Leave finalizer byte charge overflow")?,
     );
     let added_rows = test_participant_config().max_semantic_conversations_per_connection;
-    authority.frontier = Some(
-        authority
-            .frontier
-            .take()
-            .ok_or("pending Leave frontier disappeared")?
-            .with_pending_finalizer_test_capacity(added_rows, charge)?,
-    );
+    let frontier = authority
+        .take_frontier()?
+        .with_pending_finalizer_test_capacity(added_rows, charge)?;
+    authority.install_frontier(frontier)?;
     Ok(())
 }
 

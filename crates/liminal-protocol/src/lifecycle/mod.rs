@@ -25,6 +25,7 @@ mod enrollment_closure;
 mod incarnation;
 mod lookup;
 mod membership;
+mod obligation_dispatch;
 mod observer_recovery;
 mod operation_event;
 mod operations;
@@ -191,6 +192,11 @@ pub use membership::{
     LeaveFingerprint, LeaveVerificationError, LiveMember, LiveMemberRestore,
     MembershipInvariantError, PendingLeaveCommitParameters, PreparedLeaveAuthority,
     RetiredIdentity, RetirementError, VerifiedLeaveRequest, commit_leave, commit_pending_leave,
+};
+pub use obligation_dispatch::{
+    CoupledObligationDebtOwner, DebtDispatchDeferral, DebtDispatchInvariant,
+    ObligationDebtDispatchDecision, ObligationDebtDispatchState, ObligationDebtDispatchTransition,
+    ObligationDebtOwnerError, decide_obligation_debt_dispatch,
 };
 pub use observer_recovery::{
     ObserverProgressAdvanceDecision, ObserverProgressAdvanceError,

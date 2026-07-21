@@ -251,7 +251,7 @@ impl ConversationAuthority {
         let (shell, committed) =
             commit_through_barrier(barrier, mode, self.next_log_sequence, &make_operation)?;
         self.shell = Some(shell);
-        self.install_frontier(frontier_owner);
+        self.install_frontier(frontier_owner)?;
         self.advance_log_head()?;
         let (member, _terminal, binding_state, cell, outcome) = committed.into_parts();
         slot.member = member;

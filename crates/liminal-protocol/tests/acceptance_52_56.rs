@@ -1229,7 +1229,13 @@ fn acceptance_case_54_multi_binding_shutdown_families_and_participant_scoped_pro
         );
     }
     let encoded_progress = progress.encode().expect("variable facts serialize");
-    let fact_count_offset = 92 + 2 * 40;
+    let episode_header_width = core::mem::size_of::<u64>()
+        + 2 * core::mem::size_of::<u128>()
+        + 2 * core::mem::size_of::<u64>()
+        + 2 * core::mem::size_of::<u128>()
+        + core::mem::size_of::<u32>();
+    let participant_row_width = core::mem::size_of::<u8>() + 5 * core::mem::size_of::<u64>();
+    let fact_count_offset = episode_header_width + [P0, P1].len() * participant_row_width;
     assert_eq!(
         u32::from_be_bytes(
             encoded_progress[fact_count_offset..fact_count_offset + 4]
