@@ -42,6 +42,7 @@ mod occupancy;
 mod ops_acks;
 mod ops_attach;
 mod ops_attach_capacity;
+mod ops_attach_finalizer;
 mod ops_attach_lookup;
 mod ops_attach_verify;
 mod ops_enroll;
@@ -54,6 +55,7 @@ mod outbox;
 mod outbox_log;
 mod outbox_projection;
 mod outbox_replay;
+mod pending_died_finalizer;
 mod registry;
 mod state;
 
@@ -142,6 +144,8 @@ mod tests_w1b_fate_completion;
 mod tests_w1b_fenced_codec;
 #[cfg(test)]
 mod tests_w1b_fenced_finalizer;
+#[cfg(test)]
+mod tests_w1b_fenced_presenting;
 #[cfg(test)]
 mod tests_w1b_intent_recovery;
 #[cfg(test)]

@@ -33,8 +33,8 @@ use super::outbox_projection::project_attached_records;
 use super::state::{DurableAppend, PendingBindingFate};
 use super::tests::{dispatch_tracked, test_participant_config};
 
-struct FencedAppender<'a> {
-    log: &'a OperationLog,
+pub(super) struct FencedAppender<'a> {
+    pub(super) log: &'a OperationLog,
 }
 
 impl DurableAppend for FencedAppender<'_> {
@@ -59,10 +59,10 @@ struct ReservedSetup {
     next_log_sequence: u64,
 }
 
-struct FencedInputs {
-    request: CredentialAttachRequest,
-    allocation: StoredAttachAllocation,
-    mode: StoredAttachModeV3,
+pub(super) struct FencedInputs {
+    pub(super) request: CredentialAttachRequest,
+    pub(super) allocation: StoredAttachAllocation,
+    pub(super) mode: StoredAttachModeV3,
 }
 
 #[test]
@@ -79,7 +79,7 @@ const fn stored_wide(value: WideResourceVector) -> StoredWideResourceVector {
     }
 }
 
-fn marker_source(
+pub(super) fn marker_source(
     owner: LiveFrontierOwner,
     recovery: liminal_protocol::lifecycle::DetachedCredentialRecovery,
 ) -> Result<(LiveFrontierOwner, StoredMarkerDrain), Box<dyn Error>> {
@@ -192,15 +192,19 @@ fn reserved_setup() -> Result<ReservedSetup, Box<dyn Error>> {
     })
 }
 
-fn fenced_inputs(
-    setup: &ReservedSetup,
+pub(super) fn fenced_inputs(
+    conversation_id: ConversationId,
+    participant_id: ParticipantId,
+    prior_binding_epoch: BindingEpoch,
+    died_source_sequence: u64,
+    presentation: StoredFinalizerPresentation,
     fixture: &ExecutablePendingFencedAttach,
     marker_source_sequence: u64,
 ) -> Result<FencedInputs, Box<dyn Error>> {
     let request = CredentialAttachRequest {
-        conversation_id: setup.conversation_id,
-        participant_id: setup.participant_id,
-        capability_generation: setup.recovered_epoch.capability_generation,
+        conversation_id,
+        participant_id,
+        capability_generation: prior_binding_epoch.capability_generation,
         attach_secret: fixture.attach_secret,
         attach_attempt_token: AttachAttemptToken::new([89; 16]),
         accept_marker_delivery_seq: Some(fixture.marker_delivery_seq),
@@ -214,30 +218,30 @@ fn fenced_inputs(
         provenance_expires_at: StoredU128(200_u128.to_be_bytes()),
         admitted_now_ms: 0,
     };
-    let prior = setup.recovered_epoch.into();
+    let prior = prior_binding_epoch.into();
     let recovery = StoredDetachedCredentialRecovery {
-        conversation_id: setup.conversation_id,
-        participant_id: setup.participant_id,
+        conversation_id,
+        participant_id,
         marker_delivery_seq: fixture.marker_delivery_seq,
         prior_binding_epoch: prior,
         resulting_floor: fixture.marker_delivery_seq,
         terminal: StoredRecoveryTerminal::Pending {
             binding: StoredProofBinding {
-                conversation_id: setup.conversation_id,
-                participant_id: setup.participant_id,
+                conversation_id,
+                participant_id,
                 binding_epoch: prior,
             },
             cause: StoredComposedTerminalCause::ConnectionLost,
             transaction_order: fixture.terminal_order,
         },
         progress: StoredMarkerCursorProgress {
-            conversation_id: setup.conversation_id,
-            participant_id: setup.participant_id,
+            conversation_id,
+            participant_id,
             binding_epoch: prior,
             through_seq: fixture.marker_delivery_seq,
             marker_delivery_seq: fixture.marker_delivery_seq,
             delivery: StoredMarkerDelivery {
-                participant_id: setup.participant_id,
+                participant_id,
                 binding_epoch: prior,
                 marker_delivery_seq: fixture.marker_delivery_seq,
             },
@@ -262,10 +266,8 @@ fn fenced_inputs(
             cause: StoredComposedTerminalCause::ConnectionLost,
             transaction_order: fixture.terminal_order,
             delivery_seq: fixture.terminal_delivery_seq,
-            pending_source_sequence: setup.died_source_sequence,
-            presentation: StoredFinalizerPresentation::ConsumeRecoveredReservation {
-                recovered_source_sequence: setup.recovered_source_sequence,
-            },
+            pending_source_sequence: died_source_sequence,
+            presentation,
         }),
     };
     Ok(FencedInputs {
@@ -275,25 +277,24 @@ fn fenced_inputs(
     })
 }
 
-fn extend_finalizer_capacity(
+pub(super) fn extend_finalizer_capacity(
     authority: &mut super::state::ConversationAuthority,
-    setup: &ReservedSetup,
+    conversation_id: ConversationId,
+    participant_id: ParticipantId,
+    prior_binding_epoch: BindingEpoch,
     terminal_order: u64,
     terminal_delivery_seq: u64,
     allocation: &StoredAttachAllocation,
 ) -> Result<(), Box<dyn Error>> {
     let terminal = super::frontier::terminal_charge(
-        setup.conversation_id,
-        setup.participant_id,
-        setup.recovered_epoch,
+        conversation_id,
+        participant_id,
+        prior_binding_epoch,
         terminal_order,
         terminal_delivery_seq,
     )?;
-    let attached = super::frontier::credential_attached_charge(
-        setup.conversation_id,
-        setup.participant_id,
-        allocation,
-    )?;
+    let attached =
+        super::frontier::credential_attached_charge(conversation_id, participant_id, allocation)?;
     let charge = ResourceVector::new(
         terminal
             .entries
@@ -317,7 +318,17 @@ fn commit_fenced_finalizer(setup: &ReservedSetup) -> Result<(), Box<dyn Error>> 
     let fixture = executable_pending_fenced_attach()?;
     assert_eq!(fixture.prior_binding_epoch, setup.recovered_epoch);
     let marker_source_sequence = setup.next_log_sequence;
-    let inputs = fenced_inputs(setup, &fixture, marker_source_sequence)?;
+    let inputs = fenced_inputs(
+        setup.conversation_id,
+        setup.participant_id,
+        setup.recovered_epoch,
+        setup.died_source_sequence,
+        StoredFinalizerPresentation::ConsumeRecoveredReservation {
+            recovered_source_sequence: setup.recovered_source_sequence,
+        },
+        &fixture,
+        marker_source_sequence,
+    )?;
     let (frontier, marker_row) = marker_source(fixture.owner, fixture.recovery)?;
     block_on(setup.log.append(
         &StoredOperation::MarkerDrained { row: marker_row },
@@ -339,7 +350,9 @@ fn commit_fenced_finalizer(setup: &ReservedSetup) -> Result<(), Box<dyn Error>> 
             .ok_or("fenced Attached source overflow")?;
         extend_finalizer_capacity(
             authority,
-            setup,
+            setup.conversation_id,
+            setup.participant_id,
+            setup.recovered_epoch,
             fixture.terminal_order,
             fixture.terminal_delivery_seq,
             &inputs.allocation,

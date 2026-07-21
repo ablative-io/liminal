@@ -10,7 +10,7 @@ use liminal_protocol::lifecycle::{
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, BindingEpoch, ClientRequest, ConnectionIncarnation,
     CredentialAttachRequest, EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken,
-    LeaveRequest, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
+    LeaveRequest, ParticipantAck, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
 };
 
 use crate::server::participant::{
@@ -71,24 +71,26 @@ struct BoundDebtFixture {
     attach_secret: AttachSecret,
 }
 
-struct PendingRestartFixture {
-    handler: ProductionParticipantHandler,
-    log: OperationLog,
-    conversation_id: u64,
-    participant_id: u64,
-    binding_epoch: BindingEpoch,
-    died_source_sequence: u64,
-    specific_sequence: u64,
-    terminal_order: u64,
+pub(super) struct PendingRestartFixture {
+    pub(super) handler: ProductionParticipantHandler,
+    pub(super) log: OperationLog,
+    pub(super) conversation_id: u64,
+    pub(super) participant_id: u64,
+    pub(super) binding_epoch: BindingEpoch,
+    pub(super) died_source_sequence: u64,
+    pub(super) specific_sequence: u64,
+    pub(super) terminal_order: u64,
     next_terminal_sequence: u64,
     connection: ConnectionIncarnation,
     attach_secret: AttachSecret,
 }
 
-fn bound_debt_fixture() -> Result<BoundDebtFixture, Box<dyn Error>> {
-    let conversation_id = 67;
-    let connection = ConnectionIncarnation::new(97, 3);
-    let peer_connection = ConnectionIncarnation::new(97, 4);
+fn bound_debt_fixture(
+    conversation_id: u64,
+    connection: ConnectionIncarnation,
+    peer_connection: ConnectionIncarnation,
+    ack_through_seq: Option<u64>,
+) -> Result<BoundDebtFixture, Box<dyn Error>> {
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
     let mut config = test_participant_config();
     config.max_retained_record_rows = 4;
@@ -151,6 +153,22 @@ fn bound_debt_fixture() -> Result<BoundDebtFixture, Box<dyn Error>> {
     if !matches!(record, ServerValue::RecordCommitted(_)) {
         return Err(format!("pending-Died debt record did not commit: {record:?}").into());
     }
+    if let Some(through_seq) = ack_through_seq {
+        let acked = dispatch_tracked(
+            &handler,
+            connection,
+            &mut conversations,
+            ClientRequest::ParticipantAck(ParticipantAck {
+                conversation_id,
+                participant_id: receipt.participant_id(),
+                capability_generation: attached.origin_binding_epoch().capability_generation,
+                through_seq,
+            }),
+        )?;
+        if !matches!(acked, ServerValue::AckCommitted(_)) {
+            return Err(format!("pending-Died cursor ack did not commit: {acked:?}").into());
+        }
+    }
     Ok(BoundDebtFixture {
         handler,
         conversations,
@@ -162,8 +180,38 @@ fn bound_debt_fixture() -> Result<BoundDebtFixture, Box<dyn Error>> {
     })
 }
 
-fn pending_restart_fixture() -> Result<PendingRestartFixture, Box<dyn Error>> {
-    let setup = bound_debt_fixture()?;
+pub(super) fn pending_restart_fixture() -> Result<PendingRestartFixture, Box<dyn Error>> {
+    pending_restart_fixture_with_shape(
+        67,
+        ConnectionIncarnation::new(97, 3),
+        ConnectionIncarnation::new(97, 4),
+        None,
+    )
+}
+
+pub(super) fn pending_restart_fixture_acked(
+    through_seq: u64,
+) -> Result<PendingRestartFixture, Box<dyn Error>> {
+    pending_restart_fixture_with_shape(
+        1,
+        ConnectionIncarnation::new(2, 2),
+        ConnectionIncarnation::new(2, 3),
+        Some(through_seq),
+    )
+}
+
+fn pending_restart_fixture_with_shape(
+    conversation_id: u64,
+    connection: ConnectionIncarnation,
+    peer_connection: ConnectionIncarnation,
+    ack_through_seq: Option<u64>,
+) -> Result<PendingRestartFixture, Box<dyn Error>> {
+    let setup = bound_debt_fixture(
+        conversation_id,
+        connection,
+        peer_connection,
+        ack_through_seq,
+    )?;
     let cell = setup.handler.cell(setup.conversation_id)?;
     let mut owner = cell
         .lock()

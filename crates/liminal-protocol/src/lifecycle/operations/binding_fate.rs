@@ -185,6 +185,12 @@ struct ValidatedBindingFateMeasurement {
     owner_plan: BindingFateOwnerPlan,
 }
 
+struct ValidatedBindingFateFloor {
+    participant_id: crate::wire::ParticipantId,
+    binding_epoch: crate::wire::BindingEpoch,
+    resulting_floor: DeliverySeq,
+}
+
 impl LiveFrontierOwner {
     /// Consumes one sealed fate token after measuring its real post-release floor.
     ///
@@ -292,6 +298,58 @@ impl LiveFrontierOwner {
             })),
         }
     }
+
+    /// Measures Ordinary after fenced proof minting consumed marker authority.
+    ///
+    /// The fenced attach transition itself owns the pending identity change, so
+    /// this preparation validates the token, terminal, cursor, and exact floor
+    /// but defers floor installation to the post-attach owner.
+    ///
+    /// # Errors
+    ///
+    /// Returns every move-only input unchanged when token authority, terminal,
+    /// observer progress, or checked floor measurement is inconsistent.
+    pub fn prepare_pending_died_ordinary_after_fenced_proof(
+        self,
+        token: SealedBindingFateToken,
+        terminal: CommittedDiedTerminal,
+        hard_observer_progress: DeliverySeq,
+    ) -> Result<PreparedPendingDiedOrdinaryFinalizer, Box<BindingFateMeasurementRefused>> {
+        let terminal_input = BindingFateTerminal::Ordinary(terminal);
+        let measurement = match validate_binding_fate_floor(
+            &self,
+            &token,
+            terminal_input,
+            hard_observer_progress,
+        ) {
+            Ok(measurement) => measurement,
+            Err(error) => {
+                return Err(Box::new(BindingFateMeasurementRefused {
+                    owner: self,
+                    token,
+                    terminal: terminal_input,
+                    error,
+                }));
+            }
+        };
+        let resulting_floor = measurement.resulting_floor;
+        match token.ordinary_binding_fate(terminal, resulting_floor) {
+            Ok(fate) => Ok(PreparedPendingDiedOrdinaryFinalizer {
+                owner: self,
+                fate,
+                finalizer: PendingDiedOrdinaryFinalizer {
+                    resulting_floor,
+                    authority: FinalizerAuthority,
+                },
+            }),
+            Err(token) => Err(Box::new(BindingFateMeasurementRefused {
+                owner: self,
+                token: *token,
+                terminal: terminal_input,
+                error: BindingFateMeasurementError::Terminal,
+            })),
+        }
+    }
 }
 
 fn validate_binding_fate_measurement(
@@ -300,6 +358,33 @@ fn validate_binding_fate_measurement(
     terminal: BindingFateTerminal,
     hard_observer_progress: DeliverySeq,
 ) -> Result<ValidatedBindingFateMeasurement, BindingFateMeasurementError> {
+    let floor = validate_binding_fate_floor(owner, token, terminal, hard_observer_progress)?;
+    let owner_plan = owner
+        .prepare_binding_fate_transition(
+            floor.participant_id,
+            floor.binding_epoch,
+            token
+                .measurement_context()
+                .ok_or(BindingFateMeasurementError::Token)?
+                .cursor,
+            floor.resulting_floor,
+            terminal == BindingFateTerminal::RecoveredAndReserveFinalizer,
+        )
+        .map_err(|_| BindingFateMeasurementError::OwnerTransition)?;
+    Ok(ValidatedBindingFateMeasurement {
+        participant_id: floor.participant_id,
+        binding_epoch: floor.binding_epoch,
+        resulting_floor: floor.resulting_floor,
+        owner_plan,
+    })
+}
+
+fn validate_binding_fate_floor(
+    owner: &LiveFrontierOwner,
+    token: &SealedBindingFateToken,
+    terminal: BindingFateTerminal,
+    hard_observer_progress: DeliverySeq,
+) -> Result<ValidatedBindingFateFloor, BindingFateMeasurementError> {
     let Some(context) = token.measurement_context() else {
         return Err(BindingFateMeasurementError::Token);
     };
@@ -358,20 +443,10 @@ fn validate_binding_fate_measurement(
     let Ok(resulting_floor) = DeliverySeq::try_from(measured.resulting_floor) else {
         return Err(BindingFateMeasurementError::ResultingFloor);
     };
-    let owner_plan = owner
-        .prepare_binding_fate_transition(
-            context.participant_id,
-            context.binding_epoch,
-            context.cursor,
-            resulting_floor,
-            terminal == BindingFateTerminal::RecoveredAndReserveFinalizer,
-        )
-        .map_err(|_| BindingFateMeasurementError::OwnerTransition)?;
-    Ok(ValidatedBindingFateMeasurement {
+    Ok(ValidatedBindingFateFloor {
         participant_id: context.participant_id,
         binding_epoch: context.binding_epoch,
         resulting_floor,
-        owner_plan,
     })
 }
 

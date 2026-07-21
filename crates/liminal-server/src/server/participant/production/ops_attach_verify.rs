@@ -5,15 +5,15 @@ use std::sync::Arc;
 use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::{
-    AttachCommitParameters, AttachSecretProof, BindingState, ClosureState,
-    CommittedBindingTerminalPosition, LiveFrontierOwner, MintFencedAttachResult,
+    ActiveBinding, AttachCommitParameters, AttachSecretProof, AttachedRecordPosition, BindingState,
+    ClosureState, CommittedBindingTerminalPosition, LiveFrontierOwner, MintFencedAttachResult,
     VerifiedAttachCommit,
 };
-use liminal_protocol::wire::CredentialAttachRequest;
+use liminal_protocol::wire::{AttachSecret, CredentialAttachRequest, Generation};
 
 use super::facts::Digest;
 use super::fenced_attach_codec::FencedAttachProofContext;
-use super::log::{OperationLogError, StoredAttachModeV3};
+use super::log::{OperationLogError, StoredAttachAllocation, StoredAttachModeV3};
 use super::marker_source::validate_marker_source;
 use super::state::StateError;
 
@@ -43,6 +43,30 @@ pub(super) struct AttachVerification<'a> {
     pub(super) parameters: AttachCommitParameters,
     pub(super) store: Arc<dyn DurableStore>,
     pub(super) source_sequence: u64,
+}
+
+pub(super) fn stored_attach_parameters(
+    request: &CredentialAttachRequest,
+    allocation: &StoredAttachAllocation,
+) -> Result<(Generation, AttachCommitParameters), StateError> {
+    let binding_epoch = allocation.binding_epoch.to_epoch()?;
+    Ok((
+        binding_epoch.capability_generation,
+        AttachCommitParameters {
+            binding: ActiveBinding {
+                participant_id: request.participant_id,
+                conversation_id: request.conversation_id,
+                binding_epoch,
+            },
+            attach_secret: AttachSecret::new(allocation.attach_secret),
+            attached_position: AttachedRecordPosition::new(
+                allocation.attached_order,
+                allocation.attached_seq,
+            ),
+            receipt_expires_at: allocation.receipt_expires_at.get(),
+            provenance_expires_at: allocation.provenance_expires_at.get(),
+        },
+    ))
 }
 
 pub(super) fn verify_attach_mode(
