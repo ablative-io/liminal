@@ -8,6 +8,23 @@ use super::{
     CommittedDiedTerminal, Event, OrdinaryBindingFate, RecoveredBindingFate, SealedBindingFateToken,
 };
 
+/// Closed persistence shape carried by one sealed binding-fate token.
+///
+/// This projection exposes only the durable intent fields. It neither exposes
+/// nor duplicates the move-only authority consumed by protocol measurement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SealedBindingFateIntent {
+    /// A no-marker attachment must complete through an exact Died terminal.
+    Ordinary,
+    /// A fenced attachment retains the exact prior epoch and accepted marker.
+    Recovered {
+        /// Binding epoch whose marker authorized the fenced replacement.
+        prior_binding_epoch: BindingEpoch,
+        /// Exact accepted marker delivery sequence.
+        marker_delivery_seq: DeliverySeq,
+    },
+}
+
 /// Protocol-private measurement inputs carried by one sealed fate token.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::lifecycle) struct BindingFateMeasurementContext {
@@ -22,6 +39,19 @@ impl SealedBindingFateToken {
     #[must_use]
     pub const fn is_recovered(&self) -> bool {
         self.recovered.is_some()
+    }
+
+    /// Returns the closed durable intent shape without surrendering authority.
+    #[must_use]
+    pub const fn intent(&self) -> Option<SealedBindingFateIntent> {
+        match (&self.ordinary, &self.recovered) {
+            (Some(_), None) => Some(SealedBindingFateIntent::Ordinary),
+            (None, Some(proof)) => Some(SealedBindingFateIntent::Recovered {
+                prior_binding_epoch: proof.prior_binding_epoch(),
+                marker_delivery_seq: proof.marker_delivery_seq(),
+            }),
+            (None, None) | (Some(_), Some(_)) => None,
+        }
     }
 
     #[cfg(test)]

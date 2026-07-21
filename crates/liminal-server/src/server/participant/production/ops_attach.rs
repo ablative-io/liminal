@@ -41,8 +41,8 @@ use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
 use super::ops_attach_verify::{AttachVerification, verify_attach_mode};
 use super::state::{
-    AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend, Slot,
-    StateError,
+    AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend,
+    PendingBindingFate, Slot, StateError,
 };
 
 impl ConversationAuthority {
@@ -314,7 +314,10 @@ impl ConversationAuthority {
         let (installed, fate_token) = committed.into_slot_and_fate();
         slot.member = installed.member;
         slot.binding = installed.binding_state;
-        slot.binding_fate = Some(fate_token);
+        slot.binding_fate = Some(PendingBindingFate {
+            attached_source_sequence: source_sequence,
+            token: fate_token,
+        });
         slot.cell = installed.detach_cell;
         slot.attach_secret = AttachSecret::new(allocation.attach_secret);
         install_attach_receipt(

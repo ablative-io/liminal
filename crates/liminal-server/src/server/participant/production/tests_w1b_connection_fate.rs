@@ -1,10 +1,10 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use liminal::durability::{DurableStore, open_ephemeral};
+use liminal::durability::{DurableStore, bridge::block_on, open_ephemeral};
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, DetachAttemptToken, DetachRequest, EnrollmentRequest,
-    EnrollmentToken, Generation, ServerValue,
+    EnrollmentToken, Generation, ParticipantId, ServerValue,
 };
 
 use crate::server::participant::{
@@ -13,11 +13,29 @@ use crate::server::participant::{
 };
 
 use super::ProductionParticipantHandler;
+use super::log::{
+    DecodedStoredOperation, OperationLog, StoredDetachedCause, StoredDetachedSource,
+    StoredDiedCause, StoredOperation, StoredTerminalDisposition,
+};
 use super::tests::{dispatch_tracked, test_participant_config};
 
+fn read_operation(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    sequence: u64,
+) -> Result<StoredOperation, Box<dyn Error>> {
+    let log = OperationLog::new(Arc::clone(&handler.store), conversation_id);
+    let Some(decoded) = block_on(log.read_at(sequence))?? else {
+        return Err(format!("operation {sequence} was not durably appended").into());
+    };
+    let DecodedStoredOperation::V3(operation) = decoded.operation else {
+        return Err(format!("operation {sequence} did not use schema v3").into());
+    };
+    Ok(operation)
+}
+
 #[test]
-fn production_connection_fate_handler_records_authority_selected_targets()
--> Result<(), Box<dyn Error>> {
+fn connection_lost_appends_died_source_before_transport_teardown() -> Result<(), Box<dyn Error>> {
     let store = Arc::new(open_ephemeral(1)?);
     let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
     let connection_incarnation = ConnectionIncarnation::new(41, 7);
@@ -61,7 +79,193 @@ fn production_connection_fate_handler_records_authority_selected_targets()
     );
     drop(owner);
 
-    handler.handle_connection_fate(work_item)?;
+    handler.handle_connection_fate(work_item.clone())?;
+    let StoredOperation::Died { row } = read_operation(&handler, conversation_id, 2)? else {
+        return Err("ConnectionLost did not append a Died row".into());
+    };
+    assert_eq!(row.participant_id, receipt.participant_id());
+    assert_eq!(
+        row.binding_epoch.to_epoch()?,
+        receipt.origin_binding_epoch()
+    );
+    assert_eq!(row.cause, StoredDiedCause::ConnectionLost);
+    assert_eq!(
+        row.connection_intent_sequence,
+        Some(work_item.open_sequence)
+    );
+    assert!(row.specific_fate_intent.is_none());
+    assert!(matches!(
+        row.disposition,
+        StoredTerminalDisposition::Committed { .. }
+    ));
+    let owner = cell
+        .lock()
+        .map_err(|_| "connection-fate test owner lock was poisoned after append")?;
+    let authority = owner
+        .as_ref()
+        .ok_or("connection-fate test owner was unavailable after append")?;
+    let slot = authority
+        .slots
+        .get(&receipt.participant_id())
+        .ok_or("connection-fate target slot disappeared after append")?;
+    assert!(matches!(
+        slot.binding,
+        liminal_protocol::lifecycle::BindingState::Detached
+    ));
+    drop(owner);
+    Ok(())
+}
+
+fn enroll_for_fate(
+    handler: &ProductionParticipantHandler,
+    connection_incarnation: ConnectionIncarnation,
+    conversation_id: u64,
+    token_byte: u8,
+) -> Result<(ParticipantId, Vec<u64>), Box<dyn Error>> {
+    let mut conversations = ParticipantConnectionConversations::default();
+    let enrolled = dispatch_tracked(
+        handler,
+        connection_incarnation,
+        &mut conversations,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([token_byte; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt) = enrolled else {
+        return Err(format!("enrollment did not bind: {enrolled:?}").into());
+    };
+    Ok((
+        receipt.participant_id(),
+        conversations.tracked_conversations(),
+    ))
+}
+
+#[test]
+fn clean_disconnect_appends_detached_source_before_transport_teardown() -> Result<(), Box<dyn Error>>
+{
+    let store = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let connection_incarnation = ConnectionIncarnation::new(71, 3);
+    let conversation_id = 37;
+    let (participant_id, tracked_conversations) =
+        enroll_for_fate(&handler, connection_incarnation, conversation_id, 43)?;
+    let work_item = ConnectionFateWorkItem {
+        open_sequence: 13,
+        connection_incarnation,
+        class: ConnectionFateClass::CleanDisconnect,
+        tracked_conversations,
+    };
+
+    handler.handle_connection_fate(work_item.clone())?;
+    let StoredOperation::Detached { row } = read_operation(&handler, conversation_id, 2)? else {
+        return Err("CleanDisconnect did not append a Detached row".into());
+    };
+    assert_eq!(row.participant_id, participant_id);
+    assert_eq!(row.cause, StoredDetachedCause::CleanDeregister);
+    assert!(matches!(
+        row.source,
+        StoredDetachedSource::ConnectionClose {
+            connection_intent_sequence
+        } if connection_intent_sequence == work_item.open_sequence
+    ));
+    Ok(())
+}
+
+#[test]
+fn server_force_close_appends_shutdown_detached_source_before_release() -> Result<(), Box<dyn Error>>
+{
+    let store = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let connection_incarnation = ConnectionIncarnation::new(73, 4);
+    let conversation_id = 41;
+    let (participant_id, tracked_conversations) =
+        enroll_for_fate(&handler, connection_incarnation, conversation_id, 47)?;
+    let work_item = ConnectionFateWorkItem {
+        open_sequence: 17,
+        connection_incarnation,
+        class: ConnectionFateClass::ServerShutdown,
+        tracked_conversations,
+    };
+
+    handler.handle_connection_fate(work_item.clone())?;
+    let StoredOperation::Detached { row } = read_operation(&handler, conversation_id, 2)? else {
+        return Err("ServerShutdown did not append a Detached row".into());
+    };
+    assert_eq!(row.participant_id, participant_id);
+    assert_eq!(row.cause, StoredDetachedCause::ServerShutdown);
+    assert!(matches!(
+        row.source,
+        StoredDetachedSource::ConnectionClose {
+            connection_intent_sequence
+        } if connection_intent_sequence == work_item.open_sequence
+    ));
+    Ok(())
+}
+
+#[test]
+fn protocol_error_appends_died_source_only_for_bound_terminal_refusal() -> Result<(), Box<dyn Error>>
+{
+    let store = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let connection_incarnation = ConnectionIncarnation::new(79, 5);
+    let conversation_id = 43;
+    let (participant_id, tracked_conversations) =
+        enroll_for_fate(&handler, connection_incarnation, conversation_id, 53)?;
+    let work_item = ConnectionFateWorkItem {
+        open_sequence: 19,
+        connection_incarnation,
+        class: ConnectionFateClass::ProtocolError,
+        tracked_conversations,
+    };
+
+    handler.handle_connection_fate(work_item.clone())?;
+    let StoredOperation::Died { row } = read_operation(&handler, conversation_id, 2)? else {
+        return Err("bound ProtocolError did not append a Died row".into());
+    };
+    assert_eq!(row.participant_id, participant_id);
+    assert_eq!(row.cause, StoredDiedCause::ProtocolError);
+    assert_eq!(
+        row.connection_intent_sequence,
+        Some(work_item.open_sequence)
+    );
+
+    let absent_conversation = 47;
+    handler.handle_connection_fate(ConnectionFateWorkItem {
+        tracked_conversations: vec![absent_conversation],
+        ..work_item
+    })?;
+    assert_eq!(handler.registry_len(), 1);
+    Ok(())
+}
+
+#[test]
+fn unclean_restart_appends_prior_incarnation_died_before_owner_publication()
+-> Result<(), Box<dyn Error>> {
+    let store = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let connection_incarnation = ConnectionIncarnation::new(83, 2);
+    let conversation_id = 53;
+    let (participant_id, _) =
+        enroll_for_fate(&handler, connection_incarnation, conversation_id, 59)?;
+
+    handler.repair_unclean_server_restart(
+        connection_incarnation
+            .server_incarnation
+            .checked_add(1)
+            .ok_or("restart incarnation overflow")?,
+    )?;
+    let StoredOperation::Died { row } = read_operation(&handler, conversation_id, 2)? else {
+        return Err("unclean restart did not append a Died row".into());
+    };
+    assert_eq!(row.participant_id, participant_id);
+    assert_eq!(
+        row.cause,
+        StoredDiedCause::UncleanServerRestart {
+            prior_server_incarnation: connection_incarnation.server_incarnation,
+        }
+    );
+    assert_eq!(row.connection_intent_sequence, None);
     Ok(())
 }
 

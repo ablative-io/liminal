@@ -82,10 +82,11 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
     ) -> Result<(), ParticipantSemanticError> {
         self.ensure_service_live()?;
         for conversation_id in work_item.tracked_conversations.iter().copied() {
-            let result = self.with_conversation(conversation_id, |authority, appender| {
-                let transaction = authority.prepare_connection_fate_transaction(&work_item);
-                transaction.complete(authority, appender)
-            });
+            let result =
+                self.with_conversation_fate_source(conversation_id, |authority, appender| {
+                    let transaction = authority.prepare_connection_fate_transaction(&work_item);
+                    transaction.complete(authority, appender)
+                });
             if let Err(error) = result {
                 let fatal =
                     self.latch_connection_fate_fatal(work_item.open_sequence, conversation_id)?;
@@ -103,7 +104,7 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
     ) -> Result<(), ParticipantSemanticError> {
         self.ensure_service_live()?;
         for conversation_id in self.registered_conversation_ids()? {
-            self.with_conversation(conversation_id, |authority, appender| {
+            self.with_conversation_fate_source(conversation_id, |authority, appender| {
                 let transaction = authority
                     .prepare_unclean_server_restart_transaction(current_server_incarnation)?;
                 transaction.complete(authority, appender)
