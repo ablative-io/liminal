@@ -7,61 +7,167 @@ use liminal_protocol::lifecycle::{
     BindingState, ObligationDebtDispatchDecision, decide_obligation_debt_dispatch,
 };
 use liminal_protocol::wire::{
-    BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, EnrollmentRequest,
-    ObserverRecoveryHandshake, ParticipantId, ParticipantRecord, ServerValue,
+    BindingEpoch, ClientRequest, ConnectionIncarnation, ConversationId, ObserverRecoveryHandshake,
+    ParticipantId, ParticipantRecord, ServerValue,
 };
 
 use crate::server::participant::{
     ConnectionFateWorkItem, ObserverPublicationTarget, ParticipantConnectionContext,
     ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantPublication,
-    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantServiceFatal,
+    ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSemanticOutcome,
+    ParticipantServiceFatal, dispatch_impact::DispatchImpactAccumulator,
 };
 
-use super::barrier::ArmOutcome;
+use super::barrier::{ArmOutcome, OperationFacts};
 use super::handler::ProductionParticipantHandler;
 use super::outbox_log::OutboxLog;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ProductionParticipantHandler {
-    /// Runs one conversation-scoped operation arm and applies its
-    /// connection-tracking effect to the connection's dispatch map.
-    fn conversation_operation(
+    /// Runs one conversation-scoped operation with one lossless request impact
+    /// accumulator under the conversation lock, then applies its tracking effect.
+    fn conversation_operation_with_impact(
         &self,
         conversation_id: ConversationId,
         conversations: &mut ParticipantConnectionConversations,
         operation: impl FnOnce(
             &mut ConversationAuthority,
             &dyn DurableAppend,
+            &mut DispatchImpactAccumulator,
         ) -> Result<ArmOutcome, StateError>,
-    ) -> Result<ServerValue, ParticipantSemanticError> {
-        let outcome = self.with_conversation(conversation_id, operation)?;
-        if outcome.newly_tracked {
-            conversations.track(conversation_id);
-        }
-        Ok(outcome.value)
+    ) -> ParticipantSemanticOutcome<ServerValue> {
+        let mut impact = DispatchImpactAccumulator::new();
+        let result = self.with_conversation_impact(conversation_id, &mut impact, operation);
+        let result = result.map(|outcome| {
+            if outcome.newly_tracked {
+                conversations.track(conversation_id);
+            }
+            outcome.value
+        });
+        ParticipantSemanticOutcome::new(result, impact.finish(conversation_id))
     }
 
-    fn handle_enrollment(
+    fn conversation_operation_with_facts(
+        &self,
+        context: ParticipantConnectionContext,
+        conversation_id: ConversationId,
+        conversations: &mut ParticipantConnectionConversations,
+        operation: impl FnOnce(
+            &mut ConversationAuthority,
+            &OperationFacts,
+            &dyn DurableAppend,
+            &mut DispatchImpactAccumulator,
+        ) -> Result<ArmOutcome, StateError>,
+    ) -> ParticipantSemanticOutcome<ServerValue> {
+        let operation_facts = match self.operation_facts(context, conversation_id, conversations) {
+            Ok(facts) => facts,
+            Err(error) => return ParticipantSemanticOutcome::unchanged(Err(error)),
+        };
+        self.conversation_operation_with_impact(
+            conversation_id,
+            conversations,
+            |authority, appender, impact| operation(authority, &operation_facts, appender, impact),
+        )
+    }
+
+    fn handle_request_with_impact(
         &self,
         context: ParticipantConnectionContext,
         conversations: &mut ParticipantConnectionConversations,
-        request: &EnrollmentRequest,
-    ) -> Result<ServerValue, ParticipantSemanticError> {
-        let operation_facts =
-            self.operation_facts(context, request.conversation_id, conversations)?;
-        self.conversation_operation(
-            request.conversation_id,
-            conversations,
-            |authority, appender| {
-                authority.apply_enrollment(
-                    request,
-                    &operation_facts,
-                    &self.capacity,
-                    &self.config,
-                    appender,
+        request: ClientRequest,
+    ) -> ParticipantSemanticOutcome<ServerValue> {
+        if let Err(error) = self.ensure_service_live() {
+            return ParticipantSemanticOutcome::unchanged(Err(error));
+        }
+        match request {
+            ClientRequest::Enrollment(request) => self.conversation_operation_with_facts(
+                context,
+                request.conversation_id,
+                conversations,
+                |authority, operation_facts, appender, impact| {
+                    authority.apply_enrollment_with_impact(
+                        &request,
+                        operation_facts,
+                        &self.capacity,
+                        &self.config,
+                        appender,
+                        impact,
+                    )
+                },
+            ),
+            ClientRequest::CredentialAttach(request) => self.conversation_operation_with_facts(
+                context,
+                request.conversation_id,
+                conversations,
+                |authority, operation_facts, appender, impact| {
+                    authority.apply_credential_attach_with_impact(
+                        &request,
+                        operation_facts,
+                        &self.capacity,
+                        self.store.clone(),
+                        appender,
+                        impact,
+                    )
+                },
+            ),
+            ClientRequest::Detach(request) => self.conversation_operation_with_facts(
+                context,
+                request.conversation_id,
+                conversations,
+                |authority, operation_facts, appender, impact| {
+                    authority.apply_detach_with_impact(&request, operation_facts, appender, impact)
+                },
+            ),
+            ClientRequest::ParticipantAck(request) => self.conversation_operation_with_facts(
+                context,
+                request.conversation_id,
+                conversations,
+                |authority, operation_facts, appender, impact| {
+                    authority.apply_ack_with_impact(&request, operation_facts, appender, impact)
+                },
+            ),
+            ClientRequest::MarkerAck(request) => {
+                let outbox_log = OutboxLog::new(Arc::clone(&self.store), request.conversation_id);
+                self.conversation_operation_with_facts(
+                    context,
+                    request.conversation_id,
+                    conversations,
+                    |authority, operation_facts, _appender, impact| {
+                        authority.apply_marker_ack_with_impact(
+                            &request,
+                            operation_facts,
+                            &outbox_log,
+                            impact,
+                        )
+                    },
                 )
-            },
-        )
+            }
+            ClientRequest::Leave(request) => self.conversation_operation_with_facts(
+                context,
+                request.conversation_id,
+                conversations,
+                |authority, operation_facts, appender, impact| {
+                    authority.apply_leave_with_impact(&request, operation_facts, appender, impact)
+                },
+            ),
+            ClientRequest::RecordAdmission(request) => self.conversation_operation_with_facts(
+                context,
+                request.conversation_id,
+                conversations,
+                |authority, operation_facts, appender, impact| {
+                    authority.apply_record_admission_with_impact(
+                        &request,
+                        operation_facts,
+                        &self.config,
+                        appender,
+                        impact,
+                    )
+                },
+            ),
+            ClientRequest::ObserverRecovery(request) => ParticipantSemanticOutcome::unchanged(
+                self.apply_observer_recovery(context, conversations, &request, None),
+            ),
+        }
     }
 }
 
@@ -324,97 +430,23 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         self.apply_observer_recovery(context, conversations, &request, target.as_ref())
     }
 
+    fn handle_with_impact(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ClientRequest,
+    ) -> ParticipantSemanticOutcome<ServerValue> {
+        self.handle_request_with_impact(context, conversations, request)
+    }
+
     fn handle(
         &self,
         context: ParticipantConnectionContext,
         conversations: &mut ParticipantConnectionConversations,
         request: ClientRequest,
     ) -> Result<ServerValue, ParticipantSemanticError> {
-        self.ensure_service_live()?;
-        match request {
-            ClientRequest::Enrollment(request) => {
-                self.handle_enrollment(context, conversations, &request)
-            }
-            ClientRequest::CredentialAttach(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_credential_attach(
-                            &request,
-                            &operation_facts,
-                            &self.capacity,
-                            self.store.clone(),
-                            appender,
-                        )
-                    },
-                )
-            }
-            ClientRequest::Detach(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_detach(&request, &operation_facts, appender)
-                    },
-                )
-            }
-            ClientRequest::ParticipantAck(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| authority.apply_ack(&request, &operation_facts, appender),
-                )
-            }
-            ClientRequest::MarkerAck(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                let outbox_log = OutboxLog::new(Arc::clone(&self.store), request.conversation_id);
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, _appender| {
-                        authority.apply_marker_ack(&request, &operation_facts, &outbox_log)
-                    },
-                )
-            }
-            ClientRequest::Leave(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_leave(&request, &operation_facts, appender)
-                    },
-                )
-            }
-            ClientRequest::RecordAdmission(request) => {
-                let operation_facts =
-                    self.operation_facts(context, request.conversation_id, conversations)?;
-                self.conversation_operation(
-                    request.conversation_id,
-                    conversations,
-                    |authority, appender| {
-                        authority.apply_record_admission(
-                            &request,
-                            &operation_facts,
-                            &self.config,
-                            appender,
-                        )
-                    },
-                )
-            }
-            ClientRequest::ObserverRecovery(request) => {
-                self.apply_observer_recovery(context, conversations, &request, None)
-            }
-        }
+        self.handle_request_with_impact(context, conversations, request)
+            .into_result()
     }
 }
 

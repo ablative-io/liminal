@@ -28,6 +28,8 @@ use liminal_protocol::wire::{
     CredentialAttachResponse, Generation, ReceiptExpiryReason,
 };
 
+use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
+
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::capacity::ServerCapacity;
 use super::facts::{self, Digest};
@@ -41,6 +43,7 @@ use super::ops_attach_capacity::AttachStage8;
 use super::ops_attach_finalizer::SelectedFencedFinalizer;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
 use super::ops_attach_verify::{AttachVerification, stored_attach_parameters, verify_attach_mode};
+use super::outbox_projection::capture_projection_prestate;
 use super::state::{
     AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend,
     PendingBindingFate, Slot, StateError,
@@ -52,13 +55,14 @@ impl ConversationAuthority {
     /// Attach never creates a conversation: a fresh conversation id has no
     /// slots and classifies as `ParticipantUnknown` without any durable
     /// append.
-    pub(super) fn apply_credential_attach(
+    pub(super) fn apply_credential_attach_with_impact(
         &mut self,
         request: &CredentialAttachRequest,
         operation_facts: &OperationFacts,
         server_capacity: &ServerCapacity,
         store: Arc<dyn DurableStore>,
         appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let envelope = attach_envelope(request);
         let now = u128::from(operation_facts.now_ms);
@@ -160,6 +164,9 @@ impl ConversationAuthority {
             provenance_expires_at: deadlines.provenance_expires_at().into(),
             admitted_now_ms: operation_facts.now_ms,
         };
+        let source_log_sequence = self.next_log_sequence;
+        let source = attached_source(request, allocation, &attach_mode);
+        let projection_facts = capture_projection_prestate(self, &source);
         let outcome = self.attach_commit(
             request,
             &allocation,
@@ -167,6 +174,9 @@ impl ConversationAuthority {
             store,
             CommitMode::Live(appender),
         )?;
+        self.record_produced_source(source_log_sequence, &source, projection_facts, impact)?;
+        self.record_binding_changed(request.participant_id, impact);
+        self.record_episode_changed(impact);
         // The durable append succeeded: the stage-8 reservation becomes
         // permanent and the receipts this rotation retired early (the
         // superseded attach receipt and, on the first rotation, the ended
@@ -474,5 +484,19 @@ pub(super) const fn attach_envelope(request: &CredentialAttachRequest) -> Attach
         capability_generation: request.capability_generation,
         attach_attempt_token: request.attach_attempt_token,
         accept_marker_delivery_seq: request.accept_marker_delivery_seq,
+    }
+}
+
+fn attached_source(
+    request: &CredentialAttachRequest,
+    allocation: StoredAttachAllocation,
+    mode: &StoredAttachModeV3,
+) -> StoredOperation {
+    StoredOperation::Attached {
+        request: request.into(),
+        secret_verified: true,
+        allocation,
+        mode: Box::new(mode.clone()),
+        event: Vec::new(),
     }
 }

@@ -19,6 +19,7 @@ use liminal_protocol::wire::{
 };
 
 use crate::config::types::ParticipantConfig;
+use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 
 use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::Digest;
@@ -27,21 +28,41 @@ use super::log::{
     StoredBindingEpoch, StoredMarkerDrain, StoredOperation, StoredRecordAdmission,
     StoredRecordAdmissionRequest, StoredResourceVector, StoredRetainedCharge,
 };
+use super::outbox_projection::ReplayedProjectionFacts;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
-    /// Applies one ordinary record admission.
-    ///
-    /// Binding lookup (stages 2-5), stage-6 connection capacity, and all
-    /// frontier-dependent admission outcomes run through protocol selectors.
-    /// Commit and mandatory marker-drain arms publish state only after their
-    /// complete durable rows have appended and flushed.
+    #[cfg(test)]
     pub(super) fn apply_record_admission(
         &mut self,
         request: &RecordAdmission,
         operation_facts: &OperationFacts,
         config: &ParticipantConfig,
         appender: &dyn DurableAppend,
+    ) -> Result<ArmOutcome, StateError> {
+        let mut impact = DispatchImpactAccumulator::new();
+        self.apply_record_admission_with_impact(
+            request,
+            operation_facts,
+            config,
+            appender,
+            &mut impact,
+        )
+    }
+
+    /// Applies one ordinary record admission.
+    ///
+    /// Binding lookup (stages 2-5), stage-6 connection capacity, and all
+    /// frontier-dependent admission outcomes run through protocol selectors.
+    /// Commit and mandatory marker-drain arms publish state only after their
+    /// complete durable rows have appended and flushed.
+    pub(super) fn apply_record_admission_with_impact(
+        &mut self,
+        request: &RecordAdmission,
+        operation_facts: &OperationFacts,
+        config: &ParticipantConfig,
+        appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
@@ -118,13 +139,13 @@ impl ConversationAuthority {
                     unchanged,
                     retained_record_limit,
                 );
-                self.persist_marker_and_retry(
-                    candidate,
-                    owner,
+                self.persist_next_marker(candidate, owner, appender, impact)?;
+                self.apply_record_admission_with_impact(
                     &request,
                     operation_facts,
                     config,
                     appender,
+                    impact,
                 )
             }
             RecordAdmissionDecision::Fault(failure) => {
@@ -138,21 +159,9 @@ impl ConversationAuthority {
                 receiving_epoch,
                 retained_record_limit,
                 appender,
+                impact,
             ),
         }
-    }
-
-    fn persist_marker_and_retry(
-        &mut self,
-        candidate: ImmutableSequenceCandidate,
-        owner: LiveFrontierOwner,
-        request: &RecordAdmission,
-        operation_facts: &OperationFacts,
-        config: &ParticipantConfig,
-        appender: &dyn DurableAppend,
-    ) -> Result<ArmOutcome, StateError> {
-        self.persist_next_marker(candidate, owner, appender)?;
-        self.apply_record_admission(request, operation_facts, config, appender)
     }
 
     pub(super) fn persist_next_marker(
@@ -160,6 +169,7 @@ impl ConversationAuthority {
         candidate: ImmutableSequenceCandidate,
         owner: LiveFrontierOwner,
         appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<(), StateError> {
         let next_seq =
             candidate
@@ -195,17 +205,32 @@ impl ConversationAuthority {
         let (owner, _, projection) =
             LiveFrontierOwner::from_marker_drain(commit, retained_record_limit);
         validate_marker_projection(self.conversation_id, &projection)?;
+        let marker_delivery = projection.delivery().clone();
         #[cfg(test)]
         {
-            self.last_marker_projection = Some(projection.delivery().clone());
+            self.last_marker_projection = Some(marker_delivery.clone());
         }
-        appender.append(
-            &StoredOperation::MarkerDrained { row },
-            self.next_log_sequence,
-        )?;
+        let source_log_sequence = self.next_log_sequence;
+        let source = StoredOperation::MarkerDrained { row };
+        appender.append(&source, source_log_sequence)?;
         self.install_frontier(owner)?;
         self.next_seq = self.next_seq.max(next_seq);
         self.advance_log_head()?;
+        self.record_produced_source(
+            source_log_sequence,
+            &source,
+            ReplayedProjectionFacts {
+                superseded_binding_epoch: None,
+                marker_delivery: Some(marker_delivery),
+            },
+            impact,
+        )?;
+        if self
+            .obligation_debt_dispatch()
+            .is_some_and(|state| state.episode().is_some())
+        {
+            self.record_episode_changed(impact);
+        }
         Ok(())
     }
 
@@ -215,6 +240,7 @@ impl ConversationAuthority {
         receiving_epoch: BindingEpoch,
         retained_record_limit: u64,
         appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let persistence = commit.into_persistence_parts();
         let admission_order = persistence.record.admission_order();
@@ -237,10 +263,9 @@ impl ConversationAuthority {
                 .collect(),
             resulting_closure_accounting: format!("{:?}", persistence.accounting).into_bytes(),
         };
-        appender.append(
-            &StoredOperation::RecordAdmission { row },
-            self.next_log_sequence,
-        )?;
+        let source_log_sequence = self.next_log_sequence;
+        let source = StoredOperation::RecordAdmission { row };
+        appender.append(&source, source_log_sequence)?;
         let response = persistence.outcome.clone();
         let order = persistence.order.major();
         let sequence = persistence.record.delivery_seq();
@@ -251,6 +276,16 @@ impl ConversationAuthority {
         self.install_frontier(owner)?;
         self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()?;
+        self.record_produced_source(
+            source_log_sequence,
+            &source,
+            ReplayedProjectionFacts {
+                superseded_binding_epoch: None,
+                marker_delivery: None,
+            },
+            impact,
+        )?;
+        self.record_episode_changed(impact);
         Ok(ArmOutcome::committed(
             RecordAdmissionResponse::record_committed(response).into_server_value(),
             connection_capacity,

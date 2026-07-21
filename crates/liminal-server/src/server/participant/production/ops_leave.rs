@@ -10,6 +10,8 @@ use liminal_protocol::lifecycle::{
 };
 use liminal_protocol::wire::{BindingEpoch, LeaveEnvelope, LeaveRequest, LeaveResponse};
 
+use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
+
 use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::{self, Digest};
 use super::fate_occurrence::{FateOccurrenceKey, PendingFinalizerRoute};
@@ -20,6 +22,7 @@ use super::log::{
 };
 use super::non_presenting_finalizer::NonPresentingFinalizerCommit;
 use super::observer_progress::ObserverProgressSourceMetadata;
+use super::outbox_projection::{ReplayedProjectionFacts, project_committed_source};
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 /// Complete move-only server input to one protocol-owned Leave transition.
@@ -45,12 +48,24 @@ struct PreparedLeaveCommit {
 }
 
 impl ConversationAuthority {
-    /// Applies one terminal Leave request.
+    #[cfg(test)]
     pub(super) fn apply_leave(
         &mut self,
         request: &LeaveRequest,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
+    ) -> Result<ArmOutcome, StateError> {
+        let mut impact = DispatchImpactAccumulator::new();
+        self.apply_leave_with_impact(request, operation_facts, appender, &mut impact)
+    }
+
+    /// Applies one terminal Leave request.
+    pub(super) fn apply_leave_with_impact(
+        &mut self,
+        request: &LeaveRequest,
+        operation_facts: &OperationFacts,
+        appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
@@ -89,8 +104,8 @@ impl ConversationAuthority {
             });
         if let Some(candidate) = next_immutable {
             let owner = self.take_frontier()?;
-            self.persist_next_marker(candidate, owner, appender)?;
-            return self.apply_leave(request, operation_facts, appender);
+            self.persist_next_marker(candidate, owner, appender, impact)?;
+            return self.apply_leave_with_impact(request, operation_facts, appender, impact);
         }
         self.persist_leave(
             request,
@@ -98,6 +113,7 @@ impl ConversationAuthority {
             request_verifier,
             capacity,
             appender,
+            impact,
         )
     }
 
@@ -202,6 +218,7 @@ impl ConversationAuthority {
         request_verifier: Digest,
         capacity: ConnectionConversationCapacityCommit,
         appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let source_sequence = self.next_log_sequence;
         let finalizer = self.select_leave_finalizer(request.participant_id)?;
@@ -224,7 +241,8 @@ impl ConversationAuthority {
                     route.presentation
                 }),
         };
-        appender.append(&StoredOperation::Left { row }, self.next_log_sequence)?;
+        let source = StoredOperation::Left { row };
+        appender.append(&source, source_sequence)?;
         self.install_frontier(prepared.owner)?;
         self.retired
             .insert(request.participant_id, prepared.tombstone);
@@ -239,8 +257,22 @@ impl ConversationAuthority {
         }
         self.observe_replayed_position(prepared.left_order, prepared.left_seq)?;
         self.advance_log_head()?;
+        if let Some(projection) = project_committed_source(
+            self,
+            source_sequence,
+            &source,
+            ReplayedProjectionFacts {
+                superseded_binding_epoch: None,
+                marker_delivery: None,
+            },
+        )? {
+            self.record_published_projection(&projection, impact)?;
+        }
+        self.record_retired(impact);
+        self.record_episode_changed(impact);
         if prepared.completes_ordinary {
             self.complete_prepared_ordinary_finalizer(request.participant_id, appender)?;
+            self.record_episode_changed(impact);
         }
         Ok(ArmOutcome::committed(
             LeaveResponse::leave_committed(outcome).into_server_value(),

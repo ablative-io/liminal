@@ -19,6 +19,7 @@ mod capacity;
 mod connection_fate;
 mod connection_fate_replay;
 mod connection_fate_rows;
+mod dispatch_impact;
 mod facts;
 mod fate_occurrence;
 mod fenced_attach_codec;

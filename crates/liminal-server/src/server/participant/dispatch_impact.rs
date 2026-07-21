@@ -109,6 +109,7 @@ impl DispatchImpact {
 #[derive(Debug, Default)]
 pub struct DispatchImpactAccumulator {
     effects: BTreeMap<DispatchEffect, BTreeSet<DispatchTarget>>,
+    staged_effects: BTreeMap<DispatchEffect, BTreeSet<DispatchTarget>>,
 }
 
 impl DispatchImpactAccumulator {
@@ -117,6 +118,7 @@ impl DispatchImpactAccumulator {
     pub const fn new() -> Self {
         Self {
             effects: BTreeMap::new(),
+            staged_effects: BTreeMap::new(),
         }
     }
 
@@ -133,11 +135,40 @@ impl DispatchImpactAccumulator {
         self.effects.entry(effect).or_default().extend(targets);
     }
 
+    /// Stages an effect whose enclosing durability/reconciliation barrier has
+    /// not installed every coupled owner yet.
+    pub(crate) fn stage(
+        &mut self,
+        effect: DispatchEffect,
+        targets: impl IntoIterator<Item = DispatchTarget>,
+    ) {
+        self.staged_effects
+            .entry(effect)
+            .or_default()
+            .extend(targets);
+    }
+
+    /// Commits every staged effect after the enclosing barrier is installed.
+    pub(crate) fn install_staged(&mut self) {
+        let staged = core::mem::take(&mut self.staged_effects);
+        for (effect, targets) in staged {
+            self.record(effect, targets);
+        }
+    }
+
+    /// Reports whether a durable source awaits reconciliation before telling.
+    pub(crate) fn has_staged(&self) -> bool {
+        !self.staged_effects.is_empty()
+    }
+
     /// Merges another installed-prefix accumulator without replacing any
     /// earlier effect or target.
     pub fn merge(&mut self, prefix: Self) {
         for (effect, targets) in prefix.effects {
             self.record(effect, targets);
+        }
+        for (effect, targets) in prefix.staged_effects {
+            self.stage(effect, targets);
         }
     }
 

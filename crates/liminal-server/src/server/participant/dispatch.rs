@@ -187,8 +187,15 @@ impl<T> ParticipantSemanticOutcome<T> {
         Self { result, impact }
     }
 
-    fn into_parts(self) -> (Result<T, ParticipantSemanticError>, DispatchImpact) {
+    pub(crate) fn into_parts(self) -> (Result<T, ParticipantSemanticError>, DispatchImpact) {
         (self.result, self.impact)
+    }
+
+    /// Returns the semantic result when an internal caller has no notification
+    /// boundary. Production request dispatch uses the complete envelope; this
+    /// projection exists for the trait's legacy direct-call entry point.
+    pub(crate) fn into_result(self) -> Result<T, ParticipantSemanticError> {
+        self.result
     }
 }
 

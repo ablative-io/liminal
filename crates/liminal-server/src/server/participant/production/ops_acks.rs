@@ -18,6 +18,8 @@ use liminal_protocol::wire::{
     ParticipantAckEnvelope, ParticipantAckResponse, ServerDiscriminant, ServerValue,
 };
 
+use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
+
 use super::barrier::{ArmOutcome, OperationFacts};
 use super::facts::Digest;
 use super::log::{StoredAck, StoredBindingEpoch, StoredOperation};
@@ -27,12 +29,24 @@ use super::outbox_log::{OutboxLog, OutboxRow, StoredMarkerAckCommitted};
 use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, Slot, StateError};
 
 impl ConversationAuthority {
-    /// Applies one cumulative acknowledgement over the zero-debt selector.
+    #[cfg(test)]
     pub(super) fn apply_ack(
         &mut self,
         request: &ParticipantAck,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
+    ) -> Result<ArmOutcome, StateError> {
+        let mut impact = DispatchImpactAccumulator::new();
+        self.apply_ack_with_impact(request, operation_facts, appender, &mut impact)
+    }
+
+    /// Applies one cumulative acknowledgement over the zero-debt selector.
+    pub(super) fn apply_ack_with_impact(
+        &mut self,
+        request: &ParticipantAck,
+        operation_facts: &OperationFacts,
+        appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
@@ -48,13 +62,18 @@ impl ConversationAuthority {
         );
         let (obligations, contiguously_available_through) =
             outbox.recipient_ack_obligations(request.participant_id, acknowledged_through)?;
-        self.ack_commit(
+        let outcome = self.ack_commit(
             request,
             receiving_epoch.into(),
             &obligations,
             contiguously_available_through,
             Some((operation_facts, appender)),
-        )
+        )?;
+        if matches!(outcome.value, ServerValue::AckCommitted(_)) {
+            self.record_acknowledged(request.participant_id, impact);
+            self.record_episode_changed(impact);
+        }
+        Ok(outcome)
     }
 
     /// Replays one committed zero-debt ack entry from its stored inputs.
@@ -218,12 +237,16 @@ impl ConversationAuthority {
     }
 
     /// Applies one marker acknowledgement over the zero-debt marker selector.
-    pub(super) fn apply_marker_ack(
+    pub(super) fn apply_marker_ack_with_impact(
         &mut self,
         request: &MarkerAck,
         operation_facts: &OperationFacts,
         outbox_log: &OutboxLog,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
+        let owed = self
+            .obligation_debt_dispatch()
+            .is_some_and(|state| state.episode().is_some());
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
             request.capability_generation,
@@ -295,7 +318,15 @@ impl ConversationAuthority {
                 Ok(ArmOutcome::respond(response.into_server_value()))
             }
             MarkerAckDecision::Commit(commit) => {
-                self.commit_marker_ack(request, operation_facts, outbox_log, commit)
+                let outcome =
+                    self.commit_marker_ack(request, operation_facts, outbox_log, commit)?;
+                if matches!(outcome.value, ServerValue::MarkerAckCommitted(_)) {
+                    self.record_acknowledged(request.participant_id, impact);
+                    if owed {
+                        self.record_episode_changed(impact);
+                    }
+                }
+                Ok(outcome)
             }
         }
     }

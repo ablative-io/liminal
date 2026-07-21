@@ -31,12 +31,14 @@ use liminal_protocol::wire::{
 };
 
 use crate::config::types::ParticipantConfig;
+use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::capacity::{ServerCapacity, Stage8Outcome};
 use super::facts::{self, Digest};
 use super::frontier;
 use super::log::{StoredEnrollmentAllocation, StoredEnrollmentRequest, StoredOperation};
+use super::outbox_projection::ReplayedProjectionFacts;
 use super::state::{ConversationAuthority, DurableAppend, Slot, StateError};
 
 /// Server-owned participant-slot allocation proof for one enrollment.
@@ -69,13 +71,14 @@ impl ConversationAuthority {
     /// shell genesis is minted only on the authorized-new arm, immediately
     /// before the enrollment's own committing append — a refused request on a
     /// never-seen conversation id leaves the durable store byte-identical.
-    pub(super) fn apply_enrollment(
+    pub(super) fn apply_enrollment_with_impact(
         &mut self,
         request: &EnrollmentRequest,
         operation_facts: &OperationFacts,
         server_capacity: &ServerCapacity,
         config: &ParticipantConfig,
         appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let token_bytes = request.enrollment_token.into_bytes();
         if let Some(participant_id) = self.tokens.get(&token_bytes).copied() {
@@ -128,6 +131,7 @@ impl ConversationAuthority {
         // The one conversation-creating arm: genesis is durable exactly when
         // an authorized enrollment is about to append its own entry.
         self.ensure_genesis(appender)?;
+        let source_log_sequence = self.next_log_sequence;
         let (attached_order, attached_seq) = self.allocate_position()?;
         let allocation = StoredEnrollmentAllocation {
             participant_id: self.next_participant,
@@ -170,6 +174,22 @@ impl ConversationAuthority {
         } else {
             self.enroll_commit(request, &allocation, CommitMode::Live(appender))?
         };
+        let source = StoredOperation::Enrolled {
+            request: request.into(),
+            allocation,
+            event: Vec::new(),
+        };
+        self.record_produced_source(
+            source_log_sequence,
+            &source,
+            ReplayedProjectionFacts {
+                superseded_binding_epoch: None,
+                marker_delivery: None,
+            },
+            impact,
+        )?;
+        self.record_binding_changed(allocation.participant_id, impact);
+        self.record_episode_changed(impact);
         // The durable append succeeded: the stage-8 reservation becomes
         // permanent (enrollment retires no earlier receipt).
         reservation.confirm(&[]);

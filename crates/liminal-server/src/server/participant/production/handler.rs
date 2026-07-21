@@ -22,7 +22,7 @@ use liminal_protocol::wire::ConversationId;
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::{
     ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantSemanticError, ParticipantServiceFatal,
+    ParticipantSemanticError, ParticipantServiceFatal, dispatch_impact::DispatchImpactAccumulator,
 };
 
 use super::barrier::{OperationFacts, ReceiptCapacityLimits};
@@ -215,20 +215,27 @@ impl ProductionParticipantHandler {
         Ok(cell)
     }
 
-    /// Runs one operation over the exclusively owned conversation authority.
-    ///
-    /// On any [`StateError`] the in-memory owner is discarded — durable state
-    /// is untouched by failed operations, so the next touch cold-replays
-    /// exact durable reality. A conversation whose durable log is still empty
-    /// after the operation (a refused or failed probe of a never-committed
-    /// conversation id) leaves no residue: its registry cell is evicted, so
-    /// wire probes grow neither durable nor in-memory state.
-    pub(super) fn with_conversation<T>(
+    pub(super) fn with_conversation_impact<T>(
         &self,
         conversation_id: ConversationId,
-        operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
+        impact: &mut DispatchImpactAccumulator,
+        operation: impl FnOnce(
+            &mut ConversationAuthority,
+            &dyn DurableAppend,
+            &mut DispatchImpactAccumulator,
+        ) -> Result<T, StateError>,
     ) -> Result<T, ParticipantSemanticError> {
-        self.with_conversation_reconciliation(conversation_id, true, operation)
+        self.with_conversation_reconciliation(
+            conversation_id,
+            true,
+            Some(impact),
+            |authority, appender, impact| {
+                impact.map_or_else(
+                    || Err(StateError::invariant("impact owner is unavailable")),
+                    |impact| operation(authority, appender, impact),
+                )
+            },
+        )
     }
 
     /// Runs a fate-source append and reconciles its exact Unit 2 projection before
@@ -240,14 +247,31 @@ impl ProductionParticipantHandler {
         conversation_id: ConversationId,
         operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
     ) -> Result<T, ParticipantSemanticError> {
-        self.with_conversation_reconciliation(conversation_id, true, operation)
+        self.with_conversation_reconciliation(
+            conversation_id,
+            true,
+            None,
+            |authority, appender, impact| {
+                if impact.is_some() {
+                    return Err(StateError::invariant(
+                        "fate source unexpectedly received a request impact owner",
+                    ));
+                }
+                operation(authority, appender)
+            },
+        )
     }
 
     fn with_conversation_reconciliation<T>(
         &self,
         conversation_id: ConversationId,
         reconcile_appended_source: bool,
-        operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
+        mut impact: Option<&mut DispatchImpactAccumulator>,
+        operation: impl FnOnce(
+            &mut ConversationAuthority,
+            &dyn DurableAppend,
+            Option<&mut DispatchImpactAccumulator>,
+        ) -> Result<T, StateError>,
     ) -> Result<T, ParticipantSemanticError> {
         let cell = self.cell(conversation_id)?;
         let mut owner: MutexGuard<'_, Option<ConversationAuthority>> =
@@ -273,7 +297,8 @@ impl ProductionParticipantHandler {
             conversation_id,
         };
         let starting_log_sequence = authority.next_log_sequence;
-        let (result, durably_empty) = match operation(authority, &appender) {
+        let operation_result = operation(authority, &appender, impact.as_deref_mut());
+        let (result, durably_empty) = match operation_result {
             Ok(value)
                 if reconcile_appended_source
                     && authority.next_log_sequence > starting_log_sequence =>
@@ -284,6 +309,9 @@ impl ProductionParticipantHandler {
                 match self.replay_and_repair(conversation_id, &log) {
                     Ok(reconciled) => {
                         let durably_empty = reconciled.next_log_sequence == 0;
+                        if let Some(impact) = impact.as_deref_mut() {
+                            impact.install_staged();
+                        }
                         *owner = Some(reconciled);
                         (Ok(value), durably_empty)
                     }
@@ -294,14 +322,35 @@ impl ProductionParticipantHandler {
                 }
             }
             Ok(value) => {
+                if let Some(impact) = impact.as_deref_mut() {
+                    impact.install_staged();
+                }
                 let durably_empty = authority.next_log_sequence == 0;
                 (Ok(value), durably_empty)
             }
             Err(error) => {
-                // Discard the possibly part-consumed in-memory owner; durable
-                // reality is authoritative and will be replayed next touch.
-                let durably_empty = authority.next_log_sequence == 0;
-                *owner = None;
+                let mut durably_empty = authority.next_log_sequence == 0;
+                let staged = impact
+                    .as_deref()
+                    .is_some_and(DispatchImpactAccumulator::has_staged);
+                if staged {
+                    match self.replay_and_repair(conversation_id, &log) {
+                        Ok(reconciled) => {
+                            durably_empty = reconciled.next_log_sequence == 0;
+                            *owner = Some(reconciled);
+                            if let Some(impact) = impact.as_mut() {
+                                impact.install_staged();
+                            }
+                        }
+                        Err(_) => {
+                            *owner = None;
+                        }
+                    }
+                } else {
+                    // No committed prefix awaits a tell. Discard the possibly
+                    // part-consumed owner and replay durable truth next touch.
+                    *owner = None;
+                }
                 (Err(state_error(&error)), durably_empty)
             }
         };

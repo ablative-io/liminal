@@ -15,6 +15,8 @@ use liminal_protocol::lifecycle::{
 };
 use liminal_protocol::wire::{BindingEpoch, DetachEnvelope, DetachRequest, DetachResponse};
 
+use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
+
 use super::barrier::{ArmOutcome, CommitMode, OperationFacts, commit_through_barrier};
 use super::facts::{self, Digest};
 use super::frontier;
@@ -23,15 +25,17 @@ use super::log::{
     StoredDetachedSource, StoredOperation, StoredTerminalDisposition,
 };
 use super::observer_progress::ObserverProgressSourceMetadata;
+use super::outbox_projection::ReplayedProjectionFacts;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
     /// Applies one explicit detach request end to end.
-    pub(super) fn apply_detach(
+    pub(super) fn apply_detach_with_impact(
         &mut self,
         request: &DetachRequest,
         operation_facts: &OperationFacts,
         appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
         let envelope = detach_envelope(request);
         let receiving_epoch = BindingEpoch::new(
@@ -111,16 +115,26 @@ impl ConversationAuthority {
             }
         };
         let (terminal_order, terminal_seq) = self.allocate_position()?;
-        let outcome = self.detach_commit(
-            request,
-            verifier,
-            DetachCommitPosition {
-                receiving_epoch: receiving_epoch.into(),
-                terminal_order,
-                terminal_seq,
+        let source_log_sequence = self.next_log_sequence;
+        let position = DetachCommitPosition {
+            receiving_epoch: receiving_epoch.into(),
+            terminal_order,
+            terminal_seq,
+        };
+        let outcome =
+            self.detach_commit(request, verifier, position, CommitMode::Live(appender))?;
+        let source = stored_detached_operation(request, verifier, position, Vec::new());
+        self.record_produced_source(
+            source_log_sequence,
+            &source,
+            ReplayedProjectionFacts {
+                superseded_binding_epoch: None,
+                marker_delivery: None,
             },
-            CommitMode::Live(appender),
+            impact,
         )?;
+        self.record_binding_changed(request.participant_id, impact);
+        self.record_episode_changed(impact);
         Ok(ArmOutcome::committed(
             DetachResponse::detach_committed(outcome).into_server_value(),
             capacity,
