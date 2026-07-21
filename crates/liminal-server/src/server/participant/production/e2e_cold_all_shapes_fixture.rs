@@ -303,13 +303,16 @@ pub(super) fn assert_decoded_source_census(
                     ) | (
                         ProducedSourceKind::Detached,
                         StoredOperation::Detached { .. }
-                    ) | (
-                        ProducedSourceKind::MarkerDrained,
-                        StoredOperation::MarkerDrained { .. }
-                    ) | (
-                        ProducedSourceKind::RecordAdmission,
-                        StoredOperation::RecordAdmission { .. }
-                    ) | (ProducedSourceKind::Left, StoredOperation::Left { .. })
+                    ) | (ProducedSourceKind::Died, StoredOperation::Died { .. })
+                        | (
+                            ProducedSourceKind::MarkerDrained,
+                            StoredOperation::MarkerDrained { .. }
+                        )
+                        | (
+                            ProducedSourceKind::RecordAdmission,
+                            StoredOperation::RecordAdmission { .. }
+                        )
+                        | (ProducedSourceKind::Left, StoredOperation::Left { .. })
                 );
                 assert!(matching, "Produced row/source kind drifted");
             }
