@@ -313,11 +313,19 @@ poststate `(participant_id, binding_epoch)` and therefore carries the current
 connection incarnation. An effect's target set may be empty; no true effect may
 be dropped merely because no current binding can be told.
 
-The map is constructed under the conversation lock from the operation's exact
-prestate, committed transition, and installed poststate. It is returned only
-after every relevant operation, outbox, fate/finalizer, and coupled-state row
-is flushed and installed. It is **not** inferred later from a request kind or a
-poststate reread. After unlock, the wrapper takes the set union of all effect
+Each semantic request creates one `DispatchImpactAccumulator` under the
+conversation lock. After **each** source/outbox/fate/finalizer/coupled-state
+subcommit is flushed and installed, the owner derives that subcommit's effects
+from its exact prestate, transition, and poststate and extends the accumulator's
+target set for each effect. Repeated effects union their targets; no later
+subcommit, refusal, backpressure response, or error may replace or clear a
+committed prefix. The request returns a result/impact envelope, so every exit
+path can carry the accumulated map even when the final wire result is not a
+commit. An empty accumulator becomes `Unchanged`; a nonempty one becomes
+`Changed`.
+
+The map is **not** inferred later from a request kind or a final-poststate
+reread. After unlock, the wrapper takes the set union of all accumulated effect
 targets, deduplicates exact targets, and notifies each once. There is no scalar
 precedence rule. The eventual pump still rereads durable authority before
 selection; that freshness check does not reconstruct lost effects or targets.
@@ -327,7 +335,7 @@ selection; that freshness check does not reconstruct lost effects or targets.
 | `Published` | Any committed `Produced` batch that adds at least one live recipient obligation, after source and batch flush/install. Existing installation creates obligations at `crates/liminal-server/src/server/participant/production/outbox.rs:262-307`. A zero-recipient batch has no `Published` effect. | Exact poststate bound recipients of newly live obligations. |
 | `Acknowledged` | A committed zero- or nonzero-debt normal ack after its full barrier, and every committed marker ack after its extension/member/frontier barrier. Existing zero-debt selection seals testimony at `crates/liminal-server/src/server/participant/production/ops_acks.rs:41-57`; marker durability is at `crates/liminal-server/src/server/participant/production/ops_acks.rs:332-367`. | The acknowledging current binding when another obligation or dispatch verdict may now be selected, plus any exact current target whose reconciled dispatch key changed. |
 | `BindingChanged` | Committed enrollment/attach/rebind, Died, or Detached after binding and any Owed episode tag agree. | Only exact current poststate bindings affected by the change; never a detached/dead epoch. A committed rebind is the sole replay tell after restart. |
-| `EpisodeChanged` | Observer/candidate/cap/debt transition; Ordinary or Recovered; every enclosing finalizer; an Owed marker ack; and any other operation whenever cursor, floor, `H'`, observer, cap, facts, debt, or owner variant changes—**whether or not `ClosureState` changes**. Marker ack preserves accounting state while advancing cursor (`crates/liminal-protocol/src/lifecycle/operations/live_frontier/state.rs:61-75`; `crates/liminal-protocol/src/lifecycle/operations/live_frontier.rs:1203-1250`). W1b floor accounting also preserves closure state (`crates/liminal-protocol/src/lifecycle/operations/live_frontier/state.rs:33-58`), and Ordinary/Recovered have no `Produced` row (`crates/liminal-server/src/server/participant/production/outbox_projection.rs:49-60`), so this effect is mandatory when those poststate fields change. A Clear marker has `Acknowledged`, not a fabricated episode effect. | Exact current poststate bindings whose coupled dispatch key may have changed. |
+| `EpisodeChanged` | Observer/candidate/cap/debt transition; Ordinary or Recovered; every enclosing finalizer; an Owed marker ack; an Owed `MarkerDrained` append; and any other operation whenever cursor, floor, `H'`, observer, cap, facts, debt, closure edge, or owner variant changes—**whether or not `ClosureState` changes**. Marker ack preserves accounting state while advancing cursor (`crates/liminal-protocol/src/lifecycle/operations/live_frontier/state.rs:61-75`; `crates/liminal-protocol/src/lifecycle/operations/live_frontier.rs:1203-1250`). Marker drain applies a new marker event to the Owed closure edge before returning its poststate (`crates/liminal-protocol/src/lifecycle/operations/marker_drain.rs:244-257,280-308`). W1b floor accounting also preserves closure state (`crates/liminal-protocol/src/lifecycle/operations/live_frontier/state.rs:33-58`), and Ordinary/Recovered have no `Produced` row (`crates/liminal-server/src/server/participant/production/outbox_projection.rs:49-60`), so this effect is mandatory when those poststate fields change. A Clear marker has `Acknowledged`, not a fabricated episode effect. | Exact current poststate bindings whose coupled dispatch key may have changed. |
 | `Retired` | Committed `Left` only, after its source batch and permanent outbox discharge install. The source validator selects retirement only for `Left` (`crates/liminal-server/src/server/participant/production/outbox/validation.rs:9-25`), and discharge removes that participant's live obligations (`crates/liminal-server/src/server/participant/production/outbox.rs:363-379`). | Surviving exact current bindings affected by discharge; never the retired identity. |
 
 The effect vocabulary is closed, but a commit may carry any truthful subset:
@@ -337,8 +345,36 @@ The effect vocabulary is closed, but a commit may carry any truthful subset:
 | enrollment/attach/rebind | `BindingChanged`; also `Published` iff its `Produced` batch adds a live recipient obligation; also `EpisodeChanged` iff the owner variant, episode, facts, or debt dispatch state changes | Union exact new/current binding targets with produced-recipient and episode-change targets. First Owed enrollment with only its filtered sender has no `Published` entry. | `dispatch_impact_unions_multi_effect_targets` |
 | marker ack | `Acknowledged` on both owner variants; also `EpisodeChanged` when Owed episode cursor/facts change | Union and deduplicate; Clear never invents `EpisodeChanged`. | `dispatch_impact_unions_multi_effect_targets`; `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` |
 | normal ack | `Acknowledged`; also `EpisodeChanged` for every actual coupled cursor/fact/debt/variant change | Union acknowledging and all newly eligible exact targets. | `dispatch_impact_unions_multi_effect_targets` |
+| one or more `MarkerDrained` prefixes, then retried record admission | For every prefix, add `Published` iff its separate MarkerDrained batch has live recipients and add `EpisodeChanged` for an actual Owed closure-edge/coupled-state change. A committed retry independently adds its RecordAdmission `Published`/`EpisodeChanged`; a final refusal or backpressure adds nothing but cannot erase prefix entries. | Union targets from **every** prefix and the final commit, including multiple target sets for the same effect. Return `Changed` even when the final wire value is a refusal after a committed prefix. | `marker_drain_retry_accumulates_all_prefix_effects`; `dispatch_impact_unions_multi_effect_targets` |
+| one or more `MarkerDrained` prefixes, then retried `Left` | Accumulate every prefix exactly as above, then independently add the terminal commit's truthful `Retired`, `Published`, `EpisodeChanged`, and any other actual effects. A noncommitting final response preserves the prefixes. | Union all prefix and terminal targets without subtracting an earlier truthful prefix target. `Retired` itself never targets the retired identity; if a prior exact prefix target is stale by unlock, ordinary binding freshness rejects it after the told wake. | `marker_drain_retry_accumulates_all_prefix_effects`; `dispatch_impact_unions_multi_effect_targets` |
 | Died/Detached/Ordinary/Recovered or enclosing finalizer | Include `BindingChanged`, `EpisodeChanged`, and `Published` independently whenever that committed transition has the corresponding effect. | Union all exact surviving poststate targets; omit only effects that did not occur. | `dispatch_impact_unions_multi_effect_targets`; `dispatch_impact_covers_state_preserving_marker_and_w1b_changes` |
-| `Left`/terminal commit | `Retired`; also `Published` when the same source adds live survivor obligations; also `EpisodeChanged` when surviving coupled debt/episode state changes; `BindingChanged` only for another binding actually changed by that commit | Union surviving poststate targets. Retirement discharge never targets the retired identity. | `dispatch_impact_unions_multi_effect_targets` |
+| `Left`/terminal commit without a marker prefix | `Retired`; also `Published` when the same source adds live survivor obligations; also `EpisodeChanged` when surviving coupled debt/episode state changes; `BindingChanged` only for another binding actually changed by that commit | Union surviving poststate targets. Retirement discharge never targets the retired identity. | `dispatch_impact_unions_multi_effect_targets` |
+
+#### 2.1.1 Produced-batch sweep and prefix accumulator
+
+The producer list above is derived from bytes, not memory. The exhaustive
+`ProducedSourceKind` enum is exactly Enrolled, Attached, Detached, Died,
+MarkerDrained, RecordAdmission, and Left
+(`crates/liminal-server/src/server/participant/production/outbox_log.rs:108-118`).
+The exhaustive projection maps each committed v2 source row to at most one
+outbox row and maps MarkerDrained and RecordAdmission separately
+(`crates/liminal-server/src/server/participant/production/outbox_projection.rs:49-135`).
+A production call-site sweep for recursive semantic operations finds exactly
+two multi-source-row request paths:
+
+| request path | durable Produced sequence | terminal shape | accumulator obligation | acceptance source |
+|---|---|---|---|---|
+| record admission `DrainFirst` | `MarkerDrained` × N, N ≥ 1, followed by `RecordAdmission` only if the retry commits. `persist_marker_and_retry` installs one marker and recursively re-enters admission (`crates/liminal-server/src/server/participant/production/ops_frontier.rs:115-155`); their distinct Produced projections are at `crates/liminal-server/src/server/participant/production/outbox_projection.rs:115-131`. | Commit, or a refusal/backpressure/error after one or more durable prefixes. | Merge each prefix immediately after its source and Produced projection install; finish once with all prefix targets even if no RecordAdmission row exists. | `marker_drain_retry_accumulates_all_prefix_effects` |
+| Leave with immutable markers | `MarkerDrained` × N, N ≥ 1, followed by `Left` when the retried Leave commits. Leave persists the marker and recursively re-enters itself at `crates/liminal-server/src/server/participant/production/ops_leave.rs:75-101`. | Left commit, or any noncommitting/error exit after a durable prefix. | Merge every marker prefix, then merge the final Left effects if present; no final outcome may reset the accumulator. | `marker_drain_retry_accumulates_all_prefix_effects` |
+| all other Produced shapes | One source row and at most one Produced batch per semantic operation. Attached may carry multiple records, but `project_attached` wraps them in one batch (`crates/liminal-server/src/server/participant/production/outbox_projection.rs:203-220,222-272`). Ordinary/Recovered project no batch (`crates/liminal-server/src/server/participant/production/outbox_projection.rs:49-60`). | Existing single-row overlap rows above. | One merge; no request-level prefix sequence. | `marker_drain_retry_accumulates_all_prefix_effects` |
+
+The grep pin for this absence proof is
+`git grep -n 'self\.apply_[a-z_]*(' -- 'crates/liminal-server/src/server/participant/production/ops_*.rs'`:
+its only recursive results are record admission at
+`crates/liminal-server/src/server/participant/production/ops_frontier.rs:155`
+and Leave at
+`crates/liminal-server/src/server/participant/production/ops_leave.rs:93`. Any future third result changes the exhaustive
+producer set and requires a brief revision before build acceptance.
 
 There is no `Expired` effect and no durable expiry operation at this pin. A
 future expiry must first land its own durable operation and then revise this
@@ -352,8 +388,10 @@ commit/eligibility verdict
 that `request_conversation_id`-driven notification. The wrapper notifies the
 union only for `DispatchImpact::Changed`; a `Changed` map whose union is empty
 fires no READY. Refusals, no-ops, idempotent replays, and commits with no listed
-effect return `Unchanged`. Semantic fixtures default to `Unchanged`, never to
-an inferred effect or tell.
+effect return `Unchanged` **only when the request accumulator is empty**. A
+refusal/backpressure/error after any durable marker prefix returns the prefix's
+`Changed` map; the final noncommit cannot suppress its tells. Semantic fixtures
+default to an empty accumulator, never to an inferred effect or tell.
 
 A changed conversation may coalesce behind one inbox entry. The inbox already
 coalesces conversation ids and fires READY only on empty→nonempty
@@ -367,8 +405,9 @@ state, because selection rereads the latest coupled authority.
 |---|---|---|
 | publish creates first/current obligation | Tell exact live bindings once after flush; another connection and every pre-flush cut see nothing. | `published_obligation_tells_exact_live_dispatch_once` |
 | normal ack, bind/fate, marker ack, W1b floor/finalizer, debt-zero, or retirement changes the dispatch key | The committing owner returns a `Changed` effect map; marker and W1b rows are covered even when closure state is byte-equal. | `dispatch_impact_covers_state_preserving_marker_and_w1b_changes` |
-| one commit has publish/bind/ack/episode/retirement effects in combination | Record every true effect with its exact target set; notify the deduplicated union after unlock. No scalar cause or precedence may discard a target. | `dispatch_impact_unions_multi_effect_targets` |
-| refusal, no-op, idempotent replay, or unrelated successful semantic return | Return `Unchanged`; remove the r1 unconditional wrapper tell. | `semantic_noop_refusal_and_unchanged_commit_emit_no_dispatch_tell` |
+| one request has publish/bind/ack/episode/retirement effects in one or more committed rows | Record every true effect with its exact target set; notify the deduplicated request-level union after unlock. No scalar cause, later row, or precedence may discard a target. | `dispatch_impact_unions_multi_effect_targets` |
+| marker-drain prefix commits before retried admission/Leave completes | Accumulate each MarkerDrained `Published` and Owed `EpisodeChanged` target set; merge final commit effects if any; preserve prefixes when the final result refuses, backpressures, or errors. | `marker_drain_retry_accumulates_all_prefix_effects` |
+| refusal, no-op, idempotent replay, or unrelated successful semantic return with no committed prefix | Return `Unchanged`; remove the r1 unconditional wrapper tell. | `semantic_noop_refusal_and_unchanged_commit_emit_no_dispatch_tell` |
 | decision is `Defer` | Consume ready work without encode, budget debit, held head, self-requeue, or W2 wake. Only a later committed `Changed` may tell it. | `deferred_debt_does_not_self_requeue_or_create_debt_wakes` |
 | source inspection | No W2 interval/tick/sleep/sweep/registration path reaches `decide_obligation_debt_dispatch`; the only authority call graph is changed inbox work → existing pump → `next_publication`. | `dispatch_source_has_no_timer_sweep_or_periodic_probe` |
 | restart and new connection registration | Replay reconstructs passively; TCP/WebSocket register before socket service; only later committed bind impact tells the exact conversation, with no sweep or reverse index. | `registration_is_passive_and_committed_bind_tells_without_sweep` |
@@ -687,34 +726,39 @@ sleep-based test, log-only assertion, or mock that bypasses the production
 | 28 | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` | §1.1.1 W1b bridge | Every route follows its resulting closure: `Clear` has no episode and `Owed` has one complete episode; no bare-owner route remains. |
 | 29 | `enrollment_clear_or_owed_and_no_obligation_are_total` | §§1.1–1.1.1, 3.1 enrollment branches | Exercise initial enrollment resulting in `Clear`, `Owed` with another recipient, and `Owed` with sender-filtered no obligation; owner shape and selector result are defined in all three. |
 | 30 | `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` | §§1.1.1, 3.1 marker bridge/read | Marker ack preserves `Clear` without an episode or advances both Owed cursors; with raw outbox ack behind, live/cold/post-fate reads skip marker-covered endpoints without mutating accounting. |
-| 31 | `semantic_noop_refusal_and_unchanged_commit_emit_no_dispatch_tell` | §2.2 exclusive impacts | Refusal, no-op, idempotent replay, and successful unchanged commit fire no READY; the request-success wrapper has no unconditional notify path. |
+| 31 | `semantic_noop_refusal_and_unchanged_commit_emit_no_dispatch_tell` | §2.2 exclusive impacts | A refusal, no-op, idempotent replay, or successful unchanged commit with an empty request accumulator fires no READY; a refusal after a committed prefix is expressly outside this oracle and must tell the prefix map. |
 | 32 | `registration_is_passive_and_committed_bind_tells_without_sweep` | §2.3 register/bind ordering | TCP/WebSocket register before socket service, registration reads no conversations, and the later exact committed bind tells replay work without a scan or reverse index. |
-| 33 | `dispatch_impact_unions_multi_effect_targets` | §§2.1–2.2 effect map/union | Enrollment/attach, Owed marker/normal ack, W1b finalizer, and Left fixtures that combine effects retain every effect-specific exact target; notification is the deduplicated union with no scalar precedence or poststate reconstruction. |
+| 33 | `dispatch_impact_unions_multi_effect_targets` | §§2.1–2.2 effect map/union | Single- and multi-row requests retain every effect-specific exact target; repeated effects union all target sets, and notification uses the deduplicated request-level union with no scalar precedence or final-poststate reconstruction. |
 | 34 | `marker_covered_outbox_accounting_stays_bounded_until_real_discharge` | §§3.1, 5.2 accounting honesty | After marker ack, delivery skips endpoints at/below protocol cursor while outbox records/obligations/count/bytes remain charged across idle and restart; equal-cursor ordinary ack is `AckNoOp`, the configured count bound is enforced, and only a later strictly advancing committed ack or retirement discharges. |
+| 35 | `marker_drain_retry_accumulates_all_prefix_effects` | §2.1.1 multi-row sweep, §2.2 wake row | Record-admission and Leave fixtures commit one or multiple MarkerDrained prefixes, then respectively commit or return refusal/backpressure/error; every prefix’s Published and Owed EpisodeChanged targets survive, final commit effects merge, and the one post-unlock notification is their deduplicated union. |
 
 ### 7.1 Acceptance mechanics
 
 The tear SHALL perform all of the following:
 
-1. exact-name census: one implementation for each of the 34 names above and no
+1. exact-name census: one implementation for each of the 35 names above and no
    absent or duplicate census row;
 2. production-caller grep: both
    `apply_nonzero_participant_ack_with_obligations` and
    `apply_nonzero_participant_ack` have a non-test call in the W2 ack arm, while
    item 28 remains on `apply_participant_ack_with_obligations`;
-3. effect-map matrix: overlapping enrollment/attach, Owed marker/normal ack,
-   W1b finalizer, and Left fixtures assert every effect-specific target and the
-   deduplicated notification union; no test substitutes a scalar precedence;
-4. marker-accounting fixture: after marker ack, assert delivery suppression,
+3. Produced-source and recursion sweep: assert the seven-kind enum/projection
+   census and exactly the record-admission and Leave recursive call sites from
+   §2.1.1; any third site fails acceptance pending brief revision;
+4. effect-map matrix: overlapping enrollment/attach, Owed marker/normal ack,
+   W1b finalizer, Left, and single/multiple MarkerDrained-prefix fixtures assert
+   every subcommit's target set and the deduplicated request-level union. Both
+   record-admission and Leave retries end in commit and noncommit/error cases;
+5. marker-accounting fixture: after marker ack, assert delivery suppression,
    unchanged outbox accounting, equal-cursor `AckNoOp`, exact configured count
    failure, flat idle counters, cold equality, and discharge only by a later
    strictly advancing committed ack or retirement;
-5. absence grep plus both idle fixtures: no W2 timer/sweep/poll/register entry;
+6. absence grep plus both idle fixtures: no W2 timer/sweep/poll/register entry;
    W2 counters stay flat with keepalive disabled and enabled, while the enabled
    fixture proves total WebSocket slice/Ping counters grow;
-6. narrow W2 tests, then repository-standard formatting, check, clippy, and
+7. narrow W2 tests, then repository-standard formatting, check, clippy, and
    workspace tests; and
-7. crash matrix and both transports: every §6 cut and TCP/WebSocket final-probe
+8. crash matrix and both transports: every §6 cut and TCP/WebSocket final-probe
    race is exercised, not inferred from one transport.
 
 ## 8. Scope walls and lens questions
@@ -723,7 +767,7 @@ The tear SHALL perform all of the following:
 
 | inside W2 | expressly outside W2 |
 |---|---|
-| One synchronous debt selector at the existing participant publication seam; coupled authority/replay state; explicit post-commit publish/ack/binding/episode/retirement effect maps; legal bounded marker-covered accounting; nonzero ack routing; the 34 oracles above. | A new scheduler, worker, durable queue, transport, outbox, connection registry, reverse index, registration catch-up, or generic subscription path. Existing generic subscription delivery is a separate pump (`crates/liminal-server/src/server/connection/delivery.rs:83-181`). |
+| One synchronous debt selector at the existing participant publication seam; coupled authority/replay state; request-scoped post-commit publish/ack/binding/episode/retirement effect accumulation; legal bounded marker-covered accounting; nonzero ack routing; the 35 oracles above. | A new scheduler, worker, durable queue, transport, outbox, connection registry, reverse index, registration catch-up, or generic subscription path. Existing generic subscription delivery is a separate pump (`crates/liminal-server/src/server/connection/delivery.rs:83-181`). |
 | The no-polling law for this arm and its exact producers. | Wholesale LAW-1 polling retirement. W4 remains its own named lane and oracle floor (`docs/design/WIRING-LEDGER.md:212-219`); W2 neither claims nor blocks its unrelated replacements. |
 | Composition with W1b post-fate state and fatal routing. | Reopening W1b fate classification, schema, source order, finalizer ownership, presentation, or `ParticipantServiceFatal`. Those landed bytes remain owned by the W1b path (`crates/liminal-server/src/server/participant/production/binding_fate_completion.rs:38-188`; `crates/liminal-server/src/server/participant/dispatch.rs:99-158`). |
 | Bounded live outbox reads required for one locked decision. | W7 history-linear index compaction/reconstruction. The ledger keeps that as a separate design-first lane (`docs/design/WIRING-LEDGER.md:180-210`). |
@@ -745,18 +789,20 @@ implementation guess.
    `ClosureState`, with no episode on `Clear`, one complete episode on `Owed`,
    and defined first-enrollment outcomes for Clear, Owed-with-recipient, and
    Owed-without-obligation?
-2. Does §3.1 reconcile validated marker cursor lead identically live, cold, and
-   after fate/rebind, while leaving durable outbox ack unchanged and retaining a
-   loud invariant for every unproved non-marker cursor split?
+2. Do §§3.1 and 5.1–5.2 reconcile marker delivery identically live/cold/fate
+   while retaining bounded outbox accounting, treating equal-cursor ordinary
+   ack as `AckNoOp`, exposing the capacity/idle consequence, and keeping every
+   unproved non-marker cursor split loud?
 3. Does the concrete §3 fixture (`H'=100`, floor/cap=25, cursor=0,
    obligation=10) permit dispatch and commit through exact testimony, while
    only an endpoint above `H'` defers?
 4. Does §4's production scalar domain—exact committed endpoints and common
    pre-availability refusals—satisfy the ledger's same-fixture non-divergence
    floor without weakening sparse endpoint membership?
-5. Does every overlapping producer return one truthful nonempty effect map,
-   retain every effect-specific exact target, and notify the deduplicated union
-   without scalar precedence or poststate target reconstruction?
+5. Does §2's request accumulator merge every MarkerDrained prefix plus final
+   record-admission/Leave effect, preserve repeated target sets through final
+   refusal/backpressure/error, and does the byte sweep prove those are the only
+   recursive multi-Produced request paths?
 6. Does passive replay plus register-before-socket and committed-bind-after-
    register close every restart cut without a conversation sweep, reverse
    index, registration lookup, or pre-admission tell?
@@ -774,3 +820,4 @@ implementation guess.
 | r1 | 2026-07-21 | liminal `23acdea0c390d4238a9ad1dcdd02cd60a85ffcbd`; `WIRING-LEDGER.md` r1.9, 2026-07-20 | Initial design-first ruling for the W2 obligation-debt dispatch arm: exact existing seam and single owner; TOLD-only wake producers; debt permit/defer/invariant semantics; production disposition of both nonzero selectors with same-fixture oracle floor; idle-cost refusal; W1b crash/fate composition; 26-oracle census; scope walls and lens questions. |
 | r2 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-2 **5 MAJOR + 2 minor** array. **Major — Adjudication 2 NO, below-floor arm rejects a landed-legal endpoint:** §3 separates physical retention floor from exact testified endpoint eligibility and pins the H=100/floor=25/cursor=0/obligation=10 commit. **Major — Adjudication 1 NO, W1b has no coupled episode transition:** §§1.1–1.1.1 replace the bare frontier with a protocol move-coupled owner, widen episode binding state, and exhaustively rule Died/Detached/Ordinary/Recovered/finalizer/marker/ack/Left transitions. **Major — Adjudication 4 NO, wake vocabulary is neither exhaustive nor exclusive:** §§2.1–2.2 replace successful-request notification with operation-owned `DispatchImpact`, cover state-preserving marker/W1b changes, and require `Unchanged` for refusal/no-op/unchanged commits. **Major — Adjudication 5 NO, registration cannot exact-tell without sweep/index:** §§2.3 and 6 select passive registration plus register-before-socket and committed-bind tells; no reverse index, sweep, or recovery tell. **Major — permanent zero-slice bound false under WebSocket keepalive:** §5.1 narrows permanently to zero debt-attributable work and requires growing transport slice/Ping counters in the keepalive fixture. **Minor — Adjudication 7 NO, cause must be Retired:** §§2.1 and 5.2 close vocabulary on `Retired`; expiry requires a future durable operation and brief revision. **Minor — two census names lacked table origins:** §§4.2 and 5.1 give the sparse-gap and idle names table rows; §7 requires all 31 names to be table-derived. |
 | r3 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-3 **2 MAJOR + 1 minor** array. **Major — coupled bridge has no coherent Clear/Owed result for enrollment and marker commits:** §§1.1–1.1.1 derive every owner variant from the operation's resulting closure, keep Clear episode-free, preserve marker's input variant, and explicitly permit first Owed enrollment with no recipient obligation; §3.1 makes that real state `Defer(NoObligation)` and adds `enrollment_clear_or_owed_and_no_obligation_are_total`. **Major — Owed marker ack creates the outbox/cursor disagreement declared fatal:** §§1.1.1 and 3.1 advance the Owed protocol cursor while leaving durable outbox ack unchanged, compute `dispatch_after` from durable ack/protocol/current-offer cursors after validating marker provenance, retain fatal treatment for non-marker splits, and require live/cold/post-fate equivalence; §§6.1–6.2 resume after that reconciled cursor, with `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` and the renamed fate oracle. **Minor — scalar DispatchImpact cause cannot represent multi-effect commits:** §§2.1–2.3 replace the scalar with a nonempty `DispatchEffect -> Set<DispatchTarget>` map built under lock, enumerate overlapping enrollment/attach, marker/normal ack, W1b finalizer, and Left effects, and notify the deduplicated exact-target union with no precedence or poststate reconstruction; §§5.2 and 6.2 compose that rule through coalescing/fate, and §7 closes a 33-oracle table-derived census including `dispatch_impact_unions_multi_effect_targets`. |
+| r4 | 2026-07-21 | same liminal/ledger pin | Folds the complete round-4 **2 MAJOR** array. **Major — read-time marker reconciliation suppresses delivery but never reconciles live outbox accounting:** §3.1 keeps the sound `dispatch_after` eligibility read, states it writes and consumes nothing, removes the promised ordinary catch-up because equal-cursor ack is `AckNoOp`, and permits only real later advancing `AckAdvanced` or retirement discharge; §§5.1–5.2 choose legal bounded accounting divergence, disclose retained records/obligations/count/bytes, the `max_retained_record_rows × identity_slots` bound, earlier capacity failure, and zero active idle work, pinned by `marker_covered_outbox_accounting_stays_bounded_until_real_discharge`. **Major — lossless effect matrix omits the multi-row marker-drain/record-admission path:** §§2.1–2.2 add a request-scoped prefix accumulator, independently merge every MarkerDrained `Published` and Owed `EpisodeChanged` target set, preserve prefixes through final refusal/backpressure/error, and merge final RecordAdmission or Left effects. §2.1.1 derives the complete seven-kind Produced census and finds exactly two recursive multi-source-row request paths—record admission and Leave—while distinguishing Attached's multi-record single batch; §7 closes a 35-oracle table-derived census with `marker_drain_retry_accumulates_all_prefix_effects`. |
