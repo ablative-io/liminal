@@ -174,7 +174,7 @@ pub struct ParticipantSemanticOutcome<T> {
 impl<T> ParticipantSemanticOutcome<T> {
     /// Wraps a fixture or operation which installed no dispatch effect.
     #[must_use]
-    pub fn unchanged(result: Result<T, ParticipantSemanticError>) -> Self {
+    pub const fn unchanged(result: Result<T, ParticipantSemanticError>) -> Self {
         Self {
             result,
             impact: DispatchImpact::Unchanged,
@@ -183,7 +183,7 @@ impl<T> ParticipantSemanticOutcome<T> {
 
     /// Carries an operation result and its complete request accumulator.
     #[must_use]
-    pub fn new(result: Result<T, ParticipantSemanticError>, impact: DispatchImpact) -> Self {
+    pub const fn new(result: Result<T, ParticipantSemanticError>, impact: DispatchImpact) -> Self {
         Self { result, impact }
     }
 
