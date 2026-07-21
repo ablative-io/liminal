@@ -231,19 +231,16 @@ impl ProductionParticipantHandler {
         self.with_conversation_reconciliation(conversation_id, true, operation)
     }
 
-    /// Runs a source-only fate append while retaining the transitioned live owner.
-    ///
-    /// Died/Detached source rows are durably complete before the occurrence
-    /// router and cold replay join are installed. They therefore cannot enter
-    /// the existing projection replay pass, which rejects those v3 variants
-    /// explicitly. All other ownership and error-discard behavior is identical
-    /// to [`Self::with_conversation`].
+    /// Runs a fate-source append and reconciles its exact Unit 2 projection before
+    /// retaining the transitioned live owner. Died/Detached joined the exhaustive
+    /// v3 replay projection pass with W1b, so this boundary must use the same
+    /// post-append repair as semantic sources to keep live and cold owners equal.
     pub(super) fn with_conversation_fate_source<T>(
         &self,
         conversation_id: ConversationId,
         operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
     ) -> Result<T, ParticipantSemanticError> {
-        self.with_conversation_reconciliation(conversation_id, false, operation)
+        self.with_conversation_reconciliation(conversation_id, true, operation)
     }
 
     fn with_conversation_reconciliation<T>(

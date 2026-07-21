@@ -237,7 +237,7 @@ fn drain_connections(supervisor: &ConnectionSupervisor, drain_timeout: Duration)
     }
 }
 
-fn wait_after_force_close(supervisor: &ConnectionSupervisor) {
+pub(crate) fn wait_after_force_close(supervisor: &ConnectionSupervisor) {
     let deadline = Instant::now() + FORCE_CLOSE_SETTLE_TIMEOUT;
     while Instant::now() < deadline {
         let reaped = supervisor.reap_crashed_connections();

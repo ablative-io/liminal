@@ -8,13 +8,15 @@ use std::sync::Arc;
 use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
 use liminal_protocol::wire::{
-    AttachSecret, ClientRequest, EnrollBound, Generation, ParticipantAck, ParticipantDelivery,
-    ParticipantRecord, ServerValue,
+    AttachSecret, BindingEpoch, ClientRequest, EnrollBound, Generation, ParticipantAck,
+    ParticipantDelivery, ParticipantId, ParticipantRecord, ServerValue,
 };
 
 use super::e2e_tests::SocketFixture;
 use super::log::{
-    DecodedStoredOperation, OperationLog, OperationSchemaPhase, StoredAttachModeV3, StoredOperation,
+    DecodedStoredOperation, OperationLog, OperationSchemaPhase, StoredAttachModeV3,
+    StoredBindingEpoch, StoredDetachedCause, StoredDetachedSource, StoredDiedCause,
+    StoredOperation,
 };
 use super::outbox_log::{OutboxLog, OutboxRow, ProducedSourceKind};
 use super::tests::open_disk_store_for_tests;
@@ -23,6 +25,7 @@ pub(super) const ALL_SHAPES_CONVERSATION: u64 = 0x24_01;
 pub(super) const MARKER_INTERLEAVING_CONVERSATION: u64 = 0x24_02;
 
 type DecodedHistory = (Vec<(u64, StoredOperation)>, Vec<(u64, OutboxRow)>);
+type ClassifiedCrashCut = (Vec<(u64, StoredOperation)>, Vec<TypedFateSource>);
 
 #[derive(Clone, Copy)]
 pub(super) struct ColdMember {
@@ -41,6 +44,121 @@ impl ColdMember {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum BoundClosePath {
+    DroppedSocket,
+    ServerStop,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TypedFateSource {
+    DiedConnectionClose {
+        participant_id: ParticipantId,
+        binding_epoch: StoredBindingEpoch,
+        cause: StoredDiedCause,
+    },
+    DiedWithoutConnectionIntent {
+        participant_id: ParticipantId,
+        binding_epoch: StoredBindingEpoch,
+        cause: StoredDiedCause,
+    },
+    DetachedConnectionClose {
+        participant_id: ParticipantId,
+        binding_epoch: StoredBindingEpoch,
+        cause: StoredDetachedCause,
+    },
+    DetachedExplicitRequest {
+        participant_id: ParticipantId,
+        binding_epoch: StoredBindingEpoch,
+        cause: StoredDetachedCause,
+    },
+    Ordinary,
+    Recovered,
+}
+
+pub(super) fn expected_bound_close_fate(
+    participant_id: ParticipantId,
+    binding_epoch: BindingEpoch,
+    path: BoundClosePath,
+) -> TypedFateSource {
+    match path {
+        BoundClosePath::DroppedSocket => TypedFateSource::DiedConnectionClose {
+            participant_id,
+            binding_epoch: binding_epoch.into(),
+            cause: StoredDiedCause::ConnectionLost,
+        },
+        BoundClosePath::ServerStop => TypedFateSource::DetachedConnectionClose {
+            participant_id,
+            binding_epoch: binding_epoch.into(),
+            cause: StoredDetachedCause::ServerShutdown,
+        },
+    }
+}
+
+pub(super) fn semantic_rows_and_typed_fate_suffix(
+    mut base: Vec<(u64, StoredOperation)>,
+) -> Result<ClassifiedCrashCut, Box<dyn Error>> {
+    let final_semantic_index = base
+        .iter()
+        .rposition(|(_, operation)| is_semantic_operation(operation))
+        .ok_or("durable history contained no semantic operation")?;
+    let suffix_start = final_semantic_index
+        .checked_add(1)
+        .ok_or("semantic cut index overflowed")?;
+    let suffix = base
+        .split_off(suffix_start)
+        .into_iter()
+        .map(|(_, operation)| match operation {
+            StoredOperation::Died { row } if row.connection_intent_sequence.is_some() => {
+                Ok(TypedFateSource::DiedConnectionClose {
+                    participant_id: row.participant_id,
+                    binding_epoch: row.binding_epoch,
+                    cause: row.cause,
+                })
+            }
+            StoredOperation::Died { row } => Ok(TypedFateSource::DiedWithoutConnectionIntent {
+                participant_id: row.participant_id,
+                binding_epoch: row.binding_epoch,
+                cause: row.cause,
+            }),
+            StoredOperation::Detached { row }
+                if matches!(row.source, StoredDetachedSource::ConnectionClose { .. }) =>
+            {
+                Ok(TypedFateSource::DetachedConnectionClose {
+                    participant_id: row.participant_id,
+                    binding_epoch: row.binding_epoch,
+                    cause: row.cause,
+                })
+            }
+            StoredOperation::Detached { row } => Ok(TypedFateSource::DetachedExplicitRequest {
+                participant_id: row.participant_id,
+                binding_epoch: row.binding_epoch,
+                cause: row.cause,
+            }),
+            StoredOperation::Ordinary { .. } => Ok(TypedFateSource::Ordinary),
+            StoredOperation::Recovered { .. } => Ok(TypedFateSource::Recovered),
+            operation => {
+                Err(format!("non-fate row followed the final semantic cut: {operation:?}").into())
+            }
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    base.retain(|(_, operation)| is_semantic_operation(operation));
+    Ok((base, suffix))
+}
+
+fn is_semantic_operation(operation: &StoredOperation) -> bool {
+    matches!(
+        operation,
+        StoredOperation::Genesis { .. }
+            | StoredOperation::Enrolled { .. }
+            | StoredOperation::Attached { .. }
+            | StoredOperation::ZeroDebtAck { .. }
+            | StoredOperation::MarkerDrained { .. }
+            | StoredOperation::RecordAdmission { .. }
+            | StoredOperation::Left { .. }
+    )
+}
+
 pub(super) fn expect_enrolled(
     value: ServerValue,
     label: &str,
@@ -56,6 +174,13 @@ pub(super) fn decoded_history(
     conversation_id: u64,
 ) -> Result<DecodedHistory, Box<dyn Error>> {
     let store: Arc<dyn DurableStore> = open_disk_store_for_tests(data_dir)?;
+    decoded_history_from_store(store, conversation_id)
+}
+
+pub(super) fn decoded_history_from_store(
+    store: Arc<dyn DurableStore>,
+    conversation_id: u64,
+) -> Result<DecodedHistory, Box<dyn Error>> {
     let log = OperationLog::new(Arc::clone(&store), conversation_id);
     let mut base = Vec::new();
     let mut next = 0_u64;
