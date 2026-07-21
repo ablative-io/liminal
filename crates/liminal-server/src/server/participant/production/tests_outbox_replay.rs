@@ -7,14 +7,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use liminal::durability::bridge::block_on;
 use liminal::durability::{DurabilityError, DurableStore, StoredEntry, open_ephemeral};
 use liminal_protocol::wire::{
-    ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, ReceiptReplay,
-    ServerValue,
+    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
+    EnrollmentRequest, EnrollmentToken, ReceiptReplay, ServerValue,
 };
 
 use crate::server::connection::ReadyWaker;
 use crate::server::participant::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantSemanticHandler,
+    ParticipantOfferedProgress, ParticipantSemanticHandler,
 };
 
 use super::ProductionParticipantHandler;
@@ -272,6 +272,107 @@ fn expected_second_enrollment_payload() -> Result<Vec<u8>, Box<dyn Error>> {
         .ok_or_else(|| "healthy second enrollment omitted its outbox row".into())
 }
 
+fn durable_ack_through(
+    handler: &ProductionParticipantHandler,
+    participant_id: u64,
+) -> Result<u64, Box<dyn Error>> {
+    let cell = handler.cell(CONVERSATION)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "repaired conversation owner lock was poisoned")?;
+    let authority = owner
+        .as_ref()
+        .ok_or("repaired conversation owner was absent")?;
+    let outbox = authority
+        .outbox
+        .as_ref()
+        .ok_or("repaired conversation outbox was absent")?;
+    let cursor = outbox.durable_ack_through(participant_id);
+    drop(owner);
+    Ok(cursor)
+}
+
+fn replay_then_commit_rebind(
+    repaired: &InstalledParticipantService,
+    repaired_handler: &ProductionParticipantHandler,
+    first_bound: &EnrollBound,
+    first_incarnation: ConnectionIncarnation,
+    second_incarnation: ConnectionIncarnation,
+    exact_request: ClientRequest,
+) -> Result<(), Box<dyn Error>> {
+    // Construction returns only after cold first-touch reconciliation. Neither
+    // startup, registration, nor an exact-token replay commits an impact or tell.
+    let repaired_wakes = Arc::new(AtomicU64::new(u64::from(false)));
+    let repaired_inbox = repaired.new_publication_inbox();
+    repaired.publication_registry().register(
+        first_incarnation,
+        &repaired_inbox,
+        ReadyWaker::for_test(Arc::clone(&repaired_wakes)),
+    )?;
+    assert!(!repaired_inbox.has_pending()?);
+    assert_eq!(repaired_wakes.load(Ordering::SeqCst), u64::from(false));
+    let retry = apply_service(repaired, second_incarnation, exact_request)?;
+    let ServerValue::Bound(ReceiptReplay::Enrollment(bound)) = retry else {
+        return Err(format!("exact-token retry lost its terminal answer: {retry:?}").into());
+    };
+    assert_eq!(bound.token(), EnrollmentToken::new([0xC2; 16]));
+    assert_eq!(bound.conversation_id(), CONVERSATION);
+    assert!(!repaired_inbox.has_pending()?);
+    assert_eq!(repaired_wakes.load(Ordering::SeqCst), u64::from(false));
+
+    let reconciled_cursor = durable_ack_through(repaired_handler, first_bound.participant_id())?;
+    let rebound_incarnation = ConnectionIncarnation::new(0xC4, 3);
+    let rebound_inbox = repaired.new_publication_inbox();
+    repaired.publication_registry().register(
+        rebound_incarnation,
+        &rebound_inbox,
+        ReadyWaker::for_test(Arc::clone(&repaired_wakes)),
+    )?;
+    assert!(!rebound_inbox.has_pending()?);
+    assert_eq!(repaired_wakes.load(Ordering::SeqCst), u64::from(false));
+
+    let rebound = apply_service(
+        repaired,
+        rebound_incarnation,
+        ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id: CONVERSATION,
+            participant_id: first_bound.participant_id(),
+            capability_generation: first_bound.capability_generation(),
+            attach_secret: first_bound.attach_secret(),
+            attach_attempt_token: AttachAttemptToken::new([0xC3; 16]),
+            accept_marker_delivery_seq: None,
+        }),
+    )?;
+    if !matches!(rebound, ServerValue::AttachBound(_)) {
+        return Err(format!("committed rebind did not bind: {rebound:?}").into());
+    }
+    assert_eq!(repaired_wakes.load(Ordering::SeqCst), u64::from(true));
+    assert!(!repaired_inbox.has_pending()?);
+    let ready = rebound_inbox.take_ready()?;
+    assert_eq!(ready.conversations, vec![CONVERSATION]);
+    assert!(ready.observer_progressed.is_empty());
+
+    let repaired_obligation = repaired
+        .next_publication(rebound_incarnation, CONVERSATION, None)?
+        .ok_or("committed rebind did not select the repaired obligation")?;
+    assert_eq!(
+        repaired_obligation.participant_id,
+        first_bound.participant_id()
+    );
+    assert!(repaired_obligation.delivery_seq() > reconciled_cursor);
+    let offered = ParticipantOfferedProgress {
+        binding_epoch: repaired_obligation.binding_epoch,
+        through_seq: repaired_obligation.delivery_seq(),
+    };
+    assert!(
+        repaired
+            .next_publication(rebound_incarnation, CONVERSATION, Some(offered))?
+            .is_none(),
+        "repaired obligation was not dispatched exactly once"
+    );
+    Ok(())
+}
+
 fn exercise_repair_and_retry(
     fail_append: bool,
     fail_flush: bool,
@@ -290,7 +391,9 @@ fn exercise_repair_and_retry(
     let first_incarnation = ConnectionIncarnation::new(0xC4, 1);
     let second_incarnation = ConnectionIncarnation::new(0xC4, 2);
     let first = apply_service(&service, first_incarnation, enrollment_with(0xC1))?;
-    assert!(matches!(first, ServerValue::EnrollBound(_)));
+    let ServerValue::EnrollBound(first_bound) = first else {
+        return Err(format!("first enrollment did not bind: {first:?}").into());
+    };
 
     let wake_count = Arc::new(AtomicU64::new(0));
     let inbox = service.new_publication_inbox();
@@ -333,33 +436,21 @@ fn exercise_repair_and_retry(
     assert_eq!(repaired_payloads.len(), 2);
     assert_eq!(repaired_payloads[1], expected_second_payload);
 
-    // Construction returns only after cold first-touch reconciliation. The new
-    // registry has not published authority work yet; exact-token retry remains
-    // the Unit 1 path that returns the correlated terminal result.
-    let repaired = installed_service(repaired_handler, Arc::clone(&store))?;
-    let repaired_wakes = Arc::new(AtomicU64::new(0));
-    let repaired_inbox = repaired.new_publication_inbox();
-    repaired.publication_registry().register(
+    let repaired = installed_service(Arc::clone(&repaired_handler), Arc::clone(&store))?;
+    replay_then_commit_rebind(
+        &repaired,
+        &repaired_handler,
+        &first_bound,
         first_incarnation,
-        &repaired_inbox,
-        ReadyWaker::for_test(Arc::clone(&repaired_wakes)),
+        second_incarnation,
+        exact_request,
     )?;
-    assert!(!repaired_inbox.has_pending()?);
-    let retry = apply_service(&repaired, second_incarnation, exact_request)?;
-    let ServerValue::Bound(ReceiptReplay::Enrollment(bound)) = retry else {
-        return Err(format!("exact-token retry lost its terminal answer: {retry:?}").into());
-    };
-    assert_eq!(bound.token(), EnrollmentToken::new([0xC2; 16]));
-    assert_eq!(bound.conversation_id(), CONVERSATION);
-    assert_eq!(repaired_wakes.load(Ordering::SeqCst), 1);
-    let ready = repaired_inbox.take_ready()?;
-    assert_eq!(ready.conversations, vec![CONVERSATION]);
-    assert!(ready.observer_progressed.is_empty());
 
+    let payloads_after_rebind = raw_extension_payloads(&store)?;
     drop(repaired);
     let restored_again =
         ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
-    assert_eq!(raw_extension_payloads(&store)?, repaired_payloads);
+    assert_eq!(raw_extension_payloads(&store)?, payloads_after_rebind);
     drop(restored_again);
     Ok(())
 }
