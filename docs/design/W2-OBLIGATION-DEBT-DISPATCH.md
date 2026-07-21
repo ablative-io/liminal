@@ -1,6 +1,6 @@
 # W2 — obligation-debt dispatch arm
 
-**Revision r2 — design-first brief, 2026-07-21**
+**Revision r3 — design-first brief, 2026-07-21**
 
 This brief rules the first production arm that makes participant-delivery
 scheduling conditional on protocol-owned obligation debt. It is a docs-only
@@ -197,9 +197,26 @@ it:
 * `Clear(LiveFrontierOwner)` means protocol `ClosureState::Clear` and carries no
   episode;
 * `Owed(CoupledObligationDebtOwner)` move-couples one `LiveFrontierOwner` and one
-  `NonzeroDebtCursorEpisode`; and
+  `NonzeroDebtCursorEpisode`, even when no recipient obligation is presently
+  dispatchable; and
 * no public constructor, server-side splice, absent episode, or independently
   replayed episode is permitted.
+
+The installed variant SHALL follow the operation's **resulting**
+`ClosureState`, never its route name. A returned `Clear` always consumes any old
+episode and installs `Clear(frontier)`; a returned `Owed` always constructs or
+updates the complete coupled episode and installs `Owed(coupled)`. Initial
+enrollment is proof that a route cannot imply a variant: its closure calculation
+selects either `Clear` or `Owed`
+(`crates/liminal-protocol/src/lifecycle/enrollment_closure.rs:431-445`). It is
+also legal for first enrollment to return `Owed` with no next obligation for
+the enrolling participant. The `Enrolled` projection identifies that
+participant as sender
+(`crates/liminal-server/src/server/participant/production/outbox_projection.rs:60-72`),
+and recipient construction excludes the sender
+(`crates/liminal-server/src/server/participant/production/outbox_projection.rs:365-372`).
+`Owed` therefore means closure debt exists; it does not assert that every bound
+participant has a current outbox recipient entry.
 
 This is a necessary r2 correction, not a claim about landed bytes. At the pin,
 `LiveFrontierOwner` contains only claim frontiers, closure accounting, retained
@@ -227,20 +244,30 @@ participant and all its facts only after its retirement discharge commits.
 
 Every operation that can touch either half consumes `ObligationDebtDispatchState`
 and returns one state. Production may not take and reinstall a bare
-`LiveFrontierOwner` while the state is `Owed`. The bridge is exhaustive:
+`LiveFrontierOwner` while the state is `Owed`. Every row obeys the variant law
+above: an exact `Clear` result has no episode, while an exact `Owed` result has a
+complete episode. The bridge is exhaustive:
 
 | route | protocol-owned coupled output | fact/binding disposition | acceptance source |
 |---|---|---|---|
-| ordinary or fenced enrollment/attach/rebind | Exact frontier poststate plus an inserted/rebound `Bound(new_epoch, durable_cursor)` episode entry. Rebind proves the same permanent participant and nonregressing cursor. | Preserve that participant's facts across temporary detach; a first enrollment starts empty facts. | `temporary_fate_preserves_cursor_facts_and_rebinds_exact_epoch` |
-| Died | Exact Died frontier/closure output plus `Detached(last_dead_epoch, cursor)` in the episode. | Preserve cursor and all facts; reject an epoch or cursor mismatch before append. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
-| explicit/orderly Detached | Exact Detached frontier/closure output plus `Detached(last_epoch, cursor)` in the episode. | Same preservation and mismatch refusal as Died. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
-| Ordinary | Consume the exact Died-owned Ordinary fate, verify the detached participant/epoch, and install its resulting frontier floor, charges, closure accounting, episode floor/cap, and observer input as one value. | Binding remains Detached; facts remain keyed and unchanged except where the protocol's floor transition marks an already-covered fact. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
-| Recovered | Consume the exact recovered-epoch fate and install its resulting frontier floor, charges, closure accounting, episode floor/cap, and observer input as one value. | The dead recovered epoch becomes/remains Detached; preserve facts for a later exact rebind. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
+| ordinary or fenced enrollment/attach/rebind | Branch on the operation's resulting closure: `Clear` installs only its exact frontier; `Owed` installs that frontier plus a complete episode with `Bound(new_epoch, durable_cursor)`. Rebind proves the same permanent participant and nonregressing cursor. First `Owed` enrollment is valid even when sender filtering leaves no next obligation. | Preserve that participant's facts across temporary detach; a first enrollment starts empty facts. Never fabricate an episode on the `Clear` branch. | `enrollment_clear_or_owed_and_no_obligation_are_total`; `temporary_fate_preserves_cursor_facts_and_rebinds_exact_epoch` |
+| Died | Install the exact Died frontier/closure output. A `Clear` output has no episode; an `Owed` output carries `Detached(last_dead_epoch, cursor)` in its complete episode. | Preserve cursor and all facts on the `Owed` branch; reject an epoch or cursor mismatch before append. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
+| explicit/orderly Detached | Install the exact Detached frontier/closure output. A `Clear` output has no episode; an `Owed` output carries `Detached(last_epoch, cursor)`. | Same conditional preservation and mismatch refusal as Died. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
+| Ordinary | Consume the exact Died-owned Ordinary fate, verify the detached participant/epoch, and install its resulting frontier floor, charges, closure accounting, and closure-selected owner variant as one value. | On `Owed`, install episode floor/cap and observer input and preserve keyed facts except where the floor transition marks an already-covered fact; on `Clear`, consume the episode. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
+| Recovered | Consume the exact recovered-epoch fate and install its resulting frontier floor, charges, closure accounting, and closure-selected owner variant as one value. | On `Owed`, the dead recovered epoch remains Detached with facts preserved for exact rebind; on `Clear`, no episode survives. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
 | each enclosing Ordinary/Recovered finalizer, including pending storage/cursor-release completion | Consume the finalizer authority and return both the updated frontier and updated episode. If the protocol returns `ClosureState::Clear`, consume the episode and return `Clear`; if debt remains, return a fully updated `Owed`. | No server field copy or scalar debt patch is allowed. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
-| marker ack | Apply its cursor advance to frontier and episode together even though closure state is unchanged. | Advance the exact participant cursor and consume covered participant facts; preserve every other participant. | `marker_ack_updates_coupled_cursor_without_closure_state_delta` |
-| nonzero normal ack | Use the existing `NonzeroParticipantAckCommit`'s resulting episode and apply the same cursor/floor result to the frontier in the same barrier. | Existing obligation-aware fact record/consume semantics remain authoritative. | `nonzero_debt_ack_row_replays_obligation_aware_commit` |
+| marker ack | Preserve the input owner variant because marker selection has no closure-state input and frontier accounting preserves the existing state. `Clear(frontier)` becomes `Clear(updated_frontier)` with no episode. `Owed(coupled)` advances the matching frontier and episode participant cursor/facts and remains `Owed`. | Advance the exact protocol participant cursor and consume covered facts only on the `Owed` branch; never create an episode on `Clear`. Durable outbox ack remains unchanged and is reconciled by §3.1. | `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` |
+| nonzero normal ack | Apply the existing `NonzeroParticipantAckCommit`'s cursor/floor result to both halves in one barrier, then obey its resulting closure: consume the episode on `Clear`, otherwise install the complete resulting `Owed`. | Existing obligation-aware fact record/consume semantics remain authoritative. | `nonzero_debt_ack_row_replays_obligation_aware_commit` |
 | `Left` | Install the frontier retirement and outbox discharge, then remove the participant and its facts from the episode; clear the episode only if closure state clears. | Permanent removal only; no later rebind. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
 | any remaining frontier/observer/floor/debt transition | A total protocol method returns matching frontier, observer, floor/cap, participant, and fact state or a typed invariant. | No route may preserve one half implicitly. | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` |
+
+The marker split is mandatory. `apply_marker_ack` receives identity, binding,
+epoch, request, and marker proof—but no closure state
+(`crates/liminal-protocol/src/lifecycle/operations/marker_ack.rs:208-214`)—and
+marker frontier accounting copies the existing closure state
+(`crates/liminal-protocol/src/lifecycle/operations/live_frontier/state.rs:61-75`).
+Route-name inference would therefore manufacture an episode on a legal `Clear`
+commit.
 
 The need for this bridge is byte-grounded: W1b's landed transition updates only
 frontiers, retained charges, and closure accounting
@@ -254,8 +281,9 @@ The protocol crate SHALL also own a total
 `decide_obligation_debt_dispatch` selector with `Permit`,
 `Defer(DebtDispatchDeferral)`, and `Invariant(DebtDispatchInvariant)` results.
 Production `next_publication` provides one locked coupled state, selected
-participant/binding, durable ack, and the outbox's least next obligation. Only
-`Permit` continues to publication construction.
+participant/binding, the reconciled cursor defined by §3.1, and the outbox's
+least obligation strictly after that cursor. Only `Permit` continues to
+publication construction.
 
 ### 1.2 Ownership, lock, and ordering law
 
@@ -355,15 +383,45 @@ This ordering is pinned by
 
 ### 3.1 Total decision table
 
-| locked prestate | decision | effect |
-|---|---|---|
-| `Clear`, no next durable recipient obligation | `Defer(NoObligation)` | No work is retained or requeued; a later committed publish/bind impact must tell it. |
-| `Clear`, exact current binding and next durable obligation | `Permit` | Preserve today's least-sequence selection and offered-progress rule from `crates/liminal-server/src/server/participant/production/handler_semantic.rs:193-218`. Zero-debt ack remains the distinct item-28 path. |
-| `Owed(coupled)`, exact bound participant/epoch, and testified next obligation with `cursor < delivery_seq <= H'` | `Permit`, **including when `delivery_seq < resulting_floor`** | Schedule that exact obligation. Its later ack routes through the obligation-aware nonzero selector. Endpoint testimony and `H'`, not retained-floor membership, own legality. |
-| `Owed(coupled)`, exact testified next obligation with `delivery_seq > H'` | `Defer(BeyondCandidateHighWatermark)` | The active episode cannot authorize that endpoint. Consume ready work without a held head or self-requeue; a later committed coupled-state impact must tell it. |
-| `Owed(coupled)`, next outbox obligation is at/below that participant's durable cursor, participant/epoch differs between coupled state and current binding, testimony context differs, or closure debt differs inside the coupled owner | `Invariant(...)` | Fail the participant semantic service loudly; do not fabricate a wire refusal or silently fall back to zero debt. |
-| `Owed(coupled)` participant is Detached | `Defer(NoCurrentBinding)` | No incarnation is eligible. Exact rebind owns the later tell; registration never scans for it. |
-| poststate transitions `Owed` → `Clear` | `Clear` plus a post-commit dispatch impact | Consume the episode with the durable transition, tell exact currently bound recipients whose eligibility changed, and resume from outbox durable ack—not volatile old-binding offer state. |
+Selection reconciles the two landed cursor meanings before asking for an
+obligation. Under the conversation lock, let `protocol_cursor` be the exact
+current participant cursor from the frontier; in `Owed`, require the episode
+participant cursor to equal it. Let `offered_cursor` contribute only when its
+binding epoch is still exact. Production computes
+
+`dispatch_after = max(outbox.durable_ack_through, protocol_cursor, offered_cursor)`
+
+and calls `delivery_after(participant, dispatch_after)`. This extends today's
+raw durable-ack/offered choice at
+`crates/liminal-server/src/server/participant/production/handler_semantic.rs:206-213`.
+A delivery returned at or below `dispatch_after` is an invariant; a raw durable
+outbox ack below `protocol_cursor` is not, provided operation commit/replay has
+validated the cursor advance. No cursor is written by this read.
+
+This carve-out is exact to marker semantics. Production appends/applies
+`MarkerAckCommitted`, advances the durable member, and installs the frontier
+(`crates/liminal-server/src/server/participant/production/ops_acks.rs:332-367`),
+but outbox application advances durable ack only for `AckAdvanced` and treats
+`MarkerAckCommitted` as a deliberate no-op
+(`crates/liminal-server/src/server/participant/production/outbox.rs:199-206`).
+The later ordinary catch-up is visibly a distinct `AckAdvanced` row
+(`crates/liminal-server/src/server/participant/production/tests_marker_ack.rs:304-314`).
+Commit/replay validation therefore requires ordinary ack cursor advances to
+have their matching `AckAdvanced`; only validated marker provenance permits the
+protocol cursor to lead raw outbox ack. Live and cold selection use the same
+`dispatch_after`, so fate/rebind cannot resurrect a marker-covered obligation.
+
+| locked prestate | decision | effect | acceptance source |
+|---|---|---|---|
+| `Clear`, no recipient obligation strictly after `dispatch_after` | `Defer(NoObligation)` | No work is retained or requeued; a later committed publish/bind/ack impact may tell it. | — |
+| `Clear`, exact current binding and next obligation strictly after `dispatch_after` | `Permit` | Preserve today's least-sequence selection and current-epoch offered-progress rule. Zero-debt ack remains the distinct item-28 path. | — |
+| `Owed(coupled)`, exact bound participant/epoch, but no obligation strictly after `dispatch_after` | `Defer(NoObligation)` | This is legal for first `Owed` enrollment whose sender is filtered and after marker reconciliation consumes the only stale raw outbox candidate. Do not invent an obligation or self-requeue; only a later exact changed impact may tell. | `enrollment_clear_or_owed_and_no_obligation_are_total`; `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` |
+| `Owed(coupled)`, exact bound participant/epoch, and testified next obligation with `cursor < delivery_seq <= H'` | `Permit`, **including when `delivery_seq < resulting_floor`** | Schedule that exact obligation. Its later ack routes through the obligation-aware nonzero selector. Endpoint testimony and `H'`, not retained-floor membership, own legality. | `nonzero_debt_permits_testified_below_floor_and_defers_above_high_watermark` |
+| `Owed(coupled)`, exact testified next obligation with `delivery_seq > H'` | `Defer(BeyondCandidateHighWatermark)` | The active episode cannot authorize that endpoint. Consume ready work without a held head or self-requeue; a later committed coupled-state impact must tell it. | `nonzero_debt_permits_testified_below_floor_and_defers_above_high_watermark` |
+| validated marker commit leaves raw outbox durable ack below the matching protocol cursor | Reconcile through `dispatch_after`; then apply the applicable row above | Do not redispatch an obligation at/below the marker-advanced cursor and do not mutate outbox ack. A later ordinary ack owns its separate `AckAdvanced`. | `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` |
+| `delivery_after` returns at/below `dispatch_after`; frontier/episode participant cursors differ in `Owed`; a non-marker cursor advance lacks its required `AckAdvanced`; participant/epoch or testimony context differs; or closure debt differs inside the coupled owner | `Invariant(...)` | Fail the participant semantic service loudly; do not fabricate a wire refusal or silently fall back to zero debt. | `debt_dispatch_invariant_never_falls_back_or_fabricates_wire_refusal` |
+| `Owed(coupled)` participant is Detached | `Defer(NoCurrentBinding)` | No incarnation is eligible. Exact rebind owns the later tell; registration never scans for it. | — |
+| poststate transitions `Owed` → `Clear` | `Clear` plus a post-commit dispatch impact | Consume the episode with the durable transition, tell exact currently bound recipients whose eligibility changed, and resume after the same reconciled cursor—not volatile old-binding offer state. | `debt_zero_transition_releases_deferred_obligation` |
 
 The floor is a **retention/physical-compaction fact, not ack endpoint
 eligibility**. `retains` checks only `resulting_floor <= delivery_seq <= H'`
@@ -397,7 +455,7 @@ exact held head, and oversize remains a typed pump fault
 | boundary | type | acceptance source |
 |---|---|---|
 | testified endpoint above `H'` defers; testified endpoint below physical floor but above cursor permits | `DebtDispatchDeferral` is internal scheduling, never a client error; floor is not an eligibility predicate | `nonzero_debt_permits_testified_below_floor_and_defers_above_high_watermark` |
-| durable closure/episode/outbox disagreement | `DebtDispatchInvariant` → `ParticipantSemanticError::Internal`, or the already-latched service fatal | `debt_dispatch_invariant_never_falls_back_or_fabricates_wire_refusal` |
+| closure/episode disagreement, invalid outbox selection, or an unproved non-marker cursor lead | `DebtDispatchInvariant` → `ParticipantSemanticError::Internal`, or the already-latched service fatal; validated marker lag handled by §3.1 is expressly not an invariant | `debt_dispatch_invariant_never_falls_back_or_fabricates_wire_refusal` |
 | sink lacks current room | existing held-head result; not debt and not teardown | `debt_refusal_and_pressure_holdback_remain_distinct` |
 | zero transition | one told wake and ordinary budgeted continuation | `debt_zero_transition_releases_deferred_obligation` |
 
@@ -481,7 +539,7 @@ per-W2-tick state, timer, reverse index, or idle allocation exists.
 |---|---|
 | commit-path duplicate decision | Eligible nonzero commits and common pre-availability refusals run both public selectors on cloned immutable input. This is intentional bounded CPU for ledger-mandated non-divergence; it performs no second append and cannot choose the scalar result. |
 | coalescing | Multiple debt changes may collapse to one conversation wake. This sacrifices cause-by-cause observability, not correctness, because the decision rereads one locked durable poststate. |
-| duplicates | Crash or reattach may offer the same unacked obligation again. Current durable ack, not socket offer, is authority; Unit 2 already records offered progress as volatile per binding (`crates/liminal-server/src/server/participant/publication.rs:19-34`). |
+| duplicates | Crash or reattach may offer the same unacked obligation again. Across fate/restart, §3.1's reconciled durable/protocol cursor—not an old socket offer—is authority; Unit 2 already records offered progress as volatile per binding (`crates/liminal-server/src/server/participant/publication.rs:19-34`). A current-epoch offer still contributes to live `dispatch_after`. |
 | no wall-clock expiry | The pin has retirement discharge but no obligation TTL. The closed cause is `Retired` only. A future expiry requires its own durable operation, an explicit revision adding an `Expired` cause, and the same TOLD interface; W2 refuses anticipatory vocabulary and periodic scans. |
 | no W2 periodic anything | Any implementation adding a **W2 debt** timer, sweep, interval, unconditional scheduler continuation, registration catch-up, or deferred self-requeue is a **design refusal** and must be escalated to the board. Existing WebSocket keepalive timers remain transport-only; they may enter an empty-inbox pump slice but cannot call the debt selector. |
 
@@ -515,8 +573,8 @@ post-registration bind impact makes a current incarnation eligible (§2.3).
 | cut | restart obligation | acceptance source |
 |---|---|---|
 | before a debt/outbox/ack/fate row flush | Restore the prior state; no tell or delivery attributable only to the uncommitted candidate. | `crash_before_debt_flush_restores_prior_dispatch_state` |
-| after durable change and install, before `DispatchImpact::Changed` is notified | Cold replay reconstructs the exact coupled state but does not sweep or tell. W1b repairs dead bindings; the next connection registers, then its committed rebind impact selects the least durable unacked obligation. | `crash_after_debt_flush_before_tell_rebind_replays_ready_work` |
-| after tell, before enqueue | Volatile ready work may vanish with the old connection. Restart remains passive; the later registered connection's committed rebind selects the same least unacked obligation without skip. | `crash_after_tell_before_enqueue_rebind_replays_same_obligation` |
+| after durable change and install, before `DispatchImpact::Changed` is notified | Cold replay reconstructs the exact coupled state but does not sweep or tell. W1b repairs dead bindings; the next connection registers, then its committed rebind impact selects the least obligation strictly after §3.1's reconciled cursor. | `crash_after_debt_flush_before_tell_rebind_replays_ready_work` |
+| after tell, before enqueue | Volatile ready work may vanish with the old connection. Restart remains passive; the later registered connection's committed rebind selects the same least obligation after the reconciled cursor without skip or marker resurrection. | `crash_after_tell_before_enqueue_rebind_replays_same_obligation` |
 | after enqueue, before ack commit | Offer testimony does not discharge debt. Restart/reattach may duplicate the same obligation, and the obligation-aware ack still accepts the durable endpoint. | `crash_after_enqueue_before_ack_reoffers_and_accepts_endpoint` |
 | after nonzero ack row but before outbox/coupled-owner state is fully durable | Ordered barrier/reconciliation either completes the exact coupled commit or fails startup loudly; it never publishes one half. | `crash_between_nonzero_ack_barriers_reconciles_one_coupled_commit` |
 
@@ -530,8 +588,12 @@ discarded on fresh validation; an unacked durable obligation survives for a
 later current binding unless permanent Left discharged it. Current held publication
 already checks binding before offer
 (`crates/liminal-server/src/server/connection/participant_delivery.rs:349-359`),
-and current reattach selection restarts from durable ack when binding epoch
-changes (`crates/liminal-server/src/server/participant/production/handler_semantic.rs:193-218`).
+and current reattach selection falls back to durable outbox ack when binding
+epoch changes
+(`crates/liminal-server/src/server/participant/production/handler_semantic.rs:193-218`).
+W2 replaces that raw fallback with §3.1's `dispatch_after`, so a validated marker
+cursor survives fate/rebind even though the outbox's ack scalar intentionally
+lags.
 
 If W1b latches `ParticipantServiceFatal::ConnectionFateIntentIncomplete`, the
 arm MUST produce no publication, wake-induced mutation, or scalar audit until
@@ -542,7 +604,7 @@ catches it nor translates it to a participant wire response.
 
 | fate boundary | acceptance source |
 |---|---|
-| stale held/in-flight head is rejected, durable unacked work follows the post-fate binding/retirement result | `connection_fate_drops_stale_head_and_replays_from_durable_ack` |
+| stale held/in-flight head is rejected; the least obligation after the reconciled durable/protocol cursor follows the post-fate binding/retirement result without marker resurrection | `connection_fate_drops_stale_head_and_replays_after_reconciled_cursor` |
 | Died/Detached plus Ordinary/Recovered replay completes before service publication; no replay tell fires, and the later committed bind cannot double-present a delivery | `w1b_fate_replay_precedes_bind_triggered_dispatch` |
 | latched participant fatal blocks dispatch and is never downgraded | `participant_service_fatal_blocks_obligation_dispatch` |
 
@@ -575,24 +637,25 @@ sleep-based test, log-only assertion, or mock that bypasses the production
 | 17 | `nonzero_debt_ack_row_replays_obligation_aware_commit` | §4.1 durable decision | The distinct nonzero tag persists canonical event/scalar audit, replay reconstructs obligations and the episode at its row boundary, and exactly one coupled commit results. |
 | 18 | `obligation_debt_dispatch_idle_has_zero_debt_attributable_work` | §5.1 idle table | With empty W2 state, W2 wake/selector/authority/outbox/allocation counters stay flat; a configured WebSocket fixture simultaneously proves transport slice/Ping counters grow. |
 | 19 | `crash_before_debt_flush_restores_prior_dispatch_state` | §6.1 cut 1 | Cut before flush restores the exact prior closure/episode/outbox state and emits no candidate-derived work. |
-| 20 | `crash_after_debt_flush_before_tell_rebind_replays_ready_work` | §6.1 cut 2 | Cut after durable install but before tell; cold replay is passive, then post-registration committed rebind selects ready durable work without a sweep. |
-| 21 | `crash_after_tell_before_enqueue_rebind_replays_same_obligation` | §6.1 cut 3 | Lose the volatile tell and old connection; passive restart plus committed rebind selects the same least durable unacked obligation without skip. |
+| 20 | `crash_after_debt_flush_before_tell_rebind_replays_ready_work` | §6.1 cut 2 | Cut after durable install but before tell; cold replay is passive, then post-registration committed rebind selects the least obligation after the reconciled cursor without a sweep. |
+| 21 | `crash_after_tell_before_enqueue_rebind_replays_same_obligation` | §6.1 cut 3 | Lose the volatile tell and old connection; passive restart plus committed rebind selects the same least obligation after the reconciled cursor without skip or marker resurrection. |
 | 22 | `crash_after_enqueue_before_ack_reoffers_and_accepts_endpoint` | §6.1 cut 4 | Lose the connection after enqueue; restart/reattach reoffers the same obligation and the obligation-aware nonzero ack commits it. |
 | 23 | `crash_between_nonzero_ack_barriers_reconciles_one_coupled_commit` | §6.1 cut 5 | Every barrier cut yields either old state, exactly one coupled ack/episode/outbox commit, or loud startup failure—never mixed published authority. |
-| 24 | `connection_fate_drops_stale_head_and_replays_from_durable_ack` | §6.2 fate | W1b fate invalidates the old held/in-flight head; the surviving post-fate binding resumes from durable ack, or retirement discharges it. |
+| 24 | `connection_fate_drops_stale_head_and_replays_after_reconciled_cursor` | §6.2 fate | W1b fate invalidates the old held/in-flight head; the surviving post-fate binding resumes after the reconciled durable/protocol cursor, or retirement discharges it. |
 | 25 | `w1b_fate_replay_precedes_bind_triggered_dispatch` | §6.2 fate/restart | Died/Detached and selected Ordinary/Recovered rows/finalizers finish before service publication; replay emits no tell, and later committed bind cannot present a pre-fate head. |
 | 26 | `participant_service_fatal_blocks_obligation_dispatch` | §6.2 fatal | A latched `ParticipantServiceFatal` prevents selection, enqueue, wake-induced mutation, and scalar audit and is never converted to a wire refusal. |
 | 27 | `temporary_fate_preserves_cursor_facts_and_rebinds_exact_epoch` | §1.1.1 attach/rebind bridge | Temporary detach/death preserves the participant cursor and fact map; exact nonregressing rebind changes only the binding tag/epoch and restores eligibility. |
-| 28 | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` | §1.1.1 W1b bridge | Died, Detached, Ordinary, Recovered, and every enclosing finalizer consume and return one coupled frontier/episode state; no bare-owner route remains. |
-| 29 | `marker_ack_updates_coupled_cursor_without_closure_state_delta` | §1.1.1 marker bridge | Marker ack advances matching frontier/episode cursor and facts and emits a permission impact even though `ClosureState` is unchanged. |
-| 30 | `semantic_noop_refusal_and_unchanged_commit_emit_no_dispatch_tell` | §2.2 exclusive impacts | Refusal, no-op, idempotent replay, and successful unchanged commit fire no READY; the request-success wrapper has no unconditional notify path. |
-| 31 | `registration_is_passive_and_committed_bind_tells_without_sweep` | §2.3 register/bind ordering | TCP/WebSocket register before socket service, registration reads no conversations, and the later exact committed bind tells replay work without a scan or reverse index. |
+| 28 | `coupled_debt_owner_covers_every_w1b_fate_and_finalizer_route` | §1.1.1 W1b bridge | Every route follows its resulting closure: `Clear` has no episode and `Owed` has one complete episode; no bare-owner route remains. |
+| 29 | `enrollment_clear_or_owed_and_no_obligation_are_total` | §§1.1–1.1.1, 3.1 enrollment branches | Exercise initial enrollment resulting in `Clear`, `Owed` with another recipient, and `Owed` with sender-filtered no obligation; owner shape and selector result are defined in all three. |
+| 30 | `marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor` | §§1.1.1, 3.1 marker bridge/read | Marker ack preserves `Clear` without an episode or advances both Owed cursors; with raw outbox ack behind, live and post-fate reads skip marker-covered endpoints and later ordinary catch-up alone appends `AckAdvanced`. |
+| 31 | `semantic_noop_refusal_and_unchanged_commit_emit_no_dispatch_tell` | §2.2 exclusive impacts | Refusal, no-op, idempotent replay, and successful unchanged commit fire no READY; the request-success wrapper has no unconditional notify path. |
+| 32 | `registration_is_passive_and_committed_bind_tells_without_sweep` | §2.3 register/bind ordering | TCP/WebSocket register before socket service, registration reads no conversations, and the later exact committed bind tells replay work without a scan or reverse index. |
 
 ### 7.1 Acceptance mechanics
 
 The tear SHALL perform all of the following:
 
-1. exact-name census: one implementation for each of the 31 names above and no
+1. exact-name census: one implementation for each of the 32 names above and no
    absent or duplicate census row;
 2. production-caller grep: both
    `apply_nonzero_participant_ack_with_obligations` and
@@ -612,7 +675,7 @@ The tear SHALL perform all of the following:
 
 | inside W2 | expressly outside W2 |
 |---|---|
-| One synchronous debt selector at the existing participant publication seam; coupled authority/replay state; explicit post-commit publish/ack/binding/episode/retirement impacts; nonzero ack routing; the 31 oracles above. | A new scheduler, worker, durable queue, transport, outbox, connection registry, reverse index, registration catch-up, or generic subscription path. Existing generic subscription delivery is a separate pump (`crates/liminal-server/src/server/connection/delivery.rs:83-181`). |
+| One synchronous debt selector at the existing participant publication seam; coupled authority/replay state; explicit post-commit publish/ack/binding/episode/retirement impacts; nonzero ack routing; the 32 oracles above. | A new scheduler, worker, durable queue, transport, outbox, connection registry, reverse index, registration catch-up, or generic subscription path. Existing generic subscription delivery is a separate pump (`crates/liminal-server/src/server/connection/delivery.rs:83-181`). |
 | The no-polling law for this arm and its exact producers. | Wholesale LAW-1 polling retirement. W4 remains its own named lane and oracle floor (`docs/design/WIRING-LEDGER.md:212-219`); W2 neither claims nor blocks its unrelated replacements. |
 | Composition with W1b post-fate state and fatal routing. | Reopening W1b fate classification, schema, source order, finalizer ownership, presentation, or `ParticipantServiceFatal`. Those landed bytes remain owned by the W1b path (`crates/liminal-server/src/server/participant/production/binding_fate_completion.rs:38-188`; `crates/liminal-server/src/server/participant/dispatch.rs:99-158`). |
 | Bounded live outbox reads required for one locked decision. | W7 history-linear index compaction/reconstruction. The ledger keeps that as a separate design-first lane (`docs/design/WIRING-LEDGER.md:180-210`). |
