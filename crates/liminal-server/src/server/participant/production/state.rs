@@ -24,6 +24,7 @@ use liminal_protocol::wire::{
 };
 
 use super::facts::{Digest, FactsError};
+use super::fate_occurrence::{FateOccurrenceConflict, FateOccurrenceRouter};
 use super::log::{OperationLogError, StoredOperation, StoredSpecificFateIntent};
 use super::observer_progress::{
     ObserverProgressConformanceError, ObserverProgressSourceMetadata,
@@ -170,6 +171,9 @@ pub(super) struct ConversationAuthority {
     pub(super) slots: BTreeMap<ParticipantId, Slot>,
     /// Durable Died intents awaiting their exact Ordinary/Recovered consumer.
     pub(super) pending_specific_fates: BTreeMap<ParticipantId, PendingSpecificFate>,
+    /// Four-class occurrence ownership rebuilt from durable rows before any
+    /// observer mutation. This retains active keys, never a copy of history.
+    pub(super) fate_occurrences: FateOccurrenceRouter,
     /// Permanent retired identity tombstones keyed by participant id.
     pub(super) retired: BTreeMap<ParticipantId, RetiredIdentity<Digest, Digest, Digest>>,
     /// Permanent enrollment-token index.
@@ -211,6 +215,9 @@ pub(super) enum StateError {
     /// Observer-progress source or durable-prefix conformance failed.
     #[error(transparent)]
     ObserverProgressConformance(#[from] ObserverProgressConformanceError),
+    /// Four-class binding-fate occurrence routing refused conflicting history.
+    #[error(transparent)]
+    FateOccurrenceConflict(#[from] FateOccurrenceConflict),
     /// The protocol shell refused an operation the log claims committed.
     #[error("conversation shell refused a committed operation: {reason:?}")]
     ShellRefused {
@@ -283,6 +290,7 @@ impl ConversationAuthority {
             last_marker_projection: None,
             slots: BTreeMap::new(),
             pending_specific_fates: BTreeMap::new(),
+            fate_occurrences: FateOccurrenceRouter::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),
             next_order: 0,

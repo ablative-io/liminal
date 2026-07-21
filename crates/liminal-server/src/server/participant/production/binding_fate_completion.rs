@@ -176,6 +176,7 @@ impl ConversationAuthority {
             row: row.clone(),
             event,
         };
+        self.route_fate_occurrence(&make_operation(Vec::new()), self.next_log_sequence)?;
         let (shell, _) = commit_through_barrier(
             barrier,
             CommitMode::Live(appender),
@@ -220,6 +221,7 @@ impl ConversationAuthority {
             row: row.clone(),
             event,
         };
+        self.route_fate_occurrence(&make_operation(Vec::new()), self.next_log_sequence)?;
         let (shell, _) = commit_through_barrier(
             barrier,
             CommitMode::Live(appender),

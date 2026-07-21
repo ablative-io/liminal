@@ -223,6 +223,7 @@ fn complete_target(
         admitted.stored_disposition,
         specific_fate_intent,
     );
+    authority.route_fate_occurrence(&completed.operation, source_sequence)?;
     appender.append(&completed.operation, authority.next_log_sequence)?;
     authority.install_frontier(admitted.owner);
     authority.next_order = next_order_after;

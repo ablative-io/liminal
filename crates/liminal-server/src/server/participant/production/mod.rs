@@ -20,6 +20,7 @@ mod connection_fate;
 mod connection_fate_replay;
 mod connection_fate_rows;
 mod facts;
+mod fate_occurrence;
 mod fenced_attach_codec;
 mod fenced_attach_terminal;
 mod frontier;
@@ -138,6 +139,8 @@ mod tests_w1b_fate_completion;
 mod tests_w1b_fenced_codec;
 #[cfg(test)]
 mod tests_w1b_marker_source;
+#[cfg(test)]
+mod tests_w1b_occurrence;
 #[cfg(test)]
 mod tests_w1b_oracle26;
 #[cfg(test)]
