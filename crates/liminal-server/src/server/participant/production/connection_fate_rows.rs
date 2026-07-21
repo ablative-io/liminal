@@ -2,7 +2,7 @@
 
 use liminal_protocol::lifecycle::{
     ActiveBinding, BindingState, BindingTerminalDisposition, CommittedDiedTerminal,
-    DiedBindingTransition,
+    DetachedBindingTransition, DiedBindingTransition, ObserverProgressProjection,
 };
 
 use crate::server::participant::ConnectionFateClass;
@@ -17,6 +17,7 @@ pub(super) struct CompletedSourceOperation {
     pub(super) operation: StoredOperation,
     pub(super) binding_state: BindingState,
     pub(super) clear_fate_token: bool,
+    pub(super) observer_projection: Option<ObserverProgressProjection>,
     pub(super) committed_died_terminal: Option<CommittedDiedTerminal>,
 }
 
@@ -50,7 +51,7 @@ pub(super) fn source_operation(
                 open_sequence,
                 disposition_order(disposition),
                 stored_disposition,
-                transition.binding_state(),
+                transition,
             )
         }
         ConnectionFateSource::Open {
@@ -65,7 +66,7 @@ pub(super) fn source_operation(
                 open_sequence,
                 disposition_order(disposition),
                 stored_disposition,
-                transition.binding_state(),
+                transition,
             )
         }
         ConnectionFateSource::Open {
@@ -132,8 +133,9 @@ fn detached_source_operation(
     connection_intent_sequence: u64,
     terminal_order: u64,
     disposition: StoredTerminalDisposition,
-    binding_state: BindingState,
+    transition: DetachedBindingTransition,
 ) -> CompletedSourceOperation {
+    let observer_projection = transition.observer_progress_projection();
     CompletedSourceOperation {
         operation: StoredOperation::Detached {
             row: StoredDetached {
@@ -147,8 +149,9 @@ fn detached_source_operation(
                 },
             },
         },
-        binding_state,
+        binding_state: transition.binding_state(),
         clear_fate_token: true,
+        observer_projection,
         committed_died_terminal: None,
     }
 }
@@ -157,6 +160,7 @@ fn died_source_operation(
     input: DiedSourceRow,
     transition: DiedBindingTransition,
 ) -> CompletedSourceOperation {
+    let observer_projection = transition.observer_progress_projection();
     let committed_died_terminal = match transition {
         DiedBindingTransition::Committed(terminal) => Some(terminal),
         DiedBindingTransition::Pending(_) => None,
@@ -175,6 +179,7 @@ fn died_source_operation(
         },
         binding_state: transition.binding_state(),
         clear_fate_token: false,
+        observer_projection,
         committed_died_terminal,
     }
 }

@@ -153,6 +153,8 @@ mod tests_w1b_pending_finalizer;
 #[cfg(test)]
 mod tests_w1b_projection;
 #[cfg(test)]
+mod tests_w1b_source_flush;
+#[cfg(test)]
 mod tests_w1b_substrate;
 #[cfg(test)]
 mod tests_w3_restore;

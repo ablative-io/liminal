@@ -47,6 +47,7 @@ pub(super) enum ObserverProgressConformanceError {
 enum BaseSourceKind {
     Attached,
     Detached,
+    Died,
     ParticipantAck,
     Left,
     Recovered,
@@ -81,6 +82,11 @@ enum ObserverProgressOccurrence {
         terminal_delivery_seq: DeliverySeq,
     },
     DetachedTerminal {
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        terminal_delivery_seq: DeliverySeq,
+    },
+    DiedTerminal {
         conversation_id: ConversationId,
         participant_id: ParticipantId,
         terminal_delivery_seq: DeliverySeq,
@@ -121,6 +127,9 @@ impl ObserverProgressOccurrence {
             | Self::DetachedTerminal {
                 conversation_id, ..
             }
+            | Self::DiedTerminal {
+                conversation_id, ..
+            }
             | Self::ParticipantAck {
                 conversation_id, ..
             }
@@ -140,6 +149,7 @@ impl ObserverProgressOccurrence {
         match self {
             Self::AttachedTerminal { participant_id, .. }
             | Self::DetachedTerminal { participant_id, .. }
+            | Self::DiedTerminal { participant_id, .. }
             | Self::ParticipantAck { participant_id, .. }
             | Self::MarkerAck { participant_id, .. }
             | Self::Leave { participant_id, .. }
@@ -154,6 +164,10 @@ impl ObserverProgressOccurrence {
                 ..
             }
             | Self::DetachedTerminal {
+                terminal_delivery_seq,
+                ..
+            }
+            | Self::DiedTerminal {
                 terminal_delivery_seq,
                 ..
             } => terminal_delivery_seq,
@@ -184,6 +198,7 @@ enum ObserverProgressLineage {
 pub(super) enum ObserverProgressProducer {
     Attach,
     Detach,
+    Died,
     ParticipantAck,
     MarkerAck,
     LiveLeaveCommit,
@@ -241,6 +256,27 @@ impl ObserverProgressSourceMetadata {
             },
             lineage: ObserverProgressLineage::ParticipantTerminal(participant_id),
             producer: ObserverProgressProducer::Detach,
+        }
+    }
+
+    pub(super) const fn died(
+        source_sequence: u64,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        terminal_delivery_seq: DeliverySeq,
+    ) -> Self {
+        Self {
+            source: ObserverProgressSourceIdentity::Base {
+                sequence: source_sequence,
+                kind: BaseSourceKind::Died,
+            },
+            occurrence: ObserverProgressOccurrence::DiedTerminal {
+                conversation_id,
+                participant_id,
+                terminal_delivery_seq,
+            },
+            lineage: ObserverProgressLineage::ParticipantTerminal(participant_id),
+            producer: ObserverProgressProducer::Died,
         }
     }
 
@@ -536,6 +572,15 @@ const fn validate_metadata(
                 ObserverProgressOccurrence::DetachedTerminal { .. },
                 ObserverProgressLineage::ParticipantTerminal(lineage_participant),
                 ObserverProgressProducer::Detach,
+            )
+            | (
+                ObserverProgressSourceIdentity::Base {
+                    kind: BaseSourceKind::Died,
+                    ..
+                },
+                ObserverProgressOccurrence::DiedTerminal { .. },
+                ObserverProgressLineage::ParticipantTerminal(lineage_participant),
+                ObserverProgressProducer::Died,
             )
             | (
                 ObserverProgressSourceIdentity::Base {
