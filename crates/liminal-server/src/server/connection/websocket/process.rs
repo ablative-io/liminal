@@ -265,6 +265,10 @@ impl WebSocketConnectionProcess {
         if let Err(error) = self.arm_readiness(pid, ctx, interest) {
             return self.fail_slice(pid, &error);
         }
+        self.finish_slice_after_arm(pid, ctx)
+    }
+
+    fn finish_slice_after_arm(&mut self, pid: u64, ctx: &NativeContext<'_>) -> NativeOutcome {
         #[cfg(test)]
         let barrier_staged = self.runtime.run_pre_wait_barrier();
         match self.final_probe(pid, ctx) {
