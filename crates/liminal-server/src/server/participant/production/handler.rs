@@ -343,6 +343,14 @@ impl ProductionParticipantHandler {
             RestoreError::Extension(error) => outbox_log_error(&error),
             RestoreError::Semantic(error) => state_error(&error),
         })?;
+        let appender = LogAppender {
+            log,
+            registry: &self.registry,
+            conversation_id,
+        };
+        replayed
+            .repair_pending_specific_fates(&appender)
+            .map_err(|error| state_error(&error))?;
         let observer_witnesses = replayed.take_observer_progress_witnesses();
         if !replayed.tokens.is_empty() {
             self.reconcile_observer_progress(

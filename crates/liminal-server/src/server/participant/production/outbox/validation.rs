@@ -82,7 +82,13 @@ fn body_and_sender_match(kind: ProducedSourceKind, records: &[ProjectedRecord]) 
         (ProducedSourceKind::Detached, [record]) => match record.body() {
             ParticipantRecord::Detached {
                 affected_participant_id,
-                cause: DetachedCause::CleanDeregister,
+                ..
+            } => record.sender() == Some(*affected_participant_id),
+            _ => false,
+        },
+        (ProducedSourceKind::Died, [record]) => match record.body() {
+            ParticipantRecord::Died {
+                affected_participant_id,
                 ..
             } => record.sender() == Some(*affected_participant_id),
             _ => false,

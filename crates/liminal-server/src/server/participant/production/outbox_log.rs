@@ -111,6 +111,7 @@ pub(super) enum ProducedSourceKind {
     Enrolled,
     Attached,
     Detached,
+    Died,
     MarkerDrained,
     RecordAdmission,
     Left,

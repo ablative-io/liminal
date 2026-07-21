@@ -335,7 +335,10 @@ impl ConversationAuthority {
                 self.replay_attached(request, &allocation, &mode, &event, sequence, store)
                     .map(|()| None)
             }
-            StoredOperation::Detached { row } => match (row.disposition, row.source) {
+            StoredOperation::Detached { row } => match (row.disposition, row.source.clone()) {
+                (_, StoredDetachedSource::ConnectionClose { .. }) => self
+                    .replay_connection_detached(&row, sequence)
+                    .map(|()| None),
                 (
                     StoredTerminalDisposition::Committed { terminal_seq },
                     StoredDetachedSource::ExplicitRequestCommitted {
@@ -364,10 +367,10 @@ impl ConversationAuthority {
                 }
                 _ => Err(OperationLogError::V3FateReplayUnavailable { sequence }.into()),
             },
-            StoredOperation::Died { .. }
-            | StoredOperation::Ordinary { .. }
-            | StoredOperation::Recovered { .. } => {
-                Err(OperationLogError::V3FateReplayUnavailable { sequence }.into())
+            StoredOperation::Died { row } => self.replay_died_source(&row, sequence).map(|()| None),
+            operation @ (StoredOperation::Ordinary { .. } | StoredOperation::Recovered { .. }) => {
+                self.replay_specific_fate(&operation, sequence)
+                    .map(|()| None)
             }
             StoredOperation::ZeroDebtAck {
                 request,

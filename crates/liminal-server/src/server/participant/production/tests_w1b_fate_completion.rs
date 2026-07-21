@@ -181,5 +181,17 @@ fn assert_ordinary_completion(
         u128::from(row.resulting_floor)
     );
     drop(owner);
+
+    let cold =
+        ProductionParticipantHandler::new(Arc::clone(&handler.store), test_participant_config())?;
+    let replayed = cold.replay_and_repair(expected.conversation_id, &log)?;
+    let replayed_frontier = replayed
+        .frontier
+        .as_ref()
+        .ok_or("cold replay omitted the measured frontier owner")?;
+    assert_eq!(
+        replayed_frontier.frontiers().retained_floor(),
+        u128::from(row.resulting_floor)
+    );
     Ok(())
 }
