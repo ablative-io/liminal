@@ -54,7 +54,7 @@ pub use dispatch::{
     ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
     ParticipantDispatchError, ParticipantSemanticError, ParticipantSemanticHandler,
-    ParticipantServiceFatal, dispatch_generic_frame,
+    ParticipantSemanticOutcome, ParticipantServiceFatal, dispatch_generic_frame,
 };
 pub use production::marker_source::{
     MarkerSourceRefusalReason, MarkerSourceRefused, ValidatedFencedMarkerInputs,

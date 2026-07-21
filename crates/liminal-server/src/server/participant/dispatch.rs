@@ -15,6 +15,7 @@ use liminal_protocol::wire::{
     ObserverRecoveryHandshake, ParticipantId, ServerValue, ValidatedFrameLimit,
 };
 
+use super::dispatch_impact::DispatchImpact;
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
     normalize_configured_frame_limit,
@@ -156,6 +157,39 @@ pub enum ParticipantSemanticError {
     /// A process-wide participant fatal has already latched.
     #[error(transparent)]
     ServiceFatal(ParticipantServiceFatal),
+}
+
+/// One semantic result paired with every dispatch effect durably installed by
+/// the request before it returned.
+///
+/// The envelope deliberately owns the `Result`: a marker-drain prefix can
+/// commit before a later retry fails, and that failure must not erase the
+/// prefix's post-commit tell.
+#[derive(Debug)]
+pub struct ParticipantSemanticOutcome<T> {
+    result: Result<T, ParticipantSemanticError>,
+    impact: DispatchImpact,
+}
+
+impl<T> ParticipantSemanticOutcome<T> {
+    /// Wraps a fixture or operation which installed no dispatch effect.
+    #[must_use]
+    pub fn unchanged(result: Result<T, ParticipantSemanticError>) -> Self {
+        Self {
+            result,
+            impact: DispatchImpact::Unchanged,
+        }
+    }
+
+    /// Carries an operation result and its complete request accumulator.
+    #[must_use]
+    pub fn new(result: Result<T, ParticipantSemanticError>, impact: DispatchImpact) -> Self {
+        Self { result, impact }
+    }
+
+    fn into_parts(self) -> (Result<T, ParticipantSemanticError>, DispatchImpact) {
+        (self.result, self.impact)
+    }
 }
 
 /// Server-owned adapter from a decoded request to a protocol-owned value.
@@ -335,6 +369,19 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
         )
     }
 
+    /// Applies one request and preserves post-commit effects on every exit.
+    ///
+    /// Semantic-only fixtures default to an empty accumulator. Production
+    /// overrides this boundary and returns operation-owned effects.
+    fn handle_with_impact(
+        &self,
+        context: ParticipantConnectionContext,
+        conversations: &mut ParticipantConnectionConversations,
+        request: ClientRequest,
+    ) -> ParticipantSemanticOutcome<ServerValue> {
+        ParticipantSemanticOutcome::unchanged(self.handle(context, conversations, request))
+    }
+
     /// Applies one decoded participant request to protocol-owned authority.
     ///
     /// # Errors
@@ -459,16 +506,16 @@ impl InstalledParticipantService {
         self.handler.record_publication_offer(publication)
     }
 
-    fn notify_ready(
-        &self,
-        conversation_id: ConversationId,
-    ) -> Result<(), ParticipantSemanticError> {
-        for incarnation in self
-            .handler
-            .ready_connection_incarnations(conversation_id)?
-        {
+    fn notify_impact(&self, impact: &DispatchImpact) -> Result<(), ParticipantSemanticError> {
+        let Some(conversation_id) = impact.conversation_id() else {
+            return Ok(());
+        };
+        for target in impact.target_union() {
             self.publication_registry
-                .notify(incarnation, conversation_id)
+                .notify(
+                    target.binding_epoch().connection_incarnation,
+                    conversation_id,
+                )
                 .map_err(|error| ParticipantSemanticError::Internal {
                     message: format!("participant publication wake failed: {error}"),
                 })?;
@@ -536,25 +583,12 @@ impl ParticipantSemanticHandler for InstalledParticipantService {
                 .handler
                 .handle_observer_recovery(context, conversations, request, target);
         }
-        let conversation_id = request_conversation_id(&request);
-        let value = self.handler.handle(context, conversations, request)?;
-        if let Some(conversation_id) = conversation_id {
-            self.notify_ready(conversation_id)?;
-        }
-        Ok(value)
-    }
-}
-
-const fn request_conversation_id(request: &ClientRequest) -> Option<ConversationId> {
-    match request {
-        ClientRequest::Enrollment(request) => Some(request.conversation_id),
-        ClientRequest::CredentialAttach(request) => Some(request.conversation_id),
-        ClientRequest::Detach(request) => Some(request.conversation_id),
-        ClientRequest::ParticipantAck(request) => Some(request.conversation_id),
-        ClientRequest::Leave(request) => Some(request.conversation_id),
-        ClientRequest::MarkerAck(request) => Some(request.conversation_id),
-        ClientRequest::RecordAdmission(request) => Some(request.conversation_id),
-        ClientRequest::ObserverRecovery(_) => None,
+        let outcome = self
+            .handler
+            .handle_with_impact(context, conversations, request);
+        let (result, impact) = outcome.into_parts();
+        self.notify_impact(&impact)?;
+        result
     }
 }
 
