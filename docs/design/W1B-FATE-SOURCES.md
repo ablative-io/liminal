@@ -1,6 +1,6 @@
 # W1b — durable Died / Ordinary / Recovered / Detached fate sources
 
-Revision: r4, 2026-07-20. Design-first lane; this revision is docs-only.
+Revision: r5, 2026-07-21. Design-first lane; this revision is docs-only (ruled rider §10.1).
 
 Normative ledger: `docs/design/WIRING-LEDGER.md` r1.9 at `c77ce31`. Source pin:
 `c77ce31`. The only repository change from the r1 source pin to this pin is the
@@ -849,6 +849,38 @@ constant and call it observation; every assertion reads protocol output, decoded
 durable bytes, store head, owner state, publication, or an instrumented production
 point.
 
+### 10.1 Ruled rider (2026-07-21): landed crash-cut oracles vs the §2 fate suffix
+
+Build-time contradiction, found by a fix worker's conflict-rule STOP (commended
+on the record) and ruled at the coordination seat: the landed F-0c crash-cut
+oracle (`e2e_leave_commit_boundary.rs:285-289`) pins "no semantic operation
+follows the selected durability cut" and asserts `base.last()` is the Left row
+across a socket/server teardown, while §2.2/§2.3 and census rows 5–8 require
+exactly those teardown paths to append Died/Detached fate-source rows for
+still-Bound epochs before release. The §10 rider list above did not name this
+oracle; that omission was a brief-internal contradiction, not an implementation
+defect.
+
+**Ruling (proposed by the liminal coordination seat; approved as written by the
+tear seat 2026-07-21, recorded there for the lead's veto):** the final semantic
+row (Left, in the named oracle) remains the last SEMANTIC row at the cut. The
+crash suffix after it must be EXACTLY the §2-classified fate-source rows of that
+teardown — a typed suffix census, not a tolerance window. This preserves the
+original pin's intent (no semantic mutation follows the cut) while making the
+fate accounting exact instead of forbidden.
+
+Application: the named oracle's terminal assertion is amended accordingly. The
+same ruling governs any landed oracle whose sole W1b failure mode is the
+§2-classified fate suffix following its final semantic row (at ruling time:
+`terminal_answer_precedes_independent_push_work` and
+`leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_reopens`
+fail in this territory; each must be adjudicated individually against this
+clause). Every amended assertion keeps its original semantic pin verbatim and
+adds the typed suffix census; no assertion may be deleted or weakened, and every
+amendment is enumerated in the implementing leg's report and the coordinator's
+boundary record. An oracle whose failure is NOT solely the fate suffix is
+outside this rider and remains a defect to fix in the new code.
+
 ## 11. Ordering, crash cuts, and integration
 
 For a connection fold:
@@ -1142,3 +1174,4 @@ Ordinary/Recovered callers are **not** deferred.
 | r2 | 2026-07-20 | Pins `c77ce31` / ledger r1.9 and folds the full findings array (**5 MAJOR + 1 minor**), the coordinator's **EXTEND** ruling for first-class Detached, and both coordinator notes (bounded intent owner/lifecycle; airtight fenced-Attached lens). Adds clean Disconnect/server-shutdown producers, durable bounded tail intent, exact Ordinary/Recovered caller and protocol floor selector, replay-completed Died-specific intent, closed v3 Attached modes and lossless v2 mapping, one-use fate token, cross-page schema phase, protocol disposition selector, honest StoredLeave source audit, enforced Died-before-Recovered including Advance case, 45-oracle renumbered census, and bounded active-cost statement. |
 | r3 | 2026-07-20 | Keeps pin `c77ce31` and folds the complete round-2 six-element findings array (**5 NEW MAJOR + 1 minor**): immutable Pending-Died Ordinary finalizer sources and Recovered-owned reservation/non-presenting Leave+Fenced finalizers; by-value non-Clone/non-Copy `FencedAttachCommit` with private recovered authority and 0.3.0 next-publish semver flag; sealed two-stage terminal prepare/admit with exact v3 keyed candidate charge; event-free ExplicitRequestPending Detached; post-Open participant/server-fatal policy with `max_connections` unmatched bound and non-crash recovery; and source-row/full-validation marker identity with no digest. Extends the census from 45 to 48. |
 | r4 | 2026-07-20 | Keeps pin `c77ce31` and folds the complete round-3 two-element findings array (**2 MAJOR**): moves proof linearity to a non-public fenced mint that consumes the one fully validated non-Clone/non-Copy marker record before the r3 by-value chain; and binds simultaneous unmatched Opens to their lower Allocate/startup generation's persisted `declared_reference_bound`, allowing exact recovery after a current-limit reduction and refusing fabricated over-bound/cross-generation history. Names all three implementation-review carries (startup composition sequencing, charge constructor/error-path ownership, validate-pass memory proof), extends Oracle 26, and extends/renumbers the census from 48 to 49. |
+| r5 | 2026-07-21 | Docs-only ruled rider §10.1 (build-time): amends the landed F-0c crash-cut oracle — the final semantic row remains the last SEMANTIC row; the crash suffix must be EXACTLY the §2-classified fate-source rows of the teardown (typed suffix census, not tolerance). Governs sibling oracles failing solely on the fate suffix, each adjudicated individually; original semantic pins kept verbatim. Proposed at the coordination seat, approved as written by the tear seat 2026-07-21, recorded for the lead's veto. |
