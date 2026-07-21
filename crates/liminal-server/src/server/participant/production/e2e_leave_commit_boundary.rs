@@ -7,13 +7,16 @@ use std::sync::Arc;
 use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
 use liminal_protocol::wire::{
-    ClientRequest, Generation, LeaveAttemptToken, LeaveRequest, RecordAdmission,
+    ClientRequest, EnrollBound, Generation, LeaveAttemptToken, LeaveRequest, RecordAdmission,
     RecordAdmissionAttemptToken, ServerValue,
 };
 
-use super::e2e_cold_all_shapes_fixture::{ColdMember, ack_through, decoded_history};
+use super::e2e_cold_all_shapes_fixture::{
+    BoundClosePath, ColdMember, TypedFateSource, ack_through, decoded_history,
+    decoded_history_from_store, expected_bound_close_fate, semantic_rows_and_typed_fate_suffix,
+};
 use super::e2e_leave_regression::{CONVERSATION, enroll_three};
-use super::e2e_tests::{OutboxOwnerFacts, SocketFixture};
+use super::e2e_tests::{OutboxOwnerFacts, SocketFixture, SocketPeer};
 use super::log::{READ_BATCH_SIZE, STREAM_PREFIX, StoredOperation};
 use super::outbox_log::{
     OUTBOX_STREAM_PREFIX, OutboxRow, ProducedSourceKind, UNIT2_OUTBOX_RESTORE_BATCH_ROWS,
@@ -46,6 +49,12 @@ struct LeaveCrashCutEvidence {
     crash: DurableHistoryBytes,
     restored: DurableHistoryBytes,
     restored_owner: OutboxOwnerFacts,
+}
+
+struct RuledTeardownEvidence {
+    durable: DurableHistoryBytes,
+    live_owner: Option<OutboxOwnerFacts>,
+    expected_fate_suffix: [TypedFateSource; 2],
 }
 
 fn stream_bytes(
@@ -84,27 +93,50 @@ fn stream_bytes(
     })
 }
 
-fn durable_history_bytes(data_dir: &Path) -> Result<DurableHistoryBytes, Box<dyn Error>> {
-    let store: Arc<dyn DurableStore> = open_disk_store_for_tests(data_dir)?;
+fn durable_history_bytes_from_store(
+    store: &Arc<dyn DurableStore>,
+) -> Result<DurableHistoryBytes, Box<dyn Error>> {
     Ok(DurableHistoryBytes {
         base: stream_bytes(
-            &store,
+            store,
             &format!("{STREAM_PREFIX}{CONVERSATION}"),
             READ_BATCH_SIZE,
         )?,
         extension: stream_bytes(
-            &store,
+            store,
             &format!("{OUTBOX_STREAM_PREFIX}{CONVERSATION}"),
             UNIT2_OUTBOX_RESTORE_BATCH_ROWS,
         )?,
     })
 }
 
+fn durable_history_bytes(data_dir: &Path) -> Result<DurableHistoryBytes, Box<dyn Error>> {
+    let store: Arc<dyn DurableStore> = open_disk_store_for_tests(data_dir)?;
+    durable_history_bytes_from_store(&store)
+}
+
 fn assert_left_source_and_audit_rows(
     data_dir: &Path,
+    expected_fate_suffix: &[super::e2e_cold_all_shapes_fixture::TypedFateSource],
     expected_extension_batches: usize,
 ) -> Result<(), Box<dyn Error>> {
     let (base, extension) = decoded_history(data_dir, CONVERSATION)?;
+    assert_left_source_and_audit_history(
+        base,
+        &extension,
+        expected_fate_suffix,
+        expected_extension_batches,
+    )
+}
+
+fn assert_left_source_and_audit_history(
+    base: Vec<(u64, StoredOperation)>,
+    extension: &[(u64, OutboxRow)],
+    expected_fate_suffix: &[super::e2e_cold_all_shapes_fixture::TypedFateSource],
+    expected_extension_batches: usize,
+) -> Result<(), Box<dyn Error>> {
+    let (base, fate_suffix) = semantic_rows_and_typed_fate_suffix(base)?;
+    assert_eq!(fate_suffix, expected_fate_suffix);
     let (left_source_sequence, _) = base
         .iter()
         .rev()
@@ -135,6 +167,7 @@ fn assert_left_source_and_audit_rows(
 fn restore_and_assert_idempotency(
     data_dir: &Path,
     cut: LeaveCrashCut,
+    expected_fate_suffix: &[super::e2e_cold_all_shapes_fixture::TypedFateSource],
     crash: &DurableHistoryBytes,
     live_after_flushes: Option<OutboxOwnerFacts>,
     leaver_id: u64,
@@ -153,14 +186,11 @@ fn restore_and_assert_idempotency(
     }
     first_restore.stop();
     let restored = durable_history_bytes(data_dir)?;
-    assert_left_source_and_audit_rows(data_dir, 1)?;
+    assert_left_source_and_audit_rows(data_dir, expected_fate_suffix, 1)?;
 
     match cut {
-        LeaveCrashCut::AfterBothFlushes => assert_eq!(&restored, crash),
-        LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
-            assert_eq!(restored.base, crash.base);
-            assert_eq!(restored.extension.row_count, crash.extension.row_count + 1);
-            assert_eq!(restored.extension.head, crash.extension.head + 1);
+        LeaveCrashCut::AfterBothFlushes | LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
+            assert_eq!(&restored, crash);
         }
     }
 
@@ -198,6 +228,90 @@ fn arm_leave_crash_cut(server: &SocketFixture, cut: LeaveCrashCut) -> Result<(),
             server.fail_next_outbox_append()
         }
     }
+}
+
+fn observe_live_leave_cut(
+    server: &SocketFixture,
+    cut: LeaveCrashCut,
+    leave_result: &Result<ServerValue, String>,
+    leaver_id: u64,
+    signed_outbox_bound: u64,
+) -> Result<Option<OutboxOwnerFacts>, Box<dyn Error>> {
+    match cut {
+        LeaveCrashCut::AfterBothFlushes => {
+            assert!(matches!(leave_result, Ok(ServerValue::LeaveCommitted(_))));
+            let facts = server.outbox_owner_facts(CONVERSATION, leaver_id)?;
+            assert_eq!(facts.next_live_obligation, None);
+            assert!(facts.charged_bytes <= signed_outbox_bound);
+            Ok(Some(facts))
+        }
+        LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
+            assert!(
+                leave_result.is_err(),
+                "item 30 barrier-2 append fault fabricated a terminal response"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn capture_semantic_cut(
+    server: &SocketFixture,
+    cut: LeaveCrashCut,
+) -> Result<DurableHistoryBytes, Box<dyn Error>> {
+    let store = server.durable_store();
+    let crash = durable_history_bytes_from_store(&store)?;
+    let (cut_base, cut_extension) = decoded_history_from_store(store, CONVERSATION)?;
+    let expected_pre_teardown_fate_suffix = Vec::new();
+    assert_left_source_and_audit_history(
+        cut_base,
+        &cut_extension,
+        &expected_pre_teardown_fate_suffix,
+        usize::from(cut == LeaveCrashCut::AfterBothFlushes),
+    )?;
+    Ok(crash)
+}
+
+fn perform_ruled_teardown(
+    server: SocketFixture,
+    observer_socket: SocketPeer,
+    sender: &EnrollBound,
+    observer: &EnrollBound,
+    leaver_id: u64,
+    capture_live_owner: bool,
+    data_dir: &Path,
+) -> Result<RuledTeardownEvidence, Box<dyn Error>> {
+    let expected_fate_suffix = [
+        expected_bound_close_fate(
+            observer.participant_id(),
+            observer.origin_binding_epoch(),
+            BoundClosePath::DroppedSocket,
+        ),
+        expected_bound_close_fate(
+            sender.participant_id(),
+            sender.origin_binding_epoch(),
+            BoundClosePath::ServerStop,
+        ),
+    ];
+    server.arm_outbox_barriers([OutboxBarrierKind::OperationFlush])?;
+    observer_socket.shutdown_transport()?;
+    server.wait_for_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    server.release_outbox_barrier(OutboxBarrierKind::OperationFlush)?;
+    drop(observer_socket);
+    server.force_close_and_wait();
+    let live_owner = if capture_live_owner {
+        Some(server.outbox_owner_facts(CONVERSATION, leaver_id)?)
+    } else {
+        None
+    };
+    server.stop();
+    let teardown = durable_history_bytes(data_dir)?;
+    assert_left_source_and_audit_rows(data_dir, &expected_fate_suffix, 1)?;
+    Ok(RuledTeardownEvidence {
+        durable: teardown,
+        live_owner,
+        expected_fate_suffix,
+    })
 }
 
 fn run_leave_crash_cut(cut: LeaveCrashCut) -> Result<LeaveCrashCutEvidence, Box<dyn Error>> {
@@ -265,38 +379,39 @@ fn run_leave_crash_cut(cut: LeaveCrashCut) -> Result<LeaveCrashCutEvidence, Box<
         .join()
         .map_err(|_| "item 30 Leave socket thread panicked")?;
 
-    let live_after_flushes = match cut {
-        LeaveCrashCut::AfterBothFlushes => {
-            assert!(matches!(leave_result, Ok(ServerValue::LeaveCommitted(_))));
-            let facts = server.outbox_owner_facts(CONVERSATION, leaver.participant_id())?;
-            assert_eq!(facts.next_live_obligation, None);
-            assert!(facts.charged_bytes <= signed_outbox_bound);
-            Some(facts)
-        }
-        LeaveCrashCut::BetweenBaseFlushAndExtensionAppend => {
-            assert!(
-                leave_result.is_err(),
-                "item 30 barrier-2 append fault fabricated a terminal response"
-            );
-            None
-        }
-    };
+    let live_after_flushes = observe_live_leave_cut(
+        &server,
+        cut,
+        &leave_result,
+        leaver.participant_id(),
+        signed_outbox_bound,
+    )?;
 
-    // No semantic operation follows the selected durability cut. Tear down every
-    // socket and the full supervisor before examining or reopening disk state.
-    drop(observer_socket);
-    server.stop();
-    let crash = durable_history_bytes(&data_dir)?;
-    assert_left_source_and_audit_rows(
+    // Preserve the original cut before mandatory first-touch repair of cut (b).
+    let crash = capture_semantic_cut(&server, cut)?;
+
+    // Derive §10.1's ordered suffix from observed Bound receipts and close paths.
+    let capture_live_owner = live_after_flushes.is_some();
+    let RuledTeardownEvidence {
+        durable: teardown,
+        live_owner: live_after_fate_suffix,
+        expected_fate_suffix,
+    } = perform_ruled_teardown(
+        server,
+        observer_socket,
+        &sender,
+        &observer,
+        leaver.participant_id(),
+        capture_live_owner,
         &data_dir,
-        usize::from(cut == LeaveCrashCut::AfterBothFlushes),
     )?;
 
     let (restored, restored_owner) = restore_and_assert_idempotency(
         &data_dir,
         cut,
-        &crash,
-        live_after_flushes,
+        &expected_fate_suffix,
+        &teardown,
+        live_after_fate_suffix,
         leaver.participant_id(),
         signed_outbox_bound,
     )?;

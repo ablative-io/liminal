@@ -2,7 +2,7 @@
 
 use std::error::Error;
 use std::io::Write;
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -33,6 +33,7 @@ use crate::server::participant::{
     ParticipantOfferedProgress, ParticipantPublication, ParticipantSemanticError,
     ParticipantSemanticHandler, ParticipantServiceFatal,
 };
+use crate::server::shutdown::wait_after_force_close;
 
 use super::super::ProductionParticipantHandler;
 use super::super::tests::{open_disk_store_for_tests, test_participant_config};
@@ -195,6 +196,7 @@ pub(in crate::server::participant::production) struct SocketFixture {
     client: TcpStream,
     inbound: Vec<u8>,
     handler: Arc<ProductionParticipantHandler>,
+    store: Arc<dyn DurableStore>,
     publication_gate: Option<Arc<PublicationGate>>,
     barriers: Option<Arc<OutboxBarrierStore>>,
     supervisor: ConnectionSupervisor,
@@ -305,6 +307,7 @@ impl SocketFixture {
                     })
                 },
             );
+        let fixture_store = Arc::clone(&store);
         let participant_service =
             InstalledParticipantService::new(semantic_handler, store, config.wire_frame_limit)
                 .map_err(|error| format!("{error:?}"))?;
@@ -317,6 +320,7 @@ impl SocketFixture {
             client,
             inbound,
             handler,
+            store: fixture_store,
             publication_gate,
             barriers,
             supervisor,
@@ -599,25 +603,44 @@ impl SocketFixture {
             .ok_or_else(|| "socket fixture has no publication gate".into())
     }
 
+    pub(in crate::server::participant::production) fn durable_store(
+        &self,
+    ) -> Arc<dyn DurableStore> {
+        Arc::clone(&self.store)
+    }
+
+    pub(in crate::server::participant::production) fn force_close_and_wait(&self) {
+        self.supervisor.force_close_active_connections();
+        wait_after_force_close(&self.supervisor);
+    }
+
     pub(in crate::server::participant::production) fn stop(self) {
         let Self {
             client,
             inbound,
             handler,
+            store,
             publication_gate,
             barriers,
             supervisor,
             connection,
         } = self;
+        self::wait_after_force_close_request(&supervisor);
         drop(client);
         drop(inbound);
         supervisor.shutdown();
         drop(connection);
         drop(supervisor);
         drop(handler);
+        drop(store);
         drop(publication_gate);
         drop(barriers);
     }
+}
+
+fn wait_after_force_close_request(supervisor: &ConnectionSupervisor) {
+    supervisor.force_close_active_connections();
+    wait_after_force_close(supervisor);
 }
 
 impl SocketPeer {
@@ -626,6 +649,12 @@ impl SocketPeer {
         request: ClientRequest,
     ) -> Result<ServerValue, Box<dyn Error>> {
         roundtrip(&mut self.client, &mut self.inbound, request)
+    }
+
+    pub(in crate::server::participant::production) fn shutdown_transport(
+        &self,
+    ) -> Result<(), Box<dyn Error>> {
+        self.client.shutdown(Shutdown::Both).map_err(Into::into)
     }
 
     pub(in crate::server::participant::production) fn read_push(
