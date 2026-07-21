@@ -6,7 +6,8 @@
 
 use liminal_protocol::lifecycle::{
     ActiveBinding, BindingState, BindingTerminalAdmission, BindingTerminalCauseClass,
-    BindingTerminalDisposition, LiveFrontierOwner, SealedBindingFateIntent,
+    BindingTerminalDisposition, LiveFrontierOwner, ObserverProgressProjection,
+    SealedBindingFateIntent,
 };
 use liminal_protocol::wire::{BindingEpoch, ParticipantId};
 
@@ -14,7 +15,8 @@ use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 
 use super::connection_fate_rows::source_operation;
 use super::frontier;
-use super::log::{StoredSpecificFateIntent, StoredTerminalDisposition};
+use super::log::{StoredOperation, StoredSpecificFateIntent, StoredTerminalDisposition};
+use super::observer_progress::ObserverProgressSourceMetadata;
 use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, StateError};
 
 /// Exact source authority copied from one durable server-wide Open.
@@ -240,6 +242,9 @@ fn complete_target(
     if completed.clear_fate_token {
         slot.binding_fate = None;
     }
+    if let Some(projection) = completed.observer_projection {
+        record_source_projection(authority, &completed.operation, source_sequence, projection)?;
+    }
     if let Some(intent) = specific_fate_intent {
         let completes_without_terminal =
             matches!(intent, StoredSpecificFateIntent::Recovered { .. });
@@ -254,6 +259,34 @@ fn complete_target(
         }
     }
     Ok(())
+}
+
+fn record_source_projection(
+    authority: &mut ConversationAuthority,
+    operation: &StoredOperation,
+    source_sequence: u64,
+    projection: ObserverProgressProjection,
+) -> Result<(), StateError> {
+    let metadata = match operation {
+        StoredOperation::Died { row } => ObserverProgressSourceMetadata::died(
+            source_sequence,
+            authority.conversation_id,
+            row.participant_id,
+            projection.new_observer_progress(),
+        ),
+        StoredOperation::Detached { row } => ObserverProgressSourceMetadata::detached(
+            source_sequence,
+            authority.conversation_id,
+            row.participant_id,
+            projection.new_observer_progress(),
+        ),
+        _ => {
+            return Err(StateError::invariant(
+                "connection-fate source produced a non-terminal observer projection",
+            ));
+        }
+    };
+    authority.record_observer_progress_projection(projection, metadata)
 }
 
 pub(super) struct AdmittedTerminal {

@@ -9,6 +9,7 @@ use super::connection_fate::{admit_terminal, stored_specific_fate_intent};
 use super::log::{
     StoredDetached, StoredDetachedCause, StoredDetachedSource, StoredDied, StoredDiedCause,
 };
+use super::observer_progress::ObserverProgressSourceMetadata;
 use super::state::{ConversationAuthority, PendingSpecificFate, StateError};
 
 impl ConversationAuthority {
@@ -25,15 +26,27 @@ impl ConversationAuthority {
         let active = self.replay_fate_active(row.participant_id, row.binding_epoch.to_epoch()?)?;
         let admitted = admit_terminal(self, active, BindingTerminalCauseClass::Detached)?;
         validate_terminal_row(row.terminal_order, row.disposition, &admitted, sequence)?;
-        let binding = match row.cause {
-            StoredDetachedCause::CleanDeregister => active
-                .clean_disconnect(admitted.disposition)
-                .binding_state(),
-            StoredDetachedCause::ServerShutdown => {
-                active.server_shutdown(admitted.disposition).binding_state()
-            }
+        let transition = match row.cause {
+            StoredDetachedCause::CleanDeregister => active.clean_disconnect(admitted.disposition),
+            StoredDetachedCause::ServerShutdown => active.server_shutdown(admitted.disposition),
         };
-        self.install_replayed_terminal(row.participant_id, binding, admitted, sequence, true)
+        let projection = transition.observer_progress_projection();
+        let binding = transition.binding_state();
+        self.install_replayed_terminal(row.participant_id, binding, admitted, sequence, true)?;
+        if let (
+            Some(projection),
+            super::log::StoredTerminalDisposition::Committed { terminal_seq },
+        ) = (projection, row.disposition)
+        {
+            let metadata = ObserverProgressSourceMetadata::detached(
+                sequence,
+                self.conversation_id,
+                row.participant_id,
+                terminal_seq,
+            );
+            self.record_observer_progress_projection(projection, metadata)?;
+        }
+        Ok(())
     }
 
     pub(super) fn replay_explicit_pending_detached(
@@ -142,12 +155,26 @@ impl ConversationAuthority {
         let admitted = admit_terminal(self, active, BindingTerminalCauseClass::Died)?;
         validate_terminal_row(row.terminal_order, row.disposition, &admitted, sequence)?;
         let transition = died_transition(active, row.cause, admitted.disposition);
+        let projection = transition.observer_progress_projection();
         let terminal = match transition {
             DiedBindingTransition::Committed(terminal) => Some(terminal),
             DiedBindingTransition::Pending(_) => None,
         };
         let binding = transition.binding_state();
         self.install_replayed_terminal(row.participant_id, binding, admitted, sequence, false)?;
+        if let (
+            Some(projection),
+            super::log::StoredTerminalDisposition::Committed { terminal_seq },
+        ) = (projection, row.disposition)
+        {
+            let metadata = ObserverProgressSourceMetadata::died(
+                sequence,
+                self.conversation_id,
+                row.participant_id,
+                terminal_seq,
+            );
+            self.record_observer_progress_projection(projection, metadata)?;
+        }
         if let Some(intent) = row.specific_fate_intent {
             if self
                 .pending_specific_fates
