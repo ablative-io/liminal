@@ -6,8 +6,8 @@ use liminal_protocol::lifecycle::BindingState;
 use liminal_protocol::lifecycle::test_support_external::executable_recovered_attach;
 use liminal_protocol::wire::{
     AttachAttemptToken, BindingEpoch, ClientRequest, ConnectionIncarnation,
-    CredentialAttachRequest, DeliverySeq, EnrollmentRequest, EnrollmentToken, Generation,
-    ParticipantId, ServerValue,
+    CredentialAttachRequest, DeliverySeq, DetachAttemptToken, DetachRequest, EnrollmentRequest,
+    EnrollmentToken, Generation, ParticipantId, ServerValue,
 };
 
 use crate::server::participant::{
@@ -17,8 +17,9 @@ use crate::server::participant::{
 
 use super::ProductionParticipantHandler;
 use super::log::{
-    DecodedStoredOperation, OperationLog, OperationLogError, StoredOperation,
-    StoredOrdinaryTerminalSource, StoredRecoveredPresentation, StoredSpecificFateIntent,
+    DecodedStoredOperation, OperationLog, OperationLogError, StoredDetached, StoredDetachedCause,
+    StoredDetachedSource, StoredOperation, StoredOrdinaryTerminalSource,
+    StoredRecoveredPresentation, StoredSpecificFateIntent, StoredTerminalDisposition,
 };
 use super::state::{DurableAppend, PendingBindingFate};
 use super::tests::{dispatch_tracked, test_participant_config};
@@ -158,6 +159,100 @@ fn recovered_completion_uses_protocol_floor_and_exact_production_caller()
 fn recovered_source_flush_precedes_observer_advance_and_cold_repair() -> Result<(), Box<dyn Error>>
 {
     run_recovered_completion()
+}
+
+#[test]
+fn pending_detached_restart_restores_disconnect_or_shutdown_without_refinish()
+-> Result<(), Box<dyn Error>> {
+    let recovered = executable_recovered_attach()?;
+    let conversation_id = recovered.member.conversation_id();
+    let participant_id = recovered.member.participant_id();
+    let connection_incarnation = recovered.recovered_binding_epoch.connection_incarnation;
+    let store = Arc::new(open_ephemeral(1)?);
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let mut conversations = ParticipantConnectionConversations::default();
+    let enrolled = dispatch_tracked(
+        &handler,
+        connection_incarnation,
+        &mut conversations,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([73; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt) = enrolled else {
+        return Err(format!("pending Detached fixture did not enroll: {enrolled:?}").into());
+    };
+    assert_eq!(receipt.participant_id(), participant_id);
+
+    let cell = handler.cell(conversation_id)?;
+    let mut owner = cell
+        .lock()
+        .map_err(|_| "pending Detached owner lock was poisoned")?;
+    let authority = owner
+        .as_mut()
+        .ok_or("pending Detached owner was unavailable")?;
+    authority.frontier = Some(recovered.owner);
+    authority.next_seq = recovered.next_terminal_sequence;
+    authority.next_order = recovered.next_terminal_order;
+    let slot = authority
+        .slots
+        .get_mut(&participant_id)
+        .ok_or("pending Detached participant slot is absent")?;
+    slot.member = recovered.member;
+    slot.binding = recovered.binding;
+    slot.cell = recovered.detach_cell;
+    slot.binding_fate = Some(PendingBindingFate {
+        attached_source_sequence: authority
+            .next_log_sequence
+            .checked_sub(1)
+            .ok_or("pending Detached attached source underflow")?,
+        token: recovered.fate_token,
+    });
+    let request = DetachRequest {
+        conversation_id,
+        participant_id,
+        capability_generation: recovered.recovered_binding_epoch.capability_generation,
+        detach_attempt_token: DetachAttemptToken::new([79; 16]),
+    };
+    let sequence = authority.next_log_sequence;
+    let terminal_order = authority.next_order;
+    let observer_baseline = authority.observer_progress;
+    let row = StoredDetached {
+        participant_id,
+        binding_epoch: recovered.recovered_binding_epoch.into(),
+        cause: StoredDetachedCause::CleanDeregister,
+        terminal_order,
+        disposition: StoredTerminalDisposition::Pending,
+        source: StoredDetachedSource::ExplicitRequestPending {
+            request: (&request).into(),
+            secret_verified: true,
+            verifier: super::facts::detach_request_verifier(&request),
+            receiving_epoch: recovered.recovered_binding_epoch.into(),
+            observer_baseline,
+        },
+    };
+    authority.replay_explicit_pending_detached(&row, sequence)?;
+    let restored = &authority.slots[&participant_id];
+    assert!(matches!(
+        restored.binding,
+        BindingState::PendingFinalization(_)
+    ));
+    assert!(matches!(
+        restored.cell,
+        liminal_protocol::lifecycle::DetachCell::Pending(_)
+    ));
+    assert_eq!(authority.observer_progress, observer_baseline);
+    assert_eq!(
+        authority.next_log_sequence,
+        sequence.checked_add(1).ok_or("log overflow")?
+    );
+    assert_eq!(
+        authority.next_order,
+        terminal_order.checked_add(1).ok_or("order overflow")?
+    );
+    drop(owner);
+    Ok(())
 }
 
 pub(super) fn run_recovered_completion() -> Result<(), Box<dyn Error>> {

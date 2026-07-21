@@ -227,8 +227,8 @@ fn production_chain(cold: bool) -> Result<[u64; 5], Box<dyn Error>> {
         .map_err(|error| format!("attach commit failed: {error:?}"))?;
     observed[2] = observed[2].checked_add(1).ok_or("commit count overflow")?;
     drop(spent_owner);
-    let (_, token) = committed.into_slot_and_fate();
-    drop(token);
+    let split = committed.into_slot_and_fate();
+    assert!(split.1.is_recovered());
     observed[3] = observed[3].checked_add(1).ok_or("split count overflow")?;
     super::tests_w1b_fate_completion::run_recovered_completion()?;
     observed[4] = observed[4]
