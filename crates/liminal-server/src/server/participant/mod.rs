@@ -23,6 +23,7 @@ mod cursor_repository;
 #[cfg(test)]
 mod detach_repository;
 mod dispatch;
+pub mod dispatch_impact;
 pub(super) mod incarnation_stream;
 mod production;
 pub(crate) mod publication;
@@ -40,6 +41,8 @@ mod crash_repository_tests;
 mod cursor_repository_tests;
 #[cfg(test)]
 mod detach_repository_tests;
+#[cfg(test)]
+mod dispatch_impact_tests;
 #[cfg(test)]
 mod dispatch_tests;
 #[cfg(test)]
