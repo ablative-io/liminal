@@ -2,14 +2,22 @@
 //!
 //! Leg 4b owns target discovery and orchestration. The durable Died/Detached
 //! source-row transaction body is deliberately isolated in [`PreparedConnectionFate::complete`]
-//! for leg 4c; callers cannot supply participant ids or binding epochs.
+//! so callers cannot supply participant ids or binding epochs.
 
-use liminal_protocol::lifecycle::BindingState;
+use liminal_protocol::lifecycle::{
+    ActiveBinding, BindingState, BindingTerminalAdmission, BindingTerminalCauseClass,
+    BindingTerminalDisposition, LiveFrontierOwner, SealedBindingFateIntent,
+};
 use liminal_protocol::wire::{BindingEpoch, ParticipantId};
 
 use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 
-use super::state::{ConversationAuthority, DurableAppend, StateError};
+use super::frontier;
+use super::log::{
+    StoredDetached, StoredDetachedCause, StoredDetachedSource, StoredDied, StoredDiedCause,
+    StoredOperation, StoredSpecificFateIntent, StoredTerminalDisposition,
+};
+use super::state::{ConversationAuthority, DurableAppend, PendingBindingFate, StateError};
 
 /// Exact source authority copied from one durable server-wide Open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -104,18 +112,16 @@ impl ConversationAuthority {
 impl PreparedConnectionFate {
     /// Consumes the exact prepared target set under the same conversation lock.
     ///
-    /// This is the typed leg-4c transaction seam. Today it verifies that every
-    /// recorded target still names the authority-selected Bound epoch and then
-    /// completes without fabricating a source row. Leg 4c replaces this body with
-    /// the disposition/source append-and-flush transaction while retaining the
-    /// non-caller-constructible target set and source authority.
+    /// Every target is revalidated before the first mutation. Each target then
+    /// consumes the sealed protocol terminal selector, appends and flushes its
+    /// exact source row, and only afterwards installs the selected frontier,
+    /// allocators, and binding state.
     pub(super) fn complete(
         self,
-        authority: &ConversationAuthority,
+        authority: &mut ConversationAuthority,
         appender: &dyn DurableAppend,
     ) -> Result<(), StateError> {
-        let _: &dyn DurableAppend = appender;
-        for target in self.targets {
+        for target in &self.targets {
             let Some(slot) = authority.slots.get(&target.participant_id) else {
                 return Err(StateError::invariant(
                     "prepared connection-fate target disappeared under its conversation lock",
@@ -147,11 +153,341 @@ impl PreparedConnectionFate {
                 ));
             }
         }
+        for target in self.targets {
+            complete_target(self.source, target, authority, appender)?;
+        }
         Ok(())
     }
 
     #[cfg(test)]
     pub(super) fn targets(&self) -> &[ConnectionFateTarget] {
         &self.targets
+    }
+}
+
+fn complete_target(
+    source: ConnectionFateSource,
+    target: ConnectionFateTarget,
+    authority: &mut ConversationAuthority,
+    appender: &dyn DurableAppend,
+) -> Result<(), StateError> {
+    let active = match authority.slots.get(&target.participant_id) {
+        Some(slot) => match slot.binding {
+            BindingState::Bound(active) => active,
+            _ => {
+                return Err(StateError::invariant(
+                    "validated connection-fate target stopped being Bound",
+                ));
+            }
+        },
+        None => {
+            return Err(StateError::invariant(
+                "validated connection-fate target disappeared",
+            ));
+        }
+    };
+    let specific_fate_intent = match source_row_class(source) {
+        BindingTerminalCauseClass::Died => authority
+            .slots
+            .get(&target.participant_id)
+            .and_then(|slot| slot.binding_fate.as_ref())
+            .map(stored_specific_fate_intent)
+            .transpose()?,
+        BindingTerminalCauseClass::Detached => None,
+    };
+    let next_order = authority.next_order;
+    let next_seq = authority.next_seq;
+    let next_order_after = next_order
+        .checked_add(1)
+        .ok_or(StateError::AllocationExhausted {
+            domain: "transaction order",
+        })?;
+    let next_seq_after = next_seq
+        .checked_add(1)
+        .ok_or(StateError::AllocationExhausted {
+            domain: "delivery sequence",
+        })?;
+    let next_log_sequence_after =
+        authority
+            .next_log_sequence
+            .checked_add(1)
+            .ok_or(StateError::AllocationExhausted {
+                domain: "log sequence",
+            })?;
+
+    let admitted = admit_terminal(authority, active, source_row_class(source))?;
+
+    let (operation, binding_state, clear_fate_token) = source_operation(
+        source,
+        active,
+        admitted.disposition,
+        admitted.stored_disposition,
+        specific_fate_intent,
+    );
+    appender.append(&operation, authority.next_log_sequence)?;
+    authority.install_frontier(admitted.owner);
+    authority.next_order = next_order_after;
+    if admitted.committed {
+        authority.next_seq = next_seq_after;
+    }
+    authority.next_log_sequence = next_log_sequence_after;
+    let Some(slot) = authority.slots.get_mut(&target.participant_id) else {
+        return Err(StateError::invariant(
+            "connection-fate target disappeared after durable source append",
+        ));
+    };
+    slot.binding = binding_state;
+    if clear_fate_token {
+        slot.binding_fate = None;
+    }
+    Ok(())
+}
+
+struct AdmittedTerminal {
+    owner: LiveFrontierOwner,
+    disposition: BindingTerminalDisposition,
+    stored_disposition: StoredTerminalDisposition,
+    committed: bool,
+}
+
+fn admit_terminal(
+    authority: &mut ConversationAuthority,
+    active: ActiveBinding,
+    cause_class: BindingTerminalCauseClass,
+) -> Result<AdmittedTerminal, StateError> {
+    let owner = authority.take_frontier()?;
+    let prepared = match owner.prepare_binding_terminal(
+        active,
+        cause_class,
+        authority.next_order,
+        authority.next_seq,
+        authority.observer_progress,
+    ) {
+        Ok(prepared) => prepared,
+        Err(refused) => {
+            let error = refused.error();
+            authority.install_frontier(refused.into_owner());
+            return Err(StateError::invariant(format!(
+                "binding-terminal prepare refused: {error:?}"
+            )));
+        }
+    };
+    let key = prepared.candidate_key();
+    let charge = match frontier::terminal_charge(
+        key.conversation_id(),
+        key.participant_id(),
+        key.binding_epoch(),
+        key.admission_order().transaction_order(),
+        key.delivery_seq(),
+    ) {
+        Ok(charge) => charge,
+        Err(error) => {
+            authority.install_frontier(prepared.into_owner());
+            return Err(error);
+        }
+    };
+    match prepared.admit(key.bind_v3_charge(charge)) {
+        BindingTerminalAdmission::Commit(committed) => {
+            let (owner, position) = committed.into_parts();
+            Ok(AdmittedTerminal {
+                owner,
+                disposition: BindingTerminalDisposition::Committed(position),
+                stored_disposition: StoredTerminalDisposition::Committed {
+                    terminal_seq: position.delivery_seq(),
+                },
+                committed: true,
+            })
+        }
+        BindingTerminalAdmission::Pending(pending) => {
+            let (owner, position) = pending.into_parts();
+            Ok(AdmittedTerminal {
+                owner,
+                disposition: BindingTerminalDisposition::Pending(position),
+                stored_disposition: StoredTerminalDisposition::Pending,
+                committed: false,
+            })
+        }
+        BindingTerminalAdmission::Refused(refused) => {
+            let error = refused.error();
+            authority.install_frontier(refused.into_owner());
+            Err(StateError::invariant(format!(
+                "binding-terminal admission refused: {error:?}"
+            )))
+        }
+    }
+}
+
+fn stored_specific_fate_intent(
+    pending: &PendingBindingFate,
+) -> Result<StoredSpecificFateIntent, StateError> {
+    match pending.token.intent() {
+        Some(SealedBindingFateIntent::Ordinary) => Ok(StoredSpecificFateIntent::Ordinary {
+            attached_source_sequence: pending.attached_source_sequence,
+        }),
+        Some(SealedBindingFateIntent::Recovered {
+            prior_binding_epoch,
+            marker_delivery_seq,
+        }) => Ok(StoredSpecificFateIntent::Recovered {
+            attached_source_sequence: pending.attached_source_sequence,
+            prior_binding_epoch: prior_binding_epoch.into(),
+            marker_delivery_seq,
+        }),
+        None => Err(StateError::invariant(
+            "sealed binding-fate token has no unique durable intent",
+        )),
+    }
+}
+
+const fn source_row_class(source: ConnectionFateSource) -> BindingTerminalCauseClass {
+    match source {
+        ConnectionFateSource::Open {
+            class: ConnectionFateClass::CleanDisconnect | ConnectionFateClass::ServerShutdown,
+            ..
+        } => BindingTerminalCauseClass::Detached,
+        ConnectionFateSource::Open {
+            class: ConnectionFateClass::ConnectionLost | ConnectionFateClass::ProtocolError,
+            ..
+        }
+        | ConnectionFateSource::UncleanServerRestart { .. } => BindingTerminalCauseClass::Died,
+    }
+}
+
+fn source_operation(
+    source: ConnectionFateSource,
+    active: ActiveBinding,
+    disposition: BindingTerminalDisposition,
+    stored_disposition: StoredTerminalDisposition,
+    specific_fate_intent: Option<StoredSpecificFateIntent>,
+) -> (StoredOperation, BindingState, bool) {
+    let binding_epoch = active.binding_epoch.into();
+    match source {
+        ConnectionFateSource::Open {
+            open_sequence,
+            class: ConnectionFateClass::CleanDisconnect,
+            ..
+        } => {
+            let transition = active.clean_disconnect(disposition);
+            (
+                StoredOperation::Detached {
+                    row: StoredDetached {
+                        participant_id: active.participant_id,
+                        binding_epoch,
+                        cause: StoredDetachedCause::CleanDeregister,
+                        terminal_order: disposition_order(disposition),
+                        disposition: stored_disposition,
+                        source: StoredDetachedSource::ConnectionClose {
+                            connection_intent_sequence: open_sequence,
+                        },
+                    },
+                },
+                transition.binding_state(),
+                true,
+            )
+        }
+        ConnectionFateSource::Open {
+            open_sequence,
+            class: ConnectionFateClass::ServerShutdown,
+            ..
+        } => {
+            let transition = active.server_shutdown(disposition);
+            (
+                StoredOperation::Detached {
+                    row: StoredDetached {
+                        participant_id: active.participant_id,
+                        binding_epoch,
+                        cause: StoredDetachedCause::ServerShutdown,
+                        terminal_order: disposition_order(disposition),
+                        disposition: stored_disposition,
+                        source: StoredDetachedSource::ConnectionClose {
+                            connection_intent_sequence: open_sequence,
+                        },
+                    },
+                },
+                transition.binding_state(),
+                true,
+            )
+        }
+        ConnectionFateSource::Open {
+            open_sequence,
+            class: ConnectionFateClass::ConnectionLost,
+            ..
+        } => {
+            let binding_state = active.connection_lost(disposition).binding_state();
+            died_source_operation(
+                active,
+                StoredDiedCause::ConnectionLost,
+                disposition_order(disposition),
+                stored_disposition,
+                Some(open_sequence),
+                specific_fate_intent,
+                binding_state,
+            )
+        }
+        ConnectionFateSource::Open {
+            open_sequence,
+            class: ConnectionFateClass::ProtocolError,
+            ..
+        } => {
+            let binding_state = active.protocol_error(disposition).binding_state();
+            died_source_operation(
+                active,
+                StoredDiedCause::ProtocolError,
+                disposition_order(disposition),
+                stored_disposition,
+                Some(open_sequence),
+                specific_fate_intent,
+                binding_state,
+            )
+        }
+        ConnectionFateSource::UncleanServerRestart { .. } => {
+            let binding_state = active.unclean_server_restart(disposition).binding_state();
+            died_source_operation(
+                active,
+                StoredDiedCause::UncleanServerRestart {
+                    prior_server_incarnation: active
+                        .binding_epoch
+                        .connection_incarnation
+                        .server_incarnation,
+                },
+                disposition_order(disposition),
+                stored_disposition,
+                None,
+                specific_fate_intent,
+                binding_state,
+            )
+        }
+    }
+}
+
+fn died_source_operation(
+    active: ActiveBinding,
+    cause: StoredDiedCause,
+    terminal_order: u64,
+    disposition: StoredTerminalDisposition,
+    connection_intent_sequence: Option<u64>,
+    specific_fate_intent: Option<StoredSpecificFateIntent>,
+    binding_state: BindingState,
+) -> (StoredOperation, BindingState, bool) {
+    (
+        StoredOperation::Died {
+            row: StoredDied {
+                participant_id: active.participant_id,
+                binding_epoch: active.binding_epoch.into(),
+                cause,
+                terminal_order,
+                disposition,
+                connection_intent_sequence,
+                specific_fate_intent,
+            },
+        },
+        binding_state,
+        false,
+    )
+}
+
+const fn disposition_order(disposition: BindingTerminalDisposition) -> u64 {
+    match disposition {
+        BindingTerminalDisposition::Committed(position) => position.transaction_order(),
+        BindingTerminalDisposition::Pending(position) => position.transaction_order(),
     }
 }

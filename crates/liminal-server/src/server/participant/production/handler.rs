@@ -228,6 +228,30 @@ impl ProductionParticipantHandler {
         conversation_id: ConversationId,
         operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
     ) -> Result<T, ParticipantSemanticError> {
+        self.with_conversation_reconciliation(conversation_id, true, operation)
+    }
+
+    /// Runs a source-only fate append while retaining the transitioned live owner.
+    ///
+    /// Died/Detached source rows are durably complete before the occurrence
+    /// router and cold replay join are installed. They therefore cannot enter
+    /// the existing projection replay pass, which rejects those v3 variants
+    /// explicitly. All other ownership and error-discard behavior is identical
+    /// to [`Self::with_conversation`].
+    pub(super) fn with_conversation_fate_source<T>(
+        &self,
+        conversation_id: ConversationId,
+        operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
+    ) -> Result<T, ParticipantSemanticError> {
+        self.with_conversation_reconciliation(conversation_id, false, operation)
+    }
+
+    fn with_conversation_reconciliation<T>(
+        &self,
+        conversation_id: ConversationId,
+        reconcile_appended_source: bool,
+        operation: impl FnOnce(&mut ConversationAuthority, &dyn DurableAppend) -> Result<T, StateError>,
+    ) -> Result<T, ParticipantSemanticError> {
         let cell = self.cell(conversation_id)?;
         let mut owner: MutexGuard<'_, Option<ConversationAuthority>> =
             cell.lock()
@@ -253,7 +277,10 @@ impl ProductionParticipantHandler {
         };
         let starting_log_sequence = authority.next_log_sequence;
         let (result, durably_empty) = match operation(authority, &appender) {
-            Ok(value) if authority.next_log_sequence > starting_log_sequence => {
+            Ok(value)
+                if reconcile_appended_source
+                    && authority.next_log_sequence > starting_log_sequence =>
+            {
                 // The v2 source barrier crossed. Reconcile its exact Unit 2
                 // projection under this same conversation lock before the
                 // caller can publish the correlated terminal response.

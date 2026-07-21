@@ -105,6 +105,7 @@ pub use binding::{
     PendingBindingTerminalPosition, PendingDetachedFinalization, PendingDiedFinalization,
     PendingFinalization,
 };
+pub use binding_fate::SealedBindingFateIntent;
 pub use claim_frontier::{
     ActiveIdentityRanks, BindingTerminalOwner, ClaimFrontierCounter, ClaimFrontierError,
     ClaimFrontierInvalidReason, ClaimFrontiers, ClaimFrontiersRestore, ExitProductRange,

@@ -75,6 +75,15 @@ pub(super) struct AttachProvenanceRecord {
     pub(super) provenance_expires_at: u128,
 }
 
+/// Durable Attached source identity coupled to its sole move-only fate token.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct PendingBindingFate {
+    /// Physical operation-log sequence of the Attached row that minted the token.
+    pub(super) attached_source_sequence: u64,
+    /// Sole protocol authority consumed by measured Ordinary/Recovered completion.
+    pub(super) token: SealedBindingFateToken,
+}
+
 /// One enrolled participant's live authority and replay facts.
 #[derive(Debug)]
 pub(super) struct Slot {
@@ -84,7 +93,7 @@ pub(super) struct Slot {
     pub(super) binding: BindingState,
     /// Sole move-only fate authority emitted by the most recent attach split.
     /// Operational slot state never contains or duplicates this authority.
-    pub(super) binding_fate: Option<SealedBindingFateToken>,
+    pub(super) binding_fate: Option<PendingBindingFate>,
     /// Four-variant detach replay cell.
     pub(super) cell: DetachCell<Digest>,
     /// Exact committed enrollment receipt held for lookup-phase resolution.
