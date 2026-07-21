@@ -871,10 +871,6 @@ impl OrdinaryBindingAuthority {
     ///
     /// Returns this authority unchanged for another event class, participant,
     /// epoch, or previous cursor.
-    #[allow(
-        dead_code,
-        reason = "the crate-owned participant-ack operation advances this sealed authority"
-    )]
     pub(crate) fn cursor_progressed(self, event: Event) -> Result<Self, Self> {
         let EventKind::CursorProgressed {
             participant_id,
@@ -889,9 +885,29 @@ impl OrdinaryBindingAuthority {
         else {
             return Err(self);
         };
-        if participant_id != self.binding.participant_id
+        self.participant_ack_progressed(
+            self.binding.conversation_id,
+            participant_id,
+            binding_epoch,
+            previous_cursor,
+            through_seq,
+        )
+    }
+
+    /// Replays one protocol-selected normal acknowledgement into this authority.
+    pub(crate) fn participant_ack_progressed(
+        self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        previous_cursor: DeliverySeq,
+        through_seq: DeliverySeq,
+    ) -> Result<Self, Self> {
+        if conversation_id != self.binding.conversation_id
+            || participant_id != self.binding.participant_id
             || binding_epoch != self.binding.binding_epoch
             || previous_cursor != self.through_seq
+            || through_seq <= previous_cursor
         {
             return Err(self);
         }

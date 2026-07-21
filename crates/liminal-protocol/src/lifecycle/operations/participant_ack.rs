@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use crate::wire::{
     AckCommitted, AckGap, AckRegression, BindingEpoch, ConversationId, DeliverySeq, Generation,
     ParticipantAck, ParticipantAckEnvelope, ParticipantAckResponse, ParticipantId,
@@ -6,7 +8,7 @@ use crate::wire::{
 use super::super::{
     BindingRequiredLookupResult, BindingState, LiveMember, ObserverProgressProjection,
     ParticipantBindingRequest, PresentedIdentity, RecipientAckObligations,
-    RecipientAckObligationsContextError, lookup_binding_required,
+    RecipientAckObligationsContextError, SealedBindingFateToken, lookup_binding_required,
     membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
 };
 
@@ -19,6 +21,8 @@ use super::super::{
 pub struct ParticipantAckCommit {
     outcome: AckCommitted,
     cursor_update: LiveMemberCursorUpdate,
+    binding_epoch: BindingEpoch,
+    previous_cursor: DeliverySeq,
 }
 
 impl ParticipantAckCommit {
@@ -33,6 +37,26 @@ impl ParticipantAckCommit {
     pub const fn observer_progress_projection(&self) -> ObserverProgressProjection {
         let request = self.outcome.request();
         ObserverProgressProjection::new(request.conversation_id, request.through_seq)
+    }
+
+    /// Replays this exact selected cursor transition into one sealed fate token.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged token when its conversation, participant, binding
+    /// epoch, or cursor prestate differs from this committed acknowledgement.
+    pub fn progress_binding_fate_token(
+        &self,
+        token: SealedBindingFateToken,
+    ) -> Result<SealedBindingFateToken, Box<SealedBindingFateToken>> {
+        let request = self.outcome.request();
+        token.participant_ack_progressed(
+            request.conversation_id,
+            request.participant_id,
+            self.binding_epoch,
+            self.previous_cursor,
+            request.through_seq,
+        )
     }
 
     /// Applies this commit to either its exact old cursor or its already-written
@@ -202,6 +226,8 @@ pub fn apply_participant_ack<EF, V, LF>(
 
     let outcome = AckCommitted::new(ack_envelope(request));
     ParticipantAckDecision::Commit(ParticipantAckCommit {
+        binding_epoch: receiving_binding_epoch,
+        previous_cursor: current_cursor,
         cursor_update: LiveMemberCursorUpdate::new(
             request.conversation_id,
             request.participant_id,
@@ -291,6 +317,8 @@ pub fn apply_participant_ack_with_obligations<EF, V, LF>(
 
     let outcome = AckCommitted::new(ack_envelope(request));
     Ok(ParticipantAckDecision::Commit(ParticipantAckCommit {
+        binding_epoch: receiving_binding_epoch,
+        previous_cursor: current_cursor,
         cursor_update: LiveMemberCursorUpdate::new(
             request.conversation_id,
             request.participant_id,
