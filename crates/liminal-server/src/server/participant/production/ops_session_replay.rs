@@ -371,7 +371,13 @@ impl ConversationAuthority {
                     )
                     .map(|()| None)
                 }
-                _ => Err(OperationLogError::V3FateReplayUnavailable { sequence }.into()),
+                (
+                    StoredTerminalDisposition::Pending,
+                    StoredDetachedSource::ExplicitRequestPending { .. },
+                ) => self
+                    .replay_explicit_pending_detached(&row, sequence)
+                    .map(|()| None),
+                _ => Err(OperationLogError::CorruptRow { sequence }.into()),
             },
             StoredOperation::Died { row } => self.replay_died_source(&row, sequence).map(|()| None),
             operation @ (StoredOperation::Ordinary { .. } | StoredOperation::Recovered { .. }) => {

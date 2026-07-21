@@ -1,7 +1,8 @@
 //! Cold application of durable connection-fate source rows.
 
 use liminal_protocol::lifecycle::{
-    BindingState, BindingTerminalCauseClass, BindingTerminalDisposition, DiedBindingTransition,
+    BindingState, BindingTerminalCauseClass, BindingTerminalDisposition, DetachCell,
+    DiedBindingTransition, start_blocked_detach,
 };
 
 use super::connection_fate::{admit_terminal, stored_specific_fate_intent};
@@ -33,6 +34,91 @@ impl ConversationAuthority {
             }
         };
         self.install_replayed_terminal(row.participant_id, binding, admitted, sequence, true)
+    }
+
+    pub(super) fn replay_explicit_pending_detached(
+        &mut self,
+        row: &StoredDetached,
+        sequence: u64,
+    ) -> Result<(), StateError> {
+        let StoredDetachedSource::ExplicitRequestPending {
+            request,
+            secret_verified: true,
+            verifier,
+            receiving_epoch,
+            observer_baseline,
+        } = row.source.clone()
+        else {
+            return Err(StateError::invariant(
+                "pending explicit Detached replay received contradictory source evidence",
+            ));
+        };
+        if row.cause != StoredDetachedCause::CleanDeregister
+            || row.disposition != super::log::StoredTerminalDisposition::Pending
+            || row.participant_id != request.participant_id
+            || row.binding_epoch != receiving_epoch
+            || observer_baseline != self.observer_progress
+        {
+            return Err(StateError::invariant(
+                "pending explicit Detached replay row disagrees with its request or observer baseline",
+            ));
+        }
+        let active = self.replay_fate_active(row.participant_id, row.binding_epoch.to_epoch()?)?;
+        let admitted = admit_terminal(self, active, BindingTerminalCauseClass::Detached)?;
+        validate_terminal_row(row.terminal_order, row.disposition, &admitted, sequence)?;
+        let BindingTerminalDisposition::Pending(position) = admitted.disposition else {
+            return Err(StateError::invariant(
+                "pending explicit Detached row replay selected a committed terminal",
+            ));
+        };
+        let request = request.to_request()?;
+        let verified = active
+            .verify_detach_request(request.clone(), verifier)
+            .map_err(|error| {
+                StateError::invariant(format!(
+                    "pending explicit Detached request verification failed: {error:?}"
+                ))
+            })?;
+        let (participant_id, mut slot) =
+            self.slots
+                .remove_entry(&row.participant_id)
+                .ok_or_else(|| {
+                    StateError::invariant(
+                        "pending explicit Detached participant disappeared during replay",
+                    )
+                })?;
+        let transition = start_blocked_detach(
+            slot.member,
+            verified,
+            slot.cell,
+            position,
+            observer_baseline,
+        )
+        .map_err(|error| {
+            StateError::invariant(format!(
+                "pending explicit Detached transition failed: {error:?}"
+            ))
+        })?;
+        let (member, binding, cell, _outcome) = transition.into_parts();
+        self.install_frontier(admitted.owner);
+        self.next_order =
+            self.next_order
+                .checked_add(1)
+                .ok_or(StateError::AllocationExhausted {
+                    domain: "transaction order",
+                })?;
+        if self.next_log_sequence != sequence {
+            return Err(StateError::invariant(
+                "pending explicit Detached replay log head disagrees with durable sequence",
+            ));
+        }
+        self.advance_log_head()?;
+        slot.member = member;
+        slot.binding = binding;
+        slot.cell = DetachCell::Pending(cell);
+        slot.exact_detach_token = Some(request.detach_attempt_token);
+        self.slots.insert(participant_id, slot);
+        Ok(())
     }
 
     pub(super) fn replay_died_source(
