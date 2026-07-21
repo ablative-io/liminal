@@ -15,6 +15,7 @@ impl ClaimFrontiers {
         binding_epoch: BindingEpoch,
         cursor: DeliverySeq,
         resulting_floor: DeliverySeq,
+        reserve_finalizer: bool,
     ) -> Result<BindingFateFrontierPlan, LiveFrontierTransitionError> {
         let mut participants = self.active_identities.participants().to_vec();
         let Some(participant) = participants
@@ -41,9 +42,14 @@ impl ClaimFrontiers {
         {
             return Err(LiveFrontierTransitionError::Precedence);
         }
+        let resulting_cursor = if reserve_finalizer {
+            cursor
+        } else {
+            high_watermark
+        };
         *participant = FrontierParticipant::new(
             participant_id,
-            high_watermark,
+            resulting_cursor,
             FrontierBinding::Detached(binding_epoch),
         );
         let active_identities =

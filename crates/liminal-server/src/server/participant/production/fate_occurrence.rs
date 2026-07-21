@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 use liminal_protocol::wire::{BindingEpoch, ParticipantId};
 
 use super::log::{
-    StoredDetached, StoredDied, StoredOperation, StoredOrdinaryTerminalSource,
-    StoredRecoveredPresentation, StoredSpecificFateIntent, StoredTerminalDisposition,
+    StoredDetached, StoredDied, StoredFinalizerPresentation, StoredOperation,
+    StoredOrdinaryTerminalSource, StoredRecoveredPresentation, StoredSpecificFateIntent,
+    StoredTerminalDisposition,
 };
 use super::state::{ConversationAuthority, StateError};
 
@@ -38,6 +39,14 @@ pub(super) enum FatePresentationOwner {
     Died,
     Detached,
     Recovered,
+    Finalizer,
+}
+
+/// Durable source and explicit presentation mode selected for one finalizer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PendingFinalizerRoute {
+    pub(super) pending_source_sequence: u64,
+    pub(super) presentation: StoredFinalizerPresentation,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +62,10 @@ enum PrimaryFate {
         committed: bool,
         expected_specific: Option<ExpectedSpecificFate>,
     },
-    Detached,
+    Detached {
+        source_sequence: u64,
+        committed: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +97,10 @@ pub(super) enum FateOccurrenceConflict {
     BindingEpoch,
     #[error("binding-fate presentation tag disagrees with durable occurrence ownership")]
     PresentationOwner,
+    #[error("pending finalizer has no matching pending Died or Detached occurrence")]
+    FinalizerSource,
+    #[error("Recovered finalizer reservation is missing, wrong, or already consumed")]
+    RecoveredReservation,
 }
 
 /// Active occurrence table rebuilt from the validated durable stream.
@@ -108,7 +124,9 @@ impl FateOccurrenceRouter {
     ) -> Result<(), FateOccurrenceConflict> {
         match operation {
             StoredOperation::Died { row } => self.route_died(conversation_id, row, source_sequence),
-            StoredOperation::Detached { row } => self.route_detached(conversation_id, row),
+            StoredOperation::Detached { row } => {
+                self.route_detached(conversation_id, row, source_sequence)
+            }
             StoredOperation::Ordinary { row, .. } => {
                 let died_source_sequence = match row.terminal_source {
                     StoredOrdinaryTerminalSource::DiedCommitted {
@@ -192,6 +210,7 @@ impl FateOccurrenceRouter {
         &mut self,
         conversation_id: u64,
         row: &StoredDetached,
+        source_sequence: u64,
     ) -> Result<(), FateOccurrenceConflict> {
         let key = FateOccurrenceKey {
             conversation_id,
@@ -205,7 +224,10 @@ impl FateOccurrenceRouter {
         self.insert_primary(
             key,
             FateOccurrenceState {
-                primary: PrimaryFate::Detached,
+                primary: PrimaryFate::Detached {
+                    source_sequence,
+                    committed,
+                },
                 specific: None,
                 presentation_owner: committed.then_some(FatePresentationOwner::Detached),
                 recovered_reservation: None,
@@ -229,6 +251,53 @@ impl FateOccurrenceRouter {
             });
         }
         Ok(())
+    }
+
+    /// Selects and consumes the one durable presentation mode before a real
+    /// Leave or fenced-Attached finalizer can construct an observer projection.
+    pub(super) fn select_finalizer(
+        &mut self,
+        key: FateOccurrenceKey,
+    ) -> Result<PendingFinalizerRoute, FateOccurrenceConflict> {
+        let state = self
+            .occurrences
+            .get_mut(&key)
+            .ok_or(FateOccurrenceConflict::FinalizerSource)?;
+        let (pending_source_sequence, pending) = match state.primary {
+            PrimaryFate::Died {
+                source_sequence,
+                committed,
+                ..
+            }
+            | PrimaryFate::Detached {
+                source_sequence,
+                committed,
+            } => (source_sequence, !committed),
+        };
+        if !pending {
+            return Err(FateOccurrenceConflict::FinalizerSource);
+        }
+        let presentation = if let Some(recovered_source_sequence) = state.recovered_reservation {
+            if state.reservation_consumed
+                || state.presentation_owner != Some(FatePresentationOwner::Recovered)
+            {
+                return Err(FateOccurrenceConflict::RecoveredReservation);
+            }
+            state.reservation_consumed = true;
+            StoredFinalizerPresentation::ConsumeRecoveredReservation {
+                recovered_source_sequence,
+            }
+        } else {
+            if state.presentation_owner.is_some() {
+                return Err(FateOccurrenceConflict::PresentationOwner);
+            }
+            state.presentation_owner = Some(FatePresentationOwner::Finalizer);
+            StoredFinalizerPresentation::PresentEnclosing
+        };
+        Ok(PendingFinalizerRoute {
+            pending_source_sequence,
+            presentation,
+        })
     }
 
     fn route_specific(
@@ -301,7 +370,7 @@ impl FateOccurrenceRouter {
 const fn primary_class(primary: PrimaryFate) -> FateOccurrenceClass {
     match primary {
         PrimaryFate::Died { .. } => FateOccurrenceClass::Died,
-        PrimaryFate::Detached => FateOccurrenceClass::Detached,
+        PrimaryFate::Detached { .. } => FateOccurrenceClass::Detached,
     }
 }
 

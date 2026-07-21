@@ -129,25 +129,40 @@ pub(super) fn project_committed_source(
             source_log_sequence,
             row,
         )?),
-        StoredOperation::Left { row } => Some(produced(
-            authority,
-            source_log_sequence,
-            ProducedSourceKind::Left,
-            Some(row.request.participant_id),
-            vec![(
-                row.left_delivery_seq,
-                ParticipantRecord::Left {
-                    affected_participant_id: row.request.participant_id,
-                    ended_binding_epoch: row
-                        .ended_binding_epoch
-                        .map(StoredBindingEpoch::to_epoch)
-                        .transpose()?,
-                },
-            )],
-        )?),
+        StoredOperation::Left { row } => project_left(authority, source_log_sequence, row)?,
         StoredOperation::Died { row } => project_died(authority, source_log_sequence, row)?,
     };
     Ok(projected)
+}
+
+fn project_left(
+    authority: &ConversationAuthority,
+    source_log_sequence: u64,
+    row: &super::log::StoredLeaveV3,
+) -> Result<Option<OutboxRow>, StateError> {
+    if matches!(
+        row.finalizer_presentation,
+        StoredFinalizerPresentation::ConsumeRecoveredReservation { .. }
+    ) {
+        return Ok(None);
+    }
+    produced(
+        authority,
+        source_log_sequence,
+        ProducedSourceKind::Left,
+        Some(row.request.participant_id),
+        vec![(
+            row.left_delivery_seq,
+            ParticipantRecord::Left {
+                affected_participant_id: row.request.participant_id,
+                ended_binding_epoch: row
+                    .ended_binding_epoch
+                    .map(StoredBindingEpoch::to_epoch)
+                    .transpose()?,
+            },
+        )],
+    )
+    .map(Some)
 }
 
 fn project_died(
