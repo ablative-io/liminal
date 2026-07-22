@@ -4,17 +4,19 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use liminal::durability::{DurableStore, open_ephemeral};
+use liminal_protocol::algebra::WideResourceVector;
+use liminal_protocol::lifecycle::{ClosureDebt, ClosureState, Event, ObserverProjection};
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest,
-    EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck, ReceiptReplay, RecordAdmission,
-    RecordAdmissionAttemptToken, ServerValue,
+    EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck, ParticipantRecord,
+    ReceiptReplay, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
 };
 
 use crate::server::connection::ReadyWaker;
 use crate::server::participant::dispatch_impact::{DispatchEffect, DispatchImpact, DispatchTarget};
 use crate::server::participant::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantSemanticHandler,
+    ParticipantOfferedProgress, ParticipantSemanticHandler,
 };
 
 use super::ProductionParticipantHandler;
@@ -269,5 +271,88 @@ fn dispatch_impact_covers_state_preserving_marker_and_w1b_changes() -> Result<()
     let fate = include_str!("connection_fate_dispatch.rs");
     assert!(fate.contains("Some(&mut impact)"));
     assert!(fate.contains("complete_with_impact(authority, appender, impact)"));
+    Ok(())
+}
+
+#[test]
+fn debt_zero_transition_releases_deferred_obligation() -> Result<(), Box<dyn Error>> {
+    let projection = ObserverProjection::new(1);
+    let debt = ClosureDebt::new(WideResourceVector::new(1, 1))
+        .ok_or("zero-transition fixture debt was zero")?;
+    let event = Event::projection_completed(1);
+    let successor = projection
+        .clear_after_completion(&event)
+        .ok_or("projection completion did not select Clear")?;
+    let resulting = projection
+        .complete(debt, event, successor)
+        .map_err(|state| format!("Owed-to-Clear transition refused: {state:?}"))?;
+    assert_eq!(resulting, ClosureState::Clear);
+
+    let service = installed_service()?;
+    let first_incarnation = ConnectionIncarnation::new(0xF2, 20);
+    let second_incarnation = ConnectionIncarnation::new(0xF2, 21);
+    let mut first_conversations = ParticipantConnectionConversations::default();
+    let first = apply(
+        &service,
+        first_incarnation,
+        &mut first_conversations,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0x31; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(first) = first else {
+        return Err("zero-transition wake fixture first enrollment did not bind".into());
+    };
+
+    let wake_count = Arc::new(AtomicU64::new(0));
+    let inbox = service.new_publication_inbox();
+    service.publication_registry().register(
+        first_incarnation,
+        &inbox,
+        ReadyWaker::for_test(Arc::clone(&wake_count)),
+    )?;
+    assert!(!inbox.has_pending()?);
+
+    let mut second_conversations = ParticipantConnectionConversations::default();
+    let second = apply(
+        &service,
+        second_incarnation,
+        &mut second_conversations,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0x32; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(second) = second else {
+        return Err("zero-transition wake fixture second enrollment did not bind".into());
+    };
+    assert_eq!(wake_count.load(Ordering::SeqCst), 1);
+    let ready = inbox.take_ready()?;
+    assert_eq!(ready.conversations, vec![CONVERSATION]);
+    assert!(!inbox.has_pending()?);
+
+    let released = service
+        .next_publication(first_incarnation, CONVERSATION, None)?
+        .ok_or("told transition did not release the least obligation")?;
+    assert!(matches!(
+        released.delivery.record,
+        ParticipantRecord::Attached {
+            affected_participant_id,
+            ..
+        } if affected_participant_id == second.participant_id()
+    ));
+    assert_eq!(
+        service.next_publication(
+            first_incarnation,
+            CONVERSATION,
+            Some(ParticipantOfferedProgress {
+                binding_epoch: released.binding_epoch,
+                through_seq: released.delivery_seq(),
+            }),
+        )?,
+        None
+    );
+    assert_eq!(first.participant_id(), 0);
     Ok(())
 }
