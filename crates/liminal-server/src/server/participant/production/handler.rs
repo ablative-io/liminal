@@ -144,7 +144,12 @@ impl ProductionParticipantHandler {
     /// non-test compilation of this method is byte-identical to the direct
     /// call the two call sites (owner-restore expiry and operation facts)
     /// previously made.
+    ///
+    /// `&self` is unused here but retained deliberately so both compilations
+    /// share the one `self.now_ms()` call form; the `#[cfg(test)]` sibling
+    /// reads `self.now_override`.
     #[cfg(not(test))]
+    #[allow(clippy::unused_self)]
     fn now_ms(&self) -> Result<u64, facts::FactsError> {
         facts::now_unix_millis()
     }
