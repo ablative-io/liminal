@@ -12,7 +12,18 @@ delivery, `func_info` raising catchable `function_clause` instead of
 spinning, bare-atom `if_clause`, boxed-reference `demonitor/1`) plus the
 breaking selector-shadow removal — liminal's actor tiers assemble no
 selector opcodes, so the removal is inert here (verified by instruction
-census at the 0.16.0 uptake). `liminal-protocol` is unchanged at 0.3.0.
+census at the 0.16.0 uptake). Ships with `liminal-protocol` 0.3.1.
+
+## liminal-protocol 0.3.1 — 2026-07-23
+
+Additive release (no removed or changed public items — verified by diff
+against the 0.3.0 release commit): the W2 obligation-debt dispatch
+surface (`ObligationDebtDispatchState`/`Transition`/`Decision`,
+`decide_obligation_debt_dispatch`, `scalar_audit_for_recipient_endpoint`,
+debt-owner coupling at the delivery seam). Published because
+`liminal-server` 0.3.2 consumes this surface — the gap was caught by
+`cargo publish`'s tarball verify, which builds against the registry
+rather than workspace paths.
 
 ## liminal-protocol 0.3.0 — 2026-07-21
 
