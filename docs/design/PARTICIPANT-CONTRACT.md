@@ -323,6 +323,24 @@ nineteen underlying findings were hand-verified before drafting.
 | B6 — ambiguous Leave/K accounting | Separates E/X-counter-backed lifecycle ownership, ordinary-Q Leaves with zero K charge, and K-claim-backed detached Leaves whose exact appended charge transfers from K_remaining. | R-A2/R-C2/R-C4/R-D1; cases 44–56 |
 | B7 — public histories misclassified as test seeds | Enumerates the four actually seeded cases, classifies every other boundary as a stated public history, and removes stale historical/final-audit claims to the contrary. | changelogs; acceptance preamble/cases 42/48/49/56; final audit |
 
+### 0.12 R18 amendment A1 — response/push ordering on one participant connection (2026-07-23)
+
+**Status: amendment to DRAFT R18, authored by the liminal domain owner (Hermes
+Crumpet); rides the two-key gate with the draft — the reviewer-of-record key
+(Vesper Lynd) ratifies or refutes it at the next redraft.** Provenance: during a
+loaded W4 tear battery one run of
+`leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_reopens`
+read a well-formed unsolicited `ServerPush(ParticipantDelivery)` where it
+expected its request's `ServerValue` response. Amplification reproduced the
+interleave at will (52/60 iterations under 8-way CPU contention, byte-identical
+captures; the response was correctly buffered behind the push — an ordering
+artifact, not loss or corruption). Root cause of the ambiguity: R18 nowhere
+states whether a request's semantic response and unsolicited pushes on the same
+connection are ordered. This amendment closes that gap in prose; it changes no
+wire bytes and no server behavior. It adds the `«RESPONSE-PUSH-ORDER»` socket
+(decided-by-amendment) and one paragraph in section (c) after the
+`conversation_id` demux paragraph.
+
 ## 1. The verified gap
 
 The evidence base was re-verified rather than copied:
@@ -3295,6 +3313,26 @@ before mint/bind under `«MULTI-BINDING-PER-CONVERSATION»`; v1 neither adds rec
 id to deliveries nor silently multiplexes two cursors. Connection teardown
 finalizes every active binding through R-A2.
 
+**Response/push ordering (amendment A1).** One participant connection's
+server-originated bytes flow through a single FIFO writer, and each
+conversation's delivery order is preserved (above) — but the contract promises
+**no ordering between a request's `ServerValue` response and unsolicited
+`ServerPush` frames**, including pushes of the same conversation: a held
+obligation released concurrently with request service may lawfully reach the
+wire before the response. A correct client therefore demuxes by frame variant —
+`ServerValue` answers the client's single outstanding request; `ServerPush` is
+queued/consumed in arrival order — and never assumes the first frame after a
+request is that request's response. v1 offers no request-correlation field
+(`stream_id` is fixed to zero and carries no correlation meaning, above; R-D3
+defers an application-level reply relationship to an explicit future mechanism
+rather than overloading `correlation_id`). Reference implementation:
+`crates/liminal-sdk/src/remote/participant.rs` `receive()` routes
+`ServerPush → Push` and delegates `ServerValue` to the outstanding-operation
+slot. Single-outstanding-request discipline is what makes variant demux a
+sufficient correlation mechanism in v1; a client that pipelines requests has no
+correlation surface and is outside this contract until R-D3's future mechanism
+lands.
+
 ### Silence-attacking acceptance frame
 
 **Finite-boundary test convention.** “Test-seed” below means a test-only
@@ -6189,6 +6227,7 @@ to choose incompatible semantics silently.
 | `«COMPACTION-EXIT»` | **decided-by-draft** | A pending marker shares the durable server-candidate admission order with finalizations; at append it recomputes `abandoned_after..abandoned_through` and the physical-floor snapshot. Acking abandons through that pre-marker watermark and advances to marker sequence. | Both marker/finalization orders, append-time fields, retained-suffix choice, marker loss/redelivery, later independent floor episode, concurrent-live, and post-ack flow tests. |
 | `«RETENTION-UNITS»` | **decided-by-draft** | Caps start at `2Q+I×marker`: debt borrows only Q; K=Q is componentwise transferable recovery occupancy. Recovery charge moves from K_remaining into B; fit uses exact post-transfer K_remaining. One quartet and the fixed occurrence/selection array back the complete successor plan; anchored DCR forbids ordinary attach. | Empty equality with one-record enrollment; exact S/B/K_remaining transfers; marker ack/compaction; fenced DCR/Leave; equality refusal and farther-max quartet; crash-atomic successor tests. |
 | `«MULTI-CONVERSATION-MUX»` | **decided-by-draft** | Yes. One connection carries many conversations, demuxed by `conversation_id`; participant `stream_id = 0` and has no semantic role. | Cross-conversation interleaving and independent-cursor tests. |
+| `«RESPONSE-PUSH-ORDER»` | **decided-by-amendment (A1, 2026-07-23; pending reviewer-of-record key)** | No ordering is promised between a request's `ServerValue` response and unsolicited `ServerPush` frames on one connection; per-conversation push order is preserved; correct clients demux by frame variant with single-outstanding-request discipline; v1 has no request-correlation field (R-D3 defers it). | Amplified interleave reproduction (52/60 under 8-way contention, byte captures) plus harness demux fix as fail-first pair; SDK `receive()` variant-demux as reference; cross-conversation interleaving tests of `«MULTI-CONVERSATION-MUX»` unaffected. |
 | `«MULTI-BINDING-PER-CONVERSATION»` | **decided-by-draft (excluded in v1)** | At most one participant binds each `(connection_incarnation, conversation_id)`. A different-id enrollment/attach gets R-C1's exact request-echo variant, which adds only `presented_participant_id:None\|Some(request participant)` and never an occupying identity field; same-id rotation is allowed. | Empty-slot race, enrollment with no presented id, Q-after-P refusal without P disclosure, same-P rotation, and conversation-only delivery codec. |
 | `«LIFECYCLE-VERDICT-RECIPIENTS»` | **decided-by-draft** | Every member is entitled to every lifecycle/compaction record in total order, including while detached, unless it explicitly accepts a named abandonment after compaction broke continuity. | Three-party lifecycle/compaction races, offline replay, and explicit-abandonment tests. |
 | `«LIFECYCLE-OBSERVER-DELIVERY»` | **decided-by-draft** | The log is sole completed lifecycle history and observer progress hard. Signed per-conversation and SDK-wide conversation/row/full-byte caps plus request/row maxima bound parking; durable first-row interest slots make all Awaiting conversations armable. `Reserved` restart, checked u64 order, cohort marking, authority loss, epoch monotonicity, and all-dimension renegotiation are explicit. Acks never park. | Independent row/byte/global cap hits, interest-slot recovery, Reserved crash, per-row downward incompatibility, near-max order, epoch races, credential loss, and no orphan/ack/poll. |

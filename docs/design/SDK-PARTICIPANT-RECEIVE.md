@@ -75,6 +75,15 @@ THIS repo; F-0c then re-proves them from the outside as a consumer:
    documented: what is guaranteed (per-sender FIFO? total per-conversation?)
    and what is not — request-response correlation and workflow steps both
    stand on this answer.
+
+   **Status note (2026-07-23, amendment A1):** the response-vs-push half of
+   this question is now ANSWERED at the contract: no ordering is promised
+   between a request's `ServerValue` response and unsolicited `ServerPush`
+   frames on one connection; correct clients demux by frame variant under
+   single-outstanding-request discipline (PARTICIPANT-CONTRACT.md §0.12
+   amendment A1 and the `«RESPONSE-PUSH-ORDER»` socket). The
+   lifecycle-vs-delivery ordering half remains this brief's open question for
+   the worker to answer with evidence.
 6. **BACKPRESSURE** — the Accept/Defer/Reject surface reaches the
    participant honestly: what a slow consumer experiences is typed, not
    emergent (within the bounds of what the A1 wiring state permits — see
