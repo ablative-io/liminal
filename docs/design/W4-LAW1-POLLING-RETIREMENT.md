@@ -1,6 +1,6 @@
 # W4 — LAW-1 polling retirement (server-internal readiness/notification wave)
 
-**Revision r1 — design-first brief of record, 2026-07-22**
+**Revision r2 — design-first brief of record, 2026-07-22 (lens r1 fold: 3 MAJOR + 5 minor + coordinator finding)**
 
 This brief rules the first buildable wave of the LAW-1 polling-retirement
 program named as lane **W4** in the wiring ledger. It is a docs-only lane: it
@@ -95,9 +95,9 @@ citation this brief carries was re-verified at `829b3c3`; the drift is:
 
 | skeleton anchor (`ce8814d`) | state at `829b3c3` | disposition |
 |---|---|---|
-| Unconditional `notify_ready` after every successful semantic return | **Retired by W2.** Notification is now impact-driven: `InstalledParticipantService::notify_impact` iterates `impact.target_union()` at `crates/liminal-server/src/server/participant/dispatch.rs:582-588`, called only for `DispatchImpact::Changed` at `dispatch.rs:625,676`. A grep for `notify_ready` in that module returns nothing. | Reuse this TOLD vocabulary; do not reintroduce an unconditional tell. |
+| Unconditional `notify_ready` after every successful semantic return | **Retired by W2.** Notification is now impact-driven: `InstalledParticipantService::notify_impact` iterates `impact.target_union()` at `crates/liminal-server/src/server/participant/dispatch.rs:582-588`. The `notify_impact` calls at `dispatch.rs:625,676` are **unconditional**; the gating lives inside `target_union` itself — `DispatchImpact::Unchanged` returns an empty `BTreeSet` at `crates/liminal-server/src/server/participant/dispatch_impact.rs:97-104` (empty-set arm at `:99`), so an `Unchanged` impact fires no READY. A grep for `notify_ready` in that module returns nothing. | Reuse this TOLD vocabulary; do not reintroduce an unconditional tell. |
 | Main listener loop `listener.rs:125-155` | Loop body `crates/liminal-server/src/server/listener.rs:130-155`; constants unchanged at `:11-12`; nonblocking at `:100`; reap+accept+`WouldBlock` sleep at `:131-142`; transient 50 ms sleep at `:147`. | Re-pinned. W4-NOW leg 1. |
-| — (absent at `ce8814d`) | **NEW family:** the sibling WebSocket accept worker `crates/liminal-server/src/server/connection/websocket/listener.rs`, landed with the W2 WebSocket transport. Constants `:26-28`, nonblocking `:67`, `accept_loop` reap+accept+`WouldBlock` 10 ms sleep + 50 ms transient sleep at `:150-177`. It self-documents "Mirrors the main TCP listener's accept loop" (`:25-28`). | New at `829b3c3`. W4-NOW leg 1 (same shape, same wave). |
+| — (absent at `ce8814d`) | **NEW family:** the sibling WebSocket accept worker `crates/liminal-server/src/server/connection/websocket/listener.rs`, landed with the W2 WebSocket transport. Constants `:26-28`, nonblocking `:67`, `accept_loop` reap+accept+`WouldBlock` 10 ms sleep + 50 ms transient sleep at `:150-177`. It self-documents "Mirrors the main TCP [`ServerListener`]…ownership shape exactly" at the module doc `:3-4`, and its constants are commented "matching the main TCP listener's accept loop" at `:25`. | New at `829b3c3`. W4-NOW leg 1 (same shape, same wave). |
 | Health serve loop `endpoint.rs:104-133` | `crates/liminal-server/src/health/endpoint.rs:104-134`; startup nonblocking+spawn at `:83-101`; `WouldBlock` 10 ms sleep at `:121-122`. | Re-pinned. W4-NOW leg 2. |
 | Shutdown drain loop `shutdown.rs:185-226`; settle `:229-245`; constants `:14-16` | Constants unchanged at `crates/liminal-server/src/server/shutdown.rs:14-16`; `drain_connections` reap/count/sleep loop drifted to `:196-238` (sleep `:236`); `wait_after_force_close` drifted to `:240-256` (sleep `:255`). `run_shutdown_sequence` now also takes an optional `WebSocketListener` and stop-accepts both transports at `:169-194`. A TOLD `Condvar`-based `ShutdownHandle::wait` already exists at `:49-62,86-107`. | Re-pinned. W4-NOW leg 3; the existing `Condvar` is a reuse candidate for the drain-completion primitive. |
 | Cluster membership `membership.rs:40-44,112-128,198-223,225-230` | `POLL_INTERVAL` at `crates/liminal-server/src/cluster/membership.rs:44`; `poll_once` at `:115`; `PollLoop` field at `:149`; `run_poll_loop` reap/sleep at `:225-228`; `start` at `:362`. | Re-pinned. **Scoped out** (§3): external beamr `«MEMBERSHIP-EVENT-SOURCE»`. |
@@ -119,6 +119,15 @@ Rust paths under `sdks/liminal-ts/wasm-src/`; no non-`crates/` product-Rust
 family exists outside the SDK wasm codec. Every confirmed family below carries a
 byte-verified loop; every candidate carries grep evidence plus the D.2 pairing
 question it still owes.
+
+**Class exclusions stated explicitly (skeleton §D.1: silence about a class is a
+defect).** The `crates/liminal-sdk/examples/` tree is excluded from the product
+claim: the only `sleep` there is `crates/liminal-sdk/examples/demo_feed_publisher/main.rs:90`
+(`thread::sleep(TICK_INTERVAL)`), which is demo publish-pacing in an example
+binary, not shipped product. The `#[cfg(test)]` sleeps surfaced by the sweep
+(e.g. `listener.rs:284`, `execute.rs:407,431,452`, the `*_tests.rs` files) are
+test scaffolding, not production loops. The TypeScript/Gleam SDK roots remain
+under the skeleton's own §C/§D closure and are not re-swept here.
 
 ### 2.1 Confirmed polling families (byte-verified loop at `829b3c3`)
 
@@ -142,16 +151,26 @@ dirty.
 
 | # | candidate | evidence at `829b3c3` | required question (→ §7) |
 |---:|---|---|---|
-| C1 | WebSocket SDK background reader **(new at `829b3c3`)** | `websocket/subscription.rs:412-419`: `run_reader` blocks on `socket.read_event()` with **no armed read window** (`std_socket.rs:283` sets `set_read_timeout(None)`); a `SocketRead::TimedOut` re-enters the blocking read via `continue` (`:417`), self-documented "not a poll: no interval" (`:414-416`). Materially different from F8/F9. | Lens Q5 — conforming blocking reader, or a family? Must carry the four idle-cost answers **and** a shutdown-wake proof. |
+| C1 | WebSocket SDK background reader **(new at `829b3c3`)** | **Absence evidence.** The background reader `run_reader` (`websocket/subscription.rs:399-419`) contains **no** `set_read_timeout` call, so it arms no read window; a `SocketRead::TimedOut` merely re-enters the blocking `read_event` via `continue` (`:417`), self-documented "not a poll: no interval" (`:414-416`). The window is explicitly disarmed once in setup at `websocket/subscription.rs:283` (`set_read_timeout(None)`). The `set_read_timeout` primitive is defined at `std_socket.rs:155` (doc: "`None` blocks indefinitely") and passes through at `:158`; the only `Some(window)` arming anywhere is the connect handshake `Some(IO_TIMEOUT)` at `std_socket.rs:93`. So the reader blocks with no interval. Materially different from F8/F9. | Lens Q5 — conforming blocking reader, or a family? Must carry the four idle-cost answers **and** a shutdown-wake proof. |
 | C2 | WebSocket keepalive Ping timer **(new at `829b3c3`)** | `websocket/process.rs:78-91,640-659`: `KeepaliveSchedule` from config `ping_interval_ms`; W2 §5.1 already discloses it as a transport slice and pins that slice/Ping counters GROW while debt counters stay flat. | Lens Q6 — by-design transport idle cost (SENDS liveness, does not poll for change); confirm bound + pin + sign-off, and that it stays outside W4 change-detection scope. |
 | C3 | `PushReplyAwaiter` recv re-arm | `supervisor.rs:745,790,844` (`recv_timeout`/`try_recv`); the skeleton's §C `UNVERIFIED-UNTIL-SWEPT` row, re-pinned. | Lens Q9 — confirmed out-of-W4-NOW; tracked to its own SDK-successor disposition. |
-| C4 | Durability bridge `block_on` (`MAX_POLLS`) | `durability/bridge.rs:52,87-93`: bounded 8-poll loop against a NoopWaker; skeleton §C row, unchanged. | Lens Q9 — synchronous-contract assertion vs bounded scan; out-of-W4-NOW. |
-| C5 | Cluster resolver NoopWaker `block_on` | `cluster/discovery.rs:187-245`: `future.poll()` once against a NoopWaker, `panic!` on `Pending`. Distinct from C4 (single poll, no loop). | Lens Q9 — classify with C4, do not conflate. |
-| C6 | Dedup sweeper | `durability/dedup/sweep.rs:76-105` (`DedupSweeper`, `scan`+sweep). Grep finds **no production timer arming it** — only re-exports in `dedup.rs`/`durability/mod.rs`; not scheduled into a periodic loop at this pin. | Lens Q8 — confirm on-demand-only; a future periodic caller re-enters it as a family. |
-| C7 | Single-shot admitted-deadline `recv_timeout` waits | `conversation/actor/sync.rs:33`; `conversation/actor.rs:469` (5 s); `routing/table.rs:437` (1 s); `routing/dispatch.rs:316` (`HANDOFF_CONFIRMATION_WINDOW`); `connection/conversation.rs:214,278` (`try_recv`/`recv_timeout` on `exit_rx`). Each appears to be a one-shot admitted wait budget, not a change-detection loop. | Lens Q7 — D.2 pairing must confirm each is a terminal admitted-deadline wait, not a re-check loop. |
-| C8 | TypeScript SDK reconnection loop | Skeleton §C `OPEN` row (`sdks/liminal-ts/src/connection.ts`), outside the `crates sdks` Rust roots; unchanged at this pin. | Out-of-scope here (TS root); tracked by the skeleton's own §C/§D closure. |
+| C4 | Durability bridge `block_on` (`MAX_POLLS`, NoopWaker scan) | `durability/bridge.rs:52,87-93`: bounded 8-poll loop against a **NoopWaker** (a waker that can never be woken); skeleton §C row, unchanged. This is the NoopWaker-scan mechanism — distinct from the real-waker runtime parks C5/C6 and never to be conflated with them (skeleton §C row 3). | Lens Q9 — synchronous-contract assertion vs bounded scan; out-of-W4-NOW. |
+| C5 | Cluster **startup** tokio `block_on` (real-waker park) **(skeleton §C row-3 ordered site)** | `cluster/membership.rs:320` (`runtime.block_on(scheduler.start_distribution_listener(...))`) and `:328` (`runtime.block_on(discovery::connect_seeds(...))`): a real tokio runtime parks the startup thread on an async I/O op until the reactor wakes it on completion. No application-layer interval/poll; not a NoopWaker scan. | Lens Q11 — classify as a real-waker runtime park (event-driven blocking bridge), distinct from C4, pending confirmation the awaited distribution futures hide no poll (dependency boundary, §D.5). |
+| C6 | Cluster **per-write** tokio `block_on` (real-waker park) **(skeleton §C row-3 ordered site)** | `cluster/sync.rs:277-290`: on a multithread runtime `tokio::task::block_in_place(\|\| handle.block_on(write))` (`:282`), else a `Builder::new_current_thread()` runtime `block_on(write)` (`:286-290`), where `write` is `connection.write_raw(&frame).await` (`:275`). Real-waker park on a socket write, per outbound write, not a change-detection loop. | Lens Q11 — same classification as C5; the two `block_on` sites the skeleton §C row 3 ordered separately classified. |
+| C7 | Dedup sweeper | `durability/dedup/sweep.rs:76-105` (`DedupSweeper`, `scan`+sweep). Grep finds **no production timer arming it** — only re-exports in `dedup.rs`/`durability/mod.rs`; not scheduled into a periodic loop at this pin. | Lens Q8 — confirm on-demand-only; a future periodic caller re-enters it as a family. |
+| C8 | Single-shot admitted-deadline `recv_timeout` waits | `conversation/actor/sync.rs:33`; `conversation/actor.rs:469` (5 s); `routing/table.rs:437` (1 s); `routing/dispatch.rs:316` (`HANDOFF_CONFIRMATION_WINDOW`); `connection/conversation.rs:214,278` (`try_recv`/`recv_timeout` on `exit_rx`). Each appears to be a one-shot admitted wait budget, not a change-detection loop. | Lens Q7 — D.2 pairing must confirm each is a terminal admitted-deadline wait, not a re-check loop. |
+| C9 | TypeScript SDK reconnection loop | Skeleton §C `OPEN` row (`sdks/liminal-ts/src/connection.ts`), outside the `crates sdks` Rust roots; unchanged at this pin. | Out-of-scope here (TS root); tracked by the skeleton's own §C/§D closure. |
 
-Census discipline: names F1–F9 and C1–C8 are unique. Any future sweep hit
+**Examined and excluded — not a candidate.** The cluster resolver `NoopWaker`
+`block_on` that an earlier draft carried as a production candidate is **test-only**:
+it lives entirely inside `#[cfg(test)] mod tests` at `cluster/discovery.rs:180-182`
+(`NoopWake` at `:189`, helper `resolve_now` at `:195`, `#[test]` fns at
+`:222,240`). Production `ClusterResolver::resolve` at `discovery.rs:66` returns a
+`ResolveFuture` driven by the tokio runtime, not a NoopWaker scan. It is recorded
+here so its examination is not a silent drop, but it carries no lens question
+because it is not production code.
+
+Census discipline: names F1–F9 and C1–C9 are unique. Any future sweep hit
 appends a new row; it is never folded into a similar one.
 
 ## 3. Scope ruling
@@ -171,7 +190,7 @@ opened as a separate lane.
 | **Ledgered-elsewhere** | F6 (cluster membership) | Blocked on external `«MEMBERSHIP-EVENT-SOURCE»` — an ordered join/leave API on beamr distribution's `ConnectionManager`; native-only (distribution is net-gated). Its own successor brief (skeleton §B). |
 | **Ledgered-elsewhere** | F7 (channel command-reply) | Blocked on external `«CHANNEL-REPLY-EVENT-RACE»` — a scheduler-to-waiter process-exit notification (beamr/Artemis lane). Separate scheduler-seam brief. |
 | **Ledgered-elsewhere** | F8, F9 (SDK TCP readers), and C1 (SDK WS reader) | Liminal-local but client-side, sharing **one** portable socket-wake mechanism and a different race taxonomy from the server loops. Own shared SDK-reader brief (skeleton §B). Kept out of W4-NOW so the server wave is not gated on the SDK wake decision. |
-| **Out-of-scope-with-why** | C2 (WS keepalive), C3–C7 (growth), C8 (TS) | C2 is a by-design transport idle cost already disclosed by W2, not change-detection. C3–C7 are unresolved growth candidates owed a D.2 pairing or a synchronous-contract classification. C8 is outside the Rust roots. All carry a §7 lens question so none is a silent gap. |
+| **Out-of-scope-with-why** | C2 (WS keepalive), C3–C8 (growth), C9 (TS) | C2 is a by-design transport idle cost already disclosed by W2, not change-detection. C3–C8 are unresolved growth candidates owed a D.2 pairing, a synchronous-contract classification, or a real-waker-park confirmation; C5/C6 are the two tokio `block_on` sites the skeleton §C row 3 ordered separately classified (event-driven runtime parks, not the NoopWaker scan C4). C9 is outside the Rust roots. All carry a §7 lens question so none is a silent gap. |
 
 W4-NOW is a buildable wave of **three legs** (leg count ≤ 3, per the W2 shape).
 Each leg separates **FIXED behaviour** from **OPEN mechanism** per the
@@ -184,11 +203,15 @@ timer, poll, sweep, scan, periodic reap, `WouldBlock`/timeout wake, or stop-flag
 sample. The landed TOLD vocabularies this wave REUSES — it does not invent
 parallel ones — are: **(a)** the shared beamr-readiness reactor already consumed
 by parked connections (inventory pinned in `supervisor_tests.rs`; quiescence
-oracle `publication.rs:408`); **(b)** the W1b connection-fate exit delivery
-(`ConnectionFateWorkItem` routed at
-`crates/liminal-server/src/server/participant/dispatch.rs:99-158`; completion at
-`binding_fate_completion.rs`), which already delivers a connection's exit rather
-than finding it by a reap scan; and **(c)** the existing `Condvar`-based
+oracle `publication.rs:408`); **(b)** the W1b connection-fate exit delivery —
+the `ConnectionFateWorkItem` struct is defined at
+`crates/liminal-server/src/server/participant/dispatch.rs:115`, and its routing
+funnel `handle_connection_fate` is at `dispatch.rs:618-628`; completion appends
+at
+`crates/liminal-server/src/server/participant/production/binding_fate_completion.rs`
+— which already delivers a **registered** connection's exit rather than finding
+it by a reap scan (the §4.1 handshake-stage carve-out bounds what (b) does and
+does not cover); and **(c)** the existing `Condvar`-based
 `ShutdownHandle` (`shutdown.rs:49-62,86-107`) as the completion-notification
 shape.
 
@@ -205,12 +228,32 @@ resource-exhaustion policy must fail, shed, or await a genuine resource event �
 never sleep-and-retry the EMFILE/ENFILE path (`listener.rs:145-147`,
 `websocket/listener.rs:165-167`).
 
+**Handshake-stage carve-out (coordinator finding, verified at bytes).** F2 has
+**two** distinct exits, and the W1b funnel (b) covers only one of them. A
+**completed** upgrade is spawned into the shared `ConnectionSupervisor`
+(`websocket/supervisor.rs:194,212`) and becomes an ordinary supervised
+connection — its later exit rides the W1b `ConnectionFateWorkItem` delivery
+exactly like a TCP connection's. But a **handshake-stage** worker that never
+registers — a refused or failed upgrade (`websocket/supervisor.rs:196-201`), or
+a pre-upgrade shutdown interrupt — ends without ever entering the shared
+supervisor; its thread-completion is tracked today by the join-scan
+`HandshakeSupervisor::reap_finished` (`websocket/supervisor.rs:112`), called each
+accept iteration at `websocket/listener.rs:156`. **W1b does not cover
+handshake-stage exits.** The module doc confirms the boundary: "A COMPLETED
+upgrade is then spawned into the SHARED `ConnectionSupervisor`"
+(`websocket/supervisor.rs:7-10`). Therefore leg 1 replaces `reap_finished` with
+its **own** TOLD handshake-worker completion delivery — a worker signals its own
+thread-end into a completion primitive; still no reap loop — which is **not**
+literally the W1b funnel. Only post-upgrade connection exits reuse (b).
+
 **OPEN mechanism (candidates, none selected).** Socket
 `«MAIN-LISTENER-READINESS-SHUTDOWN-EXIT»` and its WebSocket sibling
 `«WS-LISTENER-READINESS-SHUTDOWN-EXIT»`: expose host-owned listener-fd readiness
 from the existing shared reactor, **or** a portable blocking-accept plus an
-explicit cross-platform interrupt. The connection-exit half REUSES the W1b fate
-exit delivery (c) rather than a new reap path.
+explicit cross-platform interrupt. The **registered** connection-exit half
+REUSES the W1b fate exit delivery (b/c) rather than a new reap path; the
+**handshake-worker** completion half needs its own TOLD delivery per the
+carve-out above, whose concrete completion primitive is also OPEN.
 
 **Idle-cost lens.** (1) Zero application-thread wakes and zero repeated
 accept/reap calls on a silent listener; pin zero. (2) For `L_tcp + L_ws`
@@ -284,7 +327,7 @@ the production accept/drain path satisfies a row.
 | 3 | `main_listener_source_has_no_accept_backoff_or_reap_poll` | 1 / absence-grep | No hit for `ACCEPT_IDLE_BACKOFF\|TRANSIENT_ERROR_BACKOFF\|WouldBlock.*sleep\|reap_crashed_connections` in the replacement accept path. |
 | 4 | `websocket_listener_source_has_no_accept_backoff_or_handshake_reap_poll` | 1 / absence-grep | No hit for the same constants nor `reap_finished` in a per-iteration sleep in the WebSocket accept path. |
 | 5 | `listener_shutdown_interrupts_accept_wait_without_backoff` | 1 / correctness | Race shutdown before, during, and after arming, on both listeners; the wait returns promptly with no sleep and no lost accept. |
-| 6 | `connection_exit_reaches_supervisor_cleanup_by_delivery_not_reap` | 1 / correctness | A connection-process exit while the listener is silent reaches supervisor/handshake cleanup via the W1b fate delivery, with no per-iteration reap scan. |
+| 6 | `registered_connection_exit_reaches_supervisor_cleanup_by_delivery_not_reap` | 1 / correctness | A **registered** connection-process exit (TCP, or a post-upgrade WebSocket connection) reaches supervisor cleanup via the W1b fate delivery, with no per-iteration `reap_crashed_connections` scan. |
 | 7 | `listener_idle_grows_unrelated_reactor_slices_while_accept_counters_stay_flat` | 1 / idle-honesty | Under an unrelated live workload, reactor/transport slice counters GROW while accept-attempt and reap counters stay FLAT — proving the test cannot pass by disabling the reactor. |
 | 8 | `silent_health_listener_has_zero_application_wakes` | 2 / absence | Quiet health listener: zero accept attempts and zero application wakes after arming, route behaviour unchanged. |
 | 9 | `health_accept_source_has_no_wouldblock_sleep_poll` | 2 / absence-grep | No hit for `set_nonblocking\(true\)`-driven `WouldBlock` + `sleep` in the health accept path. |
@@ -299,12 +342,13 @@ the production accept/drain path satisfies a row.
 | 18 | `drain_exit_between_predicate_and_park_is_not_lost` | 3 / crash-cut | An exit delivered between the completion-predicate observation and the park is not lost (arm-before-observe barrier). |
 | 19 | `last_drain_exit_simultaneous_with_deadline_resolves_one_winner` | 3 / crash-cut | The last exit arriving at the same barrier as the deadline resolves to exactly one winner; completion is neither double-counted nor dropped. |
 | 20 | `accepted_socket_racing_shutdown_is_supervised_or_shed_never_slept` | 1 / crash-cut | A socket accepted while shutdown fires is either supervised or explicitly shed, never left to a sleep-retry; no connection slips past the shutdown broadcast. |
+| 21 | `handshake_worker_completion_delivered_not_reap_scanned` | 1 / correctness | A handshake-stage worker that never registers (refused/failed upgrade, or pre-upgrade shutdown) signals its own completion; no `HandshakeSupervisor::reap_finished` join-scan runs per accept iteration. This is the F2 exit W1b does not cover. |
 
 ## 6. Scope walls
 
 | inside W4-NOW | expressly outside W4-NOW |
 |---|---|
-| Retiring the five server-owned sample/sleep loops F1–F5; TOLD readiness/completion + explicit shutdown/deadline wakes; reuse of the beamr-readiness reactor, W1b fate exit delivery, and the `ShutdownHandle` `Condvar`; the 20 oracles above. | Inventing any new reactor, second exit path, or parallel wake vocabulary. Reuse (a)/(b)/(c) or leave the mechanism OPEN under a named socket. |
+| Retiring the five server-owned sample/sleep loops F1–F5; TOLD readiness/completion + explicit shutdown/deadline wakes; reuse of the beamr-readiness reactor, W1b fate exit delivery, and the `ShutdownHandle` `Condvar`; the 21 oracles above. | Inventing any new reactor, second exit path, or parallel wake vocabulary. Reuse (a)/(b)/(c) or leave the mechanism OPEN under a named socket. |
 | The listener/health accept wait and the drain/settle completion wait. | Health/readiness/metrics route semantics, auth, or the console/OpsState design that rides the health listener. |
 | Composition of drain completion with W1b connection-fate exits. | Reopening W1b fate classification, schema, source order, finalizer ownership, or `ParticipantServiceFatal`. |
 | Server-side loops only. | Cluster membership (F6), channel command-reply (F7), and the SDK readers (F8/F9/C1) — each its own ledgered lane (§3). W4-NOW neither claims nor blocks their replacements. |
@@ -327,35 +371,52 @@ the brief for revision; it does not license an implementation guess.
    for the two listener fds, or select a portable blocking-accept interrupt?
    Neither is chosen here; the lens rules whether either candidate is admissible
    before build.
-4. Does reusing the W1b `ConnectionFateWorkItem` exit delivery for both the
-   leg-1 listener reap and the leg-3 drain-completion decrement correctly
-   replace both reap scans through ONE exit funnel, with no parallel exit path?
-5. Is the WebSocket SDK background reader (C1) — blocking, `set_read_timeout(None)`,
-   self-described "not a poll: no interval" (`websocket/subscription.rs:414-417`)
-   — genuinely conforming, and if so does it carry the four idle-cost answers
-   AND a shutdown-wake proof? If not, it is a family and re-enters the SDK lane.
+4. Does reusing the W1b `ConnectionFateWorkItem` exit delivery cover the leg-1
+   **registered**-connection reap (F1, and post-upgrade WebSocket connections)
+   and the leg-3 drain-completion decrement through one funnel — while the F2
+   **handshake-stage** `reap_finished` (`websocket/supervisor.rs:112`) is
+   replaced by its own TOLD handshake-worker completion delivery (oracle 21),
+   since W1b does not cover pre-registration handshake exits
+   (`websocket/supervisor.rs:7-10,194,212`)?
+5. Is the WebSocket SDK background reader (C1) — blocking, arming no read window
+   (no `set_read_timeout` in `run_reader` at `websocket/subscription.rs:399-419`),
+   self-described "not a poll: no interval" (`:414-417`) — genuinely conforming,
+   and if so does it carry the four idle-cost answers AND a shutdown-wake proof?
+   If not, it is a family and re-enters the SDK lane.
 6. Is the WebSocket keepalive Ping timer (C2) a by-design transport idle cost
    (it SENDS liveness, does not poll for change) already bounded/pinned/signed
    under W2 §5.1, and does it stay outside W4 change-detection scope?
-7. Do the single-shot admitted-deadline `recv_timeout` waits (C7:
+7. Do the single-shot admitted-deadline `recv_timeout` waits (C8:
    `conversation/actor/sync.rs:33`, `conversation/actor.rs:469`,
    `routing/table.rs:437`, `routing/dispatch.rs:316`,
    `connection/conversation.rs:214,278`) each pass D.2 structural pairing as a
    terminal admitted-wait budget rather than a change-detection re-check loop?
-8. Does the dedup sweeper (C6, `durability/dedup/sweep.rs:76-105`) have no
+8. Does the dedup sweeper (C7, `durability/dedup/sweep.rs:76-105`) have no
    production timer arming it at `829b3c3` — confirming on-demand-only — with a
    standing note that any future periodic caller re-enters it as a family?
-9. Are the §C growth carryovers — `PushReplyAwaiter` re-arm (C3,
-   `supervisor.rs:745-790`), durability bridge `MAX_POLLS` (C4,
-   `bridge.rs:52,87-93`), and the cluster resolver NoopWaker `block_on` (C5,
-   `discovery.rs:187-245`, classified distinctly from C4) — confirmed out of
-   W4-NOW and tracked to their own dispositions?
+9. Are the growth carryovers — `PushReplyAwaiter` re-arm (C3,
+   `supervisor.rs:745-790`) and the durability bridge `MAX_POLLS` NoopWaker scan
+   (C4, `bridge.rs:52,87-93`) — confirmed out of W4-NOW and tracked to their own
+   dispositions? (The skeleton's `discovery.rs` NoopWaker is **not** a production
+   candidate: it is entirely `#[cfg(test)]` — `mod tests` at `discovery.rs:180-182`,
+   `NoopWake` at `:189`, helper `resolve_now` at `:195`; production `resolve` at
+   `:66` returns a runtime-driven future, not a NoopWaker scan.)
 10. Does the shared readiness reactor receive a wake-RATE pin (not merely the
     existing one-thread inventory pin in `supervisor_tests.rs`) plus
     certifying-pair sign-off before leg 1 is accepted?
+11. Are the two tokio-runtime `block_on` sites the skeleton §C row 3 ordered
+    separately classified — cluster startup (C5, `membership.rs:320,328`: bind +
+    seed-connect) and cluster per-write (C6, `sync.rs:277-290`: `block_in_place`
+    / current-thread runtime around `write_raw(...).await`) — correctly
+    classified as **real-waker runtime parks** (the tokio reactor wakes the
+    thread on I/O completion), a different mechanism from the NoopWaker scan (C4)
+    that must not be conflated with it, and not LAW-1 change-detection families —
+    pending confirmation that the awaited distribution futures hide no poll loop
+    of their own (dependency boundary per skeleton §D.5)?
 
 ## 8. Revision record
 
 | revision | date | byte/ledger pin | record |
 |---|---|---|---|
 | r1 | 2026-07-22 | liminal `829b3c30a9f27bab8aa31cbe21470e687c59937d`; `WIRING-LEDGER.md` r1.9, 2026-07-20 | Initial design-first brief of record for lane W4. Re-pins the `ce8814d` skeleton to `829b3c3` with a full drift ledger (§1): W2 retired the unconditional `notify_ready` for `notify_impact`/`target_union`; the WebSocket transport added a new server listener family (F2) and SDK reader/keepalive candidates (C1/C2); shutdown/membership/reader anchors moved. Mechanical family census (§2): nine confirmed byte-verified polling families (F1–F9) plus eight growth/candidate rows (C1–C8), unique-named. Scope ruling (§3): W4-NOW = server-internal readiness wave (F1–F5) in three legs; F6/F7/F8/F9/C1 ledgered to their own lanes; C2–C8 out-of-scope-with-why. Replacement designs (§4) reuse the landed beamr-readiness reactor, W1b fate exit delivery, and the `ShutdownHandle` `Condvar` — no parallel wake vocabulary — each with FIXED/OPEN separation and the four-part idle-cost lens. Twenty-oracle absence-proof census (§5): structural grep + runtime quiescence + crash-cut + idle-honesty both-sides. Scope walls (§6) and ten numbered lens questions (§7). Ready for the lens rounds. |
+| r2 | 2026-07-22 | same liminal/ledger pin | Folds lens r1 (**3 MAJOR + 5 minor**) plus the **coordinator (Fable-seat) finding**, each re-verified at `829b3c3` bytes. **MAJOR-1 — phantom production candidate:** the cluster resolver `NoopWaker` `block_on` is entirely `#[cfg(test)]` (`discovery.rs:180-182,189,195`); production `resolve` at `:66` returns a runtime-driven future. The candidate row is deleted and re-recorded as "examined and excluded — test-only" in §2.2; Q9 rewritten accordingly. **MAJOR-2 — dropped skeleton-ordered sites:** the two tokio-runtime `block_on` sites the skeleton §C row 3 ordered separately classified are added as census rows C5 (`membership.rs:320,328`, startup) and C6 (`sync.rs:277-290`, per-write), classified as real-waker runtime parks (distinct from the NoopWaker scan C4) and gated by new lens question Q11. **MAJOR-3 — C1 cited nonexistent bytes:** the "no armed read window" claim is rewritten to ABSENCE form — `run_reader` (`websocket/subscription.rs:399-419`) makes no `set_read_timeout` call; the primitive is defined at `std_socket.rs:155`/passed at `:158`, and the only `Some(window)` arming is `std_socket.rs:93`. **minor-a** listener doc attribution corrected to `:3-4` ("Mirrors") + `:25` ("matching"); **minor-b** the `notify_impact` gloss re-anchored — calls at `dispatch.rs:625,676` are unconditional, gating is `target_union`'s empty-set arm at `dispatch_impact.rs:97-104` (`:99`); **minor-c** `ConnectionFateWorkItem` routing re-cited to `handle_connection_fate` at `dispatch.rs:618-628` (struct def `:115`); **minor-d** the `examples/` class exclusion stated explicitly (`demo_feed_publisher/main.rs:90` demo pacing) plus the `#[cfg(test)]` sleeps; **minor-e** full path for `binding_fate_completion.rs`. **Coordinator finding (design amendment):** verified at bytes that `HandshakeSupervisor::reap_finished` (`websocket/supervisor.rs:112`) reaps handshake-stage workers that never register, which W1b's `ConnectionFateWorkItem` does not cover — §4.1 gains an explicit handshake-stage carve-out (own TOLD completion delivery, not the W1b funnel), oracle 6 is scoped to **registered** connections, new oracle 21 `handshake_worker_completion_delivered_not_reap_scanned` is added (census now 21), and Q4 amended. Census now F1–F9 + C1–C9; eleven lens questions. |
