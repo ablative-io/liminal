@@ -355,7 +355,7 @@ fn assert_marker_base_interleaving(
 }
 
 #[test]
-fn marker_ack_and_base_row_interleavings_replay_exactly_and_totally() -> Result<(), Box<dyn Error>>
+fn marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor() -> Result<(), Box<dyn Error>>
 {
     assert_marker_base_interleaving(MarkerBaseInterleaving::AckFirst)?;
     assert_marker_base_interleaving(MarkerBaseInterleaving::AckBetween)
