@@ -256,7 +256,7 @@ fn frontier_owner() -> LiveFrontierOwner {
 }
 
 #[test]
-fn nonzero_debt_ack_moves_the_same_committed_cursor_through_live_frontier_ownership() {
+fn debt_zero_transition_releases_deferred_obligation() {
     let member = member(P0, OBSERVER);
     let episode = episode();
     let commit = commit_for(&member, epoch(1, 0), 1, &episode);
