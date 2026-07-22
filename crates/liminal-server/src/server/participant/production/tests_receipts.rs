@@ -180,19 +180,42 @@ fn attach_deadline_provenance_replay_carries_result_generation() -> Result<(), B
 /// inside its window the exact old token answers `ReceiptExpired` with reason
 /// `Superseded`; after the window it answers `StaleOrUnknownReceipt` — never
 /// the false no-commit proof `StaleAuthority`.
+///
+/// Time is driven deterministically through the harness-owned clock seam
+/// ([`ProductionParticipantHandler::pin_clock_ms`]) rather than the wall
+/// clock: `T0` and the second rotation are both stamped at a pinned base, so
+/// the rotation provably lands inside the first receipt's live receipt window
+/// (yielding `Superseded`); the in-window read is stepped to a fixed instant
+/// past the receipt window but inside the provenance window; and the
+/// after-window read is stepped past the provenance deadline. No wall-clock
+/// race and no sleep survive, so a loaded suite cannot elapse a window out
+/// from under an assertion. TTLs are tightened accordingly (never widened).
 #[test]
 fn superseded_receipt_keeps_provenance_then_degrades_to_stale_or_unknown()
 -> Result<(), Box<dyn Error>> {
+    // Pinned base and tightened windows: the receipt (secret) window closes at
+    // BASE + RECEIPT_TTL_MS, the provenance window at BASE + PROVENANCE_TTL_MS.
+    const BASE_MS: u64 = 1_000_000_000;
+    const RECEIPT_TTL_MS: u64 = 1_000;
+    const PROVENANCE_TTL_MS: u64 = 2_000;
+
     let home = tempfile::tempdir()?;
     let data_dir = home.path().join("durability");
     let incarnation = ConnectionIncarnation::new(63, 1);
     let store = open_disk_store_for_tests(&data_dir)?;
-    // Receipt window 2s, provenance window 2.5s: wide enough that the second
-    // rotation lands inside the first receipt's live window even under full
-    // parallel test-suite load (the Superseded reason depends on it), while
-    // the after-window half stays a bounded sleep.
-    let handler = ProductionParticipantHandler::new(store, short_ttl_config(2_000, 2_500))?;
+    let handler = ProductionParticipantHandler::new(
+        store,
+        short_ttl_config(RECEIPT_TTL_MS, PROVENANCE_TTL_MS),
+    )?;
     let conversation_id = 603;
+
+    // Pin the clock at the base for the whole build: enrollment, first attach
+    // (mints the first receipt at T0 = BASE), the second detach, and the
+    // second attach (supersedes at T1 = BASE) all read the same instant, so
+    // T1 < T0 + RECEIPT_TTL_MS holds by construction and the retired first
+    // receipt is recorded with reason Superseded — never a load-dependent
+    // Deadline.
+    handler.pin_clock_ms(BASE_MS);
 
     let receipt = enroll(&handler, incarnation, conversation_id, [67; 16])?;
     let participant_id = receipt.participant_id();
@@ -237,8 +260,10 @@ fn superseded_receipt_keeps_provenance_then_degrades_to_stale_or_unknown()
     )?;
     assert_eq!(second.capability_generation(), generation(3)?);
 
-    // Inside the replaced receipt's provenance window: the exact committed
-    // old token returns the exact ReceiptExpired payload with Superseded.
+    // Step to a fixed instant past the receipt (secret) window but inside the
+    // provenance window: the exact committed old token returns the exact
+    // ReceiptExpired payload with Superseded. Deterministic — no wall clock.
+    handler.pin_clock_ms(BASE_MS + RECEIPT_TTL_MS + 1);
     let in_window = dispatch(&handler, incarnation, first_request.clone())?;
     let ServerValue::ReceiptExpired(ReceiptExpired::CredentialAttach {
         token,
@@ -260,10 +285,10 @@ fn superseded_receipt_keeps_provenance_then_degrades_to_stale_or_unknown()
     assert_eq!(current_generation, generation(3)?);
     assert_eq!(reason, ReceiptExpiryReason::Superseded);
 
-    // After the provenance window: exact-old degrades to the intentionally
-    // ambiguous StaleOrUnknownReceipt (no no-commit claim). Sleeping late is
-    // safe in this direction.
-    sleep(Duration::from_millis(3_000));
+    // Step past the provenance deadline: exact-old degrades to the
+    // intentionally ambiguous StaleOrUnknownReceipt (no no-commit claim).
+    // Deterministic — the window is a pinned instant, not an elapsed sleep.
+    handler.pin_clock_ms(BASE_MS + PROVENANCE_TTL_MS + 1);
     let after_window = dispatch(&handler, incarnation, first_request)?;
     let ServerValue::StaleOrUnknownReceipt(StaleOrUnknownReceipt {
         token,
