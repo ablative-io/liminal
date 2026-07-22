@@ -356,7 +356,8 @@ impl StatusCode {
 mod tests {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
-    use std::time::Duration;
+    use std::thread;
+    use std::time::{Duration, Instant};
 
     use serde_json::Value;
 
@@ -560,6 +561,183 @@ mod tests {
 
         assert_status(&response, 405);
 
+        Ok(())
+    }
+
+    /// Oracle 8 (W4 leg 2) — on a quiet health listener the blocking accept is
+    /// issued exactly once (the parked call) and never again: zero repeated
+    /// accepts, zero application wakes after arming, with route behaviour
+    /// unchanged (a real request is still served afterwards).
+    #[test]
+    fn silent_health_listener_has_zero_application_wakes() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let server = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.accept_attempts() < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let armed = server.accept_attempts();
+        assert_eq!(
+            armed, 1,
+            "the blocking accept is issued exactly once when parked"
+        );
+
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            server.accept_attempts(),
+            armed,
+            "a silent health listener must not wake or re-accept"
+        );
+        assert_eq!(
+            server.shed_count(),
+            0,
+            "a silent health listener sheds nothing"
+        );
+
+        // Route behaviour unchanged: a real request is still served after silence.
+        let response = get(server.local_addr(), "/health")?;
+        assert_status(&response, 200);
+        let body = json_body(&response)?;
+        assert_eq!(body["status"], "healthy");
+
+        server.shutdown()?;
+        Ok(())
+    }
+
+    /// Oracle 9 (W4 leg 2) — absence proof over this module's production source:
+    /// the retired non-blocking flip and its `WouldBlock` + sleep poll must not
+    /// appear in the health accept path.
+    #[test]
+    fn health_accept_source_has_no_wouldblock_sleep_poll() {
+        const SOURCE: &str = include_str!("endpoint.rs");
+        let production = SOURCE.split("mod tests").next().unwrap_or(SOURCE);
+        for forbidden in [
+            "set_nonblocking(true)",
+            "ErrorKind::WouldBlock",
+            "thread::sleep",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "retired health accept-path source `{forbidden}` reappeared"
+            );
+        }
+    }
+
+    /// Oracle 10 (W4 leg 2) — shutdown interrupts the blocking accept wait at
+    /// every race point: before the worker arms, after it parks, concurrent with
+    /// a pending connection, and after an accept returns. Each shutdown returns
+    /// promptly (no sleep-poll) and joins cleanly (no worker leak); the released
+    /// listener refuses further connects (no descriptor leak).
+    #[test]
+    fn health_shutdown_interrupts_accept_wait() -> Result<(), Box<dyn std::error::Error>> {
+        // (a) shutdown immediately after start — possibly before the worker arms.
+        let server = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+        let start = Instant::now();
+        server.shutdown()?;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown before arming must interrupt promptly, not sleep-poll"
+        );
+
+        // (b) shutdown after the worker has parked the blocking accept.
+        let server = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.accept_attempts() < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            server.accept_attempts(),
+            1,
+            "the worker parked before shutdown"
+        );
+        let parked_addr = server.local_addr();
+        let start = Instant::now();
+        server.shutdown()?;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown of a parked accept must interrupt promptly"
+        );
+        // No descriptor leak: the released listener refuses further connects.
+        assert!(
+            TcpStream::connect(parked_addr).is_err(),
+            "the listener descriptor was released; further connects are refused"
+        );
+
+        // (c) shutdown concurrent with accept readiness: a client is pending.
+        let server = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.accept_attempts() < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let _pending = TcpStream::connect(server.local_addr())?;
+        let start = Instant::now();
+        server.shutdown()?;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown concurrent with a pending accept must interrupt promptly"
+        );
+
+        // (d) shutdown after an accept returns and a request is served.
+        let server = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+        let response = get(server.local_addr(), "/health")?;
+        assert_status(&response, 200);
+        let start = Instant::now();
+        server.shutdown()?;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown after a served request must interrupt the next parked accept promptly"
+        );
+
+        Ok(())
+    }
+
+    /// Oracle 11 (W4 leg 2, idle-honesty both-sides) — an unrelated served
+    /// request grows the BUSY listener's accept-attempt counter while the silent
+    /// listener's accept-attempt counter stays FLAT during the workload. The
+    /// growing side proves the fixture cannot pass by hiding the workload (a
+    /// frozen harness would leave the busy counter flat and fail); the flat side
+    /// proves genuine silence rather than a global freeze.
+    #[test]
+    fn health_idle_grows_unrelated_counters_while_accept_stays_flat()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let idle = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+        let busy = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while (idle.accept_attempts() < 1 || busy.accept_attempts() < 1)
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let idle_armed = idle.accept_attempts();
+        assert_eq!(idle_armed, 1, "the idle listener parks exactly one accept");
+        let busy_before = busy.accept_attempts();
+
+        // Unrelated served workload on the BUSY listener: each served request
+        // returns the parked accept and re-parks a fresh one, growing its counter.
+        for _ in 0..5 {
+            let response = get(busy.local_addr(), "/health")?;
+            assert_status(&response, 200);
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while busy.accept_attempts() <= busy_before && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            busy.accept_attempts() > busy_before,
+            "an unrelated served request grows the busy listener's accept counter"
+        );
+        assert_eq!(
+            idle.accept_attempts(),
+            idle_armed,
+            "the silent listener's accept counter stays flat during the workload"
+        );
+        assert_eq!(idle.shed_count(), 0, "the silent listener sheds nothing");
+
+        idle.shutdown()?;
+        busy.shutdown()?;
         Ok(())
     }
 }
