@@ -2938,11 +2938,9 @@ impl ConnectionRuntime {
     fn park_until_removed_or(&self, snapshot: u64, timeout: Duration) {
         let outcome = self
             .drain_removed
-            .wait_timeout_while(
-                recover_lock(&self.drain_generation),
-                timeout,
-                |current| *current == snapshot,
-            )
+            .wait_timeout_while(recover_lock(&self.drain_generation), timeout, |current| {
+                *current == snapshot
+            })
             .unwrap_or_else(PoisonError::into_inner);
         // A non-timed-out return means the predicate went false — a real removal
         // bumped the generation and woke this park (as opposed to the deadline).
