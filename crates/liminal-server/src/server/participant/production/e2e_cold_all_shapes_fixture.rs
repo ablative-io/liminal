@@ -213,6 +213,7 @@ pub(super) fn expected_live_deliveries(
     extension: &[(u64, OutboxRow)],
 ) -> Vec<ParticipantDelivery> {
     let mut ack_through = 0_u64;
+    let mut marker_cursor = 0_u64;
     let mut retired = false;
     let mut projected = Vec::new();
     for (_, row) in extension {
@@ -243,15 +244,21 @@ pub(super) fn expected_live_deliveries(
                 through_seq,
                 ..
             } if *acked == participant_id => ack_through = *through_seq,
+            OutboxRow::MarkerAckCommitted(stored)
+                if stored.request.participant_id == participant_id =>
+            {
+                marker_cursor = marker_cursor.max(stored.resulting_cursor);
+            }
             OutboxRow::AckAdvanced { .. } | OutboxRow::MarkerAckCommitted(_) => {}
         }
     }
     if retired {
         Vec::new()
     } else {
+        let dispatch_after = ack_through.max(marker_cursor);
         projected
             .into_iter()
-            .filter(|delivery| delivery.delivery_seq > ack_through)
+            .filter(|delivery| delivery.delivery_seq > dispatch_after)
             .collect()
     }
 }
