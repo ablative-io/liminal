@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use liminal::durability::{DurableStore, bridge::block_on, open_ephemeral};
 use liminal_protocol::wire::{
@@ -7,9 +8,11 @@ use liminal_protocol::wire::{
     EnrollmentToken, Generation, ParticipantId, ServerValue,
 };
 
+use crate::server::connection::ReadyWaker;
 use crate::server::participant::{
     ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
-    ParticipantConnectionConversations, ParticipantSemanticHandler, ParticipantServiceFatal,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticHandler,
+    ParticipantServiceFatal,
 };
 
 use super::ProductionParticipantHandler;
@@ -330,8 +333,7 @@ fn protocol_fate_classification_requires_current_bound_authority() -> Result<(),
 }
 
 #[test]
-fn installed_participant_service_delegates_connection_fate_fatal_latch()
--> Result<(), Box<dyn Error>> {
+fn participant_service_fatal_blocks_obligation_dispatch() -> Result<(), Box<dyn Error>> {
     const OPEN_SEQUENCE: u64 = 11;
     const CONVERSATION_ID: u64 = 17;
     const LATER_OPEN_SEQUENCE: u64 = 19;
@@ -343,8 +345,16 @@ fn installed_participant_service_delegates_connection_fate_fatal_latch()
         Arc::clone(&store),
         config,
     )?);
-    let service = InstalledParticipantService::new(handler, store, config.wire_frame_limit)
+    let service = InstalledParticipantService::new(handler.clone(), store, config.wire_frame_limit)
         .map_err(|error| format!("participant service configuration failed: {error:?}"))?;
+    let incarnation = ConnectionIncarnation::new(53, 1);
+    let inbox = service.new_publication_inbox();
+    let wakes = Arc::new(AtomicU64::new(0));
+    service.publication_registry().register(
+        incarnation,
+        &inbox,
+        ReadyWaker::for_test(Arc::clone(&wakes)),
+    )?;
 
     let selected =
         service.latch_connection_fate_intent_incomplete(OPEN_SEQUENCE, CONVERSATION_ID)?;
@@ -362,6 +372,35 @@ fn installed_participant_service_delegates_connection_fate_fatal_latch()
         "the installed wrapper must preserve the inner handler's first fatal"
     );
     assert_eq!(service.service_fatal()?, Some(selected.clone()));
+    let work_before = handler.obligation_dispatch_work_snapshot();
+    let ready_fires_before = service.publication_registry().ready_fire_count();
+
+    let publication = service.next_publication(incarnation, CONVERSATION_ID, None);
+    assert!(matches!(
+        publication,
+        Err(crate::server::participant::ParticipantSemanticError::ServiceFatal(fatal))
+            if fatal == selected
+    ));
+    let request = service.handle(
+        ParticipantConnectionContext::new(incarnation),
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: CONVERSATION_ID,
+            enrollment_token: EnrollmentToken::new([0x26; 16]),
+        }),
+    );
+    assert!(matches!(
+        request,
+        Err(crate::server::participant::ParticipantSemanticError::ServiceFatal(fatal))
+            if fatal == selected
+    ));
+    assert_eq!(handler.obligation_dispatch_work_snapshot(), work_before);
+    assert_eq!(
+        service.publication_registry().ready_fire_count(),
+        ready_fires_before
+    );
+    assert_eq!(wakes.load(Ordering::SeqCst), 0);
+    assert!(!inbox.has_pending()?);
 
     let stopped = service.handle_connection_fate(ConnectionFateWorkItem {
         open_sequence: LATER_OPEN_SEQUENCE,

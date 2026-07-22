@@ -293,11 +293,11 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         conversation_id: ConversationId,
         offered: Option<ParticipantOfferedProgress>,
     ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
+        self.ensure_service_live()?;
         #[cfg(test)]
         self.obligation_dispatch_work
             .selector_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        self.ensure_service_live()?;
         let cell = self.cell(conversation_id)?;
         #[cfg(test)]
         self.obligation_dispatch_work

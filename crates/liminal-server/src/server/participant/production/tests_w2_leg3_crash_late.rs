@@ -14,7 +14,8 @@ use super::tests_outbox_barrier_fixture::{OutboxBarrierKind, OutboxBarrierStore}
 use super::tests_w2_leg3_crash_early::{CONVERSATION, enroll_without_tell, handler, installed};
 use crate::server::connection::ReadyWaker;
 use crate::server::participant::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
+    ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
     ParticipantSemanticHandler,
 };
 
@@ -69,6 +70,67 @@ fn rebind(
             accept_marker_delivery_seq: None,
         }),
     )
+}
+
+#[test]
+fn w1b_fate_replay_precedes_bind_triggered_dispatch() -> Result<(), Box<dyn Error>> {
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let live = handler(Arc::clone(&store))?;
+    let live_service = installed(&live, Arc::clone(&store))?;
+    let old_incarnation = ConnectionIncarnation::new(0xD3, 61);
+    let peer_incarnation = ConnectionIncarnation::new(0xD3, 62);
+    let rebound_incarnation = ConnectionIncarnation::new(0xD3, 63);
+    let first = enroll(&live_service, old_incarnation, 0x61)?;
+    enroll(&live_service, peer_incarnation, 0x62)?;
+    let pre_fate_endpoint = live_service
+        .next_publication(old_incarnation, CONVERSATION, None)?
+        .ok_or("fate replay fixture had no pre-fate durable obligation")?
+        .delivery_seq();
+
+    live_service.handle_connection_fate(ConnectionFateWorkItem {
+        open_sequence: 61,
+        connection_incarnation: old_incarnation,
+        class: ConnectionFateClass::CleanDisconnect,
+        tracked_conversations: vec![CONVERSATION],
+    })?;
+    drop(live_service);
+    drop(live);
+
+    let cold = handler(Arc::clone(&store))?;
+    let cold_service = installed(&cold, store)?;
+    let inbox = cold_service.new_publication_inbox();
+    let wakes = Arc::new(AtomicU64::new(0));
+    cold_service.publication_registry().register(
+        rebound_incarnation,
+        &inbox,
+        ReadyWaker::for_test(Arc::clone(&wakes)),
+    )?;
+    assert_eq!(wakes.load(Ordering::SeqCst), 0);
+    assert!(!inbox.has_pending()?);
+
+    assert!(matches!(
+        rebind(&cold_service, rebound_incarnation, &first, 0x63)?,
+        ServerValue::AttachBound(_)
+    ));
+    assert_eq!(wakes.load(Ordering::SeqCst), 1);
+    let replayed = cold_service
+        .next_publication(rebound_incarnation, CONVERSATION, None)?
+        .ok_or("post-replay bind did not select the surviving obligation")?;
+    assert_eq!(replayed.delivery_seq(), pre_fate_endpoint);
+    assert!(
+        cold_service
+            .next_publication(
+                rebound_incarnation,
+                CONVERSATION,
+                Some(ParticipantOfferedProgress {
+                    binding_epoch: replayed.binding_epoch,
+                    through_seq: replayed.delivery_seq(),
+                }),
+            )?
+            .is_none(),
+        "the bind-triggered arm must not double-present the pre-fate endpoint"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

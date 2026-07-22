@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use liminal::durability::{DurableStore, open_ephemeral};
 use liminal_protocol::wire::{
-    ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, Generation,
-    ParticipantAck, ServerValue,
+    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest,
+    EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck, ServerValue,
 };
 
 use super::{RecordingSink, service_participant_publications};
 use crate::server::connection::state::ConnectionProcessState;
 use crate::server::participant::{
-    InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
-    ParticipantSemanticHandler,
+    ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
+    ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticHandler,
 };
 use crate::server::participant::{ProductionParticipantHandler, test_participant_config};
 
@@ -37,12 +37,12 @@ fn production_service(
     Ok((handler, service))
 }
 
-fn enroll(
+fn enroll_bound(
     service: &InstalledParticipantService,
     incarnation: ConnectionIncarnation,
     conversation_id: u64,
     token: u8,
-) -> Result<u64, Box<dyn Error>> {
+) -> Result<liminal_protocol::wire::EnrollBound, Box<dyn Error>> {
     let value = service.handle(
         ParticipantConnectionContext::new(incarnation),
         &mut ParticipantConnectionConversations::default(),
@@ -54,7 +54,16 @@ fn enroll(
     let ServerValue::EnrollBound(bound) = value else {
         return Err(format!("production enrollment did not bind: {value:?}").into());
     };
-    Ok(bound.participant_id())
+    Ok(bound)
+}
+
+fn enroll(
+    service: &InstalledParticipantService,
+    incarnation: ConnectionIncarnation,
+    conversation_id: u64,
+    token: u8,
+) -> Result<u64, Box<dyn Error>> {
+    Ok(enroll_bound(service, incarnation, conversation_id, token)?.participant_id())
 }
 
 fn ready_state(
@@ -121,6 +130,65 @@ fn held_obligation_revalidates_binding_and_debt_before_offer() -> Result<(), Box
     assert!(state.held_pushes.is_empty());
     assert!(state.participant_offered.is_empty());
     assert!(sink.frames.is_empty());
+    Ok(())
+}
+
+#[test]
+fn connection_fate_drops_stale_head_and_replays_after_reconciled_cursor()
+-> Result<(), Box<dyn Error>> {
+    let conversation_id = 0xD3_18;
+    let old_incarnation = ConnectionIncarnation::new(0xD3, 18);
+    let peer_incarnation = ConnectionIncarnation::new(0xD3, 19);
+    let new_incarnation = ConnectionIncarnation::new(0xD3, 20);
+    let (_handler, service) = production_service(12)?;
+    let bound = enroll_bound(&service, old_incarnation, conversation_id, 0x81)?;
+    enroll(&service, peer_incarnation, conversation_id, 0x82)?;
+
+    let selected = service
+        .next_publication(old_incarnation, conversation_id, None)?
+        .ok_or("fate fixture had no durable obligation")?;
+    let endpoint = selected.delivery_seq();
+    let mut state = ready_state(&service, old_incarnation, conversation_id)?;
+    let mut sink = RecordingSink::new(4096);
+    sink.fill_current_room();
+    assert_eq!(
+        service_participant_publications(&mut state, &service, &mut sink, 1)?,
+        0
+    );
+    assert_eq!(state.held_pushes.participant_len(), 1);
+
+    service.handle_connection_fate(ConnectionFateWorkItem {
+        open_sequence: 18,
+        connection_incarnation: old_incarnation,
+        class: ConnectionFateClass::CleanDisconnect,
+        tracked_conversations: vec![conversation_id],
+    })?;
+    sink.writable();
+    assert_eq!(
+        service_participant_publications(&mut state, &service, &mut sink, 1)?,
+        0
+    );
+    assert!(state.held_pushes.is_empty());
+    assert!(state.participant_offered.is_empty());
+    assert!(sink.frames.is_empty());
+
+    let attached = service.handle(
+        ParticipantConnectionContext::new(new_incarnation),
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id,
+            participant_id: bound.participant_id(),
+            capability_generation: Generation::ONE,
+            attach_secret: bound.attach_secret(),
+            attach_attempt_token: AttachAttemptToken::new([0x83; 16]),
+            accept_marker_delivery_seq: None,
+        }),
+    )?;
+    assert!(matches!(attached, ServerValue::AttachBound(_)));
+    let replayed = service
+        .next_publication(new_incarnation, conversation_id, None)?
+        .ok_or("post-fate binding did not replay the surviving obligation")?;
+    assert_eq!(replayed.delivery_seq(), endpoint);
     Ok(())
 }
 
