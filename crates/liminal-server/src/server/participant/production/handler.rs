@@ -12,6 +12,8 @@
 //! durable nor in-memory residue.
 
 use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use liminal::durability::DurableStore;
@@ -81,6 +83,18 @@ pub struct ProductionParticipantHandler {
     /// Exact W2 work observation points, isolated per handler and test-only.
     #[cfg(test)]
     pub(super) obligation_dispatch_work: ObligationDispatchWorkCounters,
+    /// Harness-owned clock override for deterministic time-window tests.
+    ///
+    /// `0` is the released/unset state, under which [`Self::now_ms`] reads the
+    /// live wall clock exactly as production does; any nonzero value pins the
+    /// participant clock to that fixed Unix-millisecond reading so a test can
+    /// step through the deterministic receipt/provenance window states instead
+    /// of racing the wall clock. This field and every branch that consults it
+    /// are `#[cfg(test)]`-only — production never compiles, observes, or is
+    /// slowed by it, and the non-test clock path is byte-identical to a direct
+    /// [`facts::now_unix_millis`] call.
+    #[cfg(test)]
+    now_override: AtomicU64,
 }
 
 impl ProductionParticipantHandler {
@@ -117,9 +131,49 @@ impl ProductionParticipantHandler {
             registry,
             #[cfg(test)]
             obligation_dispatch_work: ObligationDispatchWorkCounters::default(),
+            #[cfg(test)]
+            now_override: AtomicU64::new(0),
         };
         handler.restore_all_conversations()?;
         Ok(handler)
+    }
+
+    /// Reads the participant clock as Unix milliseconds.
+    ///
+    /// Production builds forward directly to [`facts::now_unix_millis`]; the
+    /// non-test compilation of this method is byte-identical to the direct
+    /// call the two call sites (owner-restore expiry and operation facts)
+    /// previously made.
+    #[cfg(not(test))]
+    fn now_ms(&self) -> Result<u64, facts::FactsError> {
+        facts::now_unix_millis()
+    }
+
+    /// Reads the participant clock as Unix milliseconds, honouring the
+    /// harness-owned [`Self::now_override`] pin.
+    ///
+    /// When the override is released (`0`) this is exactly the production
+    /// wall-clock read; when a test has pinned it, the fixed reading is
+    /// returned so deterministic time-window tests never race the wall clock.
+    /// Test-only: production compiles the `#[cfg(not(test))]` sibling, which
+    /// has no branch and no field access.
+    #[cfg(test)]
+    fn now_ms(&self) -> Result<u64, facts::FactsError> {
+        match self.now_override.load(Ordering::SeqCst) {
+            0 => facts::now_unix_millis(),
+            fixed => Ok(fixed),
+        }
+    }
+
+    /// Pins the participant clock to a fixed Unix-millisecond reading, or
+    /// releases it back to the wall clock when passed `0`.
+    ///
+    /// Harness-owned and test-only: it drives [`Self::now_override`], which
+    /// exists only under `#[cfg(test)]`. Time-window tests set an explicit
+    /// base and step it across the deterministic window states they assert.
+    #[cfg(test)]
+    pub(super) fn pin_clock_ms(&self, now_ms: u64) {
+        self.now_override.store(now_ms, Ordering::SeqCst);
     }
 
     #[cfg(test)]
@@ -422,7 +476,7 @@ impl ProductionParticipantHandler {
         // conversation's complete server-scope contribution into the ledger
         // — a replace, so a discarded-and-replayed owner never double
         // counts and the ledger self-heals from durable truth.
-        let now = facts::now_unix_millis().map_err(|error| ParticipantSemanticError::Internal {
+        let now = self.now_ms().map_err(|error| ParticipantSemanticError::Internal {
             message: format!("participant clock read failed: {error}"),
         })?;
         let now = u128::from(now);
@@ -518,10 +572,9 @@ impl ProductionParticipantHandler {
         conversation_id: ConversationId,
         conversations: &ParticipantConnectionConversations,
     ) -> Result<OperationFacts, ParticipantSemanticError> {
-        let now_ms =
-            facts::now_unix_millis().map_err(|error| ParticipantSemanticError::Internal {
-                message: format!("participant clock read failed: {error}"),
-            })?;
+        let now_ms = self.now_ms().map_err(|error| ParticipantSemanticError::Internal {
+            message: format!("participant clock read failed: {error}"),
+        })?;
         // The connection map only grows through capacity commits, so its
         // occupancy always fits the validated nonzero signed limit; a counter
         // rejection here is genuine internal drift and fails closed.
