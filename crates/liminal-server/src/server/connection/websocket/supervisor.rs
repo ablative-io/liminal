@@ -381,10 +381,7 @@ impl HandshakeSupervisor {
     /// Number of worker records currently held. Test observation of the
     /// registry size for the completion-delivery oracle.
     fn worker_record_count(&self) -> usize {
-        self.inner
-            .workers
-            .lock()
-            .map_or(0, |workers| workers.len())
+        self.inner.workers.lock().map_or(0, |workers| workers.len())
     }
 
     /// Blocks until at least `target` completions have been delivered, waking on
