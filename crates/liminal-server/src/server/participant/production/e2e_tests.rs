@@ -196,6 +196,73 @@ fn roundtrip(
     Ok(value)
 }
 
+/// Lowercase hex of a byte slice, for the amplifier's raw-frame dump.
+fn to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('?'));
+        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('?'));
+    }
+    out
+}
+
+/// Names the decoded participant frame variant for the amplifier dump.
+fn participant_variant_name(frame: &ParticipantFrame) -> &'static str {
+    match frame {
+        ParticipantFrame::ClientRequest(_) => "ClientRequest",
+        ParticipantFrame::ServerValue(_) => "ServerValue",
+        ParticipantFrame::ServerPush(_) => "ServerPush",
+    }
+}
+
+/// Amplifier-only instrumented sibling of [`roundtrip`]. It performs the exact
+/// same wire steps but, when the frame read back decodes to a variant OTHER than
+/// `ServerValue` (the response-displacement failure this lane is chasing), it
+/// dumps the raw frame bytes as hex, the decoded variant name, the decoded
+/// frame Debug, and the residual buffer length before returning the same error
+/// text the real harness produces. This never weakens the landed `roundtrip`'s
+/// assertions and is only reachable through the `#[ignore]` amplifier.
+fn roundtrip_capture(
+    client: &mut TcpStream,
+    inbound: &mut Vec<u8>,
+    request: ClientRequest,
+    label: &str,
+) -> Result<ServerValue, Box<dyn Error>> {
+    client.write_all(&encode_request(request)?)?;
+    let frame = read_frame(client, inbound)?;
+    let Frame::Unknown {
+        type_id: PARTICIPANT_FRAME_TYPE,
+        ..
+    } = frame
+    else {
+        return Err(format!("{label}: expected a participant frame, got {frame:?}").into());
+    };
+    let bytes = encode_frame(&frame)?;
+    let decoded = decode_participant(&bytes, ReceiverDirection::Client)
+        .map_err(|error| format!("{label}: {error:?}"))?;
+    match decoded {
+        ParticipantFrame::ServerValue(value) => Ok(value),
+        other => {
+            let variant = participant_variant_name(&other);
+            eprintln!(
+                "[AMP-CAPTURE] {label}: FRAME THAT DISPLACED THE RESPONSE variant={variant} \
+                 frame_len={} residue_bytes={} hex={}",
+                bytes.len(),
+                inbound.len(),
+                to_hex(&bytes)
+            );
+            eprintln!("[AMP-CAPTURE] {label}: decoded_frame_debug={other:?}");
+            Err(format!(
+                "participant response did not decode as a server value (got {variant}, \
+                 frame_len={}, residue_bytes={})",
+                bytes.len(),
+                inbound.len()
+            )
+            .into())
+        }
+    }
+}
+
 fn await_genuine_park(
     server: &SocketFixture,
     pid: u64,
@@ -635,5 +702,204 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
 
     drop(client);
     supervisor.shutdown();
+    Ok(())
+}
+
+/// One amplifier iteration. Returns `Ok(true)` when the sender's response
+/// roundtrip was displaced by an interleaved push (the captured failure),
+/// `Ok(false)` when the response arrived cleanly.
+fn amplify_interleave_once(iteration: u32, peer_count: u32) -> Result<bool, Box<dyn Error>> {
+    const AMP_CONVERSATION: u64 = 0x5150;
+    // The conversation identity capacity is 4 (sender + 3 peers), so hold the
+    // peer roster at three: enough to accrue several held `Attached` pushes.
+    let peer_count = peer_count.min(3);
+
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    // Gate CLOSED: every enrollment's `Attached` delivery obligation for the
+    // sender accrues undelivered, exactly as in the leave regression's gated
+    // enrollment phase.
+    let mut sender_fixture = SocketFixture::start_replay_gated(&data_dir)?;
+    let enrolled = sender_fixture.request(ClientRequest::Enrollment(EnrollmentRequest {
+        conversation_id: AMP_CONVERSATION,
+        enrollment_token: EnrollmentToken::new([0x10; 16]),
+    }))?;
+    let ServerValue::EnrollBound(sender) = enrolled else {
+        return Err(format!("amp {iteration}: sender did not enroll: {enrolled:?}").into());
+    };
+
+    // Peers enroll behind the closed gate; each creates a held `Attached`
+    // obligation owed to the sender's connection.
+    let mut peers = Vec::with_capacity(peer_count as usize);
+    let mut peer_ids = Vec::with_capacity(peer_count as usize);
+    for index in 0..peer_count {
+        let mut peer = sender_fixture.spawn_peer()?;
+        let token = u8::try_from(0x40 + (index & 0x1f)).unwrap_or(0x40);
+        let bound = peer.request(ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: AMP_CONVERSATION,
+            enrollment_token: EnrollmentToken::new([token; 16]),
+        }))?;
+        let ServerValue::EnrollBound(peer_bound) = bound else {
+            return Err(format!("amp {iteration}: peer {index} did not enroll: {bound:?}").into());
+        };
+        peer_ids.push(peer_bound.participant_id());
+        peers.push(peer);
+    }
+
+    // Open the gate, then fire a fresh readiness edge on the SENDER's connection
+    // by having the last-enrolled peer (which owes no held pushes of its own)
+    // commit a record. The resulting `OrdinaryRecord` obligation for the sender
+    // marks the sender's connection ready, waking a publication slice that can
+    // flush the sender's held `Attached` pushes ahead of the response to the
+    // sender's own request — the leave regression's `open_publication_replay`
+    // followed by an immediate roundtrip.
+    sender_fixture.open_publication_replay()?;
+    if let (Some(waker_peer), Some(waker_id)) = (peers.last_mut(), peer_ids.last()) {
+        let woke = waker_peer.request_capture(
+            ClientRequest::RecordAdmission(RecordAdmission {
+                conversation_id: AMP_CONVERSATION,
+                participant_id: *waker_id,
+                capability_generation: Generation::ONE,
+                record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xB2; 16]),
+                payload: vec![0xD4],
+            }),
+            &format!("amp#{iteration}-waker"),
+        );
+        // A displaced waker roundtrip is itself an interleave; either way the
+        // sender's connection has been marked ready.
+        if let Err(error) = woke {
+            let text = error.to_string();
+            if !text.contains("did not decode as a server value") {
+                return Err(format!("amp {iteration}: waker record failed: {text}").into());
+            }
+        }
+    }
+
+    // The sender immediately drives a RecordAdmission roundtrip. `request_capture`
+    // reads ONE frame and dumps raw bytes if it is not a `ServerValue`.
+    let label = format!("amp#{iteration}");
+    let outcome = sender_fixture.request_capture(
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: AMP_CONVERSATION,
+            participant_id: sender.participant_id(),
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA2; 16]),
+            payload: vec![0xD3],
+        }),
+        &label,
+    );
+
+    let interleaved = match outcome {
+        Ok(ServerValue::RecordCommitted(_)) => false,
+        Ok(other) => {
+            return Err(format!("amp {iteration}: unexpected clean value: {other:?}").into());
+        }
+        Err(error) => {
+            let text = error.to_string();
+            if text.contains("did not decode as a server value") {
+                eprintln!("[AMP-CAPTURE] {label}: CAPTURED interleave -> {text}");
+                true
+            } else {
+                return Err(format!("amp {iteration}: unexpected roundtrip error: {text}").into());
+            }
+        }
+    };
+
+    drop(peers);
+    sender_fixture.stop();
+    Ok(interleaved)
+}
+
+/// Interleave amplifier — IGNORED so it never joins the normal battery.
+///
+/// Reproduces the contention-dependent failure of
+/// `leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_reopens`:
+/// on one participant connection an unsolicited `ServerPush`
+/// (`ParticipantDelivery`) can reach the wire AHEAD of the semantic response to
+/// a client request, because a publication `READY` wake can schedule a
+/// connection slice that flushes a held obligation before the request's bytes
+/// are read (see the single-FIFO-writer, per-slice ordering in
+/// `server/connection/process.rs`). The harness `roundtrip` reads exactly ONE
+/// frame and requires `ServerValue`, so it observes the push and reports
+/// "participant response did not decode as a server value".
+///
+/// Self-contained: spawns `std::thread` CPU burners so no external load is
+/// needed. Tune via env vars `AMP_ITERS` (default 400), `AMP_PEERS` (default 6),
+/// `AMP_BURNERS` (default 8).
+#[test]
+#[ignore = "amplifier: run explicitly to reproduce the response/push interleave"]
+fn amplify_leave_regression_response_push_interleave() -> Result<(), Box<dyn Error>> {
+    fn env_u32(key: &str, default: u32) -> u32 {
+        std::env::var(key)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    }
+
+    let iterations = env_u32("AMP_ITERS", 400);
+    let peer_count = env_u32("AMP_PEERS", 6);
+    let burner_count = env_u32("AMP_BURNERS", 8);
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut burners = Vec::with_capacity(burner_count as usize);
+    for _ in 0..burner_count {
+        let stop = Arc::clone(&stop);
+        burners.push(std::thread::spawn(move || {
+            let mut accumulator = 0_u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                for step in 0..8192_u64 {
+                    accumulator = accumulator
+                        .wrapping_mul(6_364_136_223_846_793_005)
+                        .wrapping_add(step);
+                }
+                std::hint::black_box(accumulator);
+            }
+        }));
+    }
+
+    eprintln!("[AMP] starting: iters={iterations} peers={peer_count} burners={burner_count}");
+    let mut failures = 0_u32;
+    let mut first_failure_iter: Option<u32> = None;
+    let mut run_error: Option<String> = None;
+    for iteration in 0..iterations {
+        match amplify_interleave_once(iteration, peer_count) {
+            Ok(true) => {
+                failures = failures.saturating_add(1);
+                if first_failure_iter.is_none() {
+                    first_failure_iter = Some(iteration);
+                }
+            }
+            Ok(false) => {}
+            Err(error) => {
+                run_error = Some(error.to_string());
+                break;
+            }
+        }
+        if iteration % 25 == 0 {
+            eprintln!("[AMP] progress iter={iteration} failures_so_far={failures}");
+        }
+    }
+
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for burner in burners {
+        let _ = burner.join();
+    }
+
+    eprintln!(
+        "[AMP] RESULT: {failures} interleave failures / {iterations} iterations \
+         under {burner_count} burners, {peer_count} peers; first_failure_iter={first_failure_iter:?}"
+    );
+    if let Some(error) = run_error {
+        return Err(format!("amplifier aborted on a non-interleave error: {error}").into());
+    }
+    // Fail-first gate: while an unsolicited `ServerPush` can displace the
+    // response that `roundtrip` reads back, this is non-zero. It goes green only
+    // once the harness demultiplexes pushes from responses (the recommended
+    // fix), never by changing production emission.
+    assert_eq!(
+        failures, 0,
+        "response/push interleave reproduced: an unsolicited ServerPush displaced \
+         the semantic response on {failures} of {iterations} roundtrips"
+    );
     Ok(())
 }

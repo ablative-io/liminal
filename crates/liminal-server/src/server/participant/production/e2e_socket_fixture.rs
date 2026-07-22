@@ -40,7 +40,8 @@ use super::super::ProductionParticipantHandler;
 use super::super::tests::{open_disk_store_for_tests, test_participant_config};
 use super::super::tests_outbox_barrier_fixture::{OutboxBarrierKind, OutboxBarrierStore};
 use super::{
-    ParticipantOnlyServices, encode_frame, encode_request, read_frame, roundtrip, tcp_pair,
+    ParticipantOnlyServices, encode_frame, encode_request, read_frame, roundtrip,
+    roundtrip_capture, tcp_pair,
 };
 
 const WEBSOCKET_PATH: &str = "/participant";
@@ -368,6 +369,18 @@ impl SocketFixture {
         request: ClientRequest,
     ) -> Result<ServerValue, Box<dyn Error>> {
         roundtrip(&mut self.client, &mut self.inbound, request)
+    }
+
+    /// Amplifier-only variant of [`Self::request`] that dumps the raw frame
+    /// bytes when the reply read back is not a `ServerValue`. Reachable only
+    /// from the `#[ignore]` interleave amplifier; the landed tests use
+    /// [`Self::request`].
+    pub(in crate::server::participant::production) fn request_capture(
+        &mut self,
+        request: ClientRequest,
+        label: &str,
+    ) -> Result<ServerValue, Box<dyn Error>> {
+        roundtrip_capture(&mut self.client, &mut self.inbound, request, label)
     }
 
     pub(in crate::server::participant::production) fn spawn_peer(
@@ -707,6 +720,16 @@ impl SocketPeer {
         request: ClientRequest,
     ) -> Result<ServerValue, Box<dyn Error>> {
         roundtrip(&mut self.client, &mut self.inbound, request)
+    }
+
+    /// Amplifier-only variant of [`Self::request`]; see
+    /// [`SocketFixture::request_capture`].
+    pub(in crate::server::participant::production) fn request_capture(
+        &mut self,
+        request: ClientRequest,
+        label: &str,
+    ) -> Result<ServerValue, Box<dyn Error>> {
+        roundtrip_capture(&mut self.client, &mut self.inbound, request, label)
     }
 
     pub(in crate::server::participant::production) fn shutdown_transport(
