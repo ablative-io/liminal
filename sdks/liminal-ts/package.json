@@ -1,6 +1,6 @@
 {
   "name": "@ablative/liminal",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "TypeScript SDK facade for typed liminal channels backed by the Rust WASM protocol bridge",
   "license": "Apache-2.0",
   "repository": {
