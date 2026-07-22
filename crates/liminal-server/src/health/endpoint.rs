@@ -43,6 +43,12 @@ pub struct HealthServerHandle {
     /// (test observability for the shed helper reused from leg 1).
     #[cfg(test)]
     shed_count: Arc<AtomicU64>,
+    /// Count of accepted requests the worker has entered (incremented just
+    /// before it blocks reading the request). Test observability so a race can
+    /// deterministically catch the worker mid-request rather than parked in
+    /// `accept`.
+    #[cfg(test)]
+    requests_entered: Arc<AtomicU64>,
 }
 
 impl HealthServerHandle {
@@ -94,6 +100,12 @@ impl HealthServerHandle {
     fn shed_count(&self) -> u64 {
         self.shed_count.load(Ordering::SeqCst)
     }
+
+    /// Accepted requests the worker has entered (test observability).
+    #[cfg(test)]
+    fn requests_entered(&self) -> u64 {
+        self.requests_entered.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for HealthServerHandle {
@@ -135,9 +147,11 @@ pub fn start_health_server(
     let shutdown = Arc::new(AtomicBool::new(false));
     let accept_attempts = Arc::new(AtomicU64::new(0));
     let shed_count = Arc::new(AtomicU64::new(0));
+    let requests_entered = Arc::new(AtomicU64::new(0));
     let worker_shutdown = Arc::clone(&shutdown);
     let worker_attempts = Arc::clone(&accept_attempts);
     let worker_shed = Arc::clone(&shed_count);
+    let worker_entered = Arc::clone(&requests_entered);
     let worker = thread::spawn(move || {
         serve(
             &listener,
@@ -145,6 +159,7 @@ pub fn start_health_server(
             &worker_shutdown,
             &worker_attempts,
             &worker_shed,
+            &worker_entered,
         )
     });
 
@@ -157,6 +172,8 @@ pub fn start_health_server(
         accept_attempts,
         #[cfg(test)]
         shed_count,
+        #[cfg(test)]
+        requests_entered,
     })
 }
 
@@ -166,6 +183,7 @@ fn serve(
     shutdown: &AtomicBool,
     accept_attempts: &AtomicU64,
     shed_count: &AtomicU64,
+    requests_entered: &AtomicU64,
 ) -> Result<(), ServerError> {
     // One reserve descriptor held for the shed-with-spare-fd EMFILE policy,
     // reusing the leg-1 helper.
@@ -182,6 +200,7 @@ fn serve(
                     drop(stream);
                     continue;
                 }
+                requests_entered.fetch_add(1, Ordering::SeqCst);
                 // A per-connection error (e.g. a TCP probe that connects but sends no HTTP
                 // data within the read timeout) must NOT terminate the serve loop — otherwise
                 // a single port probe kills the health server for the process lifetime and
@@ -687,6 +706,56 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "shutdown after a served request must interrupt the next parked accept promptly"
+        );
+
+        Ok(())
+    }
+
+    /// Regression for oracle 10 case (c) (W4 leg 2 — tear-seat BOUNCE): an
+    /// in-flight SILENT request must not defer shutdown by its read window. A
+    /// client that connects and sends nothing parks the worker inside
+    /// `handle_connection`'s blocking read (the admitted 2s slow-client
+    /// deadline). Shutdown must interrupt that read directly (TOLD stream
+    /// interrupt), NOT wait for the deadline to expire.
+    ///
+    /// The promptness bound is inherently a timing assertion: it is set to
+    /// 500 ms — comfortably under the 2s read deadline (so the pre-fix bytes,
+    /// where the self-connect interrupt merely queues behind the blocked read,
+    /// red deterministically) and comfortably over scheduler-wakeup noise even
+    /// under full-workspace parallel load (so the post-fix stream interrupt
+    /// greens deterministically). The worker's entry into the read is observed
+    /// via the `requests_entered` counter, not a sleep, so the race is caught
+    /// deterministically mid-request.
+    #[test]
+    fn shutdown_interrupts_in_flight_silent_request_read() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let server = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
+
+        // Connect but send NOTHING and keep the socket open: the worker accepts
+        // and blocks in handle_connection's read on the silent stream. The named
+        // binding keeps the client alive (a bare `_` would drop it and end the
+        // read early with EOF).
+        let _silent = TcpStream::connect(server.local_addr())?;
+
+        // Observe the worker has entered the in-flight request read (counter, not
+        // a sleep) so shutdown is fired while it is genuinely blocked on the read.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while server.requests_entered() < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(
+            server.requests_entered(),
+            1,
+            "the worker entered the in-flight silent request read"
+        );
+
+        let start = Instant::now();
+        server.shutdown()?;
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "shutdown must interrupt an in-flight silent request read promptly (TOLD), \
+             not defer by the read's admitted 2s deadline: elapsed {:?}",
+            start.elapsed()
         );
 
         Ok(())
