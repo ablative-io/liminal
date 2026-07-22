@@ -245,7 +245,7 @@ impl ConnectionSupervisor {
     /// this same waiter, each with its own one-shot deadline; there is no second
     /// settle poll loop.
     #[must_use]
-    pub fn wait_for_connections_drained(&self, deadline: Instant) -> bool {
+    pub(crate) fn wait_for_connections_drained(&self, deadline: Instant) -> bool {
         self.inner
             .runtime
             .wait_for_active_connections_drained(deadline)
@@ -1062,7 +1062,8 @@ impl SupervisorInner {
             None => {
                 tracing::error!(
                     "connection scheduler exit-event subscription unavailable; \
-                     external-termination reclamation is degraded to the drain-time scan"
+                     external-termination reclamation has no TOLD exit source (the \
+                     shutdown-drain scan that once backstopped it was retired by W4 leg 3)"
                 );
             }
         }
@@ -2500,9 +2501,9 @@ impl ConnectionRuntime {
     /// process's [`ExitEvent`] (via [`run_reclaim_reactor`]) or at the
     /// registration point check, and routed through the SAME [`Self::remove`]
     /// funnel as every other teardown — no third funnel, no periodic scan.
-    /// Idempotent: a record already removed in-slice, by the orphan reconcile, by
-    /// a duplicate delivery, or by the leg-3 drain reap is a no-op here (remove
-    /// returns `None`), so the §5 admission gauge is released exactly once.
+    /// Idempotent: a record already removed in-slice, by the orphan reconcile, or
+    /// by a duplicate delivery is a no-op here (remove returns `None`), so the §5
+    /// admission gauge is released exactly once.
     fn reclaim_terminated(&self, pid: u64, reason: ExitReason) {
         let Some(record) = self.remove(pid) else {
             return;
@@ -2679,12 +2680,14 @@ impl ConnectionRuntime {
                 let peer_addr = removed.and_then(|record| record.peer_addr);
                 // This process exited without ever reaching `mark_crashed`/`finish`
                 // (e.g. the beamr scheduler terminated it externally). W4 leg 1
-                // retired this scan from the per-accept listener loop: the primary
+                // retired this scan from the per-accept listener loop, and W4 leg 3
+                // retired the shutdown-drain reconciliation that also drove it: the
                 // reclaimer of these exits is now the TOLD exit-event reactor
-                // ([`run_reclaim_reactor`]). This scan survives only as the leg-3
-                // drain reconciliation and the exit-event overflow (`Lagged`)
-                // recovery, both of which drive it a bounded number of times, never
-                // periodically. beamr 0.15.4 exposes a public, non-blocking
+                // ([`run_reclaim_reactor`]), which also composes drain completion
+                // through the one `remove()` funnel. This scan now survives only as
+                // that reactor's exit-event overflow (`Lagged`) recovery, driven a
+                // bounded number of times, never periodically. beamr 0.15.4 exposes
+                // a public, non-blocking
                 // `peek_exit_reason` (and `take_exit_outcome`), so the real reason
                 // IS recoverable here rather than logged as an opaque literal.
                 let reason = scheduler.peek_exit_reason(pid);
