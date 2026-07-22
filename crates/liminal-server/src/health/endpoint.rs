@@ -1,11 +1,12 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::ServerError;
+use crate::server::listener::{loopback_interrupt_target, shed_on_fd_exhaustion};
 
 use super::checks::{SharedReadinessState, health_check, readiness_check};
 
@@ -18,11 +19,30 @@ const APPLICATION_JSON: &str = "application/json";
 const READ_BUFFER_BYTES: usize = 2048;
 
 /// Handle for a running health endpoint server.
+///
+/// W4 leg 2 (§4.2): the health accept worker BLOCKS in `accept` (kernel-parked,
+/// zero idle wakes) rather than spinning a non-blocking poll with a backoff
+/// sleep. Shutdown wakes the blocked `accept` with an explicit self-connect
+/// interrupt to `interrupt_target` (the bound address, loopback-normalised),
+/// mirroring the leg-1 listeners.
 #[derive(Debug)]
 pub struct HealthServerHandle {
     local_addr: SocketAddr,
+    /// Loopback-normalised self-connect target used to interrupt the blocking
+    /// `accept` at shutdown.
+    interrupt_target: SocketAddr,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<Result<(), ServerError>>>,
+    /// Count of `accept` calls issued by the worker (test observability for the
+    /// zero-idle-wakes oracle: on a silent listener this stays at the single
+    /// parked call). The worker always maintains the counter; only the host-side
+    /// handle for reading it is test-scoped.
+    #[cfg(test)]
+    accept_attempts: Arc<AtomicU64>,
+    /// Count of connections shed under fd exhaustion via the reserve descriptor
+    /// (test observability for the shed helper reused from leg 1).
+    #[cfg(test)]
+    shed_count: Arc<AtomicU64>,
 }
 
 impl HealthServerHandle {
@@ -47,10 +67,32 @@ impl HealthServerHandle {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
+        // Explicit cross-platform interrupt (mirrors the leg-1 listeners): a
+        // single self-connect wakes the blocked `accept`. The worker sees the
+        // shutdown flag it observed under the same ordering and sheds the woken
+        // (spurious) socket rather than serving it — at most one spurious accept
+        // per interrupt. If the worker already exited (a real accept then flag
+        // check), the listener is gone and this connect fails fast; the join then
+        // returns immediately.
+        if let Ok(waker) = TcpStream::connect(self.interrupt_target) {
+            drop(waker);
+        }
 
         worker.join().map_err(|_| ServerError::HealthEndpoint {
             message: "health endpoint worker thread terminated unexpectedly".to_owned(),
         })?
+    }
+
+    /// `accept` calls issued by the worker (test observability, oracle 8).
+    #[cfg(test)]
+    fn accept_attempts(&self) -> u64 {
+        self.accept_attempts.load(Ordering::SeqCst)
+    }
+
+    /// Connections shed under fd exhaustion (test observability).
+    #[cfg(test)]
+    fn shed_count(&self) -> u64 {
+        self.shed_count.load(Ordering::SeqCst)
     }
 }
 
@@ -69,9 +111,10 @@ impl Drop for HealthServerHandle {
 ///
 /// # Errors
 ///
-/// Returns [`ServerError::HealthEndpoint`] when the health listener cannot bind,
-/// cannot be configured for non-blocking accepts, or cannot report its local
-/// address.
+/// Returns [`ServerError::HealthEndpoint`] when the health listener cannot bind
+/// or cannot report its local address. The listener stays BLOCKING (W4 leg 2):
+/// the accept worker kernel-parks in `accept` with zero idle wakes; shutdown
+/// wakes it via the self-connect interrupt.
 pub fn start_health_server(
     bind_address: SocketAddr,
     readiness: SharedReadinessState,
@@ -80,24 +123,40 @@ pub fn start_health_server(
         TcpListener::bind(bind_address).map_err(|error| ServerError::HealthEndpoint {
             message: format!("failed to bind health endpoint at {bind_address}: {error}"),
         })?;
-    listener
-        .set_nonblocking(true)
-        .map_err(|error| ServerError::HealthEndpoint {
-            message: format!("failed to configure health endpoint listener: {error}"),
-        })?;
+    // The listener stays BLOCKING (W4 leg 2): the accept worker kernel-parks in
+    // `accept` with zero idle wakes; shutdown wakes it via the self-connect
+    // interrupt below.
     let local_addr = listener
         .local_addr()
         .map_err(|error| ServerError::HealthEndpoint {
             message: format!("failed to inspect health endpoint listener address: {error}"),
         })?;
+    let interrupt_target = loopback_interrupt_target(local_addr);
     let shutdown = Arc::new(AtomicBool::new(false));
+    let accept_attempts = Arc::new(AtomicU64::new(0));
+    let shed_count = Arc::new(AtomicU64::new(0));
     let worker_shutdown = Arc::clone(&shutdown);
-    let worker = thread::spawn(move || serve(&listener, &readiness, &worker_shutdown));
+    let worker_attempts = Arc::clone(&accept_attempts);
+    let worker_shed = Arc::clone(&shed_count);
+    let worker = thread::spawn(move || {
+        serve(
+            &listener,
+            &readiness,
+            &worker_shutdown,
+            &worker_attempts,
+            &worker_shed,
+        )
+    });
 
     Ok(HealthServerHandle {
         local_addr,
+        interrupt_target,
         shutdown,
         worker: Some(worker),
+        #[cfg(test)]
+        accept_attempts,
+        #[cfg(test)]
+        shed_count,
     })
 }
 
@@ -105,10 +164,24 @@ fn serve(
     listener: &TcpListener,
     readiness: &SharedReadinessState,
     shutdown: &AtomicBool,
+    accept_attempts: &AtomicU64,
+    shed_count: &AtomicU64,
 ) -> Result<(), ServerError> {
+    // One reserve descriptor held for the shed-with-spare-fd EMFILE policy,
+    // reusing the leg-1 helper.
+    let mut reserve = listener.try_clone().ok();
     while !shutdown.load(Ordering::SeqCst) {
+        accept_attempts.fetch_add(1, Ordering::SeqCst);
         match listener.accept() {
             Ok((stream, ..)) => {
+                if shutdown.load(Ordering::SeqCst) {
+                    // Accepted while shutdown fired — the self-connect interrupt,
+                    // or a real probe racing the broadcast. Shed it, never serve:
+                    // no request slips past the shutdown broadcast, and the worker
+                    // exits promptly rather than sleeping.
+                    drop(stream);
+                    continue;
+                }
                 // A per-connection error (e.g. a TCP probe that connects but sends no HTTP
                 // data within the read timeout) must NOT terminate the serve loop — otherwise
                 // a single port probe kills the health server for the process lifetime and
@@ -118,10 +191,10 @@ fn serve(
                     tracing::debug!(%error, "health endpoint connection error");
                 }
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(10));
-            }
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) if is_transient_accept_error(&error) => {
+                shed_on_fd_exhaustion(listener, &mut reserve, shed_count, &error);
+            }
             Err(error) => {
                 return Err(ServerError::HealthEndpoint {
                     message: format!("health endpoint accept failed: {error}"),
@@ -131,6 +204,12 @@ fn serve(
     }
 
     Ok(())
+}
+
+/// EMFILE/ENFILE resource exhaustion is transient, exactly as the leg-1 accept
+/// loops treat it (mirrors the sibling WebSocket listener's local predicate).
+fn is_transient_accept_error(error: &std::io::Error) -> bool {
+    matches!(error.raw_os_error(), Some(code) if code == 24 || code == 23)
 }
 
 fn handle_connection(
