@@ -664,8 +664,7 @@ fn force_close_settle_uses_exit_notification_not_second_poll()
 /// in-slice `finish`) BOTH decrement drain completion through the one `remove()`
 /// funnel. The drain completes by delivery, with no reap scan driven by the test.
 #[test]
-fn drain_completes_on_last_exit_delivered_by_w1b_fate()
--> Result<(), Box<dyn std::error::Error>> {
+fn drain_completes_on_last_exit_delivered_by_w1b_fate() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = ConnectionSupervisor::new()?;
 
     // Orderly close: client hangs up -> EOF -> in-slice mark_crashed/finish.
@@ -730,7 +729,8 @@ fn drain_deadline_fires_at_most_once_per_sequence() -> Result<(), Box<dyn std::e
 
     // A second, independent drain sequence: exactly one more deadline delivery —
     // no background helper accrued ticks between the sequences.
-    let second = supervisor.wait_for_connections_drained(Instant::now() + Duration::from_millis(60));
+    let second =
+        supervisor.wait_for_connections_drained(Instant::now() + Duration::from_millis(60));
     assert!(!second);
     assert_eq!(
         supervisor.drain_deadline_hits(),
@@ -800,8 +800,7 @@ fn drain_idle_grows_unrelated_slices_while_drain_counters_stay_flat()
 /// `active_count`, so the exit's generation bump is detected at the park and the
 /// waiter completes immediately instead of sleeping to the (far) deadline.
 #[test]
-fn drain_exit_between_predicate_and_park_is_not_lost()
--> Result<(), Box<dyn std::error::Error>> {
+fn drain_exit_between_predicate_and_park_is_not_lost() -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = ConnectionSupervisor::new()?;
     let (_client, server) = tcp_pair()?;
     let handle = supervisor.spawn_connection(server)?;
@@ -814,8 +813,8 @@ fn drain_exit_between_predicate_and_park_is_not_lost()
     // A far deadline: only the un-lost exit can complete the drain quickly.
     let drainer = thread::spawn(move || {
         let started = Instant::now();
-        let drained = drain_supervisor
-            .wait_for_connections_drained(Instant::now() + Duration::from_secs(30));
+        let drained =
+            drain_supervisor.wait_for_connections_drained(Instant::now() + Duration::from_secs(30));
         (drained, started.elapsed())
     });
 
