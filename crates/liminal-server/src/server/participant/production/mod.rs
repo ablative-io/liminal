@@ -185,6 +185,8 @@ mod tests_w2_leg2_census;
 #[cfg(test)]
 mod tests_w2_leg3_crash_early;
 #[cfg(test)]
+mod tests_w2_leg3_crash_late;
+#[cfg(test)]
 mod tests_w3_restore;
 #[cfg(test)]
 mod tests_w3_restore_fixture;

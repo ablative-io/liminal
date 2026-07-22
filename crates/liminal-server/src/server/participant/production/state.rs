@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 use liminal_protocol::lifecycle::{
-    BindingState, CommittedDiedTerminal, ConversationDecision, ConversationGenesis,
+    BindingState, ClosureState, CommittedDiedTerminal, ConversationDecision, ConversationGenesis,
     ConversationRefusalReason, CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt,
     LiveFrontierOwner, LiveMember, NonzeroParticipantAckCommit, ObligationDebtDispatchState,
     ObligationDebtDispatchTransition, ObligationDebtOwnerError, ObserverProgressProjection,
@@ -354,7 +354,30 @@ impl ConversationAuthority {
             self.observer_progress_witnesses
                 .inject_duplicate_producer(metadata)?;
         }
-        self.observer_progress = self.observer_progress.max(progress);
+        let next_progress = self.observer_progress.max(progress);
+        if next_progress != self.observer_progress {
+            self.observer_progress = next_progress;
+            self.reconcile_obligation_debt_observer_progress()?;
+        }
+        Ok(())
+    }
+
+    /// Keeps the move-coupled debt episode synchronized with an independently
+    /// committed observer-progress projection.
+    fn reconcile_obligation_debt_observer_progress(&mut self) -> Result<(), StateError> {
+        if self.pending_debt_dispatch_transition.is_some() {
+            return Err(StateError::invariant(
+                "observer progress advanced during an obligation-debt transition",
+            ));
+        }
+        let Some(owner) = self.obligation_debt_dispatch.take() else {
+            return Ok(());
+        };
+        let (frontier, transition) = owner.begin_transition();
+        let state = transition
+            .complete(frontier, self.observer_progress)
+            .map_err(|error| StateError::ObligationDebtOwner { error })?;
+        self.obligation_debt_dispatch = Some(state);
         Ok(())
     }
 
@@ -441,6 +464,16 @@ impl ConversationAuthority {
         commit: NonzeroParticipantAckCommit,
         participant_id: ParticipantId,
     ) -> Result<AckCommitted, StateError> {
+        let ClosureState::Owed { debt, .. } = frontier.closure_accounting().state() else {
+            return Err(StateError::invariant(
+                "nonzero ack resulting frontier is not Owed",
+            ));
+        };
+        if commit.resulting_episode().debt() != debt {
+            return Err(StateError::invariant(
+                "nonzero ack resulting episode debt differs from resulting frontier",
+            ));
+        }
         let transition = self
             .pending_debt_dispatch_transition
             .take()

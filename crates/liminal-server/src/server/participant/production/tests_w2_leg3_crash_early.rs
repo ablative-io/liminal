@@ -18,9 +18,9 @@ use crate::server::participant::{
     ParticipantSemanticHandler,
 };
 
-const CONVERSATION: u64 = 0xD3_20;
+pub(super) const CONVERSATION: u64 = 0xD3_20;
 
-fn handler(
+pub(super) fn handler(
     store: Arc<dyn DurableStore>,
 ) -> Result<Arc<ProductionParticipantHandler>, Box<dyn Error>> {
     let mut config = test_participant_config();
@@ -28,7 +28,7 @@ fn handler(
     Ok(Arc::new(ProductionParticipantHandler::new(store, config)?))
 }
 
-fn apply_without_tell(
+pub(super) fn apply_without_tell(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
     request: ClientRequest,
@@ -42,7 +42,7 @@ fn apply_without_tell(
     Ok((result?, impact))
 }
 
-fn enroll_without_tell(
+pub(super) fn enroll_without_tell(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
     token: u8,
@@ -61,7 +61,7 @@ fn enroll_without_tell(
     Ok(bound)
 }
 
-fn installed(
+pub(super) fn installed(
     handler: &Arc<ProductionParticipantHandler>,
     store: Arc<dyn DurableStore>,
 ) -> Result<InstalledParticipantService, Box<dyn Error>> {
@@ -71,12 +71,12 @@ fn installed(
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct DispatchSnapshot {
-    authority: String,
-    selected_endpoint: Option<u64>,
+pub(super) struct DispatchSnapshot {
+    pub(super) authority: String,
+    pub(super) selected_endpoint: Option<u64>,
 }
 
-fn dispatch_snapshot(
+pub(super) fn dispatch_snapshot(
     handler: &ProductionParticipantHandler,
     incarnation: ConnectionIncarnation,
 ) -> Result<DispatchSnapshot, Box<dyn Error>> {
