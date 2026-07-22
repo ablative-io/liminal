@@ -14,7 +14,8 @@ use super::{
         ActiveBinding, BindingState, BoundParticipantCursor, ClosureAccounting, ClosureDebt,
         ClosureState, CursorProgressFact, CursorProgressKey, EnrollmentFingerprint, IdentityState,
         LiveMember, LiveMemberRestore, NonzeroDebtCursorEpisode, OrderClaims, OrderHigh,
-        OrderLedger, PresentedIdentity, RecoverySequenceReserve, SequenceClaims, SequenceLedger,
+        OrderLedger, PresentedIdentity, RecipientAckObligations, RecoverySequenceReserve,
+        SequenceClaims, SequenceLedger,
         claim_frontier::{
             BindingTerminalOwner, ClaimFrontiers, ClaimFrontiersRestore, FrontierBinding,
             FrontierParticipant, MovableOrderClaim, MovableSequenceClaim,
@@ -27,7 +28,7 @@ use super::{
     nonzero_participant_ack::{
         NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
         NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError,
-        apply_nonzero_participant_ack,
+        apply_nonzero_participant_ack, apply_nonzero_participant_ack_with_obligations,
     },
 };
 
@@ -505,82 +506,5 @@ fn aggregate_commit_rejects_unrelated_and_split_restored_prestates() {
     assert_eq!(unchanged_episode, old_episode);
 }
 
-#[test]
-fn two_participants_ack_same_retained_suffix_through_total_wrapper() {
-    // LP-EXTRACTION-GOAL.md Fix 2's exact blocker history now crosses common
-    // authority, aggregate validation, episode transition, and atomic commit.
-    let steps = [
-        (P0, epoch(1, 0), 1),
-        (P1, epoch(1, 1), 1),
-        (P0, epoch(1, 0), 2),
-        (P1, epoch(1, 1), 2),
-    ];
-    let mut members = [member(P0, OBSERVER), member(P1, OBSERVER)];
-    let mut subject = episode();
-    let mut durable_intermediates = Vec::new();
-
-    for (participant_id, binding_epoch, boundary) in steps {
-        let index = usize::try_from(participant_id).expect("fixture ids index the member array");
-        let before_member = members[index].clone();
-        let before_episode = subject.clone();
-        let commit = commit_for(&members[index], binding_epoch, boundary, &subject);
-        let expected = AckCommitted::new(envelope(participant_id, boundary));
-        assert_eq!(commit.outcome(), &expected);
-
-        let mut crash_member = before_member;
-        let mut crash_episode = before_episode;
-        assert_eq!(
-            commit
-                .clone()
-                .apply_to(&mut crash_member, &mut crash_episode),
-            Ok(expected.clone()),
-        );
-        assert_eq!(crash_member.cursor(), boundary);
-        assert_eq!(&crash_episode, commit.resulting_episode());
-
-        assert_eq!(
-            commit.clone().apply_to(&mut members[index], &mut subject),
-            Ok(expected.clone()),
-        );
-        assert_eq!(members[index].cursor(), boundary);
-        assert_eq!(
-            commit.apply_to(&mut members[index], &mut subject),
-            Ok(expected),
-            "replay from each durable resulting pair is identical",
-        );
-
-        assert_eq!(subject.retained_suffix_start(), Some(1));
-        assert!(subject.retains(1));
-        assert!(subject.retains(2));
-        assert_eq!(subject.floor_computation().resulting_floor, 1);
-        assert_eq!(subject.cap_floor(), 1);
-        assert_eq!(
-            subject.facts().get(CursorProgressKey {
-                participant_index: participant_id,
-                boundary,
-            }),
-            Some(CursorProgressFact::Consumed),
-        );
-        durable_intermediates.push(subject.encode().expect("each variable fact map serializes"));
-    }
-
-    assert_eq!(members[0].cursor(), H);
-    assert_eq!(members[1].cursor(), H);
-    for participant_index in [P0, P1] {
-        for boundary in [1, 2] {
-            assert_eq!(
-                subject.facts().get(CursorProgressKey {
-                    participant_index,
-                    boundary,
-                }),
-                Some(CursorProgressFact::Consumed),
-            );
-        }
-    }
-    assert_eq!(subject.facts().len(), 4);
-    assert!(
-        durable_intermediates
-            .windows(2)
-            .all(|states| states[0] != states[1])
-    );
-}
+#[path = "nonzero_participant_ack_oracle_tests.rs"]
+mod oracle;
