@@ -7,7 +7,7 @@ use std::os::fd::RawFd;
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
-use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -233,6 +233,22 @@ impl ConnectionSupervisor {
     #[must_use]
     pub fn active_connection_count(&self) -> usize {
         self.inner.runtime.active_count()
+    }
+
+    /// Parks until every tracked connection has been removed or `deadline`
+    /// elapses, returning `true` when the drain completed and `false` when the
+    /// single admitted deadline won.
+    ///
+    /// The TOLD drain-completion replacement (W4 leg 3, §4.3): the waiter is woken
+    /// by the one `remove()` funnel every connection exit reaches — never by a
+    /// reap/count timer. Both the graceful drain and the force-close settle call
+    /// this same waiter, each with its own one-shot deadline; there is no second
+    /// settle poll loop.
+    #[must_use]
+    pub fn wait_for_connections_drained(&self, deadline: Instant) -> bool {
+        self.inner
+            .runtime
+            .wait_for_active_connections_drained(deadline)
     }
 
     /// Returns the first latched post-Open participant fatal, if any.
@@ -630,6 +646,25 @@ impl ConnectionSupervisor {
     #[cfg(test)]
     pub(super) fn pre_wait_probe_hits(&self) -> u64 {
         self.inner.runtime.pre_wait_probe_hits()
+    }
+
+    /// Installs the one-use drain-park gate (oracles 18, 19) and returns its
+    /// `(armed, release)` endpoints.
+    #[cfg(test)]
+    pub(super) fn install_drain_park_barrier(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        self.inner.runtime.install_drain_park_barrier()
+    }
+
+    /// Drain waiter wakes that observed a real connection removal (oracle 12).
+    #[cfg(test)]
+    pub(super) fn drain_exit_wakes(&self) -> u64 {
+        self.inner.runtime.drain_exit_wakes()
+    }
+
+    /// Drain waiter deadline expirations (oracles 12, 16).
+    #[cfg(test)]
+    pub(super) fn drain_deadline_hits(&self) -> u64 {
+        self.inner.runtime.drain_deadline_hits()
     }
 }
 
@@ -1364,6 +1399,36 @@ pub(super) struct ConnectionRuntime {
     /// notifier fires from another actor's slice. Weak so it never keeps the
     /// scheduler alive (the scheduler owns the processes that own this runtime).
     scheduler: Weak<Scheduler>,
+    /// W4 leg 3 (§4.3) TOLD drain-completion primitive. Reuses the
+    /// [`ShutdownHandle`] `Condvar` shape (`shutdown.rs` reuse candidate (c)): a
+    /// monotonic connection-removal generation guarded by [`Self::drain_removed`]'s
+    /// mutex, bumped once whenever [`Self::remove`] actually drops a record — the
+    /// single removal funnel every exit route (in-slice `mark_crashed`/`finish`,
+    /// the reclaim reactor, and the reconciliation scan) reaches. The
+    /// shutdown-sequence drain/settle waiter parks on the `Condvar` and wakes only
+    /// on a delivered exit (a generation bump + `notify_all`) or the one admitted
+    /// deadline it passes to `wait_timeout`. No periodic reap or count scan.
+    drain_generation: Mutex<u64>,
+    /// Woken on every connection-record removal; the drain/settle waiter parks
+    /// here. Paired with [`Self::drain_generation`] under the same mutex so an
+    /// exit delivered between the waiter's arm-before-observe snapshot and its
+    /// park cannot be lost (oracle 18).
+    drain_removed: Condvar,
+    /// Test-only count of drain waiter wakes that observed a real removal
+    /// (generation advanced across the park). A quiet drain records zero — it
+    /// wakes only for the single deadline (oracle 12).
+    #[cfg(test)]
+    drain_exit_wakes: AtomicU64,
+    /// Test-only count of drain waiter deadline expirations. A quiet drain that
+    /// times out records exactly one — one arming, one delivery, no helper tick
+    /// (oracles 12, 16).
+    #[cfg(test)]
+    drain_deadline_hits: AtomicU64,
+    /// Test-only one-use gate in the drain waiter's observe->park window, so a
+    /// harness can deliver an exit strictly after the completion observation and
+    /// before the park to pin the arm-before-observe barrier (oracles 18, 19).
+    #[cfg(test)]
+    drain_park_barrier: Mutex<Option<PreWaitBarrier>>,
     /// R7 (§1.2(6)) test-only per-connection slice counter, keyed by pid. Bumped
     /// once at the head of every serviced slice. The park-flip's permanent rule-1
     /// assertion (a parked connection's counter must not advance without an event)
@@ -1462,6 +1527,14 @@ impl ConnectionRuntime {
             control_atom,
             ready_atom,
             scheduler,
+            drain_generation: Mutex::new(0),
+            drain_removed: Condvar::new(),
+            #[cfg(test)]
+            drain_exit_wakes: AtomicU64::new(0),
+            #[cfg(test)]
+            drain_deadline_hits: AtomicU64::new(0),
+            #[cfg(test)]
+            drain_park_barrier: Mutex::new(None),
             #[cfg(test)]
             slice_counts: Mutex::new(HashMap::new()),
             #[cfg(test)]
@@ -1754,6 +1827,52 @@ impl ConnectionRuntime {
         } else {
             None
         }
+    }
+
+    /// Installs the one-use drain-park gate (oracles 18, 19) and returns its
+    /// `(armed, release)` endpoints. Staged in the drain waiter's observe->park
+    /// window so a harness can deliver an exit strictly between the completion
+    /// observation and the park. Entirely `#[cfg(test)]`; changes no production
+    /// wait semantics.
+    #[cfg(test)]
+    pub(super) fn install_drain_park_barrier(&self) -> (Arc<Barrier>, Arc<Barrier>) {
+        let armed = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        if let Ok(mut slot) = self.drain_park_barrier.lock() {
+            *slot = Some(PreWaitBarrier {
+                armed: Arc::clone(&armed),
+                release: Arc::clone(&release),
+            });
+        }
+        (armed, release)
+    }
+
+    /// Runs the one-use drain-park gate, if installed. One-use so only the staged
+    /// park rendezvouses; every later park in the same waiter runs ungated.
+    #[cfg(test)]
+    fn run_drain_park_barrier(&self) {
+        let barrier = self
+            .drain_park_barrier
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        let Some(barrier) = barrier else {
+            return;
+        };
+        barrier.armed.wait();
+        barrier.release.wait();
+    }
+
+    /// Test-only count of drain waiter wakes that observed a real removal.
+    #[cfg(test)]
+    pub(super) fn drain_exit_wakes(&self) -> u64 {
+        self.drain_exit_wakes.load(Ordering::SeqCst)
+    }
+
+    /// Test-only count of drain waiter deadline expirations.
+    #[cfg(test)]
+    pub(super) fn drain_deadline_hits(&self) -> u64 {
+        self.drain_deadline_hits.load(Ordering::SeqCst)
     }
 
     /// Runs a one-use deterministic test gate after arm. Returns whether the gate
@@ -2742,7 +2861,88 @@ impl ConnectionRuntime {
             // Explicit after-deregister drop documents and enforces the fd wall.
             drop(record.fd_guard.take());
         }
+        // TOLD drain-completion tell (W4 leg 3, §4.3): the record map above already
+        // reflects this removal, so bump the removal generation and wake the
+        // drain/settle waiter AFTER the observed state is updated. Ordering the
+        // state update before the generation bump — paired with the waiter arming
+        // its snapshot before observing `active_count` — is the arm-before-observe
+        // barrier that makes a concurrently delivered exit un-losable (oracle 18).
+        // Only a real removal tells, so a double-remove drives no spurious wake.
+        if removed.is_some() {
+            self.signal_connection_removed();
+        }
         removed
+    }
+
+    /// Bumps the drain-completion generation and wakes the drain/settle waiter.
+    /// Called from [`Self::remove`] on every route that actually drops a record.
+    fn signal_connection_removed(&self) {
+        let mut generation = recover_lock(&self.drain_generation);
+        *generation = generation.wrapping_add(1);
+        // Wake under the held mutex so the waiter cannot miss the bump between its
+        // generation re-check and its park (Condvar contract).
+        self.drain_removed.notify_all();
+    }
+
+    /// Parks the calling thread until every tracked connection has been removed
+    /// or `deadline` elapses, returning `true` when the drain completed and
+    /// `false` when the single admitted deadline won. This is the TOLD
+    /// replacement (W4 leg 3, §4.3) for the retired reap/count/sleep drain loop:
+    /// it never samples completion on a timer. Completion is observed only on a
+    /// delivered connection-removal wake (composed from the one `remove()` funnel,
+    /// so a Died/Detached/crash exit and an orderly close decrement through the
+    /// same path — oracle 15) or the one deadline. Force-close settle reuses this
+    /// same waiter with its own deadline rather than a second poll loop (oracle
+    /// 14).
+    pub(super) fn wait_for_active_connections_drained(&self, deadline: Instant) -> bool {
+        loop {
+            // ARM before OBSERVE: snapshot the removal generation first, so an exit
+            // delivered after the completion observation below and before the park
+            // bumps a generation the park detects — it is never lost (oracle 18).
+            let snapshot = self.drain_generation_snapshot();
+            // OBSERVE completion first: a last exit that reaches zero wins a tie
+            // with a simultaneously elapsed deadline (oracle 19).
+            if self.active_count() == 0 {
+                return true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                #[cfg(test)]
+                self.drain_deadline_hits.fetch_add(1, Ordering::SeqCst);
+                return false;
+            };
+            #[cfg(test)]
+            self.run_drain_park_barrier();
+            self.park_until_removed_or(snapshot, remaining);
+        }
+    }
+
+    /// Reads the current removal generation under its mutex.
+    fn drain_generation_snapshot(&self) -> u64 {
+        *recover_lock(&self.drain_generation)
+    }
+
+    /// Parks on the removal `Condvar` for at most `timeout`, but only while no
+    /// removal has bumped the generation since `snapshot` — the arm-before-observe
+    /// barrier. A generation already advanced means an exit landed between the
+    /// observation and here, so the caller re-loops without sleeping.
+    fn park_until_removed_or(&self, snapshot: u64, timeout: Duration) {
+        let generation = recover_lock(&self.drain_generation);
+        if *generation != snapshot {
+            return;
+        }
+        let outcome = self
+            .drain_removed
+            .wait_timeout(generation, timeout)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        #[cfg(test)]
+        {
+            let (generation, _timed_out) = outcome;
+            if *generation != snapshot {
+                self.drain_exit_wakes.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        #[cfg(not(test))]
+        let _ = outcome;
     }
 }
 
