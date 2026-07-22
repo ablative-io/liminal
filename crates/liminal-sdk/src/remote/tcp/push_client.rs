@@ -27,11 +27,12 @@ use alloc::vec::Vec;
 use core::time::Duration;
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::net::{Shutdown, TcpStream};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
+use std::time::Instant;
 
 use liminal::protocol::{
     CausalContext, Frame, MessageEnvelope, ProtocolError, ProtocolVersion, SchemaId,
@@ -52,6 +53,17 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const READER_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 /// Read chunk size used when draining the socket into the frame buffer.
 const READ_CHUNK_BYTES: usize = 4096;
+/// Short per-read deadline used only while draining acks on drop, so the drain
+/// polls the socket without wedging on a quiet gap between acks.
+const DROP_DRAIN_READ_TIMEOUT: Duration = Duration::from_millis(20);
+/// Total wall-clock budget for the drop-time graceful close, so the drain never
+/// hangs on a peer that never sends its FIN even though the common path reaches
+/// EOF within a few milliseconds of the write-half `shutdown`.
+const DROP_DRAIN_BUDGET: Duration = Duration::from_secs(5);
+/// Upper bound on best-effort drain reads when the socket is shared with a live
+/// `PushWriter` clone (no write-half `shutdown` is safe), so that path stays
+/// bounded too.
+const DROP_DRAIN_MAX_READS: usize = 64;
 /// Upper bound on a single buffered frame, guarding against runaway buffering.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Application stream id used for the client's push reply frames.
@@ -360,6 +372,84 @@ impl Drop for PushClient {
             // The reader wakes within READER_POLL_TIMEOUT to observe the stop flag,
             // so this join does not hang on a quiet connection.
             reader.join().ok();
+        }
+        // Drain the server acks the now-stopped reader left unread BEFORE the
+        // socket closes. Closing a socket whose receive buffer still holds unread
+        // bytes emits a kernel RST, and on RST the server's kernel discards the
+        // publish frames it has not yet read — the connection slice dies as a
+        // ConnectionLost and those fire-and-forget publishes never fan out. Reading
+        // the pending acks first lets the close emit a clean FIN, so every accepted
+        // publish survives the teardown. The drain is bounded (a short read deadline
+        // plus a read cap) so a normal teardown never hangs, and it runs only here
+        // at drop — `publish` stays non-blocking, fire-and-forget as before.
+        drain_pending_acks(&self.writer);
+    }
+}
+
+/// Closes the push connection with a graceful half-close so a normal teardown
+/// never RSTs: shut the write half (a FIN tells the server the client is done, so
+/// the server reads and processes every publish frame still buffered before it,
+/// then closes), then drain-read the acks to the server's FIN so no unread bytes
+/// remain to trigger a reset.
+///
+/// The half-close is taken only when this `PushClient` is the sole owner of the
+/// socket (no live [`PushWriter`] clone is still publishing on it); otherwise a
+/// best-effort bounded receive-buffer drain is the most that is safe. Both are
+/// bounded by [`DROP_DRAIN_READ_TIMEOUT`] and [`DROP_DRAIN_MAX_READS`], so drop
+/// never hangs. A poisoned writer lock is a no-op — the socket still closes.
+fn drain_pending_acks(writer: &Arc<Mutex<TcpStream>>) {
+    // Sole owner iff no `PushWriter` clone shares the socket; the reader's cloned
+    // handle has already been dropped by the join above, so a strong count of one
+    // means this drop closes the socket and a write-half FIN is safe to send.
+    let sole_owner = Arc::strong_count(writer) == 1;
+    let Ok(mut stream) = writer.lock() else {
+        return;
+    };
+    // Tighten the read deadline for the drain so each read returns promptly once
+    // the buffer momentarily empties; a failure to set it is non-fatal (the
+    // socket's existing READER_POLL_TIMEOUT still bounds every read).
+    let _ = stream.set_read_timeout(Some(DROP_DRAIN_READ_TIMEOUT));
+    let mut scratch = [0_u8; READ_CHUNK_BYTES];
+    if !sole_owner {
+        // A live `PushWriter` clone still shares the socket: a write-half shutdown
+        // would break its publishes, so do a bounded best-effort receive drain
+        // only and let the socket close when the last handle drops.
+        for _ in 0..DROP_DRAIN_MAX_READS {
+            match stream.read(&mut scratch) {
+                // Consumed buffered bytes; look for more.
+                Ok(read) if read > 0 => {}
+                // FIN (`Ok(0)`), an empty buffer, or any error: nothing more to drain.
+                _ => break,
+            }
+        }
+        return;
+    }
+    // Graceful close (sole owner): FIN the write half so the server finishes
+    // reading and fanning out EVERY buffered publish, then read to the server's
+    // own FIN. A transient empty buffer (WouldBlock/TimedOut) is NOT the end —
+    // acks arrive as the server works through the burst — so keep reading until
+    // EOF or the total budget elapses. Reading to EOF is what guarantees no unread
+    // bytes remain to turn the final close into a RST that would strand publishes
+    // the server had not yet read.
+    let _ = stream.shutdown(Shutdown::Write);
+    let deadline = Instant::now() + DROP_DRAIN_BUDGET;
+    loop {
+        match stream.read(&mut scratch) {
+            // The server's FIN: connection fully drained and closing cleanly.
+            Ok(0) => return,
+            // Consumed buffered bytes; look for more.
+            Ok(_) => {}
+            // A momentary gap between acks: keep waiting until EOF or the budget.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            // A hard error: nothing more can be drained.
+            Err(_) => return,
+        }
+        if Instant::now() >= deadline {
+            return;
         }
     }
 }
