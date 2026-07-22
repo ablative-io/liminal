@@ -179,6 +179,8 @@ mod tests_w2_impacts;
 #[cfg(test)]
 mod tests_w2_leg1_census;
 #[cfg(test)]
+mod tests_w2_leg2_census;
+#[cfg(test)]
 mod tests_w3_restore;
 #[cfg(test)]
 mod tests_w3_restore_fixture;
