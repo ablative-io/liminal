@@ -602,6 +602,15 @@ impl ConnectionSupervisor {
         self.inner.runtime.install_reclaim_barrier(pid)
     }
 
+    /// A weak handle to the connection runtime (test observability): lets a
+    /// lifetime test assert the runtime — and transitively the durable store's
+    /// writer lock — is released synchronously at supervisor drop rather than
+    /// held by the detached reclaim reactor.
+    #[cfg(test)]
+    pub(super) fn runtime_weak(&self) -> Weak<ConnectionRuntime> {
+        Arc::downgrade(&self.inner.runtime)
+    }
+
     /// Installs a one-use observation for the process-owned stream at `fd` being
     /// dropped. External scheduler termination removes the process-table entry
     /// before an executing native handler is destroyed, so table absence is not
