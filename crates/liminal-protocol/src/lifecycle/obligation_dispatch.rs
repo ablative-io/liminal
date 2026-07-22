@@ -352,22 +352,55 @@ fn classify_selected_obligation<T>(
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
+    use crate::{
+        algebra::WideResourceVector,
+        wire::{BindingEpoch, ConnectionIncarnation, Generation},
+    };
+
     use super::{
+        super::{BoundParticipantCursor, ClosureDebt, NonzeroDebtCursorEpisode},
         DebtDispatchDeferral, DebtDispatchInvariant, ObligationDebtDispatchDecision,
         classify_selected_obligation,
     };
 
+    fn binding_epoch() -> BindingEpoch {
+        BindingEpoch::new(
+            ConnectionIncarnation::new(1, 1),
+            Generation::new(1).unwrap_or(Generation::ONE),
+        )
+    }
+
     #[test]
-    fn selection_is_total_without_using_the_retention_floor() {
+    fn nonzero_debt_permits_testified_below_floor_and_defers_above_high_watermark() {
         let cursor = 0;
         let high_watermark = 100;
+        let physical_floor = 25;
+        let capacity_floor = 25;
         let below_floor_endpoint = 10;
         let above_high_watermark = high_watermark + 1;
+        let episode = NonzeroDebtCursorEpisode::new(
+            1,
+            ClosureDebt::new(WideResourceVector::new(1, 1))
+                .unwrap_or_else(|| unreachable!("fixture debt is nonzero")),
+            high_watermark,
+            high_watermark,
+            physical_floor,
+            capacity_floor,
+            vec![BoundParticipantCursor::new(0, binding_epoch(), cursor)],
+        )
+        .unwrap_or_else(|error| unreachable!("fixture episode must be valid: {error:?}"));
 
+        assert_eq!(episode.candidate_high_watermark(), high_watermark);
+        assert_eq!(episode.observer_progress(), high_watermark);
+        assert_eq!(episode.cap_floor(), capacity_floor);
+        assert_eq!(episode.retained_suffix_start(), Some(25));
+        assert!(!episode.retains(below_floor_endpoint));
         assert_eq!(
             classify_selected_obligation(
                 cursor,
-                Some(high_watermark),
+                Some(episode.candidate_high_watermark()),
                 Some((below_floor_endpoint, below_floor_endpoint)),
             ),
             ObligationDebtDispatchDecision::Permit(below_floor_endpoint)
@@ -375,18 +408,39 @@ mod tests {
         assert_eq!(
             classify_selected_obligation(
                 cursor,
-                Some(high_watermark),
+                Some(episode.candidate_high_watermark()),
                 Some((above_high_watermark, above_high_watermark)),
             ),
             ObligationDebtDispatchDecision::Defer(DebtDispatchDeferral::BeyondDebtHighWatermark)
         );
         assert_eq!(
-            classify_selected_obligation::<u64>(cursor, Some(high_watermark), None),
+            classify_selected_obligation::<u64>(
+                cursor,
+                Some(episode.candidate_high_watermark()),
+                None,
+            ),
             ObligationDebtDispatchDecision::Defer(DebtDispatchDeferral::NoObligation)
         );
+    }
+
+    #[test]
+    fn debt_dispatch_invariant_never_falls_back_or_fabricates_wire_refusal() {
+        let cursor = 7;
+        let selected_payload = "durable publication";
+        let decision =
+            classify_selected_obligation(cursor, Some(100), Some((cursor, selected_payload)));
+
         assert_eq!(
-            classify_selected_obligation(cursor, Some(high_watermark), Some((cursor, cursor)),),
+            decision,
             ObligationDebtDispatchDecision::Invariant(DebtDispatchInvariant::OutboxSelection)
         );
+        assert!(!matches!(
+            decision,
+            ObligationDebtDispatchDecision::Permit(_)
+        ));
+        assert!(!matches!(
+            decision,
+            ObligationDebtDispatchDecision::Defer(_)
+        ));
     }
 }
