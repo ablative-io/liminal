@@ -38,8 +38,8 @@ fn connected_pair(
 }
 
 #[test]
-fn handshake_worker_completion_delivered_not_reap_scanned()
--> Result<(), Box<dyn std::error::Error>> {
+fn handshake_worker_completion_delivered_not_reap_scanned() -> Result<(), Box<dyn std::error::Error>>
+{
     let supervisor = ConnectionSupervisor::new()?;
     let handshakes = HandshakeSupervisor::new(supervisor.clone(), acceptor_settings());
 
