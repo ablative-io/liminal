@@ -98,6 +98,22 @@ type GeneratedWasmModule = {
 const textEncoder = new TextEncoder();
 const RECEIVE_PREFIX_LENGTH = 19;
 let activeBindings: Promise<WasmProtocolBindings> | undefined;
+let defaultWasmSource: WasmSource | undefined;
+
+/**
+ * Installs the fallback {@link WasmSource} used when neither per-call load
+ * options nor {@link configureWasmBridge} supplied one.
+ *
+ * Registration is synchronous and performs no instantiation: the source is
+ * only consumed the first time protocol bindings are actually needed. The
+ * self-contained browser artifact calls this at module evaluation with the
+ * WASM bytes it embeds, so the default wasm-bindgen asset resolution (a
+ * `fetch` relative to the glue module) is never reached from that artifact.
+ * When no default is installed, behavior is unchanged.
+ */
+export function setDefaultWasmSource(source: WasmSource): void {
+  defaultWasmSource = source;
+}
 
 export async function connect(
   options: WasmConnectOptions,
@@ -157,7 +173,7 @@ export async function loadBindings(
   if (options.bindings !== undefined) {
     return resolveBindings(options.bindings);
   }
-  activeBindings ??= instantiateBindings(options.source);
+  activeBindings ??= instantiateBindings(options.source ?? defaultWasmSource);
   return activeBindings;
 }
 
