@@ -893,23 +893,33 @@ impl PushReplyAwaiter {
 /// the pid through [`ConnectionRuntime::reclaim_terminated`], which funnels into
 /// `remove()`. On the bounded queue's [`ExitEvent::Lagged`] overflow marker it
 /// runs exactly one reconciliation pass over the tracked records (beamr's
-/// documented recovery), driven by that one TELL — not a timer. It returns when
-/// the subscription disconnects, i.e. when the scheduler and its publisher drop,
-/// so scheduler teardown reaps it with no stop flag to sample.
+/// documented recovery), driven by that one TELL — not a timer.
+///
+/// It holds WEAK handles to both the scheduler and the runtime and upgrades them
+/// per event, so it never keeps either alive past supervisor drop. It returns
+/// when the subscription disconnects (scheduler and publisher dropped) OR when a
+/// per-event upgrade fails — both observed at an event delivery, never sampled,
+/// so there is no stop flag (LAW-1). The runtime and its durable store therefore
+/// release synchronously at supervisor drop rather than after the reactor exits.
 fn run_reclaim_reactor(
     subscription: &ExitEventSubscription,
     scheduler: &Weak<Scheduler>,
-    runtime: &Arc<ConnectionRuntime>,
+    runtime: &Weak<ConnectionRuntime>,
 ) {
     loop {
         match subscription.recv() {
             Ok(ExitEvent::Exited { pid, reason }) => {
+                let Some(runtime) = runtime.upgrade() else {
+                    return;
+                };
                 runtime.deliver_reclamation(scheduler, pid, reason);
             }
             Ok(ExitEvent::Lagged) => {
-                if let Some(scheduler) = scheduler.upgrade() {
-                    runtime.reap_crashed(&scheduler);
-                }
+                let (Some(runtime), Some(scheduler)) = (runtime.upgrade(), scheduler.upgrade())
+                else {
+                    return;
+                };
+                runtime.reap_crashed(&scheduler);
             }
             Err(_) => return,
         }
@@ -1000,7 +1010,11 @@ impl SupervisorInner {
         match scheduler.subscribe_exit_events() {
             Some(subscription) => {
                 let reactor_scheduler = Arc::downgrade(&scheduler);
-                let reactor_runtime = Arc::clone(&runtime);
+                // WEAK, symmetric with the scheduler handle: the reactor must not
+                // keep the runtime (and its durable store's writer lock) alive past
+                // supervisor drop. It upgrades per event and exits on a failed
+                // upgrade, so the runtime is released synchronously at drop.
+                let reactor_runtime = Arc::downgrade(&runtime);
                 thread::Builder::new()
                     .name("liminal-connection-reclaim".to_owned())
                     .spawn(move || {
