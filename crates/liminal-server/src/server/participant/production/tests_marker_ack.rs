@@ -8,11 +8,13 @@ use liminal_protocol::wire::{
 };
 
 use super::ProductionParticipantHandler;
+use super::outbox::RetainedAuthorityMeasurements;
 use super::outbox_log::{OutboxLog, OutboxRow, StoredMarkerAckCommitted};
 use super::tests::dispatch;
 use super::tests_marker_ack_fixture::{
     MarkerFixture, marker_fixture_config, marker_protocol_snapshot, prepare_marker_fixture,
 };
+use super::tests_outbox_owner::assert_live_recipient_obligation_bound_holds_without_mutation_and_owner_continues;
 use crate::server::participant::{ParticipantOfferedProgress, ParticipantSemanticHandler};
 
 fn dispatch_marker_ack(
@@ -221,6 +223,42 @@ fn commit_interleaved_catchup(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MarkerAccountingSnapshot {
+    live_records: usize,
+    live_obligations: u64,
+    charged_bytes: u64,
+    durable_ack: u64,
+    next_live: Option<u64>,
+    retained: RetainedAuthorityMeasurements,
+}
+
+fn marker_accounting_snapshot(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    participant_id: u64,
+) -> Result<MarkerAccountingSnapshot, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "marker accounting owner lock was poisoned")?;
+    let authority = owner.as_ref().ok_or("marker accounting owner was absent")?;
+    let outbox = authority
+        .outbox
+        .as_ref()
+        .ok_or("marker accounting outbox was absent")?;
+    let snapshot = MarkerAccountingSnapshot {
+        live_records: outbox.live_record_count(),
+        live_obligations: outbox.live_recipient_obligation_count(),
+        charged_bytes: outbox.charged_bytes(),
+        durable_ack: outbox.ack_through(participant_id),
+        next_live: outbox.next_live(participant_id),
+        retained: outbox.retained_authority_measurements()?,
+    };
+    drop(owner);
+    Ok(snapshot)
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct CompleteMarkerSnapshot {
     cursor: u64,
@@ -359,6 +397,94 @@ fn marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor() -> Result
 {
     assert_marker_base_interleaving(MarkerBaseInterleaving::AckFirst)?;
     assert_marker_base_interleaving(MarkerBaseInterleaving::AckBetween)
+}
+
+#[test]
+fn marker_covered_outbox_accounting_stays_bounded_until_real_discharge()
+-> Result<(), Box<dyn Error>> {
+    let fixture = prepare_marker_fixture()?;
+    let conversation_id = fixture.marker_delivery.conversation_id;
+    let marker_cursor = fixture.marker_delivery.delivery_seq;
+    let target_participant = fixture.target_participant;
+    let target_connection = fixture.target_connection;
+    let catchup_participant = fixture.catchup_participant;
+    let catchup_connection = fixture.catchup_connection;
+    let catchup_through_seq = fixture.catchup_through_seq;
+
+    record_exact_marker_offer(&fixture)?;
+    let before_marker =
+        marker_accounting_snapshot(&fixture.handler, conversation_id, target_participant)?;
+    assert!(before_marker.live_records > 0);
+    assert!(before_marker.live_obligations > 0);
+    assert!(before_marker.charged_bytes > 0);
+    commit_exact_marker_ack(&fixture)?;
+    let after_marker =
+        marker_accounting_snapshot(&fixture.handler, conversation_id, target_participant)?;
+    assert_eq!(after_marker, before_marker);
+
+    let (protocol_cursor, _) =
+        marker_protocol_snapshot(&fixture.handler, conversation_id, target_participant)?;
+    assert_eq!(protocol_cursor, marker_cursor);
+    if let Some(publication) =
+        fixture
+            .handler
+            .next_publication(target_connection, conversation_id, None)?
+    {
+        assert!(publication.delivery_seq() > protocol_cursor);
+    }
+
+    let no_op = dispatch(
+        &fixture.handler,
+        target_connection,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id,
+            participant_id: target_participant,
+            capability_generation: Generation::ONE,
+            through_seq: protocol_cursor,
+        }),
+    )?;
+    assert!(matches!(no_op, ServerValue::AckNoOp(_)));
+    assert_eq!(
+        marker_accounting_snapshot(&fixture.handler, conversation_id, target_participant)?,
+        after_marker
+    );
+
+    let idle_before = fixture.handler.obligation_dispatch_work_snapshot();
+    assert_eq!(
+        marker_accounting_snapshot(&fixture.handler, conversation_id, target_participant)?,
+        after_marker
+    );
+    assert_eq!(
+        fixture.handler.obligation_dispatch_work_snapshot(),
+        idle_before
+    );
+    assert_live_recipient_obligation_bound_holds_without_mutation_and_owner_continues()?;
+
+    let store = Arc::clone(&fixture.store);
+    drop(fixture);
+    let cold = ProductionParticipantHandler::new(store, marker_fixture_config())?;
+    let cold_snapshot = marker_accounting_snapshot(&cold, conversation_id, target_participant)?;
+    assert_eq!(cold_snapshot, after_marker);
+    if let Some(publication) = cold.next_publication(target_connection, conversation_id, None)? {
+        assert!(publication.delivery_seq() > protocol_cursor);
+    }
+
+    let before_discharge = marker_accounting_snapshot(&cold, conversation_id, catchup_participant)?;
+    let advanced = dispatch(
+        &cold,
+        catchup_connection,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id,
+            participant_id: catchup_participant,
+            capability_generation: Generation::ONE,
+            through_seq: catchup_through_seq,
+        }),
+    )?;
+    assert!(matches!(advanced, ServerValue::AckCommitted(_)));
+    let after_discharge = marker_accounting_snapshot(&cold, conversation_id, catchup_participant)?;
+    assert!(after_discharge.live_obligations < before_discharge.live_obligations);
+    assert!(after_discharge.charged_bytes <= before_discharge.charged_bytes);
+    Ok(())
 }
 
 #[test]

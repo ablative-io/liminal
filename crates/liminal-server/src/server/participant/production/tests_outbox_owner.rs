@@ -298,8 +298,7 @@ fn participant_ack_only_advances_receipt_frontier() -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-#[test]
-fn live_recipient_obligation_bound_holds_without_mutation_and_owner_continues()
+pub(super) fn assert_live_recipient_obligation_bound_holds_without_mutation_and_owner_continues()
 -> Result<(), Box<dyn Error>> {
     let limits = ConversationOutboxLimits::try_new(1, 2)?;
     let mut owner = ConversationOutbox::restore(CONVERSATION, Vec::new(), limits)?;
@@ -335,6 +334,12 @@ fn live_recipient_obligation_bound_holds_without_mutation_and_owner_continues()
     assert_eq!(owner.next_extension_sequence(), 3);
     assert!(owner.delivery_after(RECIPIENT + 2, 0).is_some());
     Ok(())
+}
+
+#[test]
+fn live_recipient_obligation_bound_holds_without_mutation_and_owner_continues()
+-> Result<(), Box<dyn Error>> {
+    assert_live_recipient_obligation_bound_holds_without_mutation_and_owner_continues()
 }
 
 #[test]
