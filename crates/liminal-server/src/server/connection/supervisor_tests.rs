@@ -583,6 +583,322 @@ fn no_final_slice_exit_cannot_leak_admission_slot_across_idle()
     Ok(())
 }
 
+/// Oracle 12 (W4 leg 3, §4.3) — a held-silent active connection keeps the drain
+/// waiter parked: it wakes for NO exit (zero exit wakes) and returns only when
+/// the single admitted deadline expires (exactly one deadline delivery). The
+/// retired reap/count/sleep loop woke ~100 times a second; this wakes zero times
+/// while the connection is held and drops the deadline exactly once.
+#[test]
+fn quiet_drain_wakes_only_for_exit_or_single_deadline() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (_client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    wait_for_parked(&supervisor, handle.pid())?;
+    assert_eq!(supervisor.active_connection_count(), 1);
+
+    // The connection is held silent (never exits), so the drain can only end at
+    // the deadline. This blocking wait parks on the TOLD completion primitive.
+    let started = Instant::now();
+    let deadline = started + Duration::from_millis(120);
+    let drained = supervisor.wait_for_connections_drained(deadline);
+
+    assert!(
+        !drained,
+        "a held connection must not drain before the deadline"
+    );
+    assert!(
+        started.elapsed() >= Duration::from_millis(110),
+        "the waiter must park for the full window, not spin: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(
+        supervisor.drain_exit_wakes(),
+        0,
+        "a quiet drain must wake for no exit"
+    );
+    assert_eq!(
+        supervisor.drain_deadline_hits(),
+        1,
+        "a quiet drain must drop the single admitted deadline exactly once"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 14 (W4 leg 3, §4.3) — force-close settle continues on the SAME TOLD
+/// connection-exit notification the graceful drain uses; there is no second
+/// settle poll loop. The forced connection exits through the one `remove()`
+/// funnel, waking the settle waiter, which returns with the connection gone and
+/// without exhausting its window.
+#[test]
+fn force_close_settle_uses_exit_notification_not_second_poll()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (_client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    wait_for_parked(&supervisor, handle.pid())?;
+    assert_eq!(supervisor.active_connection_count(), 1);
+
+    supervisor.force_close_active_connections();
+    // The settle parks on the exit notification (no poll loop); it returns once
+    // the forced connection's exit funnels through remove().
+    crate::server::shutdown::wait_after_force_close(&supervisor);
+
+    assert_eq!(
+        supervisor.active_connection_count(),
+        0,
+        "force-close settle must complete via the exit notification"
+    );
+    assert!(!supervisor.is_tracked(handle.pid()));
+    assert_eq!(
+        supervisor.drain_deadline_hits(),
+        0,
+        "the settle completed on the exit notification, not by exhausting its window"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 15 (W4 leg 3, §4.3) — a crash exit (external kill, no final slice,
+/// reclaimed by the leg-1 reactor) and an orderly close (client hangs up,
+/// in-slice `finish`) BOTH decrement drain completion through the one `remove()`
+/// funnel. The drain completes by delivery, with no reap scan driven by the test.
+#[test]
+fn drain_completes_on_last_exit_delivered_by_w1b_fate()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+
+    // Orderly close: client hangs up -> EOF -> in-slice mark_crashed/finish.
+    let (client_orderly, server_orderly) = tcp_pair()?;
+    let orderly = supervisor.spawn_connection(server_orderly)?;
+    wait_for_parked(&supervisor, orderly.pid())?;
+
+    // Crash exit: external kill, no final slice -> reclaim reactor -> remove().
+    let (_client_crash, server_crash) = tcp_pair()?;
+    let crashed = supervisor.spawn_connection(server_crash)?;
+    wait_for_parked(&supervisor, crashed.pid())?;
+    assert_eq!(supervisor.active_connection_count(), 2);
+
+    drop(client_orderly);
+    supervisor
+        .scheduler()
+        .terminate_process(crashed.pid(), ExitReason::Error);
+
+    // The drain parks on the TOLD notification; both exits decrement through the
+    // one funnel and wake it. A generous deadline proves completion is by
+    // delivery, not by timeout.
+    let drained = supervisor.wait_for_connections_drained(Instant::now() + Duration::from_secs(5));
+
+    assert!(
+        drained,
+        "both exit classes must decrement drain completion by delivery"
+    );
+    assert_eq!(supervisor.active_connection_count(), 0);
+    assert_eq!(
+        supervisor.drain_deadline_hits(),
+        0,
+        "the drain completed by delivery, not the deadline"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 16 (W4 leg 3, §4.3) — the drain deadline is a single one-shot: exactly
+/// one arming and one delivery per drain sequence, with no helper tick. A held
+/// connection times out one drain once; an independent second drain arms and
+/// delivers exactly one more — never a background timer accruing ticks between
+/// the sequences.
+#[test]
+fn drain_deadline_fires_at_most_once_per_sequence() -> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (_client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    wait_for_parked(&supervisor, handle.pid())?;
+
+    let first = supervisor.wait_for_connections_drained(Instant::now() + Duration::from_millis(60));
+    assert!(!first);
+    assert_eq!(
+        supervisor.drain_deadline_hits(),
+        1,
+        "one arming, one delivery per sequence"
+    );
+    assert_eq!(
+        supervisor.drain_exit_wakes(),
+        0,
+        "no exit wakes and no helper tick during a quiet drain"
+    );
+
+    // A second, independent drain sequence: exactly one more deadline delivery —
+    // no background helper accrued ticks between the sequences.
+    let second = supervisor.wait_for_connections_drained(Instant::now() + Duration::from_millis(60));
+    assert!(!second);
+    assert_eq!(
+        supervisor.drain_deadline_hits(),
+        2,
+        "each sequence arms and delivers exactly one deadline"
+    );
+    assert_eq!(supervisor.drain_exit_wakes(), 0);
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 17 (W4 leg 3, §4.3) — idle-honesty both-sides. During a quiet drain, an
+/// unrelated live connection's scheduler slices GROW while the drain waiter's
+/// wake counters stay FLAT: the fixture cannot pass by freezing the scheduler
+/// (slices grow) nor by hiding a poll (the drain waiter wakes for no non-exit).
+#[test]
+fn drain_idle_grows_unrelated_slices_while_drain_counters_stay_flat()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    wait_for_parked(&supervisor, pid)?;
+
+    // Park the drain waiter in a worker with a deadline generous enough to cover
+    // the unrelated traffic below. The connection never exits, so the waiter must
+    // stay parked the whole window.
+    let drain_supervisor = supervisor.clone();
+    let drainer = thread::spawn(move || {
+        drain_supervisor.wait_for_connections_drained(Instant::now() + Duration::from_secs(2))
+    });
+
+    let slices_before = supervisor.slice_count(pid);
+    for _ in 0..5 {
+        write_frame(&mut client, &Frame::Ping { flags: 0 })?;
+        assert!(matches!(read_frame(&mut client)?, Frame::Pong { .. }));
+    }
+    let slices_after = supervisor.slice_count(pid);
+
+    // Unrelated scheduler slices GREW; the drain waiter's exit-wake counter stayed
+    // FLAT while it was parked on the (unfired) exit notification.
+    assert!(
+        slices_after > slices_before,
+        "unrelated connection slices must grow: {slices_before} -> {slices_after}"
+    );
+    assert_eq!(
+        supervisor.drain_exit_wakes(),
+        0,
+        "the drain waiter must not wake while parked and no exit fires"
+    );
+
+    let drained = drainer.join().map_err(|_| "drain worker panicked")?;
+    assert!(!drained, "the held connection never drains");
+    assert_eq!(
+        supervisor.drain_deadline_hits(),
+        1,
+        "the parked drain woke only for its single deadline"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 18 (W4 leg 3, §4.3) — arm-before-observe barrier. An exit delivered
+/// strictly between the drain waiter's completion observation and its park is not
+/// lost: the waiter snapshots the removal generation BEFORE observing
+/// `active_count`, so the exit's generation bump is detected at the park and the
+/// waiter completes immediately instead of sleeping to the (far) deadline.
+#[test]
+fn drain_exit_between_predicate_and_park_is_not_lost()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (_client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    wait_for_parked(&supervisor, pid)?;
+
+    // Gate the waiter in its observe->park window.
+    let (armed, release) = supervisor.install_drain_park_barrier();
+    let drain_supervisor = supervisor.clone();
+    // A far deadline: only the un-lost exit can complete the drain quickly.
+    let drainer = thread::spawn(move || {
+        let started = Instant::now();
+        let drained = drain_supervisor
+            .wait_for_connections_drained(Instant::now() + Duration::from_secs(30));
+        (drained, started.elapsed())
+    });
+
+    // The waiter has observed active==1 and is gated BEFORE parking. Deliver the
+    // exit now — its generation bump lands while the waiter is not yet parked.
+    armed.wait();
+    supervisor
+        .scheduler()
+        .terminate_process(pid, ExitReason::Error);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while supervisor.is_tracked(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        !supervisor.is_tracked(pid),
+        "the exit must be delivered while the waiter is gated"
+    );
+    release.wait();
+
+    let (drained, elapsed) = drainer.join().map_err(|_| "drain worker panicked")?;
+    assert!(
+        drained,
+        "an exit delivered between observe and park must not be lost"
+    );
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "the waiter must not sleep to the far deadline: {elapsed:?}"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 19 (W4 leg 3, §4.3) — a last exit arriving at the same barrier as the
+/// deadline resolves to exactly one winner. The waiter checks completion BEFORE
+/// the deadline, so a drain that reaches zero wins the tie even when the deadline
+/// has already elapsed; completion is neither double-counted nor dropped.
+#[test]
+fn last_drain_exit_simultaneous_with_deadline_resolves_one_winner()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (_client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    wait_for_parked(&supervisor, pid)?;
+
+    let (armed, release) = supervisor.install_drain_park_barrier();
+    let drain_supervisor = supervisor.clone();
+    // A short deadline that WILL have elapsed by the time the gate releases, so
+    // the last exit and the deadline are both true when the waiter re-loops.
+    let drainer = thread::spawn(move || {
+        drain_supervisor.wait_for_connections_drained(Instant::now() + Duration::from_millis(50))
+    });
+
+    armed.wait();
+    // Deliver the last exit...
+    supervisor
+        .scheduler()
+        .terminate_process(pid, ExitReason::Error);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while supervisor.is_tracked(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert!(!supervisor.is_tracked(pid));
+    // ...and let the 50 ms deadline elapse, so the release resolves a genuine tie.
+    // The pass is timing-independent (completion is checked first regardless); the
+    // wait only makes the tie real for coverage.
+    thread::sleep(Duration::from_millis(80));
+    release.wait();
+
+    let drained = drainer.join().map_err(|_| "drain worker panicked")?;
+    assert!(
+        drained,
+        "completion must win the tie with the elapsed deadline — one winner, not dropped"
+    );
+    assert_eq!(
+        supervisor.active_connection_count(),
+        0,
+        "completion is not double-counted"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
 #[test]
 fn force_close_sends_disconnect_and_removes_connection() -> Result<(), Box<dyn std::error::Error>> {
     // The supervisor must carry the "orders" channel so the subscribe below
