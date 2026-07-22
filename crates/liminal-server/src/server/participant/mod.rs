@@ -61,6 +61,8 @@ pub use production::marker_source::{
     MarkerSourceRefusalReason, MarkerSourceRefused, ValidatedFencedMarkerInputs,
     validate_marker_source,
 };
+#[cfg(test)]
+pub(crate) use production::tests::test_participant_config;
 pub(crate) use production::{ProductionParticipantHandler, constant_time_eq};
 pub(crate) use publication::{
     ObserverPublication, ParticipantPublicationError, ParticipantPublicationInbox,

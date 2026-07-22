@@ -452,6 +452,9 @@ mod held_cap;
 #[path = "participant_delivery_observer_requeue_tests.rs"]
 mod observer_requeue;
 
+#[path = "participant_delivery_w2_leg3_tests.rs"]
+mod w2_leg3;
+
 #[test]
 fn tcp_and_websocket_publish_identical_participant_bytes() -> Result<(), Box<dyn std::error::Error>>
 {

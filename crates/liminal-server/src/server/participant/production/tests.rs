@@ -32,7 +32,7 @@ use std::sync::Arc;
 use super::ProductionParticipantHandler;
 
 /// Deployment-shaped participant configuration for the production tests.
-pub(super) const fn test_participant_config() -> ParticipantConfig {
+pub const fn test_participant_config() -> ParticipantConfig {
     ParticipantConfig {
         wire_frame_limit: 65_536,
         attach_receipt_ttl_ms: 60_000,

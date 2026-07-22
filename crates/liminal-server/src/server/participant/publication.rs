@@ -7,6 +7,8 @@
 //! process or scheduler alive.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use liminal_protocol::wire::{
@@ -274,6 +276,8 @@ struct ParticipantPublicationHandle {
 #[derive(Debug, Default)]
 pub struct ParticipantPublicationRegistry {
     registrations: Mutex<BTreeMap<ConnectionIncarnation, ParticipantPublicationHandle>>,
+    #[cfg(test)]
+    ready_fires: AtomicU64,
 }
 
 impl ParticipantPublicationRegistry {
@@ -377,9 +381,16 @@ impl ParticipantPublicationRegistry {
             was_empty
         };
         if should_wake {
+            #[cfg(test)]
+            self.ready_fires.fetch_add(1, Ordering::SeqCst);
             waker.fire();
         }
         Ok(true)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ready_fire_count(&self) -> u64 {
+        self.ready_fires.load(Ordering::SeqCst)
     }
 }
 

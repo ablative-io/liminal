@@ -293,8 +293,16 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         conversation_id: ConversationId,
         offered: Option<ParticipantOfferedProgress>,
     ) -> Result<Option<ParticipantPublication>, ParticipantSemanticError> {
+        #[cfg(test)]
+        self.obligation_dispatch_work
+            .selector_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.ensure_service_live()?;
         let cell = self.cell(conversation_id)?;
+        #[cfg(test)]
+        self.obligation_dispatch_work
+            .authority_lock_acquisitions
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let owner = cell
             .lock()
             .map_err(|_| publication_owner_poisoned(conversation_id))?;
@@ -343,9 +351,17 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
             binding_epoch,
             dispatch_after,
             |participant_id, binding_epoch, dispatch_after| {
+                #[cfg(test)]
+                self.obligation_dispatch_work
+                    .outbox_delivery_probes
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 outbox
                     .delivery_after(participant_id, dispatch_after)
                     .map(|delivery| {
+                        #[cfg(test)]
+                        self.obligation_dispatch_work
+                            .publication_allocations
+                            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         (
                             delivery.delivery_seq,
                             ParticipantPublication {
@@ -392,6 +408,19 @@ impl ParticipantSemanticHandler for ProductionParticipantHandler {
         });
         drop(owner);
         Ok(current)
+    }
+
+    fn publication_is_current(
+        &self,
+        publication: &ParticipantPublication,
+        offered: Option<ParticipantOfferedProgress>,
+    ) -> Result<bool, ParticipantSemanticError> {
+        let selected = self.next_publication(
+            publication.binding_epoch.connection_incarnation,
+            publication.conversation_id(),
+            offered,
+        )?;
+        Ok(selected.as_ref() == Some(publication))
     }
 
     fn record_publication_offer(

@@ -154,6 +154,14 @@ impl ParticipantSemanticHandler for ReplayGatedHandler {
             .publication_binding_is_current(conversation_id, participant_id, binding_epoch)
     }
 
+    fn publication_is_current(
+        &self,
+        publication: &ParticipantPublication,
+        offered: Option<ParticipantOfferedProgress>,
+    ) -> Result<bool, ParticipantSemanticError> {
+        self.inner.publication_is_current(publication, offered)
+    }
+
     fn record_publication_offer(
         &self,
         publication: &ParticipantPublication,
@@ -214,6 +222,7 @@ pub(in crate::server::participant::production) struct SocketFixture {
     client: TcpStream,
     inbound: Vec<u8>,
     handler: Arc<ProductionParticipantHandler>,
+    participant_service: InstalledParticipantService,
     store: Arc<dyn DurableStore>,
     publication_gate: Option<Arc<PublicationGate>>,
     barriers: Option<Arc<OutboxBarrierStore>>,
@@ -335,6 +344,7 @@ impl SocketFixture {
         let participant_service =
             InstalledParticipantService::new(semantic_handler, store, config.wire_frame_limit)
                 .map_err(|error| format!("{error:?}"))?;
+        let fixture_service = participant_service.clone();
         let services: Arc<dyn ConnectionServices> = Arc::new(ParticipantOnlyServices {
             participant_service,
         });
@@ -344,6 +354,7 @@ impl SocketFixture {
             client,
             inbound,
             handler,
+            participant_service: fixture_service,
             store: fixture_store,
             publication_gate,
             barriers,
@@ -402,12 +413,19 @@ impl SocketFixture {
     pub(in crate::server::participant::production) fn spawn_websocket_peer(
         &self,
     ) -> Result<WebSocketEndpoint, Box<dyn Error>> {
+        self.spawn_websocket_peer_with_ping_interval(None)
+    }
+
+    pub(in crate::server::participant::production) fn spawn_websocket_peer_with_ping_interval(
+        &self,
+        ping_interval_ms: Option<u64>,
+    ) -> Result<WebSocketEndpoint, Box<dyn Error>> {
         let listener = WebSocketListener::bind(
             &WebSocketConfig {
                 listen_address: "127.0.0.1:0".parse()?,
                 path: WEBSOCKET_PATH.to_owned(),
                 allowed_origins: vec![WEBSOCKET_ORIGIN.to_owned()],
-                ping_interval_ms: None,
+                ping_interval_ms,
             },
             self.supervisor.clone(),
         )?;
@@ -631,6 +649,18 @@ impl SocketFixture {
         Arc::clone(&self.store)
     }
 
+    pub(in crate::server::participant::production) fn obligation_dispatch_work_snapshot(
+        &self,
+    ) -> super::super::dispatch_work::ObligationDispatchWorkSnapshot {
+        self.handler.obligation_dispatch_work_snapshot()
+    }
+
+    pub(in crate::server::participant::production) fn publication_ready_fire_count(&self) -> u64 {
+        self.participant_service
+            .publication_registry()
+            .ready_fire_count()
+    }
+
     pub(in crate::server::participant::production) fn request_force_close(&self) {
         self.supervisor.force_close_active_connections();
     }
@@ -645,6 +675,7 @@ impl SocketFixture {
             client,
             inbound,
             handler,
+            participant_service,
             store,
             publication_gate,
             barriers,
@@ -658,6 +689,7 @@ impl SocketFixture {
         drop(connection);
         drop(supervisor);
         drop(handler);
+        drop(participant_service);
         drop(store);
         drop(publication_gate);
         drop(barriers);
@@ -700,6 +732,17 @@ impl SocketPeer {
 impl WebSocketPeer {
     pub(in crate::server::participant::production) const fn pid(&self) -> u64 {
         self.pid
+    }
+
+    pub(in crate::server::participant::production) fn read_keepalive_ping(
+        &mut self,
+    ) -> Result<(), Box<dyn Error>> {
+        let message = self.socket.read()?;
+        let Message::Ping(_) = message else {
+            return Err(format!("expected transport keepalive Ping, got {message:?}").into());
+        };
+        self.socket.flush()?;
+        Ok(())
     }
 
     pub(in crate::server::participant::production) fn request(

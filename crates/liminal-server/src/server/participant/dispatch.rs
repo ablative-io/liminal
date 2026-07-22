@@ -385,6 +385,29 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
         Ok(false)
     }
 
+    /// Re-selects a held publication against current binding, cursor, debt, and
+    /// outbox authority before its first offer. Semantic-only handlers retain
+    /// the binding-only default; production overrides this with the full locked
+    /// dispatch decision.
+    ///
+    /// # Errors
+    ///
+    /// Returns a semantic fault when current publication authority cannot be read.
+    fn publication_is_current(
+        &self,
+        publication: &ParticipantPublication,
+        offered: Option<ParticipantOfferedProgress>,
+    ) -> Result<bool, ParticipantSemanticError> {
+        if offered.is_some_and(|progress| progress.binding_epoch != publication.binding_epoch) {
+            return Ok(false);
+        }
+        self.publication_binding_is_current(
+            publication.conversation_id(),
+            publication.participant_id,
+            publication.binding_epoch,
+        )
+    }
+
     /// Records exact successful marker enqueue testimony. Non-marker offers are
     /// ignored by production after validating their current binding.
     ///
@@ -541,14 +564,12 @@ impl InstalledParticipantService {
             .next_publication(connection_incarnation, conversation_id, offered)
     }
 
-    pub(crate) fn publication_binding_is_current(
+    pub(crate) fn publication_is_current(
         &self,
-        conversation_id: ConversationId,
-        participant_id: ParticipantId,
-        binding_epoch: BindingEpoch,
+        publication: &ParticipantPublication,
+        offered: Option<ParticipantOfferedProgress>,
     ) -> Result<bool, ParticipantSemanticError> {
-        self.handler
-            .publication_binding_is_current(conversation_id, participant_id, binding_epoch)
+        self.handler.publication_is_current(publication, offered)
     }
 
     pub(crate) fn record_publication_offer(

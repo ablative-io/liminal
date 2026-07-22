@@ -347,13 +347,10 @@ fn service_one_conversation<Sink: DeliverySink>(
     held_limit: u64,
 ) -> Result<ConversationOutcome, ParticipantPumpError> {
     let fresh_encode = !state.held_pushes.contains_participant(conversation_id);
+    let offered = state.participant_offered.get(&conversation_id).copied();
     let publication_and_frame =
         if let Some(held) = state.held_pushes.remove_participant(conversation_id) {
-            if !service.publication_binding_is_current(
-                conversation_id,
-                held.publication.participant_id,
-                held.publication.binding_epoch,
-            )? {
+            if !service.publication_is_current(&held.publication, offered)? {
                 return Ok(ConversationOutcome::Done);
             }
             (held.publication, held.frame, held.needed)

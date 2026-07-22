@@ -48,6 +48,9 @@ mod e2e_sdk_tests;
 #[path = "tests_endpoint_ack.rs"]
 mod tests_endpoint_ack;
 
+#[path = "tests_w2_leg3_idle.rs"]
+mod tests_w2_leg3_idle;
+
 /// Connection services carrying ONLY the production participant service.
 #[derive(Debug)]
 struct ParticipantOnlyServices {

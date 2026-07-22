@@ -27,6 +27,8 @@ use crate::server::participant::{
 
 use super::barrier::{OperationFacts, ReceiptCapacityLimits};
 use super::capacity::ServerCapacity;
+#[cfg(test)]
+use super::dispatch_work::{ObligationDispatchWorkCounters, ObligationDispatchWorkSnapshot};
 use super::facts;
 use super::log::{OperationLog, OperationLogError, StoredOperation};
 use super::outbox::ConversationOutboxLimits;
@@ -76,6 +78,9 @@ pub struct ProductionParticipantHandler {
     /// each conversation's genesis append, read at startup to enumerate
     /// every durable conversation for the capacity restore.
     registry: ConversationRegistry,
+    /// Exact W2 work observation points, isolated per handler and test-only.
+    #[cfg(test)]
+    pub(super) obligation_dispatch_work: ObligationDispatchWorkCounters,
 }
 
 impl ProductionParticipantHandler {
@@ -110,9 +115,16 @@ impl ProductionParticipantHandler {
             observer: Mutex::new(None),
             capacity: ServerCapacity::default(),
             registry,
+            #[cfg(test)]
+            obligation_dispatch_work: ObligationDispatchWorkCounters::default(),
         };
         handler.restore_all_conversations()?;
         Ok(handler)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn obligation_dispatch_work_snapshot(&self) -> ObligationDispatchWorkSnapshot {
+        self.obligation_dispatch_work.snapshot()
     }
 
     pub(super) fn current_service_fatal(

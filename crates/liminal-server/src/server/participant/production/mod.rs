@@ -22,6 +22,8 @@ mod connection_fate_dispatch;
 mod connection_fate_replay;
 mod connection_fate_rows;
 mod dispatch_impact;
+#[cfg(test)]
+pub mod dispatch_work;
 mod facts;
 mod fate_occurrence;
 mod fenced_attach_codec;
@@ -78,7 +80,7 @@ mod e2e_leave_regression;
 mod e2e_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
-mod tests;
+pub mod tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_binding;
