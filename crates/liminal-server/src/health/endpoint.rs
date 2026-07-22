@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -24,7 +24,9 @@ const READ_BUFFER_BYTES: usize = 2048;
 /// zero idle wakes) rather than spinning a non-blocking poll with a backoff
 /// sleep. Shutdown wakes the blocked `accept` with an explicit self-connect
 /// interrupt to `interrupt_target` (the bound address, loopback-normalised),
-/// mirroring the leg-1 listeners.
+/// mirroring the leg-1 listeners. Shutdown also interrupts an in-flight request
+/// read directly via `active_stream`, so a silent client parked in
+/// `handle_connection`'s read cannot defer shutdown by its admitted deadline.
 #[derive(Debug)]
 pub struct HealthServerHandle {
     local_addr: SocketAddr,
@@ -32,6 +34,14 @@ pub struct HealthServerHandle {
     /// `accept` at shutdown.
     interrupt_target: SocketAddr,
     shutdown: Arc<AtomicBool>,
+    /// Slot holding a `try_clone` of the request stream the worker is currently
+    /// reading, if any. The worker registers it under the lock (with a shutdown
+    /// recheck) before blocking on the request read and clears it on completion;
+    /// `stop_worker` takes it and `shutdown(Both)`s it to interrupt an in-flight
+    /// blocking read directly (TOLD) rather than waiting out the read's admitted
+    /// deadline. At most one stream exists at a time (the worker is serial), so
+    /// one slot suffices.
+    active_stream: Arc<Mutex<Option<TcpStream>>>,
     worker: Option<JoinHandle<Result<(), ServerError>>>,
     /// Count of `accept` calls issued by the worker (test observability for the
     /// zero-idle-wakes oracle: on a silent listener this stays at the single
@@ -73,8 +83,24 @@ impl HealthServerHandle {
         let Some(worker) = self.worker.take() else {
             return Ok(());
         };
+        // Interrupt an in-flight request read directly (TOLD): the flag store
+        // above happens-before this lock acquire, so any stream the worker
+        // registered before observing the flag is taken here and shut down,
+        // waking its blocked read at once. `shutdown(Both)` on the clone reaches
+        // the same underlying socket the worker is reading (a dup'd fd). If the
+        // worker is instead parked in `accept`, the slot is empty and the
+        // self-connect below wakes it. The guard is released (statement end)
+        // before the socket call, so no lock is held across `shutdown`.
+        let in_flight = self
+            .active_stream
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(stream) = in_flight {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
         // Explicit cross-platform interrupt (mirrors the leg-1 listeners): a
-        // single self-connect wakes the blocked `accept`. The worker sees the
+        // single self-connect wakes a blocked `accept`. The worker sees the
         // shutdown flag it observed under the same ordering and sheds the woken
         // (spurious) socket rather than serving it — at most one spurious accept
         // per interrupt. If the worker already exited (a real accept then flag
@@ -145,10 +171,12 @@ pub fn start_health_server(
         })?;
     let interrupt_target = loopback_interrupt_target(local_addr);
     let shutdown = Arc::new(AtomicBool::new(false));
+    let active_stream = Arc::new(Mutex::new(None));
     let accept_attempts = Arc::new(AtomicU64::new(0));
     let shed_count = Arc::new(AtomicU64::new(0));
     let requests_entered = Arc::new(AtomicU64::new(0));
     let worker_shutdown = Arc::clone(&shutdown);
+    let worker_stream = Arc::clone(&active_stream);
     let worker_attempts = Arc::clone(&accept_attempts);
     let worker_shed = Arc::clone(&shed_count);
     let worker_entered = Arc::clone(&requests_entered);
@@ -157,6 +185,7 @@ pub fn start_health_server(
             &listener,
             &readiness,
             &worker_shutdown,
+            &worker_stream,
             &worker_attempts,
             &worker_shed,
             &worker_entered,
@@ -167,6 +196,7 @@ pub fn start_health_server(
         local_addr,
         interrupt_target,
         shutdown,
+        active_stream,
         worker: Some(worker),
         #[cfg(test)]
         accept_attempts,
@@ -181,6 +211,7 @@ fn serve(
     listener: &TcpListener,
     readiness: &SharedReadinessState,
     shutdown: &AtomicBool,
+    active_stream: &Mutex<Option<TcpStream>>,
     accept_attempts: &AtomicU64,
     shed_count: &AtomicU64,
     requests_entered: &AtomicU64,
@@ -192,11 +223,24 @@ fn serve(
         accept_attempts.fetch_add(1, Ordering::SeqCst);
         match listener.accept() {
             Ok((stream, ..)) => {
-                if shutdown.load(Ordering::SeqCst) {
-                    // Accepted while shutdown fired — the self-connect interrupt,
-                    // or a real probe racing the broadcast. Shed it, never serve:
-                    // no request slips past the shutdown broadcast, and the worker
-                    // exits promptly rather than sleeping.
+                // Register the in-flight stream and re-check shutdown atomically
+                // under the slot lock. If shutdown already fired, shed without
+                // serving (no request slips past the broadcast); otherwise the
+                // registered clone lets `stop_worker` interrupt this request's
+                // blocking read directly (TOLD). Pairing the flag load here with
+                // `stop_worker`'s flag-store-then-lock means a registration can
+                // never be missed: either the worker sees the flag and sheds, or
+                // shutdown finds the clone in the slot.
+                let admitted = {
+                    let mut slot = active_stream.lock().unwrap_or_else(PoisonError::into_inner);
+                    if shutdown.load(Ordering::SeqCst) {
+                        false
+                    } else {
+                        *slot = stream.try_clone().ok();
+                        true
+                    }
+                };
+                if !admitted {
                     drop(stream);
                     continue;
                 }
@@ -206,7 +250,12 @@ fn serve(
                 // a single port probe kills the health server for the process lifetime and
                 // subsequent liveness/readiness probes get connection-refused. Only fatal
                 // listener-level accept errors (below) terminate serving.
-                if let Err(error) = handle_connection(stream, readiness) {
+                let result = handle_connection(stream, readiness);
+                // The request is done: clear the slot so a later shutdown finds
+                // nothing to interrupt (and never shuts down an unrelated stream).
+                // A no-op if `stop_worker` already took the clone.
+                *active_stream.lock().unwrap_or_else(PoisonError::into_inner) = None;
+                if let Err(error) = result {
                     tracing::debug!(%error, "health endpoint connection error");
                 }
             }
@@ -684,6 +733,14 @@ mod tests {
         );
 
         // (c) shutdown concurrent with accept readiness: a client is pending.
+        // Whether the worker is still parked in `accept` or has already accepted
+        // and is blocked reading the silent client, shutdown interrupts promptly
+        // (self-connect for the parked case, in-flight stream shutdown for the
+        // reading case) — deterministically under the 2s read deadline. The bound
+        // is tightened to 500 ms to reflect the TOLD interrupt: it must not
+        // approach the read window that the pre-fix bytes deferred to (see
+        // `shutdown_interrupts_in_flight_silent_request_read` for the dedicated
+        // mid-read regression).
         let server = start_health_server(loopback_ephemeral()?, SharedReadinessState::default())?;
         let deadline = Instant::now() + Duration::from_secs(2);
         while server.accept_attempts() < 1 && Instant::now() < deadline {
@@ -693,8 +750,10 @@ mod tests {
         let start = Instant::now();
         server.shutdown()?;
         assert!(
-            start.elapsed() < Duration::from_secs(2),
-            "shutdown concurrent with a pending accept must interrupt promptly"
+            start.elapsed() < Duration::from_millis(500),
+            "shutdown concurrent with a pending accept must interrupt promptly (TOLD), \
+             not defer by a request read deadline: elapsed {:?}",
+            start.elapsed()
         );
 
         // (d) shutdown after an accept returns and a request is served.
