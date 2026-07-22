@@ -17,6 +17,10 @@
       "types": "./dist/esm/index.d.ts",
       "import": "./dist/esm/index.mjs",
       "require": "./dist/cjs/index.cjs"
+    },
+    "./browser": {
+      "types": "./dist/esm/index.d.ts",
+      "default": "./dist/browser/liminal.js"
     }
   },
   "files": [
@@ -36,10 +40,12 @@
     "build:esm": "tsc -p tsconfig.esm.json",
     "build:cjs": "tsc -p tsconfig.cjs.json",
     "build:extensions": "node scripts/copy-build-extensions.cjs",
-    "build": "npm run clean && npm run build:wasm && npm run build:esm && npm run build:cjs && npm run build:extensions"
+    "build:browser": "node scripts/build-browser.mjs",
+    "build": "npm run clean && npm run build:wasm && npm run build:esm && npm run build:cjs && npm run build:extensions && npm run build:browser"
   },
   "devDependencies": {
     "@types/node": "^22.7.5",
+    "esbuild": "0.28.1",
     "typescript": "^5.6.3"
   }
 }
