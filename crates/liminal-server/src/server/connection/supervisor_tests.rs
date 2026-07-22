@@ -414,6 +414,36 @@ fn fd_reuse_stale_token_deregister_after_reclamation_is_harmless_no_op()
     Ok(())
 }
 
+/// Fail-first regression (tear-seat mandate, W4 leg-1 reactor lifetime defect):
+/// the detached reclaim reactor must NOT hold the connection runtime STRONG. A
+/// strong hold keeps the runtime — and transitively the participant durable
+/// store's data-dir writer lock — alive past supervisor drop until the reactor
+/// observes publisher disconnect and exits; a reopen of the same data dir then
+/// races that async release with `DataDirLocked`. The reactor holds a WEAK
+/// handle and upgrades per event, so the runtime releases synchronously at drop.
+///
+/// Deterministic: the connection scheduler is pinned alive for the check, so the
+/// reactor stays parked (it never receives disconnect) — any runtime strong ref
+/// surviving supervisor drop is therefore the reactor's persistent hold, not a
+/// not-yet-exited teardown.
+#[test]
+fn reclaim_reactor_holds_runtime_weak_so_it_releases_synchronously_at_drop()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    // Pin the scheduler so the reactor cannot observe publisher-disconnect and
+    // exit during the check: it stays parked in recv().
+    let scheduler = supervisor.scheduler();
+    let runtime = supervisor.runtime_weak();
+    drop(supervisor);
+    assert!(
+        runtime.upgrade().is_none(),
+        "the reclaim reactor holds the runtime strong, deferring its (and the durable \
+         store writer-lock's) release past supervisor drop"
+    );
+    drop(scheduler);
+    Ok(())
+}
+
 /// Oracle 6 (W4 leg 1) — a REGISTERED connection's ordinary exit reaches
 /// host-record cleanup via its own final slice's `mark_crashed`/`finish` (the
 /// client hangs up → EOF/HUP → in-slice teardown), with NO per-iteration
