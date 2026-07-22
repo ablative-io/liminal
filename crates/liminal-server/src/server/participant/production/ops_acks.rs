@@ -48,6 +48,12 @@ impl ConversationAuthority {
         appender: &dyn DurableAppend,
         impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
+        if self
+            .obligation_debt_dispatch()
+            .is_some_and(|state| state.episode().is_some())
+        {
+            return self.apply_nonzero_ack_with_impact(request, operation_facts, appender, impact);
+        }
         let receiving_epoch = BindingEpoch::new(
             operation_facts.receiving_incarnation,
             request.capability_generation,
@@ -76,8 +82,29 @@ impl ConversationAuthority {
         Ok(outcome)
     }
 
+    /// Replays one committed zero-debt row with testimony sealed at its exact
+    /// outbox merge boundary.
+    pub(super) fn replay_zero_debt_ack_row(
+        &mut self,
+        request: StoredAck,
+        receiving_epoch: StoredBindingEpoch,
+        contiguously_available_through: u64,
+        ack_obligations: Option<(RecipientAckObligations, u64)>,
+    ) -> Result<(), StateError> {
+        let (obligations, reconciled_available_through) = ack_obligations.ok_or_else(|| {
+            StateError::invariant("zero-debt ack replay is missing recipient obligations")
+        })?;
+        self.replay_zero_debt_ack(
+            request,
+            receiving_epoch,
+            contiguously_available_through,
+            reconciled_available_through,
+            &obligations,
+        )
+    }
+
     /// Replays one committed zero-debt ack entry from its stored inputs.
-    pub(super) fn replay_zero_debt_ack(
+    fn replay_zero_debt_ack(
         &mut self,
         request: StoredAck,
         receiving_epoch: StoredBindingEpoch,

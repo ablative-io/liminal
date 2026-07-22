@@ -107,7 +107,8 @@ pub(super) fn project_committed_source(
             )?),
             _ => None,
         },
-        StoredOperation::ZeroDebtAck { request, .. } => Some(OutboxRow::AckAdvanced {
+        StoredOperation::ZeroDebtAck { request, .. }
+        | StoredOperation::NonzeroDebtAck { request, .. } => Some(OutboxRow::AckAdvanced {
             source_log_sequence,
             participant_id: request.participant_id,
             through_seq: request.through_seq,

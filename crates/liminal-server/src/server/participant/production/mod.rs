@@ -52,6 +52,7 @@ mod ops_enroll;
 mod ops_enroll_capacity;
 mod ops_frontier;
 mod ops_leave;
+mod ops_nonzero_ack;
 mod ops_session;
 mod ops_session_replay;
 mod outbox;

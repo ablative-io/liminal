@@ -273,6 +273,7 @@ pub(super) fn assert_decoded_source_census(
             StoredOperation::Attached { .. } => "ordinary_attach",
             StoredOperation::Detached { .. } => "detached",
             StoredOperation::ZeroDebtAck { .. } => "zero_debt_ack",
+            StoredOperation::NonzeroDebtAck { .. } => "nonzero_debt_ack",
             StoredOperation::MarkerDrained { .. } => "marker_drained",
             StoredOperation::RecordAdmission { .. } => "record_admission",
             StoredOperation::Left { .. } => "left",
@@ -324,7 +325,11 @@ pub(super) fn assert_decoded_source_census(
                 assert!(matches!(
                     base.iter()
                         .find(|(sequence, _)| sequence == source_log_sequence),
-                    Some((_, StoredOperation::ZeroDebtAck { .. }))
+                    Some((
+                        _,
+                        StoredOperation::ZeroDebtAck { .. }
+                            | StoredOperation::NonzeroDebtAck { .. }
+                    ))
                 ));
             }
             OutboxRow::MarkerAckCommitted(stored) => {

@@ -70,6 +70,7 @@ pub use nonzero_participant_ack::{
     NonzeroAckEpisodePosition, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
     NonzeroParticipantAckDecision, NonzeroParticipantAckInvariantError,
     apply_nonzero_participant_ack, apply_nonzero_participant_ack_with_obligations,
+    scalar_audit_for_recipient_endpoint,
 };
 pub use ordinary_record_projection::{
     OrdinaryProjectionError, OrdinaryProjectionLimits, OrdinaryRecordDrainFirst,

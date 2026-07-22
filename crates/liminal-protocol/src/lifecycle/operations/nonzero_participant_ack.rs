@@ -8,7 +8,8 @@ use crate::wire::{
 use super::super::{
     BindingRequiredLookupResult, BindingState, CumulativeAckAuthorizationError,
     CumulativeAckOutcome, LiveMember, NonzeroDebtCursorEpisode, ObserverProgressProjection,
-    ParticipantBindingRequest, PresentedIdentity, RecipientAckObligations, lookup_binding_required,
+    ParticipantBindingRequest, PresentedIdentity, RecipientAckObligations,
+    RecipientAckObligationsContextError, SealedBindingFateToken, lookup_binding_required,
     membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
 };
 
@@ -32,6 +33,7 @@ pub enum NonzeroAckEpisodePosition {
 pub struct NonzeroParticipantAckCommit {
     outcome: AckCommitted,
     from_cursor: DeliverySeq,
+    binding_epoch: BindingEpoch,
     before_episode: NonzeroDebtCursorEpisode,
     resulting_episode: NonzeroDebtCursorEpisode,
     cursor_update: LiveMemberCursorUpdate,
@@ -55,6 +57,26 @@ impl NonzeroParticipantAckCommit {
     #[must_use]
     pub const fn resulting_episode(&self) -> &NonzeroDebtCursorEpisode {
         &self.resulting_episode
+    }
+
+    /// Replays this exact selected cursor transition into one sealed fate token.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged token when its conversation, participant, binding
+    /// epoch, or cursor prestate differs from this committed acknowledgement.
+    pub fn progress_binding_fate_token(
+        &self,
+        token: SealedBindingFateToken,
+    ) -> Result<SealedBindingFateToken, Box<SealedBindingFateToken>> {
+        let request = self.outcome.request();
+        token.participant_ack_progressed(
+            request.conversation_id,
+            request.participant_id,
+            self.binding_epoch,
+            self.from_cursor,
+            request.through_seq,
+        )
     }
 
     /// Applies this aggregate commit from an exact wholly-old or
@@ -306,6 +328,27 @@ pub fn apply_nonzero_participant_ack_with_obligations<EF, V, LF>(
     )
 }
 
+/// Returns the sealed scalar audit for an endpoint in this recipient index.
+///
+/// `None` is the typed sparse-gap boundary; callers must not select the scalar
+/// sibling as a fallback there.
+///
+/// # Errors
+///
+/// Returns [`RecipientAckObligationsContextError`] if the testimony belongs to
+/// another participant or acknowledged prestate.
+pub fn scalar_audit_for_recipient_endpoint(
+    obligations: &RecipientAckObligations,
+    participant_id: ParticipantId,
+    acknowledged_through: DeliverySeq,
+    endpoint: DeliverySeq,
+    scalar_audit: DeliverySeq,
+) -> Result<Option<DeliverySeq>, RecipientAckObligationsContextError> {
+    obligations
+        .contains_endpoint(participant_id, acknowledged_through, endpoint)
+        .map(|testified| testified.then_some(scalar_audit))
+}
+
 enum AckAvailability<'a> {
     Contiguous(DeliverySeq),
     Obligations(&'a RecipientAckObligations),
@@ -388,6 +431,7 @@ fn apply_nonzero_participant_ack_by_availability<EF, V, LF>(
                     request.through_seq,
                 ),
                 outcome,
+                binding_epoch: active_binding.binding_epoch,
                 from_cursor: member.cursor(),
                 before_episode: episode.clone(),
                 resulting_episode,

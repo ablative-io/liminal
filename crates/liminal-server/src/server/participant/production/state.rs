@@ -13,15 +13,17 @@ use std::collections::BTreeMap;
 use liminal_protocol::lifecycle::{
     BindingState, CommittedDiedTerminal, ConversationDecision, ConversationGenesis,
     ConversationRefusalReason, CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt,
-    LiveFrontierOwner, LiveMember, ObligationDebtDispatchState, ObligationDebtDispatchTransition,
-    ObligationDebtOwnerError, ObserverProgressProjection, OrdinaryBindingFate,
-    ParticipantConversation, PendingDiedOrdinaryFinalizer, RetiredIdentity, SealedBindingFateToken,
+    LiveFrontierOwner, LiveMember, NonzeroParticipantAckCommit, ObligationDebtDispatchState,
+    ObligationDebtDispatchTransition, ObligationDebtOwnerError, ObserverProgressProjection,
+    OrdinaryBindingFate, ParticipantConversation, PendingDiedOrdinaryFinalizer, RetiredIdentity,
+    SealedBindingFateToken,
 };
 #[cfg(test)]
 use liminal_protocol::wire::ParticipantDelivery;
 use liminal_protocol::wire::{
-    AttachAttemptToken, AttachBound, AttachSecret, BindingEpoch, DeliverySeq, DetachAttemptToken,
-    EnrollBound, Generation, ParticipantId, ReceiptExpiryReason, TransactionOrder,
+    AckCommitted, AttachAttemptToken, AttachBound, AttachSecret, BindingEpoch, DeliverySeq,
+    DetachAttemptToken, EnrollBound, Generation, ParticipantId, ReceiptExpiryReason,
+    TransactionOrder,
 };
 
 use super::facts::{Digest, FactsError};
@@ -429,6 +431,34 @@ impl ConversationAuthority {
         };
         self.obligation_debt_dispatch = Some(state);
         Ok(())
+    }
+
+    /// Installs one nonzero acknowledgement's exact coupled frontier, episode,
+    /// and membership cursor result through the active transition token.
+    pub(super) fn install_nonzero_ack(
+        &mut self,
+        frontier: LiveFrontierOwner,
+        commit: NonzeroParticipantAckCommit,
+        participant_id: ParticipantId,
+    ) -> Result<AckCommitted, StateError> {
+        let transition = self
+            .pending_debt_dispatch_transition
+            .take()
+            .ok_or_else(|| StateError::invariant("nonzero ack transition authority is absent"))?;
+        if self.obligation_debt_dispatch.is_some() {
+            return Err(StateError::invariant(
+                "nonzero ack retained a second obligation-debt owner",
+            ));
+        }
+        let slot = self
+            .slots
+            .get_mut(&participant_id)
+            .ok_or_else(|| StateError::invariant("nonzero ack participant slot is absent"))?;
+        let (state, outcome) = transition
+            .complete_nonzero_ack(frontier, commit, &mut slot.member, self.observer_progress)
+            .map_err(|error| StateError::ObligationDebtOwner { error })?;
+        self.obligation_debt_dispatch = Some(state);
+        Ok(outcome)
     }
 
     /// Replaces a fixture's synthetic frontier with a newly coupled owner.

@@ -20,6 +20,7 @@ fn finalizer_carrier(operation: &StoredOperation) -> FinalizerCarrier {
         | StoredOperation::Ordinary { .. }
         | StoredOperation::Recovered { .. }
         | StoredOperation::ZeroDebtAck { .. }
+        | StoredOperation::NonzeroDebtAck { .. }
         | StoredOperation::MarkerDrained { .. }
         | StoredOperation::RecordAdmission { .. } => FinalizerCarrier::NotFinalizer,
     }

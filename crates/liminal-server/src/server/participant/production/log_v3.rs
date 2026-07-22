@@ -60,6 +60,12 @@ pub(super) enum StoredOperationV3 {
         receiving_epoch: StoredBindingEpoch,
         contiguously_available_through: DeliverySeq,
     },
+    NonzeroDebtAck {
+        request: StoredAck,
+        receiving_epoch: StoredBindingEpoch,
+        contiguously_available_through: DeliverySeq,
+        event: Vec<u8>,
+    },
     MarkerDrained {
         row: StoredMarkerDrain,
     },

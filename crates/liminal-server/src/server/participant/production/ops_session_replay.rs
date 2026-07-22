@@ -62,7 +62,8 @@ impl ConversationAuthority {
                 }
                 let operation_for_projection = operation.clone();
                 let ack_obligations = match &operation {
-                    StoredOperation::ZeroDebtAck { request, .. } => {
+                    StoredOperation::ZeroDebtAck { request, .. }
+                    | StoredOperation::NonzeroDebtAck { request, .. } => {
                         let acknowledged_through = authority
                             .slots
                             .get(&request.participant_id)
@@ -160,7 +161,8 @@ impl ConversationAuthority {
                 }
                 let operation_for_projection = operation.clone();
                 let ack_obligations = match &operation {
-                    StoredOperation::ZeroDebtAck { request, .. } => {
+                    StoredOperation::ZeroDebtAck { request, .. }
+                    | StoredOperation::NonzeroDebtAck { request, .. } => {
                         let acknowledged_through = authority
                             .slots
                             .get(&request.participant_id)
@@ -388,22 +390,29 @@ impl ConversationAuthority {
                 request,
                 receiving_epoch,
                 contiguously_available_through,
-            } => {
-                let (obligations, reconciled_available_through) =
-                    ack_obligations.ok_or_else(|| {
-                        StateError::invariant(
-                            "zero-debt ack replay is missing recipient obligations",
-                        )
-                    })?;
-                self.replay_zero_debt_ack(
+            } => self
+                .replay_zero_debt_ack_row(
                     request,
                     receiving_epoch,
                     contiguously_available_through,
-                    reconciled_available_through,
-                    &obligations,
+                    ack_obligations,
                 )
-                .map(|()| None)
-            }
+                .map(|()| None),
+            StoredOperation::NonzeroDebtAck {
+                request,
+                receiving_epoch,
+                contiguously_available_through,
+                event,
+            } => self
+                .replay_nonzero_debt_ack(super::ops_nonzero_ack::NonzeroAckReplay {
+                    stored_request: request,
+                    receiving_epoch,
+                    stored_scalar_audit: contiguously_available_through,
+                    ack_obligations,
+                    event: &event,
+                    sequence,
+                })
+                .map(|()| None),
             StoredOperation::RecordAdmission { row } => {
                 self.replay_record_admission(&row, config).map(|()| None)
             }

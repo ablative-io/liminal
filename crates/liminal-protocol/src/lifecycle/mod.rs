@@ -240,7 +240,8 @@ pub use operations::{
     apply_nonzero_participant_ack_with_obligations, apply_participant_ack,
     apply_participant_ack_frontier, apply_participant_ack_with_obligations, apply_record_admission,
     classify_record_admission_binding, commit_pending_leave_frontier,
-    commit_settled_leave_frontier, drain_next_marker, select_marker_proof,
+    commit_settled_leave_frontier, drain_next_marker, scalar_audit_for_recipient_endpoint,
+    select_marker_proof,
 };
 pub use storage::{
     BindingFateTerminalRestore, BindingStateRestore, ClosureStateRestore,

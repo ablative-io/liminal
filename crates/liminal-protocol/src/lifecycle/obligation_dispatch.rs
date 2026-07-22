@@ -1,10 +1,10 @@
 //! Move-coupled closure-debt authority and synchronous delivery seam.
 
-use crate::wire::{BindingEpoch, DeliverySeq, ParticipantId};
+use crate::wire::{AckCommitted, BindingEpoch, DeliverySeq, ParticipantId};
 
 use super::{
-    ClosureState, CursorEpisodeBuildError, FrontierBinding, LiveFrontierOwner,
-    NonzeroDebtCursorEpisode,
+    ClosureState, CursorEpisodeBuildError, FrontierBinding, LiveFrontierOwner, LiveMember,
+    NonzeroDebtCursorEpisode, NonzeroParticipantAckCommit, NonzeroParticipantAckCommitError,
 };
 
 /// Failure to couple a validated live frontier to its complete debt episode.
@@ -12,6 +12,10 @@ use super::{
 pub enum ObligationDebtOwnerError {
     /// Validated frontier/observer inputs could not form one exact episode.
     Episode(CursorEpisodeBuildError),
+    /// A nonzero commit did not apply to the exact coupled member/episode pair.
+    NonzeroAck(NonzeroParticipantAckCommitError),
+    /// A nonzero commit was attempted without one coherent Owed owner.
+    NonzeroAckState,
 }
 
 /// Complete protocol-owned authority while closure debt is nonzero.
@@ -167,6 +171,49 @@ impl ObligationDebtDispatchTransition {
                 ))
             }
         }
+    }
+
+    /// Completes one nonzero acknowledgement with the exact episode produced by
+    /// its sealed commit instead of regenerating cursor facts from frontier
+    /// scalars. The member, episode, and frontier therefore cross one protocol
+    /// barrier as the same commit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ObligationDebtOwnerError`] if the transition did not begin from
+    /// Owed, the aggregate commit rejects the member/episode pair, or the exact
+    /// resulting episode disagrees with the resulting frontier and closure debt.
+    pub fn complete_nonzero_ack<F>(
+        mut self,
+        frontier: LiveFrontierOwner,
+        commit: NonzeroParticipantAckCommit,
+        member: &mut LiveMember<F>,
+        observer_progress: DeliverySeq,
+    ) -> Result<(ObligationDebtDispatchState, AckCommitted), ObligationDebtOwnerError> {
+        let ClosureState::Owed { debt, .. } = frontier.closure_accounting().state() else {
+            return Err(ObligationDebtOwnerError::NonzeroAckState);
+        };
+        let mut episode = self
+            .prior_episode
+            .take()
+            .ok_or(ObligationDebtOwnerError::NonzeroAckState)?;
+        let outcome = commit
+            .apply_to(member, &mut episode)
+            .map_err(ObligationDebtOwnerError::NonzeroAck)?;
+        if episode.debt() != debt {
+            return Err(ObligationDebtOwnerError::NonzeroAckState);
+        }
+        let reconciled = episode
+            .clone()
+            .reconcile_claim_frontiers(frontier.frontiers(), debt, observer_progress)
+            .map_err(ObligationDebtOwnerError::Episode)?;
+        if reconciled != episode {
+            return Err(ObligationDebtOwnerError::NonzeroAckState);
+        }
+        Ok((
+            ObligationDebtDispatchState::Owed(CoupledObligationDebtOwner { frontier, episode }),
+            outcome,
+        ))
     }
 }
 
