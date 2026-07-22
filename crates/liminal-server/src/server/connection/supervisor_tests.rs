@@ -760,7 +760,7 @@ fn drain_idle_grows_unrelated_slices_while_drain_counters_stay_flat()
     // the unrelated traffic below. The connection never exits, so the waiter must
     // stay parked the whole window.
     let drain_supervisor = supervisor.clone();
-    let drainer = thread::spawn(move || {
+    let drain_worker = thread::spawn(move || {
         drain_supervisor.wait_for_connections_drained(Instant::now() + Duration::from_secs(2))
     });
 
@@ -783,7 +783,7 @@ fn drain_idle_grows_unrelated_slices_while_drain_counters_stay_flat()
         "the drain waiter must not wake while parked and no exit fires"
     );
 
-    let drained = drainer.join().map_err(|_| "drain worker panicked")?;
+    let drained = drain_worker.join().map_err(|_| "drain worker panicked")?;
     assert!(!drained, "the held connection never drains");
     assert_eq!(
         supervisor.drain_deadline_hits(),
@@ -811,7 +811,7 @@ fn drain_exit_between_predicate_and_park_is_not_lost() -> Result<(), Box<dyn std
     let (armed, release) = supervisor.install_drain_park_barrier();
     let drain_supervisor = supervisor.clone();
     // A far deadline: only the un-lost exit can complete the drain quickly.
-    let drainer = thread::spawn(move || {
+    let drain_worker = thread::spawn(move || {
         let started = Instant::now();
         let drained =
             drain_supervisor.wait_for_connections_drained(Instant::now() + Duration::from_secs(30));
@@ -834,7 +834,7 @@ fn drain_exit_between_predicate_and_park_is_not_lost() -> Result<(), Box<dyn std
     );
     release.wait();
 
-    let (drained, elapsed) = drainer.join().map_err(|_| "drain worker panicked")?;
+    let (drained, elapsed) = drain_worker.join().map_err(|_| "drain worker panicked")?;
     assert!(
         drained,
         "an exit delivered between observe and park must not be lost"
@@ -864,7 +864,7 @@ fn last_drain_exit_simultaneous_with_deadline_resolves_one_winner()
     let drain_supervisor = supervisor.clone();
     // A short deadline that WILL have elapsed by the time the gate releases, so
     // the last exit and the deadline are both true when the waiter re-loops.
-    let drainer = thread::spawn(move || {
+    let drain_worker = thread::spawn(move || {
         drain_supervisor.wait_for_connections_drained(Instant::now() + Duration::from_millis(50))
     });
 
@@ -884,7 +884,7 @@ fn last_drain_exit_simultaneous_with_deadline_resolves_one_winner()
     thread::sleep(Duration::from_millis(80));
     release.wait();
 
-    let drained = drainer.join().map_err(|_| "drain worker panicked")?;
+    let drained = drain_worker.join().map_err(|_| "drain worker panicked")?;
     assert!(
         drained,
         "completion must win the tie with the elapsed deadline — one winner, not dropped"
