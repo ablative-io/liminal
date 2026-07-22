@@ -1,5 +1,6 @@
 //! Reusable real-socket participant server fixture and deterministic replay gate.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io::Write;
 use std::net::{Shutdown, TcpStream};
@@ -40,12 +41,16 @@ use super::super::ProductionParticipantHandler;
 use super::super::tests::{open_disk_store_for_tests, test_participant_config};
 use super::super::tests_outbox_barrier_fixture::{OutboxBarrierKind, OutboxBarrierStore};
 use super::{
-    ParticipantOnlyServices, encode_frame, encode_request, read_frame, roundtrip,
-    roundtrip_capture, tcp_pair,
+    ParticipantOnlyServices, encode_frame, encode_request, next_push, read_frame, roundtrip,
+    tcp_pair,
 };
 
 const WEBSOCKET_PATH: &str = "/participant";
 const WEBSOCKET_ORIGIN: &str = "https://participant.test";
+
+/// Frame-count bound on the WebSocket response demultiplex loop; mirrors the
+/// TCP `MAX_DEMUX_FRAMES`.
+const WEBSOCKET_DEMUX_FRAMES: usize = 4096;
 
 #[derive(Debug)]
 struct PublicationGate {
@@ -222,6 +227,9 @@ pub(in crate::server::participant::production) struct OutboxOwnerFacts {
 pub(in crate::server::participant::production) struct SocketFixture {
     client: TcpStream,
     inbound: Vec<u8>,
+    /// Pushes demultiplexed ahead of a response by [`roundtrip`], drained FIFO
+    /// by [`Self::read_push`] so per-connection order is preserved.
+    pushes: VecDeque<ServerPush>,
     handler: Arc<ProductionParticipantHandler>,
     participant_service: InstalledParticipantService,
     store: Arc<dyn DurableStore>,
@@ -234,11 +242,13 @@ pub(in crate::server::participant::production) struct SocketFixture {
 pub(in crate::server::participant::production) struct SocketPeer {
     client: TcpStream,
     inbound: Vec<u8>,
+    pushes: VecDeque<ServerPush>,
     connection: Option<ConnectionHandle>,
 }
 
 pub(in crate::server::participant::production) struct WebSocketPeer {
     socket: WebSocket<TcpStream>,
+    pushes: VecDeque<ServerPush>,
     pid: u64,
 }
 
@@ -354,6 +364,7 @@ impl SocketFixture {
         Ok(Self {
             client,
             inbound,
+            pushes: VecDeque::new(),
             handler,
             participant_service: fixture_service,
             store: fixture_store,
@@ -368,19 +379,12 @@ impl SocketFixture {
         &mut self,
         request: ClientRequest,
     ) -> Result<ServerValue, Box<dyn Error>> {
-        roundtrip(&mut self.client, &mut self.inbound, request)
-    }
-
-    /// Amplifier-only variant of [`Self::request`] that dumps the raw frame
-    /// bytes when the reply read back is not a `ServerValue`. Reachable only
-    /// from the `#[ignore]` interleave amplifier; the landed tests use
-    /// [`Self::request`].
-    pub(in crate::server::participant::production) fn request_capture(
-        &mut self,
-        request: ClientRequest,
-        label: &str,
-    ) -> Result<ServerValue, Box<dyn Error>> {
-        roundtrip_capture(&mut self.client, &mut self.inbound, request, label)
+        roundtrip(
+            &mut self.client,
+            &mut self.inbound,
+            &mut self.pushes,
+            request,
+        )
     }
 
     pub(in crate::server::participant::production) fn spawn_peer(
@@ -390,6 +394,7 @@ impl SocketFixture {
         Ok(SocketPeer {
             client,
             inbound,
+            pushes: VecDeque::new(),
             connection: Some(connection),
         })
     }
@@ -482,7 +487,11 @@ impl SocketFixture {
             .ok_or("WebSocket connection process was not registered")?;
         Ok(WebSocketEndpoint {
             listener,
-            peer: WebSocketPeer { socket, pid },
+            peer: WebSocketPeer {
+                socket,
+                pushes: VecDeque::new(),
+                pid,
+            },
         })
     }
 
@@ -550,14 +559,7 @@ impl SocketFixture {
     pub(in crate::server::participant::production) fn read_push(
         &mut self,
     ) -> Result<ServerPush, Box<dyn Error>> {
-        let frame = read_frame(&mut self.client, &mut self.inbound)?;
-        let bytes = encode_frame(&frame)?;
-        let decoded = decode_participant(&bytes, ReceiverDirection::Client)
-            .map_err(|error| format!("{error:?}"))?;
-        let ParticipantFrame::ServerPush(push) = decoded else {
-            return Err(format!("expected participant push, got {decoded:?}").into());
-        };
-        Ok(push)
+        next_push(&mut self.client, &mut self.inbound, &mut self.pushes)
     }
 
     pub(in crate::server::participant::production) fn participant_owner_facts(
@@ -687,6 +689,7 @@ impl SocketFixture {
         let Self {
             client,
             inbound,
+            pushes,
             handler,
             participant_service,
             store,
@@ -698,6 +701,7 @@ impl SocketFixture {
         self::wait_after_force_close_request(&supervisor);
         drop(client);
         drop(inbound);
+        drop(pushes);
         supervisor.shutdown();
         drop(connection);
         drop(supervisor);
@@ -719,17 +723,12 @@ impl SocketPeer {
         &mut self,
         request: ClientRequest,
     ) -> Result<ServerValue, Box<dyn Error>> {
-        roundtrip(&mut self.client, &mut self.inbound, request)
-    }
-
-    /// Amplifier-only variant of [`Self::request`]; see
-    /// [`SocketFixture::request_capture`].
-    pub(in crate::server::participant::production) fn request_capture(
-        &mut self,
-        request: ClientRequest,
-        label: &str,
-    ) -> Result<ServerValue, Box<dyn Error>> {
-        roundtrip_capture(&mut self.client, &mut self.inbound, request, label)
+        roundtrip(
+            &mut self.client,
+            &mut self.inbound,
+            &mut self.pushes,
+            request,
+        )
     }
 
     pub(in crate::server::participant::production) fn shutdown_transport(
@@ -741,14 +740,7 @@ impl SocketPeer {
     pub(in crate::server::participant::production) fn read_push(
         &mut self,
     ) -> Result<ServerPush, Box<dyn Error>> {
-        let frame = read_frame(&mut self.client, &mut self.inbound)?;
-        let bytes = encode_frame(&frame)?;
-        let decoded = decode_participant(&bytes, ReceiverDirection::Client)
-            .map_err(|error| format!("{error:?}"))?;
-        let ParticipantFrame::ServerPush(push) = decoded else {
-            return Err(format!("expected participant push, got {decoded:?}").into());
-        };
-        Ok(push)
+        next_push(&mut self.client, &mut self.inbound, &mut self.pushes)
     }
 }
 
@@ -774,18 +766,37 @@ impl WebSocketPeer {
     ) -> Result<ServerValue, Box<dyn Error>> {
         self.socket
             .send(Message::Binary(encode_request(request)?.into()))?;
-        let bytes = read_websocket_binary(&mut self.socket)?;
-        let decoded = decode_participant(&bytes, ReceiverDirection::Client)
-            .map_err(|error| format!("{error:?}"))?;
-        let ParticipantFrame::ServerValue(value) = decoded else {
-            return Err(format!("expected WebSocket participant value, got {decoded:?}").into());
-        };
-        Ok(value)
+        // Demultiplex like the TCP `roundtrip`: an unsolicited push may arrive
+        // ahead of the response even over WebSocket. Stash pushes in order and
+        // read until the response, bounded by frame count and the socket read
+        // deadline.
+        for _ in 0..WEBSOCKET_DEMUX_FRAMES {
+            let bytes = read_websocket_binary(&mut self.socket)?;
+            let decoded = decode_participant(&bytes, ReceiverDirection::Client)
+                .map_err(|error| format!("{error:?}"))?;
+            match decoded {
+                ParticipantFrame::ServerValue(value) => return Ok(value),
+                ParticipantFrame::ServerPush(push) => self.pushes.push_back(push),
+                ParticipantFrame::ClientRequest(unexpected) => {
+                    return Err(format!(
+                        "WebSocket client received a ClientRequest frame: {unexpected:?}"
+                    )
+                    .into());
+                }
+            }
+        }
+        Err(format!(
+            "no WebSocket ServerValue response arrived within {WEBSOCKET_DEMUX_FRAMES} frames"
+        )
+        .into())
     }
 
     pub(in crate::server::participant::production) fn read_push(
         &mut self,
     ) -> Result<ServerPush, Box<dyn Error>> {
+        if let Some(push) = self.pushes.pop_front() {
+            return Ok(push);
+        }
         let bytes = read_websocket_binary(&mut self.socket)?;
         let decoded = decode_participant(&bytes, ReceiverDirection::Client)
             .map_err(|error| format!("{error:?}"))?;

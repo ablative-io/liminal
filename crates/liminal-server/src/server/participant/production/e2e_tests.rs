@@ -6,6 +6,7 @@
 //! end to end through the production connection supervisor and the installed
 //! production semantic handler.
 
+use std::collections::VecDeque;
 use std::error::Error;
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -166,101 +167,87 @@ fn read_frame(socket: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, Box
     }
 }
 
-/// Sends one participant request over the live socket and decodes the
-/// wire-encoded semantic response.
-fn roundtrip(
+/// Frame-count bound on the response demultiplex loop. Large enough that any
+/// legitimate burst of interleaved pushes clears before the response arrives,
+/// small enough to fail fast instead of spinning if a response never comes.
+/// The loop is additionally bounded by the socket's read deadline; it never
+/// samples wall-clock time.
+const MAX_DEMUX_FRAMES: usize = 4096;
+
+/// Reads exactly one participant frame off the socket and decodes it in the
+/// client receiver direction. Shared by the response and push readers.
+fn read_participant_frame(
     client: &mut TcpStream,
     inbound: &mut Vec<u8>,
-    request: ClientRequest,
-) -> Result<ServerValue, Box<dyn Error>> {
-    client.write_all(&encode_request(request)?)?;
-    let frame = read_frame(client, inbound)?;
-    assert!(
-        matches!(
-            frame,
-            Frame::Unknown {
-                type_id: PARTICIPANT_FRAME_TYPE,
-                ..
-            }
-        ),
-        "expected a participant frame, got {frame:?}"
-    );
-    // Re-encode the preserved generic frame back into its exact wire bytes:
-    // the participant codec owns the byte layout end to end.
-    let bytes = encode_frame(&frame)?;
-    let decoded = decode_participant(&bytes, ReceiverDirection::Client)
-        .map_err(|error| format!("{error:?}"))?;
-    let ParticipantFrame::ServerValue(value) = decoded else {
-        return Err("participant response did not decode as a server value".into());
-    };
-    Ok(value)
-}
-
-/// Lowercase hex of a byte slice, for the amplifier's raw-frame dump.
-fn to_hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len().saturating_mul(2));
-    for byte in bytes {
-        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('?'));
-        out.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('?'));
-    }
-    out
-}
-
-/// Names the decoded participant frame variant for the amplifier dump.
-fn participant_variant_name(frame: &ParticipantFrame) -> &'static str {
-    match frame {
-        ParticipantFrame::ClientRequest(_) => "ClientRequest",
-        ParticipantFrame::ServerValue(_) => "ServerValue",
-        ParticipantFrame::ServerPush(_) => "ServerPush",
-    }
-}
-
-/// Amplifier-only instrumented sibling of [`roundtrip`]. It performs the exact
-/// same wire steps but, when the frame read back decodes to a variant OTHER than
-/// `ServerValue` (the response-displacement failure this lane is chasing), it
-/// dumps the raw frame bytes as hex, the decoded variant name, the decoded
-/// frame Debug, and the residual buffer length before returning the same error
-/// text the real harness produces. This never weakens the landed `roundtrip`'s
-/// assertions and is only reachable through the `#[ignore]` amplifier.
-fn roundtrip_capture(
-    client: &mut TcpStream,
-    inbound: &mut Vec<u8>,
-    request: ClientRequest,
-    label: &str,
-) -> Result<ServerValue, Box<dyn Error>> {
-    client.write_all(&encode_request(request)?)?;
+) -> Result<ParticipantFrame, Box<dyn Error>> {
     let frame = read_frame(client, inbound)?;
     let Frame::Unknown {
         type_id: PARTICIPANT_FRAME_TYPE,
         ..
     } = frame
     else {
-        return Err(format!("{label}: expected a participant frame, got {frame:?}").into());
+        return Err(format!("expected a participant frame, got {frame:?}").into());
     };
+    // Re-encode the preserved generic frame back into its exact wire bytes:
+    // the participant codec owns the byte layout end to end.
     let bytes = encode_frame(&frame)?;
-    let decoded = decode_participant(&bytes, ReceiverDirection::Client)
-        .map_err(|error| format!("{label}: {error:?}"))?;
-    match decoded {
-        ParticipantFrame::ServerValue(value) => Ok(value),
-        other => {
-            let variant = participant_variant_name(&other);
-            eprintln!(
-                "[AMP-CAPTURE] {label}: FRAME THAT DISPLACED THE RESPONSE variant={variant} \
-                 frame_len={} residue_bytes={} hex={}",
-                bytes.len(),
-                inbound.len(),
-                to_hex(&bytes)
-            );
-            eprintln!("[AMP-CAPTURE] {label}: decoded_frame_debug={other:?}");
-            Err(format!(
-                "participant response did not decode as a server value (got {variant}, \
-                 frame_len={}, residue_bytes={})",
-                bytes.len(),
-                inbound.len()
-            )
-            .into())
+    decode_participant(&bytes, ReceiverDirection::Client)
+        .map_err(|error| format!("{error:?}").into())
+}
+
+/// Returns the next stashed `ServerPush` if the connection demultiplexed one
+/// ahead of a response, else reads the next frame off the socket (which must be
+/// a push, since a `ServerValue` only arrives in reply to an outstanding
+/// request). Stashed pushes drain FIFO, preserving per-connection order.
+fn next_push(
+    client: &mut TcpStream,
+    inbound: &mut Vec<u8>,
+    pushes: &mut VecDeque<ServerPush>,
+) -> Result<ServerPush, Box<dyn Error>> {
+    if let Some(push) = pushes.pop_front() {
+        return Ok(push);
+    }
+    match read_participant_frame(client, inbound)? {
+        ParticipantFrame::ServerPush(push) => Ok(push),
+        other => Err(format!("expected participant push, got {other:?}").into()),
+    }
+}
+
+/// Sends one participant request over the live socket and returns the
+/// wire-encoded semantic response.
+///
+/// Demultiplexes exactly as the real SDK client does
+/// (`liminal-sdk`'s `remote::participant::receive`): an unsolicited
+/// `ServerPush` may reach the wire AHEAD of the response on this shared
+/// connection — the participant contract permits per-conversation interleave
+/// and frames carry no request-correlation id, so the only discriminator is the
+/// frame variant. Interleaved pushes are stashed IN ORDER into the connection's
+/// `pushes` queue (drained later by [`SocketFixture::read_push`] /
+/// [`SocketPeer::read_push`]) and reading continues until the `ServerValue`
+/// arrives, bounded by [`MAX_DEMUX_FRAMES`] and the socket read deadline.
+fn roundtrip(
+    client: &mut TcpStream,
+    inbound: &mut Vec<u8>,
+    pushes: &mut VecDeque<ServerPush>,
+    request: ClientRequest,
+) -> Result<ServerValue, Box<dyn Error>> {
+    client.write_all(&encode_request(request)?)?;
+    for _ in 0..MAX_DEMUX_FRAMES {
+        match read_participant_frame(client, inbound)? {
+            ParticipantFrame::ServerValue(value) => return Ok(value),
+            ParticipantFrame::ServerPush(push) => pushes.push_back(push),
+            ParticipantFrame::ClientRequest(unexpected) => {
+                return Err(format!(
+                    "client connection received a ClientRequest frame: {unexpected:?}"
+                )
+                .into());
+            }
         }
     }
+    Err(
+        format!("no ServerValue response arrived within {MAX_DEMUX_FRAMES} participant frames")
+            .into(),
+    )
 }
 
 fn await_genuine_park(
@@ -541,6 +528,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
         auth_token: Vec::new(),
     })?)?;
     let mut inbound = Vec::new();
+    let mut pushes = VecDeque::new();
     let ack = read_frame(&mut client, &mut inbound)?;
     assert!(
         matches!(
@@ -554,6 +542,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let enrolled = roundtrip(
         &mut client,
         &mut inbound,
+        &mut pushes,
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: CONVERSATION,
             enrollment_token: EnrollmentToken::new([9; 16]),
@@ -583,6 +572,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let acked = roundtrip(
         &mut client,
         &mut inbound,
+        &mut pushes,
         ClientRequest::ParticipantAck(ParticipantAck {
             conversation_id: CONVERSATION,
             participant_id: participant,
@@ -601,6 +591,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let record = roundtrip(
         &mut client,
         &mut inbound,
+        &mut pushes,
         ClientRequest::RecordAdmission(RecordAdmission {
             conversation_id: CONVERSATION,
             participant_id: participant,
@@ -622,6 +613,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let detached = roundtrip(
         &mut client,
         &mut inbound,
+        &mut pushes,
         ClientRequest::Detach(DetachRequest {
             conversation_id: CONVERSATION,
             participant_id: participant,
@@ -639,6 +631,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let attached = roundtrip(
         &mut client,
         &mut inbound,
+        &mut pushes,
         ClientRequest::CredentialAttach(CredentialAttachRequest {
             conversation_id: CONVERSATION,
             participant_id: participant,
@@ -678,6 +671,7 @@ fn full_lifecycle_e2e_over_real_socket_replays_old_epoch() -> Result<(), Box<dyn
     let replayed = roundtrip(
         &mut client,
         &mut inbound,
+        &mut pushes,
         ClientRequest::Detach(DetachRequest {
             conversation_id: CONVERSATION,
             participant_id: participant,
@@ -755,18 +749,16 @@ fn amplify_interleave_once(iteration: u32, peer_count: u32) -> Result<bool, Box<
     // followed by an immediate roundtrip.
     sender_fixture.open_publication_replay()?;
     if let (Some(waker_peer), Some(waker_id)) = (peers.last_mut(), peer_ids.last()) {
-        let woke = waker_peer.request_capture(
-            ClientRequest::RecordAdmission(RecordAdmission {
-                conversation_id: AMP_CONVERSATION,
-                participant_id: *waker_id,
-                capability_generation: Generation::ONE,
-                record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xB2; 16]),
-                payload: vec![0xD4],
-            }),
-            &format!("amp#{iteration}-waker"),
-        );
+        let woke = waker_peer.request(ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: AMP_CONVERSATION,
+            participant_id: *waker_id,
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xB2; 16]),
+            payload: vec![0xD4],
+        }));
         // A displaced waker roundtrip is itself an interleave; either way the
-        // sender's connection has been marked ready.
+        // sender's connection has been marked ready. The demultiplexing
+        // `roundtrip` absorbs the push and commits, so post-fix this is Ok.
         if let Err(error) = woke {
             let text = error.to_string();
             if !text.contains("did not decode as a server value") {
@@ -775,19 +767,19 @@ fn amplify_interleave_once(iteration: u32, peer_count: u32) -> Result<bool, Box<
         }
     }
 
-    // The sender immediately drives a RecordAdmission roundtrip. `request_capture`
-    // reads ONE frame and dumps raw bytes if it is not a `ServerValue`.
+    // The sender immediately drives a RecordAdmission roundtrip through the SAME
+    // shared `request`/`roundtrip` path the landed tests use. With the harness
+    // demultiplexing pushes from responses this commits cleanly; without it, a
+    // held `Attached` push displaces the response and `roundtrip` returns the
+    // "did not decode as a server value" error this amplifier counts.
     let label = format!("amp#{iteration}");
-    let outcome = sender_fixture.request_capture(
-        ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: AMP_CONVERSATION,
-            participant_id: sender.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA2; 16]),
-            payload: vec![0xD3],
-        }),
-        &label,
-    );
+    let outcome = sender_fixture.request(ClientRequest::RecordAdmission(RecordAdmission {
+        conversation_id: AMP_CONVERSATION,
+        participant_id: sender.participant_id(),
+        capability_generation: Generation::ONE,
+        record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA2; 16]),
+        payload: vec![0xD3],
+    }));
 
     let interleaved = match outcome {
         Ok(ServerValue::RecordCommitted(_)) => false,
@@ -797,7 +789,7 @@ fn amplify_interleave_once(iteration: u32, peer_count: u32) -> Result<bool, Box<
         Err(error) => {
             let text = error.to_string();
             if text.contains("did not decode as a server value") {
-                eprintln!("[AMP-CAPTURE] {label}: CAPTURED interleave -> {text}");
+                eprintln!("[AMP] {label}: interleave observed -> {text}");
                 true
             } else {
                 return Err(format!("amp {iteration}: unexpected roundtrip error: {text}").into());
@@ -810,24 +802,28 @@ fn amplify_interleave_once(iteration: u32, peer_count: u32) -> Result<bool, Box<
     Ok(interleaved)
 }
 
-/// Interleave amplifier — IGNORED so it never joins the normal battery.
+/// Interleave amplifier / regression guard — IGNORED so it never joins the
+/// normal battery (it is heavy and self-loaded).
 ///
-/// Reproduces the contention-dependent failure of
+/// Drives the contention-dependent scenario behind
 /// `leave_after_detach_reattach_supersession_discharges_unacked_obligation_and_reopens`:
 /// on one participant connection an unsolicited `ServerPush`
 /// (`ParticipantDelivery`) can reach the wire AHEAD of the semantic response to
 /// a client request, because a publication `READY` wake can schedule a
 /// connection slice that flushes a held obligation before the request's bytes
-/// are read (see the single-FIFO-writer, per-slice ordering in
-/// `server/connection/process.rs`). The harness `roundtrip` reads exactly ONE
-/// frame and requires `ServerValue`, so it observes the push and reports
-/// "participant response did not decode as a server value".
+/// are read (single-FIFO-writer, per-slice ordering in
+/// `server/connection/process.rs`). The contract permits this interleave, so the
+/// shared harness `roundtrip` now demultiplexes pushes from responses like the
+/// real SDK client — this test asserts that, under 8 CPU burners, the interleave
+/// NEVER surfaces to a caller. It is the green half of the fail-first pair:
+/// reverting the `roundtrip` demultiplex turns it red (the historical
+/// diagnosis logs captured 52/60 failures with the pre-fix reader).
 ///
 /// Self-contained: spawns `std::thread` CPU burners so no external load is
 /// needed. Tune via env vars `AMP_ITERS` (default 400), `AMP_PEERS` (default 6),
 /// `AMP_BURNERS` (default 8).
 #[test]
-#[ignore = "amplifier: run explicitly to reproduce the response/push interleave"]
+#[ignore = "amplifier: heavy self-loaded regression guard, run explicitly"]
 fn amplify_leave_regression_response_push_interleave() -> Result<(), Box<dyn Error>> {
     fn env_u32(key: &str, default: u32) -> u32 {
         std::env::var(key)
