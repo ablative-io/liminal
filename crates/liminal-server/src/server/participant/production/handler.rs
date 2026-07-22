@@ -476,9 +476,11 @@ impl ProductionParticipantHandler {
         // conversation's complete server-scope contribution into the ledger
         // — a replace, so a discarded-and-replayed owner never double
         // counts and the ledger self-heals from durable truth.
-        let now = self.now_ms().map_err(|error| ParticipantSemanticError::Internal {
-            message: format!("participant clock read failed: {error}"),
-        })?;
+        let now = self
+            .now_ms()
+            .map_err(|error| ParticipantSemanticError::Internal {
+                message: format!("participant clock read failed: {error}"),
+            })?;
         let now = u128::from(now);
         replayed.prune_expired_provenance(now);
         let contribution = replayed
@@ -572,9 +574,11 @@ impl ProductionParticipantHandler {
         conversation_id: ConversationId,
         conversations: &ParticipantConnectionConversations,
     ) -> Result<OperationFacts, ParticipantSemanticError> {
-        let now_ms = self.now_ms().map_err(|error| ParticipantSemanticError::Internal {
-            message: format!("participant clock read failed: {error}"),
-        })?;
+        let now_ms = self
+            .now_ms()
+            .map_err(|error| ParticipantSemanticError::Internal {
+                message: format!("participant clock read failed: {error}"),
+            })?;
         // The connection map only grows through capacity commits, so its
         // occupancy always fits the validated nonzero signed limit; a counter
         // rejection here is genuine internal drift and fails closed.
