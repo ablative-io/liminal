@@ -1,6 +1,6 @@
 # W4 — LAW-1 polling retirement (server-internal readiness/notification wave)
 
-**Revision r3 — design-first brief of record, 2026-07-22 (lens r2 READY; two lens-r2 minors folded at coordinator hands)**
+**Revision r4 — design-first brief of record, 2026-07-22 (ruled amendment: reclamation carve-out + mechanism + EMFILE policy, tear-seat ruling)**
 
 This brief rules the first buildable wave of the LAW-1 polling-retirement
 program named as lane **W4** in the wiring ledger. It is a docs-only lane: it
@@ -210,24 +210,43 @@ the `ConnectionFateWorkItem` struct is defined at
 funnel `handle_connection_fate` is at `dispatch.rs:618-628`; completion appends
 at
 `crates/liminal-server/src/server/participant/production/binding_fate_completion.rs`
-— which already delivers a **registered** connection's exit rather than finding
-it by a reap scan (the §4.1 handshake-stage carve-out bounds what (b) does and
-does not cover); and **(c)** the existing `Condvar`-based
+— which delivers a **registered** connection's **participant-semantic fate**
+rather than finding it by a reap scan (the §4.1 handshake-stage carve-out bounds
+what (b) does and does not cover); and **(c)** the existing `Condvar`-based
 `ShutdownHandle` (`shutdown.rs:49-62,86-107`) as the completion-notification
 shape.
+
+**r4 correction (ruled 2026-07-22, tear seat): (b) is not the host-record
+funnel.** `handle_connection_fate` does participant-semantic conversation-fate
+bookkeeping; **host-record removal** — releasing the §5 `max_connections`
+admission slot, deregistering readiness, dropping the fd guard — is a separate
+funnel, `ConnectionSupervisor::remove` (`supervisor.rs:2456+`), reached in-slice
+via `mark_crashed` (`:2214`) / `finish` (`:2257`) on every ordinary exit route,
+and otherwise only by the `reap_crashed` scan this wave retires. Two exit
+classes never run a final slice and so reach **neither**: external/panic
+termination (the `ConnectionProcess::Drop` backstop, `process.rs:870-891`,
+reclaims no host record by design) and the register-orphan race
+(`supervisor.rs:2167-2173`, whose self-healing is documented as "`reap_crashed`,
+driven continuously by the listener loop" — the exact cadence being retired).
+The §4.1 reclamation carve-out below is the ruled disposition.
 
 ### 4.1 Leg 1 — listener accept retirement (F1 + F2)
 
 **FIXED.** Both the main TCP listener and the sibling WebSocket listener wait
 for acceptability **without a backoff loop**; explicit shutdown interrupts that
-wait; and a connection-process exit is **delivered** to supervisor cleanup, not
-found by the per-iteration `reap_crashed_connections()` (F1) /
-`handshakes.reap_finished()` (F2) scan. An admitted connection is still handed
+wait; and every connection-process exit reaches host-record cleanup by
+**delivery**, not by the per-iteration `reap_crashed_connections()` (F1) /
+`handshakes.reap_finished()` (F2) scan — ordinary exits via their own final
+slice's `mark_crashed`/`finish`, the two no-final-slice classes via the
+reclamation carve-out below. An admitted connection is still handed
 to the supervisor (F1 `spawn_connection`, `listener.rs:137`) or handshake
-supervisor (F2 `handshakes.begin`, `websocket/listener.rs:159`); a
-resource-exhaustion policy must fail, shed, or await a genuine resource event —
-never sleep-and-retry the EMFILE/ENFILE path (`listener.rs:145-147`,
-`websocket/listener.rs:165-167`).
+supervisor (F2 `handshakes.begin`, `websocket/listener.rs:159`). The
+EMFILE/ENFILE path (`listener.rs:145-147`, `websocket/listener.rs:165-167`) is
+**RULED: shed-with-spare-fd** — hold one reserve descriptor, on exhaustion
+accept-with-reserve and immediately shed the connection loudly (typed log +
+counter), release the reserve, and return to the event wait; loud, bounded, no
+retry loop, recovers when pressure lifts (oracle 24). Fail-the-listener and
+sleep-and-retry are both forbidden.
 
 **Handshake-stage carve-out (coordinator finding, verified at bytes).** F2 has
 **two** distinct exits, and the W1b funnel (b) covers only one of them. A
@@ -247,24 +266,58 @@ its **own** TOLD handshake-worker completion delivery — a worker signals its o
 thread-end into a completion primitive; still no reap loop — which is **not**
 literally the W1b funnel. Only post-upgrade connection exits reuse (b).
 
-**OPEN mechanism (candidates, none selected).** Socket
-`«MAIN-LISTENER-READINESS-SHUTDOWN-EXIT»` and its WebSocket sibling
-`«WS-LISTENER-READINESS-SHUTDOWN-EXIT»`: expose host-owned listener-fd readiness
-from the existing shared reactor, **or** a portable blocking-accept plus an
-explicit cross-platform interrupt. The **registered** connection-exit half
-REUSES the W1b fate exit delivery (b/c) rather than a new reap path; the
-**handshake-worker** completion half needs its own TOLD delivery per the
-carve-out above, whose concrete completion primitive is also OPEN.
+**Reclamation carve-out (ruled rider, tear seat 2026-07-22 — the second
+bytes-forced wall exception).** Provenance: the leg-1 builder's conflict STOP
+(zero edits) proved at bytes that the two no-final-slice exit classes (§4 r4
+correction) reach neither the W1b fate funnel nor `mark_crashed`/`finish`, and
+that the retiring reap scan is their documented sole reclaimer; a leaked record
+holds a `max_connections` admission slot, so on an idle server the leak is
+permanent and the server eventually refuses all connections. Ruling (disposition
+(i), coordinator recommendation accepted; the alternative — a reclamation seam
+with no teller — was ruled never-live because a seam nobody tells never fires on
+an idle server): leg 1 adds a **TOLD reclamation delivery for exactly these two
+classes**, routed into the EXISTING `remove()` funnel — no third funnel, no
+periodic drive — with its own oracle pair (oracles 22 and 23) and, in the same
+change, the three citing production doc-comments trued
+(`supervisor.rs:2167-2173`, `process.rs:870-876`, `supervisor.rs:2315-2328`).
+**Staged beamr contingency (ruled — not preemptive):** the builder implements
+ordinary-exit delivery plus the two-class tell as far as beamr's existing public
+surface allows; if and only if it hits the missing non-blocking exit accessor
+(`supervisor.rs:2315-2328`'s own "if beamr later grows…" note), it STOPs with
+the exact required API shape, the two gap classes go **ledgered-elsewhere** in
+this brief per the F6/F7 pattern, and the tear seat carries the scoped ask to
+the beamr seat. The contingency must not block ordinary-exit delivery landing.
 
-**Idle-cost lens.** (1) Zero application-thread wakes and zero repeated
-accept/reap calls on a silent listener; pin zero. (2) For `L_tcp + L_ws`
-listeners the aggregate application ceiling is `0`; if the shared reactor is
-chosen, adding both listener fds must add **zero** reactor threads. (3)
-Quiescence tests `silent_main_listener_has_zero_application_wakes` and
+**Mechanism (RULED, tear seat 2026-07-22 — formerly OPEN).** Sockets
+`«MAIN-LISTENER-READINESS-SHUTDOWN-EXIT»` / `«WS-LISTENER-READINESS-SHUTDOWN-EXIT»`
+are resolved to **portable blocking-accept plus an explicit cross-platform
+interrupt**: the listener socket is blocking (kernel-parked, zero idle wakes)
+and shutdown wakes it via an explicit interrupt (self-connect with loopback
+normalisation, or listener-fd `shutdown()` — builder's pick within FIXED,
+disclosed). Grounds: smaller change, no reactor coupling, and reuse-existing-
+machinery bias; the beamr-reactor alternative was ruled out because
+`ReadinessFacility` is in-slice-only (`readiness_register` is
+`pub(in crate::scheduler)`) and would force converting each listener into a
+beamr native process, and with no reactor in the design the Q10 wake-RATE-pin
+obligation is void. The **registered** connection-exit half reaches
+participant-semantic cleanup via (b) and host-record cleanup via in-slice
+`mark_crashed`/`finish`; the two no-final-slice classes ride the reclamation
+carve-out; the **handshake-worker** completion half keeps its own TOLD delivery
+per the handshake carve-out, whose concrete completion primitive remains OPEN.
+
+**Idle-cost lens (r4: restated for the ruled blocking-accept mechanism).**
+(1) Zero application-thread wakes and zero repeated accept/reap calls on a
+silent listener — the thread is kernel-parked in blocking `accept`; pin zero.
+(2) For `L_tcp + L_ws` listeners the aggregate application ceiling is `0` idle
+wakes and exactly the two parked host threads that exist today; no reactor
+threads are added (reactor ruled out). (3) Quiescence tests
+`silent_main_listener_has_zero_application_wakes` and
 `silent_websocket_listener_has_zero_application_wakes` (counters, not timing).
-(4) The shared readiness reactor is by-design infrastructure: the existing
-one-thread **inventory** pin (`supervisor_tests.rs`) is not a wake-RATE pin —
-leg 1 must add a wake-count pin and obtain certifying-pair sign-off (Lens Q10).
+(4) By-design costs: the interrupt primitive (one wake per shutdown, at most
+one spurious accept per interrupt — bound and pin both) and the shed-reserve
+descriptor (one held fd per listener — bound and pin); certifying-pair
+sign-off on both. The Q10 reactor wake-RATE obligation is void with the
+reactor ruled out.
 
 ### 4.2 Leg 2 — health accept retirement (F3)
 
@@ -328,7 +381,7 @@ the production accept/drain path satisfies a row.
 | 3 | `main_listener_source_has_no_accept_backoff_or_reap_poll` | 1 / absence-grep | No hit for `ACCEPT_IDLE_BACKOFF\|TRANSIENT_ERROR_BACKOFF\|WouldBlock.*sleep\|reap_crashed_connections` in the replacement accept path. |
 | 4 | `websocket_listener_source_has_no_accept_backoff_or_handshake_reap_poll` | 1 / absence-grep | No hit for the same constants nor `reap_finished` in a per-iteration sleep in the WebSocket accept path. |
 | 5 | `listener_shutdown_interrupts_accept_wait_without_backoff` | 1 / correctness | Race shutdown before, during, and after arming, on both listeners; the wait returns promptly with no sleep and no lost accept. |
-| 6 | `registered_connection_exit_reaches_supervisor_cleanup_by_delivery_not_reap` | 1 / correctness | A **registered** connection-process exit (TCP, or a post-upgrade WebSocket connection) reaches supervisor cleanup via the W1b fate delivery, with no per-iteration `reap_crashed_connections` scan. |
+| 6 | `registered_connection_exit_reaches_supervisor_cleanup_by_delivery_not_reap` | 1 / correctness | A **registered** connection-process exit (TCP, or a post-upgrade WebSocket connection) on an ordinary route reaches participant-semantic cleanup via the W1b fate delivery AND host-record cleanup via its own final slice's `mark_crashed`/`finish`, with no per-iteration `reap_crashed_connections` scan (r4: the two no-final-slice classes are oracle 22's territory, not this row's). |
 | 7 | `listener_idle_grows_unrelated_reactor_slices_while_accept_counters_stay_flat` | 1 / idle-honesty | Under an unrelated live workload, reactor/transport slice counters GROW while accept-attempt and reap counters stay FLAT — proving the test cannot pass by disabling the reactor. |
 | 8 | `silent_health_listener_has_zero_application_wakes` | 2 / absence | Quiet health listener: zero accept attempts and zero application wakes after arming, route behaviour unchanged. |
 | 9 | `health_accept_source_has_no_wouldblock_sleep_poll` | 2 / absence-grep | No hit for `set_nonblocking\(true\)`-driven `WouldBlock` + `sleep` in the health accept path. |
@@ -344,12 +397,15 @@ the production accept/drain path satisfies a row.
 | 19 | `last_drain_exit_simultaneous_with_deadline_resolves_one_winner` | 3 / crash-cut | The last exit arriving at the same barrier as the deadline resolves to exactly one winner; completion is neither double-counted nor dropped. |
 | 20 | `accepted_socket_racing_shutdown_is_supervised_or_shed_never_slept` | 1 / crash-cut | A socket accepted while shutdown fires is either supervised or explicitly shed, never left to a sleep-retry; no connection slips past the shutdown broadcast. |
 | 21 | `handshake_worker_completion_delivered_not_reap_scanned` | 1 / correctness | A handshake-stage worker that never registers (refused/failed upgrade, or pre-upgrade shutdown) signals its own completion; no `HandshakeSupervisor::reap_finished` join-scan runs per accept iteration. This is the F2 exit W1b does not cover. |
+| 22 | `no_final_slice_exit_record_reclaimed_by_delivery_not_scan` | 1 / correctness | An externally-terminated registered process (killed via the scheduler, no final slice) and a register-orphan record (insert lands after the first slice already exited) are each reclaimed through the existing `remove()` funnel by the ruled TOLD reclamation delivery, with no reap scan and no periodic drive. |
+| 23 | `no_final_slice_exit_cannot_leak_admission_slot_across_idle` | 1 / crash-cut | After a no-final-slice exit on an otherwise idle server (zero accepts, zero slices), the `max_connections` admission slot is released and a subsequent connection at the limit is admitted — proving the reclamation cannot depend on future accept or slice activity. |
+| 24 | `fd_exhaustion_sheds_loudly_and_recovers_without_spin` | 1 / correctness | Under EMFILE/ENFILE, the listener sheds via the reserve descriptor with a typed log + counter, never sleeps or retries in a loop, keeps zero idle wakes while pressure persists, and admits normally once pressure lifts. |
 
 ## 6. Scope walls
 
 | inside W4-NOW | expressly outside W4-NOW |
 |---|---|
-| Retiring the five server-owned sample/sleep loops F1–F5; TOLD readiness/completion + explicit shutdown/deadline wakes; reuse of the beamr-readiness reactor, W1b fate exit delivery, and the `ShutdownHandle` `Condvar`; the 21 oracles above. | Inventing any new reactor, second exit path, or parallel wake vocabulary — with ONE bytes-forced exception: the handshake-stage worker completion delivery (§4.1 carve-out, oracle 21), which W1b cannot cover and which stays OPEN under `«WS-LISTENER-READINESS-SHUTDOWN-EXIT»`. Everything else reuses (a)/(b)/(c) or stays OPEN under a named socket. |
+| Retiring the five server-owned sample/sleep loops F1–F5; TOLD readiness/completion + explicit shutdown/deadline wakes; reuse of the W1b fate exit delivery and the `ShutdownHandle` `Condvar`; the 24 oracles above. | Inventing any new reactor, second exit path, or parallel wake vocabulary — with TWO bytes-forced exceptions (both ruled at the tear seat): (1) the handshake-stage worker completion delivery (§4.1 handshake carve-out, oracle 21), which W1b cannot cover; (2) the no-final-slice reclamation delivery (§4.1 reclamation carve-out, oracles 22-23), routed into the EXISTING `remove()` funnel — a tell for records the retiring reap scan was the sole reclaimer of, not a third funnel. Everything else reuses (b)/(c); the accept mechanism is RULED blocking-accept + interrupt (r4). |
 | The listener/health accept wait and the drain/settle completion wait. | Health/readiness/metrics route semantics, auth, or the console/OpsState design that rides the health listener. |
 | Composition of drain completion with W1b connection-fate exits. | Reopening W1b fate classification, schema, source order, finalizer ownership, or `ParticipantServiceFatal`. |
 | Server-side loops only. | Cluster membership (F6), channel command-reply (F7), and the SDK readers (F8/F9/C1) — each its own ledgered lane (§3). W4-NOW neither claims nor blocks their replacements. |
@@ -368,10 +424,10 @@ the brief for revision; it does not license an implementation guess.
 2. Is the new WebSocket server listener (F2) correctly folded into leg 1 —
    same accept-loop shape as F1, same wave — rather than opened as a separate
    lane?
-3. Wake mechanism (OPEN): should leg 1 reuse the shared beamr-readiness reactor
-   for the two listener fds, or select a portable blocking-accept interrupt?
-   Neither is chosen here; the lens rules whether either candidate is admissible
-   before build.
+3. ~~Wake mechanism (OPEN)~~ **RESOLVED BY RULING (r4, tear seat 2026-07-22):**
+   portable blocking-accept + explicit interrupt; reactor reuse ruled out
+   (in-slice-only `ReadinessFacility`, listener-to-native-process conversion
+   cost). Recorded in §4.1; no longer a lens question.
 4. Does reusing the W1b `ConnectionFateWorkItem` exit delivery cover the leg-1
    **registered**-connection reap (F1, and post-upgrade WebSocket connections)
    and the leg-3 drain-completion decrement through one funnel — while the F2
@@ -402,9 +458,10 @@ the brief for revision; it does not license an implementation guess.
    candidate: it is entirely `#[cfg(test)]` — `mod tests` at `discovery.rs:180-182`,
    `NoopWake` at `:189`, helper `resolve_now` at `:195`; production `resolve` at
    `:66` returns a runtime-driven future, not a NoopWaker scan.)
-10. Does the shared readiness reactor receive a wake-RATE pin (not merely the
-    existing one-thread inventory pin in `supervisor_tests.rs`) plus
-    certifying-pair sign-off before leg 1 is accepted?
+10. ~~Reactor wake-RATE pin~~ **VOID BY RULING (r4):** the reactor is ruled out
+    of leg 1, so the wake-RATE-pin obligation attached to choosing it is void.
+    The ruled mechanism's by-design costs (interrupt primitive, shed-reserve
+    descriptor) carry their own bound + pin + sign-off per §4.1 lens item (4).
 11. Are the two tokio-runtime `block_on` sites the skeleton §C row 3 ordered
     separately classified — cluster startup (C5, `membership.rs:320,328`: bind +
     seed-connect) and cluster per-write (C6, `sync.rs:277-290`: `block_in_place`
@@ -422,3 +479,4 @@ the brief for revision; it does not license an implementation guess.
 | r1 | 2026-07-22 | liminal `829b3c30a9f27bab8aa31cbe21470e687c59937d`; `WIRING-LEDGER.md` r1.9, 2026-07-20 | Initial design-first brief of record for lane W4. Re-pins the `ce8814d` skeleton to `829b3c3` with a full drift ledger (§1): W2 retired the unconditional `notify_ready` for `notify_impact`/`target_union`; the WebSocket transport added a new server listener family (F2) and SDK reader/keepalive candidates (C1/C2); shutdown/membership/reader anchors moved. Mechanical family census (§2): nine confirmed byte-verified polling families (F1–F9) plus eight growth/candidate rows (C1–C8), unique-named. Scope ruling (§3): W4-NOW = server-internal readiness wave (F1–F5) in three legs; F6/F7/F8/F9/C1 ledgered to their own lanes; C2–C8 out-of-scope-with-why. Replacement designs (§4) reuse the landed beamr-readiness reactor, W1b fate exit delivery, and the `ShutdownHandle` `Condvar` — no parallel wake vocabulary — each with FIXED/OPEN separation and the four-part idle-cost lens. Twenty-oracle absence-proof census (§5): structural grep + runtime quiescence + crash-cut + idle-honesty both-sides. Scope walls (§6) and ten numbered lens questions (§7). Ready for the lens rounds. |
 | r2 | 2026-07-22 | same liminal/ledger pin | Folds lens r1 (**3 MAJOR + 5 minor**) plus the **coordinator (Fable-seat) finding**, each re-verified at `829b3c3` bytes. **MAJOR-1 — phantom production candidate:** the cluster resolver `NoopWaker` `block_on` is entirely `#[cfg(test)]` (`discovery.rs:180-182,189,195`); production `resolve` at `:66` returns a runtime-driven future. The candidate row is deleted and re-recorded as "examined and excluded — test-only" in §2.2; Q9 rewritten accordingly. **MAJOR-2 — dropped skeleton-ordered sites:** the two tokio-runtime `block_on` sites the skeleton §C row 3 ordered separately classified are added as census rows C5 (`membership.rs:320,328`, startup) and C6 (`sync.rs:277-290`, per-write), classified as real-waker runtime parks (distinct from the NoopWaker scan C4) and gated by new lens question Q11. **MAJOR-3 — C1 cited nonexistent bytes:** the "no armed read window" claim is rewritten to ABSENCE form — `run_reader` (`websocket/subscription.rs:399-419`) makes no `set_read_timeout` call; the primitive is defined at `std_socket.rs:155`/passed at `:158`, and the only `Some(window)` arming is `std_socket.rs:93`. **minor-a** listener doc attribution corrected to `:3-4` ("Mirrors") + `:25` ("matching"); **minor-b** the `notify_impact` gloss re-anchored — calls at `dispatch.rs:625,676` are unconditional, gating is `target_union`'s empty-set arm at `dispatch_impact.rs:97-104` (`:99`); **minor-c** `ConnectionFateWorkItem` routing re-cited to `handle_connection_fate` at `dispatch.rs:618-628` (struct def `:115`); **minor-d** the `examples/` class exclusion stated explicitly (`demo_feed_publisher/main.rs:90` demo pacing) plus the `#[cfg(test)]` sleeps; **minor-e** full path for `binding_fate_completion.rs`. **Coordinator finding (design amendment):** verified at bytes that `HandshakeSupervisor::reap_finished` (`websocket/supervisor.rs:112`) reaps handshake-stage workers that never register, which W1b's `ConnectionFateWorkItem` does not cover — §4.1 gains an explicit handshake-stage carve-out (own TOLD completion delivery, not the W1b funnel), oracle 6 is scoped to **registered** connections, new oracle 21 `handshake_worker_completion_delivered_not_reap_scanned` is added (census now 21), and Q4 amended. Census now F1–F9 + C1–C9; eleven lens questions. |
 | r3 | 2026-07-22 | same liminal/ledger pin | Lens r2 verdict **READY (zero MAJOR)**: all r1 discharges and the coordinator carve-out verified at bytes; renumbering orphan-free; 21-oracle census unique and consistent. Folds the two lens-r2 minors at coordinator hands: (1) the §2.2 discovery test-fn cites corrected to `resolver_learns_real_peer_names` `:222` / `as_resolver_coerces_to_shared_handle` `:236` (attrs `:221,235`); (2) the §6 wall's no-second-exit-path prohibition reconciled with the §4.1 handshake carve-out — the bytes-forced handshake-worker completion delivery (oracle 21, OPEN under `«WS-LISTENER-READINESS-SHUTDOWN-EXIT»`) is named as the one admitted distinct completion, removing the §4.1/§6 tension. Lens record: r1 3M+5m+coordinator finding → r2 READY + 2 minor → r3 folds them. Declared for tear at r3. |
+| r4 | 2026-07-22 | same liminal/ledger pin; ruling: tear seat (Waffles), DM 2026-07-22 ~08:44Z, four-part | Ruled amendment following the leg-1 builder's conflict STOP (zero edits; coordinator re-verified every claim at bytes; LAW-2 miss in r1-r3 owned at the author seat). (1) §4 gains the r4 correction: the W1b funnel (b) is participant-semantic only; host-record removal is the `remove()` funnel (in-slice `mark_crashed`/`finish` on ordinary exits), and two no-final-slice classes — external/panic termination (`process.rs:870-891`) and the register-orphan race (`supervisor.rs:2167-2173`) — reached it only via the retiring reap scan. (2) §4.1 gains the RECLAMATION CARVE-OUT, the second bytes-forced wall exception: a TOLD reclamation delivery for exactly those two classes into the EXISTING `remove()` funnel, with the staged beamr contingency (STOP-with-API-shape → ledgered-elsewhere per F6/F7 if the missing non-blocking exit accessor blocks; must not block ordinary-exit delivery). (3) Mechanism RULED: portable blocking-accept + explicit interrupt; reactor reuse ruled out (in-slice-only `ReadinessFacility`); Q3 resolved, Q10 void, idle-cost lens restated. (4) EMFILE/ENFILE RULED: shed-with-spare-fd, loud, bounded, no retry. Oracle 6 rescoped to ordinary routes; new oracles 22 `no_final_slice_exit_record_reclaimed_by_delivery_not_scan`, 23 `no_final_slice_exit_cannot_leak_admission_slot_across_idle`, 24 `fd_exhaustion_sheds_loudly_and_recovers_without_spin` — census now 24. §6 wall now names TWO ruled exceptions. Build obligation: true the three citing doc-comments in the same change. Leg-1a split (handshake carve-out) endorsed as executed. |
