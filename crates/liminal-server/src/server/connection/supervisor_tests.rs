@@ -311,8 +311,25 @@ fn crashing_one_connection_process_does_not_affect_others() -> Result<(), Box<dy
     Ok(())
 }
 
+/// Oracle 25 (W4 leg 1, §4.1 r5 rider) — successor of the retired
+/// `external_kill_then_fd_reuse_survives_old_token_deregister` pin, whose
+/// never-modify status was formally lifted at the tear seat for exactly the
+/// reclamation carve-out. The retired test relied on the pre-carve-out leak (an
+/// externally killed connection's host record persisting until an explicit reap)
+/// to stage stale/fresh readiness coexistence on one reused fd. Under the TOLD
+/// reclamation delivery that leak is gone, so the same PROPERTY — a stale token
+/// must never harm the fd's new occupant — is pinned here under the new
+/// mechanism, in two halves:
+///  (a) after a no-final-slice exit the stale registration is deregistered by the
+///      reclamation delivery BEFORE the fd is reused; and
+///  (b) [load-bearing wall] replaying the stale token's deregister AFTER
+///      reclamation and AFTER a new registration claimed the reused fd is a
+///      keyed no-op that leaves the new occupant intact.
+///
+/// Known fd-reuse flake (allocator timing under full-suite concurrency): isolated
+/// rerun before any red call, per the W4 flake ledger.
 #[test]
-fn external_kill_then_fd_reuse_survives_old_token_deregister()
+fn fd_reuse_stale_token_deregister_after_reclamation_is_harmless_no_op()
 -> Result<(), Box<dyn std::error::Error>> {
     let supervisor = ConnectionSupervisor::new()?;
     let (old_client, old_server) = tcp_pair()?;
@@ -322,10 +339,11 @@ fn external_kill_then_fd_reuse_survives_old_token_deregister()
     let old_fd = supervisor
         .readiness_fd(old.pid())
         .ok_or("old connection did not publish its readiness fd")?;
+    // Capture the stale token BEFORE reclamation so half (b) can replay it.
+    let stale_token = supervisor
+        .readiness_token(old.pid())
+        .ok_or("old connection did not publish its readiness token")?;
 
-    // Build the replacement pair while `old_fd` is still owned by the old process.
-    // Once the drop event arrives, the only fd allocation this test performs is the
-    // clone loop that claims the newly reusable number.
     let (mut new_client, new_server_original) = tcp_pair()?;
     let old_stream_dropped = supervisor.observe_process_stream_drop(old_fd);
     supervisor
@@ -336,9 +354,25 @@ fn external_kill_then_fd_reuse_survives_old_token_deregister()
         .map_err(|error| format!("externally killed process did not drop its stream: {error}"))?;
     assert!(!old.is_live());
 
+    // Half (a): the TOLD reclamation delivery (NOT a reap call) deregisters the
+    // stale registration. Bounded wait on the record going away — no reap here,
+    // so only the delivery can have freed it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while supervisor.is_tracked(old.pid()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !supervisor.is_tracked(old.pid()),
+        "the reclamation delivery did not release the killed connection's record"
+    );
+    assert_eq!(
+        supervisor.readiness_registration_count(),
+        0,
+        "the stale registration must be gone before the fd is reused"
+    );
+
     // Hold clone descriptors below `old_fd` until the allocator reaches the exact
-    // externally-freed number. Full-suite concurrency may leave unrelated lower
-    // holes, so a single clone is not deterministic.
+    // externally-freed number (full-suite concurrency may leave lower holes).
     let mut fillers = Vec::new();
     let new_server = loop {
         let candidate = new_server_original.try_clone()?;
@@ -356,16 +390,165 @@ fn external_kill_then_fd_reuse_survives_old_token_deregister()
     drop(fillers);
     wait_for_parked(&supervisor, new.pid())?;
     assert_eq!(supervisor.readiness_fd(new.pid()), Some(old_fd));
-    assert_eq!(supervisor.readiness_registration_count(), 2);
-
-    assert_eq!(supervisor.reap_crashed_connections(), 1);
     assert_eq!(supervisor.readiness_registration_count(), 1);
+
+    // Half (b), the load-bearing wall: replay the STALE token's deregister now
+    // that `new` owns the reused fd. `readiness_deregister` is token-keyed, so the
+    // stale token targets old's already-removed registration — a harmless no-op
+    // that must not disturb the new fd occupant.
+    supervisor.scheduler().readiness_deregister(stale_token);
+    assert_eq!(
+        supervisor.readiness_registration_count(),
+        1,
+        "a stale token's deregister must not remove the new fd occupant's registration"
+    );
+    assert_eq!(supervisor.readiness_fd(new.pid()), Some(old_fd));
+
     new_client.set_read_timeout(Some(Duration::from_secs(2)))?;
     write_frame(&mut new_client, &Frame::Ping { flags: 0 })?;
     assert!(matches!(read_frame(&mut new_client)?, Frame::Pong { .. }));
     assert!(new.is_live());
 
     drop(old_client);
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 6 (W4 leg 1) — a REGISTERED connection's ordinary exit reaches
+/// host-record cleanup via its own final slice's `mark_crashed`/`finish` (the
+/// client hangs up → EOF/HUP → in-slice teardown), with NO per-iteration
+/// `reap_crashed_connections` scan. The two no-final-slice classes are oracle
+/// 22's territory, not this row's.
+#[test]
+fn registered_connection_exit_reaches_supervisor_cleanup_by_delivery_not_reap()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    wait_for_parked(&supervisor, pid)?;
+    assert_eq!(supervisor.readiness_registration_count(), 1);
+
+    // Ordinary exit: the client hangs up; the connection's own final slice runs
+    // mark_crashed/finish in-slice. Wait for cleanup WITHOUT calling reap, so the
+    // in-slice funnel (not a scan) is what frees the record.
+    drop(client);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while supervisor.is_tracked(pid) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !supervisor.is_tracked(pid),
+        "an ordinary registered exit must reach cleanup without a reap scan"
+    );
+    assert_eq!(supervisor.readiness_registration_count(), 0);
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 22 (W4 leg 1, §4.1) — both no-final-slice exit classes are reclaimed
+/// through the existing `remove()` funnel by the TOLD reclamation delivery, with
+/// NO reap scan and NO periodic drive.
+#[test]
+fn no_final_slice_exit_record_reclaimed_by_delivery_not_scan()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+
+    // Class 1 — external termination of a registered process (no final slice):
+    // the exit-event reactor reclaims it through remove(); no reap is called.
+    let (client, server) = tcp_pair()?;
+    let killed = supervisor.spawn_connection(server)?;
+    wait_for_parked(&supervisor, killed.pid())?;
+    supervisor
+        .scheduler()
+        .terminate_process(killed.pid(), ExitReason::Error);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while supervisor.is_tracked(killed.pid()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !supervisor.is_tracked(killed.pid()),
+        "external termination must be reclaimed by delivery, not a reap scan"
+    );
+    drop(client);
+
+    // Class 2 — register-orphan: a record inserted for a pid already absent from
+    // the scheduler process table (the insert-after-exit orphan) is reclaimed by
+    // the registration-event point check through remove() — no scan, no loop.
+    let orphan_pid = u64::MAX;
+    supervisor.inner.runtime.register(orphan_pid, None)?;
+    assert!(supervisor.is_tracked(orphan_pid));
+    supervisor
+        .inner
+        .runtime
+        .reconcile_register_orphan(orphan_pid);
+    assert!(
+        !supervisor.is_tracked(orphan_pid),
+        "a register-orphan record must be reclaimed by the registration point check through remove()"
+    );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Oracle 23 (W4 leg 1, §4.1) — after a no-final-slice exit on an otherwise idle
+/// server (zero accepts, zero slices after the exit, no reap call), the §5
+/// `max_connections` admission slot is released by the delivery and a subsequent
+/// connection at the limit is admitted — proving reclamation cannot depend on
+/// future accept or slice activity.
+#[test]
+fn no_final_slice_exit_cannot_leak_admission_slot_across_idle()
+-> Result<(), Box<dyn std::error::Error>> {
+    use crate::config::types::{LimitsConfig, ServerConfig, ServicesConfig};
+
+    let config = ServerConfig {
+        listen_address: "127.0.0.1:0".parse()?,
+        health_listen_address: "127.0.0.1:1".parse()?,
+        drain_timeout_ms: 30_000,
+        channels: Vec::new(),
+        routing_rules: Vec::new(),
+        persistence_path: None,
+        cluster: None,
+        auth: None,
+        services: ServicesConfig::default(),
+        limits: LimitsConfig {
+            max_connections: 1,
+            ..LimitsConfig::default()
+        },
+        participant: None,
+        websocket: None,
+    };
+    let supervisor = ConnectionSupervisor::from_config(&config)?;
+
+    let (_client_a, server_a) = tcp_pair()?;
+    let a = supervisor.spawn_connection(server_a)?;
+    assert_eq!(supervisor.active_connection_count(), 1);
+
+    // No-final-slice exit: external kill runs no mark_crashed/finish.
+    supervisor
+        .scheduler()
+        .terminate_process(a.pid(), ExitReason::Error);
+
+    // The reclamation delivery frees the slot with ZERO accepts and ZERO slices
+    // after the exit — no reap here, no new connection yet.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while supervisor.is_tracked(a.pid()) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        !supervisor.is_tracked(a.pid()),
+        "the killed connection's admission slot was not released by delivery"
+    );
+    assert_eq!(supervisor.active_connection_count(), 0);
+
+    // A subsequent connection at the limit is admitted — the slot really freed.
+    let (_client_b, server_b) = tcp_pair()?;
+    let b = supervisor.spawn_connection(server_b);
+    assert!(
+        b.is_ok(),
+        "a no-final-slice exit must not leak the admission slot: {b:?}"
+    );
+
     supervisor.shutdown();
     Ok(())
 }
@@ -1530,15 +1713,21 @@ fn err_from_public_push_publishes_nothing_after_close() -> Result<(), Box<dyn st
     Ok(())
 }
 
-/// S8 pin (Err side), driving the REAL failed-wake rollback path over a real
-/// connection: the process is killed externally (which leaves its host record —
-/// so the confirm passes and the push reaches `enqueue_control`), the wake
-/// fails against the dead pid, and `remove_control` REMOVES the never-consumed
-/// entry — the observation-proven unpublished case. The API must return the
-/// typed `Err` with zero slots, an empty control queue, and no `Push` frame on
-/// the client socket. (Neither S7 test executed this branch; this one does.)
+/// Oracle 26 (W4 leg 1, §4.1 r5 rider) — redesigned setup for the S8 failed-wake
+/// rollback branch, successor of `failed_wake_rollback_err_publishes_nothing`.
+/// The retired test reached the S8 Err branch (confirm passes, wake fails against
+/// a dead pid) THROUGH the pre-carve-out leak (the killed record persisting until
+/// reaped). Under the TOLD reclamation delivery, dead-but-tracked is no longer a
+/// permanent leak — it narrows to the window between actual death and the
+/// delivery reaching `remove()`. The S8 Err branch is that window's branch and
+/// keeps coverage. The window is constructed DETERMINISTICALLY with the
+/// harness-owned reclamation gate (no sleeps; no production-semantics hook — the
+/// gate is entirely `#[cfg(test)]`): hold the delivery, kill, drive the wake into
+/// S8 Err, assert it publishes nothing, release the gate, assert the funnel
+/// completes.
 #[test]
-fn failed_wake_rollback_err_publishes_nothing() -> Result<(), Box<dyn std::error::Error>> {
+fn s8_failed_wake_in_reclamation_window_publishes_nothing_then_funnel_completes()
+-> Result<(), Box<dyn std::error::Error>> {
     let supervisor = ConnectionSupervisor::new()?;
     let (mut client, server) = tcp_pair()?;
     let handle = supervisor.spawn_connection(server)?;
@@ -1546,24 +1735,23 @@ fn failed_wake_rollback_err_publishes_nothing() -> Result<(), Box<dyn std::error
     client.set_read_timeout(Some(Duration::from_millis(300)))?;
     wait_for_parked(&supervisor, pid)?;
 
-    // External kill: the process leaves the scheduler table but its host record
-    // REMAINS until reaped (the fd-reuse pin established this), so the push
-    // below passes its confirm and fails at the wake — the exact S8 branch.
+    // Hold the reclamation delivery for this pid, then externally kill it. The
+    // `reached` rendezvous proves the reactor received the exit event (so the pid
+    // is dead) while its host record is still tracked — the S8 window, pinned
+    // deterministically with no sleep.
+    let (reached, release, done) = supervisor.install_reclaim_barrier(pid);
     supervisor
         .scheduler()
         .terminate_process(pid, ExitReason::Error);
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while handle.is_live() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(5));
-    }
-    if handle.is_live() {
-        return Err("externally killed process did not exit".into());
-    }
+    reached.wait();
+    assert!(!handle.is_live());
     assert!(
         supervisor.is_tracked(pid),
-        "the host record must still exist so the confirm passes"
+        "the killed pid must be dead-but-tracked inside the reclamation window"
     );
 
+    // S8 Err: the confirm passes (record present), the wake fails (pid dead), and
+    // `remove_control` rolls the never-consumed entry back — publishing nothing.
     let result = supervisor.push_to_connection(pid, b"never-consumed".to_vec());
     assert!(
         matches!(result, Err(crate::ServerError::ListenerAccept { .. })),
@@ -1583,6 +1771,15 @@ fn failed_wake_rollback_err_publishes_nothing() -> Result<(), Box<dyn std::error
         read_frame(&mut client).is_err(),
         "an Err from the failed-wake rollback must publish nothing"
     );
+
+    // Release the gate: the reclamation delivery completes the `remove()` funnel.
+    release.wait();
+    done.wait();
+    assert!(
+        !supervisor.is_tracked(pid),
+        "the remove() funnel completed after the gate released"
+    );
+
     supervisor.shutdown();
     Ok(())
 }

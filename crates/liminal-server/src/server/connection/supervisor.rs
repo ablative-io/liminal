@@ -8,13 +8,16 @@ use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use beamr::atom::{Atom, AtomTable};
 use beamr::module::ModuleRegistry;
 use beamr::native::native_process::NativeHandlerFactory;
 use beamr::process::ExitReason;
-use beamr::scheduler::{ReadinessToken, Scheduler, SchedulerConfig, SchedulerServices};
+use beamr::scheduler::{
+    ExitEvent, ExitEventSubscription, ReadinessToken, Scheduler, SchedulerConfig, SchedulerServices,
+};
 use beamr::timer::TimerRef;
 
 use liminal::protocol::WorkerRegistration;
@@ -581,6 +584,24 @@ impl ConnectionSupervisor {
         self.inner.runtime.readiness_fd(pid)
     }
 
+    /// The readiness token registered for `pid` (test observability). Lets the
+    /// fd-reuse successor oracle capture a stale token before reclamation and
+    /// replay its deregister afterwards, proving it is a keyed no-op.
+    #[cfg(test)]
+    pub(super) fn readiness_token(&self, pid: u64) -> Option<ReadinessToken> {
+        self.inner.runtime.readiness_token(pid)
+    }
+
+    /// Installs the pid-specific reclamation gate (oracle 26) and returns its
+    /// `(reached, release, done)` endpoints.
+    #[cfg(test)]
+    pub(super) fn install_reclaim_barrier(
+        &self,
+        pid: u64,
+    ) -> (Arc<Barrier>, Arc<Barrier>, Arc<Barrier>) {
+        self.inner.runtime.install_reclaim_barrier(pid)
+    }
+
     /// Installs a one-use observation for the process-owned stream at `fd` being
     /// dropped. External scheduler termination removes the process-table entry
     /// before an executing native handler is destroyed, so table absence is not
@@ -851,6 +872,41 @@ impl PushReplyAwaiter {
     }
 }
 
+/// The kernel-parked exit-event reactor (W4 leg 1 reclamation carve-out, §4.1).
+/// It is the single TOLD source that reclaims connection host records for
+/// processes that exit WITHOUT a final handler slice, replacing the retired
+/// per-accept `reap_crashed` scan for that class.
+///
+/// It blocks on beamr's sole exit-event subscription — never polling, never
+/// timed — and on each delivered [`ExitEvent::Exited`] it (1) drains the
+/// retained additive outcome so beamr's exactly-once outcome store stays bounded
+/// (we are the sole subscriber and therefore the sole drainer) and (2) reclaims
+/// the pid through [`ConnectionRuntime::reclaim_terminated`], which funnels into
+/// `remove()`. On the bounded queue's [`ExitEvent::Lagged`] overflow marker it
+/// runs exactly one reconciliation pass over the tracked records (beamr's
+/// documented recovery), driven by that one TELL — not a timer. It returns when
+/// the subscription disconnects, i.e. when the scheduler and its publisher drop,
+/// so scheduler teardown reaps it with no stop flag to sample.
+fn run_reclaim_reactor(
+    subscription: &ExitEventSubscription,
+    scheduler: &Weak<Scheduler>,
+    runtime: &Arc<ConnectionRuntime>,
+) {
+    loop {
+        match subscription.recv() {
+            Ok(ExitEvent::Exited { pid, reason }) => {
+                runtime.deliver_reclamation(scheduler, pid, reason);
+            }
+            Ok(ExitEvent::Lagged) => {
+                if let Some(scheduler) = scheduler.upgrade() {
+                    runtime.reap_crashed(&scheduler);
+                }
+            }
+            Err(_) => return,
+        }
+    }
+}
+
 pub(super) struct SupervisorInner {
     scheduler: Arc<Scheduler>,
     runtime: Arc<ConnectionRuntime>,
@@ -911,21 +967,50 @@ impl SupervisorInner {
         // notifier wakes (R3/R1(vi)) can be fired from another actor's slice
         // without a strong scheduler↔process↔runtime cycle that would leak the
         // whole connection scheduler.
+        let runtime = Arc::new(ConnectionRuntime::new(
+            ConnectionRuntimeInstallation {
+                services: installed_services,
+                incarnations: incarnations.clone(),
+                fatal_shutdown,
+            },
+            control_atom,
+            ready_atom,
+            Arc::downgrade(&scheduler),
+            notifier,
+            auth_token,
+            limits,
+        ));
+        // W4 leg 1 reclamation carve-out (§4.1): the kernel-parked exit-event
+        // reactor is the TOLD source that reclaims a connection host record whose
+        // process exited WITHOUT a final handler slice (external/panic
+        // termination). It blocks on beamr's single exit-event subscription —
+        // never a poll — and routes every reclamation through the same `remove()`
+        // funnel as an ordinary exit. Detached on purpose: it exits when the
+        // scheduler (and so its event publisher) drops, so there is no stop flag
+        // to sample (LAW-1).
+        match scheduler.subscribe_exit_events() {
+            Some(subscription) => {
+                let reactor_scheduler = Arc::downgrade(&scheduler);
+                let reactor_runtime = Arc::clone(&runtime);
+                thread::Builder::new()
+                    .name("liminal-connection-reclaim".to_owned())
+                    .spawn(move || {
+                        run_reclaim_reactor(&subscription, &reactor_scheduler, &reactor_runtime);
+                    })
+                    .map_err(|error| ServerError::ListenerAccept {
+                        message: format!("failed to start connection reclamation reactor: {error}"),
+                    })?;
+            }
+            None => {
+                tracing::error!(
+                    "connection scheduler exit-event subscription unavailable; \
+                     external-termination reclamation is degraded to the drain-time scan"
+                );
+            }
+        }
         Ok(Self {
-            runtime: Arc::new(ConnectionRuntime::new(
-                ConnectionRuntimeInstallation {
-                    services: installed_services,
-                    incarnations: incarnations.clone(),
-                    fatal_shutdown,
-                },
-                control_atom,
-                ready_atom,
-                Arc::downgrade(&scheduler),
-                notifier,
-                auth_token,
-                limits,
-            )),
             scheduler,
+            runtime,
             incarnations,
         })
     }
@@ -1194,6 +1279,22 @@ struct PreWaitBarrier {
     release: Arc<Barrier>,
 }
 
+/// Pid-specific, one-use deterministic gate on the reclamation delivery path
+/// (oracle 26). The exit-event reactor stages it only for the targeted pid, so
+/// unrelated exits still reclaim immediately; for the target it rendezvouses
+/// `reached` (proving the pid is dead but its record still tracked — the S8
+/// reclamation window), then `release` (the harness lets the reclaim proceed),
+/// then `done` (the `remove()` funnel completed). It changes no production
+/// semantics — the whole type and its call sites are `#[cfg(test)]`.
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct ReclaimBarrier {
+    pid: u64,
+    reached: Arc<Barrier>,
+    release: Arc<Barrier>,
+    done: Arc<Barrier>,
+}
+
 #[derive(Debug)]
 struct ConnectionServiceInstallation {
     services: Arc<dyn ConnectionServices>,
@@ -1267,6 +1368,10 @@ pub(super) struct ConnectionRuntime {
     /// Deterministic test gate in `enqueue_control`'s insert->wake window (S8).
     #[cfg(test)]
     pre_wake_barrier: Mutex<Option<PreWaitBarrier>>,
+    /// Pid-specific one-use gate held on the reclamation delivery path so a test
+    /// can pin the dead-but-tracked S8 window deterministically (oracle 26).
+    #[cfg(test)]
+    reclaim_barrier: Mutex<Option<ReclaimBarrier>>,
     /// Barrier-staged slices where the final probe found newly arrived work.
     #[cfg(test)]
     pre_wait_probe_hits: AtomicU64,
@@ -1350,6 +1455,8 @@ impl ConnectionRuntime {
             pre_wait_barrier: Mutex::new(None),
             #[cfg(test)]
             pre_wake_barrier: Mutex::new(None),
+            #[cfg(test)]
+            reclaim_barrier: Mutex::new(None),
             #[cfg(test)]
             pre_wait_probe_hits: AtomicU64::new(0),
             #[cfg(test)]
@@ -1589,6 +1696,41 @@ impl ConnectionRuntime {
             });
         }
         (armed, release)
+    }
+
+    /// Installs the pid-specific reclamation gate (oracle 26) and returns its
+    /// `(reached, release, done)` endpoints. The harness rendezvouses `reached`
+    /// to pin the dead-but-tracked window, `release` to let the reclaim proceed,
+    /// and `done` to observe the `remove()` funnel completing.
+    #[cfg(test)]
+    pub(super) fn install_reclaim_barrier(
+        &self,
+        pid: u64,
+    ) -> (Arc<Barrier>, Arc<Barrier>, Arc<Barrier>) {
+        let reached = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let done = Arc::new(Barrier::new(2));
+        if let Ok(mut slot) = self.reclaim_barrier.lock() {
+            *slot = Some(ReclaimBarrier {
+                pid,
+                reached: Arc::clone(&reached),
+                release: Arc::clone(&release),
+                done: Arc::clone(&done),
+            });
+        }
+        (reached, release, done)
+    }
+
+    /// Takes the installed reclamation gate iff it targets `pid` (one-use). Any
+    /// other pid's delivery is ungated, so unrelated exits reclaim immediately.
+    #[cfg(test)]
+    fn stage_reclaim_barrier(&self, pid: u64) -> Option<ReclaimBarrier> {
+        let mut slot = self.reclaim_barrier.lock().ok()?;
+        if slot.as_ref().is_some_and(|barrier| barrier.pid == pid) {
+            slot.take()
+        } else {
+            None
+        }
     }
 
     /// Runs a one-use deterministic test gate after arm. Returns whether the gate
@@ -2168,9 +2310,10 @@ impl ConnectionRuntime {
     /// slice may run on another worker thread before this insert lands. If that
     /// first slice exits immediately (e.g. a missing-stream crash) its
     /// `mark_crashed`/`finish` removes nothing and this insert then leaves a
-    /// record for an already-dead pid. That orphan is self-healing:
-    /// `reap_crashed`, driven continuously by the listener loop, removes any
-    /// record whose pid is absent from the scheduler process table.
+    /// record for an already-dead pid. W4 leg 1 retires the per-accept
+    /// `reap_crashed` scan that used to self-heal that orphan continuously;
+    /// instead [`Self::reconcile_register_orphan`] closes the race with a SINGLE
+    /// point check on the registration event itself — never a loop.
     fn register_with_fd(
         &self,
         pid: u64,
@@ -2178,7 +2321,87 @@ impl ConnectionRuntime {
         connection_incarnation: Option<ConnectionIncarnation>,
         fd_guard: TcpStream,
     ) -> Result<(), ServerError> {
-        self.register_record(pid, peer_addr, connection_incarnation, Some(fd_guard))
+        self.register_record(pid, peer_addr, connection_incarnation, Some(fd_guard))?;
+        self.reconcile_register_orphan(pid);
+        Ok(())
+    }
+
+    /// Closes the register-orphan race (see [`Self::register_with_fd`]) with one
+    /// point check driven by the registration event — not a periodic scan. If
+    /// the just-registered pid is already absent from the scheduler process
+    /// table, its first slice has run and exited, so the record this
+    /// registration inserted is an orphan the retiring reap scan used to sweep;
+    /// reclaim it immediately through the ordinary `remove()` funnel. A pid still
+    /// present is live and needs nothing here: a later external termination rides
+    /// the exit-event reactor and an ordinary exit its own final slice.
+    fn reconcile_register_orphan(&self, pid: u64) {
+        let Some(scheduler) = self.scheduler.upgrade() else {
+            return;
+        };
+        // The process-table lookup returns a sharded guard; bind only the
+        // presence bool so the guard is released before `reclaim_terminated`
+        // takes the connection registry lock (no cross-lock hold).
+        let already_exited = scheduler.process_table().get(pid).is_none();
+        if !already_exited {
+            return;
+        }
+        let reason = scheduler
+            .peek_exit_reason(pid)
+            .unwrap_or(ExitReason::Normal);
+        self.reclaim_terminated(pid, reason);
+    }
+
+    /// TOLD reclamation of a connection whose process exited WITHOUT running a
+    /// final handler slice — external/panic termination, where
+    /// [`ConnectionProcess::Drop`] runs but no `mark_crashed`/`finish` does, and
+    /// the register-orphan race above. Delivered the instant beamr publishes the
+    /// process's [`ExitEvent`] (via [`run_reclaim_reactor`]) or at the
+    /// registration point check, and routed through the SAME [`Self::remove`]
+    /// funnel as every other teardown — no third funnel, no periodic scan.
+    /// Idempotent: a record already removed in-slice, by the orphan reconcile, by
+    /// a duplicate delivery, or by the leg-3 drain reap is a no-op here (remove
+    /// returns `None`), so the §5 admission gauge is released exactly once.
+    fn reclaim_terminated(&self, pid: u64, reason: ExitReason) {
+        let Some(record) = self.remove(pid) else {
+            return;
+        };
+        self.fire_unregistered(pid, &record);
+        tracing::warn!(
+            connection_pid = pid,
+            peer_addr = ?record.peer_addr,
+            reason = ?reason,
+            "connection process exited without a final slice; host record reclaimed by delivery"
+        );
+    }
+
+    /// One exit-event delivery: drain beamr's retained outcome (sole drainer,
+    /// bounding its store) then reclaim through [`Self::reclaim_terminated`]. The
+    /// only non-production element is the `#[cfg(test)]` reclamation gate, which
+    /// is staged for at most one targeted pid and compiled out entirely in
+    /// production — the delivery semantics are identical with or without it.
+    fn deliver_reclamation(&self, scheduler: &Weak<Scheduler>, pid: u64, reason: ExitReason) {
+        if let Some(scheduler) = scheduler.upgrade() {
+            // The reason is already in-hand from the event; the drained outcome
+            // is discarded, its purpose being only to bound beamr's store.
+            drop(scheduler.take_exit_outcome(pid));
+        }
+        #[cfg(test)]
+        let staged = self.stage_reclaim_barrier(pid);
+        #[cfg(test)]
+        if let Some(barrier) = staged.as_ref() {
+            // Rendezvous: the pid is now dead but its record is still tracked —
+            // the S8 reclamation window (oracle 26). Then wait for the harness to
+            // release the reclaim.
+            barrier.reached.wait();
+            barrier.release.wait();
+        }
+        self.reclaim_terminated(pid, reason);
+        #[cfg(test)]
+        if let Some(barrier) = staged.as_ref() {
+            // Signal the funnel completed so the harness can observe the record
+            // gone without sampling.
+            barrier.done.wait();
+        }
     }
 
     #[cfg(test)]
@@ -2313,18 +2536,21 @@ impl ConnectionRuntime {
                 }
                 let peer_addr = removed.and_then(|record| record.peer_addr);
                 // This process exited without ever reaching `mark_crashed`/`finish`
-                // (e.g. the beamr scheduler terminated it externally). beamr records
-                // the real `ExitReason` in its private `exit_tombstones` map, but its
-                // public `Scheduler` API exposes no non-blocking accessor for it
-                // (only `run_until_exit`, which blocks). So we cannot recover the true
-                // reason here; log a truthful, specific message rather than the
-                // misleading literal "unknown". If beamr later grows a public,
-                // non-blocking exit-reason query for a dead pid, read it here instead.
+                // (e.g. the beamr scheduler terminated it externally). W4 leg 1
+                // retired this scan from the per-accept listener loop: the primary
+                // reclaimer of these exits is now the TOLD exit-event reactor
+                // ([`run_reclaim_reactor`]). This scan survives only as the leg-3
+                // drain reconciliation and the exit-event overflow (`Lagged`)
+                // recovery, both of which drive it a bounded number of times, never
+                // periodically. beamr 0.15.4 exposes a public, non-blocking
+                // `peek_exit_reason` (and `take_exit_outcome`), so the real reason
+                // IS recoverable here rather than logged as an opaque literal.
+                let reason = scheduler.peek_exit_reason(pid);
                 tracing::warn!(
                     connection_pid = pid,
                     ?peer_addr,
-                    reason = "terminated externally (no exit reason recorded by supervisor)",
-                    "connection process crashed"
+                    ?reason,
+                    "connection process exited without a final slice; reclaimed by reconciliation"
                 );
                 reaped += 1;
             }
@@ -2355,6 +2581,15 @@ impl ConnectionRuntime {
             .ok()?
             .get(&pid)
             .and_then(|record| record.readiness.map(|registration| registration.fd))
+    }
+
+    #[cfg(test)]
+    fn readiness_token(&self, pid: u64) -> Option<ReadinessToken> {
+        self.records
+            .lock()
+            .ok()?
+            .get(&pid)
+            .and_then(|record| record.readiness.map(|registration| registration.token))
     }
 
     fn active_connections(&self) -> Vec<ActiveConnection> {
