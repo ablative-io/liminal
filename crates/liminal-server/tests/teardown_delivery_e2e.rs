@@ -26,19 +26,21 @@ use std::error::Error;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use liminal_sdk::remote::{PushClient, SubscriptionStream};
 use liminal_server::config::types::WebSocketConfig;
 use liminal_server::config::{ChannelDef, LimitsConfig, ServerConfig, ServicesConfig};
 use liminal_server::server::connection::{LiminalConnectionServices, WebSocketListener};
 use liminal_server::server::shutdown::run_shutdown_sequence;
 use liminal_server::server::{ConnectionSupervisor, ServerListener};
-use liminal_sdk::remote::{PushClient, SubscriptionStream};
 
 const CHANNEL: &str = "app.events";
 /// Bound on connection-count setup waits and on each delivery read.
 const DEADLINE: Duration = Duration::from_secs(5);
-/// The drain budget handed to the shutdown sequence. Generous enough that a
-/// correct flush barrier always completes inside it on loopback.
-const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
+/// The drain budget handed to the shutdown sequence. Generous enough that the
+/// flush barrier always quiesces inside it on loopback (quiescence is sub-ms);
+/// it also bounds how long the drain phase waits for the still-connected
+/// publisher before force-closing it, so it is kept modest to keep the pin brisk.
+const DRAIN_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Storeless embedding of the server: both listeners over one shared supervisor,
 /// a single `durable = false` channel, no persistence, no `[participant]` config
@@ -78,11 +80,8 @@ impl RunningServer {
             websocket: Some(ws_config.clone()),
         };
         let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
-        let supervisor = ConnectionSupervisor::with_services_auth_and_limits(
-            services,
-            None,
-            config.limits.clone(),
-        )?;
+        let supervisor =
+            ConnectionSupervisor::with_services_auth_and_limits(services, None, config.limits)?;
         let tcp = ServerListener::bind(&config, supervisor)?;
         let supervisor = tcp.supervisor();
         let ws = WebSocketListener::bind(&ws_config, supervisor.clone())?;

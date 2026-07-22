@@ -251,6 +251,15 @@ impl ConnectionSupervisor {
             .wait_for_active_connections_drained(deadline)
     }
 
+    /// FIX A-ii shutdown flush barrier: parks until every active connection has
+    /// fanned out its accepted publishes to its socket, or `deadline` elapses.
+    /// Called in `run_shutdown_sequence` BEFORE the shutdown Disconnect broadcast
+    /// so an accepted-but-unfanned-out publish can no longer be overtaken by it.
+    #[must_use]
+    pub(crate) fn wait_for_delivery_quiesced(&self, deadline: Instant) -> bool {
+        self.inner.runtime.wait_for_delivery_quiesced(deadline)
+    }
+
     /// Returns the first latched post-Open participant fatal, if any.
     ///
     /// The production runtime reads this after its existing shutdown handle wakes,
@@ -1415,6 +1424,19 @@ pub(super) struct ConnectionRuntime {
     /// exit delivered between the waiter's arm-before-observe snapshot and its
     /// park cannot be lost (oracle 18).
     drain_removed: Condvar,
+    /// FIX A-ii shutdown flush barrier: a delivery-quiescence generation of the
+    /// exact TOLD `drain_generation` shape. Bumped whenever a connection parks
+    /// with every accepted publish already fanned out to its socket — but only
+    /// while [`Self::settle_armed`] is set (the flush barrier is waiting) — so
+    /// normal operation pays nothing. Guards [`Self::settle_changed`]'s mutex.
+    settle_generation: Mutex<u64>,
+    /// Woken when a connection reaches delivery quiescence during shutdown; the
+    /// flush barrier parks here, paired with [`Self::settle_generation`] for the
+    /// same arm-before-observe safety as the drain waiter.
+    settle_changed: Condvar,
+    /// Set only while the flush barrier is actively waiting, so a park bumps the
+    /// settle generation and wakes the barrier ONLY when someone is listening.
+    settle_armed: AtomicBool,
     /// Test-only count of drain waiter wakes that observed a real removal
     /// (generation advanced across the park). A quiet drain records zero — it
     /// wakes only for the single deadline (oracle 12).
@@ -1530,6 +1552,9 @@ impl ConnectionRuntime {
             scheduler,
             drain_generation: Mutex::new(0),
             drain_removed: Condvar::new(),
+            settle_generation: Mutex::new(0),
+            settle_changed: Condvar::new(),
+            settle_armed: AtomicBool::new(false),
             #[cfg(test)]
             drain_exit_wakes: AtomicU64::new(0),
             #[cfg(test)]
@@ -1667,6 +1692,121 @@ impl ConnectionRuntime {
                     .map(|record| record.ready_pending.load(Ordering::Acquire))
             })
             .unwrap_or(false)
+    }
+
+    /// FIX A-ii: marks `pid` as executing a slice — not parked, so not yet
+    /// delivery-quiescent. Reuses the registry lock the slice already takes for
+    /// `is_registered`; it never touches the barrier condvar.
+    pub(super) fn mark_running(&self, pid: u64) {
+        if let Ok(records) = self.records.lock()
+            && let Some(record) = records.get(&pid)
+        {
+            record.parked.store(false, Ordering::Release);
+        }
+    }
+
+    /// FIX A-ii: marks `pid` as parked with every accepted publish already fanned
+    /// out to its socket, and — only while the shutdown flush barrier is armed —
+    /// bumps the settle generation and wakes it. The bump/notify is skipped
+    /// entirely in normal operation, so a park off the shutdown path is just one
+    /// flag store.
+    pub(super) fn mark_parked(&self, pid: u64) {
+        if let Ok(records) = self.records.lock()
+            && let Some(record) = records.get(&pid)
+        {
+            record.parked.store(true, Ordering::Release);
+        }
+        if self.settle_armed.load(Ordering::Acquire) {
+            self.signal_settle_changed();
+        }
+    }
+
+    /// Bumps the delivery-quiescence generation under its mutex, then wakes the
+    /// flush barrier — the same lock-then-notify discipline as
+    /// [`Self::signal_connection_removed`], so a park published before the notify
+    /// can never be missed by a waiter holding the mutex across its re-check.
+    fn signal_settle_changed(&self) {
+        {
+            let mut generation = recover_lock(&self.settle_generation);
+            *generation = generation.wrapping_add(1);
+        }
+        self.settle_changed.notify_all();
+    }
+
+    /// Reads the current delivery-quiescence generation under its mutex.
+    fn settle_generation_snapshot(&self) -> u64 {
+        *recover_lock(&self.settle_generation)
+    }
+
+    /// True when every tracked connection is parked with no pending READY edge —
+    /// i.e. every accepted publish has been pumped to its subscriber's outbound
+    /// and no fan-out wake is still in flight. An empty registry is trivially
+    /// quiescent.
+    fn all_connections_delivery_quiesced(&self) -> bool {
+        let Ok(records) = self.records.lock() else {
+            return false;
+        };
+        records.values().all(|record| {
+            record.parked.load(Ordering::Acquire) && !record.ready_pending.load(Ordering::Acquire)
+        })
+    }
+
+    /// FIX A-ii: wakes every tracked connection once so it drains its socket and
+    /// pumps its subscriptions. This is what makes the flush barrier robust to the
+    /// readiness gap: a publisher whose fire-and-forget publish bytes have arrived
+    /// but whose readiness wake has not yet rescheduled it still looks "parked",
+    /// so without this it could be sampled as quiescent before it admits and fans
+    /// out those publishes. Firing sets each connection's `ready_pending` edge, so
+    /// the quiescence check below cannot pass until every woken connection has run
+    /// its slice (reading and admitting any buffered publish, whose admission then
+    /// fires its subscribers in turn) and re-parked.
+    fn wake_all_connections_for_flush(&self) {
+        let pids: Vec<u64> = self
+            .records
+            .lock()
+            .map(|records| records.keys().copied().collect())
+            .unwrap_or_default();
+        for pid in pids {
+            if let Some(waker) = self.ready_waker(pid) {
+                waker.fire();
+            }
+        }
+    }
+
+    /// FIX A-ii: parks until every tracked connection has fanned out its accepted
+    /// publishes (delivery quiescence) or `deadline` elapses, returning `true` on
+    /// quiescence and `false` when the single admitted deadline won. The TOLD
+    /// shape mirrors [`Self::wait_for_active_connections_drained`]: arm the
+    /// barrier, then snapshot-before-observe so a park delivered between the
+    /// observation and the wait bumps a generation the wait detects. It samples
+    /// nothing on a timer — it wakes only on a delivered park (generation bump) or
+    /// the one deadline.
+    pub(super) fn wait_for_delivery_quiesced(&self, deadline: Instant) -> bool {
+        self.settle_armed.store(true, Ordering::Release);
+        // Force every connection to run once so a publisher whose buffered publish
+        // bytes have not yet triggered a readiness wake still drains and admits
+        // them (and fires its subscribers) before the quiescence check can pass.
+        self.wake_all_connections_for_flush();
+        let quiesced = loop {
+            let snapshot = self.settle_generation_snapshot();
+            if self.all_connections_delivery_quiesced() {
+                break true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                break false;
+            };
+            let outcome = self
+                .settle_changed
+                .wait_timeout_while(
+                    recover_lock(&self.settle_generation),
+                    remaining,
+                    |current| *current == snapshot,
+                )
+                .unwrap_or_else(PoisonError::into_inner);
+            drop(outcome);
+        };
+        self.settle_armed.store(false, Ordering::Release);
+        quiesced
     }
 
     /// R7: records one serviced slice for `pid`. Bumped at the head of every
@@ -2567,6 +2707,7 @@ impl ConnectionRuntime {
                 registration: None,
                 readiness: None,
                 ready_pending: Arc::new(AtomicBool::new(false)),
+                parked: AtomicBool::new(false),
                 fd_guard,
             },
         );
@@ -2997,6 +3138,12 @@ struct ConnectionRecord {
     /// Shared edge set before READY enters beamr's process-table pending queue;
     /// the executing process reads it at its final probe.
     ready_pending: Arc<AtomicBool>,
+    /// FIX A-ii: `true` while this connection is parked (its last slice returned
+    /// `Wait`). A parked connection with no `ready_pending` edge has fanned out
+    /// every accepted publish to its socket, so the shutdown flush barrier reads
+    /// this with `ready_pending` to know delivery has quiesced before it lets the
+    /// shutdown Disconnect be broadcast.
+    parked: AtomicBool,
     /// Keeps the fd alive until deregistration has been acknowledged, preventing
     /// stale registration delivery to a subsequently reused descriptor number.
     fd_guard: Option<TcpStream>,
