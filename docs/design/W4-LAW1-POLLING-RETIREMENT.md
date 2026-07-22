@@ -1,6 +1,6 @@
 # W4 — LAW-1 polling retirement (server-internal readiness/notification wave)
 
-**Revision r4 — design-first brief of record, 2026-07-22 (ruled amendment: reclamation carve-out + mechanism + EMFILE policy, tear-seat ruling)**
+**Revision r5 — design-first brief of record, 2026-07-22 (ruled rider: beamr-contingency closure + two landed-test dispositions, tear-seat ruling)**
 
 This brief rules the first buildable wave of the LAW-1 polling-retirement
 program named as lane **W4** in the wiring ledger. It is a docs-only lane: it
@@ -280,13 +280,69 @@ classes**, routed into the EXISTING `remove()` funnel — no third funnel, no
 periodic drive — with its own oracle pair (oracles 22 and 23) and, in the same
 change, the three citing production doc-comments trued
 (`supervisor.rs:2167-2173`, `process.rs:870-876`, `supervisor.rs:2315-2328`).
-**Staged beamr contingency (ruled — not preemptive):** the builder implements
-ordinary-exit delivery plus the two-class tell as far as beamr's existing public
-surface allows; if and only if it hits the missing non-blocking exit accessor
-(`supervisor.rs:2315-2328`'s own "if beamr later grows…" note), it STOPs with
-the exact required API shape, the two gap classes go **ledgered-elsewhere** in
-this brief per the F6/F7 pattern, and the tear seat carries the scoped ask to
-the beamr seat. The contingency must not block ordinary-exit delivery landing.
+**Staged beamr contingency (r5: CLOSED — VOID, receipts at registry bytes).**
+The r4 contingency anticipated a missing non-blocking exit accessor
+(`supervisor.rs:2315-2328`'s own "if beamr later grows…" note). The pinned
+beamr 0.15.4 (Cargo.lock) ALREADY carries the full public exit surface,
+verified at the registry source `beamr-0.15.4/src/scheduler/execution.rs` at
+the coordinator seat: `subscribe_exit_events()` (`:213` — one subscription per
+scheduler lifetime, kernel-parked `recv()`, bounded 1024-deep queue with a
+typed `ExitEvent::Lagged` recovery marker, events delivered only after the
+outcome is observable), `take_exit_outcome(pid)` (`:194` — non-blocking,
+exactly-once, retained until consumed), `peek_exit_reason(pid)` (`:177` —
+non-consuming point query). No liminal code holds the subscription today, so
+the sole subscription is available to the reclamation delivery. The
+STOP-with-API-shape clause, the ledgered-elsewhere fallback, and the scoped
+beamr ask are all VOID; no upstream ask exists. Delivery realization within
+the ruled carve-out: one detached kernel-parked delivery thread holds the
+subscription and blocks on `recv()`; on `Exited` it drains `take_exit_outcome`
+(the delivery is the sole drainer, bounding beamr's retained-outcome memory)
+and routes into the EXISTING `remove()` funnel (idempotent); on `Lagged` it
+runs exactly one TOLD-triggered reconciliation pass; it exits on publisher
+disconnect — no stop flag is sampled (LAW-1). The register-orphan class closes
+with a single point check on the registration event, not a loop.
+
+**r5 rider — landed-test dispositions (RULED, tear seat, DM 2026-07-22
+~09:36Z; both dispositions land in the SAME boundary as the mechanism change —
+code and tests move together, one lineage).** The builder's second conflict
+STOP (zero edits) proved at bytes that two landed tests encode the
+pre-carve-out persist-until-reap leak as a load-bearing invariant and
+deterministically fail under the ruled prompt reclamation (oracles 22/23):
+both assert only after `!is_live()`/stream-drop, so any exit-keyed delivery
+fires before their assertions — no timing reconciles them.
+
+1. `external_kill_then_fd_reuse_survives_old_token_deregister`
+   (`supervisor_tests.rs:314`; asserts `readiness_registration_count() == 2`
+   and `reap_crashed_connections() == 1` AFTER an external kill): disposition
+   **RE-EXPRESS**; its never-modify status is formally LIFTED at the tear seat
+   for exactly this change. The pin protected the PROPERTY — a stale token
+   must never harm the fd's new occupant — not the mechanism that used to
+   realize it. The successor (oracle 25) pins the same property under the new
+   mechanism: after a no-final-slice exit and TOLD reclamation, the stale
+   registration is gone before reuse is observable, AND a stale token's
+   deregister arriving after reclamation is a typed no-op proven harmless
+   against a new registration on the reused fd — the second half is the
+   load-bearing wall ("holds by construction" claims get walls too, same as
+   the fence-chain's idempotent-on-absent rule). The successor carries a
+   lineage comment naming the retired test and citing this brief, so the
+   deletion cannot read as coverage loss.
+
+2. `failed_wake_rollback_err_publishes_nothing`
+   (`supervisor_tests.rs:1540`; asserts `is_tracked(pid)` after the kill,
+   reaching the S8 Err branch THROUGH the leak): disposition **REDESIGN THE
+   SETUP**, not re-scope. Dead-but-tracked is not gone from the new design; it
+   narrows from a permanent leak to the window between actual death and the
+   reclamation delivery reaching `remove()`. The S8 Err branch is that
+   window's branch and keeps coverage. The redesigned setup (oracle 26)
+   constructs the window deterministically: hold the reclamation delivery at a
+   harness-controlled scheduling point, kill, drive the wake into S8 Err,
+   assert publishes-nothing, then release the delivery and assert the funnel
+   completes. No sleeps; no test hook that changes production semantics (a
+   harness-owned gate on the delivery path is fine; the cleanest construction
+   is the builder's pick, disclosed). Escape hatch: only a bytes-proof that no
+   deterministic construction of the window exists reopens re-scoping — and at
+   that point the question becomes whether S8 Err is reachable at all, a
+   different and bigger finding for the tear seat.
 
 **Mechanism (RULED, tear seat 2026-07-22 — formerly OPEN).** Sockets
 `«MAIN-LISTENER-READINESS-SHUTDOWN-EXIT»` / `«WS-LISTENER-READINESS-SHUTDOWN-EXIT»`
@@ -400,12 +456,14 @@ the production accept/drain path satisfies a row.
 | 22 | `no_final_slice_exit_record_reclaimed_by_delivery_not_scan` | 1 / correctness | An externally-terminated registered process (killed via the scheduler, no final slice) and a register-orphan record (insert lands after the first slice already exited) are each reclaimed through the existing `remove()` funnel by the ruled TOLD reclamation delivery, with no reap scan and no periodic drive. |
 | 23 | `no_final_slice_exit_cannot_leak_admission_slot_across_idle` | 1 / crash-cut | After a no-final-slice exit on an otherwise idle server (zero accepts, zero slices), the `max_connections` admission slot is released and a subsequent connection at the limit is admitted — proving the reclamation cannot depend on future accept or slice activity. |
 | 24 | `fd_exhaustion_sheds_loudly_and_recovers_without_spin` | 1 / correctness | Under EMFILE/ENFILE, the listener sheds via the reserve descriptor with a typed log + counter, never sleeps or retries in a loop, keeps zero idle wakes while pressure persists, and admits normally once pressure lifts. |
+| 25 | `fd_reuse_stale_token_deregister_after_reclamation_is_harmless_no_op` | 1 / correctness (successor pin) | Successor of the retired `external_kill_then_fd_reuse_survives_old_token_deregister` pin (§4.1 r5 rider; never-modify lifted at the tear seat): after a no-final-slice exit the stale registration is deregistered before fd reuse is observable, AND a stale token's deregister arriving after reclamation is a typed no-op proven harmless against a new registration on the reused fd. Carries the lineage comment naming the retired test. |
+| 26 | `s8_failed_wake_in_reclamation_window_publishes_nothing_then_funnel_completes` | 1 / crash-cut | Redesigned setup for the S8 Err branch (§4.1 r5 rider): with the reclamation delivery held at a harness-owned gate, an externally-killed pid is deterministically dead-but-tracked; a push drives the S8 Err branch and publishes nothing; releasing the gate completes the `remove()` funnel. No sleeps; no production-semantics test hook. |
 
 ## 6. Scope walls
 
 | inside W4-NOW | expressly outside W4-NOW |
 |---|---|
-| Retiring the five server-owned sample/sleep loops F1–F5; TOLD readiness/completion + explicit shutdown/deadline wakes; reuse of the W1b fate exit delivery and the `ShutdownHandle` `Condvar`; the 24 oracles above. | Inventing any new reactor, second exit path, or parallel wake vocabulary — with TWO bytes-forced exceptions (both ruled at the tear seat): (1) the handshake-stage worker completion delivery (§4.1 handshake carve-out, oracle 21), which W1b cannot cover; (2) the no-final-slice reclamation delivery (§4.1 reclamation carve-out, oracles 22-23), routed into the EXISTING `remove()` funnel — a tell for records the retiring reap scan was the sole reclaimer of, not a third funnel. Everything else reuses (b)/(c); the accept mechanism is RULED blocking-accept + interrupt (r4). |
+| Retiring the five server-owned sample/sleep loops F1–F5; TOLD readiness/completion + explicit shutdown/deadline wakes; reuse of the W1b fate exit delivery and the `ShutdownHandle` `Condvar`; the 26 oracles above. | Inventing any new reactor, second exit path, or parallel wake vocabulary — with TWO bytes-forced exceptions (both ruled at the tear seat): (1) the handshake-stage worker completion delivery (§4.1 handshake carve-out, oracle 21), which W1b cannot cover; (2) the no-final-slice reclamation delivery (§4.1 reclamation carve-out, oracles 22-23), routed into the EXISTING `remove()` funnel — a tell for records the retiring reap scan was the sole reclaimer of, not a third funnel. Everything else reuses (b)/(c); the accept mechanism is RULED blocking-accept + interrupt (r4). |
 | The listener/health accept wait and the drain/settle completion wait. | Health/readiness/metrics route semantics, auth, or the console/OpsState design that rides the health listener. |
 | Composition of drain completion with W1b connection-fate exits. | Reopening W1b fate classification, schema, source order, finalizer ownership, or `ParticipantServiceFatal`. |
 | Server-side loops only. | Cluster membership (F6), channel command-reply (F7), and the SDK readers (F8/F9/C1) — each its own ledgered lane (§3). W4-NOW neither claims nor blocks their replacements. |
@@ -480,3 +538,4 @@ the brief for revision; it does not license an implementation guess.
 | r2 | 2026-07-22 | same liminal/ledger pin | Folds lens r1 (**3 MAJOR + 5 minor**) plus the **coordinator (Fable-seat) finding**, each re-verified at `829b3c3` bytes. **MAJOR-1 — phantom production candidate:** the cluster resolver `NoopWaker` `block_on` is entirely `#[cfg(test)]` (`discovery.rs:180-182,189,195`); production `resolve` at `:66` returns a runtime-driven future. The candidate row is deleted and re-recorded as "examined and excluded — test-only" in §2.2; Q9 rewritten accordingly. **MAJOR-2 — dropped skeleton-ordered sites:** the two tokio-runtime `block_on` sites the skeleton §C row 3 ordered separately classified are added as census rows C5 (`membership.rs:320,328`, startup) and C6 (`sync.rs:277-290`, per-write), classified as real-waker runtime parks (distinct from the NoopWaker scan C4) and gated by new lens question Q11. **MAJOR-3 — C1 cited nonexistent bytes:** the "no armed read window" claim is rewritten to ABSENCE form — `run_reader` (`websocket/subscription.rs:399-419`) makes no `set_read_timeout` call; the primitive is defined at `std_socket.rs:155`/passed at `:158`, and the only `Some(window)` arming is `std_socket.rs:93`. **minor-a** listener doc attribution corrected to `:3-4` ("Mirrors") + `:25` ("matching"); **minor-b** the `notify_impact` gloss re-anchored — calls at `dispatch.rs:625,676` are unconditional, gating is `target_union`'s empty-set arm at `dispatch_impact.rs:97-104` (`:99`); **minor-c** `ConnectionFateWorkItem` routing re-cited to `handle_connection_fate` at `dispatch.rs:618-628` (struct def `:115`); **minor-d** the `examples/` class exclusion stated explicitly (`demo_feed_publisher/main.rs:90` demo pacing) plus the `#[cfg(test)]` sleeps; **minor-e** full path for `binding_fate_completion.rs`. **Coordinator finding (design amendment):** verified at bytes that `HandshakeSupervisor::reap_finished` (`websocket/supervisor.rs:112`) reaps handshake-stage workers that never register, which W1b's `ConnectionFateWorkItem` does not cover — §4.1 gains an explicit handshake-stage carve-out (own TOLD completion delivery, not the W1b funnel), oracle 6 is scoped to **registered** connections, new oracle 21 `handshake_worker_completion_delivered_not_reap_scanned` is added (census now 21), and Q4 amended. Census now F1–F9 + C1–C9; eleven lens questions. |
 | r3 | 2026-07-22 | same liminal/ledger pin | Lens r2 verdict **READY (zero MAJOR)**: all r1 discharges and the coordinator carve-out verified at bytes; renumbering orphan-free; 21-oracle census unique and consistent. Folds the two lens-r2 minors at coordinator hands: (1) the §2.2 discovery test-fn cites corrected to `resolver_learns_real_peer_names` `:222` / `as_resolver_coerces_to_shared_handle` `:236` (attrs `:221,235`); (2) the §6 wall's no-second-exit-path prohibition reconciled with the §4.1 handshake carve-out — the bytes-forced handshake-worker completion delivery (oracle 21, OPEN under `«WS-LISTENER-READINESS-SHUTDOWN-EXIT»`) is named as the one admitted distinct completion, removing the §4.1/§6 tension. Lens record: r1 3M+5m+coordinator finding → r2 READY + 2 minor → r3 folds them. Declared for tear at r3. |
 | r4 | 2026-07-22 | same liminal/ledger pin; ruling: tear seat (Waffles), DM 2026-07-22 ~08:44Z, four-part | Ruled amendment following the leg-1 builder's conflict STOP (zero edits; coordinator re-verified every claim at bytes; LAW-2 miss in r1-r3 owned at the author seat). (1) §4 gains the r4 correction: the W1b funnel (b) is participant-semantic only; host-record removal is the `remove()` funnel (in-slice `mark_crashed`/`finish` on ordinary exits), and two no-final-slice classes — external/panic termination (`process.rs:870-891`) and the register-orphan race (`supervisor.rs:2167-2173`) — reached it only via the retiring reap scan. (2) §4.1 gains the RECLAMATION CARVE-OUT, the second bytes-forced wall exception: a TOLD reclamation delivery for exactly those two classes into the EXISTING `remove()` funnel, with the staged beamr contingency (STOP-with-API-shape → ledgered-elsewhere per F6/F7 if the missing non-blocking exit accessor blocks; must not block ordinary-exit delivery). (3) Mechanism RULED: portable blocking-accept + explicit interrupt; reactor reuse ruled out (in-slice-only `ReadinessFacility`); Q3 resolved, Q10 void, idle-cost lens restated. (4) EMFILE/ENFILE RULED: shed-with-spare-fd, loud, bounded, no retry. Oracle 6 rescoped to ordinary routes; new oracles 22 `no_final_slice_exit_record_reclaimed_by_delivery_not_scan`, 23 `no_final_slice_exit_cannot_leak_admission_slot_across_idle`, 24 `fd_exhaustion_sheds_loudly_and_recovers_without_spin` — census now 24. §6 wall now names TWO ruled exceptions. Build obligation: true the three citing doc-comments in the same change. Leg-1a split (handshake carve-out) endorsed as executed. |
+| r5 | 2026-07-22 | same liminal/ledger pin; ruling: tear seat (Waffles), DM 2026-07-22 ~09:36Z, on the resumed-leg-1 builder's SECOND conflict STOP (zero edits; coordinator re-verified every claim at bytes: both test assertions, both oracle rows, and the beamr registry surface) | Ruled rider. (1) §4.1 staged beamr contingency CLOSED — VOID: pinned beamr 0.15.4 already carries the public exit surface (`scheduler/execution.rs` `subscribe_exit_events` `:213` / `take_exit_outcome` `:194` / `peek_exit_reason` `:177`, registry-bytes receipts at the coordinator seat); no upstream ask; delivery realization recorded (single kernel-parked subscription thread → existing `remove()` funnel, `Lagged` → one TOLD reconciliation, exits on disconnect). (2) `external_kill_then_fd_reuse_survives_old_token_deregister` (`supervisor_tests.rs:314`): RE-EXPRESS, never-modify status formally lifted at the tear seat for exactly this change; successor oracle 25 pins the property (stale-gone-before-reuse + post-reclamation stale deregister = typed harmless no-op) with a lineage comment. (3) `failed_wake_rollback_err_publishes_nothing` (`supervisor_tests.rs:1540`): REDESIGN THE SETUP — dead-but-tracked narrows to the death-to-delivery window; oracle 26 constructs it deterministically via a harness-owned gate (no sleeps, no production-semantics hook); re-scoping only on a bytes-proof that no deterministic construction exists. (4) Both dispositions land in the SAME boundary as the mechanism change — one lineage. Census now 26. |
