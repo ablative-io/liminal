@@ -7,7 +7,7 @@ use std::os::fd::RawFd;
 use std::sync::Barrier;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, TryRecvError, channel};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -2880,10 +2880,15 @@ impl ConnectionRuntime {
     /// Bumps the drain-completion generation and wakes the drain/settle waiter.
     /// Called from [`Self::remove`] on every route that actually drops a record.
     fn signal_connection_removed(&self) {
-        let mut generation = recover_lock(&self.drain_generation);
-        *generation = generation.wrapping_add(1);
-        // Wake under the held mutex so the waiter cannot miss the bump between its
-        // generation re-check and its park (Condvar contract).
+        // Bump the generation under the lock, release it, THEN notify. A waiter
+        // holds this lock continuously from its generation re-check through the
+        // atomic release inside `wait_timeout`, so it can never miss a bump
+        // published before the notify — the Condvar lost-wakeup contract holds
+        // without notifying under the guard.
+        {
+            let mut generation = recover_lock(&self.drain_generation);
+            *generation = generation.wrapping_add(1);
+        }
         self.drain_removed.notify_all();
     }
 
@@ -2926,26 +2931,27 @@ impl ConnectionRuntime {
 
     /// Parks on the removal `Condvar` for at most `timeout`, but only while no
     /// removal has bumped the generation since `snapshot` — the arm-before-observe
-    /// barrier. A generation already advanced means an exit landed between the
-    /// observation and here, so the caller re-loops without sleeping.
+    /// barrier. `wait_timeout_while` evaluates the predicate under the lock BEFORE
+    /// waiting, so a generation already advanced (an exit landed between the
+    /// observation and here) returns immediately without sleeping; spurious wakes
+    /// re-wait inside the call and never return early.
     fn park_until_removed_or(&self, snapshot: u64, timeout: Duration) {
-        let generation = recover_lock(&self.drain_generation);
-        if *generation != snapshot {
-            return;
-        }
         let outcome = self
             .drain_removed
-            .wait_timeout(generation, timeout)
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .wait_timeout_while(
+                recover_lock(&self.drain_generation),
+                timeout,
+                |current| *current == snapshot,
+            )
+            .unwrap_or_else(PoisonError::into_inner);
+        // A non-timed-out return means the predicate went false — a real removal
+        // bumped the generation and woke this park (as opposed to the deadline).
         #[cfg(test)]
-        {
-            let (generation, _timed_out) = outcome;
-            if *generation != snapshot {
-                self.drain_exit_wakes.fetch_add(1, Ordering::SeqCst);
-            }
+        if !outcome.1.timed_out() {
+            self.drain_exit_wakes.fetch_add(1, Ordering::SeqCst);
         }
-        #[cfg(not(test))]
-        let _ = outcome;
+        // Release the guard promptly; the caller re-loops unlocked.
+        drop(outcome);
     }
 }
 
