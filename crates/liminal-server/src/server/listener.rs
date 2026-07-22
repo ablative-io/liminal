@@ -174,8 +174,9 @@ pub fn bind_listener(
 
 /// Normalises a bound address to a loopback self-connect target: an unspecified
 /// bind (`0.0.0.0` / `::`) is reached at the matching loopback (`127.0.0.1` /
-/// `::1`) on the same port; a specific address is used as-is.
-fn loopback_interrupt_target(addr: SocketAddr) -> SocketAddr {
+/// `::1`) on the same port; a specific address is used as-is. Shared with the
+/// sibling WebSocket listener (F2), which uses the same interrupt shape.
+pub(crate) fn loopback_interrupt_target(addr: SocketAddr) -> SocketAddr {
     match addr {
         SocketAddr::V4(v4) if v4.ip().is_unspecified() => {
             SocketAddr::from((Ipv4Addr::LOCALHOST, v4.port()))
@@ -230,8 +231,9 @@ fn accept_loop(
 /// immediately shed loudly (typed log + counter), then the reserve is
 /// re-established. No sleep, no retry of the failing call, no listener death;
 /// the loop returns to the blocking wait, keeping zero idle wakes while pressure
-/// persists and admitting normally once it lifts.
-fn shed_on_fd_exhaustion(
+/// persists and admitting normally once it lifts. Shared with the sibling
+/// WebSocket listener (F2), which sheds the same way.
+pub(crate) fn shed_on_fd_exhaustion(
     listener: &TcpListener,
     reserve: &mut Option<TcpListener>,
     shed_count: &AtomicU64,
@@ -293,15 +295,18 @@ const fn enfile() -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::thread;
     use std::time::{Duration, Instant};
 
+    use liminal::protocol::{Frame, encode, encoded_len};
+
     use super::{ServerListener, emfile, is_transient_accept_error, shed_on_fd_exhaustion};
     use crate::ServerError;
-    use crate::config::types::{ChannelDef, ServerConfig};
-    use crate::server::connection::ConnectionSupervisor;
+    use crate::config::types::{ChannelDef, ServerConfig, WebSocketConfig};
+    use crate::server::connection::{ConnectionSupervisor, WebSocketListener};
 
     /// Oracle 1 (W4 leg 1) — on a quiet listener the blocking accept is issued
     /// exactly once (the parked call) and never again: zero repeated accepts,
@@ -425,6 +430,120 @@ mod tests {
         let (accepted, _peer) = listener.accept()?;
         drop(accepted);
         drop(client2);
+        Ok(())
+    }
+
+    /// Oracle 5 (W4 leg 1) — shutdown interrupts the blocking accept wait on BOTH
+    /// listeners, promptly (no backoff sleep) and with no lost accept: a
+    /// connection admitted before shutdown stays supervised.
+    #[test]
+    fn listener_shutdown_interrupts_accept_wait_without_backoff()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let tcp_address = reserve_loopback_port()?;
+        let tcp_config = sample_config(tcp_address)?;
+        let tcp_supervisor = ConnectionSupervisor::new()?;
+        let tcp_listener = ServerListener::bind(&tcp_config, tcp_supervisor.clone())?;
+
+        // A connection admitted before shutdown must survive stop (no lost accept).
+        let _client = TcpStream::connect(tcp_listener.local_addr())?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while tcp_supervisor.active_connection_count() < 1 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(tcp_supervisor.active_connection_count(), 1);
+
+        let ws_address = reserve_loopback_port()?;
+        let ws_config = WebSocketConfig {
+            listen_address: ws_address,
+            path: "/liminal".to_owned(),
+            allowed_origins: Vec::new(),
+            ping_interval_ms: None,
+        };
+        let ws_supervisor = ConnectionSupervisor::new()?;
+        let ws_listener = WebSocketListener::bind(&ws_config, ws_supervisor.clone())?;
+
+        // Race shutdown while both accept workers are parked: both interrupt
+        // promptly rather than draining a backoff.
+        let start = Instant::now();
+        tcp_listener.shutdown()?;
+        ws_listener.shutdown()?;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "shutdown must interrupt the accept wait promptly, not sleep-poll"
+        );
+        assert_eq!(
+            tcp_supervisor.active_connection_count(),
+            1,
+            "a connection admitted before shutdown is not lost"
+        );
+
+        tcp_supervisor.shutdown();
+        ws_supervisor.shutdown();
+        Ok(())
+    }
+
+    /// Oracle 7 (W4 leg 1, idle-honesty both-sides) — under an unrelated live
+    /// workload the connection's reactor slice counter GROWS while the listener's
+    /// accept-attempt counter stays FLAT, proving the test cannot pass by
+    /// disabling the reactor.
+    #[test]
+    fn listener_idle_grows_unrelated_reactor_slices_while_accept_counters_stay_flat()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let address = reserve_loopback_port()?;
+        let config = sample_config(address)?;
+        let supervisor = ConnectionSupervisor::new()?;
+        let listener = ServerListener::bind(&config, supervisor)?;
+        let local_addr = listener.local_addr();
+        let supervisor = listener.supervisor();
+
+        let mut client = TcpStream::connect(local_addr)?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pid = loop {
+            if let Some(pid) = supervisor.active_connection_pids().first().copied() {
+                break pid;
+            }
+            if Instant::now() >= deadline {
+                return Err("connection did not register".into());
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        let accepts_after_admit = listener.accept_attempts();
+        let slices_before = supervisor.slice_count(pid);
+
+        // Unrelated live workload on the EXISTING connection: each ping drives a slice.
+        for _ in 0..5 {
+            write_ping(&mut client)?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while supervisor.slice_count(pid) <= slices_before && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        assert!(
+            supervisor.slice_count(pid) > slices_before,
+            "unrelated reactor slices must grow under live traffic"
+        );
+        assert_eq!(
+            listener.accept_attempts(),
+            accepts_after_admit,
+            "the accept counter stays flat while an existing connection is busy"
+        );
+
+        drop(client);
+        supervisor.shutdown();
+        Ok(())
+    }
+
+    fn write_ping(stream: &mut TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+        let frame = Frame::Ping { flags: 0 };
+        let len = encoded_len(&frame).map_err(|error| format!("encoded_len: {error:?}"))?;
+        let mut bytes = vec![0_u8; len];
+        let written = encode(&frame, &mut bytes).map_err(|error| format!("encode: {error:?}"))?;
+        stream.write_all(
+            bytes
+                .get(..written)
+                .ok_or("encoded frame length was invalid")?,
+        )?;
         Ok(())
     }
 
