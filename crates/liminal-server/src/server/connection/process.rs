@@ -870,10 +870,13 @@ impl NativeHandler for ConnectionProcess {
 impl Drop for ConnectionProcess {
     fn drop(&mut self) {
         // Backstop for termination paths that never run another handler slice:
-        // external termination (a `reap_crashed` target killed via the scheduler)
-        // and scheduler shutdown drop the handler directly. On the explicit
-        // in-handler teardown paths the conversation map is already drained, so
-        // this is a no-op there.
+        // external termination (killed via the scheduler) and scheduler shutdown
+        // drop the handler directly. This drop does NOT reclaim the host record;
+        // W4 leg 1 delivers that reclamation TOLD, the instant beamr publishes
+        // the process's exit event, through the supervisor's exit-event reactor
+        // into the ordinary `remove()` funnel (replacing the retired per-accept
+        // `reap_crashed` scan for this class). On the explicit in-handler teardown
+        // paths the conversation map is already drained, so this is a no-op there.
         self.release_conversations();
         let timers = self.state.pending_replies.take_retired_timers();
         self.runtime.cancel_deadline_timers(timers);
