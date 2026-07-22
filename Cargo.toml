@@ -29,7 +29,7 @@ liminal-sdk = { version = "0.3.1", path = "crates/liminal-sdk" }
 
 anyhow = "1"
 async-trait = "0.1"
-beamr = { version = "0.15.4", features = ["readiness"] }
+beamr = { version = "0.16.0", features = ["readiness"] }
 blake3 = "1"
 chrono = "0.4.45"
 clap = "4"
@@ -39,7 +39,7 @@ clap = "4"
 # re-enabling default features it disabled, so the lean base is the only base that
 # can satisfy both.)
 futures-core = { version = "0.3", default-features = false }
-haematite = "0.6.1"
+haematite = "0.6.2"
 js-sys = "0.3.102"
 jsonschema = { version = "0.46.5", default-features = false }
 rand = "0.10.1"
