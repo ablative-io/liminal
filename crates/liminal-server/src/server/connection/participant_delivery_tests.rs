@@ -286,8 +286,24 @@ fn slow_recipient_holds_only_its_head() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
-fn held_head_precedes_later_sequence_after_writable_ready_and_duplicate_ready_is_idempotent()
--> Result<(), Box<dyn std::error::Error>> {
+fn debt_refusal_and_pressure_holdback_remain_distinct() -> Result<(), Box<dyn std::error::Error>> {
+    let deferred_source = Arc::new(FixtureSource::new([]));
+    let deferred_service = service(Arc::clone(&deferred_source))?;
+    let mut deferred_state = state(&deferred_service, &[1])?;
+    let mut deferred_sink = RecordingSink::new(4096);
+    assert_eq!(
+        service_participant_publications(
+            &mut deferred_state,
+            &deferred_service,
+            &mut deferred_sink,
+            32,
+        )?,
+        0
+    );
+    assert!(deferred_state.held_pushes.is_empty());
+    assert!(deferred_sink.frames.is_empty());
+    assert!(deferred_source.offered().is_empty());
+
     let source = Arc::new(FixtureSource::new([delivery(1, 1), delivery(1, 2)]));
     let service = service(Arc::clone(&source))?;
     let mut state = state(&service, &[1])?;
