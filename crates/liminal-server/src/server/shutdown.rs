@@ -308,4 +308,28 @@ mod tests {
         supervisor.shutdown();
         Ok(())
     }
+
+    /// Oracle 13 (W4 leg 3, §4.3) — absence proof over the drain/settle
+    /// implementation (this module before its `mod tests`): none of the retired
+    /// poll constants nor the per-iteration reap scan survive. The forbid-list
+    /// literals below live in the test section, so `split` excludes them from the
+    /// implementation slice under inspection.
+    #[test]
+    fn drain_source_has_no_reap_count_sleep_loop() {
+        let source = include_str!("shutdown.rs");
+        // `split` always yields a first segment; `unwrap_or` keeps this panic-free
+        // under the workspace lint deny while never falling back in practice.
+        let implementation = source.split("mod tests").next().unwrap_or(source);
+        for forbidden in [
+            "DRAIN_PROGRESS_INTERVAL",
+            "FORCE_CLOSE_SETTLE_TIMEOUT",
+            "FORCE_CLOSE_POLL_INTERVAL",
+            "reap_crashed_connections",
+        ] {
+            assert!(
+                !implementation.contains(forbidden),
+                "retired poll/reap token `{forbidden}` must not appear in the drain/settle implementation"
+            );
+        }
+    }
 }
