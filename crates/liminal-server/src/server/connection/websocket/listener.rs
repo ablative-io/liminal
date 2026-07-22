@@ -153,7 +153,6 @@ fn accept_loop(
     shutdown: &AtomicBool,
 ) -> Result<(), ServerError> {
     while !shutdown.load(Ordering::SeqCst) {
-        handshakes.reap_finished();
         match listener.accept() {
             Ok((stream, peer_addr)) => {
                 handshakes.begin(stream, Some(peer_addr));
