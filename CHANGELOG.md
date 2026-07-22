@@ -3,6 +3,17 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## 0.3.2 — 2026-07-23
+
+Dependency convergence release, no API changes: beamr 0.15.4 → 0.16.0 and
+haematite 0.6.1 → 0.6.2. beamr 0.16.0 carries four interpreter/BIF fixes
+that are hot-path once `gleam_erlang` loads (cross-process local `send/2`
+delivery, `func_info` raising catchable `function_clause` instead of
+spinning, bare-atom `if_clause`, boxed-reference `demonitor/1`) plus the
+breaking selector-shadow removal — liminal's actor tiers assemble no
+selector opcodes, so the removal is inert here (verified by instruction
+census at the 0.16.0 uptake). `liminal-protocol` is unchanged at 0.3.0.
+
 ## liminal-protocol 0.3.0 — 2026-07-21
 
 W1b durable connection-fate sources land: every participant binding now
