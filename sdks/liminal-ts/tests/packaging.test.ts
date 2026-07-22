@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 type PackFile = {
   path: string;
@@ -18,6 +18,10 @@ type RuntimeCondition = "import" | "require";
 type PackageManifest = {
   exports: {
     ".": Record<RuntimeCondition, string>;
+    "./browser": {
+      types: string;
+      default: string;
+    };
   };
 };
 
@@ -47,6 +51,10 @@ test("published runtime graphs contain every default WASM glue import target", (
 
   const shippedPaths = new Set(report.files.map((file) => file.path));
   const importers = report.files
+    // The self-contained browser artifact INLINES the WASM glue (esbuild's
+    // module-path comments still name it); it has no external glue import by
+    // design and is covered by its own packaging and smoke tests below.
+    .filter((file) => !file.path.startsWith("dist/browser/"))
     .filter((file) => runtimeFilePattern.test(file.path))
     .map((file) => ({
       file,
@@ -105,6 +113,66 @@ test("published runtime graphs contain every default WASM glue import target", (
       `package ${condition} export graph from ${exportTarget} must reach a WASM glue importer`,
     );
   }
+});
+
+test("npm pack ships the self-contained browser artifact wired to its export", async () => {
+  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
+  const output = execFileSync(
+    npm,
+    ["pack", "--dry-run", "--json", "--ignore-scripts"],
+    { cwd: packageRoot, encoding: "utf8" },
+  );
+  const reports = JSON.parse(output) as PackReport[];
+  assert.equal(reports.length, 1, "npm pack should describe exactly one tarball");
+  const report = reports[0];
+  assert.ok(report);
+  const shippedPaths = new Set(report.files.map((file) => file.path));
+
+  const manifest = JSON.parse(
+    readFileSync(path.join(packageRoot, "package.json"), "utf8"),
+  ) as PackageManifest;
+  const browserExport = manifest.exports["./browser"];
+  assert.ok(browserExport, "package must expose a ./browser export");
+  const artifactTarget = packagePath(browserExport.default);
+  const typesTarget = packagePath(browserExport.types);
+  assert.equal(
+    artifactTarget,
+    "dist/browser/liminal.js",
+    "./browser must resolve to the single-file artifact",
+  );
+  assert.ok(
+    shippedPaths.has(artifactTarget),
+    `./browser export target ${artifactTarget} must be shipped by npm pack`,
+  );
+  assert.ok(
+    shippedPaths.has(typesTarget),
+    `./browser types target ${typesTarget} must be shipped by npm pack`,
+  );
+
+  const artifactPath = path.join(packageRoot, artifactTarget);
+  const artifactText = readFileSync(artifactPath, "utf8");
+  const staticImport = /^\s*(?:import\b|export\s+[^;\n]*?\bfrom\b)/m.exec(artifactText);
+  assert.equal(
+    staticImport,
+    null,
+    `shipped artifact must have no static module dependencies, found ${JSON.stringify(staticImport?.[0])}`,
+  );
+  assert.ok(
+    !/\bimport\s*\(/.test(artifactText),
+    "shipped artifact must have no dynamic import() calls",
+  );
+
+  const artifact = (await import(pathToFileURL(artifactPath).href)) as Record<string, unknown>;
+  assert.equal(
+    typeof artifact["LiminalFeedSource"],
+    "function",
+    "shipped artifact must parse as an ES module exporting LiminalFeedSource",
+  );
+  assert.equal(
+    typeof artifact["createChannel"],
+    "function",
+    "shipped artifact must parse as an ES module exporting createChannel",
+  );
 });
 
 function extractGlueImports(source: string): GlueImport[] {
