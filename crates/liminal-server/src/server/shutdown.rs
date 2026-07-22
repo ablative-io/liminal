@@ -11,9 +11,11 @@ use crate::ServerError;
 use crate::server::connection::{ConnectionSupervisor, WebSocketListener};
 use crate::server::listener::ServerListener;
 
-const DRAIN_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
-const FORCE_CLOSE_SETTLE_TIMEOUT: Duration = Duration::from_millis(500);
-const FORCE_CLOSE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+/// Bounded window the force-close settle waits for the forced connections to
+/// deliver their exits, as a single admitted one-shot deadline — not a poll
+/// interval. The waiter parks on the shared TOLD drain-completion notification
+/// (W4 leg 3, §4.3) and this deadline only bounds how long it will wait.
+const FORCE_CLOSE_SETTLE_WINDOW: Duration = Duration::from_millis(500);
 
 /// Idempotent shutdown activation handle shared by the runtime and signal thread.
 #[derive(Clone)]
@@ -193,68 +195,49 @@ pub fn run_shutdown_sequence(
     Ok(())
 }
 
+/// Waits for every active connection to exit, or for `drain_timeout` to elapse.
+///
+/// This is the TOLD drain (W4 leg 3, §4.3): it parks on the supervisor's
+/// drain-completion notification, woken only by a delivered connection exit —
+/// every exit route (in-slice `mark_crashed`/`finish`, the reclaim reactor, and
+/// the reconciliation scan) funnels through the single `remove()` teardown that
+/// bumps the drain generation — or by the one admitted `drain_timeout` deadline.
+/// It runs no per-iteration reap or active-count poll: the retired
+/// reap/count/sleep loop sampled completion ~100 times a second; this samples it
+/// zero times while the connections are held and drops the deadline exactly once.
 fn drain_connections(supervisor: &ConnectionSupervisor, drain_timeout: Duration) -> bool {
-    let deadline = Instant::now() + drain_timeout;
-    let mut last_log = Instant::now()
-        .checked_sub(DRAIN_PROGRESS_INTERVAL)
-        .unwrap_or_else(Instant::now);
-
-    loop {
-        let reaped = supervisor.reap_crashed_connections();
-        if reaped > 0 {
-            tracing::debug!(
-                reaped_connections = reaped,
-                "reaped connections during drain"
-            );
-        }
-
-        let active = supervisor.active_connection_count();
-        if active == 0 {
-            tracing::info!("all connections drained before timeout");
-            return true;
-        }
-
-        let now = Instant::now();
-        if now >= deadline {
-            tracing::warn!(
-                active_connections = active,
-                ?drain_timeout,
-                "drain timeout expired with active connections"
-            );
-            return false;
-        }
-
-        if now.duration_since(last_log) >= DRAIN_PROGRESS_INTERVAL {
-            tracing::info!(
-                active_connections = active,
-                "waiting for active connections to drain"
-            );
-            last_log = now;
-        }
-
-        let remaining = deadline.saturating_duration_since(now);
-        thread::sleep(remaining.min(FORCE_CLOSE_POLL_INTERVAL));
+    let active_at_start = supervisor.active_connection_count();
+    if active_at_start == 0 {
+        return true;
     }
+    tracing::info!(
+        active_connections = active_at_start,
+        ?drain_timeout,
+        "waiting for active connections to drain"
+    );
+    let deadline = Instant::now() + drain_timeout;
+    let drained = supervisor.wait_for_connections_drained(deadline);
+    if drained {
+        tracing::info!("all connections drained before timeout");
+    } else {
+        tracing::warn!(
+            active_connections = supervisor.active_connection_count(),
+            ?drain_timeout,
+            "drain timeout expired with active connections"
+        );
+    }
+    drained
 }
 
 pub(crate) fn wait_after_force_close(supervisor: &ConnectionSupervisor) {
-    let deadline = Instant::now() + FORCE_CLOSE_SETTLE_TIMEOUT;
-    while Instant::now() < deadline {
-        let reaped = supervisor.reap_crashed_connections();
-        let active = supervisor.active_connection_count();
-        if active == 0 {
-            return;
-        }
-        if reaped > 0 {
-            tracing::debug!(
-                reaped_connections = reaped,
-                active_connections = active,
-                "reaped connections after force close"
-            );
-        }
-        thread::sleep(FORCE_CLOSE_POLL_INTERVAL);
+    // Force-close reuses the SAME TOLD exit notification the graceful drain parks
+    // on (§4.3) — the forced connections deliver their exits through the one
+    // `remove()` funnel — bounded by its own single settle deadline. There is no
+    // second settle poll loop and no reap scan.
+    let deadline = Instant::now() + FORCE_CLOSE_SETTLE_WINDOW;
+    if supervisor.wait_for_connections_drained(deadline) {
+        return;
     }
-
     let remaining = supervisor.active_connection_count();
     if remaining > 0 {
         tracing::warn!(
