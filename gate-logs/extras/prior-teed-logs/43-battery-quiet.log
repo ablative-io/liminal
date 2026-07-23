@@ -1,0 +1,249 @@
+
+running 427 tests
+....................................................................................... 87/427
+....................................................................................... 174/427
+....................................................................................... 261/427
+....................................................................................... 348/427
+...............................................................................
+test result: ok. 427 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+
+running 25 tests
+.........................
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 19 tests
+...................
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 9 tests
+.........
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.85s
+
+
+running 5 tests
+.....
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+.....
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 3 tests
+...
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+
+running 336 tests
+....................................................................................... 87/336
+....................................................................................... 174/336
+....................................................................................... 261/336
+...........................................................................
+test result: ok. 336 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.86s
+
+
+running 5 tests
+.....
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 8 tests
+........
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 7 tests
+.......
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.32s
+
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+
+running 7 tests
+.......
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 9 tests
+.........
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 49 tests
+.................................................
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.50s
+
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 10 tests
+..........
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 13 tests
+.............
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 19 tests
+...................
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 18 tests
+..................
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
+
+
+running 563 tests
+....................................................................................... 87/563
+....................................................................................... 174/563
+....................................................................................... 261/563
+....................................................................................... 348/563
+....................................................................................... 435/563
+.....................    Checking liminal-server-tests v0.0.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/target/tests/trybuild/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.32s
+...
+
+...test [0m[1mtests/trybuild/plain_leave_projection_removed.rs[0m ... [0m[32mok
+[0m
+
+.......    Checking liminal-server-tests v0.0.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/target/tests/trybuild/liminal-server)
+.    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.69s
+..
+
+.........test [0m[1mtests/trybuild/production_connection_fate_cannot_select_process_killed.rs[0m ... [0m[32mok
+[0m
+
+.................   Compiling liminal-server-tests v0.0.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/target/tests/trybuild/liminal-server)
+..    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.05s
+.
+
+test [0m[1mtests/trybuild/fenced_descriptions_remain_copy.rs[0m [should pass] ... ..................... 522/563
+................................test server::participant::incarnation_stream_tests::cold_replay_crosses_bounded_pages_without_polling has been running for over 60 seconds
+........test server::participant::production::tests_w1b_substrate::fenced_attach_linearity_ui_contract has been running for over 60 seconds
+[0m[32mok
+[0mtest [0m[1mtests/trybuild/fenced_raw_mint_is_private.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/fenced_owner_cannot_mint_twice.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/fenced_proof_cannot_clone.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/fenced_proof_cannot_copy.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/fenced_proof_cannot_reuse_after_verify.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/fenced_proof_fate_method_is_private.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/fenced_attach_commit_cannot_split_twice.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/validated_marker_record_cannot_clone.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/validated_marker_record_cannot_copy.rs[0m [should fail to compile] ... [0m[32mok
+[0mtest [0m[1mtests/trybuild/validated_marker_record_cannot_feed_two_recoveries.rs[0m [should fail to compile] ... [0m[32mok
+[0m
+
+.
+test result: ok. 563 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 109.55s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 5 tests
+.....
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.78s
+
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+
+running 18 tests
+..................
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.89s
+
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.26s
+
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+
+running 5 tests
+.....
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.07s
+
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.66s
+
+
+running 23 tests
+.......................
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.23s
+
+
+running 98 tests
+....................................................................................... 87/98
+...........
+test result: ok. 98 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 42 tests
+..........................................
+test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 1 test
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+all doctests ran in 0.75s; merged doctests compilation took 0.35s
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+BATTERY EXIT=0

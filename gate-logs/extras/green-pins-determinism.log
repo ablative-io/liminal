@@ -1,0 +1,10 @@
+=== iteration 1 ===
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 563 filtered out; finished in 13.69s
+=== iteration 2 ===
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 563 filtered out; finished in 13.69s
+=== iteration 3 ===
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 563 filtered out; finished in 13.80s
+=== iteration 4 ===
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 563 filtered out; finished in 14.27s
+=== iteration 5 ===
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 563 filtered out; finished in 13.35s

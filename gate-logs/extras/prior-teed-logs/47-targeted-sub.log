@@ -1,0 +1,13 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.68s
+     Running tests/subscription_e2e.rs (target/debug/deps/subscription_e2e-1e19b01ff97718de)
+
+running 5 tests
+test subscription_publish_wakes_parked_connection_in_order ... ok
+test large_payload_is_delivered_intact ... ok
+test slow_reader_does_not_wedge_other_connections ... ok
+test oversize_frame_survives_wouldblock_boundary_and_no_desync ... ok
+test inbox_overflow_sheds_the_offending_subscription_without_tearing_down_the_connection ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.57s
+

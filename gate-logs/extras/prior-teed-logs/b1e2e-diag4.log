@@ -1,0 +1,90 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 21.98s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e51de38dd69d7bf0)
+
+running 1 test
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Detached"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Detached"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Detached"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Bound"), (1, "Detached")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Bound"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(0) states=[(0, "Detached"), (1, "Bound")]
+PRODUCED conv=b12e sender=Some(1) states=[(0, "Detached"), (1, "Detached")]
+
+thread 'server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay' (31782308) panicked at crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:158:5:
+assertion `left == right` failed: resumed replay must redeliver exactly (e2=6, e3=8) in order; a missing e3 is the while-dead publish lost from the resumed session
+  left: [6]
+ right: [6, 8]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 563 filtered out; finished in 15.04s
+
+error: test failed, to rerun pass `-p liminal-server --lib`

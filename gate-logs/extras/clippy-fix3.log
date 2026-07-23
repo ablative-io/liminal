@@ -1,0 +1,20 @@
+    Checking liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+error: this function has too many lines (104/100)
+  --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:83:1
+   |
+83 | fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_lines
+   = note: `-D clippy::too-many-lines` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::too_many_lines)]`
+
+error: this function has too many lines (104/100)
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:233:1
+    |
+233 | fn clean_leave_departed_mints_no_obligation() -> Result<(), Box<dyn Error>> {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_lines
+
+error: could not compile `liminal-server` (lib test) due to 2 previous errors

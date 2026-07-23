@@ -10,3 +10,6 @@ Thumbs.db
 aion.db
 __pycache__/
 *.pyc
+
+# Gate evidence must travel with the branch (gates.py verify reads these at a fresh checkout)
+!gate-logs/**/*.log

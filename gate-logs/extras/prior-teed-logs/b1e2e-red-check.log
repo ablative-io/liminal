@@ -1,0 +1,24 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.27s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e51de38dd69d7bf0)
+
+running 1 test
+PUSH e1: ParticipantDelivery(ParticipantDelivery { conversation_id: 45358, delivery_seq: 6, record: OrdinaryRecord { sender_participant_id: 0, payload: [1] } })
+ACK e1: AckCommitted(AckCommitted { request: ParticipantAckEnvelope { conversation_id: 45358, participant_id: 1, capability_generation: Generation(2), through_seq: 6 } })
+PUSH e2: ParticipantDelivery(ParticipantDelivery { conversation_id: 45358, delivery_seq: 7, record: OrdinaryRecord { sender_participant_id: 0, payload: [2] } })
+
+thread 'server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay' (31705233) panicked at crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:168:5:
+assertion `left == right` failed: resumed replay must redeliver exactly (e2=7, e3=9) in order; a missing e3 is the while-dead publish lost from the resumed session
+  left: [7]
+ right: [7, 9]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 563 filtered out; finished in 15.69s
+
+error: test failed, to rerun pass `-p liminal-server --lib`

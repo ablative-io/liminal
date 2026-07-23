@@ -181,6 +181,25 @@ pub fn run_shutdown_sequence(
         websocket_listener.stop_accepting()?;
     }
     listener.stop_accepting()?;
+
+    // FIX A-ii: flush accepted-but-unfanned-out publishes to their subscriber
+    // connections BEFORE broadcasting the shutdown Disconnect. Accept is now
+    // stopped, so the set of accepted publishes is bounded; this TOLD barrier
+    // parks on the delivery-quiescence signal (a connection parks only once every
+    // accepted publish has been pumped to its socket) until every active
+    // connection has quiesced, bounded by the same `drain_timeout` budget. Without
+    // it, `notify_shutdown_subscribers` below could enqueue a subscriber's
+    // Disconnect ahead of an in-flight fan-out (measured 8-131 ms) and the
+    // subscriber's reader would exit before delivery. A timeout here is logged,
+    // not fatal — the drain and force-close legs below still run.
+    let flush_deadline = Instant::now() + drain_timeout;
+    if !supervisor.wait_for_delivery_quiesced(flush_deadline) {
+        tracing::warn!(
+            ?drain_timeout,
+            "delivery flush barrier did not quiesce before its budget; proceeding to shutdown notification"
+        );
+    }
+
     supervisor.notify_shutdown_subscribers();
 
     let drained = drain_connections(supervisor, drain_timeout);

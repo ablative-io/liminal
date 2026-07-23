@@ -1,0 +1,25 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.45s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e51de38dd69d7bf0)
+
+running 2 tests
+test server::participant::production::tests_w1b_while_dead_replay::clean_leave_departed_mints_no_obligation ... ok
+test server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay ... FAILED
+
+failures:
+
+---- server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay stdout ----
+
+thread 'server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay' (31919463) panicked at crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:175:5:
+assertion `left == right` failed: resumed replay must redeliver exactly (e2=7, e3=9) in order; a missing e3 is the while-dead publish lost from the resumed session
+  left: [7]
+ right: [7, 9]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 563 filtered out; finished in 13.23s
+
+error: test failed, to rerun pass `-p liminal-server --lib`

@@ -3,6 +3,53 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## Unreleased
+
+### Fixed
+
+Teardown-window delivery loss (DEFECT A): events published fire-and-forget
+immediately before an embedded server's shutdown were lost through two
+unfenced teardown windows, first detected by a downstream storeless
+consumer that published a burst into its own shutdown.
+
+- **SDK (A-i):** `PushClient::drop` now closes gracefully — it shuts the
+  write half and drains pending `PublishAck`s to the server's FIN rather
+  than closing with unread bytes, so a fire-and-forget burst is no longer
+  stranded by the RST that made the server's kernel discard publish frames
+  it had not yet read.
+- **Server (A-ii):** `run_shutdown_sequence` now runs a TOLD flush barrier
+  between stop-accepting and the shutdown `Disconnect` broadcast — parking
+  (bounded by `drain_timeout`, no polling) until every accepted publish has
+  fanned out to its subscriber's socket — so the `Disconnect` can no longer
+  overtake an in-flight delivery.
+
+While-dead publish delivery loss (DEFECT B1): a publish accepted while a
+subscriber was connection-lost-Detached-but-resumable never reached that
+subscriber's resumed replay — the recipient snapshot admitted only
+live-`Bound` slots, so the accepted-then-lost record minted no durable
+obligation for the resumable peer.
+
+- **Server (B1):** the produced-record recipient snapshot now admits
+  `Bound | Detached` slots, keyed on map presence (a cleanly-Left peer is
+  removed from `authority.slots`, so departed identities remain excluded).
+  A Detached recipient's obligation is durably installed and PARKED — owed
+  no live delivery tell (it has no connection to notify), it replays on the
+  subscriber's `CredentialAttach` resume — so an accepted while-dead publish
+  now reaches the resumed session.
+
+### Behavior change (carried from 0.3.2, release-note flag)
+
+- **W2 obligation-debt dispatch reports peer connection loss eagerly.** On
+  a peer connection loss, obligation-debt dispatch delivers a typed
+  `ResponderFailed { NoConnection }` on the request surface AND exactly one
+  `PeerFailed` lifecycle item on each subscribed surface — exactly-once per
+  exact target, a designed W2 invariant per `W2-OBLIGATION-DEBT-DISPATCH.md`'s
+  dedup-and-notify-once rule (oracle-guarded by
+  `published_obligation_tells_exact_live_dispatch_once` and
+  `dispatch_impact_unions_multi_effect_targets`) — where prior versions were
+  silent until the requester's deadline. This is intended behavior being
+  flagged for release notes, not a fix.
+
 ## 0.3.2 — 2026-07-23
 
 Dependency convergence release, no API changes: beamr 0.15.4 → 0.16.0 and

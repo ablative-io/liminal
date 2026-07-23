@@ -1,0 +1,31 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.17s
+     Running tests/ws_transport_e2e.rs (target/debug/deps/ws_transport_e2e-78c493188ad4125d)
+
+running 23 tests
+test ws_dependency_adds_no_async_runtime_or_http_framework ... ok
+test ws_ordinary_http_and_wrong_route_receive_fixed_refusals ... ok
+test ws_oversize_declared_length_is_refused_before_allocation ... ok
+test ws_offered_subprotocol_is_refused ... ok
+test ws_nine_byte_header_closes ... ok
+test ws_liminal_ping_gets_liminal_pong_not_transport_pong ... ok
+test ws_and_tcp_share_one_max_connections_bound ... ok
+test ws_and_tcp_auth_refusals_are_byte_identical_and_both_close ... ok
+test ws_fragmented_binary_is_reassembled_and_applied_once ... ok
+test ws_empty_binary_message_closes ... ok
+test ws_connection_serves_server_push_and_correlated_reply ... ok
+test ws_text_message_is_a_typed_protocol_failure_that_closes ... ok
+test ws_client_close_removes_connection_resources ... ok
+test ws_trailing_bytes_close ... ok
+test ws_and_tcp_connect_responses_are_byte_identical ... ok
+test ws_truncated_declared_body_closes ... ok
+test ws_subscriber_receives_tcp_publish_as_one_binary_message ... ok
+test ws_origin_cases_enumerated ... ok
+test ws_upgrade_declines_permessage_deflate_offer_without_negotiating ... ok
+test ws_two_concatenated_frames_close ... ok
+test ws_keepalive_sends_transport_pings_on_the_named_interval ... ok
+test ws_keepalive_absent_means_no_pings ... ok
+test ws_graceful_shutdown_notifies_subscribers_and_drains_both_transports ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.25s
+

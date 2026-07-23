@@ -248,6 +248,11 @@ impl ConnectionProcess {
             Ok(false) => {
                 #[cfg(test)]
                 self.runtime.record_park(pid);
+                // FIX A-ii: parked with every accepted publish flushed to the
+                // socket (final_probe found no pending inbox/held delivery and no
+                // READY edge). Tell the shutdown flush barrier this connection has
+                // quiesced.
+                self.runtime.mark_parked(pid);
                 NativeOutcome::Wait
             }
             Err(error) => self.fail_slice(pid, &error),
@@ -281,6 +286,7 @@ impl ConnectionProcess {
         if self.state.held_pushes.participant_len() > held_before
             && self.runtime.pause_participant_holdback(pid)
         {
+            self.runtime.mark_parked(pid);
             return Some(NativeOutcome::Wait);
         }
         None
@@ -851,6 +857,12 @@ impl ConnectionProcess {
 impl NativeHandler for ConnectionProcess {
     fn handle(&mut self, ctx: &mut NativeContext<'_>) -> NativeOutcome {
         let pid = ctx.self_pid();
+        // FIX A-ii: the moment this connection is scheduled it is executing, so it
+        // is no longer delivery-quiescent. Marked BEFORE the mailbox drain and
+        // `acknowledge_ready` below, so the shutdown flush barrier can never sample
+        // this connection as parked-with-no-pending-READY in the window between a
+        // fan-out wake clearing `ready_pending` and its delivering slice starting.
+        self.runtime.mark_running(pid);
         // Registration is owned solely by the spawn thread (`SupervisorInner::
         // spawn_connection` calls `runtime.register` before returning the
         // handle), so the handler never writes the registry — it only reads its

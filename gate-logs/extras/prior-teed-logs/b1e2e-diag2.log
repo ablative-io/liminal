@@ -1,0 +1,35 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+warning: unused imports: `ParticipantRecord` and `ServerPush`
+  --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:20:33
+   |
+20 |     Generation, ParticipantAck, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
+   |                                 ^^^^^^^^^^^^^^^^^
+21 |     ServerPush, ServerValue,
+   |     ^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `SocketPeer`
+  --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:24:39
+   |
+24 | use super::e2e_tests::{SocketFixture, SocketPeer};
+   |                                       ^^^^^^^^^^
+
+warning: `liminal-server` (lib test) generated 2 warnings (run `cargo fix --lib -p liminal-server --tests` to apply 2 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.84s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e51de38dd69d7bf0)
+
+running 1 test
+PUSH e1: ParticipantDelivery(ParticipantDelivery { conversation_id: 45358, delivery_seq: 6, record: OrdinaryRecord { sender_participant_id: 0, payload: [1] } })
+ACK e1: AckCommitted(AckCommitted { request: ParticipantAckEnvelope { conversation_id: 45358, participant_id: 1, capability_generation: Generation(2), through_seq: 6 } })
+PUSH e2: ParticipantDelivery(ParticipantDelivery { conversation_id: 45358, delivery_seq: 7, record: OrdinaryRecord { sender_participant_id: 0, payload: [2] } })
+SUB OUTBOX FACTS after fold, before e3: OutboxOwnerFacts { ack_through: 6, next_live_obligation: Some(7), live_record_count: 6, source_batch_count: 7, charged_bytes: 362 }
+E3 RESULT: RecordCommitted(RecordCommitted { request: RecordAdmissionEnvelope { conversation_id: 45358, participant_id: 0, capability_generation: Generation(1), record_admission_attempt_token: RecordAdmissionAttemptToken([7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7]) }, delivery_seq: 9 })
+SUB OUTBOX FACTS after e3: OutboxOwnerFacts { ack_through: 6, next_live_obligation: Some(7), live_record_count: 6, source_batch_count: 8, charged_bytes: 362 }
+REATTACH: AttachBound(AttachBound { conversation_id: 45358, token: AttachAttemptToken([8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8]), participant_id: 1, request_generation: Generation(2), attach_secret: AttachSecret([171, 254, 53, 154, 47, 139, 74, 153, 111, 59, 115, 77, 189, 163, 152, 49, 51, 162, 105, 241, 223, 194, 53, 41, 123, 67, 34, 119, 65, 193, 203, 240]), origin_binding_epoch: BindingEpoch { connection_incarnation: ConnectionIncarnation { server_incarnation: 1, connection_ordinal: 2 }, capability_generation: Generation(3) }, persisted_cursor: 6, accepted_marker_delivery_seq: None, receipt_expires_at: 1784763864446, provenance_expires_at: 1784764404446 })
+REPLAY push 1: Ok(ParticipantDelivery(ParticipantDelivery { conversation_id: 45358, delivery_seq: 7, record: OrdinaryRecord { sender_participant_id: 0, payload: [2] } }))
+REPLAY push 2: Err(Os { code: 35, kind: WouldBlock, message: "Resource temporarily unavailable" })
+test server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_replay ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 563 filtered out; finished in 14.54s
+

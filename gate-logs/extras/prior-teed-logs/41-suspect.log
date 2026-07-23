@@ -1,0 +1,18 @@
+   Compiling liminal-sdk v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-sdk)
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.43s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e51de38dd69d7bf0)
+
+running 1 test
+    Blocking waiting for file lock on build directory
+    Checking liminal-server-tests v0.0.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/target/tests/trybuild/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 19.79s
+
+
+test [0m[1mtests/trybuild/production_connection_fate_cannot_select_process_killed.rs[0m ... [0m[32mok
+[0m
+
+test server::participant::production::tests_w1b_connection_fate::process_killed_has_no_production_participant_binding_emitter ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 562 filtered out; finished in 20.20s
+

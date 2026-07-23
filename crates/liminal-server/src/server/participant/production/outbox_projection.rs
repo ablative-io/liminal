@@ -363,11 +363,22 @@ fn produced(
     sender: Option<ParticipantId>,
     records: Vec<(u64, ParticipantRecord)>,
 ) -> Result<OutboxRow, StateError> {
+    // A produced record is owed to every slot-present recipient that can still
+    // consume it: a live `Bound` binding OR a connection-lost-but-resumable
+    // `Detached` slot. Slot presence is the resumable discriminator — a cleanly
+    // Left participant is removed from `slots` entirely (ops_leave.rs:289, the
+    // sole removal path), so a departed peer is absent by construction and can
+    // never be named. Including `Detached` mints the durable obligation the
+    // resumed session replays; `record_published_projection` parks its live tell.
     let recipients: Vec<_> = authority
         .slots
         .iter()
         .filter_map(|(participant_id, slot)| {
-            matches!(slot.binding, BindingState::Bound(_)).then_some(*participant_id)
+            matches!(
+                slot.binding,
+                BindingState::Bound(_) | BindingState::Detached
+            )
+            .then_some(*participant_id)
         })
         .filter(|participant_id| Some(*participant_id) != sender)
         .collect();

@@ -1,0 +1,4 @@
+Loaded pass burner evidence (host ncpu=18; ambient: ~40 unrelated 'yes' from concurrent lanes)
+My 8 burner PIDs: 12122 12123 12124 12125 12126 12127 12128 12129
+After SIGKILL, ps -p on those 8 PIDs returns 0 lines:
+SURVIVING_BURNERS=0

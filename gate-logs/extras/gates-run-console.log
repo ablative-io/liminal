@@ -1,0 +1,26 @@
+[gates] leg fmt: cargo fmt --all --check
+[gates] leg clippy: cargo clippy --workspace --all-targets -- -D warnings
+[gates] leg tests: cargo test --workspace
+
+== gate run: liminal @ e601fe251c7a (tree 89b44a72095e) ==
+  fmt                    exit 0          1.8s
+  clippy                 exit 0         17.5s
+  tests                  exit 101      101.7s   1552 passed, 3 failed (24 suites)
+
+FAILED: server::participant::production::e2e_tests::tests_endpoint_ack::endpoint_with_no_committed_obligation_refuses (leg tests)
+Error: "endpoint 6 without a committed obligation was accepted: AckCommitted(AckCommitted { request: ParticipantAckEnvelope { conversation_id: 15780113, participant_id: 0, capability_generation: Generation(2), through_seq: 6 } })"
+
+FAILED: server::participant::production::tests_delivery_acceptance::reattach_replays_unacked_in_order_after_acked_frontier (leg tests)
+thread 'server::participant::production::tests_delivery_acceptance::reattach_replays_unacked_in_order_after_acked_frontier' (32147300) panicked at crates/liminal-server/src/server/participant/production/tests_delivery_acceptance.rs:274:5:
+assertion `left == right` failed: only obligations snapshot-included while bound replay after the acked frontier
+  left: [3, 4, 5, 7]
+ right: [3, 4, 5]
+
+FAILED: server::participant::production::tests_unit2_layer1::recipient_snapshot::recipient_snapshot_is_postcommit_live_bound_minus_sender (leg tests)
+thread 'server::participant::production::tests_unit2_layer1::recipient_snapshot::recipient_snapshot_is_postcommit_live_bound_minus_sender' (32153093) panicked at crates/liminal-server/src/server/participant/production/tests_unit2_recipient_snapshot.rs:121:13:
+assertion `left == right` failed
+  left: [0, 1, 2]
+ right: [0, 1]
+
+report written: gate-logs/report.json
+VERDICT: RED

@@ -1,0 +1,11 @@
+[gates] leg fmt: cargo fmt --all --check
+[gates] leg clippy: cargo clippy --workspace --all-targets -- -D warnings
+[gates] leg tests: cargo test --workspace
+
+== gate run: liminal @ 320a09364fd0 (tree ac5e9c40e22e) ==
+  fmt                    exit 0          2.3s
+  clippy                 exit 0         27.8s
+  tests                  exit 0        133.2s   1761 passed, 0 failed (40 suites)
+
+report written: gate-logs/report.json
+VERDICT: GREEN

@@ -221,13 +221,23 @@ impl EndpointObligationScenario {
     }
 }
 
+/// The guard is unchanged contract: an ack endpoint that is not a durable
+/// obligation is refused with `AckGap`, leaving both owners untouched.
+///
+/// Only the SETUP is trued for the B1 ruled contract. Sequence 6 (participant
+/// one's reattach) is produced while participant zero is resumable-Detached, so
+/// zero now DOES hold a committed obligation at 6 — it is no longer a hole. The
+/// genuine no-obligation endpoint beyond every obligation zero holds is sequence
+/// 7, zero's own reattach record: a sender is excluded from its own recipient
+/// snapshot, so zero holds no obligation at 7. Acking to 7 (with the cursor at
+/// the real frontier 4) still returns `AckGap`.
 #[test]
 fn endpoint_with_no_committed_obligation_refuses() -> Result<(), Box<dyn Error>> {
     let mut scenario = EndpointObligationScenario::start()?;
     scenario.assert_gap_unchanged(Generation::ONE, 3, 2)?;
     scenario.commit_real_obligation_at_four()?;
     let reattached_generation = scenario.reattach_after_sequence_six_commits_detached()?;
-    scenario.assert_gap_unchanged(reattached_generation, 6, 4)?;
+    scenario.assert_gap_unchanged(reattached_generation, 7, 4)?;
     scenario.stop();
     Ok(())
 }
