@@ -1,4 +1,6 @@
-    Checking liminal-protocol v0.3.1 (/Users/tom/Developer/ablative/liminal/crates/liminal-protocol)
-    Checking liminal-sdk v0.4.0 (/Users/tom/Developer/ablative/liminal/crates/liminal-sdk)
-    Checking liminal-server v0.4.0 (/Users/tom/Developer/ablative/liminal/crates/liminal-server)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.19s
+    Checking liminal-protocol v0.3.2 (/Users/tom/Developer/ablative/liminal/crates/liminal-protocol)
+    Checking liminal-rs v0.4.1 (/Users/tom/Developer/ablative/liminal/crates/liminal)
+    Checking liminal-ts-wasm v0.3.0 (/Users/tom/Developer/ablative/liminal/sdks/liminal-ts/wasm-src)
+    Checking liminal-sdk v0.4.1 (/Users/tom/Developer/ablative/liminal/crates/liminal-sdk)
+    Checking liminal-server v0.4.1 (/Users/tom/Developer/ablative/liminal/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 21.40s
