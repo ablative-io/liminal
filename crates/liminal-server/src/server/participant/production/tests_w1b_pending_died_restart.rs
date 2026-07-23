@@ -67,6 +67,7 @@ pub(super) struct BoundDebtFixture {
     pub(super) connection: ConnectionIncarnation,
     pub(super) conversation_id: u64,
     pub(super) participant_id: u64,
+    pub(super) peer_participant_id: u64,
     pub(super) binding_epoch: BindingEpoch,
     pub(super) attach_secret: AttachSecret,
 }
@@ -76,6 +77,8 @@ pub(super) struct PendingRestartFixture {
     pub(super) log: OperationLog,
     pub(super) conversation_id: u64,
     pub(super) participant_id: u64,
+    pub(super) peer_participant_id: u64,
+    pub(super) peer_connection: ConnectionIncarnation,
     pub(super) binding_epoch: BindingEpoch,
     pub(super) died_source_sequence: u64,
     pub(super) specific_sequence: u64,
@@ -175,6 +178,7 @@ pub(super) fn bound_debt_fixture(
         connection,
         conversation_id,
         participant_id: receipt.participant_id(),
+        peer_participant_id: peer.participant_id(),
         binding_epoch: attached.origin_binding_epoch(),
         attach_secret: attached.attach_secret(),
     })
@@ -258,6 +262,8 @@ fn pending_restart_fixture_with_shape(
         log,
         conversation_id: setup.conversation_id,
         participant_id: setup.participant_id,
+        peer_participant_id: setup.peer_participant_id,
+        peer_connection,
         binding_epoch: setup.binding_epoch,
         died_source_sequence,
         specific_sequence,

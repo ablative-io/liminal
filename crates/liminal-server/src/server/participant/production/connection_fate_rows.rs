@@ -175,6 +175,7 @@ fn died_source_operation(
                 disposition: input.disposition,
                 connection_intent_sequence: input.connection_intent_sequence,
                 specific_fate_intent: input.specific_fate_intent,
+                drained: None,
             },
         },
         binding_state: transition.binding_state(),

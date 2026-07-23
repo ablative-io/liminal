@@ -17,7 +17,7 @@ use super::super::{
     ParticipantAckCommit, PendingFinalization, PendingLeaveCommitParameters,
     PrepareLeaveAuthorityError, RetainedCausalRecord, RetainedCausalRecordKind, SequenceLedger,
     StoredEdge, VerifiedLeaveRequest,
-    claim_frontier::{FencedMarkerSourceRecord, LiveFrontierTransitionError},
+    claim_frontier::{BindingTerminalOwner, FencedMarkerSourceRecord, LiveFrontierTransitionError},
     commit_leave, commit_pending_leave,
 };
 use super::{
@@ -355,6 +355,107 @@ impl LiveFrontierOwner {
         }
     }
 
+    /// Commits the exact first pending binding-terminal candidate as its own
+    /// candidate transaction — the R-A2 candidate-lane terminal drain.
+    ///
+    /// The caller supplies only the pending finalization authority it already
+    /// owns and the canonical keyed terminal charge; the candidate itself, its
+    /// delivery sequence, and its already-allocated order major are derived
+    /// from the coupled frontiers. Retention transitions through the same
+    /// accounting the live transitions use, and the resulting owner is exactly
+    /// the poststate an immediately-committed terminal would have produced:
+    /// the participant frontier stays detached at its dead epoch.
+    ///
+    /// The retained-row CAP is deliberately not re-checked here: the terminal
+    /// pended exactly because the cap could not admit its row at fate time
+    /// ([`PreparedBindingTerminal::admit`](super::PreparedBindingTerminal::admit)),
+    /// and pending DEFERRED that exact reserved row rather than discarding it.
+    /// R-A2 prescribes the drain transaction's retention transition
+    /// unconditionally — an accepted terminal fate can never become
+    /// unsequencable — so the drain honors the deferred reservation even while
+    /// the suffix rests at its cap. The overage is bounded by the
+    /// open-candidate count, itself bounded by the contract's identity-slot
+    /// candidate bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged owner when the first candidate is absent or not
+    /// this pending terminal, the charge does not name the candidate's exact
+    /// keyed row, or the resulting retention/closure accounting is invalid.
+    pub fn drain_pending_terminal(
+        self,
+        pending: PendingFinalization,
+        terminal_charge: RetainedRecordCharge,
+    ) -> Result<DrainedPendingTerminal, Box<PendingTerminalDrainRefused>> {
+        let Some(expected_sequence) = self
+            .frontiers
+            .sequence()
+            .ledger()
+            .high_watermark()
+            .checked_add(1)
+        else {
+            return drain_refusal(self, LiveFrontierError::Frontier);
+        };
+        if terminal_charge.delivery_seq() != expected_sequence
+            || terminal_charge.admission_order() != pending.admission_order()
+            || terminal_charge.encoded_charge().entries != 1
+        {
+            return drain_refusal(self, LiveFrontierError::RetainedCharge);
+        }
+        if self
+            .retained_charges
+            .len()
+            .checked_add(1)
+            .and_then(|len| u64::try_from(len).ok())
+            .is_none()
+        {
+            return drain_refusal(self, LiveFrontierError::RetainedRecordLimit);
+        }
+        let Some(accounting) = accounting_after_rows(self.closure_accounting, &[terminal_charge])
+        else {
+            return drain_refusal(self, LiveFrontierError::ClosureAccounting);
+        };
+        let Self {
+            frontiers,
+            closure_accounting,
+            mut retained_charges,
+            retained_record_limit,
+        } = self;
+        let expected_owner = BindingTerminalOwner {
+            participant_index: pending.participant_id(),
+            binding_epoch: pending.binding_epoch(),
+        };
+        let (frontiers, record) = match frontiers
+            .drain_first_binding_terminal(expected_owner, pending.admission_order())
+        {
+            Ok(drained) => drained,
+            Err(failure) => {
+                let (frontiers, error) = *failure;
+                return drain_refusal(
+                    Self {
+                        frontiers,
+                        closure_accounting,
+                        retained_charges,
+                        retained_record_limit,
+                    },
+                    map_frontier_error(error),
+                );
+            }
+        };
+        retained_charges.push(terminal_charge);
+        let projection =
+            ObserverProgressProjection::new(pending.conversation_id(), record.delivery_seq);
+        Ok(DrainedPendingTerminal {
+            owner: Self {
+                frontiers,
+                closure_accounting: accounting,
+                retained_charges,
+                retained_record_limit,
+            },
+            projection,
+        })
+    }
+
     /// Retains this move-only owner and the exact recovery while its durable
     /// marker source row is read and validated.
     ///
@@ -425,6 +526,52 @@ impl LiveFrontierOwner {
             }
         }
     }
+}
+
+/// Complete atomic candidate-lane terminal drain commit.
+///
+/// The transitioned owner and the protocol-produced observer projection share
+/// one sealed predecessor and cannot be recombined from unrelated drains.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DrainedPendingTerminal {
+    owner: LiveFrontierOwner,
+    projection: ObserverProgressProjection,
+}
+
+impl DrainedPendingTerminal {
+    /// Consumes the atomic drain into its owner and exact typed projection.
+    #[must_use]
+    pub fn into_parts(self) -> (LiveFrontierOwner, ObserverProgressProjection) {
+        (self.owner, self.projection)
+    }
+}
+
+/// Failed candidate-lane terminal drain retaining the unchanged owner.
+#[derive(Debug, PartialEq, Eq)]
+pub struct PendingTerminalDrainRefused {
+    owner: LiveFrontierOwner,
+    error: LiveFrontierError,
+}
+
+impl PendingTerminalDrainRefused {
+    /// Returns the exact typed refusal.
+    #[must_use]
+    pub const fn error(&self) -> LiveFrontierError {
+        self.error
+    }
+
+    /// Recovers the unchanged complete owner.
+    #[must_use]
+    pub fn into_owner(self) -> LiveFrontierOwner {
+        self.owner
+    }
+}
+
+fn drain_refusal(
+    owner: LiveFrontierOwner,
+    error: LiveFrontierError,
+) -> Result<DrainedPendingTerminal, Box<PendingTerminalDrainRefused>> {
+    Err(Box::new(PendingTerminalDrainRefused { owner, error }))
 }
 
 /// Exact protocol-recomputed marker facts a durable source row must match.

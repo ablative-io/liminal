@@ -160,8 +160,18 @@ fn marker_drain_retry_accumulates_all_prefix_effects() -> Result<(), Box<dyn Err
         frontier,
         &[
             "RecordAdmissionDecision::DrainFirst",
-            "persist_next_marker(candidate, owner, appender, impact)",
+            "persist_drain_first(candidate, owner, appender, impact)",
             record_call,
+        ],
+    )?;
+    let terminal_drain = include_str!("ops_terminal_drain.rs");
+    assert_order(
+        terminal_drain,
+        &[
+            "ImmutableSequenceCandidate::Marker(_)",
+            "persist_next_marker(candidate, owner, appender, impact)",
+            "ImmutableSequenceCandidate::BindingTerminal { .. }",
+            "persist_terminal_drain(candidate, owner, appender, impact)",
         ],
     )?;
     assert_order(

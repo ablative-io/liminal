@@ -277,6 +277,13 @@ impl SocketFixture {
         Self::start_inner(data_dir, None, test_participant_config(), true)
     }
 
+    pub(in crate::server::participant::production) fn start_with_config(
+        data_dir: &Path,
+        config: ParticipantConfig,
+    ) -> Result<Self, Box<dyn Error>> {
+        Self::start_inner(data_dir, None, config, false)
+    }
+
     pub(in crate::server::participant::production) fn start_replay_gated(
         data_dir: &Path,
     ) -> Result<Self, Box<dyn Error>> {

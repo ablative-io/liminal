@@ -381,7 +381,7 @@ impl ConversationAuthority {
                     .map(|()| None),
                 _ => Err(OperationLogError::CorruptRow { sequence }.into()),
             },
-            StoredOperation::Died { row } => self.replay_died_source(&row, sequence).map(|()| None),
+            StoredOperation::Died { row } => self.replay_died_row(&row, sequence).map(|()| None),
             operation @ (StoredOperation::Ordinary { .. } | StoredOperation::Recovered { .. }) => {
                 self.replay_specific_fate(&operation, sequence)
                     .map(|()| None)
@@ -499,15 +499,19 @@ async fn validate_operation_schema_inner(
 /// the dispatcher. Explicit committed Detached and both specific classes route
 /// inside their shared core, exactly once.
 const fn route_in_replay_dispatch(operation: &StoredOperation) -> bool {
-    matches!(operation, StoredOperation::Died { .. })
-        || matches!(
-            operation,
-            StoredOperation::Detached {
-                row: StoredDetached {
-                    source: StoredDetachedSource::ConnectionClose { .. }
-                        | StoredDetachedSource::ExplicitRequestPending { .. },
-                    ..
-                }
+    matches!(
+        operation,
+        StoredOperation::Died {
+            row: super::log::StoredDied { drained: None, .. }
+        }
+    ) || matches!(
+        operation,
+        StoredOperation::Detached {
+            row: StoredDetached {
+                source: StoredDetachedSource::ConnectionClose { .. }
+                    | StoredDetachedSource::ExplicitRequestPending { .. },
+                ..
             }
-        )
+        }
+    )
 }

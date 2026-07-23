@@ -57,6 +57,7 @@ mod ops_leave;
 mod ops_nonzero_ack;
 mod ops_session;
 mod ops_session_replay;
+mod ops_terminal_drain;
 mod outbox;
 mod outbox_log;
 mod outbox_projection;
@@ -75,6 +76,8 @@ mod e2e_cold_tests;
 mod e2e_leave_commit_boundary;
 #[cfg(test)]
 mod e2e_leave_regression;
+#[cfg(test)]
+mod e2e_terminal_drain;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod e2e_tests;
@@ -134,6 +137,8 @@ mod tests_record_admission;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_residue;
+#[cfg(test)]
+mod tests_restore_window;
 #[cfg(test)]
 mod tests_unit2_layer1;
 #[cfg(test)]

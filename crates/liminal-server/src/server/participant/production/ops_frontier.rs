@@ -139,7 +139,7 @@ impl ConversationAuthority {
                     unchanged,
                     retained_record_limit,
                 );
-                self.persist_next_marker(candidate, owner, appender, impact)?;
+                self.persist_drain_first(candidate, owner, appender, impact)?;
                 self.apply_record_admission_with_impact(
                     &request,
                     operation_facts,

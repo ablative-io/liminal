@@ -64,6 +64,7 @@ fn died(cause: StoredDiedCause, disposition: StoredTerminalDisposition) -> Store
                 prior_binding_epoch: epoch(4),
                 marker_delivery_seq: 8,
             }),
+            drained: None,
         },
     }
 }

@@ -33,6 +33,7 @@ fn died(
             disposition,
             connection_intent_sequence: Some(3),
             specific_fate_intent: intent,
+            drained: None,
         },
     }
 }

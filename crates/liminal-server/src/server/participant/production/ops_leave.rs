@@ -419,7 +419,7 @@ impl ConversationAuthority {
         self.advance_log_head()
     }
 
-    fn select_leave_finalizer(
+    pub(super) fn select_leave_finalizer(
         &mut self,
         participant_id: u64,
     ) -> Result<Option<PendingFinalizerRoute>, StateError> {
