@@ -1,9 +1,9 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "e1edca0947f5aa8a0d74d7a4c9f49f2f54a16e2f",
-  "tree_sha": "fcafcb2987f2e28f3e605311c1e5fe7d8a7fd918",
-  "branch": "HEAD",
+  "commit_sha": "3f0d3843367e92ed60135edd57c3c5309c19d9a9",
+  "tree_sha": "59041c409668fa311e9df9e8b097c2b9b9395919",
+  "branch": "chore/beamr-0.16.1-trap-exit-spawn",
   "dirty": false,
   "untracked_count": 0,
   "toolchain": {
@@ -11,9 +11,9 @@
     "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
   },
   "host": "Annabels-MacBook-Pro.local",
-  "started_at": "2026-07-23T05:04:01Z",
-  "finished_at": "2026-07-23T05:13:08Z",
-  "duration_s": 547.246,
+  "started_at": "2026-07-23T06:03:17Z",
+  "finished_at": "2026-07-23T06:06:13Z",
+  "duration_s": 176.269,
   "concurrent_cargo_at_start": [],
   "legs": [
     {
@@ -21,7 +21,7 @@
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 2.014,
+      "duration_s": 1.786,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -32,9 +32,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 72.974,
+      "duration_s": 9.684,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "51395726e322f52f597c2ead8138187c8a95aabbcc2cebe3c06b8db3e0e1c257",
+      "log_sha256": "d09da460fbaa1efd2dc07db66931d02198a712c5fabef283379c96e4c8de2623",
       "tests": null,
       "failures": []
     },
@@ -43,9 +43,9 @@
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
       "exit": 0,
-      "duration_s": 472.255,
+      "duration_s": 164.795,
       "log": "gate-logs/tests.log",
-      "log_sha256": "59dffb38a40682ccce64ac7611dcb5b662afccdc5d5aa7b290db415ed06ba7a1",
+      "log_sha256": "d2d9124f16d99ea1f904fdcb563bca63dfd58e33087b30f08a3b07657f261717",
       "tests": {
         "suites": 40,
         "passed": 1762,
