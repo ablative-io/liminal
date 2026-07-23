@@ -381,12 +381,7 @@ impl ConversationAuthority {
                     .map(|()| None),
                 _ => Err(OperationLogError::CorruptRow { sequence }.into()),
             },
-            StoredOperation::Died { row } => if row.drained.is_some() {
-                self.replay_terminal_drain(&row, sequence)
-            } else {
-                self.replay_died_source(&row, sequence)
-            }
-            .map(|()| None),
+            StoredOperation::Died { row } => self.replay_died_row(&row, sequence).map(|()| None),
             operation @ (StoredOperation::Ordinary { .. } | StoredOperation::Recovered { .. }) => {
                 self.replay_specific_fate(&operation, sequence)
                     .map(|()| None)
@@ -510,13 +505,13 @@ const fn route_in_replay_dispatch(operation: &StoredOperation) -> bool {
             row: super::log::StoredDied { drained: None, .. }
         }
     ) || matches!(
-            operation,
-            StoredOperation::Detached {
-                row: StoredDetached {
-                    source: StoredDetachedSource::ConnectionClose { .. }
-                        | StoredDetachedSource::ExplicitRequestPending { .. },
-                    ..
-                }
+        operation,
+        StoredOperation::Detached {
+            row: StoredDetached {
+                source: StoredDetachedSource::ConnectionClose { .. }
+                    | StoredDetachedSource::ExplicitRequestPending { .. },
+                ..
             }
-        )
+        }
+    )
 }
