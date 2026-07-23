@@ -39,6 +39,9 @@ use liminal::protocol::{
     WorkerRegisterOutcome, WorkerRegistration, decode, encode, encoded_len,
 };
 
+use super::flush::{
+    FLUSH_BUDGET, FlushLedger, FlushMode, FlushOutcome, PublishRejection, PublishVerdict,
+};
 use crate::SdkError;
 
 /// Minimum protocol version this client advertises during the handshake.
@@ -124,6 +127,9 @@ pub struct PushClient {
     stop: Arc<AtomicBool>,
     /// Background reader handle, joined on drop.
     reader: Option<JoinHandle<()>>,
+    /// Publish/verdict accounting behind [`PushClient::flush`] and
+    /// [`PushClient::close`]; shared with every [`PushWriter`] clone.
+    ledger: Arc<FlushLedger>,
 }
 
 impl PushClient {
@@ -218,10 +224,21 @@ impl PushClient {
 
         let stop = Arc::new(AtomicBool::new(false));
         let (sender, inbound) = channel();
+        let (ledger, verdicts) = FlushLedger::new();
+        let ledger = Arc::new(ledger);
+        let reader_ledger = Arc::clone(&ledger);
         let reader_stop = Arc::clone(&stop);
         let reader = std::thread::Builder::new()
             .name("liminal-push-reader".to_string())
-            .spawn(move || run_reader(read_stream, &sender, &reader_stop))
+            .spawn(move || {
+                run_reader(
+                    read_stream,
+                    &sender,
+                    &verdicts,
+                    &reader_ledger,
+                    &reader_stop,
+                );
+            })
             .map_err(|source| SdkError::Protocol {
                 description: format!("failed to start push reader thread: {source}"),
             })?;
@@ -231,6 +248,7 @@ impl PushClient {
             inbound,
             stop,
             reader: Some(reader),
+            ledger,
         })
     }
 
@@ -284,6 +302,7 @@ impl PushClient {
     pub fn writer_handle(&self) -> PushWriter {
         PushWriter {
             writer: Arc::clone(&self.writer),
+            ledger: Arc::clone(&self.ledger),
         }
     }
 
@@ -300,6 +319,78 @@ impl PushClient {
     pub fn publish(&self, channel: &str, payload: Vec<u8>) -> Result<(), SdkError> {
         self.writer_handle().publish(channel, payload)
     }
+
+    /// Awaits the server's verdict for every response-eliciting publish
+    /// written to this connection before the call, bounded by a single
+    /// wall-clock budget (5 s, in the spirit of [`DROP_DRAIN_BUDGET`]) — a
+    /// deadline'd blocking channel receive, never a poll loop.
+    ///
+    /// Publishes to the reserved [`OBSERVABILITY_CHANNEL`] elicit no server
+    /// response by design and are excluded from the flush contract. Responses
+    /// are paired to publishes by FIFO wire order (there is no correlation id
+    /// on the wire), and rejections are returned verbatim in
+    /// [`FlushOutcome::failures`].
+    ///
+    /// `failures.is_empty() && unresolved == 0` is the ONLY proven-accepted
+    /// shape. **Budget expiry with unresolved publishes is a NORMAL outcome
+    /// the caller must inspect ([`FlushOutcome::unresolved`]), never an
+    /// `Err`.** A `flush()` never half-closes the socket — the client stays
+    /// fully usable — so its [`FlushOutcome::mode`] is always
+    /// [`FlushMode::VerdictOnly`]; [`FlushMode::FlushedAndHalfClosed`] can
+    /// only be produced by [`PushClient::close`]. Concurrent flushes
+    /// serialize: a second flush waits on the flush guard, then covers only
+    /// its own write-boundary. A [`Frame::PublishAck`] proves server
+    /// acceptance, never delivery to any subscriber.
+    ///
+    /// # Errors
+    ///
+    /// The outer `Err` is reserved for failures of the flush mechanism
+    /// itself: [`SdkError::Connection`] when the flush guard is poisoned, and
+    /// [`SdkError::Protocol`] when more publish responses arrived than
+    /// response-eliciting publishes were written (a broken pairing invariant
+    /// — the flush fails loudly rather than ever mispairing a verdict).
+    pub fn flush(&self) -> Result<FlushOutcome, SdkError> {
+        let (failures, unresolved) = self.ledger.drain(FLUSH_BUDGET)?;
+        Ok(FlushOutcome::new(
+            failures,
+            unresolved,
+            FlushMode::VerdictOnly,
+        ))
+    }
+
+    /// Flush-then-graceful-close: runs [`PushClient::flush`], then tears the
+    /// connection down the way `Drop` does — so the caller learns the verdict
+    /// of every in-flight publish BEFORE the socket goes away, which `Drop`
+    /// structurally cannot report.
+    ///
+    /// As sole owner of the socket the teardown half-closes gracefully (FIN,
+    /// then drain to the server's FIN) and the outcome's mode is
+    /// [`FlushMode::FlushedAndHalfClosed`]. When a live [`PushWriter`] clone
+    /// still shares the socket a write-half shutdown would break the clone's
+    /// publishes, so close collects verdicts only — no FIN — and discloses
+    /// the degradation as [`FlushMode::VerdictOnly`]; a caller that needs the
+    /// FIN guarantee drops the clones first.
+    ///
+    /// # Errors
+    ///
+    /// Exactly [`PushClient::flush`]'s mechanism errors; the teardown itself
+    /// is best-effort and silent, as on `Drop`.
+    pub fn close(self) -> Result<FlushOutcome, SdkError> {
+        let (failures, unresolved) = self.ledger.drain(FLUSH_BUDGET)?;
+        // Sole owner iff no live `PushWriter` clone shares the write half (the
+        // reader thread holds a raw cloned stream, not this `Arc`).
+        let mode = if Arc::strong_count(&self.writer) == 1 {
+            FlushMode::FlushedAndHalfClosed
+        } else {
+            FlushMode::VerdictOnly
+        };
+        // `Drop` performs the graceful teardown this mode discloses: stop and
+        // join the reader, then drain pending acks — with a write-half FIN as
+        // sole owner, or a bounded best-effort drain (no FIN) over a shared
+        // socket.
+        drop(self);
+        Ok(FlushOutcome::new(failures, unresolved, mode))
+    }
 }
 
 /// A cheap clone of a [`PushClient`]'s write half.
@@ -311,6 +402,9 @@ impl PushClient {
 #[derive(Clone, Debug)]
 pub struct PushWriter {
     writer: Arc<Mutex<TcpStream>>,
+    /// Shared flush accounting: publishes this clone writes are counted so the
+    /// originating client's [`PushClient::flush`] covers them too.
+    ledger: Arc<FlushLedger>,
 }
 
 impl PushWriter {
@@ -338,7 +432,15 @@ impl PushWriter {
         let mut writer = self.writer.lock().map_err(|error| SdkError::Connection {
             description: format!("push writer lock poisoned: {error}"),
         })?;
-        write_frame(&mut writer, &frame)
+        write_frame(&mut writer, &frame)?;
+        // Count the publish for the flush contract while still holding the
+        // writer lock, so the count follows wire order. Publishes to the
+        // reserved observability channel elicit no server response by design
+        // and stay OUT of the flush contract.
+        if channel != OBSERVABILITY_CHANNEL {
+            self.ledger.record_written();
+        }
+        Ok(())
     }
 
     /// Send a correlated reply to a server push on the shared connection, echoing the
@@ -546,12 +648,20 @@ fn handshake(stream: &mut TcpStream, auth_token: &[u8]) -> Result<(), SdkError> 
     }
 }
 
-/// Background loop: drains the socket, surfacing each `Push` frame on `sender`.
+/// Background loop: drains the socket, surfacing each `Push` frame on `sender`
+/// and each publish verdict (`PublishAck`/`PublishError`) on `verdicts` in wire
+/// order for the flush contract.
 ///
 /// Returns (ending the thread) when the stop flag is set, the connection closes,
 /// or a fatal decode/IO error occurs. A read timeout is non-fatal: it just lets
 /// the loop re-check the stop flag.
-fn run_reader(mut stream: TcpStream, sender: &Sender<PushedFrame>, stop: &AtomicBool) {
+fn run_reader(
+    mut stream: TcpStream,
+    sender: &Sender<PushedFrame>,
+    verdicts: &Sender<PublishVerdict>,
+    ledger: &FlushLedger,
+    stop: &AtomicBool,
+) {
     let mut buffer = Vec::new();
     while !stop.load(Ordering::SeqCst) {
         match next_frame(&mut stream, &mut buffer) {
@@ -572,7 +682,26 @@ fn run_reader(mut stream: TcpStream, sender: &Sender<PushedFrame>, stop: &Atomic
                     return;
                 }
             }
-            // `Some(_)`: any non-Push frame on a push connection is unexpected for
+            // The server's per-publish verdicts: captured and forwarded in wire
+            // order (never discarded — they are what `flush()` awaits).
+            Ok(Some(Frame::PublishAck { .. })) => {
+                if verdicts.send(PublishVerdict::Accepted).is_err() {
+                    return;
+                }
+                ledger.record_arrival();
+            }
+            Ok(Some(Frame::PublishError {
+                reason_code,
+                message,
+                ..
+            })) => {
+                let rejection = PublishRejection::new(reason_code, message);
+                if verdicts.send(PublishVerdict::Rejected(rejection)).is_err() {
+                    return;
+                }
+                ledger.record_arrival();
+            }
+            // `Some(_)`: any other frame on a push connection is unexpected for
             // this spike — ignore it rather than tearing the reader down so a stray
             // frame cannot silently drop subsequent pushes. `None`: a read timeout
             // with no complete frame. Both just loop to re-check the stop flag.
@@ -702,63 +831,5 @@ fn protocol_error(error: &ProtocolError) -> SdkError {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use liminal::protocol::FrameType;
-
-    #[test]
-    fn pushed_frame_exposes_correlation_and_payload() {
-        let frame = PushedFrame {
-            correlation_id: 7,
-            payload: vec![1, 2, 3],
-        };
-        assert_eq!(frame.correlation_id(), 7);
-        assert_eq!(frame.payload(), &[1, 2, 3]);
-        assert_eq!(frame.into_payload(), vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn publish_frame_round_trips_through_codec() -> Result<(), SdkError> {
-        // The observability publish frame the drain leg writes: a Publish on the
-        // reserved channel carrying opaque payload bytes verbatim.
-        let envelope = MessageEnvelope::new(
-            SchemaId::new([0_u8; SchemaId::WIRE_LEN]),
-            CausalContext::independent(),
-            vec![9, 9, 9],
-        );
-        let frame = Frame::new_publish(APPLICATION_STREAM_ID, OBSERVABILITY_CHANNEL, envelope)
-            .map_err(|error| protocol_error(&error))?;
-        let len = encoded_len(&frame).map_err(|error| protocol_error(&error))?;
-        let mut bytes = vec![0_u8; len];
-        let written = encode(&frame, &mut bytes).map_err(|error| protocol_error(&error))?;
-        let (decoded, consumed) =
-            decode(&bytes[..written]).map_err(|error| protocol_error(&error))?;
-        assert_eq!(consumed, written);
-        assert_eq!(decoded.frame_type(), FrameType::Publish);
-        let Frame::Publish {
-            channel, envelope, ..
-        } = decoded
-        else {
-            return Err(SdkError::Protocol {
-                description: "expected a Publish frame".to_string(),
-            });
-        };
-        assert_eq!(channel, OBSERVABILITY_CHANNEL);
-        assert_eq!(envelope.payload, vec![9, 9, 9]);
-        Ok(())
-    }
-
-    #[test]
-    fn reply_frame_round_trips_through_codec() -> Result<(), SdkError> {
-        let frame = Frame::new_push_reply(APPLICATION_STREAM_ID, 9, vec![4, 5])
-            .map_err(|error| protocol_error(&error))?;
-        let len = encoded_len(&frame).map_err(|error| protocol_error(&error))?;
-        let mut bytes = vec![0_u8; len];
-        let written = encode(&frame, &mut bytes).map_err(|error| protocol_error(&error))?;
-        let (decoded, consumed) =
-            decode(&bytes[..written]).map_err(|error| protocol_error(&error))?;
-        assert_eq!(consumed, written);
-        assert_eq!(decoded.frame_type(), FrameType::PushReply);
-        Ok(())
-    }
-}
+#[path = "push_client_tests.rs"]
+mod tests;

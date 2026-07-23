@@ -23,9 +23,9 @@ pub use error::SdkError;
 pub use pressure::{DeliveryAck, PressureResponse};
 #[cfg(feature = "std")]
 pub use remote::{
-    DeliveredMessage, OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame,
-    SubscriptionStream, WebSocketDeliveredMessage, WebSocketRemoteTransport,
-    WebSocketSubscriptionStream,
+    DeliveredMessage, FlushMode, FlushOutcome, OBSERVABILITY_CHANNEL, PublishRejection, PushClient,
+    PushWriter, PushedFrame, SubscriptionStream, WebSocketDeliveredMessage,
+    WebSocketRemoteTransport, WebSocketSubscriptionStream,
 };
 pub use remote::{
     ParticipantResponseProvenance, ParticipantResumeStore, RemoteChannelHandle, RemoteConfig,

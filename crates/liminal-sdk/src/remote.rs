@@ -8,8 +8,8 @@ pub mod websocket;
 
 #[cfg(feature = "std")]
 pub use tcp::{
-    DeliveredMessage, OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame,
-    SubscriptionStream, TcpRemoteTransport,
+    DeliveredMessage, FlushMode, FlushOutcome, OBSERVABILITY_CHANNEL, PublishRejection, PushClient,
+    PushWriter, PushedFrame, SubscriptionStream, TcpRemoteTransport,
 };
 #[cfg(feature = "std")]
 pub use websocket::{
