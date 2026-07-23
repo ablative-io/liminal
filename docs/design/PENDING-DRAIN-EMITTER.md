@@ -1,13 +1,16 @@
 # PENDING-DRAIN-EMITTER — candidate-lane terminal drain + production ProcessKilled emitter
 
-Revision: r1 (proposed-pending-tear — every decision in this document, without
+Revision: r2 (proposed-pending-tear — every decision in this document, without
 exception, is `proposed-pending-tear`; nothing here is authorized for build
 until the tear seat rules on it)
 
 Base: main `14032ca` (liminal-server 0.3.3 + liminal-sdk 0.3.3). All liminal
 file:line pins below were re-verified at that commit. Branch pins name their
 branch and commit explicitly. Beamr pins were re-verified at the local beamr
-checkout `fd71c5e` (crate `beamr` version 0.16.0, `crates/beamr/Cargo.toml:3`).
+checkout `fd71c5e` (crate `beamr` version 0.16.0, `crates/beamr/Cargo.toml:3`);
+the published 0.16.0 release lineage commit is `5ebf94d`, an ancestor of that
+checkout, and pins quoted from Artemis's records were additionally checked at
+`5ebf94d` where local paths have since moved.
 
 ## 1. Scope
 
@@ -188,14 +191,23 @@ incarnations.
 
 ### 4.2 Beamr 0.16.0 facts
 
-> **Citation of record: pinned pending Artemis's §14 trigger-check post.** Her
-> forwarded findings slot in here as the authoritative citation when they
-> arrive. The pins below are this worker's local re-verification at beamr
-> checkout `fd71c5e` (crate 0.16.0) and support the design but do not
-> substitute for her post. Vesper's four-signature exit surface may already
-> satisfy §14's trigger; her post decides.
+> **Citation of record:** Artemis Peach, stack-devs channel, 2026-07-23
+> ~02:15Z, "ASK-4 BEAMR SIZING ANSWER". Tear-seat ruled: this sizing record IS
+> the §14 citation of record; no separate trigger-check post is coming. Its
+> substance: `subscribe_exit_events` (`execution.rs:213`) returns a bounded
+> single-subscriber `ExitEventSubscription`, single subscription per scheduler
+> lifetime (set-once/OnceLock sender); `ExitEvent::Exited { pid, reason:
+> ExitReason }` (`exit_events.rs:22-30`); the outcome is published BEFORE the
+> event, so an immediate `take_exit_outcome(pid)` yields the exact
+> `(ExitReason, OwnedTerm)` pair (`execution.rs:194`); the publisher is
+> `try_send` on a bounded queue (`exit_events.rs:157`) of capacity 1,024,
+> overflow → `Lagged` marker with the documented
+> drain-then-`take_exit_outcome` recovery, no outcome discarded — all
+> ancestor-verified into the published 0.16.0 release lineage (`5ebf94d`).
+> Her record is the authority; the pins below are this worker's local
+> corroboration at checkout `fd71c5e` and match it.
 
-Re-verified locally (paths under `crates/beamr/src/scheduler/`):
+Corroborated locally (paths under `crates/beamr/src/scheduler/`):
 
 - `Scheduler::subscribe_exit_events` (`execution.rs:213`) returns a bounded
   **single-subscriber** `ExitEventSubscription` — "Exactly one subscription can
@@ -218,8 +230,11 @@ Re-verified locally (paths under `crates/beamr/src/scheduler/`):
 
 - **Entry semantics.** On `Exited { pid, reason }` for a pid mapped to a live
   binding incarnation, the adapter immediately calls `take_exit_outcome(pid)`
-  for the exact pair, opens **one bounded intent**, and appends the
-  ProcessKilled Died-source row **once** — with disposition `Pending`. That is,
+  for the exact pair and applies the **ExitReason entry filter** (below, row
+  S-15). Only a filter-selected reason opens **one bounded intent** and appends
+  the ProcessKilled Died-source row **once** — with disposition `Pending`; a
+  non-entering reason consumes the outcome and cleans the pid map, nothing
+  more. For entering reasons, that is,
   the emitter **widens the `PendingFinalization(Died)` entry set**; it does not
   finalize. Finalization flows through the existing finalizers or the §3 drain,
   and thus through `record_terminal_impact` (`connection_fate.rs:312`)
@@ -234,6 +249,43 @@ Re-verified locally (paths under `crates/beamr/src/scheduler/`):
 - **Driver.** The adapter is TOLD by beamr's event delivery (blocking recv on
   the bounded channel). No polling anywhere in the path (§7).
 
+**The ExitReason taxonomy** (source: Artemis Peach, stack-devs channel,
+2026-07-23 ~04:15Z taxonomy delta; her pins at published 0.16.0 bytes,
+corroborated locally): `ExitReason` is a CLOSED six-variant `Copy` enum with no
+payload (`crates/beamr/src/process/types.rs:229-243`): `Normal`, `Kill`,
+`Killed`, `Error`, `NoConnection`, `NoProc`; `exit_reason_from_term` rejects
+any non-six atom as badarg (`crates/beamr/src/native/process_bifs/mod.rs:348-359`).
+Partition:
+
+- `Killed` — THE forced-exit terminal. The `Kill` → `Killed` conversion is
+  centralized in `link::terminal_reason`
+  (`crates/beamr/src/supervision/link.rs:159-164`) and applied before
+  `terminate()` at every site — `Killed` is what the event carries.
+- `Kill` — signal vocabulary; should never appear on an event, but treated as
+  forced-if-ever-observed (defense, not a reachability claim — no
+  `unreachable!()`).
+- `Normal` — normal completion.
+- `Error` — crash class ("Placeholder error exit until error terms land",
+  `process/types.rs:236`), plus two defensive producers:
+  `exit_reason_from_status` (`scheduler/execution/core.rs:1625-1630` at
+  `5ebf94d`; the non-`Exited` arm yields `Error`) and the VM-failure path at
+  `scheduler/timer_integration.rs:82`.
+- `NoConnection` / `NoProc` — distribution vocabulary that can become a local
+  terminal reason via an untrapped link signal.
+
+**The entry filter (row S-15).** The emitter selects ProcessKilled for
+`Killed`, and for `Kill` defensively (forced-if-ever-observed); `Normal`,
+`Error`, `NoConnection`, `NoProc` DO NOT enter the emitter — each named
+explicitly in a TOTAL match over all six variants with NO wildcard arm.
+Rationale (coverage-table discipline): when upstream widens the taxonomy —
+`Error` is a self-declared placeholder — the filter breaks compilation instead
+of silently misclassifying. Crash-class deaths (`Error`) and
+distribution-caused deaths (`NoConnection`/`NoProc`) are DELIBERATELY not
+absorbed into ProcessKilled — "exact forced exit" means exact (§14 oracle
+floor); until a crash-exit emitter earns its own seam row (§8.3), those deaths
+surface exactly as they do today (connection-fate/finalizers) — no regression,
+no new claim.
+
 ### 4.4 pid-reuse ABA — stated and pinned (row S-6)
 
 Hazard: a stale pid → incarnation map entry misattributes an exit — either an
@@ -242,9 +294,11 @@ mapping for an already-finalized incarnation swallows a fresh exit.
 
 Designed closure — **remove-on-exit-delivery**, plus insert hygiene:
 
-- Consuming an exit for pid P (including during Lagged recovery) removes P's
-  map entry in the same adapter step: one delivered exit consumes exactly one
-  mapping; a second event for P cannot re-select the dead incarnation.
+- Consuming an exit for pid P (including during Lagged recovery, and
+  regardless of the S-15 entry-filter outcome) removes P's map entry in the
+  same adapter step: one delivered exit consumes exactly one mapping; a second
+  event for P cannot re-select the dead incarnation. Map hygiene is
+  independent of whether the reason entered the emitter.
 - Insert at spawn/attach asserts vacancy. If P is occupied, the adapter first
   resolves the old entry via `take_exit_outcome(P)` (retained-until-consumed
   makes this total), appends its pending terminal, removes it, then inserts —
@@ -258,8 +312,28 @@ Specified pin: an adapter-level test that delivers exit(P) for incarnation I1,
 re-maps P to incarnation I2, delivers exit(P) again, and asserts I1 gained
 exactly one ProcessKilled append (append-once), I2's exit attributes to I2
 only, and the occupied-insert path performs resolve-then-insert. Adapter-level
-because pid reuse cannot be forced from liminal; if Artemis's post proves pids
-never recur, the pin still stands as map-hygiene coverage.
+because pid reuse cannot be forced from liminal; if beamr pids are ever proven
+never to recur, the pin still stands as map-hygiene coverage.
+
+### 4.5 Attribution and losslessness limits (design-grade caveats)
+
+1. **Attribution is BY-REASON, not by-mechanism.** `exit(Pid, killed)` is
+   expressible as a trappable signal, so an untrapped `killed` atom terminates
+   the target with `Killed` absent any true kill (same as OTP). The emitter
+   attributes the REASON the exit carries, not forensic provenance of who or
+   what produced it — stated explicitly as a limit of this design.
+2. **Losslessness.** At variant level, yes: the sole designed collapse is
+   `Kill` → `Killed` in `link::terminal_reason`
+   (`supervision/link.rs:159-164`). WITHIN `Error`, no: the `OwnedTerm` from
+   `take_exit_outcome` is the captured final-result term
+   (`scheduler/mod.rs:741-760`, NIL default), not a reason encoding; crash
+   detail lives in the companion stores `take_exit_error` /
+   `take_exit_exception` (`execution.rs:185-197` per Artemis's record; locally
+   the independence contract is documented at `execution.rs:189-193` with
+   `take_exit_error` at `:221-223`), each consumable without consuming the
+   outcome. The entry filter needs only the variant; the companions are noted
+   in case sub-`Error` attribution ever matters — it does not in this design,
+   because `Error` does not enter.
 
 ## 5. The five banked brief obligations
 
@@ -297,10 +371,12 @@ interface commitment only, not built here (§8).
 **(d) Lagged handling is MANDATORY adapter logic.** Capacity is 1,024
 (`exit_events.rs:18`). On observing `ExitEvent::Lagged` (`exit_events.rs:37`)
 the adapter performs the documented recovery: drain the marker, then call
-`take_exit_outcome(pid)` for every pid it currently tracks in the map,
-appending pending terminals for each recovered exit (append-once per
-incarnation preserved by remove-on-exit-delivery). No outcome is discarded by
-beamr, so recovery is total (row S-7).
+`take_exit_outcome(pid)` for every pid it currently tracks in the map. Every
+recovered exit passes the same S-15 entry filter: entering reasons append
+their pending terminal (append-once per incarnation preserved by
+remove-on-exit-delivery); non-entering reasons consume the outcome and clean
+the map only. No outcome is discarded by beamr, so recovery is total
+(row S-7).
 
 **(e) pid-reuse ABA.** Stated and pinned in §4.4 (row S-6).
 
@@ -308,7 +384,8 @@ beamr, so recovery is total (row S-7).
 
 - §14 oracle floor: exact forced process exit opens ONE bounded intent and
   appends ProcessKilled ONCE; other classes cannot select it; live/cold agree
-  (`W1B-FATE-SOURCES.md:1132`).
+  (`W1B-FATE-SOURCES.md:1132`). "Exact forced" is enforced at entry by the
+  S-15 ExitReason filter (§4.3).
 - Trybuild wall `production_connection_fate_cannot_select_process_killed`
   stays (`tests_w1b_connection_fate.rs:422`).
 - The crash repository stays TEST-ONLY.
@@ -339,11 +416,14 @@ that (see §8).
    `W1B-FATE-SOURCES.md:1133`): a pending terminal that no traffic ever
    touches is finalized only by Leave/attach/drain-on-publish. No sweeper is
    added, by law.
-2. **Beamr pid-reuse ground truth** is not established here; §4.4's closure is
-   designed defensively and pinned at the adapter level. Artemis's post is the
-   citation of record.
-3. **Artemis's §14 trigger-check post** had not arrived at r1 commit; §4.2 is
-   pinned pending it, on worker-local byte re-verification only.
+2. **Beamr pid-reuse ground truth** is not established here and is not
+   addressed by either cited Artemis record; §4.4's closure is designed
+   defensively and pinned at the adapter level.
+3. **A crash-exit emitter** (`Error`-class deaths, and any
+   `NoConnection`/`NoProc` absorption) would be its own future seam with its
+   own row — named here as EXCLUDED under no-row-no-dormancy, not implicitly
+   deferred. Until such a row exists, those deaths surface exactly as they do
+   today (connection-fate/finalizers): no regression, no new claim.
 4. **The behind-the-adapter multiplex** (obligation (c)) is an interface
    commitment, not a built facility.
 5. **Exact refusal-vs-commit behavior for publishes racing a concurrent
@@ -363,15 +443,16 @@ that (see §8).
 | S-3 | The drain is a sibling terminal path beside `persist_next_marker` in the existing DrainFirst arm; `drain_next_marker` stays structurally marker-only; no new frontier decision variant | proposed-pending-tear |
 | S-4 | Lane closure requires the live cold-restart SOCKET pin of §3.5 (real unclean restart, live-socket publish, client-observed post-drain commit, server keeps serving) | proposed-pending-tear |
 | S-5 | The liminal embedding's adapter claims beamr's single exit-event subscription; all other liminal-side consumers multiplex behind the adapter | proposed-pending-tear |
-| S-6 | pid → binding-incarnation map lives in the adapter (pid-correlatable-at-delivery); remove-on-exit-delivery + resolve-before-occupied-insert closes the pid-reuse ABA; adapter-level pin per §4.4 | proposed-pending-tear |
-| S-7 | Lagged handling is mandatory adapter logic: drain marker, then `take_exit_outcome` over all tracked pids; capacity 1,024 | proposed-pending-tear |
+| S-6 | pid → binding-incarnation map lives in the adapter (pid-correlatable-at-delivery); remove-on-exit-delivery (regardless of S-15 entry-filter outcome) + resolve-before-occupied-insert closes the pid-reuse ABA; adapter-level pin per §4.4 | proposed-pending-tear |
+| S-7 | Lagged handling is mandatory adapter logic: drain marker, then `take_exit_outcome` over all tracked pids, each recovered exit passing the S-15 entry filter; capacity 1,024 | proposed-pending-tear |
 | S-8 | The emitter only WIDENS the `PendingFinalization(Died)` entry set (append-once pending row); finalization is exclusively existing finalizers + the S-1 drain, all through `record_terminal_impact`; `produced`/parking untouched with the §5(b) pinning tests as witness | proposed-pending-tear |
 | S-9 | Sequencing: the drain builds FIRST and is standalone-buildable (closes the red-pinned defect with zero beamr dependency); the emitter follows, hard-gated behind the landed drain + Artemis's sizing — an emitter without the drain widens a live tear and is forbidden | proposed-pending-tear |
 | S-10 | ProcessKilled stays a DISTINCT additive intent; the trybuild wall stays; the emitter is its sole selector and selects nothing else | proposed-pending-tear |
 | S-11 | Crash repository stays test-only; no production dependency introduced by either half | proposed-pending-tear |
 | S-12 | No frame dependency is claimed anywhere (F-3a premise dead); the emitter's value claim is actor-granular death in a live VM, socket never drops | proposed-pending-tear |
-| S-13 | Emitter pacing: gated behind restore-window lane and Artemis's beamr exit-event sizing, at her pacing; §4.2 citation of record is her forthcoming trigger-check post | proposed-pending-tear |
+| S-13 | Emitter pacing: gated behind restore-window lane and Artemis's beamr exit-event sizing, at her pacing; §4.2 citation of record is her ~02:15Z "ASK-4 BEAMR SIZING ANSWER" record (tear-seat ruled; no separate trigger-check post) | proposed-pending-tear |
 | S-14 | Semver: drain = server-only defect-class behavior change (tear → commit), no wire schema change, no protocol/SDK bump — server minor class. Emitter = additive wire vocabulary (new Died/terminal cause variant visible in projections) — protocol additive minor + server minor, SDK decode addition; exact spelling deferred to build (§8.6) | proposed-pending-tear |
+| S-15 | ExitReason entry filter: the emitter selects ProcessKilled for `Killed`, and for `Kill` defensively (forced-if-ever-observed); `Normal`, `Error`, `NoConnection`, `NoProc` DO NOT enter the emitter — each named explicitly in a TOTAL match over all six variants with NO wildcard arm, so an upstream taxonomy widening (`Error` is a self-declared placeholder) breaks compilation instead of silently misclassifying; non-entering exits still consume the outcome and clean the pid map | proposed-pending-tear |
 
 ## 10. Semver / compatibility detail for S-14
 
@@ -392,3 +473,4 @@ that (see §8).
 | rev | date (UTC) | change |
 |---|---|---|
 | r1 | 2026-07-23 | Initial unified design: candidate-lane terminal drain + ProcessKilled emitter; all decisions proposed-pending-tear; §4.2 pinned pending Artemis's trigger-check post |
+| r2 | 2026-07-23 | §4.2 citation of record + ExitReason entry filter per Artemis's taxonomy delta; filter proposed Killed\|Kill→ProcessKilled, others never |
