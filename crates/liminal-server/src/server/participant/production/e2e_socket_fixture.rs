@@ -744,6 +744,18 @@ impl SocketPeer {
         self.client.shutdown(Shutdown::Both).map_err(Into::into)
     }
 
+    /// Sends the core protocol's clean `Disconnect` bow-out — the clean-close
+    /// analog of [`Self::shutdown_transport`]'s abrupt FIN — driving the
+    /// server's `CleanDisconnect` connection fate for this connection.
+    pub(in crate::server::participant::production) fn disconnect(
+        &mut self,
+    ) -> Result<(), Box<dyn Error>> {
+        self.client
+            .write_all(&encode_frame(&Frame::Disconnect { flags: 0 })?)?;
+        self.client.flush()?;
+        Ok(())
+    }
+
     pub(in crate::server::participant::production) fn read_push(
         &mut self,
     ) -> Result<ServerPush, Box<dyn Error>> {
