@@ -1,9 +1,9 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "112f17c53c71dfab4b2e98112dd5375a3bee9fd7",
-  "tree_sha": "0f394473cab34621afc1fdd453a3c77ef66e337e",
-  "branch": "fix/toctou-register-record",
+  "commit_sha": "842e267f6f946511b1b7e7a200f3523a8eff903f",
+  "tree_sha": "3a25d8fc523222aff0634fca328800ed4cbbb97f",
+  "branch": "fix/pending-terminal-drain",
   "dirty": false,
   "untracked_count": 0,
   "toolchain": {
@@ -11,22 +11,17 @@
     "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
   },
   "host": "Annabels-MacBook-Pro.local",
-  "started_at": "2026-07-23T04:16:02Z",
-  "finished_at": "2026-07-23T04:24:11Z",
-  "duration_s": 488.547,
-  "concurrent_cargo_at_start": [
-    "9793 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
-    "10795 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
-    "27400 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
-    "30971 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace"
-  ],
+  "started_at": "2026-07-23T05:50:34Z",
+  "finished_at": "2026-07-23T05:52:57Z",
+  "duration_s": 142.497,
+  "concurrent_cargo_at_start": [],
   "legs": [
     {
       "name": "fmt",
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 1.805,
+      "duration_s": 1.751,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -37,9 +32,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 39.909,
+      "duration_s": 9.113,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "fcedd59d98ed28917ec7258703288111cea51330b39a91ac6a92472fc1399e5d",
+      "log_sha256": "9cd16c9bb2f9c70637e59115f3b6e81833da6487833db9aa1fe6ab6168aff4e8",
       "tests": null,
       "failures": []
     },
@@ -48,12 +43,12 @@
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
       "exit": 0,
-      "duration_s": 446.828,
+      "duration_s": 131.63,
       "log": "gate-logs/tests.log",
-      "log_sha256": "5977aafd9b5a48d859cc9239f7bab08107905e19f82e33a41fe1e9da2d2a1758",
+      "log_sha256": "5e9287b58a02d153b3190ee39cc571089221843f729dc45412f66e7f47dedbd6",
       "tests": {
         "suites": 40,
-        "passed": 1762,
+        "passed": 1767,
         "failed": 0
       },
       "failures": []
