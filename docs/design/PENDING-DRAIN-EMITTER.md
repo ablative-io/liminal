@@ -1,8 +1,9 @@
 # PENDING-DRAIN-EMITTER — candidate-lane terminal drain + production ProcessKilled emitter
 
-Revision: r2 (proposed-pending-tear — every decision in this document, without
-exception, is `proposed-pending-tear`; nothing here is authorized for build
-until the tear seat rules on it)
+Revision: r3 (TORN 2026-07-23 — the tear seat APPROVED all fifteen sockets with
+one must-fold, folded here as the §4.4 consumed-exit invariant; the drain build
+(S-1/S-2/S-3/S-4 scope) is AUTHORIZED on this fold, spot-verified at the build
+candidate's tear; the emitter stays hard-gated per S-9/S-13)
 
 Base: main `14032ca` (liminal-server 0.3.3 + liminal-sdk 0.3.3). All liminal
 file:line pins below were re-verified at that commit. Branch pins name their
@@ -292,7 +293,11 @@ Hazard: a stale pid → incarnation map entry misattributes an exit — either a
 old process's late exit lands on a newer incarnation that reused the pid, or a
 mapping for an already-finalized incarnation swallows a fresh exit.
 
-Designed closure — **remove-on-exit-delivery**, plus insert hygiene:
+Designed closure — **remove-on-exit-delivery**, plus insert hygiene, both
+governed by the consumed-exit invariant (tear fold T1, r3): **EVERY consumed
+exit — event-delivered, Lagged-recovered, or occupied-insert-resolved — passes
+the S-15 entry filter; entering reasons append once, non-entering reasons
+consume the outcome and clean the map, no exception.**
 
 - Consuming an exit for pid P (including during Lagged recovery, and
   regardless of the S-15 entry-filter outcome) removes P's map entry in the
@@ -301,9 +306,11 @@ Designed closure — **remove-on-exit-delivery**, plus insert hygiene:
   independent of whether the reason entered the emitter.
 - Insert at spawn/attach asserts vacancy. If P is occupied, the adapter first
   resolves the old entry via `take_exit_outcome(P)` (retained-until-consumed
-  makes this total), appends its pending terminal, removes it, then inserts —
-  never a silent replace (the TOCTOU `Registry::insert` cousin fenced in beamr
-  0.15.4 is the anti-pattern).
+  makes this total), passes the resolved reason through the S-15 filter per
+  the consumed-exit invariant above (a stale `Normal` exit consumes-and-cleans,
+  never mints ProcessKilled; entering reasons append their pending terminal
+  once), removes the entry, then inserts — never a silent replace (the TOCTOU
+  `Registry::insert` cousin fenced in beamr 0.15.4 is the anti-pattern).
 - This is a designed candidate closure, **not an assumption** that beamr never
   reuses pids; whether beamr pids can in fact recur is left to Artemis's post
   (§8).
@@ -438,21 +445,21 @@ that (see §8).
 
 | id | decision | status |
 |---|---|---|
-| S-1 | Typed-refuse is dead; the fix is the R-A2 candidate-lane terminal drain: on `DrainFirst` selecting a `BindingTerminal`, drain it (terminal append + retention transition + candidate deletion + slot release, one durable transaction per candidate, strictly by `admission_order`, completion via `record_terminal_impact`), then proceed to caller admission | proposed-pending-tear |
-| S-2 | Redrawn pin: the pinned scenario's publish COMMITS after the drain; repro half kept verbatim; assertion set per §3.4 (commit, no close, one terminal append, slot released, victim excluded from recipients, replay clean) | proposed-pending-tear |
-| S-3 | The drain is a sibling terminal path beside `persist_next_marker` in the existing DrainFirst arm; `drain_next_marker` stays structurally marker-only; no new frontier decision variant | proposed-pending-tear |
-| S-4 | Lane closure requires the live cold-restart SOCKET pin of §3.5 (real unclean restart, live-socket publish, client-observed post-drain commit, server keeps serving) | proposed-pending-tear |
-| S-5 | The liminal embedding's adapter claims beamr's single exit-event subscription; all other liminal-side consumers multiplex behind the adapter | proposed-pending-tear |
-| S-6 | pid → binding-incarnation map lives in the adapter (pid-correlatable-at-delivery); remove-on-exit-delivery (regardless of S-15 entry-filter outcome) + resolve-before-occupied-insert closes the pid-reuse ABA; adapter-level pin per §4.4 | proposed-pending-tear |
-| S-7 | Lagged handling is mandatory adapter logic: drain marker, then `take_exit_outcome` over all tracked pids, each recovered exit passing the S-15 entry filter; capacity 1,024 | proposed-pending-tear |
-| S-8 | The emitter only WIDENS the `PendingFinalization(Died)` entry set (append-once pending row); finalization is exclusively existing finalizers + the S-1 drain, all through `record_terminal_impact`; `produced`/parking untouched with the §5(b) pinning tests as witness | proposed-pending-tear |
-| S-9 | Sequencing: the drain builds FIRST and is standalone-buildable (closes the red-pinned defect with zero beamr dependency); the emitter follows, hard-gated behind the landed drain + Artemis's sizing — an emitter without the drain widens a live tear and is forbidden | proposed-pending-tear |
-| S-10 | ProcessKilled stays a DISTINCT additive intent; the trybuild wall stays; the emitter is its sole selector and selects nothing else | proposed-pending-tear |
-| S-11 | Crash repository stays test-only; no production dependency introduced by either half | proposed-pending-tear |
-| S-12 | No frame dependency is claimed anywhere (F-3a premise dead); the emitter's value claim is actor-granular death in a live VM, socket never drops | proposed-pending-tear |
-| S-13 | Emitter pacing: gated behind restore-window lane and Artemis's beamr exit-event sizing, at her pacing; §4.2 citation of record is her ~02:15Z "ASK-4 BEAMR SIZING ANSWER" record (tear-seat ruled; no separate trigger-check post) | proposed-pending-tear |
-| S-14 | Semver: drain = server-only defect-class behavior change (tear → commit), no wire schema change, no protocol/SDK bump — server minor class. Emitter = additive wire vocabulary (new Died/terminal cause variant visible in projections) — protocol additive minor + server minor, SDK decode addition; exact spelling deferred to build (§8.6) | proposed-pending-tear |
-| S-15 | ExitReason entry filter: the emitter selects ProcessKilled for `Killed`, and for `Kill` defensively (forced-if-ever-observed); `Normal`, `Error`, `NoConnection`, `NoProc` DO NOT enter the emitter — each named explicitly in a TOTAL match over all six variants with NO wildcard arm, so an upstream taxonomy widening (`Error` is a self-declared placeholder) breaks compilation instead of silently misclassifying; non-entering exits still consume the outcome and clean the pid map | proposed-pending-tear |
+| S-1 | Typed-refuse is dead; the fix is the R-A2 candidate-lane terminal drain: on `DrainFirst` selecting a `BindingTerminal`, drain it (terminal append + retention transition + candidate deletion + slot release, one durable transaction per candidate, strictly by `admission_order`, completion via `record_terminal_impact`), then proceed to caller admission | ruled (torn 2026-07-23, T1 folded) |
+| S-2 | Redrawn pin: the pinned scenario's publish COMMITS after the drain; repro half kept verbatim; assertion set per §3.4 (commit, no close, one terminal append, slot released, victim excluded from recipients, replay clean) | ruled (torn 2026-07-23, T1 folded) |
+| S-3 | The drain is a sibling terminal path beside `persist_next_marker` in the existing DrainFirst arm; `drain_next_marker` stays structurally marker-only; no new frontier decision variant | ruled (torn 2026-07-23, T1 folded) |
+| S-4 | Lane closure requires the live cold-restart SOCKET pin of §3.5 (real unclean restart, live-socket publish, client-observed post-drain commit, server keeps serving) | ruled (torn 2026-07-23, T1 folded) |
+| S-5 | The liminal embedding's adapter claims beamr's single exit-event subscription; all other liminal-side consumers multiplex behind the adapter | ruled (torn 2026-07-23, T1 folded) |
+| S-6 | pid → binding-incarnation map lives in the adapter (pid-correlatable-at-delivery); remove-on-exit-delivery (regardless of S-15 entry-filter outcome) + resolve-before-occupied-insert closes the pid-reuse ABA, under the §4.4 consumed-exit invariant: EVERY consumed exit (event-delivered, Lagged-recovered, occupied-insert-resolved) passes the S-15 filter — entering reasons append once, non-entering consume-and-clean, no exception; adapter-level pin per §4.4 | ruled (torn 2026-07-23, T1 folded) |
+| S-7 | Lagged handling is mandatory adapter logic: drain marker, then `take_exit_outcome` over all tracked pids, each recovered exit passing the S-15 entry filter; capacity 1,024 | ruled (torn 2026-07-23, T1 folded) |
+| S-8 | The emitter only WIDENS the `PendingFinalization(Died)` entry set (append-once pending row); finalization is exclusively existing finalizers + the S-1 drain, all through `record_terminal_impact`; `produced`/parking untouched with the §5(b) pinning tests as witness | ruled (torn 2026-07-23, T1 folded) |
+| S-9 | Sequencing: the drain builds FIRST and is standalone-buildable (closes the red-pinned defect with zero beamr dependency); the emitter follows, hard-gated behind the landed drain + Artemis's sizing — an emitter without the drain widens a live tear and is forbidden | ruled (torn 2026-07-23, T1 folded) |
+| S-10 | ProcessKilled stays a DISTINCT additive intent; the trybuild wall stays; the emitter is its sole selector and selects nothing else | ruled (torn 2026-07-23, T1 folded) |
+| S-11 | Crash repository stays test-only; no production dependency introduced by either half | ruled (torn 2026-07-23, T1 folded) |
+| S-12 | No frame dependency is claimed anywhere (F-3a premise dead); the emitter's value claim is actor-granular death in a live VM, socket never drops | ruled (torn 2026-07-23, T1 folded) |
+| S-13 | Emitter pacing: gated behind restore-window lane and Artemis's beamr exit-event sizing, at her pacing; §4.2 citation of record is her ~02:15Z "ASK-4 BEAMR SIZING ANSWER" record (tear-seat ruled; no separate trigger-check post) | ruled (torn 2026-07-23, T1 folded) |
+| S-14 | Semver: drain = server-only defect-class behavior change (tear → commit), no wire schema change, no protocol/SDK bump — server minor class. Emitter = additive wire vocabulary (new Died/terminal cause variant visible in projections) — protocol additive minor + server minor, SDK decode addition; exact spelling deferred to build (§8.6) | ruled (torn 2026-07-23, T1 folded) |
+| S-15 | ExitReason entry filter: the emitter selects ProcessKilled for `Killed`, and for `Kill` defensively (forced-if-ever-observed); `Normal`, `Error`, `NoConnection`, `NoProc` DO NOT enter the emitter — each named explicitly in a TOTAL match over all six variants with NO wildcard arm, so an upstream taxonomy widening (`Error` is a self-declared placeholder) breaks compilation instead of silently misclassifying; non-entering exits still consume the outcome and clean the pid map | ruled (torn 2026-07-23, T1 folded) |
 
 ## 10. Semver / compatibility detail for S-14
 
@@ -474,3 +481,4 @@ that (see §8).
 |---|---|---|
 | r1 | 2026-07-23 | Initial unified design: candidate-lane terminal drain + ProcessKilled emitter; all decisions proposed-pending-tear; §4.2 pinned pending Artemis's trigger-check post |
 | r2 | 2026-07-23 | §4.2 citation of record + ExitReason entry filter per Artemis's taxonomy delta; filter proposed Killed\|Kill→ProcessKilled, others never |
+| r3 | 2026-07-23 | Tear fold T1: consumed-exit invariant stated in §4.4 and cited in S-6 — every consumed exit (event-delivered, Lagged-recovered, occupied-insert-resolved) passes S-15; entering append once, non-entering consume-and-clean. Torn APPROVE all fifteen sockets; drain build (S-1/S-2/S-3/S-4) authorized on this fold |
