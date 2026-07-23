@@ -3,6 +3,37 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## 0.4.0 — 2026-07-23
+
+Haematite 0.7.0 uptake: `liminal-rs` 0.4.0, `liminal-server` 0.4.0, and
+`liminal-sdk` 0.4.0 in lockstep. `liminal-protocol` stays 0.3.1 — untouched
+by this line.
+
+### Changed
+
+- **haematite `0.6.2` → `0.7.0`** (the sole dependency change). Every
+  `DatabaseConfig` construction site gains `executor_threads: None`
+  (haematite's auto-sizing default); no other haematite surface is exercised
+  differently. Existing v1/unstamped stores open under `V1_DEFAULT` forever;
+  databases **created** by this version are stamped haematite
+  `ON_DISK_FORMAT_VERSION = 2` and cannot be opened by earlier haematite
+  binaries.
+
+### Why 0.4.0 rather than 0.3.4
+
+- `liminal-rs`: haematite is a **public dependency** —
+  `liminal::durability::DurabilityError::StoreError(haematite::ApiError)`
+  carries a haematite type in a public field, and
+  `HaematiteStore::new(Arc<haematite::EventStore>)` takes one — so a
+  haematite major-class bump is breaking-class for this crate.
+- `liminal-sdk`: its public surface exposes `liminal::protocol` types
+  (`DeliveredMessage::schema_id() -> SchemaId` on both transports), so it
+  follows `liminal-rs`'s break.
+- `liminal-server`: API-compatible, but a compatible-range upgrade must not
+  silently begin creating format-2 stores that the operator's previous
+  binary cannot open. The no-downgrade format shift rides the major-class
+  number instead of hiding in a patch.
+
 ## 0.3.3 — 2026-07-23
 
 Delivery-integrity release: `liminal-server` 0.3.3 and `liminal-sdk` 0.3.3.
