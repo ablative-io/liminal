@@ -6,7 +6,7 @@
 //! since before 0.3.2 — had no in-repo detector. A downstream storeless consumer
 //! that dropped a subscriber's connection and kept publishing was the first to
 //! observe the while-dead publish silently never reaching the resumed session:
-//! the publish is accepted (a committed record — a PublishAck) yet mints no
+//! the publish is accepted (a committed record — a `PublishAck`) yet mints no
 //! obligation for the dead-but-resumable subscriber, because `produced()`'s
 //! recipient snapshot admits only live-`Bound` slots. This pin makes liminal its
 //! own first detector.
@@ -23,9 +23,9 @@
 use std::error::Error;
 
 use liminal_protocol::wire::{
-    AttachAttemptToken, ClientRequest, CredentialAttachRequest, EnrollmentRequest, EnrollmentToken,
-    Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck, ParticipantRecord, RecordAdmission,
-    RecordAdmissionAttemptToken, ServerPush, ServerValue,
+    AttachAttemptToken, ClientRequest, CredentialAttachRequest, EnrollBound, EnrollmentRequest,
+    EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck, ParticipantId,
+    ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken, ServerPush, ServerValue,
 };
 
 use super::e2e_tests::{SocketFixture, SocketPeer};
@@ -40,6 +40,62 @@ fn expect_record(value: ServerValue, label: &str) -> Result<u64, Box<dyn Error>>
     }
 }
 
+/// Uniform request entry over the primary fixture connection and its spawned
+/// peers — both expose the identical inherent `request`, but as distinct types.
+trait RequestPeer {
+    fn issue(&mut self, request: ClientRequest) -> Result<ServerValue, Box<dyn Error>>;
+}
+
+impl RequestPeer for SocketFixture {
+    fn issue(&mut self, request: ClientRequest) -> Result<ServerValue, Box<dyn Error>> {
+        self.request(request)
+    }
+}
+
+impl RequestPeer for SocketPeer {
+    fn issue(&mut self, request: ClientRequest) -> Result<ServerValue, Box<dyn Error>> {
+        self.request(request)
+    }
+}
+
+/// Enrolls `peer` under `token` and returns its bound receipt.
+fn enroll<P: RequestPeer>(
+    peer: &mut P,
+    token: [u8; 16],
+    label: &str,
+) -> Result<EnrollBound, Box<dyn Error>> {
+    let ServerValue::EnrollBound(bound) =
+        peer.issue(ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: CONV,
+            enrollment_token: EnrollmentToken::new(token),
+        }))?
+    else {
+        return Err(format!("{label} enroll did not bind").into());
+    };
+    Ok(bound)
+}
+
+/// Admits one record from `peer` and returns its committed delivery sequence.
+fn admit_record<P: RequestPeer>(
+    peer: &mut P,
+    participant_id: ParticipantId,
+    capability_generation: Generation,
+    attempt_token: [u8; 16],
+    payload: u8,
+    label: &str,
+) -> Result<u64, Box<dyn Error>> {
+    expect_record(
+        peer.issue(ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id: CONV,
+            participant_id,
+            capability_generation,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new(attempt_token),
+            payload: vec![payload],
+        }))?,
+        label,
+    )
+}
+
 #[test]
 fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
@@ -48,22 +104,8 @@ fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
     let mut subscriber = publisher.spawn_peer()?;
 
     // Publisher and subscriber both enroll (enrollment binds).
-    let ServerValue::EnrollBound(pub_bound) =
-        publisher.request(ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id: CONV,
-            enrollment_token: EnrollmentToken::new([0x01; 16]),
-        }))?
-    else {
-        return Err("publisher enroll did not bind".into());
-    };
-    let ServerValue::EnrollBound(sub_bound) =
-        subscriber.request(ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id: CONV,
-            enrollment_token: EnrollmentToken::new([0x02; 16]),
-        }))?
-    else {
-        return Err("subscriber enroll did not bind".into());
-    };
+    let pub_bound = enroll(&mut publisher, [0x01; 16], "publisher")?;
+    let sub_bound = enroll(&mut subscriber, [0x02; 16], "subscriber")?;
     let sub_pid = sub_bound.participant_id();
 
     // Subscriber attaches (presenting binding) and admits one record — the debt a
@@ -82,26 +124,22 @@ fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
     };
     let sub_gen = sub_attached.capability_generation();
     let sub_secret = sub_attached.attach_secret();
-    let _r0 = expect_record(
-        subscriber.request(ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: CONV,
-            participant_id: sub_pid,
-            capability_generation: sub_gen,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x04; 16]),
-            payload: vec![0x00],
-        }))?,
+    let _r0 = admit_record(
+        &mut subscriber,
+        sub_pid,
+        sub_gen,
+        [0x04; 16],
+        0x00,
         "subscriber record r0",
     )?;
 
     // Publisher admits e1; the subscriber receives it and acknowledges it.
-    let e1_seq = expect_record(
-        publisher.request(ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: CONV,
-            participant_id: pub_bound.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x05; 16]),
-            payload: vec![0x01],
-        }))?,
+    let e1_seq = admit_record(
+        &mut publisher,
+        pub_bound.participant_id(),
+        Generation::ONE,
+        [0x05; 16],
+        0x01,
         "e1",
     )?;
     let _ = subscriber.read_push()?;
@@ -116,14 +154,12 @@ fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
     }
 
     // Publisher admits e2; the subscriber receives it but does NOT acknowledge.
-    let e2_seq = expect_record(
-        publisher.request(ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: CONV,
-            participant_id: pub_bound.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x06; 16]),
-            payload: vec![0x02],
-        }))?,
+    let e2_seq = admit_record(
+        &mut publisher,
+        pub_bound.participant_id(),
+        Generation::ONE,
+        [0x06; 16],
+        0x02,
         "e2",
     )?;
     let _ = subscriber.read_push()?;
@@ -140,14 +176,12 @@ fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
     // The peer publishes e3 WHILE the subscriber is FIN-dead-but-resumable. The
     // publish is accepted (committed — a PublishAck), so the ruled contract
     // requires it to reach the resumed session's replay.
-    let e3_seq = expect_record(
-        publisher.request(ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: CONV,
-            participant_id: pub_bound.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x07; 16]),
-            payload: vec![0x03],
-        }))?,
+    let e3_seq = admit_record(
+        &mut publisher,
+        pub_bound.participant_id(),
+        Generation::ONE,
+        [0x07; 16],
+        0x03,
         "while-dead publish e3",
     )?;
 
@@ -188,7 +222,7 @@ fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
 /// `produced()`'s recipient predicate from `Bound(_)` to `Bound(_) | Detached`
 /// so a connection-lost-but-resumable subscriber keeps receiving. The discriminator
 /// that keeps this SAFE is map presence: clean Leave is the SOLE path that removes
-/// a slot from `authority.slots` (ops_leave.rs — no reinsert; the identity becomes a
+/// a slot from `authority.slots` (`ops_leave.rs` — no reinsert; the identity becomes a
 /// retired tombstone), so a departed participant is absent from the iteration and can
 /// never be named, while every resumable terminal (connection-lost Died,
 /// detach-by-request, deregistration) RETAINS the slot at `Detached`. Naming a
@@ -207,30 +241,9 @@ fn clean_leave_departed_mints_no_obligation() -> Result<(), Box<dyn Error>> {
     let mut observer = publisher.spawn_peer()?;
 
     // Publisher, the departing participant, and a still-bound observer all enroll.
-    let ServerValue::EnrollBound(pub_bound) =
-        publisher.request(ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id: CONV,
-            enrollment_token: EnrollmentToken::new([0x11; 16]),
-        }))?
-    else {
-        return Err("publisher enroll did not bind".into());
-    };
-    let ServerValue::EnrollBound(dep_bound) =
-        departing.request(ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id: CONV,
-            enrollment_token: EnrollmentToken::new([0x12; 16]),
-        }))?
-    else {
-        return Err("departing enroll did not bind".into());
-    };
-    let ServerValue::EnrollBound(obs_bound) =
-        observer.request(ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id: CONV,
-            enrollment_token: EnrollmentToken::new([0x13; 16]),
-        }))?
-    else {
-        return Err("observer enroll did not bind".into());
-    };
+    let pub_bound = enroll(&mut publisher, [0x11; 16], "publisher")?;
+    let dep_bound = enroll(&mut departing, [0x12; 16], "departing")?;
+    let obs_bound = enroll(&mut observer, [0x13; 16], "observer")?;
     let dep_pid = dep_bound.participant_id();
     let obs_pid = obs_bound.participant_id();
 
@@ -251,18 +264,19 @@ fn clean_leave_departed_mints_no_obligation() -> Result<(), Box<dyn Error>> {
 
     // Publisher admits e1; both the departing participant and the observer are
     // Bound recipients, so each accrues a live obligation.
-    let _e1 = expect_record(
-        publisher.request(ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: CONV,
-            participant_id: pub_bound.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x15; 16]),
-            payload: vec![0xE1],
-        }))?,
+    let _e1 = admit_record(
+        &mut publisher,
+        pub_bound.participant_id(),
+        Generation::ONE,
+        [0x15; 16],
+        0xE1,
         "e1",
     )?;
     assert!(
-        publisher.outbox_owner_facts(CONV, dep_pid)?.next_live_obligation.is_some(),
+        publisher
+            .outbox_owner_facts(CONV, dep_pid)?
+            .next_live_obligation
+            .is_some(),
         "departing participant should carry e1's live obligation before leaving"
     );
 
@@ -279,29 +293,34 @@ fn clean_leave_departed_mints_no_obligation() -> Result<(), Box<dyn Error>> {
         return Err(format!("clean Leave did not commit: {left:?}").into());
     }
     assert_eq!(
-        publisher.outbox_owner_facts(CONV, dep_pid)?.next_live_obligation,
+        publisher
+            .outbox_owner_facts(CONV, dep_pid)?
+            .next_live_obligation,
         None,
         "clean Leave must discharge the departed participant's obligations"
     );
 
     // Publisher admits e2 AFTER the departure. It must mint an obligation for the
     // still-Bound observer but NONE for the departed participant.
-    let _e2 = expect_record(
-        publisher.request(ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id: CONV,
-            participant_id: pub_bound.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0x17; 16]),
-            payload: vec![0xE2],
-        }))?,
+    let _e2 = admit_record(
+        &mut publisher,
+        pub_bound.participant_id(),
+        Generation::ONE,
+        [0x17; 16],
+        0xE2,
         "e2",
     )?;
     assert!(
-        publisher.outbox_owner_facts(CONV, obs_pid)?.next_live_obligation.is_some(),
+        publisher
+            .outbox_owner_facts(CONV, obs_pid)?
+            .next_live_obligation
+            .is_some(),
         "e2 must mint an obligation for the still-Bound observer (publish is not a no-op)"
     );
     assert_eq!(
-        publisher.outbox_owner_facts(CONV, dep_pid)?.next_live_obligation,
+        publisher
+            .outbox_owner_facts(CONV, dep_pid)?
+            .next_live_obligation,
         None,
         "e2 must mint NO obligation for the permanently-departed participant; a Some \
          here is undischargeable obligation debt — a W2 standing-liveness defect"

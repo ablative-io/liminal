@@ -71,12 +71,26 @@ impl ConversationAuthority {
         }
         let mut targets = BTreeSet::new();
         for participant_id in recipients {
-            let target = self.dispatch_target(participant_id).ok_or_else(|| {
-                StateError::invariant(format!(
-                    "Produced projection recipient {participant_id} has no exact poststate binding"
-                ))
-            })?;
-            targets.insert(target);
+            match self.dispatch_target(participant_id) {
+                Some(target) => {
+                    targets.insert(target);
+                }
+                None => {
+                    // No live dispatch target. If the slot is still PRESENT it is a
+                    // resumable `Detached` recipient: park the obligation — the
+                    // durable install from the outbox append persists and replays on
+                    // `CredentialAttach`, and a `Detached` binding is owed no live
+                    // tell (it has no connection to notify). If the slot is ABSENT
+                    // the recipient is a cleanly-departed peer that the snapshot must
+                    // never name, so the hard invariant stands — departed peers mint
+                    // nothing.
+                    if !self.slots.contains_key(&participant_id) {
+                        return Err(StateError::invariant(format!(
+                            "Produced projection recipient {participant_id} has no exact poststate binding"
+                        )));
+                    }
+                }
+            }
         }
         impact.stage(DispatchEffect::Published, targets);
         Ok(())
