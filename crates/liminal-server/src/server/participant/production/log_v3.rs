@@ -409,16 +409,27 @@ pub(super) struct StoredDied {
     pub(super) drained: Option<StoredDrainedTerminal>,
 }
 
-/// Exact drain provenance carried by a candidate-lane terminal drain row.
+/// Exact drain provenance carried by a candidate-lane terminal drain row
+/// (the `StoredDied::drained` field for the Died flavor, the
+/// `StoredDetachedSource::Drained` source for the Detached flavor).
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredDrainedTerminal {
-    /// Durable sequence of the pending Died source row this drain finalizes.
+    /// Durable sequence of the pending terminal source row this drain
+    /// finalizes.
     pub(super) pending_source_sequence: u64,
     /// Presentation mode consumed from the fate-occurrence router.
     pub(super) finalizer_presentation: StoredFinalizerPresentation,
 }
 
 /// Closed source authority for one exact v3 Detached row.
+///
+/// `Drained` is the additive R-A2 candidate-lane terminal DRAIN spelling
+/// (LIM-DETACHED-PENDING, PENDING-DRAIN-EMITTER §3A / S-17): the finalizer
+/// transaction that committed an earlier pending Detached terminal
+/// (disposition is always `Committed`), keyed to its pending source row and
+/// carrying the consumed finalizer presentation — the exact provenance shape
+/// `StoredDied::drained` carries for the Died flavor. Old rows carry only the
+/// three source tags that existed before it and replay unchanged.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "source")]
 pub(super) enum StoredDetachedSource {
@@ -438,6 +449,9 @@ pub(super) enum StoredDetachedSource {
     },
     ConnectionClose {
         connection_intent_sequence: u64,
+    },
+    Drained {
+        drained: StoredDrainedTerminal,
     },
 }
 

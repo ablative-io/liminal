@@ -140,6 +140,8 @@ mod tests_residue;
 #[cfg(test)]
 mod tests_restore_window;
 #[cfg(test)]
+mod tests_restore_window_detached;
+#[cfg(test)]
 mod tests_unit2_layer1;
 #[cfg(test)]
 mod tests_w1a;
