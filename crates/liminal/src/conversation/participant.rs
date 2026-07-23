@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, Weak};
 
 use beamr::atom::Atom;
@@ -92,7 +93,8 @@ impl ParticipantRuntime {
     /// processed and replies delivered back.
     ///
     /// # Errors
-    /// Returns [`LiminalError`] when the registry lock is poisoned.
+    /// Returns [`LiminalError`] when the registry lock is poisoned or when the
+    /// pid is already registered to a live conversation.
     pub(super) fn register(
         &self,
         pid: ParticipantPid,
@@ -100,15 +102,41 @@ impl ParticipantRuntime {
         behaviour: Arc<dyn ParticipantBehaviour>,
         core: Weak<ActorCore>,
     ) -> Result<(), LiminalError> {
-        lock(&self.registrations)?.insert(
-            pid.get(),
-            ParticipantRegistration {
-                inbox,
-                behaviour,
-                core,
-            },
-        );
-        Ok(())
+        let registration = ParticipantRegistration {
+            inbox,
+            behaviour,
+            core,
+        };
+        match lock(&self.registrations)?.entry(pid.get()) {
+            Entry::Occupied(mut entry) => {
+                // A colliding key whose owning core is LIVE is a supervision
+                // defect (beamr pids are unique among live processes): refuse it
+                // loudly rather than silently rebinding forwarding/reply routing
+                // to a different conversation.
+                if entry.get().core.strong_count() > 0 {
+                    return Err(LiminalError::ConversationFailed {
+                        message: format!(
+                            "participant pid {} is already registered to a live conversation",
+                            pid.get()
+                        ),
+                    });
+                }
+                // Dead-core colliding key: beamr recycled the pid to this new
+                // spawn, so the old PROCESS is provably gone and the stale entry
+                // cannot belong to any live conversation — replace it. Only the
+                // COLLIDING key is swept here: the global dead-key sweep stays
+                // with `reap_orphans`, which also terminates each orphan's still
+                // parked process — something register (no scheduler handle)
+                // cannot do, so a blanket retain here would leak those parked
+                // processes by hiding their entries from the reaper.
+                entry.insert(registration);
+                Ok(())
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(registration);
+                Ok(())
+            }
+        }
     }
 
     /// Drops a participant registration (used when a participant process exits).
