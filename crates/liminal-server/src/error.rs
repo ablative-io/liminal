@@ -83,6 +83,19 @@ pub enum ServerError {
         attempted_server_incarnation: u64,
     },
 
+    /// A connection registration found a record already present under its pid.
+    /// Enforces the pids-fresh-per-spawn supervision invariant loudly: a silent
+    /// replace would drop the displaced record's teardown-held fd guard outside
+    /// the single record-removal funnel (orphaning a live connection's stream)
+    /// and increment the `liminal_connections_active` gauge a second time with
+    /// no paired decrement. The whole registration is refused instead, leaving
+    /// the prior record — and its teardown route — intact.
+    #[error("connection registration refused: pid {pid} already has a live registry record")]
+    ConnectionPidCollision {
+        /// The connection pid that already owned a registry record.
+        pid: u64,
+    },
+
     /// A frame requested an operation the configured services profile does not
     /// serve (e.g. ordinary publish/subscribe/conversation traffic against the
     /// capability-scoped worker front door). Server-internal taxonomy, not wire
