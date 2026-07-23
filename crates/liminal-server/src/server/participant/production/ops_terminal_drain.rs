@@ -1,19 +1,36 @@
 //! Candidate-lane terminal drain (PARTICIPANT-CONTRACT R-A2).
 //!
 //! When record admission's `DrainFirst` selects a pending binding terminal
-//! as the earliest immutable candidate — the crash-restored
-//! `PendingFinalization(Died)` residence — the server drains that terminal
-//! as one durable candidate transaction instead of faulting: terminal-record
-//! append, retention transition, candidate deletion, and binding-slot
-//! release, with fate completion wired through the same
+//! as the earliest immutable candidate — a crash-restored
+//! `PendingFinalization` residence of either flavor — the server drains that
+//! terminal as one durable candidate transaction instead of faulting:
+//! terminal-record append, retention transition, candidate deletion, and the
+//! flavor's own slot settlement, with fate completion wired through the same
 //! `record_terminal_impact` path connection-fate finalizers use. The drain
 //! is the sibling terminal path beside `persist_next_marker`; the marker
 //! lane itself stays structurally marker-only.
+//!
+//! The two flavors settle their slots OPPOSITELY (PENDING-DRAIN-EMITTER
+//! §3A.3, S-16):
+//!
+//! - **Died** — R-A2 binding-slot release is identity erasure: no resume
+//!   claim survives a death with no retirement authority, so the slot and
+//!   its enrollment-token mapping are removed and later probes answer
+//!   `ParticipantUnknown`.
+//! - **Detached** — faithful detach finalization, never erasure: the
+//!   contract keeps Detached membership durable and exact-secret resumable
+//!   (`PARTICIPANT-CONTRACT.md` "membership and cursor remain durable";
+//!   `client.rs` Detached + exact-secret attach → Bound), so "release" is
+//!   the slot's transition OUT of the pending residence into committed
+//!   `BindingState::Detached` — slot and enrollment token PRESERVED, and
+//!   the victim thereafter counts as a parked `produced` recipient.
 
 use liminal_protocol::lifecycle::{
-    BindingState, ImmutableSequenceCandidate, LiveFrontierOwner, ObserverProgressProjection,
-    PendingDiedFinalization, PendingFinalization, RetainedRecordCharge,
+    BindingState, CommittedBindingTerminal, DetachCell, ImmutableSequenceCandidate,
+    LiveFrontierOwner, ObserverProgressProjection, PendingDetachedFinalization,
+    PendingDiedFinalization, PendingFinalization, RetainedRecordCharge, complete_pending_detach,
 };
+use liminal_protocol::wire::DetachedCause;
 
 use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 
@@ -22,19 +39,26 @@ use super::connection_fate::record_terminal_impact;
 use super::fate_occurrence::PendingFinalizerRoute;
 use super::frontier::terminal_charge;
 use super::log::{
-    StoredBindingEpoch, StoredDied, StoredDrainedTerminal, StoredFinalizerPresentation,
-    StoredOperation, StoredOrdinaryTerminalSource, StoredPendingDiedFinalizer,
-    StoredTerminalDisposition,
+    StoredBindingEpoch, StoredDetached, StoredDetachedCause, StoredDetachedSource, StoredDied,
+    StoredDrainedTerminal, StoredFinalizerPresentation, StoredOperation,
+    StoredOrdinaryTerminalSource, StoredPendingDiedFinalizer, StoredTerminalDisposition,
 };
 use super::observer_progress::ObserverProgressSourceMetadata;
 use super::outbox_projection::capture_projection_prestate;
 use super::state::{ConversationAuthority, DurableAppend, StateError};
 
-/// Validated drain authority: the exact pending Died residence selected by
-/// the earliest binding-terminal candidate.
+/// Cause-partitioned residence flavor selected by the drain candidate.
+#[derive(Clone, Copy)]
+enum DrainFlavor {
+    Died(PendingDiedFinalization),
+    Detached(PendingDetachedFinalization),
+}
+
+/// Validated drain authority: the exact pending residence selected by the
+/// earliest binding-terminal candidate, in either terminal flavor.
 #[derive(Clone, Copy)]
 struct DrainAuthority {
-    died: PendingDiedFinalization,
+    flavor: DrainFlavor,
     pending: PendingFinalization,
     route: PendingFinalizerRoute,
 }
@@ -81,35 +105,20 @@ impl ConversationAuthority {
         let participant_id = authority.pending.participant_id();
         let delivery_seq = candidate_delivery_seq(&candidate)?;
         let source_log_sequence = self.next_log_sequence;
+        let source = drain_row_operation(authority, delivery_seq)?;
         let (owner, projection, completes_ordinary) =
             self.drain_validated_candidate(authority, delivery_seq, source_log_sequence, owner)?;
-        let row = StoredDied {
-            participant_id,
-            binding_epoch: StoredBindingEpoch::from(authority.pending.binding_epoch()),
-            cause: stored_died_cause(authority.died.cause()),
-            terminal_order: authority.pending.admission_order().transaction_order(),
-            disposition: StoredTerminalDisposition::Committed {
-                terminal_seq: delivery_seq,
-            },
-            connection_intent_sequence: None,
-            specific_fate_intent: None,
-            drained: Some(StoredDrainedTerminal {
-                pending_source_sequence: authority.route.pending_source_sequence,
-                finalizer_presentation: authority.route.presentation,
-            }),
-        };
-        let source = StoredOperation::Died { row };
         let projection_facts = capture_projection_prestate(self, &source);
         appender.append(&source, source_log_sequence)?;
         self.install_frontier(owner)?;
-        self.release_drained_binding_slot(participant_id);
+        self.settle_drained_binding_slot(authority.flavor, delivery_seq)?;
         self.observe_replayed_position(
             authority.pending.admission_order().transaction_order(),
             delivery_seq,
         )?;
         self.advance_log_head()?;
         self.record_drain_presentation(
-            authority.route.presentation,
+            authority,
             source_log_sequence,
             participant_id,
             delivery_seq,
@@ -149,6 +158,59 @@ impl ConversationAuthority {
     /// same protocol drain and validates every persisted allocation.
     fn replay_terminal_drain(&mut self, row: &StoredDied, sequence: u64) -> Result<(), StateError> {
         let terminal_seq = validate_drain_row_shape(row)?;
+        let (authority, owner) = self.validate_drain_replay_candidate(sequence)?;
+        let DrainFlavor::Died(died) = authority.flavor else {
+            self.install_frontier(owner)?;
+            return Err(StateError::invariant(
+                "durable Died drain row does not finalize a pending Died residence",
+            ));
+        };
+        if let Err(error) =
+            validate_drain_row_authority(row, terminal_seq, authority, died, self.next_seq)
+        {
+            self.install_frontier(owner)?;
+            return Err(error);
+        }
+        self.replay_validated_drain(authority, terminal_seq, sequence, owner, row.terminal_order)
+    }
+
+    /// Cold-replays one durable Detached-flavor candidate-lane terminal drain
+    /// row (`StoredDetachedSource::Drained`) through the same protocol drain,
+    /// settling the slot at committed `Detached` exactly as the live drain
+    /// does.
+    pub(super) fn replay_detached_drain_row(
+        &mut self,
+        row: &StoredDetached,
+        sequence: u64,
+    ) -> Result<(), StateError> {
+        let (terminal_seq, drained) = validate_detached_drain_row_shape(row)?;
+        let (authority, owner) = self.validate_drain_replay_candidate(sequence)?;
+        let DrainFlavor::Detached(detached) = authority.flavor else {
+            self.install_frontier(owner)?;
+            return Err(StateError::invariant(
+                "durable Detached drain row does not finalize a pending Detached residence",
+            ));
+        };
+        if let Err(error) = validate_detached_drain_row_authority(
+            row,
+            terminal_seq,
+            drained,
+            authority,
+            detached,
+            self.next_seq,
+        ) {
+            self.install_frontier(owner)?;
+            return Err(error);
+        }
+        self.replay_validated_drain(authority, terminal_seq, sequence, owner, row.terminal_order)
+    }
+
+    /// Shared replay entry: checks the durable log head, takes the frontier,
+    /// and validates the first immutable candidate as drain authority.
+    fn validate_drain_replay_candidate(
+        &mut self,
+        sequence: u64,
+    ) -> Result<(DrainAuthority, LiveFrontierOwner), StateError> {
         if self.next_log_sequence != sequence {
             return Err(StateError::invariant(
                 "terminal drain replay log head disagrees with durable sequence",
@@ -162,28 +224,35 @@ impl ConversationAuthority {
             .first()
             .copied()
             .ok_or_else(|| StateError::invariant("durable terminal drain has no candidate"))?;
-        let authority = match self.validate_drain_candidate(candidate) {
-            Ok(authority) => authority,
+        match self.validate_drain_candidate(candidate) {
+            Ok(authority) => Ok((authority, owner)),
             Err(error) => {
                 self.install_frontier(owner)?;
-                return Err(error);
+                Err(error)
             }
-        };
-        if let Err(error) =
-            validate_drain_row_authority(row, terminal_seq, authority, self.next_seq)
-        {
-            self.install_frontier(owner)?;
-            return Err(error);
         }
+    }
+
+    /// Shared replay tail: commits the validated candidate through the
+    /// protocol drain, settles the slot per flavor, and re-records the
+    /// drain's observer presentation.
+    fn replay_validated_drain(
+        &mut self,
+        authority: DrainAuthority,
+        terminal_seq: u64,
+        sequence: u64,
+        owner: LiveFrontierOwner,
+        terminal_order: u64,
+    ) -> Result<(), StateError> {
         let participant_id = authority.pending.participant_id();
         let (owner, projection, _completes_ordinary) =
             self.drain_validated_candidate(authority, terminal_seq, sequence, owner)?;
         self.install_frontier(owner)?;
-        self.release_drained_binding_slot(participant_id);
-        self.observe_replayed_position(row.terminal_order, terminal_seq)?;
+        self.settle_drained_binding_slot(authority.flavor, terminal_seq)?;
+        self.observe_replayed_position(terminal_order, terminal_seq)?;
         self.advance_log_head()?;
         self.record_drain_presentation(
-            authority.route.presentation,
+            authority,
             sequence,
             participant_id,
             terminal_seq,
@@ -191,9 +260,10 @@ impl ConversationAuthority {
         )
     }
 
-    /// Measures the open Ordinary intent (when one exists), then commits the
-    /// candidate through the protocol drain: terminal-record retention,
-    /// candidate deletion, and the coupled observer projection.
+    /// Measures the open Ordinary intent (Died flavor only — a pending
+    /// Detached owns no specific fate), then commits the candidate through
+    /// the protocol drain: terminal-record retention, candidate deletion, and
+    /// the coupled observer projection.
     fn drain_validated_candidate(
         &mut self,
         authority: DrainAuthority,
@@ -202,23 +272,26 @@ impl ConversationAuthority {
         owner: LiveFrontierOwner,
     ) -> Result<(LiveFrontierOwner, ObserverProgressProjection, bool), StateError> {
         let DrainAuthority {
-            died,
+            flavor,
             pending,
             route,
         } = authority;
         let participant_id = pending.participant_id();
-        let (owner, completes_ordinary) = self.prepare_pending_died_finalizer(
-            participant_id,
-            route.pending_source_sequence,
-            died.commit(delivery_seq),
-            StoredOrdinaryTerminalSource::PendingDiedFinalized {
-                died_source_sequence: route.pending_source_sequence,
-                finalizer: StoredPendingDiedFinalizer::Drained {
-                    source_sequence: finalizer_source_sequence,
+        let (owner, completes_ordinary) = match flavor {
+            DrainFlavor::Died(died) => self.prepare_pending_died_finalizer(
+                participant_id,
+                route.pending_source_sequence,
+                died.commit(delivery_seq),
+                StoredOrdinaryTerminalSource::PendingDiedFinalized {
+                    died_source_sequence: route.pending_source_sequence,
+                    finalizer: StoredPendingDiedFinalizer::Drained {
+                        source_sequence: finalizer_source_sequence,
+                    },
                 },
-            },
-            owner,
-        )?;
+                owner,
+            )?,
+            DrainFlavor::Detached(_) => (owner, false),
+        };
         let charge = match terminal_charge(
             pending.conversation_id(),
             participant_id,
@@ -249,35 +322,62 @@ impl ConversationAuthority {
     }
 
     /// Records the drain's observer-progress presentation exactly as a
-    /// committed Died source does — unless a Recovered row already reserved
-    /// the presentation, in which case the drain is non-presenting, mirroring
-    /// Leave.
+    /// committed source of its flavor does — unless a Recovered row already
+    /// reserved the presentation, in which case the drain is non-presenting,
+    /// mirroring Leave.
     fn record_drain_presentation(
         &mut self,
-        presentation: StoredFinalizerPresentation,
+        authority: DrainAuthority,
         source_sequence: u64,
         participant_id: u64,
         terminal_seq: u64,
         projection: ObserverProgressProjection,
     ) -> Result<(), StateError> {
         if matches!(
-            presentation,
+            authority.route.presentation,
             StoredFinalizerPresentation::ConsumeRecoveredReservation { .. }
         ) {
             return Ok(());
         }
-        let metadata = ObserverProgressSourceMetadata::died(
-            source_sequence,
-            self.conversation_id,
-            participant_id,
-            terminal_seq,
-        );
+        let metadata = match authority.flavor {
+            DrainFlavor::Died(_) => ObserverProgressSourceMetadata::died(
+                source_sequence,
+                self.conversation_id,
+                participant_id,
+                terminal_seq,
+            ),
+            DrainFlavor::Detached(_) => ObserverProgressSourceMetadata::detached(
+                source_sequence,
+                self.conversation_id,
+                participant_id,
+                terminal_seq,
+            ),
+        };
         self.record_observer_progress_projection(projection, metadata)
+    }
+
+    /// Settles the drained slot per the flavor's ruled R-A2 reading: Died
+    /// releases (erases) the identity; Detached commits the residence in
+    /// place, preserving slot and enrollment token.
+    fn settle_drained_binding_slot(
+        &mut self,
+        flavor: DrainFlavor,
+        delivery_seq: u64,
+    ) -> Result<(), StateError> {
+        match flavor {
+            DrainFlavor::Died(died) => {
+                self.release_drained_binding_slot(died.participant_id());
+                Ok(())
+            }
+            DrainFlavor::Detached(detached) => {
+                self.commit_drained_detached_slot(detached, delivery_seq)
+            }
+        }
     }
 
     /// Releases the drained binding slot (R-A2 binding-slot release,
     /// `slots.remove` semantics per the Leave precedent) together with its
-    /// enrollment-token mapping.
+    /// enrollment-token mapping. Died flavor ONLY.
     ///
     /// Leave pairs its removal with a protocol-minted tombstone; a drain has
     /// no Leave request and fabricating retirement authority is forbidden, so
@@ -290,12 +390,66 @@ impl ConversationAuthority {
         self.tokens.retain(|_, mapped| *mapped != participant_id);
     }
 
-    /// Validates the drained candidate against the exact pending Died
-    /// residence it must finalize, consuming the finalizer presentation.
+    /// Commits the drained pending Detached residence IN PLACE — the S-16
+    /// faithful detach finalization. The slot and its enrollment-token
+    /// mapping are preserved (the participant keeps its standing exact-secret
+    /// resume claim), the member's terminal history gains the committed
+    /// Detached terminal, and the binding settles at
+    /// `BindingState::Detached`. A blocked explicit detach commits through
+    /// the protocol's own `complete_pending_detach`, retaining the replayable
+    /// committed detach cell; a shutdown-minted residence has no pending
+    /// detach cell and commits its member terminal directly.
+    fn commit_drained_detached_slot(
+        &mut self,
+        detached: PendingDetachedFinalization,
+        delivery_seq: u64,
+    ) -> Result<(), StateError> {
+        let participant_id = detached.participant_id();
+        let (slot_key, mut slot) = self.slots.remove_entry(&participant_id).ok_or_else(|| {
+            StateError::invariant("drained Detached residence lost its participant slot")
+        })?;
+        let member = slot.member;
+        let binding = slot.binding;
+        let (member, binding, cell) = match slot.cell {
+            DetachCell::Pending(pending_cell) => {
+                let transition =
+                    complete_pending_detach(member, binding, pending_cell, delivery_seq).map_err(
+                        |error| {
+                            StateError::invariant(format!(
+                                "drained pending Detached completion failed: {error:?}"
+                            ))
+                        },
+                    )?;
+                let (member, _terminal, binding, committed_cell, _outcome) =
+                    transition.into_parts();
+                (member, binding, DetachCell::Committed(committed_cell))
+            }
+            settled_cell => {
+                let terminal = detached.commit(delivery_seq);
+                let member = member
+                    .with_committed_terminal(CommittedBindingTerminal::Detached(terminal))
+                    .map_err(|error| {
+                        StateError::invariant(format!(
+                            "drained Detached terminal history refused: {error:?}"
+                        ))
+                    })?;
+                (member, BindingState::Detached, settled_cell)
+            }
+        };
+        slot.member = member;
+        slot.binding = binding;
+        slot.cell = cell;
+        self.slots.insert(slot_key, slot);
+        Ok(())
+    }
+
+    /// Validates the drained candidate against the exact pending residence it
+    /// must finalize, consuming the finalizer presentation. Both terminal
+    /// flavors are drainable; each carries its own settlement semantics.
     ///
     /// A binding-terminal candidate whose slot does not rest in
-    /// `PendingFinalization(Died)` is genuine mis-selection and refuses here;
-    /// the marker lane's own invariant stays as the backstop for terminals
+    /// `PendingFinalization` is genuine mis-selection and refuses here; the
+    /// marker lane's own invariant stays as the backstop for terminals
     /// reaching marker work.
     fn validate_drain_candidate(
         &mut self,
@@ -322,10 +476,9 @@ impl ConversationAuthority {
                 "terminal drain candidate does not rest in PendingFinalization",
             ));
         };
-        let PendingFinalization::Died(died) = pending else {
-            return Err(StateError::invariant(
-                "terminal drain candidate is not a pending Died residence",
-            ));
+        let flavor = match pending {
+            PendingFinalization::Died(died) => DrainFlavor::Died(died),
+            PendingFinalization::Detached(detached) => DrainFlavor::Detached(detached),
         };
         if pending.binding_epoch() != terminal_owner.binding_epoch
             || pending.admission_order() != admission_order
@@ -341,10 +494,66 @@ impl ConversationAuthority {
                 StateError::invariant("pending terminal drain lost its finalizer route")
             })?;
         Ok(DrainAuthority {
-            died,
+            flavor,
             pending,
             route,
         })
+    }
+}
+
+/// Builds the flavor's exact durable drain row: a drained `Died` row for the
+/// Died residence, a `Drained`-sourced `Detached` row (cause preserved in the
+/// `StoredDetachedCause` domain) for the Detached residence.
+fn drain_row_operation(
+    authority: DrainAuthority,
+    delivery_seq: u64,
+) -> Result<StoredOperation, StateError> {
+    let pending = authority.pending;
+    let drained = StoredDrainedTerminal {
+        pending_source_sequence: authority.route.pending_source_sequence,
+        finalizer_presentation: authority.route.presentation,
+    };
+    match authority.flavor {
+        DrainFlavor::Died(died) => Ok(StoredOperation::Died {
+            row: StoredDied {
+                participant_id: pending.participant_id(),
+                binding_epoch: StoredBindingEpoch::from(pending.binding_epoch()),
+                cause: stored_died_cause(died.cause()),
+                terminal_order: pending.admission_order().transaction_order(),
+                disposition: StoredTerminalDisposition::Committed {
+                    terminal_seq: delivery_seq,
+                },
+                connection_intent_sequence: None,
+                specific_fate_intent: None,
+                drained: Some(drained),
+            },
+        }),
+        DrainFlavor::Detached(detached) => Ok(StoredOperation::Detached {
+            row: StoredDetached {
+                participant_id: pending.participant_id(),
+                binding_epoch: StoredBindingEpoch::from(pending.binding_epoch()),
+                cause: stored_detached_cause(detached.cause())?,
+                terminal_order: pending.admission_order().transaction_order(),
+                disposition: StoredTerminalDisposition::Committed {
+                    terminal_seq: delivery_seq,
+                },
+                source: StoredDetachedSource::Drained { drained },
+            },
+        }),
+    }
+}
+
+/// Maps the protocol's restricted Detached cause into the durable domain. A
+/// pending residence can only carry `CleanDeregister` (blocked explicit
+/// detach / clean disconnect) or `ServerShutdown`; `Superseded` never pends —
+/// supersession commits inside its fenced attach.
+fn stored_detached_cause(cause: DetachedCause) -> Result<StoredDetachedCause, StateError> {
+    match cause {
+        DetachedCause::CleanDeregister => Ok(StoredDetachedCause::CleanDeregister),
+        DetachedCause::ServerShutdown => Ok(StoredDetachedCause::ServerShutdown),
+        DetachedCause::Superseded => Err(StateError::invariant(
+            "pending Detached residence carries a Superseded cause",
+        )),
     }
 }
 
@@ -378,12 +587,31 @@ fn validate_drain_row_shape(row: &StoredDied) -> Result<u64, StateError> {
     Ok(terminal_seq)
 }
 
+/// Validates the durable Detached drain row's own shape and returns its
+/// committed terminal sequence with the stored drain provenance.
+fn validate_detached_drain_row_shape(
+    row: &StoredDetached,
+) -> Result<(u64, StoredDrainedTerminal), StateError> {
+    let StoredDetachedSource::Drained { drained } = &row.source else {
+        return Err(StateError::invariant(
+            "terminal drain replay received a source Detached row",
+        ));
+    };
+    let StoredTerminalDisposition::Committed { terminal_seq } = row.disposition else {
+        return Err(StateError::invariant(
+            "durable terminal drain row is not committed",
+        ));
+    };
+    Ok((terminal_seq, *drained))
+}
+
 /// Validates the durable drain row against the live-recomputed residence and
 /// its consumed finalizer route.
 fn validate_drain_row_authority(
     row: &StoredDied,
     terminal_seq: u64,
     authority: DrainAuthority,
+    died: PendingDiedFinalization,
     next_seq: u64,
 ) -> Result<(), StateError> {
     let Some(drain) = row.drained else {
@@ -394,7 +622,7 @@ fn validate_drain_row_authority(
     if row.participant_id != authority.pending.participant_id()
         || row.binding_epoch.to_epoch()? != authority.pending.binding_epoch()
         || row.terminal_order != authority.pending.admission_order().transaction_order()
-        || row.cause != stored_died_cause(authority.died.cause())
+        || row.cause != stored_died_cause(died.cause())
         || terminal_seq != next_seq
     {
         return Err(StateError::invariant(
@@ -403,6 +631,36 @@ fn validate_drain_row_authority(
     }
     if authority.route.pending_source_sequence != drain.pending_source_sequence
         || authority.route.presentation != drain.finalizer_presentation
+    {
+        return Err(StateError::invariant(
+            "durable terminal drain finalizer route drifted",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates the durable Detached drain row against the live-recomputed
+/// residence and its consumed finalizer route.
+fn validate_detached_drain_row_authority(
+    row: &StoredDetached,
+    terminal_seq: u64,
+    drained: StoredDrainedTerminal,
+    authority: DrainAuthority,
+    detached: PendingDetachedFinalization,
+    next_seq: u64,
+) -> Result<(), StateError> {
+    if row.participant_id != authority.pending.participant_id()
+        || row.binding_epoch.to_epoch()? != authority.pending.binding_epoch()
+        || row.terminal_order != authority.pending.admission_order().transaction_order()
+        || row.cause != stored_detached_cause(detached.cause())?
+        || terminal_seq != next_seq
+    {
+        return Err(StateError::invariant(
+            "durable terminal drain row disagrees with its pending residence",
+        ));
+    }
+    if authority.route.pending_source_sequence != drained.pending_source_sequence
+        || authority.route.presentation != drained.finalizer_presentation
     {
         return Err(StateError::invariant(
             "durable terminal drain finalizer route drifted",

@@ -24,7 +24,7 @@ use liminal_protocol::lifecycle::{
 };
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, CredentialAttachRequest, ConnectionIncarnation, Generation,
-    RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
+    ParticipantAck, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
 };
 
 use crate::server::participant::{
@@ -80,13 +80,56 @@ pub(super) struct PendingDetachedRestartFixture {
 /// no finalizer), the still-bound peer survives on its own connection.
 pub(super) fn pending_detached_restart_fixture()
 -> Result<PendingDetachedRestartFixture, Box<dyn Error>> {
+    pending_detached_restart_fixture_with_acks(None, false)
+}
+
+/// Same prestate, with pre-crash cursors advanced (victim ack through
+/// `victim_ack_through_seq`, peer ack through the victim's debt record) so
+/// post-drain retention can release through the real floor mechanism — the
+/// prune a later record admission performs over the fully-acked prefix.
+pub(super) fn pending_detached_restart_fixture_with_acks(
+    victim_ack_through_seq: Option<u64>,
+    peer_acks_debt_record: bool,
+) -> Result<PendingDetachedRestartFixture, Box<dyn Error>> {
     let setup = bound_debt_fixture(
         73,
         ConnectionIncarnation::new(103, 3),
         ConnectionIncarnation::new(103, 4),
-        None,
+        victim_ack_through_seq,
     )?;
     let log = OperationLog::new(Arc::clone(&setup.handler.store), setup.conversation_id);
+    if peer_acks_debt_record {
+        let mut sequence = 0_u64;
+        let mut r0_seq = None;
+        while let Some(entry) = block_on(log.read_at(sequence))?? {
+            if let DecodedStoredOperation::V3(StoredOperation::RecordAdmission { row }) =
+                entry.operation
+            {
+                if row.request.participant_id == setup.participant_id {
+                    r0_seq = Some(row.delivery_seq);
+                }
+            }
+            sequence = sequence
+                .checked_add(1)
+                .ok_or("durable log sequence overflowed")?;
+        }
+        let r0_seq = r0_seq.ok_or("victim debt record r0 is absent before the fate cut")?;
+        let mut peer_conversations = ParticipantConnectionConversations::default();
+        let acked = dispatch_tracked(
+            &setup.handler,
+            ConnectionIncarnation::new(103, 4),
+            &mut peer_conversations,
+            ClientRequest::ParticipantAck(ParticipantAck {
+                conversation_id: setup.conversation_id,
+                participant_id: setup.peer_participant_id,
+                capability_generation: Generation::ONE,
+                through_seq: r0_seq,
+            }),
+        )?;
+        if !matches!(acked, ServerValue::AckCommitted(_)) {
+            return Err(format!("peer pre-crash ack of r0 did not commit: {acked:?}").into());
+        }
+    }
     let cell = setup.handler.cell(setup.conversation_id)?;
     let (detached_source_sequence, terminal_order) = {
         let mut owner = cell
@@ -470,10 +513,13 @@ fn detached_drain_appends_detach_shaped_finalizer_transaction() -> Result<(), Bo
 /// S-18 pin 5 (unit half — the decisive live replay rides the e2e analog): a
 /// post-drain exact-secret attach binds the drained victim again. The slot
 /// preserved by the faithful finalization answers `AttachBound`, never
-/// `ParticipantUnknown`.
+/// `ParticipantUnknown`. The retention window that forced the terminal to
+/// pend is first released through the real mechanism — the peer acknowledges
+/// its own obligation endpoint — so the attach's record row is admissible
+/// without any capacity waiver.
 #[test]
 fn drained_detached_victim_resumes_with_exact_secret() -> Result<(), Box<dyn Error>> {
-    let fixture = pending_detached_restart_fixture()?;
+    let fixture = pending_detached_restart_fixture_with_acks(Some(4), true)?;
     let restarted = restarted_handler(&fixture)?;
     let mut peer_conversations = ParticipantConnectionConversations::default();
     let committed = dispatch_tracked(

@@ -379,6 +379,12 @@ impl ConversationAuthority {
                 ) => self
                     .replay_explicit_pending_detached(&row, sequence)
                     .map(|()| None),
+                (
+                    StoredTerminalDisposition::Committed { .. },
+                    StoredDetachedSource::Drained { .. },
+                ) => self
+                    .replay_detached_drain_row(&row, sequence)
+                    .map(|()| None),
                 _ => Err(OperationLogError::CorruptRow { sequence }.into()),
             },
             StoredOperation::Died { row } => self.replay_died_row(&row, sequence).map(|()| None),
@@ -497,7 +503,11 @@ async fn validate_operation_schema_inner(
 
 /// Rows whose replay transition does not share its live append core route in
 /// the dispatcher. Explicit committed Detached and both specific classes route
-/// inside their shared core, exactly once.
+/// inside their shared core, exactly once. Drain rows (a `Died` row with
+/// `drained: Some`, a `Detached` row with the `Drained` source) route NOWHERE:
+/// their pending source row already owns the fate occurrence, and the drain
+/// consumed its presentation through `select_finalizer` — exactly as a
+/// pending-finalizing `Left` row does.
 const fn route_in_replay_dispatch(operation: &StoredOperation) -> bool {
     matches!(
         operation,
