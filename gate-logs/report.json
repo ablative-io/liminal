@@ -1,9 +1,9 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "112f17c53c71dfab4b2e98112dd5375a3bee9fd7",
-  "tree_sha": "0f394473cab34621afc1fdd453a3c77ef66e337e",
-  "branch": "fix/toctou-register-record",
+  "commit_sha": "89c3f0d598069b428fb596cf9d685ac1ac6228db",
+  "tree_sha": "44b8be76a5e090b036761c4813befc602e2e33cc",
+  "branch": "chore/haematite-0.7.0-uptake",
   "dirty": false,
   "untracked_count": 0,
   "toolchain": {
@@ -11,14 +11,16 @@
     "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
   },
   "host": "Annabels-MacBook-Pro.local",
-  "started_at": "2026-07-23T04:16:02Z",
-  "finished_at": "2026-07-23T04:24:11Z",
-  "duration_s": 488.547,
+  "started_at": "2026-07-23T04:32:42Z",
+  "finished_at": "2026-07-23T04:40:25Z",
+  "duration_s": 462.992,
   "concurrent_cargo_at_start": [
     "9793 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
     "10795 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
-    "27400 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
-    "30971 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace"
+    "45910 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace",
+    "53488 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --offline --config=build.rustflags=[\"--cfg\", \"tr",
+    "53766 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name cranelift_codegen --edition=2024 /U",
+    "53814 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name beamr --edition=2024 /Users/annabel"
   ],
   "legs": [
     {
@@ -26,7 +28,7 @@
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 1.805,
+      "duration_s": 2.188,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -37,9 +39,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 39.909,
+      "duration_s": 41.474,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "fcedd59d98ed28917ec7258703288111cea51330b39a91ac6a92472fc1399e5d",
+      "log_sha256": "26f0eea8c6bf808ba739c1e5475fc86cd1750f8ba127c5df79140871c8041d58",
       "tests": null,
       "failures": []
     },
@@ -48,9 +50,9 @@
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
       "exit": 0,
-      "duration_s": 446.828,
+      "duration_s": 419.327,
       "log": "gate-logs/tests.log",
-      "log_sha256": "5977aafd9b5a48d859cc9239f7bab08107905e19f82e33a41fe1e9da2d2a1758",
+      "log_sha256": "a8b55cb2ef2ede5fb0e413485d1b23fbea6a51fcf8acc152179c67390207f2c3",
       "tests": {
         "suites": 40,
         "passed": 1762,
