@@ -22,6 +22,7 @@ fn disk_store() -> Result<(Arc<dyn DurableStore>, TempDir), Box<dyn std::error::
         data_dir: dir.path().join("db"),
         shard_count: 4,
         distributed: None,
+        executor_threads: None,
     })?;
     let store: Arc<dyn DurableStore> =
         Arc::new(HaematiteStore::new(Arc::new(EventStore::new(database))));

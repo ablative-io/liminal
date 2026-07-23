@@ -831,9 +831,9 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "haematite"
-version = "0.6.2"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d23ae3f2f73b9e8d89feaccf40712f137baf2a365c990d538097f2010b31876e"
+checksum = "6a92612160dc25dec762fa07d53518c8eb632b033c25fae74670524a33646d1c"
 dependencies = [
  "beamr",
  "blake3",

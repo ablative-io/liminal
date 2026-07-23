@@ -463,6 +463,7 @@ fn open_ephemeral_in(
         data_dir: ephemeral_dir.path().to_path_buf(),
         shard_count,
         distributed: None,
+        executor_threads: None,
     })
     .map_err(|error| DurabilityError::EphemeralStoreOpen(error.to_string()))?;
     Ok(EphemeralHaematiteStore::new(database, ephemeral_dir))
