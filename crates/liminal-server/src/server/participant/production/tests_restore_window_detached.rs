@@ -610,3 +610,334 @@ fn detached_residence_census_sole_terminal_candidate_closure_clear() -> Result<(
     }
     Ok(())
 }
+
+/// A real durable appender for the mixed-flavor fixture's fate cuts.
+struct LogAppender<'a> {
+    log: &'a OperationLog,
+}
+
+impl DurableAppend for LogAppender<'_> {
+    fn append(
+        &self,
+        operation: &StoredOperation,
+        expected_sequence: u64,
+    ) -> Result<(), OperationLogError> {
+        block_on(self.log.append(operation, expected_sequence))?
+    }
+}
+
+/// S-18 pin 8 — mixed-flavor ordering. At this base the protocol admits AT
+/// MOST ONE pending binding-terminal candidate (the structural boundary the
+/// Died suite pins for its own flavor), so the pin instantiates strict
+/// `admission_order` sequencing the only way the substrate can express it:
+///
+/// - while the earlier Died candidate is open, the later Detached fate
+///   CANNOT join the candidate lane (refused at admission) — the mixed
+///   two-candidate prestate is unmintable;
+/// - each candidate then drains in strict admission order, one committed
+///   transaction each, with its OWN flavor semantics: the Died drain erases
+///   its victim (slot and token gone), the Detached drain preserves its
+///   victim at committed `BindingState::Detached` with its token mapped;
+/// - the durable log carries the two drain transactions in admission order,
+///   each keyed to its own pending source row.
+#[test]
+fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(), Box<dyn Error>>
+{
+    let conversation_id = 79;
+    let died_connection = ConnectionIncarnation::new(105, 3);
+    let detached_connection = ConnectionIncarnation::new(105, 4);
+    let publisher_connection = ConnectionIncarnation::new(105, 5);
+    let store: Arc<dyn liminal::durability::DurableStore> =
+        Arc::new(liminal::durability::open_ephemeral(1)?);
+    let mut config = test_participant_config();
+    // One more retained row than the two-party fixtures: three identities
+    // enroll (plus A's attach) before the debt record rests retention at the
+    // cap, and the cap must bind at BOTH fate cuts.
+    config.max_retained_record_rows = 5;
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
+    let log = OperationLog::new(Arc::clone(&store), conversation_id);
+
+    // Died victim A: enrolls, attaches, and publishes the debt record that
+    // rests retention at its cap.
+    let mut conversations_a = ParticipantConnectionConversations::default();
+    let enrolled_a = dispatch_tracked(
+        &handler,
+        died_connection,
+        &mut conversations_a,
+        ClientRequest::Enrollment(liminal_protocol::wire::EnrollmentRequest {
+            conversation_id,
+            enrollment_token: liminal_protocol::wire::EnrollmentToken::new([0xA1; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt_a) = enrolled_a else {
+        return Err(format!("Died victim did not enroll: {enrolled_a:?}").into());
+    };
+    let attached_a = dispatch_tracked(
+        &handler,
+        died_connection,
+        &mut conversations_a,
+        ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id,
+            participant_id: receipt_a.participant_id(),
+            capability_generation: Generation::ONE,
+            attach_secret: receipt_a.attach_secret(),
+            attach_attempt_token: AttachAttemptToken::new([0xA2; 16]),
+            accept_marker_delivery_seq: None,
+        }),
+    )?;
+    let ServerValue::AttachBound(attached_a) = attached_a else {
+        return Err(format!("Died victim did not attach: {attached_a:?}").into());
+    };
+
+    // Detached victim B and publisher C enroll on their own connections.
+    let mut conversations_b = ParticipantConnectionConversations::default();
+    let enrolled_b = dispatch_tracked(
+        &handler,
+        detached_connection,
+        &mut conversations_b,
+        ClientRequest::Enrollment(liminal_protocol::wire::EnrollmentRequest {
+            conversation_id,
+            enrollment_token: liminal_protocol::wire::EnrollmentToken::new([0xA3; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt_b) = enrolled_b else {
+        return Err(format!("Detached victim did not enroll: {enrolled_b:?}").into());
+    };
+    let mut conversations_c = ParticipantConnectionConversations::default();
+    let enrolled_c = dispatch_tracked(
+        &handler,
+        publisher_connection,
+        &mut conversations_c,
+        ClientRequest::Enrollment(liminal_protocol::wire::EnrollmentRequest {
+            conversation_id,
+            enrollment_token: liminal_protocol::wire::EnrollmentToken::new([0xA4; 16]),
+        }),
+    )?;
+    let ServerValue::EnrollBound(receipt_c) = enrolled_c else {
+        return Err(format!("publisher did not enroll: {enrolled_c:?}").into());
+    };
+    let debt = dispatch_tracked(
+        &handler,
+        died_connection,
+        &mut conversations_a,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id: receipt_a.participant_id(),
+            capability_generation: attached_a.origin_binding_epoch().capability_generation,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA5; 16]),
+            payload: vec![0xA6],
+        }),
+    )?;
+    if !matches!(debt, ServerValue::RecordCommitted(_)) {
+        return Err(format!("debt record did not commit: {debt:?}").into());
+    }
+
+    // Fate cut 1: A's connection dies -> pending Died, the sole candidate.
+    let cell = handler.cell(conversation_id)?;
+    let died_source_sequence = {
+        let mut owner = cell
+            .lock()
+            .map_err(|_| "mixed-flavor owner lock was poisoned")?;
+        let authority = owner
+            .as_mut()
+            .ok_or("mixed-flavor owner was unavailable")?;
+        let source_sequence = authority.next_log_sequence;
+        authority
+            .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
+                open_sequence: 51,
+                connection_incarnation: died_connection,
+                class: ConnectionFateClass::ConnectionLost,
+                tracked_conversations: conversations_a.tracked_conversations(),
+            })
+            .complete(authority, &LogAppender { log: &log })?;
+        if !matches!(
+            authority.slots.get(&receipt_a.participant_id()).map(|slot| slot.binding),
+            Some(BindingState::PendingFinalization(PendingFinalization::Died(_)))
+        ) {
+            return Err("fate cut 1 did not rest A in Pending Died".into());
+        }
+
+        // STRUCTURAL BOUNDARY: while A's candidate is open, B's Detached
+        // fate cannot join the candidate lane.
+        let refused = authority
+            .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
+                open_sequence: 52,
+                connection_incarnation: detached_connection,
+                class: ConnectionFateClass::ServerShutdown,
+                tracked_conversations: conversations_b.tracked_conversations(),
+            })
+            .complete(authority, &LogAppender { log: &log });
+        let error = match refused {
+            Ok(()) => {
+                return Err(
+                    "a second (Detached) pending terminal joined the candidate lane — the \
+                     mixed-flavor two-candidate prestate has become mintable; extend the \
+                     drain coverage to drain both from one lane occupancy"
+                        .into(),
+                );
+            }
+            Err(error) => format!("{error:?}"),
+        };
+        if !error.contains("binding-terminal admission refused") {
+            return Err(format!(
+                "second (Detached) pending terminal failed for an unexpected reason: {error}"
+            )
+            .into());
+        }
+        drop(owner);
+        source_sequence
+    };
+
+    // Drain 1: the publisher's record drives DrainFirst into A's candidate;
+    // Died semantics — identity erased.
+    let publish_1 = dispatch_tracked(
+        &handler,
+        publisher_connection,
+        &mut conversations_c,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id: receipt_c.participant_id(),
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA7; 16]),
+            payload: vec![0xA8],
+        }),
+    )?;
+    if !matches!(publish_1, ServerValue::RecordCommitted(_)) {
+        return Err(format!("first drain publish did not commit: {publish_1:?}").into());
+    }
+    let detached_source_sequence = {
+        let mut owner = cell
+            .lock()
+            .map_err(|_| "mixed-flavor owner lock was poisoned")?;
+        let authority = owner
+            .as_mut()
+            .ok_or("mixed-flavor owner was unavailable")?;
+        if authority.slots.contains_key(&receipt_a.participant_id()) {
+            return Err("Died drain did not erase A's binding slot".into());
+        }
+        if authority
+            .tokens
+            .values()
+            .any(|mapped| *mapped == receipt_a.participant_id())
+        {
+            return Err("Died drain left A's enrollment token mapped".into());
+        }
+
+        // Fate cut 2: with A drained, B's ServerShutdown fate pends.
+        let source_sequence = authority.next_log_sequence;
+        authority
+            .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
+                open_sequence: 53,
+                connection_incarnation: detached_connection,
+                class: ConnectionFateClass::ServerShutdown,
+                tracked_conversations: conversations_b.tracked_conversations(),
+            })
+            .complete(authority, &LogAppender { log: &log })?;
+        if !matches!(
+            authority.slots.get(&receipt_b.participant_id()).map(|slot| slot.binding),
+            Some(BindingState::PendingFinalization(PendingFinalization::Detached(_)))
+        ) {
+            return Err("fate cut 2 did not rest B in Pending Detached".into());
+        }
+        drop(owner);
+        source_sequence
+    };
+
+    // Drain 2: the next publish drains B's candidate; Detached semantics —
+    // slot preserved at committed Detached.
+    let publish_2 = dispatch_tracked(
+        &handler,
+        publisher_connection,
+        &mut conversations_c,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id: receipt_c.participant_id(),
+            capability_generation: Generation::ONE,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA9; 16]),
+            payload: vec![0xAA],
+        }),
+    )?;
+    if !matches!(publish_2, ServerValue::RecordCommitted(_)) {
+        return Err(format!("second drain publish did not commit: {publish_2:?}").into());
+    }
+    {
+        let mut owner = cell
+            .lock()
+            .map_err(|_| "mixed-flavor owner lock was poisoned")?;
+        let authority = owner
+            .as_mut()
+            .ok_or("mixed-flavor owner was unavailable")?;
+        let slot_b = authority
+            .slots
+            .get(&receipt_b.participant_id())
+            .ok_or("Detached drain erased B's binding slot")?;
+        if !matches!(slot_b.binding, BindingState::Detached) {
+            return Err(format!(
+                "Detached drain did not settle B at committed Detached: {:?}",
+                slot_b.binding
+            )
+            .into());
+        }
+        if !authority
+            .tokens
+            .values()
+            .any(|mapped| *mapped == receipt_b.participant_id())
+        {
+            return Err("Detached drain unmapped B's enrollment token".into());
+        }
+        drop(owner);
+    }
+
+    // Durable shape: [Died source(A), Died drain(A), Ordinary(A), publish 1,
+    // Detached source(B), Detached drain(B), publish 2] — two drain
+    // transactions strictly by admission order, each its own flavor.
+    let mut rows = Vec::new();
+    let mut sequence = died_source_sequence;
+    while let Some(entry) = block_on(log.read_at(sequence))?? {
+        let DecodedStoredOperation::V3(operation) = entry.operation else {
+            return Err(format!("durable row {sequence} is not schema v3").into());
+        };
+        rows.push(operation);
+        sequence = sequence
+            .checked_add(1)
+            .ok_or("durable log sequence overflowed")?;
+    }
+    let [
+        StoredOperation::Died { row: died_source },
+        StoredOperation::Died { row: died_drain },
+        StoredOperation::Ordinary { .. },
+        StoredOperation::RecordAdmission { .. },
+        StoredOperation::Detached { row: detached_source },
+        StoredOperation::Detached { row: detached_drain },
+        StoredOperation::RecordAdmission { .. },
+    ] = rows.as_slice()
+    else {
+        return Err(format!("mixed-flavor drain transactions drifted: {rows:?}").into());
+    };
+    if died_source.disposition != StoredTerminalDisposition::Pending
+        || died_drain.drained.map(|drained| drained.pending_source_sequence)
+            != Some(died_source_sequence)
+    {
+        return Err("Died drain is not keyed to its pending source".into());
+    }
+    if detached_source.disposition != StoredTerminalDisposition::Pending
+        || !matches!(
+            &detached_drain.source,
+            StoredDetachedSource::Drained { drained }
+                if drained.pending_source_sequence == detached_source_sequence
+        )
+    {
+        return Err("Detached drain is not keyed to its pending source".into());
+    }
+    if died_drain.terminal_order >= detached_drain.terminal_order {
+        return Err(format!(
+            "drains are not strictly ordered by admission order: Died {} vs Detached {}",
+            died_drain.terminal_order, detached_drain.terminal_order
+        )
+        .into());
+    }
+    if detached_drain.cause != StoredDetachedCause::ServerShutdown {
+        return Err("Detached drain lost its preserved cause".into());
+    }
+    Ok(())
+}
