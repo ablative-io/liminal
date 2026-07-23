@@ -1,26 +1,32 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "89c3f0d598069b428fb596cf9d685ac1ac6228db",
-  "tree_sha": "44b8be76a5e090b036761c4813befc602e2e33cc",
-  "branch": "chore/haematite-0.7.0-uptake",
+  "commit_sha": "9c0f0d79cf54ffa68e9522782bd5e322db8f2807",
+  "tree_sha": "2af99e0799e54bfd7530dd0a8fb62208d9519ba2",
+  "branch": "main",
   "dirty": false,
-  "untracked_count": 0,
+  "untracked_count": 3,
   "toolchain": {
-    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
-    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
   },
-  "host": "Annabels-MacBook-Pro.local",
-  "started_at": "2026-07-23T04:32:42Z",
-  "finished_at": "2026-07-23T04:40:25Z",
-  "duration_s": 462.992,
+  "host": "Toms-MacBook-Pro.local",
+  "started_at": "2026-07-23T04:49:05Z",
+  "finished_at": "2026-07-23T04:54:14Z",
+  "duration_s": 309.304,
   "concurrent_cargo_at_start": [
-    "9793 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
-    "10795 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
-    "45910 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace",
-    "53488 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo --offline --config=build.rustflags=[\"--cfg\", \"tr",
-    "53766 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name cranelift_codegen --edition=2024 /U",
-    "53814 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name beamr --edition=2024 /Users/annabel"
+    "807 /Users/tom/Developer/ablative/deploy/aion/cargo-gates-worker --address 127.0.0.1:50061 --ready-file /tmp/cargo-gates-wor",
+    "820 /Users/tom/.cargo/bin/aion server --config /Users/tom/Developer/ablative/deploy/aion/config.toml",
+    "40739 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
+    "40740 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
+    "76675 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
+    "76676 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
+    "92175 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
+    "92176 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
+    "92177 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
+    "92178 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
+    "92179 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
+    "92180 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend"
   ],
   "legs": [
     {
@@ -28,7 +34,7 @@
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 2.188,
+      "duration_s": 1.274,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -39,9 +45,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 41.474,
+      "duration_s": 31.018,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "26f0eea8c6bf808ba739c1e5475fc86cd1750f8ba127c5df79140871c8041d58",
+      "log_sha256": "45f54f8a0b70572a54d43af385c688e95f3731128d4194e8b63e1736cfc3563f",
       "tests": null,
       "failures": []
     },
@@ -49,17 +55,22 @@
       "name": "tests",
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
-      "exit": 0,
-      "duration_s": 419.327,
+      "exit": 101,
+      "duration_s": 277.007,
       "log": "gate-logs/tests.log",
-      "log_sha256": "a8b55cb2ef2ede5fb0e413485d1b23fbea6a51fcf8acc152179c67390207f2c3",
+      "log_sha256": "05084e42ea2fe20ad079c65c62a32148ed2dba7b119a68e3a1703513b982ea4b",
       "tests": {
-        "suites": 40,
-        "passed": 1762,
-        "failed": 0
+        "suites": 24,
+        "passed": 1555,
+        "failed": 1
       },
-      "failures": []
+      "failures": [
+        {
+          "test": "server::connection::services_r5_tests::duplicate_idempotency_key_delivers_to_subscriber_exactly_once",
+          "excerpt": "Error: ListenerAccept { message: \"liminal subscribe failed for channel 'orders': failed to set trap_exit on subscriber process 2: NoCaller\" }"
+        }
+      ]
     }
   ],
-  "verdict": "green"
+  "verdict": "red"
 }
