@@ -1,8 +1,8 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "9c0f0d79cf54ffa68e9522782bd5e322db8f2807",
-  "tree_sha": "2af99e0799e54bfd7530dd0a8fb62208d9519ba2",
+  "commit_sha": "69021311b51e8f623c785bcbfc6ff058b670f021",
+  "tree_sha": "155a1c6bb3d21722fa164c1d7941353eec0497a9",
   "branch": "main",
   "dirty": false,
   "untracked_count": 3,
@@ -11,9 +11,9 @@
     "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
   },
   "host": "Toms-MacBook-Pro.local",
-  "started_at": "2026-07-23T04:49:05Z",
-  "finished_at": "2026-07-23T04:54:14Z",
-  "duration_s": 309.304,
+  "started_at": "2026-07-23T04:56:12Z",
+  "finished_at": "2026-07-23T04:58:02Z",
+  "duration_s": 109.656,
   "concurrent_cargo_at_start": [
     "807 /Users/tom/Developer/ablative/deploy/aion/cargo-gates-worker --address 127.0.0.1:50061 --ready-file /tmp/cargo-gates-wor",
     "820 /Users/tom/.cargo/bin/aion server --config /Users/tom/Developer/ablative/deploy/aion/config.toml",
@@ -34,7 +34,7 @@
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 1.274,
+      "duration_s": 1.237,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -45,9 +45,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 31.018,
+      "duration_s": 0.33,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "45f54f8a0b70572a54d43af385c688e95f3731128d4194e8b63e1736cfc3563f",
+      "log_sha256": "2461b00c8697c4189b2de92ca6fb05b5d72273c78a0a47b1ce4e83ccca077b70",
       "tests": null,
       "failures": []
     },
@@ -56,18 +56,18 @@
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
       "exit": 101,
-      "duration_s": 277.007,
+      "duration_s": 108.083,
       "log": "gate-logs/tests.log",
-      "log_sha256": "05084e42ea2fe20ad079c65c62a32148ed2dba7b119a68e3a1703513b982ea4b",
+      "log_sha256": "44b22b98dbd209bc99e4ffe5395ad3bf2962381c01bfe63ef5267ee202044391",
       "tests": {
-        "suites": 24,
-        "passed": 1555,
+        "suites": 29,
+        "passed": 1583,
         "failed": 1
       },
       "failures": [
         {
-          "test": "server::connection::services_r5_tests::duplicate_idempotency_key_delivers_to_subscriber_exactly_once",
-          "excerpt": "Error: ListenerAccept { message: \"liminal subscribe failed for channel 'orders': failed to set trap_exit on subscriber process 2: NoCaller\" }"
+          "test": "sdk_subscription_delivery_parity_over_real_acceptor",
+          "excerpt": "Error: Protocol { description: \"server rejected subscribe (reason 65535): listener accept failed: liminal subscribe failed for channel 'events': failed to set trap_exit on subscriber process 2: NoCaller\" }"
         }
       ]
     }
