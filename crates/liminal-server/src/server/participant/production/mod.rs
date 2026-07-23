@@ -177,6 +177,8 @@ mod tests_w1b_umbrella;
 #[cfg(test)]
 mod tests_w1b_validation_memory;
 #[cfg(test)]
+mod tests_w1b_while_dead_replay;
+#[cfg(test)]
 mod tests_w2_impacts;
 #[cfg(test)]
 mod tests_w2_leg1_census;
