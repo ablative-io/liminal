@@ -1,0 +1,255 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling equivalent v1.0.2
+   Compiling allocator-api2 v0.2.21
+   Compiling serde_core v1.0.228
+   Compiling foldhash v0.2.0
+   Compiling smallvec v1.15.2
+   Compiling libm v0.2.16
+   Compiling shlex v2.0.1
+   Compiling cranelift-srcgen v0.131.2
+   Compiling find-msvc-tools v0.1.9
+   Compiling stable_deref_trait v1.2.1
+   Compiling serde v1.0.228
+   Compiling wasmtime-internal-core v44.0.2
+   Compiling autocfg v1.5.1
+   Compiling hashbrown v0.17.1
+   Compiling heck v0.5.0
+   Compiling cranelift-isle v0.131.2
+   Compiling log v0.4.32
+   Compiling memchr v2.8.2
+   Compiling cranelift-assembler-x64-meta v0.131.2
+   Compiling pkg-config v0.3.33
+   Compiling cranelift-codegen-shared v0.131.2
+   Compiling crossbeam-utils v0.8.21
+   Compiling once_cell v1.21.4
+   Compiling hashbrown v0.16.1
+   Compiling target-lexicon v0.13.5
+   Compiling bumpalo v3.20.3
+   Compiling itoa v1.0.18
+   Compiling num-traits v0.2.19
+   Compiling rand_core v0.10.1
+   Compiling fnv v1.0.7
+   Compiling parking_lot_core v0.9.12
+   Compiling rustc-hash v2.1.2
+   Compiling zmij v1.0.21
+   Compiling getrandom v0.4.2
+   Compiling arbitrary v1.4.2
+   Compiling scopeguard v1.2.0
+   Compiling litemap v0.8.2
+   Compiling zstd-safe v7.2.4
+   Compiling indexmap v2.14.0
+   Compiling regalloc2 v0.15.1
+   Compiling serde_json v1.0.150
+   Compiling writeable v0.6.3
+   Compiling cranelift-codegen-meta v0.131.2
+   Compiling gimli v0.33.0
+   Compiling cranelift-control v0.131.2
+   Compiling lock_api v0.4.14
+   Compiling icu_properties_data v2.2.0
+   Compiling utf8_iter v1.0.4
+   Compiling anyhow v1.0.102
+   Compiling icu_normalizer_data v2.2.0
+   Compiling cranelift-assembler-x64 v0.131.2
+   Compiling syn v2.0.117
+   Compiling typenum v1.20.1
+   Compiling cranelift-bitset v0.131.2
+   Compiling jobserver v0.1.34
+   Compiling cranelift-entity v0.131.2
+   Compiling cc v1.2.64
+   Compiling cranelift-bforest v0.131.2
+   Compiling errno v0.3.14
+   Compiling camino v1.2.2
+   Compiling zerocopy v0.8.52
+   Compiling bytes v1.11.1
+   Compiling getrandom v0.3.4
+   Compiling version_check v0.9.5
+   Compiling ref-cast v1.0.25
+   Compiling crc32fast v1.5.0
+   Compiling rustix v1.1.4
+   Compiling num-integer v0.1.46
+   Compiling num-bigint v0.4.6
+   Compiling ahash v0.8.12
+   Compiling hybrid-array v0.4.13
+   Compiling cranelift-codegen v0.131.2
+   Compiling zstd-sys v2.0.16+zstd.1.5.7
+   Compiling mach2 v0.4.3
+   Compiling aho-corasick v1.1.4
+   Compiling chacha20 v0.10.0
+   Compiling bitflags v2.13.0
+   Compiling bitflags v1.3.2
+   Compiling regex-syntax v0.8.11
+   Compiling synstructure v0.13.2
+   Compiling pin-project-lite v0.2.17
+   Compiling simd-adler32 v0.3.9
+   Compiling adler2 v2.0.1
+   Compiling miniz_oxide v0.8.9
+   Compiling num-rational v0.4.2
+   Compiling region v3.0.2
+   Compiling rand v0.10.2
+   Compiling blake3 v1.8.5
+   Compiling num-iter v0.1.45
+   Compiling num-complex v0.4.6
+   Compiling crossbeam-epoch v0.9.18
+   Compiling socket2 v0.6.4
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling ref-cast-impl v1.0.25
+   Compiling tokio-macros v2.7.0
+   Compiling wasmtime-internal-jit-icache-coherence v44.0.2
+   Compiling mio v1.2.1
+   Compiling zerofrom v0.1.8
+   Compiling borrow-or-share v0.2.4
+   Compiling bit-vec v0.8.0
+   Compiling hashbrown v0.14.5
+   Compiling foldhash v0.1.5
+   Compiling ecow v0.2.6
+   Compiling thiserror v2.0.18
+   Compiling unicode-general-category v1.1.0
+   Compiling flate2 v1.1.9
+   Compiling tokio v1.52.3
+   Compiling hashbrown v0.15.5
+   Compiling dashmap v6.2.1
+   Compiling regex-automata v0.4.14
+   Compiling bit-set v0.8.0
+   Compiling num v0.4.3
+   Compiling crossbeam-deque v0.8.6
+   Compiling thiserror-impl v2.0.18
+   Compiling crypto-common v0.2.2
+   Compiling block-buffer v0.12.1
+   Compiling parking_lot v0.12.5
+   Compiling crossbeam-queue v0.3.12
+   Compiling crossbeam-channel v0.5.15
+   Compiling num_cpus v1.17.0
+   Compiling md5 v0.8.0
+   Compiling lazy_static v1.5.0
+   Compiling vsimd v0.8.0
+   Compiling constant_time_eq v0.4.2
+   Compiling httparse v1.10.1
+   Compiling base64 v0.22.1
+   Compiling arrayvec v0.7.7
+   Compiling percent-encoding v2.3.2
+   Compiling micromap v0.3.0
+   Compiling web-time v1.1.0
+   Compiling outref v0.5.2
+   Compiling data-encoding v2.11.0
+   Compiling unicode-segmentation v1.13.3
+   Compiling utf8parse v0.2.2
+   Compiling fastrand v2.4.1
+   Compiling const-oid v0.10.2
+   Compiling arrayref v0.3.9
+   Compiling core-foundation-sys v0.8.7
+   Compiling digest v0.11.3
+   Compiling gleam-types v0.4.3
+   Compiling tempfile v3.27.0
+   Compiling iana-time-zone v0.1.65
+   Compiling anstyle-parse v1.0.0
+   Compiling uuid-simd v0.8.0
+   Compiling fraction v0.15.4
+   Compiling lru v0.12.5
+   Compiling tracing-attributes v0.1.31
+   Compiling cpufeatures v0.3.0
+   Compiling tracing-core v0.1.36
+   Compiling anstyle v1.0.14
+   Compiling num-cmp v0.1.0
+   Compiling anstyle-query v1.1.5
+   Compiling bytecount v0.6.9
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling sha1 v0.11.0
+   Compiling anstream v1.0.0
+   Compiling chrono v0.4.45
+   Compiling async-trait v0.1.89
+   Compiling uuid v1.23.3
+   Compiling http v1.4.2
+   Compiling yoke v0.8.3
+   Compiling strsim v0.11.1
+   Compiling tracing v0.1.44
+   Compiling winnow v0.7.15
+   Compiling signal-hook v0.3.18
+   Compiling clap_lex v1.1.0
+   Compiling toml_write v0.1.2
+   Compiling clap_builder v4.6.0
+   Compiling regex v1.12.4
+   Compiling fancy-regex v0.18.0
+   Compiling clap_derive v4.6.1
+   Compiling signal-hook-registry v1.4.8
+   Compiling liminal-protocol v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/detached-drain/crates/liminal-protocol)
+   Compiling winnow v1.0.4
+   Compiling target-triple v1.0.1
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling fluent-uri v0.4.1
+   Compiling email_address v0.2.9
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling toml_parser v1.1.2+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling toml_writer v1.1.2+spec-1.1.0
+   Compiling futures-core v0.3.32
+   Compiling spin v0.9.8
+   Compiling termcolor v1.4.1
+   Compiling glob v0.3.3
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling toml v1.1.3+spec-1.1.0
+   Compiling referencing v0.46.5
+   Compiling clap v4.6.1
+   Compiling tungstenite v0.30.0
+   Compiling trybuild v1.0.118
+   Compiling tinystr v0.8.3
+   Compiling icu_locale_core v2.2.0
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling toml v0.8.23
+   Compiling zstd v0.13.3
+   Compiling icu_provider v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling beamr v0.16.1
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling jsonschema v0.46.5
+   Compiling cranelift-module v0.131.2
+   Compiling cranelift-native v0.131.2
+   Compiling cranelift-frontend v0.131.2
+   Compiling cranelift-jit v0.131.2
+   Compiling haematite v0.7.0
+   Compiling liminal-rs v0.4.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/detached-drain/crates/liminal)
+   Compiling liminal-server v0.4.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/detached-drain/crates/liminal-server)
+   Compiling liminal-sdk v0.4.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/detached-drain/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 31s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e913b835ded1e619)
+
+running 4 tests
+test server::participant::production::tests_restore_window_detached::drained_detached_victim_resumes_with_exact_secret ... FAILED
+test server::participant::production::tests_restore_window_detached::detached_drain_appends_detach_shaped_finalizer_transaction ... FAILED
+test server::participant::production::tests_restore_window_detached::detached_residence_census_sole_terminal_candidate_closure_clear ... ok
+test server::participant::production::tests_restore_window_detached::valid_publish_during_pending_detached_residence_commits_after_drain ... FAILED
+
+failures:
+
+---- server::participant::production::tests_restore_window_detached::drained_detached_victim_resumes_with_exact_secret stdout ----
+Error: "dispatch did not respond: Fatal(Semantic(Internal { message: \"participant production operation failed: participant production invariant violated: terminal drain candidate is not a pending Died residence\" }))"
+
+---- server::participant::production::tests_restore_window_detached::detached_drain_appends_detach_shaped_finalizer_transaction stdout ----
+Error: "dispatch did not respond: Fatal(Semantic(Internal { message: \"participant production operation failed: participant production invariant violated: terminal drain candidate is not a pending Died residence\" }))"
+
+---- server::participant::production::tests_restore_window_detached::valid_publish_during_pending_detached_residence_commits_after_drain stdout ----
+Error: "dispatch did not respond: Fatal(Semantic(Internal { message: \"participant production operation failed: participant production invariant violated: terminal drain candidate is not a pending Died residence\" }))"
+
+
+failures:
+    server::participant::production::tests_restore_window_detached::detached_drain_appends_detach_shaped_finalizer_transaction
+    server::participant::production::tests_restore_window_detached::drained_detached_victim_resumes_with_exact_secret
+    server::participant::production::tests_restore_window_detached::valid_publish_during_pending_detached_residence_commits_after_drain
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 571 filtered out; finished in 1.62s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
