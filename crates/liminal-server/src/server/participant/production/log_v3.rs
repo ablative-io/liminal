@@ -385,6 +385,17 @@ pub(super) enum StoredSpecificFateIntent {
 }
 
 /// Complete exact v3 Died source row.
+///
+/// A `Died` row is one of two durable facts sharing this shape:
+///
+/// - `drained: None` — the connection-fate SOURCE row (the only shape that
+///   existed before the candidate-lane terminal drain; old logs decode to it
+///   unchanged and new source rows serialize byte-identically).
+/// - `drained: Some(_)` — the R-A2 candidate-lane terminal DRAIN row: the
+///   finalizer transaction that committed an earlier pending Died terminal
+///   (disposition is always `Committed`), keyed to its pending source row and
+///   carrying the consumed finalizer presentation, exactly as `Left` rows do
+///   for pending Leave.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub(super) struct StoredDied {
     pub(super) participant_id: ParticipantId,
@@ -394,6 +405,17 @@ pub(super) struct StoredDied {
     pub(super) disposition: StoredTerminalDisposition,
     pub(super) connection_intent_sequence: Option<u64>,
     pub(super) specific_fate_intent: Option<StoredSpecificFateIntent>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) drained: Option<StoredDrainedTerminal>,
+}
+
+/// Exact drain provenance carried by a candidate-lane terminal drain row.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub(super) struct StoredDrainedTerminal {
+    /// Durable sequence of the pending Died source row this drain finalizes.
+    pub(super) pending_source_sequence: u64,
+    /// Presentation mode consumed from the fate-occurrence router.
+    pub(super) finalizer_presentation: StoredFinalizerPresentation,
 }
 
 /// Closed source authority for one exact v3 Detached row.
@@ -449,6 +471,7 @@ pub(super) enum StoredOrdinaryTerminalSource {
 pub(super) enum StoredPendingDiedFinalizer {
     Left { source_sequence: u64 },
     FencedAttached { source_sequence: u64 },
+    Drained { source_sequence: u64 },
 }
 
 /// Redundant exact audit of the committed Died terminal consumed by Ordinary.
