@@ -3,7 +3,11 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
-## Unreleased
+## 0.3.3 — 2026-07-23
+
+Delivery-integrity release: `liminal-server` 0.3.3 and `liminal-sdk` 0.3.3.
+`liminal-rs` stays 0.3.2 and `liminal-protocol` stays 0.3.1 (untouched by
+this line — zero of the fix commits modify either crate).
 
 ### Fixed
 
