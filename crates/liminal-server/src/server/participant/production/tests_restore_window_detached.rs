@@ -3,7 +3,7 @@
 //!
 //! During the crash-restore window a participant slot can rest in
 //! `PendingFinalization(Detached(..))`: its Detached source row (a
-//! ServerShutdown fate cut at the retention cap, or a blocked explicit
+//! `ServerShutdown` fate cut at the retention cap, or a blocked explicit
 //! detach) is durable but no finalizer appended before the unclean stop.
 //! The restored binding terminal is the earliest frontier candidate, so a
 //! valid publish from a still-bound peer drives `DrainFirst` into it.
@@ -23,8 +23,9 @@ use liminal_protocol::lifecycle::{
     BindingState, ClosureState, ImmutableSequenceCandidate, PendingFinalization,
 };
 use liminal_protocol::wire::{
-    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, Generation,
-    ParticipantAck, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
+    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
+    EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck, RecordAdmission,
+    RecordAdmissionAttemptToken, ServerValue,
 };
 
 use crate::server::participant::{
@@ -39,7 +40,7 @@ use super::log::{
 use super::outbox_log::{OutboxLog, OutboxRow, ProducedSourceKind};
 use super::state::DurableAppend;
 use super::tests::{dispatch_tracked, test_participant_config};
-use super::tests_w1b_pending_died_restart::bound_debt_fixture;
+use super::tests_w1b_pending_died_restart::{BoundDebtFixture, bound_debt_fixture};
 
 struct SourceOnlyAppender<'a> {
     log: &'a OperationLog,
@@ -75,7 +76,7 @@ pub(super) struct PendingDetachedRestartFixture {
     pub(super) terminal_order: u64,
 }
 
-/// Mints the crash-shaped prestate: the victim's ServerShutdown connection
+/// Mints the crash-shaped prestate: the victim's `ServerShutdown` connection
 /// fate pends its Detached terminal at the retention cap (source row durable,
 /// no finalizer), the still-bound peer survives on its own connection.
 pub(super) fn pending_detached_restart_fixture()
@@ -99,36 +100,7 @@ pub(super) fn pending_detached_restart_fixture_with_acks(
     )?;
     let log = OperationLog::new(Arc::clone(&setup.handler.store), setup.conversation_id);
     if peer_acks_debt_record {
-        let mut sequence = 0_u64;
-        let mut r0_seq = None;
-        while let Some(entry) = block_on(log.read_at(sequence))?? {
-            if let DecodedStoredOperation::V3(StoredOperation::RecordAdmission { row }) =
-                entry.operation
-            {
-                if row.request.participant_id == setup.participant_id {
-                    r0_seq = Some(row.delivery_seq);
-                }
-            }
-            sequence = sequence
-                .checked_add(1)
-                .ok_or("durable log sequence overflowed")?;
-        }
-        let r0_seq = r0_seq.ok_or("victim debt record r0 is absent before the fate cut")?;
-        let mut peer_conversations = ParticipantConnectionConversations::default();
-        let acked = dispatch_tracked(
-            &setup.handler,
-            ConnectionIncarnation::new(103, 4),
-            &mut peer_conversations,
-            ClientRequest::ParticipantAck(ParticipantAck {
-                conversation_id: setup.conversation_id,
-                participant_id: setup.peer_participant_id,
-                capability_generation: Generation::ONE,
-                through_seq: r0_seq,
-            }),
-        )?;
-        if !matches!(acked, ServerValue::AckCommitted(_)) {
-            return Err(format!("peer pre-crash ack of r0 did not commit: {acked:?}").into());
-        }
+        commit_peer_debt_ack(&setup, &log)?;
     }
     let cell = setup.handler.cell(setup.conversation_id)?;
     let (detached_source_sequence, terminal_order) = {
@@ -198,6 +170,45 @@ pub(super) fn pending_detached_restart_fixture_with_acks(
         drain_sequence,
         terminal_order,
     })
+}
+
+/// Acknowledges the victim's debt record r0 from the peer BEFORE the fate
+/// cut, so the drain publish's admission can later prune the acked prefix.
+fn commit_peer_debt_ack(
+    setup: &BoundDebtFixture,
+    log: &OperationLog,
+) -> Result<(), Box<dyn Error>> {
+    let mut sequence = 0_u64;
+    let mut r0_seq = None;
+    while let Some(entry) = block_on(log.read_at(sequence))?? {
+        if let DecodedStoredOperation::V3(StoredOperation::RecordAdmission { row }) =
+            entry.operation
+        {
+            if row.request.participant_id == setup.participant_id {
+                r0_seq = Some(row.delivery_seq);
+            }
+        }
+        sequence = sequence
+            .checked_add(1)
+            .ok_or("durable log sequence overflowed")?;
+    }
+    let r0_seq = r0_seq.ok_or("victim debt record r0 is absent before the fate cut")?;
+    let mut peer_conversations = ParticipantConnectionConversations::default();
+    let acked = dispatch_tracked(
+        &setup.handler,
+        ConnectionIncarnation::new(103, 4),
+        &mut peer_conversations,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id: setup.conversation_id,
+            participant_id: setup.peer_participant_id,
+            capability_generation: Generation::ONE,
+            through_seq: r0_seq,
+        }),
+    )?;
+    if !matches!(acked, ServerValue::AckCommitted(_)) {
+        return Err(format!("peer pre-crash ack of r0 did not commit: {acked:?}").into());
+    }
+    Ok(())
 }
 
 /// Cold-restarts the fixture's durable bytes into a fresh production handler
@@ -375,7 +386,7 @@ fn assert_post_drain_recipients_include_victim(
     let outbox = OutboxLog::new(Arc::clone(&fixture.handler.store), fixture.conversation_id);
     let publish_batch = block_on(outbox.read_all())??
         .into_iter()
-        .filter_map(|(_, row)| match row {
+        .find_map(|(_, row)| match row {
             OutboxRow::Produced(batch)
                 if batch.source_log_sequence() >= fixture.drain_sequence
                     && batch.source_kind() == ProducedSourceKind::RecordAdmission =>
@@ -384,7 +395,6 @@ fn assert_post_drain_recipients_include_victim(
             }
             _ => None,
         })
-        .next()
         .ok_or("committed publish produced no outbox batch")?;
     for projected in publish_batch.ordered_records() {
         if !projected.recipients().contains(&fixture.participant_id) {
@@ -551,21 +561,53 @@ fn drained_detached_victim_resumes_with_exact_secret() -> Result<(), Box<dyn Err
             format!("drained victim's exact-secret attach did not bind: {resumed:?}").into(),
         );
     };
-    let cell = restarted.cell(fixture.conversation_id)?;
-    let owner = cell
-        .lock()
-        .map_err(|_| "resumed victim owner lock was poisoned")?;
-    let authority = owner
-        .as_ref()
-        .ok_or("resumed victim owner was unavailable")?;
-    let slot = authority
-        .slots
-        .get(&fixture.participant_id)
+    let binding = binding_of(&restarted, fixture.conversation_id, fixture.participant_id)?
         .ok_or("resumed victim slot disappeared")?;
-    if !matches!(slot.binding, BindingState::Bound(_)) {
-        return Err(format!("resumed victim is not Bound: {:?}", slot.binding).into());
+    if !matches!(binding, BindingState::Bound(_)) {
+        return Err(format!("resumed victim is not Bound: {binding:?}").into());
     }
     Ok(())
+}
+
+/// Reads one participant's live binding state under the conversation lock.
+fn binding_of(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    participant_id: u64,
+) -> Result<Option<BindingState>, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "binding probe owner lock was poisoned")?;
+    let binding = owner
+        .as_ref()
+        .ok_or("binding probe owner was unavailable")?
+        .slots
+        .get(&participant_id)
+        .map(|slot| slot.binding);
+    drop(owner);
+    Ok(binding)
+}
+
+/// Reads whether one participant's enrollment token still maps, under the
+/// conversation lock.
+fn token_mapped(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    participant_id: u64,
+) -> Result<bool, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "token probe owner lock was poisoned")?;
+    let mapped = owner
+        .as_ref()
+        .ok_or("token probe owner was unavailable")?
+        .tokens
+        .values()
+        .any(|mapped| *mapped == participant_id);
+    drop(owner);
+    Ok(mapped)
 }
 
 /// S-18 pin 6 — the R-D1 census in the Detached prestate (closes §3A.4's
@@ -628,6 +670,136 @@ impl DurableAppend for LogAppender<'_> {
     }
 }
 
+/// Enrolls one participant over a fresh connection-conversation tracking map.
+fn enroll(
+    handler: &ProductionParticipantHandler,
+    connection: ConnectionIncarnation,
+    conversation_id: u64,
+    token: u8,
+) -> Result<EnrollBound, Box<dyn Error>> {
+    let mut conversations = ParticipantConnectionConversations::default();
+    let enrolled = dispatch_tracked(
+        handler,
+        connection,
+        &mut conversations,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([token; 16]),
+        }),
+    )?;
+    match enrolled {
+        ServerValue::EnrollBound(receipt) => Ok(receipt),
+        other => Err(format!("enrollment {token:#x} did not bind: {other:?}").into()),
+    }
+}
+
+/// Publishes one record and requires `RecordCommitted`.
+fn committed_publish(
+    handler: &ProductionParticipantHandler,
+    connection: ConnectionIncarnation,
+    conversation_id: u64,
+    participant_id: u64,
+    capability_generation: Generation,
+    token: u8,
+    payload: Vec<u8>,
+) -> Result<(), Box<dyn Error>> {
+    let mut conversations = ParticipantConnectionConversations::default();
+    let committed = dispatch_tracked(
+        handler,
+        connection,
+        &mut conversations,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id,
+            capability_generation,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([token; 16]),
+            payload,
+        }),
+    )?;
+    if !matches!(committed, ServerValue::RecordCommitted(_)) {
+        return Err(format!("publish {token:#x} did not commit: {committed:?}").into());
+    }
+    Ok(())
+}
+
+/// Applies one connection-fate cut under the conversation lock. Returns the
+/// source log sequence the cut would occupy, or the fate error's debug text
+/// when the cut refuses.
+fn apply_fate_cut(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    log: &OperationLog,
+    connection: ConnectionIncarnation,
+    class: ConnectionFateClass,
+    open_sequence: u64,
+) -> Result<Result<u64, String>, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let mut owner = cell
+        .lock()
+        .map_err(|_| "fate-cut owner lock was poisoned")?;
+    let authority = owner.as_mut().ok_or("fate-cut owner was unavailable")?;
+    let source_sequence = authority.next_log_sequence;
+    let outcome = authority
+        .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
+            open_sequence,
+            connection_incarnation: connection,
+            class,
+            tracked_conversations: Vec::new(),
+        })
+        .complete(authority, &LogAppender { log });
+    drop(owner);
+    Ok(match outcome {
+        Ok(()) => Ok(source_sequence),
+        Err(error) => Err(format!("{error:?}")),
+    })
+}
+
+/// Enrolls the mixed-flavor cast — Died victim A (attached, with the debt
+/// record that rests retention at its cap), Detached victim B, publisher C —
+/// and returns their participant ids.
+fn mixed_flavor_participants(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    died_connection: ConnectionIncarnation,
+    detached_connection: ConnectionIncarnation,
+    publisher_connection: ConnectionIncarnation,
+) -> Result<(u64, u64, u64), Box<dyn Error>> {
+    let receipt_a = enroll(handler, died_connection, conversation_id, 0xA1)?;
+    let mut conversations_a = ParticipantConnectionConversations::default();
+    let attached_a = dispatch_tracked(
+        handler,
+        died_connection,
+        &mut conversations_a,
+        ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id,
+            participant_id: receipt_a.participant_id(),
+            capability_generation: Generation::ONE,
+            attach_secret: receipt_a.attach_secret(),
+            attach_attempt_token: AttachAttemptToken::new([0xA2; 16]),
+            accept_marker_delivery_seq: None,
+        }),
+    )?;
+    let ServerValue::AttachBound(attached_a) = attached_a else {
+        return Err(format!("Died victim did not attach: {attached_a:?}").into());
+    };
+    let receipt_b = enroll(handler, detached_connection, conversation_id, 0xA3)?;
+    let receipt_c = enroll(handler, publisher_connection, conversation_id, 0xA4)?;
+    committed_publish(
+        handler,
+        died_connection,
+        conversation_id,
+        receipt_a.participant_id(),
+        attached_a.origin_binding_epoch().capability_generation,
+        0xA5,
+        vec![0xA6],
+    )?;
+    Ok((
+        receipt_a.participant_id(),
+        receipt_b.participant_id(),
+        receipt_c.participant_id(),
+    ))
+}
+
 /// S-18 pin 8 — mixed-flavor ordering. At this base the protocol admits AT
 /// MOST ONE pending binding-terminal candidate (the structural boundary the
 /// Died suite pins for its own flavor), so the pin instantiates strict
@@ -658,244 +830,135 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
     let log = OperationLog::new(Arc::clone(&store), conversation_id);
 
-    // Died victim A: enrolls, attaches, and publishes the debt record that
-    // rests retention at its cap.
-    let mut conversations_a = ParticipantConnectionConversations::default();
-    let enrolled_a = dispatch_tracked(
+    // Died victim A enrolls and attaches; Detached victim B and publisher C
+    // enroll; A's debt record rests retention at its cap.
+    let (a_id, b_id, c_id) = mixed_flavor_participants(
         &handler,
+        conversation_id,
         died_connection,
-        &mut conversations_a,
-        ClientRequest::Enrollment(liminal_protocol::wire::EnrollmentRequest {
-            conversation_id,
-            enrollment_token: liminal_protocol::wire::EnrollmentToken::new([0xA1; 16]),
-        }),
-    )?;
-    let ServerValue::EnrollBound(receipt_a) = enrolled_a else {
-        return Err(format!("Died victim did not enroll: {enrolled_a:?}").into());
-    };
-    let attached_a = dispatch_tracked(
-        &handler,
-        died_connection,
-        &mut conversations_a,
-        ClientRequest::CredentialAttach(CredentialAttachRequest {
-            conversation_id,
-            participant_id: receipt_a.participant_id(),
-            capability_generation: Generation::ONE,
-            attach_secret: receipt_a.attach_secret(),
-            attach_attempt_token: AttachAttemptToken::new([0xA2; 16]),
-            accept_marker_delivery_seq: None,
-        }),
-    )?;
-    let ServerValue::AttachBound(attached_a) = attached_a else {
-        return Err(format!("Died victim did not attach: {attached_a:?}").into());
-    };
-
-    // Detached victim B and publisher C enroll on their own connections.
-    let mut conversations_b = ParticipantConnectionConversations::default();
-    let enrolled_b = dispatch_tracked(
-        &handler,
         detached_connection,
-        &mut conversations_b,
-        ClientRequest::Enrollment(liminal_protocol::wire::EnrollmentRequest {
-            conversation_id,
-            enrollment_token: liminal_protocol::wire::EnrollmentToken::new([0xA3; 16]),
-        }),
-    )?;
-    let ServerValue::EnrollBound(receipt_b) = enrolled_b else {
-        return Err(format!("Detached victim did not enroll: {enrolled_b:?}").into());
-    };
-    let mut conversations_c = ParticipantConnectionConversations::default();
-    let enrolled_c = dispatch_tracked(
-        &handler,
         publisher_connection,
-        &mut conversations_c,
-        ClientRequest::Enrollment(liminal_protocol::wire::EnrollmentRequest {
-            conversation_id,
-            enrollment_token: liminal_protocol::wire::EnrollmentToken::new([0xA4; 16]),
-        }),
     )?;
-    let ServerValue::EnrollBound(receipt_c) = enrolled_c else {
-        return Err(format!("publisher did not enroll: {enrolled_c:?}").into());
-    };
-    let debt = dispatch_tracked(
-        &handler,
-        died_connection,
-        &mut conversations_a,
-        ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id,
-            participant_id: receipt_a.participant_id(),
-            capability_generation: attached_a.origin_binding_epoch().capability_generation,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA5; 16]),
-            payload: vec![0xA6],
-        }),
-    )?;
-    if !matches!(debt, ServerValue::RecordCommitted(_)) {
-        return Err(format!("debt record did not commit: {debt:?}").into());
-    }
 
     // Fate cut 1: A's connection dies -> pending Died, the sole candidate.
-    let cell = handler.cell(conversation_id)?;
-    let died_source_sequence = {
-        let mut owner = cell
-            .lock()
-            .map_err(|_| "mixed-flavor owner lock was poisoned")?;
-        let authority = owner.as_mut().ok_or("mixed-flavor owner was unavailable")?;
-        let source_sequence = authority.next_log_sequence;
-        authority
-            .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
-                open_sequence: 51,
-                connection_incarnation: died_connection,
-                class: ConnectionFateClass::ConnectionLost,
-                tracked_conversations: conversations_a.tracked_conversations(),
-            })
-            .complete(authority, &LogAppender { log: &log })?;
-        if !matches!(
-            authority
-                .slots
-                .get(&receipt_a.participant_id())
-                .map(|slot| slot.binding),
-            Some(BindingState::PendingFinalization(
-                PendingFinalization::Died(_)
-            ))
-        ) {
-            return Err("fate cut 1 did not rest A in Pending Died".into());
-        }
+    let died_source_sequence = apply_fate_cut(
+        &handler,
+        conversation_id,
+        &log,
+        died_connection,
+        ConnectionFateClass::ConnectionLost,
+        51,
+    )?
+    .map_err(|error| format!("fate cut 1 refused: {error}"))?;
+    if !matches!(
+        binding_of(&handler, conversation_id, a_id)?,
+        Some(BindingState::PendingFinalization(
+            PendingFinalization::Died(_)
+        ))
+    ) {
+        return Err("fate cut 1 did not rest A in Pending Died".into());
+    }
 
-        // STRUCTURAL BOUNDARY: while A's candidate is open, B's Detached
-        // fate cannot join the candidate lane.
-        let refused = authority
-            .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
-                open_sequence: 52,
-                connection_incarnation: detached_connection,
-                class: ConnectionFateClass::ServerShutdown,
-                tracked_conversations: conversations_b.tracked_conversations(),
-            })
-            .complete(authority, &LogAppender { log: &log });
-        let error = match refused {
-            Ok(()) => {
-                return Err(
-                    "a second (Detached) pending terminal joined the candidate lane — the \
-                     mixed-flavor two-candidate prestate has become mintable; extend the \
-                     drain coverage to drain both from one lane occupancy"
-                        .into(),
-                );
-            }
-            Err(error) => format!("{error:?}"),
-        };
-        if !error.contains("binding-terminal admission refused") {
-            return Err(format!(
-                "second (Detached) pending terminal failed for an unexpected reason: {error}"
-            )
-            .into());
-        }
-        drop(owner);
-        source_sequence
-    };
+    // STRUCTURAL BOUNDARY: while A's candidate is open, B's Detached fate
+    // cannot join the candidate lane.
+    require_candidate_lane_refusal(apply_fate_cut(
+        &handler,
+        conversation_id,
+        &log,
+        detached_connection,
+        ConnectionFateClass::ServerShutdown,
+        52,
+    )?)?;
 
     // Drain 1: the publisher's record drives DrainFirst into A's candidate;
     // Died semantics — identity erased.
-    let publish_1 = dispatch_tracked(
+    committed_publish(
         &handler,
         publisher_connection,
-        &mut conversations_c,
-        ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id,
-            participant_id: receipt_c.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA7; 16]),
-            payload: vec![0xA8],
-        }),
+        conversation_id,
+        c_id,
+        Generation::ONE,
+        0xA7,
+        vec![0xA8],
     )?;
-    if !matches!(publish_1, ServerValue::RecordCommitted(_)) {
-        return Err(format!("first drain publish did not commit: {publish_1:?}").into());
+    if binding_of(&handler, conversation_id, a_id)?.is_some() {
+        return Err("Died drain did not erase A's binding slot".into());
     }
-    let detached_source_sequence = {
-        let mut owner = cell
-            .lock()
-            .map_err(|_| "mixed-flavor owner lock was poisoned")?;
-        let authority = owner.as_mut().ok_or("mixed-flavor owner was unavailable")?;
-        if authority.slots.contains_key(&receipt_a.participant_id()) {
-            return Err("Died drain did not erase A's binding slot".into());
-        }
-        if authority
-            .tokens
-            .values()
-            .any(|mapped| *mapped == receipt_a.participant_id())
-        {
-            return Err("Died drain left A's enrollment token mapped".into());
-        }
+    if token_mapped(&handler, conversation_id, a_id)? {
+        return Err("Died drain left A's enrollment token mapped".into());
+    }
 
-        // Fate cut 2: with A drained, B's ServerShutdown fate pends.
-        let source_sequence = authority.next_log_sequence;
-        authority
-            .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
-                open_sequence: 53,
-                connection_incarnation: detached_connection,
-                class: ConnectionFateClass::ServerShutdown,
-                tracked_conversations: conversations_b.tracked_conversations(),
-            })
-            .complete(authority, &LogAppender { log: &log })?;
-        if !matches!(
-            authority
-                .slots
-                .get(&receipt_b.participant_id())
-                .map(|slot| slot.binding),
-            Some(BindingState::PendingFinalization(
-                PendingFinalization::Detached(_)
-            ))
-        ) {
-            return Err("fate cut 2 did not rest B in Pending Detached".into());
-        }
-        drop(owner);
-        source_sequence
-    };
+    // Fate cut 2: with A drained, B's ServerShutdown fate pends.
+    let detached_source_sequence = apply_fate_cut(
+        &handler,
+        conversation_id,
+        &log,
+        detached_connection,
+        ConnectionFateClass::ServerShutdown,
+        53,
+    )?
+    .map_err(|error| format!("fate cut 2 refused: {error}"))?;
+    if !matches!(
+        binding_of(&handler, conversation_id, b_id)?,
+        Some(BindingState::PendingFinalization(
+            PendingFinalization::Detached(_)
+        ))
+    ) {
+        return Err("fate cut 2 did not rest B in Pending Detached".into());
+    }
 
     // Drain 2: the next publish drains B's candidate; Detached semantics —
-    // slot preserved at committed Detached.
-    let publish_2 = dispatch_tracked(
+    // slot preserved at committed Detached, token still mapped.
+    committed_publish(
         &handler,
         publisher_connection,
-        &mut conversations_c,
-        ClientRequest::RecordAdmission(RecordAdmission {
-            conversation_id,
-            participant_id: receipt_c.participant_id(),
-            capability_generation: Generation::ONE,
-            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xA9; 16]),
-            payload: vec![0xAA],
-        }),
+        conversation_id,
+        c_id,
+        Generation::ONE,
+        0xA9,
+        vec![0xAA],
     )?;
-    if !matches!(publish_2, ServerValue::RecordCommitted(_)) {
-        return Err(format!("second drain publish did not commit: {publish_2:?}").into());
+    if !matches!(
+        binding_of(&handler, conversation_id, b_id)?,
+        Some(BindingState::Detached)
+    ) {
+        return Err("Detached drain did not settle B at committed Detached".into());
     }
-    {
-        let mut owner = cell
-            .lock()
-            .map_err(|_| "mixed-flavor owner lock was poisoned")?;
-        let authority = owner.as_mut().ok_or("mixed-flavor owner was unavailable")?;
-        let slot_b = authority
-            .slots
-            .get(&receipt_b.participant_id())
-            .ok_or("Detached drain erased B's binding slot")?;
-        if !matches!(slot_b.binding, BindingState::Detached) {
-            return Err(format!(
-                "Detached drain did not settle B at committed Detached: {:?}",
-                slot_b.binding
-            )
-            .into());
-        }
-        if !authority
-            .tokens
-            .values()
-            .any(|mapped| *mapped == receipt_b.participant_id())
-        {
-            return Err("Detached drain unmapped B's enrollment token".into());
-        }
-        drop(owner);
+    if !token_mapped(&handler, conversation_id, b_id)? {
+        return Err("Detached drain unmapped B's enrollment token".into());
     }
 
-    // Durable shape: [Died source(A), Died drain(A), Ordinary(A), publish 1,
-    // Detached source(B), Detached drain(B), publish 2] — two drain
-    // transactions strictly by admission order, each its own flavor.
+    assert_mixed_drain_shape(&log, died_source_sequence, detached_source_sequence)
+}
+
+/// Requires the mixed two-candidate mint to refuse at binding-terminal
+/// admission — the structural sole-candidate boundary — and trips loudly if
+/// the substrate ever widens it.
+fn require_candidate_lane_refusal(outcome: Result<u64, String>) -> Result<(), Box<dyn Error>> {
+    match outcome {
+        Ok(_) => Err(
+            "a second (Detached) pending terminal joined the candidate lane — the \
+             mixed-flavor two-candidate prestate has become mintable; extend the \
+             drain coverage to drain both from one lane occupancy"
+                .into(),
+        ),
+        Err(error) if error.contains("binding-terminal admission refused") => Ok(()),
+        Err(error) => Err(format!(
+            "second (Detached) pending terminal failed for an unexpected reason: {error}"
+        )
+        .into()),
+    }
+}
+
+/// The mixed arc's durable shape: [Died source(A), Died drain(A),
+/// Ordinary(A), publish 1, Detached source(B), Detached drain(B), publish 2]
+/// — two drain transactions strictly by admission order, each keyed to its
+/// own pending source row, each with its own flavor row.
+fn assert_mixed_drain_shape(
+    log: &OperationLog,
+    died_source_sequence: u64,
+    detached_source_sequence: u64,
+) -> Result<(), Box<dyn Error>> {
     let mut rows = Vec::new();
     let mut sequence = died_source_sequence;
     while let Some(entry) = block_on(log.read_at(sequence))?? {

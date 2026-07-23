@@ -343,50 +343,9 @@ impl ConversationAuthority {
                 self.replay_attached(request, &allocation, &mode, &event, sequence, store)
                     .map(|()| None)
             }
-            StoredOperation::Detached { row } => match (row.disposition, row.source.clone()) {
-                (_, StoredDetachedSource::ConnectionClose { .. }) => self
-                    .replay_connection_detached(&row, sequence)
-                    .map(|()| None),
-                (
-                    StoredTerminalDisposition::Committed { terminal_seq },
-                    StoredDetachedSource::ExplicitRequestCommitted {
-                        request,
-                        secret_verified: true,
-                        verifier,
-                        receiving_epoch,
-                        event,
-                    },
-                ) if row.cause == StoredDetachedCause::CleanDeregister
-                    && row.participant_id == request.participant_id
-                    && row.binding_epoch == receiving_epoch =>
-                {
-                    self.replay_detached(
-                        DetachReplayInputs {
-                            request,
-                            verifier,
-                            receiving_epoch,
-                            terminal_order: row.terminal_order,
-                            terminal_seq,
-                        },
-                        &event,
-                        sequence,
-                    )
-                    .map(|()| None)
-                }
-                (
-                    StoredTerminalDisposition::Pending,
-                    StoredDetachedSource::ExplicitRequestPending { .. },
-                ) => self
-                    .replay_explicit_pending_detached(&row, sequence)
-                    .map(|()| None),
-                (
-                    StoredTerminalDisposition::Committed { .. },
-                    StoredDetachedSource::Drained { .. },
-                ) => self
-                    .replay_detached_drain_row(&row, sequence)
-                    .map(|()| None),
-                _ => Err(OperationLogError::CorruptRow { sequence }.into()),
-            },
+            StoredOperation::Detached { row } => self
+                .replay_detached_operation(&row, sequence)
+                .map(|()| None),
             StoredOperation::Died { row } => self.replay_died_row(&row, sequence).map(|()| None),
             operation @ (StoredOperation::Ordinary { .. } | StoredOperation::Recovered { .. }) => {
                 self.replay_specific_fate(&operation, sequence)
@@ -424,6 +383,55 @@ impl ConversationAuthority {
             }
             StoredOperation::MarkerDrained { row } => self.replay_marker_drain(&row).map(Some),
             StoredOperation::Left { row } => self.replay_leave(&row).map(|()| None),
+        }
+    }
+
+    /// Routes one durable Detached row to its exact replay transition by
+    /// disposition and source shape: connection-close and explicit sources
+    /// replay their fate/detach cores; a committed `Drained` source replays
+    /// the candidate-lane terminal drain.
+    fn replay_detached_operation(
+        &mut self,
+        row: &StoredDetached,
+        sequence: u64,
+    ) -> Result<(), StateError> {
+        match (row.disposition, row.source.clone()) {
+            (_, StoredDetachedSource::ConnectionClose { .. }) => {
+                self.replay_connection_detached(row, sequence)
+            }
+            (
+                StoredTerminalDisposition::Committed { terminal_seq },
+                StoredDetachedSource::ExplicitRequestCommitted {
+                    request,
+                    secret_verified: true,
+                    verifier,
+                    receiving_epoch,
+                    event,
+                },
+            ) if row.cause == StoredDetachedCause::CleanDeregister
+                && row.participant_id == request.participant_id
+                && row.binding_epoch == receiving_epoch =>
+            {
+                self.replay_detached(
+                    DetachReplayInputs {
+                        request,
+                        verifier,
+                        receiving_epoch,
+                        terminal_order: row.terminal_order,
+                        terminal_seq,
+                    },
+                    &event,
+                    sequence,
+                )
+            }
+            (
+                StoredTerminalDisposition::Pending,
+                StoredDetachedSource::ExplicitRequestPending { .. },
+            ) => self.replay_explicit_pending_detached(row, sequence),
+            (StoredTerminalDisposition::Committed { .. }, StoredDetachedSource::Drained { .. }) => {
+                self.replay_detached_drain_row(row, sequence)
+            }
+            _ => Err(OperationLogError::CorruptRow { sequence }.into()),
         }
     }
 }

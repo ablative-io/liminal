@@ -9,11 +9,11 @@
 //! publisher could exist). The pending-Detached residence is minted by a
 //! clean client `Disconnect` at the retention cap — the `CleanDisconnect`
 //! connection fate, cause `CleanDeregister`. The pin text names the
-//! ServerShutdown mint; a real server shutdown fates EVERY live connection,
+//! `ServerShutdown` mint; a real server shutdown fates EVERY live connection,
 //! and with the publisher's connection also fated there is no live socket
 //! left to publish the drain, so the socket leg exercises the clean-close
 //! mint of the same pending-Detached residence class while the dispatch
-//! suite (`tests_restore_window_detached.rs`) covers the ServerShutdown
+//! suite (`tests_restore_window_detached.rs`) covers the `ServerShutdown`
 //! cause end to end. Reported, not silent — the tear seat sizes this leg.
 
 use std::error::Error;
@@ -150,15 +150,25 @@ fn drain_replay(resumed: &mut SocketPeer) -> Vec<u64> {
     sequences
 }
 
-#[test]
-fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_serves()
--> Result<(), Box<dyn Error>> {
-    let home = tempfile::tempdir()?;
-    let data_dir = home.path().join("durability");
-    let mut server = SocketFixture::start_with_config(&data_dir, small_retention_config())?;
+/// One live-minted residence: the victim's identity facts and the peer's, as
+/// the drain publish will meet them.
+struct MintedResidence {
+    victim_id: u64,
+    victim_generation: Generation,
+    victim_secret: liminal_protocol::wire::AttachSecret,
+    peer_id: u64,
+}
 
-    // Victim on its own real connection: enroll, attach, publish the debt
-    // record that rests retention at its cap.
+/// Builds the live residence over real sockets: the victim enrolls, attaches,
+/// and publishes the debt record that rests retention at its cap; the peer
+/// enrolls on the fixture connection; both pre-crash acks land (the victim
+/// through its contiguous window, the peer through its obligation endpoint
+/// r0) so the later drain publish's admission can prune the fully-acked
+/// prefix and the resume attach's record row stays admissible without any
+/// capacity waiver; then the victim's clean `Disconnect` bow-out pends its
+/// Detached terminal — the live pending-Detached residence, durable with no
+/// finalizer.
+fn mint_live_residence(server: &mut SocketFixture) -> Result<MintedResidence, Box<dyn Error>> {
     let mut victim_socket = server.spawn_peer()?;
     let victim = enroll_bound(
         victim_socket.request(ClientRequest::Enrollment(EnrollmentRequest {
@@ -180,7 +190,6 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
         return Err(format!("victim attach did not bind: {attached:?}").into());
     };
     let victim_generation = attached.origin_binding_epoch().capability_generation;
-    let victim_secret = attached.attach_secret();
     let peer = enroll_bound(
         server.request(ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: CONVERSATION,
@@ -198,11 +207,6 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
         })),
         "victim debt record r0",
     )?;
-
-    // Pre-crash acks: the victim through its contiguous window, the peer
-    // through its obligation endpoint (r0) — so the later drain publish's
-    // admission can prune the fully-acked prefix and the resume attach's
-    // record row stays admissible without any capacity waiver.
     let victim_ack = victim_socket.request(ClientRequest::ParticipantAck(ParticipantAck {
         conversation_id: CONVERSATION,
         participant_id: victim.participant_id(),
@@ -223,10 +227,6 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
     if !matches!(peer_ack, ServerValue::AckCommitted(_)) {
         return Err(format!("peer pre-crash ack did not commit: {peer_ack:?}").into());
     }
-
-    // Clean client bow-out at the cap: the CleanDisconnect connection fate
-    // pends the victim's Detached terminal — the live pending-Detached
-    // residence, durable with no finalizer.
     victim_socket.disconnect()?;
     victim_socket.shutdown_transport()?;
     drop(victim_socket);
@@ -235,28 +235,27 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
         victim.participant_id(),
         victim_generation.get(),
     )?;
+    Ok(MintedResidence {
+        victim_id: victim.participant_id(),
+        victim_generation,
+        victim_secret: attached.attach_secret(),
+        peer_id: peer.participant_id(),
+    })
+}
 
-    // LIVE-SOCKET publish from the still-bound peer: the candidate-lane
-    // Detached drain runs and the client observes RecordCommitted on the
-    // wire — no refusal, no connection close.
-    let drain_publish_seq = committed_seq(
-        server.request(publish(peer.participant_id(), 0x87, vec![0x91, 0x92])),
-        "residence publish",
-    )?;
-    if drained_row_count(&server.durable_store(), victim.participant_id())? != 1 {
-        return Err("drain transaction left no durable Drained Detached row".into());
-    }
-
-    // The drained bytes replay through the production restore path with the
-    // faithful finalization intact: victim slot PRESENT at committed
-    // Detached, enrollment token still mapped, no residual candidate.
-    let handler =
-        ProductionParticipantHandler::new(server.durable_store(), small_retention_config())?;
-    let replay_log = OperationLog::new(server.durable_store(), CONVERSATION);
+/// The drained bytes replay through the production restore path with the
+/// faithful finalization intact: victim slot PRESENT at committed Detached,
+/// enrollment token still mapped, no residual candidate.
+fn assert_cold_replay_faithful(
+    store: Arc<dyn DurableStore>,
+    victim_id: u64,
+) -> Result<(), Box<dyn Error>> {
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), small_retention_config())?;
+    let replay_log = OperationLog::new(store, CONVERSATION);
     let replayed = handler.replay_aggregate_reference(CONVERSATION, &replay_log)?;
     let victim_slot = replayed
         .slots
-        .get(&victim.participant_id())
+        .get(&victim_id)
         .ok_or("cold replay erased the drained victim's slot")?;
     if !matches!(victim_slot.binding, BindingState::Detached) {
         return Err(format!(
@@ -265,11 +264,7 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
         )
         .into());
     }
-    if !replayed
-        .tokens
-        .values()
-        .any(|mapped| *mapped == victim.participant_id())
-    {
+    if !replayed.tokens.values().any(|mapped| *mapped == victim_id) {
         return Err("cold replay unmapped the drained victim's enrollment token".into());
     }
     let residual = replayed
@@ -282,9 +277,32 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
     if residual != 0 {
         return Err(format!("cold replay kept {residual} residual candidates").into());
     }
-    drop(replayed);
-    drop(handler);
-    drop(replay_log);
+    Ok(())
+}
+
+#[test]
+fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_serves()
+-> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let mut server = SocketFixture::start_with_config(&data_dir, small_retention_config())?;
+    let minted = mint_live_residence(&mut server)?;
+    let victim_id = minted.victim_id;
+    let victim_generation = minted.victim_generation;
+    let victim_secret = minted.victim_secret;
+    let peer_id = minted.peer_id;
+
+    // LIVE-SOCKET publish from the still-bound peer: the candidate-lane
+    // Detached drain runs and the client observes RecordCommitted on the
+    // wire — no refusal, no connection close.
+    let drain_publish_seq = committed_seq(
+        server.request(publish(peer_id, 0x87, vec![0x91, 0x92])),
+        "residence publish",
+    )?;
+    if drained_row_count(&server.durable_store(), victim_id)? != 1 {
+        return Err("drain transaction left no durable Drained Detached row".into());
+    }
+    assert_cold_replay_faithful(server.durable_store(), victim_id)?;
 
     // LIVE RESUME (the decisive pin-5 assertion): a fresh socket reattaches
     // the drained victim with its exact secret, and the replay redelivers the
@@ -293,7 +311,7 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
     let resumed_bound =
         resumed.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
             conversation_id: CONVERSATION,
-            participant_id: victim.participant_id(),
+            participant_id: victim_id,
             capability_generation: victim_generation,
             attach_secret: victim_secret,
             attach_attempt_token: AttachAttemptToken::new([0x86; 16]),
@@ -319,14 +337,14 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
     // keeps releasing through the real floor.
     let resumed_ack = resumed.request(ClientRequest::ParticipantAck(ParticipantAck {
         conversation_id: CONVERSATION,
-        participant_id: victim.participant_id(),
+        participant_id: victim_id,
         capability_generation: resumed_receipt.origin_binding_epoch().capability_generation,
         through_seq: drain_publish_seq,
     }))?;
     if !matches!(resumed_ack, ServerValue::AckCommitted(_)) {
         return Err(format!("resumed victim's ack did not commit: {resumed_ack:?}").into());
     }
-    let repeated = server.request(publish(peer.participant_id(), 0x88, vec![0x93]))?;
+    let repeated = server.request(publish(peer_id, 0x88, vec![0x93]))?;
     if !matches!(repeated, ServerValue::RecordCommitted(_)) {
         return Err(format!("repeat publish after drain did not commit: {repeated:?}").into());
     }
@@ -344,17 +362,17 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
     drop(resumed);
     wait_for_pending_detached_residence(
         &server.durable_store(),
-        victim.participant_id(),
+        victim_id,
         resumed_receipt
             .origin_binding_epoch()
             .capability_generation
             .get(),
     )?;
-    let second_drain = server.request(publish(peer.participant_id(), 0x8A, vec![0x94]))?;
+    let second_drain = server.request(publish(peer_id, 0x8A, vec![0x94]))?;
     if !matches!(second_drain, ServerValue::RecordCommitted(_)) {
         return Err(format!("second residence publish did not commit: {second_drain:?}").into());
     }
-    if drained_row_count(&server.durable_store(), victim.participant_id())? != 2 {
+    if drained_row_count(&server.durable_store(), victim_id)? != 2 {
         return Err("second drain left no second durable Drained Detached row".into());
     }
 
