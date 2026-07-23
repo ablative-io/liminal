@@ -1,0 +1,62 @@
+{
+  "schema": "gate-report/v1",
+  "repo": "liminal",
+  "commit_sha": "320a09364fd09005062926b9450785df7c8d7ce8",
+  "tree_sha": "ac5e9c40e22eb99ce029ab52c519cc243ecf6dff",
+  "branch": "fix/teardown-delivery-loss",
+  "dirty": false,
+  "untracked_count": 1,
+  "toolchain": {
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
+  },
+  "host": "Annabels-MacBook-Pro.local",
+  "started_at": "2026-07-23T00:58:05Z",
+  "finished_at": "2026-07-23T01:00:48Z",
+  "duration_s": 163.235,
+  "concurrent_cargo_at_start": [
+    "9653 /bin/zsh -c source /Users/annabel/.claude/shell-snapshots/snapshot-zsh-1784246146586-31uzd8.sh 2>/dev/null || true && se",
+    "9655 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test -p haematite --lib",
+    "9657 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc --crate-name haematite --edition=2024 crates/hae"
+  ],
+  "legs": [
+    {
+      "name": "fmt",
+      "cmd": "cargo fmt --all --check",
+      "kind": "check",
+      "exit": 0,
+      "duration_s": 2.252,
+      "log": "gate-logs/fmt.log",
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "tests": null,
+      "failures": []
+    },
+    {
+      "name": "clippy",
+      "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
+      "kind": "check",
+      "exit": 0,
+      "duration_s": 27.816,
+      "log": "gate-logs/clippy.log",
+      "log_sha256": "d539bda0f1586ba9f543bb2736a73a1d3085703a870cbe4282103ac0f74fefa1",
+      "tests": null,
+      "failures": []
+    },
+    {
+      "name": "tests",
+      "cmd": "cargo test --workspace",
+      "kind": "cargo-test",
+      "exit": 0,
+      "duration_s": 133.164,
+      "log": "gate-logs/tests.log",
+      "log_sha256": "f0a9a45d353edbf7a7939fadaa3b96d33db71eebec88ac93b088ad964a190d1b",
+      "tests": {
+        "suites": 40,
+        "passed": 1761,
+        "failed": 0
+      },
+      "failures": []
+    }
+  ],
+  "verdict": "green"
+}
