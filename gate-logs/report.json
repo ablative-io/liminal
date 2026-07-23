@@ -1,32 +1,24 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "acd8eb7ede7950d7c5e030358ee8e9bc1c00b307",
-  "tree_sha": "994b92fd1bf4824a624042d55489391ed995d25c",
-  "branch": "main",
+  "commit_sha": "4a5de6ae49a726b230d9cf67c3aaf084960e4696",
+  "tree_sha": "01efc7dfc040c8d4d7f4d01a11c055686e863222",
+  "branch": "fix/pending-detached-drain",
   "dirty": false,
-  "untracked_count": 3,
+  "untracked_count": 0,
   "toolchain": {
-    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
-    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
   },
-  "host": "Toms-MacBook-Pro.local",
-  "started_at": "2026-07-23T06:24:17Z",
-  "finished_at": "2026-07-23T06:27:55Z",
-  "duration_s": 218.056,
+  "host": "Annabels-MacBook-Pro.local",
+  "started_at": "2026-07-23T17:42:45Z",
+  "finished_at": "2026-07-23T17:47:42Z",
+  "duration_s": 296.977,
   "concurrent_cargo_at_start": [
-    "807 /Users/tom/Developer/ablative/deploy/aion/cargo-gates-worker --address 127.0.0.1:50061 --ready-file /tmp/cargo-gates-wor",
-    "820 /Users/tom/.cargo/bin/aion server --config /Users/tom/Developer/ablative/deploy/aion/config.toml",
-    "40739 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "40740 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "76675 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "76676 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92175 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92176 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92177 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92178 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "92179 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "92180 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend"
+    "47065 /Users/annabel/.cargo/bin/norn --account default --protocol jsonrpc --fast --reasoning-effort high --append-system-promp",
+    "52073 /Users/annabel/.cargo/bin/norn --account default --protocol jsonrpc --fast --reasoning-effort high --append-system-promp",
+    "64903 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace",
+    "66987 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace"
   ],
   "legs": [
     {
@@ -34,7 +26,7 @@
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 1.234,
+      "duration_s": 2.381,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -45,9 +37,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 21.684,
+      "duration_s": 24.669,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "72b4edacac4613e14a2f46dbdc025e43a39faf71778a771d40c3077dac2e9b9d",
+      "log_sha256": "abd795de909bbe4e164686f44ff93060da584171f3318d4e5538d1f045fd483a",
       "tests": null,
       "failures": []
     },
@@ -56,12 +48,12 @@
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
       "exit": 0,
-      "duration_s": 195.133,
+      "duration_s": 269.924,
       "log": "gate-logs/tests.log",
-      "log_sha256": "3238e1fc618b332944d9320807eae0825dc49d2f35c2ddb610069450f72dca89",
+      "log_sha256": "ddfc7c3fe07e5105ef419f0b13617231b45b8f39886ad488f90f75db4ddccf11",
       "tests": {
         "suites": 42,
-        "passed": 1779,
+        "passed": 1785,
         "failed": 0
       },
       "failures": []
