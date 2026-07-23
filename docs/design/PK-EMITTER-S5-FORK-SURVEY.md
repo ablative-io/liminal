@@ -120,6 +120,12 @@ registry bytes cargo compiles:
 pass at `293d368` is corroborating but NOT the consumed surface. These are the
 consumed bytes.)
 
+**Wake obligation (tear seat, 2026-07-23, recorded at the hold):** the pin
+above is the consumed 0.16.1 registry bytes. beamr 0.16.2 (the memory-safety
+patch) queue-jumped after this pin was taken — when the lane wakes, verify
+whether the workspace pin should advance to 0.16.2 and record which it is
+before building.
+
 All four §4.2 facts hold at 0.16.1, at the same line numbers the design cites:
 
 1. **Single subscription**: `Scheduler::subscribe_exit_events`
