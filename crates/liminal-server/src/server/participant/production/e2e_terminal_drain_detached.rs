@@ -78,8 +78,7 @@ fn wait_for_pending_detached_residence(
     loop {
         let mut sequence = 0_u64;
         while let Some(entry) = block_on(log.read_at(sequence))?? {
-            if let DecodedStoredOperation::V3(StoredOperation::Detached { row }) = entry.operation
-            {
+            if let DecodedStoredOperation::V3(StoredOperation::Detached { row }) = entry.operation {
                 if row.participant_id == participant_id
                     && row.disposition == StoredTerminalDisposition::Pending
                     && row.cause == StoredDetachedCause::CleanDeregister
@@ -168,16 +167,15 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
         })),
         "victim enrollment",
     )?;
-    let attached = victim_socket.request(ClientRequest::CredentialAttach(
-        CredentialAttachRequest {
+    let attached =
+        victim_socket.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
             conversation_id: CONVERSATION,
             participant_id: victim.participant_id(),
             capability_generation: Generation::ONE,
             attach_secret: victim.attach_secret(),
             attach_attempt_token: AttachAttemptToken::new([0x82; 16]),
             accept_marker_delivery_seq: None,
-        },
-    ))?;
+        }))?;
     let ServerValue::AttachBound(attached) = attached else {
         return Err(format!("victim attach did not bind: {attached:?}").into());
     };
@@ -292,14 +290,15 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
     // the drained victim with its exact secret, and the replay redelivers the
     // PARKED while-drained publication.
     let mut resumed = server.spawn_peer()?;
-    let resumed_bound = resumed.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
-        conversation_id: CONVERSATION,
-        participant_id: victim.participant_id(),
-        capability_generation: victim_generation,
-        attach_secret: victim_secret,
-        attach_attempt_token: AttachAttemptToken::new([0x86; 16]),
-        accept_marker_delivery_seq: None,
-    }))?;
+    let resumed_bound =
+        resumed.request(ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id: CONVERSATION,
+            participant_id: victim.participant_id(),
+            capability_generation: victim_generation,
+            attach_secret: victim_secret,
+            attach_attempt_token: AttachAttemptToken::new([0x86; 16]),
+            accept_marker_delivery_seq: None,
+        }))?;
     let ServerValue::AttachBound(resumed_receipt) = resumed_bound else {
         return Err(format!(
             "drained victim's exact-secret attach did not bind on the wire: {resumed_bound:?}"
@@ -346,7 +345,10 @@ fn live_socket_publish_drains_pending_detached_then_victim_resumes_and_restart_s
     wait_for_pending_detached_residence(
         &server.durable_store(),
         victim.participant_id(),
-        resumed_receipt.origin_binding_epoch().capability_generation.get(),
+        resumed_receipt
+            .origin_binding_epoch()
+            .capability_generation
+            .get(),
     )?;
     let second_drain = server.request(publish(peer.participant_id(), 0x8A, vec![0x94]))?;
     if !matches!(second_drain, ServerValue::RecordCommitted(_)) {

@@ -23,7 +23,7 @@ use liminal_protocol::lifecycle::{
     BindingState, ClosureState, ImmutableSequenceCandidate, PendingFinalization,
 };
 use liminal_protocol::wire::{
-    AttachAttemptToken, ClientRequest, CredentialAttachRequest, ConnectionIncarnation, Generation,
+    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, Generation,
     ParticipantAck, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
 };
 
@@ -547,7 +547,9 @@ fn drained_detached_victim_resumes_with_exact_secret() -> Result<(), Box<dyn Err
         }),
     )?;
     let ServerValue::AttachBound(_) = resumed else {
-        return Err(format!("drained victim's exact-secret attach did not bind: {resumed:?}").into());
+        return Err(
+            format!("drained victim's exact-secret attach did not bind: {resumed:?}").into(),
+        );
     };
     let cell = restarted.cell(fixture.conversation_id)?;
     let owner = cell
@@ -641,8 +643,7 @@ impl DurableAppend for LogAppender<'_> {
 /// - the durable log carries the two drain transactions in admission order,
 ///   each keyed to its own pending source row.
 #[test]
-fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(), Box<dyn Error>>
-{
+fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(), Box<dyn Error>> {
     let conversation_id = 79;
     let died_connection = ConnectionIncarnation::new(105, 3);
     let detached_connection = ConnectionIncarnation::new(105, 4);
@@ -738,9 +739,7 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
         let mut owner = cell
             .lock()
             .map_err(|_| "mixed-flavor owner lock was poisoned")?;
-        let authority = owner
-            .as_mut()
-            .ok_or("mixed-flavor owner was unavailable")?;
+        let authority = owner.as_mut().ok_or("mixed-flavor owner was unavailable")?;
         let source_sequence = authority.next_log_sequence;
         authority
             .prepare_connection_fate_transaction(&ConnectionFateWorkItem {
@@ -751,8 +750,13 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
             })
             .complete(authority, &LogAppender { log: &log })?;
         if !matches!(
-            authority.slots.get(&receipt_a.participant_id()).map(|slot| slot.binding),
-            Some(BindingState::PendingFinalization(PendingFinalization::Died(_)))
+            authority
+                .slots
+                .get(&receipt_a.participant_id())
+                .map(|slot| slot.binding),
+            Some(BindingState::PendingFinalization(
+                PendingFinalization::Died(_)
+            ))
         ) {
             return Err("fate cut 1 did not rest A in Pending Died".into());
         }
@@ -809,9 +813,7 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
         let mut owner = cell
             .lock()
             .map_err(|_| "mixed-flavor owner lock was poisoned")?;
-        let authority = owner
-            .as_mut()
-            .ok_or("mixed-flavor owner was unavailable")?;
+        let authority = owner.as_mut().ok_or("mixed-flavor owner was unavailable")?;
         if authority.slots.contains_key(&receipt_a.participant_id()) {
             return Err("Died drain did not erase A's binding slot".into());
         }
@@ -834,8 +836,13 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
             })
             .complete(authority, &LogAppender { log: &log })?;
         if !matches!(
-            authority.slots.get(&receipt_b.participant_id()).map(|slot| slot.binding),
-            Some(BindingState::PendingFinalization(PendingFinalization::Detached(_)))
+            authority
+                .slots
+                .get(&receipt_b.participant_id())
+                .map(|slot| slot.binding),
+            Some(BindingState::PendingFinalization(
+                PendingFinalization::Detached(_)
+            ))
         ) {
             return Err("fate cut 2 did not rest B in Pending Detached".into());
         }
@@ -864,9 +871,7 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
         let mut owner = cell
             .lock()
             .map_err(|_| "mixed-flavor owner lock was poisoned")?;
-        let authority = owner
-            .as_mut()
-            .ok_or("mixed-flavor owner was unavailable")?;
+        let authority = owner.as_mut().ok_or("mixed-flavor owner was unavailable")?;
         let slot_b = authority
             .slots
             .get(&receipt_b.participant_id())
@@ -907,15 +912,21 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
         StoredOperation::Died { row: died_drain },
         StoredOperation::Ordinary { .. },
         StoredOperation::RecordAdmission { .. },
-        StoredOperation::Detached { row: detached_source },
-        StoredOperation::Detached { row: detached_drain },
+        StoredOperation::Detached {
+            row: detached_source,
+        },
+        StoredOperation::Detached {
+            row: detached_drain,
+        },
         StoredOperation::RecordAdmission { .. },
     ] = rows.as_slice()
     else {
         return Err(format!("mixed-flavor drain transactions drifted: {rows:?}").into());
     };
     if died_source.disposition != StoredTerminalDisposition::Pending
-        || died_drain.drained.map(|drained| drained.pending_source_sequence)
+        || died_drain
+            .drained
+            .map(|drained| drained.pending_source_sequence)
             != Some(died_source_sequence)
     {
         return Err("Died drain is not keyed to its pending source".into());
