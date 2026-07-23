@@ -1,1 +1,6 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+    Checking liminal-protocol v0.3.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/toctou-register/crates/liminal-protocol)
+    Checking liminal-rs v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/toctou-register/crates/liminal)
+    Checking liminal-ts-wasm v0.3.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/toctou-register/sdks/liminal-ts/wasm-src)
+    Checking liminal-sdk v0.3.3 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/toctou-register/crates/liminal-sdk)
+    Checking liminal-server v0.3.3 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/toctou-register/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.82s
