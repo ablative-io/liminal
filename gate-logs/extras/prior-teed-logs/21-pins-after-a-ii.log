@@ -1,0 +1,20 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.60s
+     Running tests/teardown_delivery_e2e.rs (target/debug/deps/teardown_delivery_e2e-0e60f611e1739a02)
+
+running 2 tests
+test pin_a1_shutdown_flushes_accepted_publishes_before_disconnect ... FAILED
+test pin_a2_parked_subscriber_receives_burst_after_publisher_drop ... ok
+
+failures:
+
+---- pin_a1_shutdown_flushes_accepted_publishes_before_disconnect stdout ----
+Error: "iteration 2: delivery 0 of 8 never arrived before the stream ended: connection error: subscription receive failed: the subscription reader stopped before a delivery arrived"
+
+
+failures:
+    pin_a1_shutdown_flushes_accepted_publishes_before_disconnect
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.66s
+
+error: test failed, to rerun pass `-p liminal-server --test teardown_delivery_e2e`

@@ -1,0 +1,26 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.01s
+     Running tests/sdk_tcp_e2e.rs (target/debug/deps/sdk_tcp_e2e-2ea97b043901cfdf)
+
+running 18 tests
+test sdk_tcp_connect_to_closed_port_fails ... ok
+test worker_registration_rejected_returns_typed_error ... ok
+test worker_registration_round_trips_and_deregisters_on_close ... ok
+test sdk_tcp_wrong_token_is_rejected ... ok
+test worker_registration_without_notifier_is_accepted ... ok
+test sdk_tcp_missing_token_is_rejected ... ok
+test sdk_tcp_no_auth_section_behaves_as_before ... ok
+test server_push_to_client_returns_correlated_reply ... ok
+test sdk_tcp_client_subscribes_over_real_socket ... ok
+test sdk_tcp_client_publishes_over_real_socket ... ok
+test sdk_tcp_correct_token_connects_and_publishes ... ok
+test sdk_tcp_conversation_request_then_receive_correlates ... ok
+test sdk_tcp_publish_with_no_subscriber_reports_non_delivery ... ok
+test sdk_tcp_request_reply_returns_correlated_response ... ok
+test sdk_tcp_publish_with_idempotency_key_reports_genuine_delivery_ack ... ok
+test sdk_tcp_real_schema_rejects_invalid_and_delivers_valid ... ok
+test server_push_does_not_regress_request_reply ... ok
+test sdk_tcp_conversation_send_then_publish_stays_in_sync ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.96s
+

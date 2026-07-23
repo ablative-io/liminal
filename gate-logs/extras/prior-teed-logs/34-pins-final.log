@@ -1,0 +1,11 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+   Compiling liminal-sdk v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.67s
+     Running tests/teardown_delivery_e2e.rs (target/debug/deps/teardown_delivery_e2e-0e60f611e1739a02)
+
+running 2 tests
+test pin_a1_shutdown_flushes_accepted_publishes_before_disconnect ... ok
+test pin_a2_parked_subscriber_receives_burst_after_publisher_drop ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.47s
+

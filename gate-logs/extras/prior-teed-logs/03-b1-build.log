@@ -1,0 +1,21 @@
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.3.4
+   Compiling bit-vec v0.8.0
+   Compiling gimli v0.33.0
+   Compiling bit-set v0.8.0
+   Compiling fancy-regex v0.18.0
+   Compiling ahash v0.8.12
+   Compiling referencing v0.46.5
+   Compiling jsonschema v0.46.5
+   Compiling cranelift-codegen v0.131.2
+   Compiling cranelift-module v0.131.2
+   Compiling cranelift-native v0.131.2
+   Compiling cranelift-frontend v0.131.2
+   Compiling cranelift-jit v0.131.2
+   Compiling beamr v0.16.0
+   Compiling haematite v0.6.2
+   Compiling liminal-rs v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal)
+   Compiling liminal-sdk v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-sdk)
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 29s
+  Executable unittests src/lib.rs (target/debug/deps/liminal_server-e51de38dd69d7bf0)

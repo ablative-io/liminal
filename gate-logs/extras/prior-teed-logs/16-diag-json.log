@@ -1,0 +1,14 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running tests/diag_teardown.rs (target/debug/deps/diag_teardown-ad9cf606de75ba28)
+
+running 3 tests
+test diag_immediate_publisher_alive ... IMMEDIATE: got 8/8
+ok
+test diag_parked_publisher_alive ... ALIVE: got 8/8
+ok
+test diag_parked_publisher_drops ... DROP: got 8/8
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.66s
+

@@ -1,0 +1,14 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.83s
+     Running tests/teardown_delivery_e2e.rs (target/debug/deps/teardown_delivery_e2e-0e60f611e1739a02)
+
+running 1 test
+test pin_a1_shutdown_flushes_accepted_publishes_before_disconnect ... BARRIER-EXIT quiesced=true final_states=[(true, false), (true, false)]
+BARRIER-EXIT quiesced=true final_states=[(true, false), (true, false)]
+BARRIER-EXIT quiesced=true final_states=[(true, false), (true, false)]
+BARRIER-EXIT quiesced=true final_states=[(true, false), (true, false)]
+BARRIER-EXIT quiesced=true final_states=[(true, false), (true, false)]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 21.33s
+

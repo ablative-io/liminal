@@ -1,0 +1,59 @@
+    Checking fnv v1.0.7
+    Checking getrandom v0.3.4
+    Checking bit-vec v0.8.0
+    Checking liminal-protocol v0.3.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-protocol)
+    Checking gimli v0.33.0
+    Checking ahash v0.8.12
+    Checking bit-set v0.8.0
+    Checking fancy-regex v0.18.0
+    Checking referencing v0.46.5
+    Checking jsonschema v0.46.5
+    Checking cranelift-codegen v0.131.2
+    Checking cranelift-module v0.131.2
+    Checking cranelift-native v0.131.2
+    Checking cranelift-frontend v0.131.2
+    Checking cranelift-jit v0.131.2
+    Checking beamr v0.16.0
+    Checking haematite v0.6.2
+    Checking liminal-rs v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal)
+    Checking liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Checking liminal-sdk v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-sdk)
+error: item in documentation is missing backticks
+ --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:9:53
+  |
+9 | //! the publish is accepted (a committed record — a PublishAck) yet mints no
+  |                                                     ^^^^^^^^^^
+  |
+  = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#doc_markdown
+  = note: `-D clippy::doc-markdown` implied by `-D clippy::pedantic`
+  = help: to override `-D clippy::pedantic` add `#[allow(clippy::doc_markdown)]`
+help: try
+  |
+9 - //! the publish is accepted (a committed record — a PublishAck) yet mints no
+9 + //! the publish is accepted (a committed record — a `PublishAck`) yet mints no
+  |
+
+error: this function has too many lines (112/100)
+  --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:44:1
+   |
+44 | fn while_dead_publish_reaches_resumed_replay() -> Result<(), Box<dyn Error>> {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#too_many_lines
+   = note: `-D clippy::too-many-lines` implied by `-D clippy::pedantic`
+   = help: to override `-D clippy::pedantic` add `#[allow(clippy::too_many_lines)]`
+
+error: item in documentation is missing backticks
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:191:36
+    |
+191 | /// a slot from `authority.slots` (ops_leave.rs — no reinsert; the identity becomes a
+    |                                    ^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#doc_markdown
+help: try
+    |
+191 - /// a slot from `authority.slots` (ops_leave.rs — no reinsert; the identity becomes a
+191 + /// a slot from `authority.slots` (`ops_leave.rs` — no reinsert; the identity becomes a
+    |
+
+error: could not compile `liminal-server` (lib test) due to 3 previous errors

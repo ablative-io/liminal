@@ -1,0 +1,4 @@
+    Checking liminal-protocol v0.3.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-protocol)
+    Checking liminal-sdk v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-sdk)
+    Checking liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 27.72s

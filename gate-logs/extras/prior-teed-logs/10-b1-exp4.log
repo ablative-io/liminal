@@ -1,0 +1,16 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.26s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-e51de38dd69d7bf0)
+
+running 1 test
+Error: "dispatch did not respond: Fatal(Semantic(Internal { message: \"participant production operation failed: participant production invariant violated: DrainFirst selected a binding terminal instead of marker work\" }))"
+test server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_session_replay ... FAILED
+
+failures:
+
+failures:
+    server::participant::production::tests_w1b_while_dead_replay::while_dead_publish_reaches_resumed_session_replay
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 563 filtered out; finished in 2.56s
+
+error: test failed, to rerun pass `-p liminal-server --lib`

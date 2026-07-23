@@ -1,0 +1,32 @@
+   Compiling liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.57s
+     Running tests/diag_teardown.rs (target/debug/deps/diag_teardown-ad9cf606de75ba28)
+
+running 2 tests
+test diag_parked_publisher_alive ... recv err after 0: connection error: subscription receive failed: no delivery arrived within the timeout
+ALIVE: got 0/8
+
+thread 'diag_parked_publisher_alive' (31221015) panicked at crates/liminal-server/tests/diag_teardown.rs:65:5:
+assertion `left == right` failed: alive-publisher parked delivery
+  left: 0
+ right: 8
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test diag_parked_publisher_drops ... recv err after 0: connection error: subscription receive failed: no delivery arrived within the timeout
+DROP: got 0/8
+
+thread 'diag_parked_publisher_drops' (31221440) panicked at crates/liminal-server/tests/diag_teardown.rs:81:5:
+assertion `left == right` failed: dropped-publisher parked delivery
+  left: 0
+ right: 8
+FAILED
+
+failures:
+
+failures:
+    diag_parked_publisher_alive
+    diag_parked_publisher_drops
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.17s
+
+error: test failed, to rerun pass `-p liminal-server --test diag_teardown`

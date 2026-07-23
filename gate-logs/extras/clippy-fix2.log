@@ -1,0 +1,57 @@
+    Checking liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+error[E0308]: mismatched types
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:117:9
+    |
+116 |     let e1_seq = admit_record(
+    |                  ------------ arguments to this function are incorrect
+117 |         &mut publisher,
+    |         ^^^^^^^^^^^^^^ expected `&mut SocketPeer`, found `&mut SocketFixture`
+    |
+    = note: expected mutable reference `&mut server::participant::production::e2e_tests::socket_fixture::SocketPeer`
+               found mutable reference `&mut server::participant::production::e2e_tests::socket_fixture::SocketFixture`
+note: function defined here
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:44:4
+    |
+ 44 | fn admit_record(
+    |    ^^^^^^^^^^^^
+ 45 |     peer: &mut SocketPeer,
+    |     ---------------------
+
+error[E0308]: mismatched types
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:137:9
+    |
+136 |     let e2_seq = admit_record(
+    |                  ------------ arguments to this function are incorrect
+137 |         &mut publisher,
+    |         ^^^^^^^^^^^^^^ expected `&mut SocketPeer`, found `&mut SocketFixture`
+    |
+    = note: expected mutable reference `&mut server::participant::production::e2e_tests::socket_fixture::SocketPeer`
+               found mutable reference `&mut server::participant::production::e2e_tests::socket_fixture::SocketFixture`
+note: function defined here
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:44:4
+    |
+ 44 | fn admit_record(
+    |    ^^^^^^^^^^^^
+ 45 |     peer: &mut SocketPeer,
+    |     ---------------------
+
+error[E0308]: mismatched types
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:159:9
+    |
+158 |     let e3_seq = admit_record(
+    |                  ------------ arguments to this function are incorrect
+159 |         &mut publisher,
+    |         ^^^^^^^^^^^^^^ expected `&mut SocketPeer`, found `&mut SocketFixture`
+    |
+    = note: expected mutable reference `&mut server::participant::production::e2e_tests::socket_fixture::SocketPeer`
+               found mutable reference `&mut server::participant::production::e2e_tests::socket_fixture::SocketFixture`
+note: function defined here
+   --> crates/liminal-server/src/server/participant/production/tests_w1b_while_dead_replay.rs:44:4
+    |
+ 44 | fn admit_record(
+    |    ^^^^^^^^^^^^
+ 45 |     peer: &mut SocketPeer,
+    |     ---------------------
+
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `liminal-server` (lib test) due to 3 previous errors

@@ -1,0 +1,14 @@
+    Checking liminal-sdk v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-sdk)
+    Checking liminal-server v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/teardown-fix/crates/liminal-server)
+error: using `clone` on type `LimitsConfig` which implements the `Copy` trait
+  --> crates/liminal-server/tests/teardown_delivery_e2e.rs:86:13
+   |
+86 |             config.limits.clone(),
+   |             ^^^^^^^^^^^^^^^^^^^^^ help: try removing the `clone` call: `config.limits`
+   |
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.94.0/index.html#clone_on_copy
+   = note: `-D clippy::clone-on-copy` implied by `-D clippy::all`
+   = help: to override `-D clippy::all` add `#[allow(clippy::clone_on_copy)]`
+
+error: could not compile `liminal-server` (test "teardown_delivery_e2e") due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
