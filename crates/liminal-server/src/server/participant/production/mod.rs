@@ -77,6 +77,8 @@ mod e2e_leave_commit_boundary;
 #[cfg(test)]
 mod e2e_leave_regression;
 #[cfg(test)]
+mod e2e_terminal_drain;
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod e2e_tests;
 #[cfg(test)]
