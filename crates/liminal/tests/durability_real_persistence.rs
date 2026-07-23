@@ -36,6 +36,7 @@ fn open_store(data_dir: &std::path::Path) -> Result<HaematiteStore, Box<dyn std:
             data_dir: data_dir.to_path_buf(),
             shard_count: SHARD_COUNT,
             distributed: None,
+            executor_threads: None,
         })?
     };
     Ok(HaematiteStore::new(Arc::new(EventStore::new(database))))

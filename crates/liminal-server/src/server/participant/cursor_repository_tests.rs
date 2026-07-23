@@ -25,6 +25,7 @@ fn create_store(data_dir: &std::path::Path) -> Result<Arc<dyn DurableStore>, Box
         data_dir: data_dir.to_path_buf(),
         shard_count: 2,
         distributed: None,
+        executor_threads: None,
     })?;
     Ok(Arc::new(HaematiteStore::new(Arc::new(EventStore::new(
         database,

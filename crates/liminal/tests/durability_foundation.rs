@@ -23,6 +23,7 @@ fn disk_store() -> Result<(HaematiteStore, TempDir), Box<dyn std::error::Error>>
         data_dir: dir.path().join("db"),
         shard_count: 4,
         distributed: None,
+        executor_threads: None,
     })?;
     Ok((
         HaematiteStore::new(Arc::new(EventStore::new(database))),

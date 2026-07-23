@@ -937,6 +937,7 @@ fn open_or_create_database(data_dir: &Path) -> Result<Database, ServerError> {
             data_dir: data_dir.to_path_buf(),
             shard_count: DEFAULT_SHARD_COUNT,
             distributed: None,
+            executor_threads: None,
         })
     };
     result.map_err(|error| ServerError::ConfigValidation {
