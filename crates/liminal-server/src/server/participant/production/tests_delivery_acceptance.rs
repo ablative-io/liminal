@@ -265,6 +265,13 @@ fn reattach_replays_unacked_in_order_after_acked_frontier() -> Result<(), Box<dy
     let committed_while_detached = admit(&handler, sender, 0x65)?;
     assert_eq!(committed_while_detached, 7);
 
+    // Under the B1 ruled contract, a publish accepted while the recipient is
+    // connection-lost-Detached-but-resumable (its slot is still present) mints a
+    // durable obligation for it, so the while-detached publish (seq 7) now
+    // replays after the acked frontier alongside the earlier snapshot work.
+    let mut expected_replay = snapshot_included;
+    expected_replay.push(committed_while_detached);
+
     let first_reattach = attach(
         &handler,
         recipient,
@@ -273,8 +280,8 @@ fn reattach_replays_unacked_in_order_after_acked_frontier() -> Result<(), Box<dy
     )?;
     assert_eq!(
         replay_sequences(&handler, first_reattach)?,
-        snapshot_included,
-        "only obligations snapshot-included while bound replay after the acked frontier"
+        expected_replay,
+        "obligations after the acked frontier — including the while-detached publish — replay in order"
     );
 
     let second_reattach = attach(
@@ -285,12 +292,12 @@ fn reattach_replays_unacked_in_order_after_acked_frontier() -> Result<(), Box<dy
     )?;
     assert_eq!(
         replay_sequences(&handler, second_reattach)?,
-        snapshot_included,
+        expected_replay,
         "reattaching again before ack must duplicate the same ordered obligations"
     );
     assert!(
-        !replay_sequences(&handler, second_reattach)?.contains(&committed_while_detached),
-        "a record committed after detach created an obligation for the detached identity"
+        replay_sequences(&handler, second_reattach)?.contains(&committed_while_detached),
+        "a record committed while the recipient was resumable-Detached must replay on reattach (B1)"
     );
     Ok(())
 }

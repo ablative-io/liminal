@@ -45,8 +45,14 @@ fn assert_system_marker_includes_live_target() -> Result<(), Box<dyn Error>> {
     );
     Ok(())
 }
+/// The recipient snapshot is postcommit `Bound ∪ slot-present-resumable-Detached`,
+/// minus the sender (B1 ruled contract, superseding the prior Bound-only rule).
+/// `detached` reaches this state by detach-by-request, which RETAINS its slot at
+/// `Detached` and is resumable, so it is now named; `retired` left cleanly, the
+/// sole path that removes the slot from `authority.slots`, so it stays absent.
 #[test]
-fn recipient_snapshot_is_postcommit_live_bound_minus_sender() -> Result<(), Box<dyn Error>> {
+fn recipient_snapshot_is_postcommit_bound_and_resumable_detached_minus_sender()
+-> Result<(), Box<dyn Error>> {
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
     let conversation_id = 0xF0_52;
     let mut config = test_participant_config();
@@ -115,13 +121,19 @@ fn recipient_snapshot_is_postcommit_live_bound_minus_sender() -> Result<(), Box<
     leave(&handler, conversation_id, sender, 0x2C)?;
     persisted.push(newest_produced(Arc::clone(&store), conversation_id)?);
 
-    let expected = vec![peer_a.participant_id, peer_b.participant_id];
+    // Bound peers plus the resumable-Detached member, sorted ascending; the
+    // cleanly-departed identity is absent by construction (its slot is gone).
+    let expected = vec![
+        peer_a.participant_id,
+        peer_b.participant_id,
+        detached.participant_id,
+    ];
     for batch in &persisted {
         for record in batch.ordered_records() {
             assert_eq!(record.recipients(), expected);
             assert!(record.recipients().windows(2).all(|pair| pair[0] < pair[1]));
             assert_eq!(record.sender(), Some(sender.participant_id));
-            assert!(!record.recipients().contains(&detached.participant_id));
+            assert!(record.recipients().contains(&detached.participant_id));
             assert!(!record.recipients().contains(&retired.participant_id));
         }
     }
