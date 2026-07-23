@@ -3437,6 +3437,137 @@ impl ClaimFrontiers {
             frontiers: self,
         })
     }
+
+    /// Consumes the exact first pending binding-terminal candidate and
+    /// atomically materializes its retained terminal fact (the candidate-lane
+    /// terminal sibling of [`Self::drain_next_marker_core`], per the R-A2
+    /// candidate drain).
+    ///
+    /// The candidate's transaction-order major was already consumed when the
+    /// terminal pended; only the immutable tuple lane releases it here. The
+    /// delivery high watermark advances once and the pending terminal claim
+    /// decreases once. The owning participant stays in the active identity
+    /// ranks with its detached dead epoch — exactly the poststate an
+    /// immediately-committed terminal produces — and every surviving claim is
+    /// relocated through the same unreserved rebuild that live transitions
+    /// use.
+    pub(in crate::lifecycle) fn drain_first_binding_terminal(
+        mut self,
+        expected_owner: BindingTerminalOwner,
+        expected_order: super::AdmissionOrder,
+    ) -> Result<(Self, RetainedCausalRecord), Box<(Self, LiveFrontierTransitionError)>> {
+        let (delivery_seq, admission_order, owner) =
+            match self.validate_first_terminal_candidate(expected_owner, expected_order) {
+                Ok(candidate) => candidate,
+                Err(error) => return Err(Box::new((self, error))),
+            };
+        let claims = self.sequence.ledger.claims();
+        let Some(sequence_ledger) =
+            claims
+                .binding_terminals()
+                .checked_sub(1)
+                .and_then(|binding_terminals| {
+                    SequenceLedger::try_new(
+                        delivery_seq,
+                        SequenceClaims::new(
+                            claims.live_members(),
+                            binding_terminals,
+                            claims.markers(),
+                            claims.recovery(),
+                        ),
+                    )
+                    .ok()
+                })
+        else {
+            return Err(Box::new((
+                self,
+                LiveFrontierTransitionError::ResultingFrontier,
+            )));
+        };
+        let order_ledger = self.order.ledger;
+        let Ok(active) = ActiveIdentityRanks::try_new(
+            self.active_identities.participants().to_vec(),
+            sequence_ledger.high_watermark(),
+            self.identity_slot_limit,
+        ) else {
+            return Err(Box::new((self, LiveFrontierTransitionError::Authority)));
+        };
+        let (sequence, order) =
+            match rebuild_unreserved_frontiers(&active, sequence_ledger, order_ledger) {
+                Ok(frontiers) => frontiers,
+                Err(error) => return Err(Box::new((self, error))),
+            };
+        let record = RetainedCausalRecord {
+            delivery_seq,
+            admission_order,
+            kind: RetainedCausalRecordKind::BindingTerminal(owner),
+        };
+        self.active_identities = active;
+        self.sequence = sequence;
+        self.order = order;
+        self.retained_records.push(record);
+        Ok((self, record))
+    }
+
+    /// Validates the drain prestate without mutation: the sole immutable
+    /// candidate in both lanes is this exact pending binding terminal at the
+    /// next delivery sequence, its order major is already allocated, and its
+    /// owning participant rests detached at the dead epoch.
+    fn validate_first_terminal_candidate(
+        &self,
+        expected_owner: BindingTerminalOwner,
+        expected_order: super::AdmissionOrder,
+    ) -> Result<
+        (DeliverySeq, super::AdmissionOrder, BindingTerminalOwner),
+        LiveFrontierTransitionError,
+    > {
+        if self.sequence.recovery.is_some() || self.order.recovery.is_some() {
+            return Err(LiveFrontierTransitionError::Precedence);
+        }
+        let [first] = self.sequence.immutable_candidates.as_slice() else {
+            return Err(LiveFrontierTransitionError::Precedence);
+        };
+        let ImmutableSequenceCandidate::BindingTerminal {
+            delivery_seq,
+            admission_order,
+            owner,
+        } = *first
+        else {
+            return Err(LiveFrontierTransitionError::Precedence);
+        };
+        if owner != expected_owner || admission_order != expected_order {
+            return Err(LiveFrontierTransitionError::Authority);
+        }
+        let Some(expected_sequence) = self.sequence.ledger.high_watermark().checked_add(1) else {
+            return Err(LiveFrontierTransitionError::Exhausted);
+        };
+        if delivery_seq != expected_sequence
+            || order_is_above_high(
+                admission_order.transaction_order(),
+                self.order.ledger.high(),
+            )
+        {
+            return Err(LiveFrontierTransitionError::RecordPosition);
+        }
+        let [group] = self.order.immutable_candidates.as_slice() else {
+            return Err(LiveFrontierTransitionError::RecordPosition);
+        };
+        if group.candidate_keys.as_slice() != [admission_order] {
+            return Err(LiveFrontierTransitionError::RecordPosition);
+        }
+        let detached_matches = self
+            .active_identities
+            .participants()
+            .iter()
+            .any(|participant| {
+                participant.participant_index == owner.participant_index
+                    && participant.binding == FrontierBinding::Detached(owner.binding_epoch)
+            });
+        if !detached_matches {
+            return Err(LiveFrontierTransitionError::Authority);
+        }
+        Ok((delivery_seq, admission_order, owner))
+    }
 }
 
 fn apply_fenced_ledgers(
