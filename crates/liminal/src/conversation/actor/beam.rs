@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
@@ -55,9 +56,22 @@ impl ActorRuntime {
         // that exited without a close/restart deregistering it (e.g. a bare actor
         // that crashed) cannot accumulate a dead key across spawns.
         actors.retain(|_, weak| weak.strong_count() > 0);
-        actors.insert(pid.get(), core);
-        drop(actors);
-        Ok(())
+        // Every key left is owned by a LIVE core, so an occupied slot for a
+        // freshly spawned pid is a supervision defect (beamr pids are unique
+        // among live processes). Refuse it loudly instead of silently rebinding
+        // the pid's NIF dispatch to a different conversation.
+        match actors.entry(pid.get()) {
+            Entry::Occupied(_) => Err(LiminalError::ConversationFailed {
+                message: format!(
+                    "conversation actor pid {} is already registered to a live actor core",
+                    pid.get()
+                ),
+            }),
+            Entry::Vacant(entry) => {
+                entry.insert(core);
+                Ok(())
+            }
+        }
     }
 
     /// Drops the registration for `pid` only when it is owned by `owner` (called

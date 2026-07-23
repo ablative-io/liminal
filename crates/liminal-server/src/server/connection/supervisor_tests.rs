@@ -16,6 +16,7 @@ use liminal::protocol::{
 };
 
 use super::{ConnectionControl, ConnectionRuntime, ConnectionSupervisor, PushReplyAwaiter};
+use crate::ServerError;
 use crate::server::connection::services::{
     ConnectionServices, LiminalConnectionServices, server_error_from_protocol,
 };
@@ -516,6 +517,61 @@ fn no_final_slice_exit_record_reclaimed_by_delivery_not_scan()
         !supervisor.is_tracked(orphan_pid),
         "a register-orphan record must be reclaimed by the registration point check through remove()"
     );
+
+    supervisor.shutdown();
+    Ok(())
+}
+
+/// Pin (registry hygiene): a duplicate-pid registration is REFUSED with the
+/// typed [`ServerError::ConnectionPidCollision`] — never a silent replace. The
+/// registry stays consistent: the prior record survives with its `fd_guard`
+/// teardown route (the live connection still serves traffic afterwards), the
+/// tracked count stays at one, and because the gauge increment sits strictly
+/// after the vacant-only insert, `liminal_connections_active` keeps its
+/// one-increment-per-record pairing with the decrement in `remove()` — a
+/// refused duplicate increments nothing.
+#[test]
+fn duplicate_pid_registration_is_refused_and_prior_record_survives()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (mut client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+    wait_for_parked(&supervisor, pid)?;
+    assert_eq!(supervisor.active_connection_count(), 1);
+
+    match supervisor.inner.runtime.register(pid, None) {
+        Err(ServerError::ConnectionPidCollision { pid: refused }) => assert_eq!(refused, pid),
+        Err(other) => {
+            return Err(format!(
+                "duplicate registration must refuse with ConnectionPidCollision, got {other:?}"
+            )
+            .into());
+        }
+        Ok(()) => {
+            return Err("duplicate pid registration must be refused, not silently replace".into());
+        }
+    }
+
+    // Whole-op refusal: still exactly one record, and it is the ORIGINAL one —
+    // peer address and fd guard intact, not the duplicate's `None`s.
+    assert_eq!(supervisor.active_connection_count(), 1);
+    let (prior_peer_addr, prior_fd_guard_present) =
+        super::lock(&supervisor.inner.runtime.records, "connection registry")?
+            .get(&pid)
+            .map(|record| (record.peer_addr, record.fd_guard.is_some()))
+            .ok_or("prior record must survive a refused duplicate registration")?;
+    assert_eq!(prior_peer_addr, handle.peer_addr());
+    assert!(
+        prior_fd_guard_present,
+        "the prior record's fd teardown route must survive a refused duplicate"
+    );
+
+    // The displaced-record hazard made loud: the live connection's fd was not
+    // orphaned or closed — it still serves a full Ping -> Pong round trip.
+    client.set_read_timeout(Some(Duration::from_secs(2)))?;
+    write_frame(&mut client, &Frame::Ping { flags: 0 })?;
+    assert!(matches!(read_frame(&mut client)?, Frame::Pong { .. }));
 
     supervisor.shutdown();
     Ok(())

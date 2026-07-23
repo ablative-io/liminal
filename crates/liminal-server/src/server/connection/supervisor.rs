@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 #[cfg(test)]
 use std::collections::VecDeque;
+use std::collections::hash_map::Entry;
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::RawFd;
 #[cfg(test)]
@@ -2699,21 +2700,35 @@ impl ConnectionRuntime {
         connection_incarnation: Option<ConnectionIncarnation>,
         fd_guard: Option<TcpStream>,
     ) -> Result<(), ServerError> {
-        lock(&self.records, "connection registry")?.insert(
-            pid,
-            ConnectionRecord {
-                peer_addr,
-                connection_incarnation,
-                registration: None,
-                readiness: None,
-                ready_pending: Arc::new(AtomicBool::new(false)),
-                parked: AtomicBool::new(false),
-                fd_guard,
-            },
-        );
-        // Single-writer insert (see doc above) pairs one gauge increment with the
-        // decrement in `remove`, keeping `liminal_connections_active` equal to the
-        // live record count on every teardown route.
+        match lock(&self.records, "connection registry")?.entry(pid) {
+            // ENFORCED (not comment-only): pids are fresh per spawn and a record
+            // is reclaimed through the single `remove` funnel before its pid can
+            // recycle, so an occupied slot here is a supervision defect. Refuse
+            // the whole registration rather than silently replacing — a replace
+            // would drop the displaced record's `fd_guard` outside the teardown
+            // funnel (orphaning a live connection's stream) and increment the
+            // `liminal_connections_active` gauge a second time with no paired
+            // decrement. The prior record stays intact; both spawn paths roll the
+            // fresh process back on this error. Same idiom as
+            // `StreamTable::insert` (entry-vacant → typed error) and the
+            // fail-closed duplicate-conversation refusal in `apply.rs`.
+            Entry::Occupied(_) => return Err(ServerError::ConnectionPidCollision { pid }),
+            Entry::Vacant(entry) => {
+                entry.insert(ConnectionRecord {
+                    peer_addr,
+                    connection_incarnation,
+                    registration: None,
+                    readiness: None,
+                    ready_pending: Arc::new(AtomicBool::new(false)),
+                    parked: AtomicBool::new(false),
+                    fd_guard,
+                });
+            }
+        }
+        // Single-writer vacant-only insert (see doc above and the refusal arm)
+        // pairs EXACTLY one gauge increment with the decrement in `remove`,
+        // keeping `liminal_connections_active` equal to the live record count on
+        // every teardown route; a refused duplicate increments nothing.
         crate::metrics::connection_spawned();
         Ok(())
     }

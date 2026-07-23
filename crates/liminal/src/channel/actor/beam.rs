@@ -11,6 +11,7 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::{Arc, Mutex, Weak};
 
 use beamr::atom::Atom;
@@ -54,14 +55,38 @@ impl ActorRuntime {
         self.command_atom
     }
 
+    /// Registers a channel actor pid with its shared core.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LiminalError`] when the registry lock is poisoned or when the
+    /// pid is already registered to a live core.
     pub fn register(&self, pid: u64, core: Weak<ChannelActorCore>) -> Result<(), LiminalError> {
-        self.actors
+        let mut actors = self
+            .actors
             .lock()
             .map_err(|error| LiminalError::DeliveryFailed {
                 message: format!("channel actor runtime lock poisoned: {error}"),
-            })?
-            .insert(pid, core);
-        Ok(())
+            })?;
+        // Drop keys whose actor core is already gone before inserting (mirrors
+        // the conversation actor runtime), so an actor that exited without a
+        // restart deregistering it cannot accumulate a dead key across spawns.
+        actors.retain(|_, weak| weak.strong_count() > 0);
+        // Every key left is owned by a LIVE core, so an occupied slot for a
+        // freshly spawned pid is a supervision defect (beamr pids are unique
+        // among live processes). Refuse it loudly instead of silently rebinding
+        // the pid's NIF dispatch to a different channel core.
+        match actors.entry(pid) {
+            Entry::Occupied(_) => Err(LiminalError::DeliveryFailed {
+                message: format!(
+                    "channel actor pid {pid} is already registered to a live actor core"
+                ),
+            }),
+            Entry::Vacant(entry) => {
+                entry.insert(core);
+                Ok(())
+            }
+        }
     }
 
     fn actor(&self, pid: u64) -> Option<Arc<ChannelActorCore>> {
