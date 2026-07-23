@@ -135,6 +135,8 @@ mod tests_record_admission;
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_residue;
 #[cfg(test)]
+mod tests_restore_window;
+#[cfg(test)]
 mod tests_unit2_layer1;
 #[cfg(test)]
 mod tests_w1a;
