@@ -1,40 +1,27 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "a1a7816a309aa7922ebc0b122a1b0a66f5ee6bed",
-  "tree_sha": "3b591994992a97c432600061f6e9232f645cbce2",
-  "branch": "main",
+  "commit_sha": "e1edca0947f5aa8a0d74d7a4c9f49f2f54a16e2f",
+  "tree_sha": "fcafcb2987f2e28f3e605311c1e5fe7d8a7fd918",
+  "branch": "HEAD",
   "dirty": false,
-  "untracked_count": 3,
+  "untracked_count": 0,
   "toolchain": {
-    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
-    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
+    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
+    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
   },
-  "host": "Toms-MacBook-Pro.local",
-  "started_at": "2026-07-23T05:00:58Z",
-  "finished_at": "2026-07-23T05:02:45Z",
-  "duration_s": 106.931,
-  "concurrent_cargo_at_start": [
-    "807 /Users/tom/Developer/ablative/deploy/aion/cargo-gates-worker --address 127.0.0.1:50061 --ready-file /tmp/cargo-gates-wor",
-    "820 /Users/tom/.cargo/bin/aion server --config /Users/tom/Developer/ablative/deploy/aion/config.toml",
-    "40739 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "40740 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "76675 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "76676 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92175 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92176 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92177 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-tom/cargotom-2.3.13/cargotom --storage /Users/tom/Libra",
-    "92178 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "92179 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend",
-    "92180 /Users/tom/Library/Application Support/Zed/extensions/work/cargo-appraiser/cargo-appraiser-v1.1.5/cargo-appraiser --rend"
-  ],
+  "host": "Annabels-MacBook-Pro.local",
+  "started_at": "2026-07-23T05:04:01Z",
+  "finished_at": "2026-07-23T05:13:08Z",
+  "duration_s": 547.246,
+  "concurrent_cargo_at_start": [],
   "legs": [
     {
       "name": "fmt",
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 1.317,
+      "duration_s": 2.014,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -45,9 +32,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 0.703,
+      "duration_s": 72.974,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "54d32f1312e9ec321c58af432997bfe3bae5b14322fc06e68fd35a1f2f0e6519",
+      "log_sha256": "51395726e322f52f597c2ead8138187c8a95aabbcc2cebe3c06b8db3e0e1c257",
       "tests": null,
       "failures": []
     },
@@ -55,22 +42,17 @@
       "name": "tests",
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
-      "exit": 101,
-      "duration_s": 104.907,
+      "exit": 0,
+      "duration_s": 472.255,
       "log": "gate-logs/tests.log",
-      "log_sha256": "f4d5ae6a75b71875356521e05cbc3826521be02bc0bcad2f8bd5fb7d937163a0",
+      "log_sha256": "59dffb38a40682ccce64ac7611dcb5b662afccdc5d5aa7b290db415ed06ba7a1",
       "tests": {
-        "suites": 29,
-        "passed": 1583,
-        "failed": 1
+        "suites": 40,
+        "passed": 1762,
+        "failed": 0
       },
-      "failures": [
-        {
-          "test": "sdk_subscription_delivery_parity_over_real_acceptor",
-          "excerpt": "Error: Protocol { description: \"server rejected subscribe (reason 65535): listener accept failed: liminal subscribe failed for channel 'events': failed to set trap_exit on subscriber process 2: NoCaller\" }"
-        }
-      ]
+      "failures": []
     }
   ],
-  "verdict": "red"
+  "verdict": "green"
 }
