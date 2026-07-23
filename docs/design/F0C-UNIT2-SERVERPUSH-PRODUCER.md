@@ -621,11 +621,14 @@ readiness markers, or socket readability.
    batch, supersession alone has two ordered records (terminal then attached),
    every other batch has one, and MarkerAck produces no push batch. Check each
    record's own sequence, typed body, and recipient snapshot.
-6. **`recipient_snapshot_is_postcommit_live_bound_minus_sender`**: with sender,
-   two bound peers, one detached member, and one retired identity, commit each
-   participant-authored source; persist exactly the two peers, sorted and
-   duplicate-free. Later detach/attach does not rewrite the batch. A system marker
-   includes its live target.
+6. **`recipient_snapshot_is_postcommit_bound_and_resumable_detached_minus_sender`**
+   (trued 2026-07-23 to the B1 ruled contract, superseding the prior Bound-only
+   rule): with sender, two bound peers, one resumable-detached member, and one
+   cleanly-departed (retired) identity, commit each participant-authored source;
+   persist the two bound peers AND the resumable-detached member, sorted and
+   duplicate-free — the departed identity stays absent (clean Leave is the sole
+   slot-removal path, so map presence is the discriminator). Later detach/attach
+   does not rewrite the batch. A system marker includes its live target.
 7. **`outbox_row_is_impossible_before_producing_flush`**: gate operation append
    and flush independently. Before producing flush there is no outbox append,
    wake, encoded push, or response. After it, gate the outbox append/flush; no
