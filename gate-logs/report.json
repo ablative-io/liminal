@@ -1,9 +1,9 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "3fc04ede7a981dd8b42d1eb4642196aca86cc2d7",
-  "tree_sha": "f21cb5c1f01b1cf9d5da885541191b401e3044fa",
-  "branch": "fix/teardown-delivery-loss",
+  "commit_sha": "7f2f404842380a3d1ce6698c0d7fc102c3cf3463",
+  "tree_sha": "40318fb468bd4dad9c85b9e4dadadcc261b47e0a",
+  "branch": "fix/restore-window-typed-refuse",
   "dirty": false,
   "untracked_count": 0,
   "toolchain": {
@@ -11,19 +11,17 @@
     "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
   },
   "host": "Annabels-MacBook-Pro.local",
-  "started_at": "2026-07-23T01:13:49Z",
-  "finished_at": "2026-07-23T01:15:47Z",
-  "duration_s": 117.379,
-  "concurrent_cargo_at_start": [
-    "18301 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace"
-  ],
+  "started_at": "2026-07-23T02:35:40Z",
+  "finished_at": "2026-07-23T02:43:49Z",
+  "duration_s": 488.498,
+  "concurrent_cargo_at_start": [],
   "legs": [
     {
       "name": "fmt",
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 1.806,
+      "duration_s": 1.835,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -34,9 +32,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 0.296,
+      "duration_s": 56.296,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "2bc683fb4e4f4f21ee9ee39e2b8ecce2efe20d3b1be57bda5316aa519ab3d30a",
+      "log_sha256": "e9fdfe3461c388de1100fd657ba6a443d5fe88fb40c147f9017866a13167e99e",
       "tests": null,
       "failures": []
     },
@@ -45,12 +43,12 @@
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
       "exit": 0,
-      "duration_s": 115.272,
+      "duration_s": 430.363,
       "log": "gate-logs/tests.log",
-      "log_sha256": "fec4c8f6f706611c0cfd82d21aedc0b5b09f9cbadf9d8b6937d4d60077eefbe0",
+      "log_sha256": "2969e03bb33cf316773005cd5508ffe02e2b7919aa82960c5c3b40fb4b23927b",
       "tests": {
         "suites": 40,
-        "passed": 1761,
+        "passed": 1762,
         "failed": 0
       },
       "failures": []
