@@ -19,6 +19,12 @@ pub struct ServerConfig {
     /// Declarative routing rules that connect configured channels.
     pub routing_rules: Vec<RoutingRuleDef>,
     /// Optional filesystem location for durable server state.
+    ///
+    /// A fresh boot surfaces `ConfigValidation` unless this path's PARENT
+    /// directory already exists: the haematite engine creates the store dir
+    /// exactly one level below a pre-existing parent it can fence (never
+    /// `create_dir_all` — deliberate upstream hardening). Create the parent;
+    /// the engine fences into it.
     pub persistence_path: Option<PathBuf>,
     /// Optional beamr distribution cluster membership configuration.
     pub cluster: Option<ClusterConfig>,
