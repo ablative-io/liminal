@@ -432,7 +432,7 @@ pub(super) fn intent_matches_token(
     }
 }
 
-const fn stored_died_cause(cause: DiedCause) -> StoredDiedCause {
+pub(super) const fn stored_died_cause(cause: DiedCause) -> StoredDiedCause {
     match cause {
         DiedCause::ConnectionLost => StoredDiedCause::ConnectionLost,
         DiedCause::ProcessKilled => StoredDiedCause::ProcessKilled,

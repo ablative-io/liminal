@@ -57,6 +57,7 @@ mod ops_leave;
 mod ops_nonzero_ack;
 mod ops_session;
 mod ops_session_replay;
+mod ops_terminal_drain;
 mod outbox;
 mod outbox_log;
 mod outbox_projection;

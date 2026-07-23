@@ -309,7 +309,7 @@ fn complete_target(
     Ok(())
 }
 
-fn record_terminal_impact(
+pub(super) fn record_terminal_impact(
     authority: &ConversationAuthority,
     source_sequence: u64,
     operation: &StoredOperation,

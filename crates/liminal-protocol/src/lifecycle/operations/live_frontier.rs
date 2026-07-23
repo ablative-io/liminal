@@ -366,12 +366,22 @@ impl LiveFrontierOwner {
     /// the poststate an immediately-committed terminal would have produced:
     /// the participant frontier stays detached at its dead epoch.
     ///
+    /// The retained-row CAP is deliberately not re-checked here: the terminal
+    /// pended exactly because the cap could not admit its row at fate time
+    /// ([`PreparedBindingTerminal::admit`](super::PreparedBindingTerminal::admit)),
+    /// and pending DEFERRED that exact reserved row rather than discarding it.
+    /// R-A2 prescribes the drain transaction's retention transition
+    /// unconditionally — an accepted terminal fate can never become
+    /// unsequencable — so the drain honors the deferred reservation even while
+    /// the suffix rests at its cap. The overage is bounded by the
+    /// open-candidate count, itself bounded by the contract's identity-slot
+    /// candidate bound.
+    ///
     /// # Errors
     ///
     /// Returns the unchanged owner when the first candidate is absent or not
     /// this pending terminal, the charge does not name the candidate's exact
-    /// keyed row, the retained-row cap cannot admit the terminal, or the
-    /// resulting retention/closure accounting is invalid.
+    /// keyed row, or the resulting retention/closure accounting is invalid.
     pub fn drain_pending_terminal(
         self,
         pending: PendingFinalization,
@@ -392,10 +402,12 @@ impl LiveFrontierOwner {
         {
             return drain_refusal(self, LiveFrontierError::RetainedCharge);
         }
-        let resulting_len = self.retained_charges.len().checked_add(1);
-        if resulting_len
+        if self
+            .retained_charges
+            .len()
+            .checked_add(1)
             .and_then(|len| u64::try_from(len).ok())
-            .is_none_or(|len| len > self.retained_record_limit)
+            .is_none()
         {
             return drain_refusal(self, LiveFrontierError::RetainedRecordLimit);
         }
