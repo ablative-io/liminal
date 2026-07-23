@@ -23,6 +23,20 @@ consumer that published a burst into its own shutdown.
   fanned out to its subscriber's socket — so the `Disconnect` can no longer
   overtake an in-flight delivery.
 
+While-dead publish delivery loss (DEFECT B1): a publish accepted while a
+subscriber was connection-lost-Detached-but-resumable never reached that
+subscriber's resumed replay — the recipient snapshot admitted only
+live-`Bound` slots, so the accepted-then-lost record minted no durable
+obligation for the resumable peer.
+
+- **Server (B1):** the produced-record recipient snapshot now admits
+  `Bound | Detached` slots, keyed on map presence (a cleanly-Left peer is
+  removed from `authority.slots`, so departed identities remain excluded).
+  A Detached recipient's obligation is durably installed and PARKED — owed
+  no live delivery tell (it has no connection to notify), it replays on the
+  subscriber's `CredentialAttach` resume — so an accepted while-dead publish
+  now reaches the resumed session.
+
 ### Behavior change (carried from 0.3.2, release-note flag)
 
 - **W2 obligation-debt dispatch reports peer connection loss eagerly.** On
