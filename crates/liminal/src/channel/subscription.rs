@@ -559,24 +559,20 @@ impl SubscriptionHandle {
                 inbox: Arc::clone(&process_inbox),
             }) as Box<dyn NativeHandler>
         });
-        let pid =
-            scheduler
-                .spawn_native(factory)
-                .map_err(|error| LiminalError::SubscriptionFailed {
-                    message: format!("failed to spawn subscriber process: {error:?}"),
-                })?;
-        // Set trap_exit BEFORE the channel actor links to this pid, so an
-        // abnormal actor crash is trapped (delivered as a message the subscriber
-        // drains) instead of cascading across the link and killing the
-        // subscriber. This makes the subscriber outlive a channel-actor crash so
-        // the restarted actor can re-link to it on boot (R2/R4). Setting it
-        // host-side (not in the handler's first slice) removes any race against
-        // the crash: the flag is in place the instant `subscribe` proceeds.
-        scheduler
-            .set_trap_exit(pid, true)
-            .map_err(|error| LiminalError::SubscriptionFailed {
-                message: format!("failed to set trap_exit on subscriber process {pid}: {error:?}"),
-            })?;
+        // trap_exit is set on the process BEFORE it is published as runnable
+        // (0.16.1 `spawn_native_trap_exit` — pre-runnable by construction), so
+        // an abnormal channel-actor crash is trapped (delivered as a message
+        // the subscriber drains) instead of cascading across the link and
+        // killing the subscriber. This makes the subscriber outlive a
+        // channel-actor crash so the restarted actor can re-link to it on boot
+        // (R2/R4): the flag is in place before the process's first slice, with
+        // no post-spawn window for `set_trap_exit` to race (or return
+        // `NoCaller` against a mid-first-slice process).
+        let pid = scheduler.spawn_native_trap_exit(factory).map_err(|error| {
+            LiminalError::SubscriptionFailed {
+                message: format!("failed to spawn subscriber process: {error:?}"),
+            }
+        })?;
         let handle = Self {
             inner: Arc::new(SubscriptionInner {
                 pid,
