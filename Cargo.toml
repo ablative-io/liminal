@@ -23,9 +23,9 @@ authors = [
 # `cargo publish` ships to crates.io). `liminal` is published as `liminal-rs`
 # because the bare name is taken on crates.io, but is imported as `liminal`.
 [workspace.dependencies]
-liminal = { package = "liminal-rs", version = "0.4.0", path = "crates/liminal" }
-liminal-protocol = { version = "0.3.1", path = "crates/liminal-protocol" }
-liminal-sdk = { version = "0.4.0", path = "crates/liminal-sdk" }
+liminal = { package = "liminal-rs", version = "0.4.1", path = "crates/liminal" }
+liminal-protocol = { version = "0.3.2", path = "crates/liminal-protocol" }
+liminal-sdk = { version = "0.4.1", path = "crates/liminal-sdk" }
 
 anyhow = "1"
 async-trait = "0.1"

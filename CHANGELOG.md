@@ -3,6 +3,42 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## 0.4.1 — 2026-07-23
+
+`liminal-rs` 0.4.1, `liminal-server` 0.4.1, `liminal-sdk` 0.4.1;
+`liminal-protocol` 0.3.2 (additive).
+
+### Added
+
+- **SDK: explicit flush surface** (`SDK-PUSH-FLUSH` r2). `PushClient::flush()`
+  awaits the server's verdict for every response-eliciting publish written
+  before the call, bounded by a 5 s budget; `close()` = flush-then-graceful-
+  half-close. `FlushOutcome { failures, unresolved, mode }`:
+  `failures.is_empty() && unresolved == 0` is the ONLY proven-accepted shape;
+  budget expiry is a normal caller-inspected outcome, never an `Err`.
+  Rejections carry the raw wire `{reason_code, message}` verbatim. Publishes
+  to the reserved observability channel elicit no server response by design
+  and sit outside the flush contract — on a server run without a notifier,
+  an observability-channel publish falls through to channel machinery, DOES
+  elicit a response, and flush fails loudly with the response-count-mismatch
+  mechanism error: designed, and operator-visible.
+- **Protocol: candidate-lane pending-terminal drain owner operation**
+  (additive; old logs remain byte-compatible).
+
+### Fixed
+
+- **Server: restore-window publish tear.** A valid publish that encountered a
+  crash-restored `PendingFinalization(Died)` residence tore the connection
+  with a Fatal invariant error. The server now drains that pending terminal
+  as one durable candidate transaction (terminal record, retention, candidate
+  deletion, binding-slot release) and the publish COMMITS after the drain —
+  proven live-socket end-to-end including a real unclean restart replaying
+  the drain row.
+- **rs: subscriber-spawn trap_exit race.** The subscriber process is now
+  spawned via beamr 0.16.1's `spawn_native_trap_exit` (flag set before the
+  process is runnable), retiring the once-per-battery `NoCaller` failure on
+  high-core hosts.
+
 ## 0.4.0 — 2026-07-23
 
 Haematite 0.7.0 uptake: `liminal-rs` 0.4.0, `liminal-server` 0.4.0, and
