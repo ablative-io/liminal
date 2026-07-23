@@ -81,7 +81,9 @@ fn valid_publish_during_pending_finalization_residence_is_typed_refused()
         }),
     )?;
     if matches!(refused, ServerValue::RecordCommitted(_)) {
-        return Err(format!("residence publish must be refused, not committed: {refused:?}").into());
+        return Err(
+            format!("residence publish must be refused, not committed: {refused:?}").into(),
+        );
     }
 
     // The refusal left the server serving: an unrelated enrollment still binds.
@@ -116,8 +118,7 @@ fn valid_publish_during_pending_finalization_residence_is_typed_refused()
 ///   fabricated for this prestate — the contract's total simulation admits no
 ///   truthful refusal here.
 #[test]
-fn residence_frontier_census_sole_terminal_candidate_closure_clear()
--> Result<(), Box<dyn Error>> {
+fn residence_frontier_census_sole_terminal_candidate_closure_clear() -> Result<(), Box<dyn Error>> {
     let fixture = pending_restart_fixture()?;
     let restarted = restarted_handler(&fixture)?;
     let mut replayed =
@@ -128,7 +129,10 @@ fn residence_frontier_census_sole_terminal_candidate_closure_clear()
     let [sole] = candidates.as_slice() else {
         return Err(format!("residence frontier candidates drifted: {candidates:?}").into());
     };
-    let ImmutableSequenceCandidate::BindingTerminal { owner: terminal, .. } = sole else {
+    let ImmutableSequenceCandidate::BindingTerminal {
+        owner: terminal, ..
+    } = sole
+    else {
         return Err(format!("residence sole candidate is not a binding terminal: {sole:?}").into());
     };
     if terminal.participant_index != fixture.participant_id {
