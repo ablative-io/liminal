@@ -1,1 +1,39 @@
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+    Checking fnv v1.0.7
+   Compiling getrandom v0.3.4
+    Checking bit-vec v0.8.0
+    Checking ppv-lite86 v0.2.21
+    Checking wait-timeout v0.2.1
+    Checking quick-error v1.2.3
+    Checking unarray v0.1.4
+   Compiling wasm-bindgen-shared v0.2.125
+   Compiling rustversion v1.0.22
+   Compiling bumpalo v3.20.3
+    Checking unicode-ident v1.0.24
+    Checking gimli v0.33.0
+    Checking rusty-fork v0.3.1
+    Checking bit-set v0.8.0
+    Checking fancy-regex v0.18.0
+    Checking ahash v0.8.12
+    Checking rand_core v0.9.5
+    Checking referencing v0.46.5
+    Checking rand v0.9.5
+    Checking rand_xorshift v0.4.0
+    Checking rand_chacha v0.9.0
+    Checking proptest v1.11.0
+   Compiling wasm-bindgen-macro-support v0.2.125
+    Checking jsonschema v0.46.5
+   Compiling wasm-bindgen v0.2.125
+    Checking liminal-protocol v0.3.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/sdk-flush-build/crates/liminal-protocol)
+    Checking cranelift-codegen v0.131.2
+   Compiling wasm-bindgen-macro v0.2.125
+    Checking liminal-ts-wasm v0.3.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/sdk-flush-build/sdks/liminal-ts/wasm-src)
+    Checking cranelift-native v0.131.2
+    Checking cranelift-module v0.131.2
+    Checking cranelift-frontend v0.131.2
+    Checking cranelift-jit v0.131.2
+    Checking beamr v0.16.0
+    Checking haematite v0.6.2
+    Checking liminal-rs v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/sdk-flush-build/crates/liminal)
+    Checking liminal-sdk v0.3.3 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/sdk-flush-build/crates/liminal-sdk)
+    Checking liminal-server v0.3.3 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/sdk-flush-build/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 55.89s
