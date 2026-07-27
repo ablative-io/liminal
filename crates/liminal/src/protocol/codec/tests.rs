@@ -320,6 +320,7 @@ fn worker_register_node_presence_distinguishes_none_from_empty() -> Result<(), P
             node: None,
             activity_types: vec!["a".to_owned()],
             identity: "id".to_owned(),
+            activities: Vec::new(),
         },
     };
     let present_empty = Frame::WorkerRegister {
@@ -330,6 +331,7 @@ fn worker_register_node_presence_distinguishes_none_from_empty() -> Result<(), P
             node: Some(String::new()),
             activity_types: vec!["a".to_owned()],
             identity: "id".to_owned(),
+            activities: Vec::new(),
         },
     };
 

@@ -213,6 +213,17 @@ impl FrameHeader {
     pub const WIRE_LEN: usize = HEADER_LEN;
 }
 
+/// Typed activity surface committed by a worker build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkerActivityDescriptor {
+    /// Activity type.
+    pub name: String,
+    /// Canonical JSON Schema accepted by the worker.
+    pub input_schema_json: String,
+    /// Canonical JSON Schema produced by the worker.
+    pub output_schema_json: String,
+}
+
 /// Self-describing worker registration carried by [`Frame::WorkerRegister`].
 ///
 /// A worker announces the routing dimensions it serves plus a stable identity so
@@ -232,6 +243,8 @@ pub struct WorkerRegistration {
     pub activity_types: Vec<String>,
     /// Stable worker identity.
     pub identity: String,
+    /// Typed action descriptors; empty identifies a pre-contract worker.
+    pub activities: Vec<WorkerActivityDescriptor>,
 }
 
 /// Outcome of a worker registration, carried by [`Frame::WorkerRegisterAck`].

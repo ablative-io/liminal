@@ -1,6 +1,7 @@
 use crate::protocol::{
     CausalContext, Frame, MessageEnvelope, MessageId, ProtocolError, ProtocolVersion, SchemaId,
-    WorkerRegisterOutcome, WorkerRegistration, decode, encode, encoded_len,
+    WorkerActivityDescriptor, WorkerRegisterOutcome, WorkerRegistration, decode, encode,
+    encoded_len,
 };
 
 pub(super) fn round_trip(frame: &Frame) -> Result<Frame, ProtocolError> {
@@ -55,6 +56,11 @@ pub(super) fn worker_register_frames() -> [Frame; 4] {
                 node: Some("node-a".to_owned()),
                 activity_types: vec!["charge".to_owned(), "refund".to_owned()],
                 identity: "worker-1".to_owned(),
+                activities: vec![WorkerActivityDescriptor {
+                    name: "charge".to_owned(),
+                    input_schema_json: r#"{"type":"integer"}"#.to_owned(),
+                    output_schema_json: r#"{"type":"boolean"}"#.to_owned(),
+                }],
             },
         },
         // node = None (and empty vecs) — exercises the optional-node presence byte
@@ -67,6 +73,7 @@ pub(super) fn worker_register_frames() -> [Frame; 4] {
                 node: None,
                 activity_types: Vec::new(),
                 identity: "worker-2".to_owned(),
+                activities: Vec::new(),
             },
         },
         Frame::WorkerRegisterAck {

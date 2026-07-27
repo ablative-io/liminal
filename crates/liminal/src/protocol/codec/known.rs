@@ -1,6 +1,6 @@
 use crate::protocol::{
     Frame, FrameType, MessageEnvelope, MessageId, ProtocolError, ProtocolVersion, StreamPressure,
-    WorkerRegisterOutcome, WorkerRegistration,
+    WorkerActivityDescriptor, WorkerRegisterOutcome, WorkerRegistration,
     frame::{
         PUBLISH_IDEMPOTENCY_KEY_FLAG, WORKER_REGISTER_ACK_ACCEPTED, WORKER_REGISTER_ACK_REJECTED,
     },
@@ -292,6 +292,24 @@ fn decode_worker_register_payload(
     let node = reader.read_optional_string()?;
     let activity_types = reader.read_string_vec_field()?;
     let identity = reader.read_string_field()?;
+    let activities = if reader.is_finished() {
+        Vec::new()
+    } else {
+        let count = usize::try_from(reader.read_u32()?)
+            .map_err(|_| ProtocolError::codec("activity descriptor count cannot fit usize"))?;
+        let mut activities = Vec::new();
+        activities
+            .try_reserve(count)
+            .map_err(|_| ProtocolError::codec("activity descriptor allocation failed"))?;
+        for _ in 0..count {
+            activities.push(WorkerActivityDescriptor {
+                name: reader.read_string_field()?,
+                input_schema_json: reader.read_string_field()?,
+                output_schema_json: reader.read_string_field()?,
+            });
+        }
+        activities
+    };
     Ok(Frame::WorkerRegister {
         flags,
         registration: WorkerRegistration {
@@ -300,6 +318,7 @@ fn decode_worker_register_payload(
             node,
             activity_types,
             identity,
+            activities,
         },
     })
 }

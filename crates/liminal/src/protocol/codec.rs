@@ -9,7 +9,7 @@ use super::envelope::{MessageEnvelope, SchemaId};
 use super::error::ProtocolError;
 use super::frame::{
     Frame, FrameType, HEADER_LEN, WORKER_REGISTER_ACK_ACCEPTED, WORKER_REGISTER_ACK_REJECTED,
-    WorkerRegisterOutcome, WorkerRegistration, validate_stream,
+    WorkerActivityDescriptor, WorkerRegisterOutcome, WorkerRegistration, validate_stream,
 };
 use super::version::ProtocolVersion;
 use known::decode_known_payload;
@@ -249,7 +249,24 @@ fn worker_register_payload_len(registration: &WorkerRegistration) -> Result<usiz
         option_string_len(registration.node.as_deref())?,
         string_vec_field_len(&registration.activity_types)?,
         string_field_len(&registration.identity)?,
+        activity_descriptors_field_len(&registration.activities)?,
     ])
+}
+
+fn activity_descriptors_field_len(
+    activities: &[WorkerActivityDescriptor],
+) -> Result<usize, ProtocolError> {
+    checked_u32_len(activities.len())?;
+    let mut total = U32_LEN;
+    for activity in activities {
+        total = sum_lengths(&[
+            total,
+            string_field_len(&activity.name)?,
+            string_field_len(&activity.input_schema_json)?,
+            string_field_len(&activity.output_schema_json)?,
+        ])?;
+    }
+    Ok(total)
 }
 
 fn worker_register_ack_payload_len(
@@ -382,7 +399,16 @@ fn write_worker_register_payload(
     // `Some("")` so an absent node never collapses to an empty string.
     writer.write_optional_string(registration.node.as_deref())?;
     writer.write_string_vec_field(&registration.activity_types)?;
-    writer.write_string_field(&registration.identity)
+    writer.write_string_field(&registration.identity)?;
+    let count = u32::try_from(registration.activities.len())
+        .map_err(|_| ProtocolError::codec("activity descriptor count exceeded u32::MAX"))?;
+    writer.write_u32(count)?;
+    for activity in &registration.activities {
+        writer.write_string_field(&activity.name)?;
+        writer.write_string_field(&activity.input_schema_json)?;
+        writer.write_string_field(&activity.output_schema_json)?;
+    }
+    Ok(())
 }
 
 fn write_worker_register_ack_payload(
