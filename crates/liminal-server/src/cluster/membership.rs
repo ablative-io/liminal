@@ -373,10 +373,14 @@ pub fn start(
 mod tests {
     use super::{Membership, MembershipDelta};
     use beamr::atom::AtomTable;
-    use beamr::distribution::connection::ConnectionManager;
+    use beamr::distribution::connection::{AcceptHandle, ConnectionManager};
     use beamr::distribution::resolver::StaticResolver;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    const COOKIE: &str = "srv008-membership-cookie";
+    const DIALER_NAME: &str = "dialer@127.0.0.1";
+    const PEER_NAME: &str = "peer@127.0.0.1";
 
     fn empty_manager(atoms: &Arc<AtomTable>) -> ConnectionManager {
         ConnectionManager::new(
@@ -387,6 +391,77 @@ mod tests {
             1,
         )
     }
+
+    /// A live loopback pair of REAL connection managers — real sockets, real OTP
+    /// handshake, no mock. `dialer` is the manager whose membership the tests arm;
+    /// the peer just listens.
+    ///
+    /// This is the deterministic barrier SRV-008 needs. beamr's INV-SYNC says that
+    /// when the call causing a transition returns, every event it produced has
+    /// already been delivered to every subscriber — so a `connect` that returns Ok
+    /// is, on the DIALER's side, a completed delivery of the session's `Up`. No
+    /// sleep and no retry loop are needed to observe a membership change.
+    struct LivePair {
+        runtime: tokio::runtime::Runtime,
+        dialer: ConnectionManager,
+        dialer_atoms: Arc<AtomTable>,
+        /// Kept alive: dropping the peer manager or its accept handle would tear
+        /// the link down underneath the assertions.
+        _peer: ConnectionManager,
+        _accept: AcceptHandle,
+    }
+
+    impl LivePair {
+        fn new() -> Self {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .expect("build loopback test runtime");
+
+            let peer_atoms = Arc::new(AtomTable::with_common_atoms());
+            let peer = ConnectionManager::new(
+                peer_atoms,
+                Arc::new(StaticResolver::new(HashMap::new())),
+                COOKIE,
+                PEER_NAME,
+                1,
+            );
+            peer.set_runtime_handle(runtime.handle().clone());
+            let accept = runtime
+                .block_on(peer.listen("127.0.0.1:0".parse().expect("loopback addr")))
+                .expect("peer binds a loopback listener");
+
+            let mut routes = HashMap::new();
+            routes.insert(PEER_NAME.to_owned(), accept.local_addr());
+            let dialer_atoms = Arc::new(AtomTable::with_common_atoms());
+            let dialer = ConnectionManager::new(
+                Arc::clone(&dialer_atoms),
+                Arc::new(StaticResolver::new(routes)),
+                COOKIE,
+                DIALER_NAME,
+                1,
+            );
+            dialer.set_runtime_handle(runtime.handle().clone());
+
+            Self {
+                runtime,
+                dialer,
+                dialer_atoms,
+                _peer: peer,
+                _accept: accept,
+            }
+        }
+
+        /// Dials the peer and returns once the session is installed in the
+        /// dialer's table AND its connection event has been delivered (INV-SYNC).
+        fn connect(&self) {
+            self.runtime
+                .block_on(self.dialer.connect(PEER_NAME))
+                .expect("loopback handshake succeeds");
+        }
+    }
+
 
     #[test]
     fn delta_is_empty_by_default() {
@@ -400,6 +475,34 @@ mod tests {
         let delta = membership.poll_once();
         assert!(delta.is_empty());
         assert!(membership.peers().is_empty());
+    }
+
+    /// RED PIN (SRV-008 R3) — the polling-cadence defect, pinned.
+    ///
+    /// A membership tracker is armed over a real connection manager BEFORE any
+    /// peer link exists. Then a peer link is genuinely established: `connect`
+    /// returns only after beamr has installed the session and delivered its
+    /// connection event to every subscriber (INV-SYNC). An event-driven tracker
+    /// has therefore already been TOLD, and reports the peer with no sleep, no
+    /// retry, and no call into a sampling entry point.
+    ///
+    /// The polling tracker cannot: its set only moves when someone samples the
+    /// connection table, so on the current implementation this reports zero peers
+    /// and the membership change is observable only at the next 250ms tick. That
+    /// gap IS the defect SRV-008 retires.
+    #[test]
+    fn armed_membership_observes_a_join_without_sampling() {
+        let pair = LivePair::new();
+        let membership = Membership::new(pair.dialer.clone(), Arc::clone(&pair.dialer_atoms));
+
+        pair.connect();
+
+        assert_eq!(
+            membership.peers().len(),
+            1,
+            "an armed membership source must observe the join the instant beamr \
+             installs it, without any sampling of the connection table"
+        );
     }
 
     #[test]
