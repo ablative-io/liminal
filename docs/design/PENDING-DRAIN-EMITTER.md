@@ -13,7 +13,8 @@ touches no code; the survey's pins stand at its own base `6d09bae` and the
 consumed beamr 0.16.1 registry bytes (survey §3), and the r4 body below is
 unchanged except where r5 amends it in place.
 
-Prior revision: r4 (PROPOSED, pending tear — the emitter design round
+Prior revision: r4 (TORN and LANDED 2026-07-23/24, tearer-merged at `c41af22` —
+the design of record until r5; the emitter design round
 dispatched 2026-07-23: pin rebase to the 0.4.1 release tree, the
 S-14 supersession record, the LIM-DETACHED-PENDING Detached-drain ruling
 (§3A), and the ASK-6 answer (§8A). r3 was TORN 2026-07-23 — all fifteen
