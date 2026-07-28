@@ -2,8 +2,9 @@
 //!
 //! Multiple liminal-server instances form a single logical message bus by
 //! joining a beamr distribution cluster: nodes discover each other from
-//! configured seed addresses ([`discovery`]), track membership by polling the
-//! connection table ([`membership`]), and propagate channel subscriptions plus
+//! configured seed addresses ([`discovery`]), track membership from beamr's
+//! atomic initial view plus its ordered connection-event stream ([`membership`],
+//! SRV-008), and propagate channel subscriptions plus
 //! published messages across nodes through process groups ([`sync`]). All
 //! cluster behaviour delegates to beamr distribution primitives — there is no
 //! custom consensus, gossip, or failure detector here.
