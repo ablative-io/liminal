@@ -693,9 +693,23 @@ only as recorded in the Status block, never as written in the body
    `BindingState::Detached`, **slot and enrollment token PRESERVED**.
 
 **Amendment A1 (§0.12, response/push ordering on one participant connection,
-landed `fec354f`) is NOT covered** — it rides its own key and remains
-"decided-by-amendment, pending the reviewer-of-record key (**Vesper Lynd**)".
-Still open at the time of this annotation.
+landed `fec354f`) is NOT covered by `1a0b60c`** — it rides its own key and, at
+`1a0b60c`, remained "decided-by-amendment, pending the reviewer-of-record key
+(**Vesper Lynd**)".
+
+> **Same-day forward correction — A1 RATIFIED at `26f4bf2`.** This sweep is
+> based on `1a0b60c` (2026-07-28 23:23), and `26f4bf2` ("docs(contract): A1 key
+> record — reviewer-of-record key turned, every gate closed") landed on main at
+> **23:30, seven minutes later** — after this branch was cut, so the paragraph
+> above was true when written and is superseded now. Vesper Lynd (reviewer of
+> record) ratified amendment A1 at the bytes on 2026-07-28. Her verdict record
+> is folded into §0.12's status; status surfaces only (head Status block, §0.12
+> status, the `«RESPONSE-PUSH-ORDER»` socket row, closing gate posture) — the
+> frozen body is still untouched. Scope note carried with her verdict: the
+> correlation slot's *shape* was verified, not an exhaustive pipelining-refusal
+> proof — **pipelining clients sit outside the contract until R-D3**.
+> **With both `1a0b60c` and `26f4bf2`, every key on PARTICIPANT-CONTRACT.md is
+> turned and no gate remains open.**
 
 ### A-4 — R18's OBSERVES rows that W4 made stale (ledgered here, not edited there)
 
