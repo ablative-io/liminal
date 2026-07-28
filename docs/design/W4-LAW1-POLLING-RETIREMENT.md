@@ -2,6 +2,26 @@
 
 **Revision r5 — design-first brief of record, 2026-07-22 (ruled rider: beamr-contingency closure + two landed-test dispositions, tear-seat ruling)**
 
+> ## ⚠ Dated forward correction — 2026-07-28 (body unedited below)
+>
+> The sentence below, "it does not claim any replacement is implemented," was
+> true at authoring (last brief commit `c506147`, 2026-07-22) and is **stale
+> against the tree the same week**: the W4-NOW build this brief specifies
+> LANDED on 2026-07-22 — F1 `e76d5af`, F2 `64e122c`, F3 `772922f`, F4+F5
+> `778f1f4` — with the §-specified absence-proof source guards in place
+> (`server/listener.rs:345-356`, `server/shutdown.rs:337`). The wiring
+> ledger's W4 correction block (r1.10) carries the full byte audit.
+>
+> Beyond this brief's own W4-NOW scope, the out-of-wave families have since
+> moved: **F6** (cluster membership) retired 2026-07-28 by the SRV-008 lane
+> (main `048e17a` — ordered connection events, red-pinned, source-guarded);
+> **F8+F9** (SDK TCP push + subscription readers) are dispatched as SDK-010
+> under the PUSH-HANDSHAKE-DEADLINE ruling (Waffles, coordinator seat,
+> 2026-07-28); **F7** (channel command-reply liveness, now in
+> `crates/liminal/src/channel/actor/wait.rs`) remains open and unclaimed.
+> This brief remains the design of record for what it ruled; read its
+> present-tense build claims through this header.
+
 This brief rules the first buildable wave of the LAW-1 polling-retirement
 program named as lane **W4** in the wiring ledger. It is a docs-only lane: it
 specifies the build, its scope partition, its replacement designs, and its
