@@ -26,6 +26,7 @@ use liminal_protocol::outcome::ReconnectState;
 use spin::Mutex;
 
 use crate::SdkError;
+use crate::remote::SETUP_TIMEOUT;
 
 use super::binding::{AttemptFateOutcome, OpenRequestDecision, WebSocketAuthorityBinding};
 use super::connection_error;
@@ -208,6 +209,11 @@ impl WebSocketSubscriptionStream {
             });
         }
         let mut socket = WsSocket::connect(address, message_bound)?;
+        // Name the deadline this reader gives a synchronous control-frame reply
+        // rather than inheriting the socket layer's unnamed default. One value,
+        // shared by all three readers; `start` takes it back off before the
+        // background reader ever blocks on this socket.
+        socket.set_read_timeout(Some(SETUP_TIMEOUT))?;
         let step = driver.handle_event(SocketEvent::Opened);
         if step.output != DriverOutput::Opened {
             return Err(SdkError::Protocol {
@@ -278,8 +284,11 @@ impl WebSocketSubscriptionStream {
         subscription_id: u64,
         pending: Vec<WebSocketDeliveredMessage>,
     ) -> Result<Self, SdkError> {
-        // The reader blocks on socket input with no read window: teardown
-        // shuts the socket down, which surfaces as a typed terminal event.
+        // The control exchange is over, so its deadline comes off: the reader
+        // blocks on socket input with no read window. Teardown shuts the socket
+        // down, which surfaces as a typed terminal event. This is the shape the
+        // two TCP readers were generalized toward — it must not regress into a
+        // cadence, whatever period that cadence would carry.
         socket.set_read_timeout(None)?;
         let shutdown = socket.try_clone_stream()?;
         let binding = Arc::new(Mutex::new(binding));
@@ -512,5 +521,46 @@ fn unexpected_setup_frame(expected: &str, actual: &Frame) -> SdkError {
             "expected {expected} during subscription setup, received {:?}",
             actual.frame_type()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SETUP_TIMEOUT;
+    use core::time::Duration;
+
+    /// TOMBSTONE (SDK-010 R5) — the WebSocket subscription reader is the shape
+    /// the two TCP readers were generalized toward, and it must stay that shape:
+    /// no reader poll family, no stop flag, no cadence in steady state. Its
+    /// disarm (`socket.set_read_timeout(None)` before the reader spawns) is
+    /// exercised behaviorally by the landed `sdk_ws_e2e` and
+    /// `ws_transport_parity` suites, which open a real subscription over a real
+    /// server; this guard holds the source itself.
+    #[test]
+    fn websocket_subscription_source_has_no_retired_reader_poll_family() {
+        const SOURCE: &str = include_str!("subscription.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap_or(SOURCE);
+        for forbidden in [
+            "READER_POLL_TIMEOUT",
+            "AtomicBool",
+            "stop.load",
+            "stop.store",
+            "re-check the stop flag",
+            "poll the stop flag",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "retired websocket-subscription-reader poll-family source \
+                 `{forbidden}` reappeared"
+            );
+        }
+    }
+
+    /// The one named deadline (SDK-010 R3): 5 s, shared by all three readers and
+    /// generalized from the estate's already-ratified value rather than
+    /// re-chosen. Pinned here so a per-reader fork of the value fails loudly.
+    #[test]
+    fn the_named_setup_deadline_is_the_ratified_five_seconds() {
+        assert_eq!(SETUP_TIMEOUT, Duration::from_secs(5));
     }
 }

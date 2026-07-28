@@ -29,7 +29,6 @@ use core::time::Duration;
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpStream};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -43,6 +42,7 @@ use super::flush::{
     FLUSH_BUDGET, FlushLedger, FlushMode, FlushOutcome, PublishRejection, PublishVerdict,
 };
 use crate::SdkError;
+use crate::remote::SETUP_TIMEOUT;
 
 /// Minimum protocol version this client advertises during the handshake.
 const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -50,23 +50,12 @@ const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 const CLIENT_MAX_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 /// Bound on a single socket write.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Poll cadence the reader thread uses so it can observe the stop flag promptly
-/// between reads while still blocking efficiently on the socket the rest of the
-/// time.
-const READER_POLL_TIMEOUT: Duration = Duration::from_millis(100);
 /// Read chunk size used when draining the socket into the frame buffer.
 const READ_CHUNK_BYTES: usize = 4096;
-/// Short per-read deadline used only while draining acks on drop, so the drain
-/// polls the socket without wedging on a quiet gap between acks.
-const DROP_DRAIN_READ_TIMEOUT: Duration = Duration::from_millis(20);
-/// Total wall-clock budget for the drop-time graceful close, so the drain never
-/// hangs on a peer that never sends its FIN even though the common path reaches
-/// EOF within a few milliseconds of the write-half `shutdown`.
+/// Total wall-clock budget for the drop-time graceful close, so the teardown
+/// never hangs on a peer that never sends its FIN even though the common path
+/// reaches EOF within a few milliseconds of the write-half `shutdown`.
 const DROP_DRAIN_BUDGET: Duration = Duration::from_secs(5);
-/// Upper bound on best-effort drain reads when the socket is shared with a live
-/// `PushWriter` clone (no write-half `shutdown` is safe), so that path stays
-/// bounded too.
-const DROP_DRAIN_MAX_READS: usize = 64;
 /// Upper bound on a single buffered frame, guarding against runaway buffering.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 /// Application stream id used for the client's push reply frames.
@@ -122,9 +111,11 @@ pub struct PushClient {
     /// interleave bytes with any other writer.
     writer: Arc<Mutex<TcpStream>>,
     /// Inbound pushed frames surfaced by the background reader.
+    ///
+    /// Also the reader's own liveness signal: the reader owns the sending half,
+    /// so when it ends, this receiver reports `Disconnected`. Teardown waits on
+    /// that rather than on a flag the blocked reader could never sample.
     inbound: Receiver<PushedFrame>,
-    /// Signals the reader thread to stop; set on drop.
-    stop: Arc<AtomicBool>,
     /// Background reader handle, joined on drop.
     reader: Option<JoinHandle<()>>,
     /// Publish/verdict accounting behind [`PushClient::flush`] and
@@ -216,28 +207,31 @@ impl PushClient {
     /// Spawns the Push-only background reader over a handshaken (and, for a worker,
     /// already-registered) stream and returns the running client.
     fn start_reader(stream: TcpStream) -> Result<Self, SdkError> {
+        // The control exchange is over, so its deadline comes off: the reader
+        // blocks on socket input with no read window at all. Teardown ends that
+        // wait by shutting the socket down, which surfaces as a typed terminal —
+        // the socket signals, nothing sweeps. A window left armed here would be a
+        // wake cadence in steady state, which is the defect this retires,
+        // whatever period it carried.
+        stream
+            .set_read_timeout(None)
+            .map_err(|source| SdkError::Connection {
+                description: format!("failed to clear the push read deadline: {source}"),
+            })?;
         // Clone the socket so the reader thread owns one handle and the writer
         // holds the other; both refer to the same underlying connection.
         let read_stream = stream.try_clone().map_err(|source| SdkError::Protocol {
             description: format!("failed to clone push socket for reader thread: {source}"),
         })?;
 
-        let stop = Arc::new(AtomicBool::new(false));
         let (sender, inbound) = channel();
         let (ledger, verdicts) = FlushLedger::new();
         let ledger = Arc::new(ledger);
         let reader_ledger = Arc::clone(&ledger);
-        let reader_stop = Arc::clone(&stop);
         let reader = std::thread::Builder::new()
             .name("liminal-push-reader".to_string())
             .spawn(move || {
-                run_reader(
-                    read_stream,
-                    &sender,
-                    &verdicts,
-                    &reader_ledger,
-                    &reader_stop,
-                );
+                run_reader(read_stream, &sender, &verdicts, &reader_ledger);
             })
             .map_err(|source| SdkError::Protocol {
                 description: format!("failed to start push reader thread: {source}"),
@@ -246,10 +240,39 @@ impl PushClient {
         Ok(Self {
             writer: Arc::new(Mutex::new(stream)),
             inbound,
-            stop,
             reader: Some(reader),
             ledger,
         })
+    }
+
+    /// Blocks until the background reader ends or `budget` elapses, reporting
+    /// whether it ended inside the budget.
+    ///
+    /// The reader owns the sending half of `inbound`, so its exit drops that half
+    /// and surfaces here as `Disconnected` — the reader telling teardown it is
+    /// done, with no flag to sample and no cadence to wake on. Pushes that arrive
+    /// meanwhile are discarded: the client is going away.
+    fn await_reader_exit(&self, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            match self.inbound.recv_timeout(deadline.duration_since(now)) {
+                Ok(_) => {}
+                Err(RecvTimeoutError::Disconnected) => return true,
+                Err(RecvTimeoutError::Timeout) => return false,
+            }
+        }
+    }
+
+    /// Shuts the shared socket down in `how`, ignoring a poisoned lock (the
+    /// socket still closes when the last handle drops).
+    fn shutdown_socket(&self, how: Shutdown) {
+        if let Ok(stream) = self.writer.lock() {
+            let _ = stream.shutdown(how);
+        }
     }
 
     /// Blocks up to `timeout` for the next pushed frame from the server.
@@ -467,97 +490,56 @@ impl PushWriter {
     }
 }
 
-impl Drop for PushClient {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        if let Some(reader) = self.reader.take() {
-            // The reader wakes within READER_POLL_TIMEOUT to observe the stop flag,
-            // so this join does not hang on a quiet connection.
-            reader.join().ok();
-        }
-        // Drain the server acks the now-stopped reader left unread BEFORE the
-        // socket closes. Closing a socket whose receive buffer still holds unread
-        // bytes emits a kernel RST, and on RST the server's kernel discards the
-        // publish frames it has not yet read — the connection slice dies as a
-        // ConnectionLost and those fire-and-forget publishes never fan out. Reading
-        // the pending acks first lets the close emit a clean FIN, so every accepted
-        // publish survives the teardown. The drain is bounded (a short read deadline
-        // plus a read cap) so a normal teardown never hangs, and it runs only here
-        // at drop — `publish` stays non-blocking, fire-and-forget as before.
-        drain_pending_acks(&self.writer);
-    }
-}
-
-/// Closes the push connection with a graceful half-close so a normal teardown
-/// never RSTs: shut the write half (a FIN tells the server the client is done, so
-/// the server reads and processes every publish frame still buffered before it,
-/// then closes), then drain-read the acks to the server's FIN so no unread bytes
-/// remain to trigger a reset.
+/// Graceful, TOLD teardown.
+///
+/// The reader blocks on socket input with no read window, so nothing but the
+/// socket itself can end its wait — a stop flag it never wakes to sample would
+/// be a lie about how it stops. The half-close IS that tell, and it is the same
+/// act that keeps the close graceful: shutting the write half sends a FIN, so
+/// the server reads and fans out every publish frame still buffered before it,
+/// acks each one, then closes. The reader consumes those acks into the flush
+/// ledger — it is now the drainer — and exits on the server's own FIN.
+///
+/// Reading to EOF is what keeps the final close a FIN rather than a RST: closing
+/// a socket whose receive buffer still holds unread bytes resets the connection,
+/// and on a reset the server's kernel discards the publish frames it has not yet
+/// read, so those fire-and-forget publishes never fan out. That guarantee is
+/// unchanged; only the reader, rather than a separate drain loop, now performs
+/// it. Its wall-clock bound has moved with it, from a per-read deadline plus a
+/// read cap to a single [`DROP_DRAIN_BUDGET`] wait on the reader's own exit — so
+/// a peer that never sends its FIN still cannot wedge drop.
 ///
 /// The half-close is taken only when this `PushClient` is the sole owner of the
-/// socket (no live [`PushWriter`] clone is still publishing on it); otherwise a
-/// best-effort bounded receive-buffer drain is the most that is safe. Both are
-/// bounded by [`DROP_DRAIN_READ_TIMEOUT`] and [`DROP_DRAIN_MAX_READS`], so drop
-/// never hangs. A poisoned writer lock is a no-op — the socket still closes.
-fn drain_pending_acks(writer: &Arc<Mutex<TcpStream>>) {
-    // Sole owner iff no `PushWriter` clone shares the socket; the reader's cloned
-    // handle has already been dropped by the join above, so a strong count of one
-    // means this drop closes the socket and a write-half FIN is safe to send.
-    let sole_owner = Arc::strong_count(writer) == 1;
-    let Ok(mut stream) = writer.lock() else {
-        return;
-    };
-    // Tighten the read deadline for the drain so each read returns promptly once
-    // the buffer momentarily empties; a failure to set it is non-fatal (the
-    // socket's existing READER_POLL_TIMEOUT still bounds every read).
-    let _ = stream.set_read_timeout(Some(DROP_DRAIN_READ_TIMEOUT));
-    let mut scratch = [0_u8; READ_CHUNK_BYTES];
-    if !sole_owner {
-        // A live `PushWriter` clone still shares the socket: a write-half shutdown
-        // would break its publishes, so do a bounded best-effort receive drain
-        // only and let the socket close when the last handle drops.
-        for _ in 0..DROP_DRAIN_MAX_READS {
-            match stream.read(&mut scratch) {
-                // Consumed buffered bytes; look for more.
-                Ok(read) if read > 0 => {}
-                // FIN (`Ok(0)`), an empty buffer, or any error: nothing more to drain.
-                _ => break,
+/// socket. With a live [`PushWriter`] clone still publishing, a write-half
+/// shutdown would break the clone's writes, so only the read half is shut: that
+/// ends the reader's wait and leaves the clone writing. Nothing reads the
+/// clone's later acks after this point — the degradation already disclosed as
+/// [`FlushMode::VerdictOnly`], and the reason a caller who needs verdicts calls
+/// [`PushClient::close`] before dropping.
+impl Drop for PushClient {
+    fn drop(&mut self) {
+        // Sole owner iff no live `PushWriter` clone shares the write half; the
+        // reader thread holds a raw cloned stream, not this `Arc`.
+        let sole_owner = Arc::strong_count(&self.writer) == 1;
+        if sole_owner {
+            self.shutdown_socket(Shutdown::Write);
+            if !self.await_reader_exit(DROP_DRAIN_BUDGET) {
+                // The peer never closed inside the budget. End the reader's wait
+                // at the socket so drop stays bounded rather than hanging on a
+                // FIN that is not coming.
+                self.shutdown_socket(Shutdown::Both);
             }
+        } else {
+            self.shutdown_socket(Shutdown::Read);
         }
-        return;
-    }
-    // Graceful close (sole owner): FIN the write half so the server finishes
-    // reading and fanning out EVERY buffered publish, then read to the server's
-    // own FIN. A transient empty buffer (WouldBlock/TimedOut) is NOT the end —
-    // acks arrive as the server works through the burst — so keep reading until
-    // EOF or the total budget elapses. Reading to EOF is what guarantees no unread
-    // bytes remain to turn the final close into a RST that would strand publishes
-    // the server had not yet read.
-    let _ = stream.shutdown(Shutdown::Write);
-    let deadline = Instant::now() + DROP_DRAIN_BUDGET;
-    loop {
-        match stream.read(&mut scratch) {
-            // The server's FIN: connection fully drained and closing cleanly.
-            Ok(0) => return,
-            // Consumed buffered bytes; look for more.
-            Ok(_) => {}
-            // A momentary gap between acks: keep waiting until EOF or the budget.
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) => {}
-            // A hard error: nothing more can be drained.
-            Err(_) => return,
-        }
-        if Instant::now() >= deadline {
-            return;
+        if let Some(reader) = self.reader.take() {
+            reader.join().ok();
         }
     }
 }
 
-/// Opens and configures the push-client socket (Nagle off, bounded read/write
-/// timeouts) before any framing.
+/// Opens and configures the push-client socket (Nagle off, the named setup
+/// deadline on reads, a bounded write timeout) before any framing.
 fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
     let stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
         description: format!("failed to connect push client to {address}: {source}"),
@@ -567,13 +549,15 @@ fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
         .map_err(|source| SdkError::Connection {
             description: format!("failed to disable Nagle for {address}: {source}"),
         })?;
-    // A bounded read timeout lets the reader thread wake to check the stop flag
-    // even when the server is silent; without it the thread would block forever
-    // on a quiet connection and never observe drop.
+    // The named deadline for a synchronous control-frame reply, and nothing
+    // else: it covers the `Connect`/`ConnectAck` and
+    // `WorkerRegister`/`WorkerRegisterAck` exchanges that run on the CALLING
+    // thread, and `start_reader` takes it back off before the background reader
+    // ever sees the socket.
     stream
-        .set_read_timeout(Some(READER_POLL_TIMEOUT))
+        .set_read_timeout(Some(SETUP_TIMEOUT))
         .map_err(|source| SdkError::Connection {
-            description: format!("failed to set push read timeout for {address}: {source}"),
+            description: format!("failed to set the push setup deadline for {address}: {source}"),
         })?;
     stream
         .set_write_timeout(Some(WRITE_TIMEOUT))
@@ -652,24 +636,25 @@ fn handshake(stream: &mut TcpStream, auth_token: &[u8]) -> Result<(), SdkError> 
 /// and each publish verdict (`PublishAck`/`PublishError`) on `verdicts` in wire
 /// order for the flush contract.
 ///
-/// Returns (ending the thread) when the stop flag is set, the connection closes,
-/// or a fatal decode/IO error occurs. A read timeout is non-fatal: it just lets
-/// the loop re-check the stop flag.
+/// The socket carries no read window here, so the loop blocks until the server
+/// sends or the connection ends: nothing wakes it on a timer and nothing sweeps.
+/// It returns (ending the thread) when the connection closes — including the
+/// `shutdown` teardown performs — when a consumer has gone away, or on a fatal
+/// decode/IO error.
 fn run_reader(
     mut stream: TcpStream,
     sender: &Sender<PushedFrame>,
     verdicts: &Sender<PublishVerdict>,
     ledger: &FlushLedger,
-    stop: &AtomicBool,
 ) {
     let mut buffer = Vec::new();
-    while !stop.load(Ordering::SeqCst) {
+    loop {
         match next_frame(&mut stream, &mut buffer) {
-            Ok(Some(Frame::Push {
+            Ok(Frame::Push {
                 correlation_id,
                 payload,
                 ..
-            })) => {
+            }) => {
                 if sender
                     .send(PushedFrame {
                         correlation_id,
@@ -684,59 +669,43 @@ fn run_reader(
             }
             // The server's per-publish verdicts: captured and forwarded in wire
             // order (never discarded — they are what `flush()` awaits).
-            Ok(Some(Frame::PublishAck { .. })) => {
+            Ok(Frame::PublishAck { .. }) => {
                 if verdicts.send(PublishVerdict::Accepted).is_err() {
                     return;
                 }
                 ledger.record_arrival();
             }
-            Ok(Some(Frame::PublishError {
+            Ok(Frame::PublishError {
                 reason_code,
                 message,
                 ..
-            })) => {
+            }) => {
                 let rejection = PublishRejection::new(reason_code, message);
                 if verdicts.send(PublishVerdict::Rejected(rejection)).is_err() {
                     return;
                 }
                 ledger.record_arrival();
             }
-            // `Some(_)`: any other frame on a push connection is unexpected for
-            // this spike — ignore it rather than tearing the reader down so a stray
-            // frame cannot silently drop subsequent pushes. `None`: a read timeout
-            // with no complete frame. Both just loop to re-check the stop flag.
-            Ok(Some(_) | None) => {}
+            // Any other frame on a push connection is unexpected for this spike —
+            // ignore it rather than tearing the reader down so a stray frame
+            // cannot silently drop subsequent pushes.
+            Ok(_) => {}
             // Connection closed or a fatal read/decode error: end the thread. The
-            // dropped `sender` surfaces as a `Disconnected` on the receiver side.
+            // dropped `sender` surfaces as a `Disconnected` on the receiver side,
+            // which is also how teardown learns the reader is done.
             Err(_) => return,
         }
     }
 }
 
-/// Reads until one complete frame decodes, treating a read timeout as
-/// `Ok(None)` so the caller can re-check the stop flag without ending the loop.
-fn next_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Option<Frame>, SdkError> {
-    loop {
-        match decode(buffer) {
-            Ok((frame, consumed)) => {
-                buffer.drain(..consumed);
-                return Ok(Some(frame));
-            }
-            Err(
-                ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
-            ) => match fill_buffer(stream, buffer)? {
-                FillOutcome::Read => {}
-                FillOutcome::TimedOut => return Ok(None),
-            },
-            Err(error) => return Err(protocol_error(&error)),
-        }
-    }
-}
-
-/// Reads one complete frame, blocking (no timeout tolerance) — used for the
-/// synchronous handshake and worker-registration replies, before the background
-/// reader starts.
-fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, SdkError> {
+/// Reads until one complete frame decodes on the windowless steady-state socket.
+///
+/// There is no read window to expire here, so a [`FillOutcome::TimedOut`] would
+/// mean one was re-armed behind the reader's back. That is reported as the
+/// invariant break it is, rather than swallowed into a spin — a reader that
+/// looped on it would be a busy-wait, which is worse than the cadence this
+/// retired.
+fn next_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, SdkError> {
     loop {
         match decode(buffer) {
             Ok((frame, consumed)) => {
@@ -749,7 +718,8 @@ fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame,
                 FillOutcome::Read => {}
                 FillOutcome::TimedOut => {
                     return Err(SdkError::Connection {
-                        description: "push connection timed out waiting for a control-frame reply"
+                        description: "the push reader's steady-state socket reported a read \
+                                      deadline it should not carry"
                             .to_string(),
                     });
                 }
@@ -759,8 +729,45 @@ fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame,
     }
 }
 
+/// Reads one complete control-frame reply under the named [`SETUP_TIMEOUT`]
+/// deadline — used for the synchronous handshake and worker-registration replies,
+/// on the calling thread, before the background reader starts.
+///
+/// A socket read window elapsing is NOT the end: the reply may simply be slow, or
+/// arriving in pieces. Only the total deadline for this reply ends the wait. The
+/// shape this replaces died on the FIRST elapsed window, which — composed with a
+/// 100 ms reader poll cadence armed before the handshake — made connect fatal to
+/// any peer slower than 100 ms. Nobody chose that.
+fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, SdkError> {
+    let deadline = Instant::now() + SETUP_TIMEOUT;
+    loop {
+        match decode(buffer) {
+            Ok((frame, consumed)) => {
+                buffer.drain(..consumed);
+                return Ok(frame);
+            }
+            Err(
+                ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
+            ) => match fill_buffer(stream, buffer)? {
+                FillOutcome::Read => {}
+                FillOutcome::TimedOut => {
+                    if Instant::now() >= deadline {
+                        return Err(SdkError::Connection {
+                            description:
+                                "push connection timed out waiting for a control-frame reply"
+                                    .to_string(),
+                        });
+                    }
+                }
+            },
+            Err(error) => return Err(protocol_error(&error)),
+        }
+    }
+}
+
 /// Appends one socket read into `buffer`, mapping a read timeout to a non-fatal
-/// [`FillOutcome::TimedOut`] so the reader can poll the stop flag.
+/// [`FillOutcome::TimedOut`] so the setup reader can weigh it against its
+/// deadline.
 fn fill_buffer(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<FillOutcome, SdkError> {
     if buffer.len() > MAX_FRAME_BYTES {
         return Err(SdkError::Protocol {

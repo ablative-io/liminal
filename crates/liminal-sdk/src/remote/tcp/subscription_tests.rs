@@ -169,3 +169,136 @@ fn open_preserves_deliveries_coalesced_with_the_subscribe_ack() -> Result<(), Sd
     server.join().ok();
     Ok(())
 }
+
+/// The named setup deadline SDK-010 installs: 5 s, the estate's already-ratified
+/// constant generalized, never a new default.
+const NAMED_SETUP_DEADLINE: Duration = Duration::from_secs(5);
+
+/// A control-frame reply that is slow but well-behaved: past the retired 100 ms
+/// `READER_POLL_TIMEOUT` cadence, far inside the named 5 s deadline. The delay is
+/// the fixture's INTENDED slow reply, not a proof device.
+const SLOW_BUT_ANSWERED: Duration = Duration::from_millis(250);
+
+/// Runs a fake server that answers the handshake and the subscribe, optionally
+/// delaying each control reply, then holds the socket until the client tears it
+/// down. Returns the dialable address and the server's join handle.
+fn spawn_setup_server(
+    reply_delay: Duration,
+) -> Result<(String, std::thread::JoinHandle<Result<(), SdkError>>), SdkError> {
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|source| SdkError::Connection {
+        description: format!("failed to bind fake server: {source}"),
+    })?;
+    let address = listener
+        .local_addr()
+        .map_err(|source| SdkError::Connection {
+            description: format!("failed to read fake server address: {source}"),
+        })?
+        .to_string();
+    let server = std::thread::spawn(move || -> Result<(), SdkError> {
+        let (mut socket, _peer) = listener.accept().map_err(|source| SdkError::Connection {
+            description: format!("fake server accept failed: {source}"),
+        })?;
+        let mut buffer = Vec::new();
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        std::thread::sleep(reply_delay);
+        write_frame(
+            &mut socket,
+            &Frame::ConnectAck {
+                flags: 0,
+                selected_version: CLIENT_MAX_VERSION,
+                capabilities: 0,
+            },
+        )?;
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        std::thread::sleep(reply_delay);
+        write_frame(
+            &mut socket,
+            &Frame::SubscribeAck {
+                flags: 0,
+                stream_id: SUBSCRIPTION_STREAM_ID,
+                subscription_id: 42,
+                selected_schema: SchemaId::new([7; SchemaId::WIRE_LEN]),
+            },
+        )?;
+        // Read to the client's teardown so the socket outlives the assertions.
+        let mut scratch = [0_u8; 512];
+        while socket.read(&mut scratch).unwrap_or(0) > 0 {}
+        Ok(())
+    });
+    Ok((address, server))
+}
+
+/// RED PIN (SDK-010 R2, direction (b)) — the disarm, pinned behaviorally.
+///
+/// `connect_socket` arms the retired 100 ms `READER_POLL_TIMEOUT` on this socket
+/// and never takes it off, so the steady-state reader wakes ten times a second
+/// forever on a quiet subscription — family F9 in the wiring ledger.
+/// `read_timeout()` reads the live `SO_RCVTIMEO` off the very kernel socket the
+/// reader thread blocks on (the writer handle and the reader's handle are
+/// `try_clone` siblings), so this observes behaviour, not source.
+///
+/// The assertion is `None`, not "longer than before": a leaked setup deadline
+/// would report `Some(5s)` and fail exactly as `Some(100ms)` does.
+#[test]
+fn the_subscription_reader_carries_no_read_window_in_steady_state() -> Result<(), SdkError> {
+    let (address, server) = spawn_setup_server(Duration::ZERO)?;
+    let subscription = SubscriptionStream::open(&address, "orders", Vec::new())?;
+    let observed = subscription
+        .writer
+        .read_timeout()
+        .map_err(|source| SdkError::Connection {
+            description: format!("failed to read the subscription socket read timeout: {source}"),
+        })?;
+    assert_eq!(
+        observed, None,
+        "the subscription reader must block with no read window once the control \
+         exchange is over; a Some(_) here is a cadence, whatever its period"
+    );
+    drop(subscription);
+    server.join().ok();
+    Ok(())
+}
+
+/// PARITY PIN (SDK-010 R3) — the same slow-reply fixture the push reader is red
+/// against, aimed at the subscription reader.
+///
+/// This one is GREEN before the change as well as after: `subscription.rs`'s
+/// `read_one_frame` already samples the 100 ms cadence against a 5 s
+/// `SETUP_TIMEOUT` total deadline instead of dying on the first tick, so a
+/// 250 ms reply already survives here. It is pinned so the two TCP readers are
+/// held to ONE answer after the generalization, and so a regression toward the
+/// push reader's fatal-on-first-timeout shape is caught.
+#[test]
+fn open_survives_control_replies_slower_than_the_retired_poll_cadence() -> Result<(), SdkError> {
+    let (address, server) = spawn_setup_server(SLOW_BUT_ANSWERED)?;
+    let subscription = SubscriptionStream::open(&address, "orders", Vec::new())?;
+    assert_eq!(subscription.subscription_id(), 42);
+    assert!(
+        NAMED_SETUP_DEADLINE > SLOW_BUT_ANSWERED,
+        "the fixture's slow reply must sit inside the named deadline"
+    );
+    drop(subscription);
+    server.join().ok();
+    Ok(())
+}
+
+/// TOMBSTONE (SDK-010 R5) — the retired reader poll family must not reappear in
+/// this reader's production source.
+#[test]
+fn subscription_source_has_no_retired_reader_poll_family() {
+    const SOURCE: &str = include_str!("subscription.rs");
+    let production = SOURCE.split("#[cfg(test)]").next().unwrap_or(SOURCE);
+    for forbidden in [
+        "READER_POLL_TIMEOUT",
+        "AtomicBool",
+        "stop.load",
+        "stop.store",
+        "re-check the stop flag",
+        "poll the stop flag",
+    ] {
+        assert!(
+            !production.contains(forbidden),
+            "retired subscription-reader poll-family source `{forbidden}` reappeared"
+        );
+    }
+}
