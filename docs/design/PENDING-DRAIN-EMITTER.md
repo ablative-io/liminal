@@ -1,7 +1,20 @@
 # PENDING-DRAIN-EMITTER — candidate-lane terminal drain + production ProcessKilled emitter
 
-Revision: r4 (PROPOSED, pending tear — this revision is the emitter design
-round dispatched 2026-07-23: pin rebase to the 0.4.1 release tree, the
+Revision: r5 (the S-5 fork RULING round, 2026-07-28). The emitter build lane's
+mandatory reality survey — `docs/design/PK-EMITTER-S5-FORK-SURVEY.md`, carried
+into this tree at r5 verbatim from `feat/process-killed-emitter` @ `deeed3e` —
+stopped the build before any code on a contract fork in torn socket S-5. That
+fork is now RULED at the coordinator seat: **Option 1 is the ratified build
+shape, and THE EMITTER BUILD IS DEFERRED** on the survey's Finding A′, with a
+named wake trigger (§4.6, §8.10; rows S-5/S-6/S-9/S-20). The build lane is no
+longer "held awaiting word" — it is deferred by ruling, its wake trigger is
+named, and the build branch closes. r5 is doc-only: it re-verifies no pin and
+touches no code; the survey's pins stand at its own base `6d09bae` and the
+consumed beamr 0.16.1 registry bytes (survey §3), and the r4 body below is
+unchanged except where r5 amends it in place.
+
+Prior revision: r4 (PROPOSED, pending tear — the emitter design round
+dispatched 2026-07-23: pin rebase to the 0.4.1 release tree, the
 S-14 supersession record, the LIM-DETACHED-PENDING Detached-drain ruling
 (§3A), and the ASK-6 answer (§8A). r3 was TORN 2026-07-23 — all fifteen
 sockets approved, drain build authorized; the drain has since LANDED and
@@ -33,7 +46,10 @@ Detached-flavor ruling and the ASK-6 answer:
   `docs/design/W1B-FATE-SOURCES.md` = design of record; deferred-seam row at
   `docs/design/W1B-FATE-SOURCES.md:1132`; §14 heading at `:1128`): the
   beamr-to-participant exact exit-fate adapter. Still design-of-record here;
-  not built.
+  **not built — and DEFERRED BY RULING at r5** (§4.6): the build shape is
+  ratified (S-5 fork Option 1) but the build does not start until the named
+  wake trigger fires, because no production participant-actor substrate exists
+  to map (Finding A′).
 - **ASK-6** (frame, durable admission idempotency): answered at §8A —
   sequenced OUT with reasoning recorded, per the dispatch's
   no-silence requirement.
@@ -59,7 +75,9 @@ set that today tears the connection (§5.1, row S-9). At r4 the ordering has
 resolved: the drain is landed, so the emitter's hard gate S-9 is satisfied on
 the Died side. The emitter mints **Died-flavored** rows only, so it does not
 widen the still-open Detached set of §3A — the Detached extension and the
-emitter build are independent lanes (§3A.6).
+emitter build are independent lanes (§3A.6). r5 note: S-9's gate being
+satisfied is necessary, not sufficient — the emitter's remaining blocker is not
+ordering but substrate (§4.6, Finding A′).
 
 ## 3. Problem 1 — the restore-window tear (Died flavor) — LANDED RECORD
 
@@ -387,6 +405,15 @@ adapter maintains the pid → binding-incarnation map at spawn/attach; beamr
 carries pid + reason only. Layering forbids beamr knowing liminal
 incarnations.
 
+**r5 amendment to the map's contents (S-6, from the §4.6 ruling):** no
+production component spawns a beamr process correlated to a participant
+binding today (survey Finding A′), so there is no production insert site for
+this map, and **connection-host pids are ruled OUT of it permanently** — a
+connection host's forced death already has a fate (connection-fate teardown),
+and mapping it would double-fate one death. The map's production population
+therefore begins only with the participant-actor substrate whose arrival is
+this design's wake trigger (§4.6).
+
 **r4 finding — the wire vocabulary already exists end-to-end.** r3 §8.6
 deferred "ProcessKilled wire spelling" to the build; the survey at 703591d
 shows there is nothing to spell: `DiedCause::ProcessKilled` is a wire variant
@@ -400,7 +427,9 @@ change. **The emitter build is therefore a production SOURCE only**: a new
 producer that appends `StoredDiedCause::ProcessKilled` rows with disposition
 `Pending`. It adds no wire variant, which re-classes its semver (§10) and
 supersedes the S-14 emitter half (§9). Build precondition: §8.8's
-production-unreachability census.
+production-unreachability census — **discharged at r5** by the survey's formal
+census at `6d09bae` (§8 item 8), re-run at the build's actual base when the
+lane wakes.
 
 ### 4.2 Beamr 0.16.0 facts
 
@@ -559,6 +588,87 @@ never to recur, the pin still stands as map-hygiene coverage.
    in case sub-`Error` attribution ever matters — it does not in this design,
    because `Error` does not enter.
 
+### 4.6 The S-5 contract fork — RULED, and the build DEFERRED (NEW at r5)
+
+**Source of the fork.** The emitter build lane (`feat/process-killed-emitter`,
+off landed main `6d09bae`) ran the dispatch's mandatory reality survey and
+STOPPED before any code. Its record is
+`docs/design/PK-EMITTER-S5-FORK-SURVEY.md`, carried into this tree at r5
+verbatim; no adapter, no red pin, no production line was written. Two findings
+drive this ruling:
+
+- **Finding A (survey §1)** — S-5 as written is unimplementable. beamr's one
+  exit-event subscription is **already claimed at supervisor construction** by
+  the W4 leg-1 reclamation reactor on the sole production scheduler
+  (`crates/liminal-server/src/server/connection/supervisor.rs:1055`, reactor
+  `:949-972`), and that reactor is the self-described **sole drainer**,
+  `drop(scheduler.take_exit_outcome(pid))` per delivered exit
+  (`supervisor.rs:2661-2662`, `:2670`) — so even multiplexing behind it cannot
+  hand the adapter the exact `(ExitReason, OwnedTerm)` pair S-15 must consume.
+- **Finding A′ (survey §1)** — the substrate gap. No production component
+  spawns a beamr process correlated to a participant binding; the only
+  production-mappable pids are connection hosts, whose forced death drops the
+  socket and is already classed as connection-fate teardown
+  (`connection/process.rs:882-906`; `participant/dispatch.rs:102-111`).
+
+**THE RULING — Waffles the Terrible, coordinator seat, 2026-07-28.** This is a
+review/dispatch-layer ruling on the build shape and the build's pacing. **Tom
+has NOT ruled on Finding A′**; nothing here should be read as his word.
+
+1. **S-5 Option 1 is the ratified build shape.** When the emitter is built,
+   **reactor and adapter are ONE exit-fate component**, owning the sole beamr
+   `subscribe_exit_events` subscription where it is claimed today (supervisor
+   construction). S-5 is re-spelled accordingly in the register.
+2. **Option 2 is REJECTED.** Moving the claim into a new adapter and
+   multiplexing reclamation behind it builds exactly the multiplex facility
+   §5(c)/§8.4 explicitly exclude from this design — an interface commitment,
+   never a built facility. The rejection is permanent for this design, not a
+   sequencing preference.
+3. **Option 3 is moot** given the deferral below (it was named only to
+   dismiss: inventing a participant-actor scheduler here would be a silent
+   architecture change).
+4. **THE BUILD IS DEFERRED.** Finding A′ is decisive: with no production
+   participant-actor substrate, the only production-mappable pids are
+   connection hosts, and mapping those creates a **double-fating hazard this
+   design does not adjudicate** (one death producing ProcessKilled via the
+   adapter and ConnectionLost via connection fate for the same binding).
+   Building now would ship an emitter with an empty map — a placeholder
+   surface, which this estate does not ship.
+5. **Connection-host pids are ruled OUT of the S-6 map permanently.** Not
+   "until the hazard is adjudicated" — out. The design's value claim is
+   actor-granular death in a live VM where the socket never drops (§2, S-12);
+   a connection-host death is the case where the socket does drop.
+
+**NAMED WAKE TRIGGER.** The emitter build wakes on **the first production
+spawn of a beamr process correlated to a participant binding**. Nothing polls
+for it and no date attaches to it — it is an event in the tree, and the lane is
+TOLD by it. The wake obligation additionally carries, before any code:
+
+- **(i) the beamr pin question.** The survey's §8.7 re-corroboration was
+  discharged at the consumed **0.16.1** registry bytes (survey §3); check
+  whether the workspace pin has advanced (0.16.1→0.16.x) and record which pin
+  the build stands on before building.
+- **(ii) the take-vs-peek unification.** The merged component must define
+  exit-outcome-consumption ownership so no outcome is leaked or
+  double-consumed: the reactor's `Lagged` recovery peeks non-consumingly today
+  (`supervisor.rs:2849`, via `reap_crashed` `:2821-2860`) while S-7 requires
+  `take_exit_outcome` over all tracked pids (survey §1, "one adjacent wrinkle").
+
+**What remains OPEN, and where.** Underneath Finding A′ sits a DESIGN question
+that is not the coordinator seat's to answer and is **unchanged from the
+2026-07-23 routing: whether and when a participant-actor substrate exists at
+all. That question is at Tom's desk.** This deferral is deliberately compatible
+with any answer he gives: if he rules the substrate into existence, the named
+wake trigger fires in due course and the ratified Option 1 shape is what gets
+built; if he never does, the emitter correctly never builds and no dormant
+half-surface was shipped in the meantime. The wake trigger is the bridge
+between the coordinator-layer deferral and the open design question — it is
+what keeps the deferral from being a silent one (§8.10, no-row-no-dormancy).
+
+**Lane disposition.** `feat/process-killed-emitter` closes: its survey is the
+artifact, carried here; its S-5 amendment is folded into the register below;
+no code was written and none is owed until the wake trigger fires.
+
 ## 5. The five banked brief obligations
 
 **(a) DrainFirst interaction.** Emitter-created pending terminals appear in
@@ -592,6 +702,17 @@ adapter owns the subscription for the scheduler's lifetime and is the only
 component that may hold it (row S-5). The multiplex facility itself is an
 interface commitment only, not built here (§8).
 
+**r5 amendment (from the §4.6 ruling).** The obligation is discharged
+differently than r3/r4 spelled it, because the claim already exists: the
+subscription is claimed at supervisor construction by the W4 reclaim reactor
+(`supervisor.rs:1055`), so "the adapter claims it" was never implementable.
+Ruled shape: **the adapter is an EXTENSION of that reactor** — one exit-fate
+component, one subscription, claimed where it is claimed today, with the S-15
+total filter and the S-6 map inside it and outcome consumption unified on
+S-7's take semantics. Multiplexing behind a new adapter (fork Option 2) is
+REJECTED precisely because it would build the facility this obligation
+excludes.
+
 **(d) Lagged handling is MANDATORY adapter logic.** Capacity is 1,024
 (`exit_events.rs:18`). On observing `ExitEvent::Lagged` (`exit_events.rs:37`)
 the adapter performs the documented recovery: drain the marker, then call
@@ -617,8 +738,11 @@ the map only. No outcome is discarded by beamr, so recovery is total
   emitter's value is actor-granular death in a live VM where the socket never
   drops).
 - Emitter pacing: the drain gate of S-9 is satisfied (landed); Artemis's
-  sizing citation stands (S-13); the remaining build preconditions are §8.7
-  and §8.8.
+  sizing citation stands (S-13); r4's two build preconditions §8.7 and §8.8 are
+  **both DISCHARGED by the survey** (re-corroboration at consumed beamr 0.16.1,
+  survey §3; the ProcessKilled append-site census, survey §4 — verdict: no
+  production path mints a ProcessKilled fate today). Pacing is now set by the
+  §4.6 deferral and its named wake trigger, not by those preconditions.
 
 ## 7. LAW-1 / no-polling and idle-cost honesty
 
@@ -650,7 +774,8 @@ that (see §8).
    deferred. Until such a row exists, those deaths surface exactly as they do
    today (connection-fate/finalizers): no regression, no new claim.
 4. **The behind-the-adapter multiplex** (obligation (c)) is an interface
-   commitment, not a built facility.
+   commitment, not a built facility. **r5**: it is now not merely unbuilt but
+   RULED OUT of the emitter's build shape — S-5 fork Option 2 rejected (§4.6).
 5. **Exact refusal-vs-commit behavior for publishes racing a concurrent
    in-flight drain transaction** is left to the build's serialization story
    (dispatch is already serialized per conversation authority today); no new
@@ -662,13 +787,39 @@ that (see §8).
    No adapter-facing change is CLAIMED for either — but that is unverified,
    so re-corroborating §4.2's four facts at the then-current beamr pin is an
    emitter-build precondition, recorded in the build declaration.
+   **DISCHARGED at r5** (survey §3): all four facts hold at the pin liminal
+   actually consumes — **beamr 0.16.1** registry bytes, workspace
+   `Cargo.toml:32` + `Cargo.lock` — at the same line numbers §4.2 cites. The
+   estate's 0.16.2 checkout is corroborating, not the consumed surface. The
+   0.16.1→0.16.x pin question rides forward as wake obligation (i) (§4.6).
 8. **ProcessKilled production-unreachability census** (NEW at r4): the wire
    variant existing today is safe only if no production path appends
    `StoredDiedCause::ProcessKilled` before the emitter. The trybuild wall
    guards connection-fate selection, but an exhaustive append-site census at
    the build's base commit is owed in the build declaration (the r4 survey
    judged it likely-unproduced, not proven).
+   **DISCHARGED at r5** (survey §4): formal `grep -rn ProcessKilled` census at
+   `6d09bae`, every non-test hit classified — **no production path mints a
+   ProcessKilled fate today**. Production fate-row constructors mint only
+   `ConnectionLost` / `ProtocolError` / `UncleanServerRestart`
+   (`connection_fate_rows.rs:81`, `:99`, `:113`); the fenced-attach inbound arm
+   (`ops_attach_finalizer.rs:107`) can only echo an existing pending fate's
+   cause, never mint one, so it is production-inert; the crash repository is
+   `#[cfg(test)]` (S-11 holds). The verdict is pinned at `6d09bae` — the census
+   is re-run at the build's actual base when the lane wakes.
 9. **ASK-6 / durable admission idempotency** is deliberately OUT — §8A.
+10. **The emitter deferral itself** (NEW at r5) — recorded here rather than
+    left implicit, per no-row-no-dormancy. What is deferred is the BUILD, not
+    the design: the shape is ruled (§4.6, Option 1). What this design does NOT
+    solve, and what the coordinator seat did not rule: whether and when a
+    **participant-actor substrate** exists at all — that DESIGN question is
+    open at Tom's desk, unchanged from the 2026-07-23 routing of Finding A′.
+    The deferral is answer-neutral by construction: substrate ruled in ⇒ the
+    named wake trigger fires in due course and Option 1 is what gets built;
+    substrate never ruled in ⇒ the emitter correctly never builds and nothing
+    dormant was shipped. The connection-host double-fating hazard is likewise
+    not adjudicated here — it is AVOIDED by ruling those pids permanently out
+    of the S-6 map (§4.6 pt 5), which is a scope decision, not a solution.
 
 ## 8A. ASK-6 — durable admission idempotency: SEQUENCED OUT, with reasoning (NEW at r4)
 
@@ -744,11 +895,11 @@ dispatch's no-silence requirement:
 | S-2 | Redrawn pin: the pinned scenario's publish COMMITS after the drain; repro half kept verbatim; assertion set per r3 §3.4 | ruled — **DISCHARGED: landed as the `tests_restore_window.rs` suite (§3.0)** |
 | S-3 | The drain is a sibling terminal path beside `persist_next_marker`; `drain_next_marker` stays structurally marker-only; no new frontier decision variant | ruled — **DISCHARGED: landed as the `persist_drain_first` router (§3.0)** |
 | S-4 | Lane closure requires the live cold-restart SOCKET pin | ruled — **DISCHARGED: landed as `e2e_terminal_drain.rs` (§3.0)** |
-| S-5 | The liminal embedding's adapter claims beamr's single exit-event subscription; all other liminal-side consumers multiplex behind the adapter | ruled (torn 2026-07-23, T1 folded) — standing |
-| S-6 | pid → binding-incarnation map lives in the adapter (pid-correlatable-at-delivery); remove-on-exit-delivery (regardless of S-15 entry-filter outcome) + resolve-before-occupied-insert closes the pid-reuse ABA, under the §4.4 consumed-exit invariant: EVERY consumed exit (event-delivered, Lagged-recovered, occupied-insert-resolved) passes the S-15 filter — entering reasons append once, non-entering consume-and-clean, no exception; adapter-level pin per §4.4 | ruled (torn 2026-07-23, T1 folded) — standing |
-| S-7 | Lagged handling is mandatory adapter logic: drain marker, then `take_exit_outcome` over all tracked pids, each recovered exit passing the S-15 entry filter; capacity 1,024 | ruled (torn 2026-07-23, T1 folded) — standing |
+| S-5 | The liminal embedding's adapter claims beamr's single exit-event subscription; all other liminal-side consumers multiplex behind the adapter | ruled (torn 2026-07-23, T1 folded) — **AMENDED 2026-07-23 (tear seat, on the S-5 fork survey, `docs/design/PK-EMITTER-S5-FORK-SURVEY.md`)**: the subscription is already claimed at supervisor construction by the W4 reclaim reactor (`supervisor.rs:1055`, sole drainer `:2661-2670`), so "the adapter claims it" is unimplementable as written. Re-spelled, conditional on the build proceeding at all (Finding A′ routed to Tom): **the adapter is an EXTENSION of the reclaim reactor** — one component, one subscription, the S-15 total filter inside it, outcome consumption unified on S-7's take semantics (the reactor's non-consuming Lagged-path peek at `:2849` re-spelled to take). The multiplex-behind-adapter option is dead (builds what §5(c)/§8.4 exclude); a separate participant scheduler is dead (no substrate). **FORK RULED 2026-07-28 (Waffles the Terrible, coordinator seat, review/dispatch layer — §4.6)**: the amended spelling above IS the ratified build shape (fork Option 1); Option 2 REJECTED; Option 3 moot. The conditionality stands unchanged — the build is DEFERRED (S-20) |
+| S-6 | pid → binding-incarnation map lives in the adapter (pid-correlatable-at-delivery); remove-on-exit-delivery (regardless of S-15 entry-filter outcome) + resolve-before-occupied-insert closes the pid-reuse ABA, under the §4.4 consumed-exit invariant: EVERY consumed exit (event-delivered, Lagged-recovered, occupied-insert-resolved) passes the S-15 filter — entering reasons append once, non-entering consume-and-clean, no exception; adapter-level pin per §4.4 | ruled (torn 2026-07-23, T1 folded) — standing; **AMENDED 2026-07-28 (coordinator seat, §4.6 pt 5)**: **connection-host pids are OUT of this map permanently** (their forced death drops the socket and already carries a connection-fate; mapping them would double-fate one death). No production insert site exists today (Finding A′), so the map's production population begins only with the participant-actor substrate |
+| S-7 | Lagged handling is mandatory adapter logic: drain marker, then `take_exit_outcome` over all tracked pids, each recovered exit passing the S-15 entry filter; capacity 1,024 | ruled (torn 2026-07-23, T1 folded) — standing; r5 note: under the ratified one-component shape (S-5) the merged reactor's take-vs-peek ownership must be unified against this row (`supervisor.rs:2849` peeks today) — carried as wake obligation (ii), §4.6 |
 | S-8 | The emitter only WIDENS the `PendingFinalization(Died)` entry set (append-once pending row); finalization is exclusively existing finalizers + the S-1 drain, all through `record_terminal_impact`; `produced`/parking untouched with the §5(b) pinning tests as witness | ruled (torn 2026-07-23, T1 folded) — standing |
-| S-9 | Sequencing: the drain builds FIRST; the emitter follows, hard-gated behind the landed drain + Artemis's sizing | ruled — **drain gate SATISFIED at 0.4.1; remaining preconditions §8.7/§8.8** |
+| S-9 | Sequencing: the drain builds FIRST; the emitter follows, hard-gated behind the landed drain + Artemis's sizing | ruled — **drain gate SATISFIED at 0.4.1; §8.7/§8.8 both DISCHARGED by the S-5 fork survey (§8 items 7–8)**. Superseded as the emitter's pacing rule at r5: the build is DEFERRED on Finding A′ and paces off the named wake trigger, not off this sequencing (S-20, §4.6) |
 | S-10 | ProcessKilled stays a DISTINCT additive intent; the trybuild wall stays; the emitter is its sole selector and selects nothing else | ruled (torn 2026-07-23, T1 folded) — standing; wall pin refreshed (`tests_w1b_connection_fate.rs:420-423`) |
 | S-11 | Crash repository stays test-only; no production dependency introduced by either half | ruled (torn 2026-07-23, T1 folded) — standing |
 | S-12 | No frame dependency is claimed anywhere (F-3a premise dead); the emitter's value claim is actor-granular death in a live VM, socket never drops | ruled (torn 2026-07-23, T1 folded) — standing |
@@ -759,6 +910,7 @@ dispatch's no-silence requirement:
 | S-17 | **NEW r4** — Detached drain row requirements: distinguishable-by-shape replay, additive durable schema, cause-preserving, drain provenance equivalent to `StoredDrainedTerminal`; exact spelling to the build (§3A.5) | proposed r4 — pending tear |
 | S-18 | **NEW r4** — Detached extension pins (§3A.7): red-first defect pin, commits-after-drain, slot/token preserved + NOT ParticipantUnknown, victim included-and-parked in recipients, post-drain resume replays parked publication, R-D1 Detached-prestate census, replay-clean idempotence, mixed-flavor ordering, e2e analog (tearer sizes) | proposed r4 — pending tear |
 | S-19 | **NEW r4** — ASK-6 sequenced OUT of this design and the emitter/Detached builds, with §8A's recorded reasoning, the binding non-interference commitment, and a proposed named board row for its own design-first round | proposed r4 — pending tear |
+| S-20 | **NEW r5** — S-5 fork ruling + emitter build deferral (§4.6): Option 1 ratified (reactor and adapter are ONE exit-fate component owning the sole subscription where it is claimed today), Option 2 REJECTED (builds the §5(c)/§8.4-excluded multiplex), Option 3 moot; **THE BUILD IS DEFERRED** on Finding A′ (no production participant-actor substrate; connection-host pids are the only production-mappable pids and are ruled permanently OUT per S-6 — building now would ship an empty map, a placeholder surface); **named wake trigger = the first production spawn of a beamr process correlated to a participant binding**, carrying wake obligations (i) beamr 0.16.1→0.16.x pin check and (ii) take-vs-peek exit-outcome-ownership unification (survey §1); build branch `feat/process-killed-emitter` closes with the survey as its sole artifact | **ruled 2026-07-28 — Waffles the Terrible, coordinator seat (review/dispatch layer)**. NOT a ruling by Tom: the DESIGN question underneath Finding A′ — whether and when a participant-actor substrate exists at all — remains OPEN at Tom's desk, unchanged from the 2026-07-23 routing. The deferral is compatible with either answer (§8.10) |
 
 ## 10. Semver / compatibility detail (r4, superseding r3's §10)
 
@@ -775,7 +927,10 @@ dispatch's no-silence requirement:
   (a new production source + adapter). Any protocol bump would come only from
   new public protocol-crate API the build turns out to need, per the S-14
   lesson (protocol-crate API ≠ wire schema — both are bump surfaces). Ruled
-  at its release tear, per the dispatch.
+  at its release tear, per the dispatch. **r5: no semver event exists or is
+  owed** — the build is deferred (§4.6) and the survey wrote no code; the
+  ratified Option 1 shape surfaced no wire or protocol-crate API need (survey
+  §5), but that expectation is re-tested at the build when it wakes.
 - Cold/live replay equivalence is part of the §14 oracle floor, not an extra
   compat claim.
 
@@ -787,3 +942,4 @@ dispatch's no-silence requirement:
 | r2 | 2026-07-23 | §4.2 citation of record + ExitReason entry filter per Artemis's taxonomy delta; filter proposed Killed\|Kill→ProcessKilled, others never |
 | r3 | 2026-07-23 | Tear fold T1: consumed-exit invariant stated in §4.4 and cited in S-6. Torn APPROVE all fifteen sockets; drain build (S-1/S-2/S-3/S-4) authorized on this fold |
 | r4 | 2026-07-23 | The emitter design round (dispatched post-0.4.1): rebased to main `703591d`; §3.0 landed record (S-1..S-4 discharged; token-erasure delta; suite/e2e pin shapes); S-14 superseded by reality (protocol 0.3.2; emitter wire vocabulary already exists, §4.1); §3A LIM-DETACHED-PENDING ruling (S-16/S-17/S-18: faithful detach finalization, never erasure); §8A ASK-6 sequenced out with reasoning (S-19); build preconditions §8.7/§8.8 added; landed in-tree as the design of record |
+| r5 | 2026-07-28 | The S-5 fork RULING round (doc-only; no pin re-verification, no code). The build lane's mandatory reality survey is carried in verbatim as `docs/design/PK-EMITTER-S5-FORK-SURVEY.md` (from `feat/process-killed-emitter` @ `deeed3e`) and its 2026-07-23 tear-seat S-5 amendment is folded into the register. New §4.6 records the ruling — **Waffles the Terrible, coordinator seat, review/dispatch layer**: Option 1 ratified as the build shape, Option 2 REJECTED, Option 3 moot, **the emitter BUILD DEFERRED** on Finding A′, connection-host pids ruled permanently out of the S-6 map, and the wake trigger NAMED (first production spawn of a beamr process correlated to a participant binding) with its two carried obligations. S-20 added; S-5/S-6/S-7/S-9 amended; §8.7/§8.8 discharged by the survey (§8 items 7–8); §8.10 records the deferral and names what stays OPEN at Tom's desk — the participant-actor-substrate design question, on which **Tom has not ruled** |
