@@ -41,6 +41,28 @@ use crate::{ConversationId, SdkError};
 
 use self::protocol::{ProtocolRemoteTransport, RemoteTransport};
 
+/// The one named deadline every reader gives a synchronous control-frame reply.
+///
+/// Five seconds — the estate's already-ratified value, generalized rather than
+/// re-chosen: the WebSocket socket layer and the TCP subscription reader both
+/// already read `Duration::from_secs(5)`, and the TCP push reader is the odd one
+/// out. Ruled 2026-07-28 by Waffles the Terrible, coordinator seat
+/// (PUSH-HANDSHAKE-DEADLINE; see `docs/design/WIRING-LEDGER.md` and
+/// `docs/design/sdk/briefs/SDK-010.json`).
+///
+/// It is armed for the control exchange ONLY — `Connect`/`ConnectAck`,
+/// `WorkerRegister`/`WorkerRegisterAck`, `Subscribe`/`SubscribeAck` — and
+/// disarmed with `set_read_timeout(None)` before any background reader starts.
+/// It MUST NOT survive into steady state: a deadline that outlives its exchange
+/// is just a slower cadence, and LAW-1 refuses cadences whatever their period.
+///
+/// What it replaces was never chosen. `connect_socket` armed a 100 ms reader
+/// poll cadence before the handshake, and the synchronous setup read was fatal
+/// on the first timeout — composing, by accident, into a 100 ms-per-read fatal
+/// deadline on connect. Nobody chose it.
+#[cfg(feature = "std")]
+pub(crate) const SETUP_TIMEOUT: core::time::Duration = core::time::Duration::from_secs(5);
+
 /// Application-level address for a remote liminal server.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerAddress(String);

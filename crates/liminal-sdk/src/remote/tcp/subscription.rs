@@ -18,14 +18,12 @@
 
 use alloc::format;
 use alloc::string::ToString;
-use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
 use std::io::{Read, Write};
-use std::net::TcpStream;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{Shutdown, TcpStream};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -35,6 +33,7 @@ use liminal::protocol::{
 };
 
 use crate::SdkError;
+use crate::remote::SETUP_TIMEOUT;
 
 /// Minimum protocol version this client advertises during the handshake.
 const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
@@ -42,11 +41,6 @@ const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 const CLIENT_MAX_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 /// Bound on a single socket write.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Poll cadence the reader thread and synchronous setup reads use so they can
-/// observe the stop flag / a total deadline between reads.
-const READER_POLL_TIMEOUT: Duration = Duration::from_millis(100);
-/// Total budget for the synchronous handshake + subscribe reply reads.
-const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
 /// Read chunk size used when draining the socket into the frame buffer.
 const READ_CHUNK_BYTES: usize = 4096;
 /// Upper bound on a single buffered frame, guarding against runaway buffering.
@@ -107,8 +101,6 @@ pub struct SubscriptionStream {
     subscription_id: u64,
     /// Delivered messages surfaced by the background reader.
     inbound: Receiver<DeliveredMessage>,
-    /// Signals the reader thread to stop; set on drop.
-    stop: Arc<AtomicBool>,
     /// Background reader handle, joined on drop.
     reader: Option<JoinHandle<()>>,
 }
@@ -145,15 +137,24 @@ impl SubscriptionStream {
         handshake(&mut stream, &mut buffer)?;
         let subscription_id = subscribe(&mut stream, &mut buffer, channel, accepted_schemas)?;
 
+        // The control exchange is over, so its deadline comes off: the reader
+        // blocks on socket input with no read window at all. Teardown shuts the
+        // socket down, which surfaces as a typed terminal — the socket signals,
+        // nothing sweeps. A window left armed here would be a wake cadence in
+        // steady state, which is the defect this retires, whatever period it
+        // carried.
+        stream
+            .set_read_timeout(None)
+            .map_err(|source| SdkError::Connection {
+                description: format!("failed to clear the subscription read deadline: {source}"),
+            })?;
         let read_stream = stream.try_clone().map_err(|source| SdkError::Protocol {
             description: format!("failed to clone subscription socket for reader thread: {source}"),
         })?;
-        let stop = Arc::new(AtomicBool::new(false));
         let (sender, inbound) = mpsc::channel();
-        let reader_stop = Arc::clone(&stop);
         let reader = std::thread::Builder::new()
             .name("liminal-subscription-reader".to_string())
-            .spawn(move || run_reader(read_stream, buffer, &sender, &reader_stop))
+            .spawn(move || run_reader(read_stream, buffer, &sender))
             .map_err(|source| SdkError::Protocol {
                 description: format!("failed to start subscription reader thread: {source}"),
             })?;
@@ -162,7 +163,6 @@ impl SubscriptionStream {
             writer: stream,
             subscription_id,
             inbound,
-            stop,
             reader: Some(reader),
         })
     }
@@ -196,7 +196,6 @@ impl SubscriptionStream {
 
 impl Drop for SubscriptionStream {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
         // Best-effort clean teardown: tell the server to drop the subscription and
         // close the connection. Failures are ignored — the connection close alone
         // frees the server-side subscription when its subscriber process exits.
@@ -207,9 +206,15 @@ impl Drop for SubscriptionStream {
         };
         let _ = write_frame(&mut self.writer, &unsubscribe);
         let _ = write_frame(&mut self.writer, &Frame::Disconnect { flags: 0 });
+        // Then TELL the reader. It blocks on socket input with no read window, so
+        // nothing but the socket can end its wait — a stop flag it never wakes to
+        // sample would be a lie about how it stops. Shutting the socket down
+        // surfaces a typed terminal to the blocked reader, exactly as the
+        // WebSocket sibling does, and the shutdown of the write half flushes the
+        // frames just written before its FIN. The join is therefore bounded by the
+        // shutdown, not by a peer's goodwill.
+        let _ = self.writer.shutdown(Shutdown::Both);
         if let Some(reader) = self.reader.take() {
-            // The reader wakes within READER_POLL_TIMEOUT to observe the stop flag,
-            // so this join does not hang on a quiet connection.
             reader.join().ok();
         }
     }
@@ -226,10 +231,16 @@ fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
         .map_err(|source| SdkError::Connection {
             description: format!("failed to disable Nagle for {address}: {source}"),
         })?;
+    // The named deadline for a synchronous control-frame reply, and nothing
+    // else: it covers the `Connect`/`ConnectAck` and `Subscribe`/`SubscribeAck`
+    // exchanges that run on the calling thread, and `open` takes it back off
+    // before the background reader ever sees the socket.
     stream
-        .set_read_timeout(Some(READER_POLL_TIMEOUT))
+        .set_read_timeout(Some(SETUP_TIMEOUT))
         .map_err(|source| SdkError::Connection {
-            description: format!("failed to set subscription read timeout for {address}: {source}"),
+            description: format!(
+                "failed to set the subscription setup deadline for {address}: {source}"
+            ),
         })?;
     stream
         .set_write_timeout(Some(WRITE_TIMEOUT))
@@ -316,28 +327,22 @@ fn subscribe(
 /// Background loop: drains the socket, surfacing each `Deliver` frame's message on
 /// `sender`.
 ///
-/// Returns (ending the thread) when the stop flag is set, the connection closes,
-/// a `Disconnect` arrives, or a fatal decode/IO error occurs. A read timeout is
-/// non-fatal: it just lets the loop re-check the stop flag.
+/// The socket carries no read window here, so the loop blocks until the server
+/// sends or the connection ends: nothing wakes it on a timer and nothing sweeps.
+/// It returns (ending the thread) when the connection closes — including the
+/// `shutdown` teardown performs — when a `Disconnect` arrives, when the consumer
+/// has gone away, or on a fatal decode/IO error.
 ///
 /// `buffer` is seeded with the setup residue (see [`SubscriptionStream::open`]): any
 /// `Deliver` bytes the synchronous subscribe read past the `SubscribeAck` are
 /// already here, so the loop decodes them first — before its next socket read —
 /// instead of losing them and starting mid-stream.
-fn run_reader(
-    mut stream: TcpStream,
-    mut buffer: Vec<u8>,
-    sender: &Sender<DeliveredMessage>,
-    stop: &AtomicBool,
-) {
-    while !stop.load(Ordering::SeqCst) {
-        let frame = match next_frame(&mut stream, &mut buffer) {
-            Ok(Some(frame)) => frame,
-            // A read timeout with no complete frame: loop to re-check the stop flag.
-            Ok(None) => continue,
-            // Connection closed or a fatal read/decode error: end the thread. The
-            // dropped `sender` surfaces as a `Disconnected` on the receiver side.
-            Err(_) => return,
+fn run_reader(mut stream: TcpStream, mut buffer: Vec<u8>, sender: &Sender<DeliveredMessage>) {
+    loop {
+        // Connection closed or a fatal read/decode error: end the thread. The
+        // dropped `sender` surfaces as a `Disconnected` on the receiver side.
+        let Ok(frame) = next_frame(&mut stream, &mut buffer) else {
+            return;
         };
         match frame {
             Frame::Deliver {
@@ -366,29 +371,43 @@ fn run_reader(
     }
 }
 
-/// Reads until one complete frame decodes, treating a read timeout as
-/// `Ok(None)` so the caller can re-check the stop flag without ending the loop.
-fn next_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Option<Frame>, SdkError> {
+/// Reads until one complete frame decodes on the windowless steady-state socket.
+///
+/// There is no read window to expire here, so a [`FillOutcome::TimedOut`] would
+/// mean one was re-armed behind the reader's back. That is reported as the
+/// invariant break it is, rather than swallowed into a spin — a reader that
+/// looped on it would be a busy-wait, which is worse than the cadence this
+/// retired.
+fn next_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, SdkError> {
     loop {
         match decode(buffer) {
             Ok((frame, consumed)) => {
                 buffer.drain(..consumed);
-                return Ok(Some(frame));
+                return Ok(frame);
             }
             Err(
                 ProtocolError::IncompleteHeader { .. } | ProtocolError::TruncatedPayload { .. },
             ) => match fill_buffer(stream, buffer)? {
                 FillOutcome::Read => {}
-                FillOutcome::TimedOut => return Ok(None),
+                FillOutcome::TimedOut => {
+                    return Err(SdkError::Connection {
+                        description: "the subscription reader's steady-state socket reported a \
+                                      read deadline it should not carry"
+                            .to_string(),
+                    });
+                }
             },
             Err(error) => return Err(protocol_error(&error)),
         }
     }
 }
 
-/// Reads one complete frame, retrying read timeouts until [`SETUP_TIMEOUT`]
-/// elapses — used for the synchronous handshake and subscribe replies before the
-/// background reader starts.
+/// Reads one complete control-frame reply under the named [`SETUP_TIMEOUT`]
+/// deadline — used for the synchronous handshake and subscribe replies, on the
+/// calling thread, before the background reader starts.
+///
+/// A socket read window elapsing is NOT the end: the reply may simply be slow, or
+/// arriving in pieces. Only the total deadline for this reply ends the wait.
 fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, SdkError> {
     let deadline = Instant::now() + SETUP_TIMEOUT;
     loop {
@@ -417,7 +436,8 @@ fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame,
 }
 
 /// Appends one socket read into `buffer`, mapping a read timeout to a non-fatal
-/// [`FillOutcome::TimedOut`].
+/// [`FillOutcome::TimedOut`] so the setup reader can weigh it against its
+/// deadline.
 fn fill_buffer(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<FillOutcome, SdkError> {
     if buffer.len() > MAX_FRAME_BYTES {
         return Err(SdkError::Protocol {
