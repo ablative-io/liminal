@@ -829,6 +829,65 @@ future sweep will re-flag if nobody writes them down.
 - **Owner:** unassigned. Recorded under no-row-no-dormancy so the residue has a
   row rather than sitting nameless.
 
+### PUSH-HANDSHAKE-DEADLINE — the ruling that scopes SDK-010 (2026-07-28)
+
+**Ruled by Waffles the Terrible, coordinator seat, 2026-07-28**, approved as
+written from the liminal seat's decision note. Recorded here as a dated
+annotation, not as an edit to any row: the F8 and F9 row bodies above are left
+byte-unchanged, and their retirement is trued forward at the fold after the
+build lands — the precedent is the F6 correction carried at `6e37a62`.
+
+**The ruling, verbatim in substance:**
+
+> One named SETUP_TIMEOUT-class deadline, 5 seconds (the estate's
+> already-ratified constant generalized, not a new default), applied per
+> synchronous control-frame reply during the control exchange ONLY, then disarm
+> to `set_read_timeout(None)` blocking steady state — the WS reader's landed
+> shape generalized to all three readers (TCP push, TCP subscription, WS
+> subscription). The record MUST name the accidental contract verbatim:
+> `connect_socket` arms `READER_POLL_TIMEOUT` before the handshake and
+> `read_one_frame` is fatal on the first `TimedOut` — a 100ms-per-read FATAL
+> deadline on connect that NOBODY CHOSE; "nobody chose it" is the sentence
+> justifying the change.
+
+**The accidental contract, at the bytes** (re-derived 2026-07-28 in the
+`sdk-010` worktree at `6e37a62`, cited from what was checked):
+
+- `crates/liminal-sdk/src/remote/tcp/push_client.rs:56` —
+  `const READER_POLL_TIMEOUT: Duration = Duration::from_millis(100)`, whose doc
+  at `:53-55` justifies it solely as a stop-flag poll cadence for the
+  BACKGROUND reader.
+- `push_client.rs:561-584` — `connect_socket` arms it on the socket at `:574`,
+  before any framing, under a comment (`:570-572`) that again speaks only about
+  the reader thread.
+- `push_client.rs:735-760` — but `handshake` (`:621`) and `register` (`:592`)
+  run on the CALLING thread through `read_one_frame`, whose doc at `:735-737`
+  claims "blocking (no timeout tolerance)" and whose `FillOutcome::TimedOut`
+  arm at `:750-755` returns `SdkError::Connection` on the FIRST timeout.
+
+A cadence nobody meant as a deadline, composed with a reader that treats any
+timeout as fatal, is a 100ms-per-read fatal deadline on connect. **Nobody chose
+it.** That is the whole justification: the lane does not tune a deadline, it
+replaces an accident with a decision.
+
+**Scope is three readers, not two.** The dispatch note's two-reader shape is
+stale — the WebSocket subscription reader landed at `a09de81` and is the third.
+It is also the MODEL: `crates/liminal-sdk/src/remote/websocket/subscription.rs:283`
+already disarms with `socket.set_read_timeout(None)` before spawning its
+reader, and `:306-317` already tears down by `shutdown(Shutdown::Both)` rather
+than by sampling a flag. The other two readers are generalized toward it. The
+TCP subscription reader's own constant (`subscription.rs:47`, armed `:230`)
+and its setup-deadline sampling (`:389-393`) are the second half of the same
+family.
+
+- **Named consumer:** SDK-010, building on branch `feat/sdk010-reader-deadline`
+  off landed main `6e37a62`. **The build rides this branch**; the brief is
+  `docs/design/sdk/briefs/SDK-010.json`.
+- **Boundary:** R6 residue — the test-helper reap loops — is already tracked as
+  row A-7 above and is expressly NOT folded into this lane.
+- **Boundary:** F7 (`crates/liminal/src/channel/actor/wait.rs`) stays unclaimed.
+  This lane takes W4 from six-ninths to eight-ninths, not to nine.
+
 ## Companion registers (not duplicated here)
 
 - **Frame danglers:** the decisions audit (2026-07-19, coordination seat)

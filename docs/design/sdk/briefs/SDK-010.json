@@ -1,0 +1,153 @@
+{
+  "id": "SDK-010",
+  "cluster": "sdk",
+  "title": "Retire the SDK reader poll family for one named setup deadline and a blocking steady state",
+  "depends_on": [],
+  "blocked_by": [],
+  "gates_closed": [
+    "PUSH-HANDSHAKE-DEADLINE — RULED 2026-07-28 by Waffles the Terrible, coordinator seat, APPROVED AS WRITTEN from the liminal seat's decision note. The ruling text, which this brief carries verbatim-in-substance and which is also annotated into `docs/design/WIRING-LEDGER.md` under the same attribution and date:\n\n\"One named SETUP_TIMEOUT-class deadline, 5 seconds (the estate's already-ratified constant generalized, not a new default), applied per synchronous control-frame reply during the control exchange ONLY, then disarm to set_read_timeout(None) blocking steady state — the WS reader's landed shape generalized to all three readers (TCP push, TCP subscription, WS subscription). The record MUST name the accidental contract verbatim: connect_socket arms READER_POLL_TIMEOUT before the handshake and read_one_frame is fatal on the first TimedOut — a 100ms-per-read FATAL deadline on connect that NOBODY CHOSE; 'nobody chose it' is the sentence justifying the change.\"\n\nThe deadline value is therefore CHOSEN, not open. No requirement below may re-open it.",
+    "SCOPE-COUNT — the two-reader shape of the dispatch note is STALE. The WebSocket subscription reader landed at `a09de81` and is the third reader. Scope is three readers, and the WS reader is the MODEL the other two are generalized toward, not a fourth thing to invent."
+  ],
+  "new_constraints": [
+    "LAW-1 (no polling; redesign it to be TOLD) binds the steady state. Once the control exchange is over, no reader may carry a timer, cadence, or wake window: the socket tells it. The setup deadline SHALL NOT survive into steady state as a new accidental cadence — that would trade a 100ms cadence for a 5s one, which is the same defect at a different period.",
+    "Retiring the poll cadence retires the ONLY wake mechanism the two TCP readers' stop flags had. A blocking reader cannot sample an `AtomicBool`. Teardown therefore SHALL become a socket-level TELL (`shutdown`), matching the landed WebSocket sibling at `crates/liminal-sdk/src/remote/websocket/subscription.rs:306-317`, and the vestigial stop flags SHALL be removed rather than left in place as a lie about how the reader stops.",
+    "The push client's landed graceful-close guarantee (write-half FIN, then drain so no unread bytes remain to turn the close into a RST that would strand accepted publishes) is a CONTRACT, not incidental, and its DROP_DRAIN_BUDGET bound is part of it. A blocking reader must not convert a 5s-bounded teardown into an unbounded join. Any replacement SHALL keep a wall-clock bound and SHALL state where the bound now lives.",
+    "R6 residue (test-helper reap loops) is tracked as WIRING-LEDGER row A-7 and is expressly OUT of this lane. Reference it; do not fold it in."
+  ],
+  "checklist": [],
+  "stories": [],
+  "design_anchor": [
+    "docs/design/WIRING-LEDGER.md — W4 correction, families F8 and F9",
+    "docs/design/W4-LAW1-POLLING-RETIREMENT.md — the LAW-1 family census"
+  ],
+  "purpose": "DISPATCH-READY, re-scoped 2026-07-28 on branch `feat/sdk010-reader-deadline` off landed main `6e37a62`. Retire WIRING-LEDGER families F8 (SDK TCP push reader) and F9 (SDK TCP subscription reader), taking W4 from six-ninths to eight-ninths. F7 (`crates/liminal/src/channel/actor/wait.rs`) stays unclaimed and out of scope.\n\nThe re-scope folds in three things the original two-reader dispatch note did not carry: (1) the PUSH-HANDSHAKE-DEADLINE ruling verbatim-in-substance with attribution and date; (2) the third reader — the WebSocket subscription reader landed at `a09de81` — as the model shape; (3) the accidental contract named at the bytes, with cites re-derived in this worktree at `6e37a62` rather than inherited.\n\nTHE ACCIDENTAL CONTRACT, NAMED. `crates/liminal-sdk/src/remote/tcp/push_client.rs:56` declares `const READER_POLL_TIMEOUT: Duration = Duration::from_millis(100);` under a doc comment (`:53-55`) that justifies it purely as a stop-flag poll cadence for the BACKGROUND READER. `connect_socket` (`:561-584`) arms it on the socket at `:574`, BEFORE the handshake, under a comment (`:570-572`) that speaks only about the reader thread. But `handshake` (`:621`) and `register` (`:592`) both run on the CALLING thread through `read_one_frame` (`:739`), whose own doc at `:735-737` says \"blocking (no timeout tolerance)\" and whose `FillOutcome::TimedOut` arm at `:750-755` returns `SdkError::Connection { description: \"push connection timed out waiting for a control-frame reply\" }` on the FIRST timeout. The composition of a cadence nobody meant as a deadline with a reader that treats any timeout as fatal is a 100ms-per-read FATAL deadline on connect. NOBODY CHOSE IT. That sentence is the justification for this change: the lane does not tune a deadline, it replaces an accident with a decision.\n\nThe TCP subscription reader carries the same 100ms cadence at `subscription.rs:47`, armed at `:230`, but its `read_one_frame` (`:392-393`) samples the cadence against a `SETUP_TIMEOUT = 5s` total deadline (`:49`) instead of dying on the first tick — so its setup is already 5s in substance while its steady state is still a 100ms cadence. The WebSocket subscription reader already holds the target shape: a 5s window during the setup exchange, then `socket.set_read_timeout(None)` at `websocket/subscription.rs:283` before the reader starts, with teardown by `shutdown(Shutdown::Both)` at `:311`. Three readers, three different answers to one question. This lane gives them one.",
+  "task": "Give all three readers one named 5s SETUP_TIMEOUT-class deadline, armed per synchronous control-frame reply during the control exchange ONLY, then `set_read_timeout(None)` for a blocking steady state. Retire the READER_POLL_TIMEOUT family from production source and tombstone it with a source-guard test. Convert the two TCP readers' teardown from stop-flag sampling to a socket-level TELL, preserving the push client's graceful-close guarantee and its wall-clock bound. Scope is `crates/liminal-sdk/src/remote/tcp/push_client.rs`, `crates/liminal-sdk/src/remote/tcp/subscription.rs`, `crates/liminal-sdk/src/remote/websocket/subscription.rs`, their sibling test modules, and the frozen LAW-1 census in `crates/liminal-protocol/tests/acceptance_45_51.rs` (whose exact counts this change legitimately moves and which must be re-derived, never suppressed).",
+  "cite_repin": [
+    "2026-07-28 re-derivation in worktree `.worktrees/sdk-010` at `6e37a62`. Every anchor below was read at the bytes in THIS tree; none is inherited from the dispatch note.",
+    "CONFIRMED as given: `push_client.rs:56` (READER_POLL_TIMEOUT const), `push_client.rs:574` (armed in connect_socket), `subscription.rs:47` (its own constant), `subscription.rs:230` (armed), `subscription.rs:389-393` (setup-deadline sampling).",
+    "SHARPENED: the dispatch note's \"read_one_frame fatal-on-TimedOut ~:739-761\" is `push_client.rs:735-760` — signature at `:739`, the fatal arm at `:750-755`, the misleading doc at `:735-737`. connect_socket is `:561-584`, not `:561-` open-ended.",
+    "LOCATED (the note left the WS reader unlocated): the WebSocket subscription reader is `crates/liminal-sdk/src/remote/websocket/subscription.rs`. Its disarm is `:283` inside `fn start` (`:274-305`); its setup window is the 5s `IO_TIMEOUT` armed at socket construction, `crates/liminal-sdk/src/remote/websocket/std_socket.rs:26,93`, and re-armed after each windowed read at `websocket/connection/exchange.rs:237`; its teardown TELL is `shutdown(Shutdown::Both)` at `websocket/subscription.rs:306-317`.",
+    "COLLATERAL, not in the note: `push_client.rs:512` names READER_POLL_TIMEOUT inside `drain_pending_acks` as the fallback bound if the drop-drain read timeout cannot be set; retiring the constant retires that fallback, so the comment must be trued, not just the identifier deleted. `push_client.rs:474` and `subscription.rs:211` both name it in Drop's join comment.",
+    "BASELINE measured on this tree BEFORE any edit: `cargo test --workspace` exit 0, 1797 tests across 42 suites (`gate-logs/extras/baseline-6e37a62.log`)."
+  ],
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Carry the ruling and hold the deadline closed",
+      "spec": "The PUSH-HANDSHAKE-DEADLINE ruling (see `gates_closed`) is CLOSED and binding: one named SETUP_TIMEOUT-class constant, 5 seconds, generalized from the estate's already-ratified value (`subscription.rs:49` and `websocket/std_socket.rs:26` both already read `Duration::from_secs(5)`), NOT a new default. No requirement below re-opens the value, the arming site class (synchronous control-frame reply during the control exchange only), or the disarm (blocking `None` steady state).\n\nThe ruling text SHALL also appear, attributed to Waffles the Terrible's coordinator seat and dated 2026-07-28, as a new dated annotation in `docs/design/WIRING-LEDGER.md` placed after row A-7. The F8/F9 rows themselves SHALL NOT be rewritten by this lane — their retirement is trued forward at the fold after landing, on the precedent of the F6 correction at `6e37a62`.",
+      "acceptance": [
+        "The ruling text is present verbatim-in-substance, attributed and dated, in both this brief and WIRING-LEDGER.md.",
+        "Exactly one 5s constant in the SETUP_TIMEOUT family is introduced; no new default value is invented.",
+        "The WIRING-LEDGER F8 and F9 row bodies are byte-unchanged by this lane."
+      ],
+      "files": {
+        "create": [],
+        "modify": ["docs/design/WIRING-LEDGER.md"],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Red set, both directions, committed",
+      "spec": "The lane is red-first and the red set SHALL cover BOTH directions of the change, with genuine failing runs captured to `gate-logs/extras/red-sdk010.log`.\n\nDIRECTION (a) — the accidental fatality. A control-frame reply slower than 100ms during the handshake/control exchange SHALL survive. The pin uses a real socket fixture (a `TcpListener`-backed fake server on the pattern already established at `crates/liminal-sdk/src/remote/tcp/subscription_tests.rs:97-171`) whose responder delays its `ConnectAck` past 100ms and well inside 5s. Against the pre-change push client this FAILS with `SdkError::Connection { description: \"push connection timed out waiting for a control-frame reply\" }`. No sleep-based proof is admitted beyond the intentional delayed reply itself.\n\nDIRECTION (b) — the disarm. After the control exchange completes, the reader's socket read timeout SHALL be `None`. This is observable behaviorally: `std::net::TcpStream::read_timeout()` reads the live `SO_RCVTIMEO` off the same kernel socket the reader blocks on, and both TCP readers retain a `TcpStream` handle to it. A behavioral assertion is therefore REQUIRED; a source-guard is not an acceptable substitute here. Against the pre-change code this FAILS, reporting `Some(100ms)`.\n\nDIRECTION (b) carries the anti-cadence obligation: the setup deadline SHALL be shown NOT to leak into steady state. `Some(5s)` fails the same assertion as `Some(100ms)` — the assertion is `None`, not \"longer than before\".\n\nA further pin SHALL prove the setup deadline is genuinely ARMED (not `None`) during the control exchange, by showing a never-replying peer is refused rather than blocking forever.",
+        "acceptance": [
+        "red-sdk010.log contains genuine non-zero-exit runs, not narrated ones, for both directions.",
+        "The delayed-reply pin fails pre-change with the exact push timeout description and passes post-change.",
+        "The steady-state pin fails pre-change reporting Some(100ms) and passes post-change reporting None, for both TCP readers.",
+        "The steady-state pin would also fail on Some(5s), so a leaked setup deadline cannot pass it.",
+        "A never-replying peer is refused within the named deadline rather than blocking the caller forever."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client_tests.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription_tests.rs",
+          "gate-logs/extras/red-sdk010.log"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "One named deadline, armed only during the control exchange",
+      "spec": "Introduce ONE named 5s constant in the SETUP_TIMEOUT family, shared by all three readers rather than duplicated per reader, and arm it as the socket read window for the synchronous control exchange ONLY:\n\n- TCP push (`push_client.rs`): `connect_socket` arms the setup deadline instead of READER_POLL_TIMEOUT; `handshake` and `register` run under it; `read_one_frame` SHALL treat a socket-level timeout as non-fatal until a total per-reply deadline elapses, matching the shape already landed in the TCP subscription reader at `subscription.rs:392-393`, so a slow-but-answering peer is not killed.\n- TCP subscription (`subscription.rs`): `connect_socket` arms the same shared constant; the existing local `SETUP_TIMEOUT` is replaced by it, not duplicated.\n- WS subscription (`websocket/subscription.rs`): the setup window is named explicitly with the same shared constant at the subscription's own setup path, so the reader states its deadline rather than inheriting an unnamed socket default.\n\nThe control exchange is exactly: `Connect`/`ConnectAck`, `WorkerRegister`/`WorkerRegisterAck`, `Subscribe`/`SubscribeAck`. Nothing after it.",
+      "acceptance": [
+        "Exactly one 5s SETUP_TIMEOUT-family constant exists and all three readers reference it.",
+        "A control-frame reply arriving after 100ms and before the deadline completes the exchange on all three readers.",
+        "A control-frame reply that never arrives is refused with a typed error, not a hang."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription.rs",
+          "crates/liminal-sdk/src/remote/websocket/subscription.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Blocking steady state and a TOLD teardown",
+      "spec": "Immediately after the control exchange and BEFORE the background reader is spawned, each reader's socket SHALL be disarmed with `set_read_timeout(None)`, exactly as `websocket/subscription.rs:283` already does. The steady-state reader then blocks on socket input with no window, no cadence, and no flag sampling.\n\nBecause a blocking reader cannot sample an `AtomicBool`, the two TCP readers' `stop: Arc<AtomicBool>` fields and their loop guards SHALL be REMOVED, and teardown SHALL become a socket-level TELL:\n\n- TCP subscription: write the existing best-effort `Unsubscribe` + `Disconnect`, then `shutdown(Shutdown::Both)` on the writer handle, then join. The shutdown is what unblocks the reader, on the landed WS sibling's pattern (`websocket/subscription.rs:306-317`).\n- TCP push: the graceful-close contract is preserved and its bound RELOCATED, not dropped. As sole owner of the socket, drop SHALL (i) `shutdown(Shutdown::Write)` so the server finishes and acks every buffered publish then closes; (ii) wait for the outstanding publish verdicts on the flush ledger under a wall-clock budget — a deadline'd blocking channel receive, which is where the DROP_DRAIN_BUDGET bound now lives and which is a STRONGER guarantee than reading raw bytes to EOF, because it proves the server answered rather than merely that bytes stopped; (iii) `shutdown(Shutdown::Both)` to unblock and join the reader. Over a socket still shared with a live `PushWriter` clone a write-half FIN remains unsafe, so drop SHALL instead wait out the same bounded verdict window and then `shutdown(Shutdown::Read)`, which unblocks the reader without touching the clone's writes; the resulting write-only degradation is already the disclosed `FlushMode::VerdictOnly` shape and SHALL be documented at the site.\n\nThe reader threads become the drainers, so accepted-publish verdicts reach the ledger during teardown instead of being read and discarded.",
+      "acceptance": [
+        "After open/connect returns, `read_timeout()` on the live socket is None for all three readers.",
+        "No `AtomicBool` stop flag remains in either TCP reader.",
+        "Dropping a client whose peer is silent completes within the named wall-clock budget and does not hang.",
+        "The existing push-flush and teardown-delivery suites stay green, including the RST-avoidance e2e pins."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Tombstone the retired family",
+      "spec": "Add a source-guard test asserting the retired poll family is absent from the production source of each reader, on the model of `membership_source_has_no_retired_poll_family` (`crates/liminal-server/src/cluster/membership.rs:937-953`): `include_str!` the module, split off its `mod tests` tail, and assert each forbidden token absent.\n\nFORBIDDEN LIST: `READER_POLL_TIMEOUT`, `poll the stop flag`, `re-check the stop flag`, `AtomicBool`, `stop.load`, `stop.store`.\n\nThe frozen LAW-1 census in `crates/liminal-protocol/tests/acceptance_45_51.rs` pins exact grep counts over SDK production source (`:2117` and the family-evidence table at `:2208`). This change legitimately moves those counts. They SHALL be re-derived from the tree and updated, with the classified family evidence for \"SDK push reader\" and \"SDK subscription reader\" re-pointed at expressions that still match. Suppressing, loosening to a range, or deleting a census entry is FORBIDDEN — the pin exists to fail loudly here.",
+      "acceptance": [
+        "Each of the three readers carries a source-guard asserting the forbidden list absent from production source.",
+        "The LAW-1 census counts are exact, re-derived, and still assert equality.",
+        "No `#[allow]`, `#[ignore]`, or expect-attribute is introduced anywhere in the lane."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-sdk/src/remote/tcp/push_client_tests.rs",
+          "crates/liminal-sdk/src/remote/tcp/subscription_tests.rs",
+          "crates/liminal-sdk/src/remote/websocket/subscription.rs",
+          "crates/liminal-protocol/tests/acceptance_45_51.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "SHALL NOT touch F7 (`crates/liminal/src/channel/actor/wait.rs`) — unclaimed, out of scope.",
+    "SHALL NOT fold in WIRING-LEDGER row A-7 (test-helper reap loops); reference only.",
+    "SHALL NOT rewrite the WIRING-LEDGER F8/F9 row bodies; the retirement is trued forward at the fold, per the F6 precedent at `6e37a62`.",
+    "SHALL NOT publish or tag.",
+    "SHALL NOT change the request/response TCP connection (`remote/tcp/connection.rs`) or the WS request/response path — they are not readers with a background steady state and their `IO_TIMEOUT` is a per-round-trip bound, not a cadence.",
+    "SHALL NOT fix the known SDK wasm dead-code warning on `WirePublishRequest.idempotency_key` — disclosed, left alone."
+  ],
+  "verification": [
+    "`cargo fmt --all -- --check`, `cargo check --workspace --all-targets`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` all exit 0.",
+    "`cargo check -p liminal-protocol --target wasm32-unknown-unknown --no-default-features` and the same for `liminal-sdk` exit 0.",
+    "Final suite counts reconcile per-suite against the pre-edit baseline of 1797 tests / 42 suites.",
+    "`gate-logs/extras/red-sdk010.log` is committed and shows genuine failures for both directions."
+  ]
+}
