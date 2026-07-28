@@ -306,6 +306,10 @@ impl<'a> PayloadReader<'a> {
         }
     }
 
+    pub(super) const fn is_finished(&self) -> bool {
+        self.offset == self.buffer.len()
+    }
+
     pub(super) fn finish(self) -> Result<(), ProtocolError> {
         if self.offset == self.buffer.len() {
             Ok(())
