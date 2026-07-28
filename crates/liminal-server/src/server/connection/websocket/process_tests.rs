@@ -174,6 +174,7 @@ fn conversation_and_worker_frames() -> Vec<Frame> {
                 node: Some("node-a".to_owned()),
                 activity_types: vec!["activity".to_owned()],
                 identity: "worker-1".to_owned(),
+                activities: Vec::new(),
             },
         },
         Frame::WorkerRegisterAck {

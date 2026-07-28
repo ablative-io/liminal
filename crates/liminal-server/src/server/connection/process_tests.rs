@@ -451,6 +451,7 @@ fn sample_registration() -> WorkerRegistration {
         node: Some("node-a".to_owned()),
         activity_types: vec!["charge".to_owned()],
         identity: "worker-1".to_owned(),
+        activities: Vec::new(),
     }
 }
 

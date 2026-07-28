@@ -292,6 +292,9 @@ fn decode_worker_register_payload(
     let node = reader.read_optional_string()?;
     let activity_types = reader.read_string_vec_field()?;
     let identity = reader.read_string_field()?;
+    // This sniff consumes WorkerRegister's one trailing-bytes extension slot. Any
+    // future field appended to this frame must use a ProtocolVersion gate, never a
+    // second sniff: another optional tail is indistinguishable from census bytes.
     let activities = if reader.is_finished() {
         Vec::new()
     } else {

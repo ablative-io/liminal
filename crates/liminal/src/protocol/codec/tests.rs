@@ -1,13 +1,15 @@
-use super::{decode, encode, encoded_len};
+use super::{HEADER_LEN, U32_LEN, decode, encode, encoded_len, write_header};
 use crate::protocol::{
     CausalContext, Frame, FrameType, MessageEnvelope, MessageId, ProtocolError, SchemaId,
-    WorkerRegisterOutcome, WorkerRegistration, extract_causal_context,
+    WorkerActivityDescriptor, WorkerRegistration, extract_causal_context,
 };
 
 use super::tests_support::{
     pressure_frames, publish_envelope_bytes, round_trip, sample_envelope, sample_frames,
-    sample_schema, worker_register_frames,
+    sample_schema,
 };
+
+mod worker_register;
 
 /// 13-L1: a publish carrying an idempotency key round-trips the key, and a
 /// no-key publish encodes to bytes byte-identical to the pre-13-L1 layout (the
@@ -301,111 +303,108 @@ fn decode_rejects_invalid_stream_without_panicking() {
 }
 
 #[test]
-fn worker_register_frames_round_trip() -> Result<(), ProtocolError> {
-    for frame in worker_register_frames() {
-        assert_eq!(round_trip(&frame)?, frame);
-    }
-    Ok(())
-}
-
-#[test]
-fn worker_register_node_presence_distinguishes_none_from_empty() -> Result<(), ProtocolError> {
-    // node = None must NOT round-trip into Some(""): the presence byte keeps the
-    // optional-locality distinction the routing model relies on.
-    let absent = Frame::WorkerRegister {
-        flags: 0,
+fn worker_register_old_shape_decodes_to_empty_census() -> Result<(), ProtocolError> {
+    let frame = Frame::WorkerRegister {
+        flags: 0xA5,
         registration: WorkerRegistration {
-            namespaces: vec!["default".to_owned()],
-            task_queue: "q".to_owned(),
-            node: None,
-            activity_types: vec!["a".to_owned()],
-            identity: "id".to_owned(),
-            activities: Vec::new(),
-        },
-    };
-    let present_empty = Frame::WorkerRegister {
-        flags: 0,
-        registration: WorkerRegistration {
-            namespaces: vec!["default".to_owned()],
-            task_queue: "q".to_owned(),
-            node: Some(String::new()),
-            activity_types: vec!["a".to_owned()],
-            identity: "id".to_owned(),
+            namespaces: vec!["default".to_owned(), "sentinel-namespace".to_owned()],
+            task_queue: "critical-jobs".to_owned(),
+            node: Some("node-west-7".to_owned()),
+            activity_types: vec!["charge-card".to_owned(), "ship-order".to_owned()],
+            identity: "worker-pre-census".to_owned(),
             activities: Vec::new(),
         },
     };
 
-    let decoded_absent = round_trip(&absent)?;
-    let decoded_present = round_trip(&present_empty)?;
-    assert!(matches!(
-        decoded_absent,
-        Frame::WorkerRegister { registration, .. } if registration.node.is_none()
-    ));
-    assert!(matches!(
-        decoded_present,
-        Frame::WorkerRegister { registration, .. } if registration.node.as_deref() == Some("")
-    ));
-    // The two frames must NOT be byte-identical (None vs Some("") are distinct).
-    let mut absent_bytes = vec![0_u8; encoded_len(&absent)?];
-    let mut present_bytes = vec![0_u8; encoded_len(&present_empty)?];
-    encode(&absent, &mut absent_bytes)?;
-    encode(&present_empty, &mut present_bytes)?;
-    assert_ne!(absent_bytes, present_bytes);
-    Ok(())
-}
-
-#[test]
-fn worker_register_ack_outcome_round_trips() -> Result<(), ProtocolError> {
-    let accepted = Frame::WorkerRegisterAck {
-        flags: 0,
-        outcome: WorkerRegisterOutcome::Accepted,
-    };
-    let rejected = Frame::WorkerRegisterAck {
-        flags: 0,
-        outcome: WorkerRegisterOutcome::Rejected {
-            reason: "no such task queue".to_owned(),
-        },
-    };
-    assert_eq!(round_trip(&accepted)?, accepted);
-    assert_eq!(round_trip(&rejected)?, rejected);
-    assert!(matches!(
-        round_trip(&rejected)?,
-        Frame::WorkerRegisterAck {
-            outcome: WorkerRegisterOutcome::Rejected { reason },
-            ..
-        } if reason == "no such task queue"
-    ));
-    Ok(())
-}
-
-#[test]
-fn worker_register_ack_invalid_status_byte_is_rejected() {
-    // type 0x18 = WorkerRegisterAck, control frame on stream 0, payload = [0x7F]
-    // (an undefined status byte). Decode must error, not panic or silently accept.
-    let input = [0x18, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0x7F];
-    assert!(matches!(
-        decode(&input),
-        Err(ProtocolError::CodecError { .. })
-    ));
-}
-
-#[test]
-fn worker_register_discriminants_are_additive_and_unknown_preserved() -> Result<(), ProtocolError> {
-    // The assigned discriminants now run through 0x19 (Deliver); the next free byte
-    // (0x1A) must still decode to Frame::Unknown, proving the additions did not
-    // consume a forward-compatibility slot.
-    let input = [0x1A, 0x00, 0, 0, 0, 0, 0, 0, 0, 2, 0xAB, 0xCD];
-    let (frame, consumed) = decode(&input)?;
-    assert_eq!(consumed, input.len());
+    // The current encoder emits the pre-census fields followed by an unconditional
+    // zero descriptor count. Removing exactly that u32 recreates the old payload;
+    // the production header writer then records its shortened, exact payload length.
+    let new_len = encoded_len(&frame)?;
+    let mut new_bytes = vec![0_u8; new_len];
+    let new_written = encode(&frame, &mut new_bytes)?;
+    assert_eq!(new_written, new_len);
+    let old_frame_len = new_len
+        .checked_sub(U32_LEN)
+        .ok_or_else(|| ProtocolError::codec("test frame was shorter than census count"))?;
     assert_eq!(
-        frame,
-        Frame::Unknown {
-            type_id: 0x1A,
-            flags: 0x00,
-            stream_id: 0,
-            payload: vec![0xAB, 0xCD],
-        }
+        &new_bytes[old_frame_len..],
+        &0_u32.to_be_bytes(),
+        "an empty-census new frame must end in its zero descriptor count"
     );
+
+    let mut old_bytes = new_bytes[..old_frame_len].to_vec();
+    let old_payload_len = old_bytes
+        .len()
+        .checked_sub(HEADER_LEN)
+        .and_then(|len| u32::try_from(len).ok())
+        .ok_or_else(|| ProtocolError::codec("test payload length could not fit u32"))?;
+    write_header(&frame, old_payload_len, &mut old_bytes[..HEADER_LEN])?;
+    assert_eq!(old_bytes.len() + U32_LEN, new_bytes.len());
+    assert_eq!(
+        &old_bytes[HEADER_LEN..],
+        &new_bytes[HEADER_LEN..old_frame_len],
+        "the old payload must be byte-exactly the new payload without its census count"
+    );
+
+    let (decoded_old, old_consumed) = decode(&old_bytes)?;
+    assert_eq!(old_consumed, old_bytes.len());
+    assert_eq!(decoded_old, frame);
+    assert!(matches!(
+        decoded_old,
+        Frame::WorkerRegister { registration, .. } if registration.activities.is_empty()
+    ));
+
+    let (decoded_new, new_consumed) = decode(&new_bytes)?;
+    assert_eq!(new_consumed, new_bytes.len());
+    assert_eq!(decoded_new, frame);
+    assert!(matches!(
+        decoded_new,
+        Frame::WorkerRegister { registration, .. } if registration.activities.is_empty()
+    ));
+    Ok(())
+}
+
+#[test]
+fn worker_register_nonempty_census_round_trips_exactly() -> Result<(), ProtocolError> {
+    let activities = vec![
+        WorkerActivityDescriptor {
+            name: "invoice.create".to_owned(),
+            input_schema_json: r#"{"type":"object","required":["amount"],"properties":{"amount":{"type":"integer","minimum":1}}}"#
+                .to_owned(),
+            output_schema_json: String::new(),
+        },
+        WorkerActivityDescriptor {
+            name: "invoice.cancel".to_owned(),
+            input_schema_json: r#"{"type":"string","minLength":1}"#.to_owned(),
+            output_schema_json:
+                r#"{"type":"object","properties":{"cancelled":{"const":true}}}"#.to_owned(),
+        },
+    ];
+    let frame = Frame::WorkerRegister {
+        flags: 0x3C,
+        registration: WorkerRegistration {
+            namespaces: vec!["billing".to_owned(), "backoffice".to_owned()],
+            task_queue: "invoice-jobs".to_owned(),
+            node: None,
+            activity_types: vec!["invoice.create".to_owned(), "invoice.cancel".to_owned()],
+            identity: "worker-census-v1".to_owned(),
+            activities: activities.clone(),
+        },
+    };
+
+    let expected_len = encoded_len(&frame)?;
+    let mut bytes = vec![0_u8; expected_len];
+    let written = encode(&frame, &mut bytes)?;
+    assert_eq!(written, expected_len);
+    assert_eq!(bytes.len(), written);
+
+    let (decoded, consumed) = decode(&bytes)?;
+    assert_eq!(consumed, written);
+    assert_eq!(decoded, frame);
+    assert!(matches!(
+        decoded,
+        Frame::WorkerRegister { registration, .. } if registration.activities == activities
+    ));
     Ok(())
 }
 

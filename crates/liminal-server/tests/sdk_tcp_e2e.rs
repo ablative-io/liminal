@@ -992,6 +992,7 @@ fn worker_registration() -> WorkerRegistration {
         node: Some("node-a".to_owned()),
         activity_types: vec!["charge".to_owned(), "refund".to_owned()],
         identity: "worker-7".to_owned(),
+        activities: Vec::new(),
     }
 }
 
