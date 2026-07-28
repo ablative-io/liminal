@@ -3,7 +3,7 @@ use std::error::Error;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use super::*;
@@ -148,10 +148,10 @@ fn sweep_uses_scan_and_respects_ttl_grace() -> Result<(), Box<dyn Error>> {
     let cache = DedupCache::new(store.clone(), "dedup");
     let sweeper = DedupSweeper::new(
         cache.clone(),
-        Duration::from_millis(60_000),
-        Duration::from_millis(5_000),
+        Duration::from_secs(60),
+        Duration::from_secs(5),
     );
-    assert_eq!(sweeper.sweep_interval(), Duration::from_millis(5_000));
+    assert_eq!(sweeper.sweep_interval(), Duration::from_secs(5));
     assert_eq!(
         block_on(cache.claim_or_get("key", 1_000))?,
         DedupDecision::Claimed
@@ -180,8 +180,8 @@ fn sweep_keeps_receipt_younger_than_ttl_even_when_claim_is_old() -> Result<(), B
     let cache = DedupCache::new(store, "dedup");
     let sweeper = DedupSweeper::new(
         cache.clone(),
-        Duration::from_millis(60_000),
-        Duration::from_millis(5_000),
+        Duration::from_secs(60),
+        Duration::from_secs(5),
     );
 
     assert_eq!(
@@ -504,8 +504,7 @@ impl FakeStore {
 }
 
 fn block_on<F: Future>(future: F) -> F::Output {
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = Box::pin(future);
     loop {
         match Future::poll(Pin::as_mut(&mut future), &mut context) {
@@ -513,12 +512,6 @@ fn block_on<F: Future>(future: F) -> F::Output {
             Poll::Pending => std::thread::yield_now(),
         }
     }
-}
-
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
 }
 
 fn lock_error() -> DurabilityError {

@@ -362,7 +362,6 @@ fn restored_permit_is_released_once_and_failure_parks_without_timer() -> TestRes
     };
     let ReconnectPermitDecision::Permitted {
         aggregate: conflicting_aggregate,
-        permit: _,
         ..
     } = record_explicit_reconnect(
         ClientParticipantAggregate::new(),

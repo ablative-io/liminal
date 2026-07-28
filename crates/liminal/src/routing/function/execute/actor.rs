@@ -194,7 +194,7 @@ mod cooperative_smoke {
     use std::pin::Pin;
     use std::rc::Rc;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
+    use std::task::{Context, Poll, Waker};
 
     use beamr::atom::AtomTable;
     use beamr::module::ModuleRegistry;
@@ -219,24 +219,10 @@ mod cooperative_smoke {
         Rc::new(RefCell::new(WasmScheduler::new(atom_table, modules, bifs)))
     }
 
-    /// A no-op waker built through the safe [`Wake`] trait (liminal forbids
-    /// `unsafe`, so the raw-vtable construction beamr's own tests use is not
-    /// available here). The host pump — not a waker thread — advances the future,
-    /// so the wake is genuinely a no-op; polling needs only a valid `Context`.
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-        fn wake_by_ref(self: &Arc<Self>) {}
-    }
-
-    fn noop_waker() -> Waker {
-        Waker::from(Arc::new(NoopWake))
-    }
-
     fn poll_once(future: &mut Pin<Box<CallFuture<i64>>>) -> Poll<Result<i64, ActorError>> {
-        let waker = noop_waker();
-        let mut cx = Context::from_waker(&waker);
+        // The host pump — not a waker thread — advances the future, so the
+        // wake is genuinely a no-op; polling needs only a valid `Context`.
+        let mut cx = Context::from_waker(Waker::noop());
         future.as_mut().poll(&mut cx)
     }
 

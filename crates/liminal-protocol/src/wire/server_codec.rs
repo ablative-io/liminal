@@ -2527,13 +2527,10 @@ fn take_invalid_observer_epoch(
             })
         }
         t::InvalidObserverEpochReason::EpochAhead => {
-            let current_observer_progress = current.map_or_else(
-                || {
-                    decoder.invalidate();
-                    0
-                },
-                core::convert::identity,
-            );
+            let current_observer_progress = current.unwrap_or_else(|| {
+                decoder.invalidate();
+                0
+            });
             Ok(r::InvalidObserverEpoch::EpochAhead {
                 conversation_id,
                 presented_epoch,

@@ -434,7 +434,7 @@ fn expired_provenance_prunes_freeing_capacity_and_degrading_exact_old_tokens()
 
     // Wait out every provenance window; the request-time checks prune the
     // retained fingerprints, freeing the participant's capacity.
-    sleep(Duration::from_millis(2_000));
+    sleep(Duration::from_secs(2));
     let second = attach(
         &handler,
         incarnation,

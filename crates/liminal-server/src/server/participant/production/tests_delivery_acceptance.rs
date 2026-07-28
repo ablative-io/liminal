@@ -149,12 +149,9 @@ fn replay_sequences(
 ) -> Result<Vec<u64>, Box<dyn Error>> {
     let mut offered = None;
     let mut sequences = Vec::new();
-    loop {
-        let Some(publication) =
-            handler.next_publication(member.connection, CONVERSATION, offered)?
-        else {
-            break;
-        };
+    while let Some(publication) =
+        handler.next_publication(member.connection, CONVERSATION, offered)?
+    {
         sequences.push(publication.delivery_seq());
         offered = Some(ParticipantOfferedProgress {
             binding_epoch: publication.binding_epoch,

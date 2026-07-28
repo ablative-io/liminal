@@ -184,17 +184,10 @@ mod tests {
     use beamr::distribution::resolver::{NodeResolver, ResolveError};
     use std::net::SocketAddr;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
-    }
+    use std::task::{Context, Poll, Waker};
 
     fn resolve_now(resolver: &ClusterResolver, name: &str) -> Result<SocketAddr, ResolveError> {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let mut future = resolver.resolve(name);
         match future.as_mut().poll(&mut context) {
             Poll::Ready(result) => result,
@@ -237,8 +230,7 @@ mod tests {
         let (resolver, _labels) = seed_resolver(&[socket("127.0.0.1:9000")]);
         let shared = as_resolver(Arc::clone(&resolver));
         // The coerced handle resolves the same mappings.
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut context = Context::from_waker(&waker);
+        let mut context = Context::from_waker(Waker::noop());
         let mut future = shared.resolve("seed-0@127.0.0.1:9000");
         let outcome = match future.as_mut().poll(&mut context) {
             Poll::Ready(result) => result,

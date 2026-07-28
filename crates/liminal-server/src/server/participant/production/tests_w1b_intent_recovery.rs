@@ -121,10 +121,7 @@ fn operation_rows(
     let log = OperationLog::new(store, conversation_id);
     let mut rows = Vec::new();
     let mut sequence = 0_u64;
-    loop {
-        let Some(decoded) = block_on(log.read_at(sequence))?? else {
-            break;
-        };
+    while let Some(decoded) = block_on(log.read_at(sequence))?? {
         let DecodedStoredOperation::V3(operation) = decoded.operation else {
             return Err(format!(
                 "conversation {conversation_id} sequence {sequence} was not schema v3"

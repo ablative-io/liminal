@@ -307,7 +307,7 @@ fn superseded_enrollment_token_maps_to_enrollment_known_after_provenance()
     assert_eq!(attached.capability_generation(), generation(2)?);
     // Wait out the enrollment provenance window (sleeping late is safe: the
     // assertion is about AFTER the window).
-    sleep(Duration::from_millis(2_000));
+    sleep(Duration::from_secs(2));
 
     let after_window = dispatch(
         &handler,

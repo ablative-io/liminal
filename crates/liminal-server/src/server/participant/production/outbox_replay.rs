@@ -225,10 +225,7 @@ impl<'a> AggregateExtensionMerge<'a> {
         expected_projection: Option<&OutboxRow>,
     ) -> Result<(), StateError> {
         let mut projection_seen = false;
-        loop {
-            let Some((physical_sequence, row)) = self.pending.front() else {
-                break;
-            };
+        while let Some((physical_sequence, row)) = self.pending.front() {
             let boundary = row.base_log_head().ok_or_else(|| {
                 StateError::invariant("Unit 2 extension base boundary overflowed")
             })?;

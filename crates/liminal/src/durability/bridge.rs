@@ -41,8 +41,7 @@
 //! `Ready` on the first poll returns immediately with zero extra overhead.
 use std::future::Future;
 use std::pin::pin;
-use std::sync::Arc;
-use std::task::{Context, Poll, Wake, Waker};
+use std::task::{Context, Poll, Waker};
 
 /// Maximum number of polls [`block_on`] performs before failing loudly.
 ///
@@ -81,8 +80,7 @@ pub enum BridgeError {
 /// suspending backend was introduced and requires a real executor on a
 /// dedicated I/O thread (see the module docs).
 pub fn block_on<F: Future>(future: F) -> Result<F::Output, BridgeError> {
-    let waker = Waker::from(Arc::new(NoopWaker));
-    let mut context = Context::from_waker(&waker);
+    let mut context = Context::from_waker(Waker::noop());
     let mut future = pin!(future);
     for _ in 0..MAX_POLLS {
         if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
@@ -91,12 +89,6 @@ pub fn block_on<F: Future>(future: F) -> Result<F::Output, BridgeError> {
         std::thread::yield_now();
     }
     Err(BridgeError::DidNotComplete { polls: MAX_POLLS })
-}
-
-struct NoopWaker;
-
-impl Wake for NoopWaker {
-    fn wake(self: Arc<Self>) {}
 }
 
 #[cfg(test)]

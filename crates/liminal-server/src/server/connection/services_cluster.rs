@@ -95,8 +95,7 @@ pub fn build_channel_cluster(
 fn node_creation() -> u32 {
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |duration| duration.as_secs());
     // Fold the 64-bit seconds into 31 bits (the low word, masked positive) so the
     // creation is a stable-per-process, non-zero value; the exact bits do not
     // matter, only that incarnations differ and none is zero.
