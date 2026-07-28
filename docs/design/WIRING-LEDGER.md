@@ -178,6 +178,31 @@ an alias is not an absence proof. Recorded, not corrected — the r1.9 conclusio
 **Whether W1b is discharged is a ruling, not a sweep finding.** This sweep
 records the bytes only; the lane's closure is the owner's call.
 
+##### W1b — RULED CLOSED (Waffles the Terrible, ledger owner, 2026-07-28)
+
+The third leg the closure was held on — the §8 flush barriers — is evidenced
+at the artifact level and the ruling is made. Closing evidence, re-walked at
+the owner's hands on the two load-bearing hops: every production fate-row
+append funnels through the synchronous bridge into
+`production/log.rs:238-248`, where `store.append` is immediately followed by
+`self.store.flush().await?` (:248 — "the flush is the durability barrier the
+caller's pending shell commit waits behind"); at the Died/Detached site
+(`connection_fate.rs:256`) and through `commit_through_barrier`
+(`barrier.rs:138/:149`) for Ordinary/Recovered, ALL in-memory state advance is
+textually and causally after the `?`-propagated append, so a failed flush
+aborts before anything moves. Same append-then-flush shape as the observer log
+(`observer.rs:88-91/:98`) and outbox log (`outbox_log.rs:580-583/:590`) —
+class parity, not a weaker discipline. The terminal disk hop is haematite
+0.7.0's atomic commit point (temp → fsync → rename → dir fsync). §8's second
+leg (the `ObserverRow::Advance` append/flush + cold reconcile) is wired at
+`handler.rs:366-372` → `handler_observer_reconcile.rs:285-295`. The row's own
+oracle floor — per-fate append/replay/flush oracles and the cold-reconstruction
+path — is discharged by `tests_w1b_source_flush.rs` (`source_flush_precedes_advance`
+:123 with its `SourceCutAppender` fault injection; entry points :222/:227/:232).
+The earlier grep's zero hits are explained by file selection:
+`connection_fate_rows.rs` constructs rows and never appends; `log_v3.rs` is
+schema grammar; the flush is one module over.
+
 **Not verified by this sweep:** the 2026-07-24 Detached-drain landing
 (`6d09bae`) does **not** wire these producers — `bbb3ace` / `6f3febb` /
 `4a5de6a` touch `ops_session_replay.rs`, `ops_terminal_drain.rs` and their
@@ -312,6 +337,15 @@ enforced on every live ack, not merely fixture-checked.
 Wired by `e25fa72` (2026-07-22, "feat(w2): consume both nonzero ack paths") —
 the sole commit introducing either symbol into `crates/liminal-server/`.
 Formal discharge of the lane is the owner's ruling, not this sweep's.
+
+##### W2 — RULED CLOSED (Waffles the Terrible, ledger owner, 2026-07-28)
+
+Closed on the owner's own byte-walk of `select_conforming_nonzero_ack`: both
+selectors production-called, the divergence invariant returned when they
+disagree. The oracle floor asked for fixture tests asserting non-divergence; a
+production invariant enforced on every live ack is the stronger form and
+supersedes the fixture formulation. The trigger (the dispatch arm consuming
+obligation debt, `e25fa72`) has occurred.
 
 ### W3 — Apply-per-page restore (row R) — CLOSED r1.4 (landed 9dca3a3)
 - **Closure (2026-07-20, coordination-seat tear):** production restore now
@@ -856,10 +890,12 @@ close**:
   2026-07-19; a fifth `Detached` arm arrived wired.
 - **W1a** — CLOSED, and its r1.8 tear rider **discharged** by `38a7900`.
 - **W1b** — all three open claims repaired at the bytes 2026-07-20/21
-  (`87caef4`, `ebb8aaa`, `79a5ca6`, `c06bda8`, `1b03e50`). Ripe for a closure
-  ruling.
+  (`87caef4`, `ebb8aaa`, `79a5ca6`, `c06bda8`, `1b03e50`). **RULED CLOSED
+  2026-07-28** on the flush-barrier evidence — see the closure block in the
+  row.
 - **W2** — **wired at the bytes** since `e25fa72` (2026-07-22), including the
-  divergence refusal in production. Ripe for a closure ruling.
+  divergence refusal in production. **RULED CLOSED 2026-07-28** — the
+  production invariant supersedes the fixture formulation.
 - **W3** — CLOSED r1.4; closure verifies, with one census-location imprecision
   corrected forward.
 - **W4** — **five-ninths done** at the sweep's base; **six-ninths since
