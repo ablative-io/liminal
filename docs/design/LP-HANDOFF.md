@@ -1,5 +1,84 @@
 # HANDOFF — liminal participant-lifecycle delivery
 
+> ## ⚠ SUPERSEDED — dated correction, 2026-07-28
+>
+> **Do not act on the "Exact current state" or "Immediate next task" sections
+> below.** They are materially false against the tree and following them would
+> restart finished work. The body is left UNEDITED as a historical artifact —
+> this header is the forward correction, in the estate's record-forward style.
+>
+> ### What this document claimed (2026-07-16, verified quotations)
+>
+> - "**Phase A checkpoint 1 is BUILT and gate-verified.** Worktree
+>   `.worktrees/liminal-protocol`, branch `feature/liminal-protocol`, commit
+>   `83996e73388b807632330fcc5f063b8d1e26d459`"
+> - "**Checkpoint 1 independent review is IN FLIGHT.**"
+> - "Phase A2 … has NOT started"; "Phases B and C have not started."
+> - "**Nothing from this delivery is merged to `main` yet.**"
+> - "## Immediate next task: checkpoint-1 correctness review"
+>
+> ### The true state (at main `1a0b60c`, 2026-07-28)
+>
+> - **Phase A is merged.** `83996e7` ("feat(protocol): complete phase one state
+>   machine", 2026-07-16) is an ancestor of `main` —
+>   `git merge-base --is-ancestor 83996e7 origin/main` succeeds. Neither the
+>   worktree `.worktrees/liminal-protocol` nor the branch
+>   `feature/liminal-protocol` still exists (`git branch -a --list
+>   '*liminal-protocol*'` is empty); the branch was reconciled long ago.
+> - **Phases B and C are done and shipped.** `crates/liminal-protocol` is
+>   **published at 0.3.2** (bumped in `acd8eb7`, "release: liminal 0.4.1 family
+>   + protocol 0.3.2", CHANGELOG `## 0.4.1 — 2026-07-23`). `liminal-server` and
+>   `liminal-sdk` both consume it and are released at **0.5.0** (`2a15a23`,
+>   2026-07-28, "WorkerRegister activity census").
+> - Checkpoint-1 review is long closed; the norn session named below
+>   (`claude-review-lp-cp1-r2-20260715T211739Z`) is dead history. Do not chase
+>   it, and do not re-dispatch the embedded review prompt against `83996e7` —
+>   `git rev-list --count 83996e7..origin/main` is 502, of which 118 touch
+>   `crates/liminal-protocol`. The crate the prompt describes no longer exists.
+> - The gate block's checkout path (`/Users/tom/Developer/ablative/liminal`) is
+>   one operator's box, not a portable location. Run gates from whatever
+>   checkout you actually hold. The `cargo clean`-before-clippy discipline it
+>   teaches is still correct and still standing.
+>
+> ### What in this document is STILL TRUE and still binding
+>
+> Re-affirmed here explicitly, because these are the sentences that are
+> dangerous if a reader discards the whole document as stale:
+>
+> 1. **"No fixed occurrence array … It is FORBIDDEN to transcribe."** The R18
+>    `successor_milestones` / `R_max`/`E_max`/`O_max` slot machinery of the
+>    frozen contract (~2560–2715) is a confirmed defect and the non-transcription
+>    mandate **REMAINS IN FORCE**. Unchanged in `LP-EXTRACTION-GOAL.md` Fix 2
+>    ("Do not port any of it"), and carried forward as a carve-out of the R18
+>    ratification at `1a0b60c`. Cursor-progress facts stay keyed
+>    `(participant_index, boundary)`, accounted per participant. Ratifying R18
+>    did **not** un-forbid the array.
+> 2. **The four-variant detach cell (Fix 1) is mandatory, and is now built.**
+>    `Empty | Pending | Committed | Terminalized`, attach transitions
+>    `Committed → Terminalized` and never to `Empty`. Live at
+>    `crates/liminal-protocol/src/lifecycle/attach.rs` (`commit_attach` :509,
+>    `transition_detach_cell` :615). Do not "simplify" the cell back toward the
+>    frozen document's three variants — that reintroduces the original blocker.
+> 3. **"If any review disputes a mandated fix, the mandate wins unless the
+>    finding shows the mandate itself broken — in that case STOP and get a human
+>    ruling."** Standing.
+> 4. **The Standing rules section in full.** No `unsafe`; no
+>    `unwrap`/`expect`/`panic` outside test code (enforced at
+>    `[workspace.lints.clippy]` in the root `Cargo.toml`); clippy `-D warnings`;
+>    never re-implement a crate-owned rule in server or SDK code; no silent
+>    fallbacks; **no polling (LAW-1)**; **publish, tags, and merges to main are
+>    human-gated**; work in `.worktrees/<name>` on feature branches, never on the
+>    main checkout.
+> 5. **`docs/design/PARTICIPANT-CONTRACT.md` remains the semantic authority and
+>    remains frozen in body.** Frozen at
+>    `55856ae3c53206f9c662e6815650dfc67a89ce85` (2026-07-15) at 6,331 lines. The
+>    file is 6,402 lines today; the 71-line delta is entirely header/amendment
+>    material appended by `fec354f` (amendment A1 — response/push ordering) and
+>    `1a0b60c` (the R18 ratification record). The frozen body itself has not
+>    been edited.
+>
+> Retained as a historical artifact. Nothing below this line is edited.
+
 Written 2026-07-16 by Waffles (Claude/Fable seat, usage-constrained). This
 document is self-contained: a fresh model at any provider, with access to this
 repository, can continue the delivery from exactly here. Read this file fully

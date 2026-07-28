@@ -17,7 +17,46 @@ hand-verified: (1) the R18 fixed occurrence array under-reserves participant-
 scoped cursor facts (doc ~2560–2715); (2) a successful attach destroys the only
 data the promised `TerminalizedDetachCell` replay response needs (doc
 ~1578–1634 vs ~4728–4752 and ~5671). Both defect classes are caught mechanically
-by types and tests. Decision (Tom, 2026-07-15): the rules move into a shared
+by types and tests.
+
+> **Dated resolution note — 2026-07-28 (forward correction; the paragraph above
+> is left as written).**
+>
+> The prose above still reads as an open record. **Blocker 2 is FIXED on main.**
+> The `LP-EXTRACTION-GOAL.md` Fix 1 fourth detach-cell variant shipped: the cell
+> is `Empty | Pending | Committed | Terminalized`, and **no transition arm
+> produces `Empty` from a populated cell** — a successful attach moves
+> `Committed → Terminalized`, preserving the old `committed_binding_epoch` that
+> the promised `TerminalizedDetachCell` replay response needs
+> (`crates/liminal-protocol/src/lifecycle/attach.rs`: `commit_attach` :509,
+> `transition_detach_cell` :615). The `TerminalizedDetachCell` response type is
+> constructible only from the `Terminalized` variant, so the original defect is
+> a compile error by construction rather than a review obligation.
+>
+> Pinned end to end, not just at the type level:
+> - cold restart —
+>   `terminalized_detach_cold_reopen_carries_old_epoch_through_dispatch`
+>   (`crates/liminal-server/src/server/participant/production/tests.rs:158`)
+> - real socket —
+>   `full_lifecycle_e2e_over_real_socket_replays_old_epoch`
+>   (`crates/liminal-server/src/server/participant/production/e2e_tests.rs:498`)
+>
+> Verified again in the R18 ratification at main `1a0b60c` (2026-07-28), whose
+> **carve-out 2** records the attach-clears-the-detach-cell text (~contract lines
+> 1596–1645) as "defective as written … superseded by `LP-EXTRACTION-GOAL.md`
+> Fix 1's fourth `Terminalized` cell variant (verified structurally fixed on
+> main, 2026-07-28: no transition arm produces `Empty` from a populated cell;
+> cold-restart and real-socket old-epoch replay pins)".
+>
+> **Blocker 1 is NOT resolved and is not softened by this note.** The R18 fixed
+> occurrence array remains defective and its **non-transcription mandate REMAINS
+> IN FORCE** — `LP-EXTRACTION-GOAL.md` Fix 2 ("Do not port any of it"),
+> `LP-HANDOFF.md` ("It is FORBIDDEN to transcribe"), and carve-out **1** of the
+> same R18 ratification. Cursor-progress facts stay keyed
+> `(participant_index, boundary)` and accounted per participant. Ratifying R18
+> did not un-forbid the array; blocker 1 was routed around, never fixed.
+
+Decision (Tom, 2026-07-15): the rules move into a shared
 Rust crate — `crates/liminal-protocol` — consumed by both `liminal-server` and
 `liminal-sdk`, so drift is impossible and correctness is enforced by cargo on
 every commit, free, forever. The document stays frozen as source material. No
