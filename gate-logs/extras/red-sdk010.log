@@ -1,0 +1,121 @@
+# SDK-010 RED SET — pre-change tree
+# worktree: .worktrees/sdk-010  branch: feat/sdk010-reader-deadline
+# HEAD at red run: 4a235c3 (brief re-pin on top of landed main 6e37a62)
+# command: cargo test -p liminal-sdk --lib
+# date: 2026-07-28T14:04:59Z
+
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+     Running unittests src/lib.rs (target/debug/deps/liminal_sdk-19e0e7a3f4e0f66c)
+
+running 62 tests
+test connection::lifecycle::tests::disconnect_from_connecting_is_observable ... ok
+test connection::lifecycle::tests::disconnect_from_reconnecting_is_observable ... ok
+test connection::lifecycle::tests::disconnect_from_disconnected_is_rejected_without_mutation ... ok
+test connection::lifecycle::tests::externally_authorized_reconnect_has_no_delay_or_retry_counter ... ok
+test connection::lifecycle::tests::disconnected_to_connected_is_rejected ... ok
+test connection::pool::tests::invalid_pool_size_is_rejected ... ok
+test connection::lifecycle::tests::observers_receive_successful_transitions ... ok
+test connection::pool::tests::multiple_subscriptions_share_configured_connections ... ok
+test connection::pool::tests::non_reconnect_transition_does_not_resume ... ok
+test connection::pool::tests::subscriptions_are_distributed_across_connections ... ok
+test connection::pool::tests::pooled_recovery_builds_resume_requests_on_reconnect ... ok
+test connection::recovery::tests::maximum_sequence_does_not_wrap_to_zero ... ok
+test connection::recovery::tests::non_recovery_transition_builds_no_resume_requests ... ok
+test connection::pool::tests::unsubscribe_removes_assignment ... ok
+test connection::recovery::tests::acknowledged_subscriptions_resume_after_last_sequence ... ok
+test connection::recovery::tests::reconnect_to_connected_transition_builds_resume_requests ... ok
+test connection::recovery::tests::subscriptions_without_acknowledgement_resume_from_zero ... ok
+test connection::recovery::tests::unsubscribe_clears_recovery_state ... ok
+test embedded::tests::embedded_config_does_not_require_server_address ... ok
+test embedded::tests::embedded_publish_uses_direct_message_reference ... ok
+test embedded::tests::embedded_subscribe_is_local_and_empty ... ok
+test remote::participant::tests::replay::failed_checkpoint_withholds_successor_authority ... ok
+test remote::protocol::tests::publish_frame_uses_protocol_header ... ok
+test remote::protocol::tests::subscribe_and_resume_use_distinct_frame_types ... ok
+test remote::protocol::tests::subscription_connection_slot_zero_maps_to_application_stream_one ... ok
+test remote::tcp::flush::tests::rejections_surface_in_wire_order_verbatim ... ok
+test remote::tcp::flush::tests::second_drain_covers_only_its_own_boundary ... ok
+test remote::tcp::flush::tests::surplus_verdict_is_a_typed_mechanism_error ... ok
+test remote::tcp::flush::tests::concurrent_drains_serialize_without_misattribution ... ok
+test remote::tcp::push_client::tests::publish_frame_round_trips_through_codec ... ok
+test remote::tcp::push_client::tests::pushed_frame_exposes_correlation_and_payload ... ok
+test remote::participant::tests::restored_issued_reconnect_permit_resolves_take_once_testimony ... ok
+test remote::tcp::push_client::tests::reply_frame_round_trips_through_codec ... ok
+test remote::participant::tests::lpcr_round_trip_recovers_unissued_and_resolves_issued_testimony ... ok
+test remote::tcp::push_client::tests::push_client_source_has_no_retired_reader_poll_family ... FAILED
+test remote::tcp::subscription::tests::deliver_frame_round_trips_through_codec ... ok
+test remote::tcp::subscription::tests::delivered_message_exposes_seq_and_payload ... ok
+test remote::participant::tests::nonmatching_attach_preserves_inflight_then_matching_attach_supersedes ... ok
+test remote::participant::tests::replay::issued_tokenless_restore_reports_durable_abandonment ... ok
+test remote::participant::tests::tokenless_restore_surfaces_durable_abandonment_for_rerecord ... ok
+test remote::participant::tests::replay::durable_leave_from_real_receive_supersedes_inflight_detach ... ok
+test remote::tcp::subscription::tests::subscription_source_has_no_retired_reader_poll_family ... FAILED
+test remote::tcp::tests::conversation_ids_are_stable ... ok
+test remote::tcp::tests::publish_ack_maps_to_accept ... ok
+test remote::tcp::tests::publish_error_maps_to_backpressure ... ok
+test remote::tcp::tests::schema_ids_are_deterministic_and_distinct ... ok
+test remote::tests::builder_switches_channel_mode_by_config ... ok
+test remote::participant::tests::replay::in_progress_real_reconnect_restores_take_once_testimony ... ok
+test remote::tests::remote_config_requires_server_address ... ok
+test remote::tests::remote_handle_uses_lifecycle_and_recovery_on_reconnect ... ok
+test remote::participant::tests::contract_c34_ack_values_cross_the_real_receive_path ... ok
+test remote::participant::tests::response_loss_reconnects_once_and_replays_exact_detach_token ... ok
+test remote::participant::tests::sent_is_not_receipt_real_receive_releases_exact_d1_slot ... ok
+test remote::tcp::subscription::tests::the_subscription_reader_carries_no_read_window_in_steady_state ... FAILED
+test remote::websocket::subscription::tests::websocket_subscription_source_has_no_retired_reader_poll_family ... ok
+test remote::participant::tests::replay::all_detach_terminal_arms_apply_and_survive_lpcr_restore ... ok
+test remote::tcp::flush::tests::budget_expiry_counts_unresolved_and_is_not_an_error ... ok
+test remote::tcp::push_client::tests::connect_survives_a_control_reply_slower_than_the_retired_poll_cadence ... FAILED
+test remote::tcp::push_client::tests::a_peer_that_never_answers_the_handshake_is_refused_at_the_named_deadline ... FAILED
+test remote::tcp::push_client::tests::the_push_reader_carries_no_read_window_in_steady_state ... FAILED
+test remote::tcp::subscription::tests::open_preserves_deliveries_coalesced_with_the_subscribe_ack ... ok
+test remote::tcp::subscription::tests::open_survives_control_replies_slower_than_the_retired_poll_cadence ... ok
+
+failures:
+
+---- remote::tcp::push_client::tests::push_client_source_has_no_retired_reader_poll_family stdout ----
+
+thread 'remote::tcp::push_client::tests::push_client_source_has_no_retired_reader_poll_family' (2467354) panicked at crates/liminal-sdk/src/remote/tcp/push_client_tests.rs:212:9:
+retired push-reader poll-family source `READER_POLL_TIMEOUT` reappeared
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- remote::tcp::subscription::tests::subscription_source_has_no_retired_reader_poll_family stdout ----
+
+thread 'remote::tcp::subscription::tests::subscription_source_has_no_retired_reader_poll_family' (2467366) panicked at crates/liminal-sdk/src/remote/tcp/subscription_tests.rs:299:9:
+retired subscription-reader poll-family source `READER_POLL_TIMEOUT` reappeared
+
+---- remote::tcp::subscription::tests::the_subscription_reader_carries_no_read_window_in_steady_state stdout ----
+
+thread 'remote::tcp::subscription::tests::the_subscription_reader_carries_no_read_window_in_steady_state' (2467369) panicked at crates/liminal-sdk/src/remote/tcp/subscription_tests.rs:252:5:
+assertion `left == right` failed: the subscription reader must block with no read window once the control exchange is over; a Some(_) here is a cadence, whatever its period
+  left: Some(100ms)
+ right: None
+
+---- remote::tcp::push_client::tests::connect_survives_a_control_reply_slower_than_the_retired_poll_cadence stdout ----
+Error: Connection { description: "push connection timed out waiting for a control-frame reply" }
+
+---- remote::tcp::push_client::tests::a_peer_that_never_answers_the_handshake_is_refused_at_the_named_deadline stdout ----
+
+thread 'remote::tcp::push_client::tests::a_peer_that_never_answers_the_handshake_is_refused_at_the_named_deadline' (2467350) panicked at crates/liminal-sdk/src/remote/tcp/push_client_tests.rs:188:5:
+the refusal must arrive at the named 5s setup deadline, not at a poll cadence nobody chose; it arrived in 102.154875ms
+
+---- remote::tcp::push_client::tests::the_push_reader_carries_no_read_window_in_steady_state stdout ----
+
+thread 'remote::tcp::push_client::tests::the_push_reader_carries_no_read_window_in_steady_state' (2467359) panicked at crates/liminal-sdk/src/remote/tcp/push_client_tests.rs:145:5:
+assertion `left == right` failed: the push reader must block with no read window once the control exchange is over; a Some(_) here is a cadence, whatever its period
+  left: Some(100ms)
+ right: None
+
+
+failures:
+    remote::tcp::push_client::tests::a_peer_that_never_answers_the_handshake_is_refused_at_the_named_deadline
+    remote::tcp::push_client::tests::connect_survives_a_control_reply_slower_than_the_retired_poll_cadence
+    remote::tcp::push_client::tests::push_client_source_has_no_retired_reader_poll_family
+    remote::tcp::push_client::tests::the_push_reader_carries_no_read_window_in_steady_state
+    remote::tcp::subscription::tests::subscription_source_has_no_retired_reader_poll_family
+    remote::tcp::subscription::tests::the_subscription_reader_carries_no_read_window_in_steady_state
+
+test result: FAILED. 56 passed; 6 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+error: test failed, to rerun pass `-p liminal-sdk --lib`
+EXIT=101

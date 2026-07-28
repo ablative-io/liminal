@@ -514,3 +514,33 @@ fn unexpected_setup_frame(expected: &str, actual: &Frame) -> SdkError {
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    /// TOMBSTONE (SDK-010 R5) — the WebSocket subscription reader is the shape
+    /// the two TCP readers were generalized toward, and it must stay that shape:
+    /// no reader poll family, no stop flag, no cadence in steady state. Its
+    /// disarm (`socket.set_read_timeout(None)` before the reader spawns) is
+    /// exercised behaviorally by the landed `sdk_ws_e2e` and
+    /// `ws_transport_parity` suites, which open a real subscription over a real
+    /// server; this guard holds the source itself.
+    #[test]
+    fn websocket_subscription_source_has_no_retired_reader_poll_family() {
+        const SOURCE: &str = include_str!("subscription.rs");
+        let production = SOURCE.split("#[cfg(test)]").next().unwrap_or(SOURCE);
+        for forbidden in [
+            "READER_POLL_TIMEOUT",
+            "AtomicBool",
+            "stop.load",
+            "stop.store",
+            "re-check the stop flag",
+            "poll the stop flag",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "retired websocket-subscription-reader poll-family source \
+                 `{forbidden}` reappeared"
+            );
+        }
+    }
+}
