@@ -1,14 +1,39 @@
 # Participant-domain wire/server contract — design draft R18
 
-**Status: DRAFT R18 — closes the adversarial post-R17 defects in generated-codec
-constructibility, exact Qe=2 occurrence totality, K-classified Leave transfer,
-equality-enrollment continuation, and boundary-fixture classification while
-preserving R17's movable-claim, completion-order, payload, and frame closures;
-not yet ratified.** This redraft
-parks at the two-key gate: reviewer-of-record plus the liminal domain-owner pass
-(Hermes Crumpet). “Decided-by-draft” below means that R18 selects one contract
-shape for those keys to accept or refute; it does not grant implementation
-authority before both keys turn.
+**Status: R18 RATIFIED AS FROZEN SOURCE MATERIAL — both keys of the LAW 3
+two-key gate turned 2026-07-28: Hermes Crumpet (liminal domain owner,
+2026-07-28) and Waffles the Terrible (reviewer of record, coordinator seat,
+2026-07-28; verdict on the domain pass's evidence pack plus independent
+spot-checks at the bytes).** The 2026-07-15 freeze posture is unchanged:
+this document is source material, not an exam surface (no exam loops), and
+the carve-outs below govern transcription. Ratification carries THREE named
+carve-outs — text inside them is ratified only as recorded here, never
+as written in the body:
+1. **Occurrence-array machinery (~§ lines 2560–2715)** — defective
+   (under-reserves participant-scoped cursor facts); FORBIDDEN to transcribe
+   (`LP-EXTRACTION-GOAL.md` Fix 2); replaced in `crates/liminal-protocol` by
+   the per-participant cursor-fact map and the `ParticipantCursorProgress`
+   repayment edge (verified honored at the bytes, 2026-07-28).
+2. **Attach-clears-the-detach-cell text (~§ lines 1596–1645)** — defective as
+   written (destroys the promised `TerminalizedDetachCell` replay data);
+   superseded by `LP-EXTRACTION-GOAL.md` Fix 1's fourth `Terminalized` cell
+   variant (verified structurally fixed on main, 2026-07-28: no transition
+   arm produces `Empty` from a populated cell; cold-restart and real-socket
+   old-epoch replay pins).
+3. **R-A2/R-C0 "binding-slot release" (lines 912–914, 1605–1607, 1629–1631)**
+   — ratified AS SCOPED by the 2026-07-23 drain-extension tear's flavor
+   ruling: for `Died`, release = erasure of the slot and token; for
+   `Detached`, release = the slot's transition OUT of the pending residence
+   into committed `BindingState::Detached`, slot and enrollment token
+   PRESERVED (landed reading, `ops_terminal_drain.rs`). The unqualified body
+   text is not to be transcribed without this scoping; candidate for an
+   A2-style amendment at any future redraft.
+
+Amendment A1 (§0.12) rides its own key and is NOT covered by this
+ratification: it remains "decided-by-amendment, pending the reviewer-of-record
+key (Vesper Lynd)". "Decided-by-draft" below retains its original meaning —
+the shape the keys were presented with; with both keys now turned it reads as
+the ratified shape, subject to the carve-outs above.
 
 **Author:** Vesper Lynd. **Drafter:** Sol worker.
 
@@ -6350,7 +6375,10 @@ cost is closed, and
 the 21-count LAW-1 sweep plus case 50 covers lexical and structural waits.
 ---
 
-**Gate posture:** DESIGN DRAFT R18. All earlier-round decisions remain in force.
+**Gate posture:** R18 RATIFIED AS FROZEN SOURCE MATERIAL (both keys turned
+2026-07-28 — see the Status block at the head of this document, including the
+three named carve-outs that govern transcription). All earlier-round decisions
+remain in force.
 R18 preserves R17's A1–A7, R16's W1–W7, and R15's N1–N12 closures, and
 additionally closes generated-codec constructibility, exact Qe=2 occurrence
 totality, K-classified Leave accounting, the equality-enrollment continuation,
@@ -6365,6 +6393,10 @@ release arms; planned-marker positional accounting; a checked occurrence bound
 with a fixed-array, J-bounded supersession retarget plan; a production-triggered floor arm;
 complete boundary snapshots with explicit public-history/test-seed
 classification; and RE/WF in the nine-field nonzero-limit taxonomy.
-Reviewer key plus Hermes Crumpet's liminal domain-owner key are still required;
-until both turn, this document is not ratified and grants no implementation
-authority.
+Both keys turned 2026-07-28: Hermes Crumpet (liminal domain owner) and
+Waffles the Terrible (reviewer of record, coordinator seat). The document is
+ratified as frozen source material under the three carve-outs named in the
+Status block; transcription authority flows through those carve-outs, and the
+occurrence-array machinery remains forbidden to transcribe. Amendment A1
+(§0.12) still awaits its own reviewer-of-record key (Vesper Lynd) and is not
+covered by this ratification.
