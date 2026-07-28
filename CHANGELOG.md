@@ -3,6 +3,36 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## 0.5.0 — 2026-07-28
+
+`liminal-rs` 0.5.0, `liminal-server` 0.5.0, `liminal-sdk` 0.5.0;
+`liminal-protocol` 0.3.2 (unchanged).
+
+### Deployment note — upgrade servers BEFORE workers
+
+`WorkerRegister` now carries a trailing activity census. An old worker
+registering against a new server is safe by construction (the absent census
+decodes as empty — the pre-contract shape). A NEW worker registering against
+an old (≤0.4.1) server fails the connection loudly: the census bytes are
+refused as leftover payload. Upgrade every server before any worker.
+
+### Added
+
+- **Protocol: worker activity census on `WorkerRegister`.** A trailing field
+  after `identity`: u32 descriptor count, then per descriptor three
+  length-prefixed strings (`name`, `input_schema_json`, `output_schema_json`).
+  An empty census identifies a pre-contract worker. Compatibility rides
+  trailing-bytes detection (`PayloadReader::is_finished`); this consumes the
+  frame's ONE trailing-bytes extension slot — any future field on this frame
+  must ride a `ProtocolVersion` gate, never a second sniff. Pinned both ways:
+  old-shaped frame → empty census, and non-empty census exact round-trip.
+
+### Fixed
+
+- **Server: Detached-flavor candidate-lane drain is faithful detach
+  finalization** (S-16), with live-drain, live-resume-with-parked-replay,
+  mixed-flavor ordering, and unclean-restart pins (S-18).
+
 ## 0.4.1 — 2026-07-23
 
 `liminal-rs` 0.4.1, `liminal-server` 0.4.1, `liminal-sdk` 0.4.1;
