@@ -1,24 +1,21 @@
 {
   "schema": "gate-report/v1",
   "repo": "liminal",
-  "commit_sha": "4a5de6ae49a726b230d9cf67c3aaf084960e4696",
-  "tree_sha": "01efc7dfc040c8d4d7f4d01a11c055686e863222",
-  "branch": "fix/pending-detached-drain",
+  "commit_sha": "4c2a4d8d57bcd6a4429cdc0e05b0bcd416b754b1",
+  "tree_sha": "82d6bd3598ae45f01976e6ca41adb6bde4fec7fb",
+  "branch": "feat/handshake-protocol",
   "dirty": false,
   "untracked_count": 0,
   "toolchain": {
-    "rustc": "rustc 1.94.1 (e408947bf 2026-03-25)",
-    "cargo": "cargo 1.94.1 (29ea6fb6a 2026-03-24)"
+    "rustc": "rustc 1.92.0 (ded5c06cf 2025-12-08)",
+    "cargo": "cargo 1.92.0 (344c4567c 2025-10-21)"
   },
-  "host": "Annabels-MacBook-Pro.local",
-  "started_at": "2026-07-23T17:42:45Z",
-  "finished_at": "2026-07-23T17:47:42Z",
-  "duration_s": 296.977,
+  "host": "Toms-MacBook-Pro.local",
+  "started_at": "2026-07-28T05:09:54Z",
+  "finished_at": "2026-07-28T05:17:43Z",
+  "duration_s": 469,
   "concurrent_cargo_at_start": [
-    "47065 /Users/annabel/.cargo/bin/norn --account default --protocol jsonrpc --fast --reasoning-effort high --append-system-promp",
-    "52073 /Users/annabel/.cargo/bin/norn --account default --protocol jsonrpc --fast --reasoning-effort high --append-system-promp",
-    "64903 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace",
-    "66987 /Users/annabel/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo test --workspace"
+    "one cargo/rustc process observed at preflight (Waffles' topics lanes winding down; cmdline not captured)"
   ],
   "legs": [
     {
@@ -26,7 +23,7 @@
       "cmd": "cargo fmt --all --check",
       "kind": "check",
       "exit": 0,
-      "duration_s": 2.381,
+      "duration_s": 1,
       "log": "gate-logs/fmt.log",
       "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "tests": null,
@@ -37,9 +34,9 @@
       "cmd": "cargo clippy --workspace --all-targets -- -D warnings",
       "kind": "check",
       "exit": 0,
-      "duration_s": 24.669,
+      "duration_s": 46,
       "log": "gate-logs/clippy.log",
-      "log_sha256": "abd795de909bbe4e164686f44ff93060da584171f3318d4e5538d1f045fd483a",
+      "log_sha256": "4347791e0a0e2c49b881e397303f0e8241ab01874759fd90633e598bb6914803",
       "tests": null,
       "failures": []
     },
@@ -48,12 +45,12 @@
       "cmd": "cargo test --workspace",
       "kind": "cargo-test",
       "exit": 0,
-      "duration_s": 269.924,
+      "duration_s": 422,
       "log": "gate-logs/tests.log",
-      "log_sha256": "ddfc7c3fe07e5105ef419f0b13617231b45b8f39886ad488f90f75db4ddccf11",
+      "log_sha256": "a8bbb40daae7aee95d99b1f0498eaad06264bba5e4eddd78d1849fffb9fbd323",
       "tests": {
         "suites": 42,
-        "passed": 1785,
+        "passed": 1789,
         "failed": 0
       },
       "failures": []
