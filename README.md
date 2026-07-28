@@ -8,7 +8,7 @@ A messaging system where conversations — not individual messages — are the f
 
 ## Status
 
-**v0.2.2.** Core messaging, channels, schema validation, durable mailboxes, and the wire protocol are implemented and tested. Backpressure and predicate routing exist as tested subsystems not yet wired into the delivery path; the Aion integration is a set of protocol-level seams (worker registration, push dispatch, observability drain) consumed by the external `aion` crates. See `docs/stack-review/` for the honest state map.
+**v0.5.0** (`liminal-rs` / `liminal-server` / `liminal-sdk` 0.5.0; `liminal-protocol` 0.3.2). Core messaging, channels, schema validation, durable mailboxes, and the wire protocol are implemented and tested. Backpressure and predicate routing exist as tested subsystems not yet wired into the delivery path; the Aion integration is a set of protocol-level seams (worker registration, push dispatch, observability drain) consumed by the external `aion` crates. See `CHANGELOG.md` for the release record and `docs/stack-review/` for the honest state map.
 
 ## Install
 
@@ -16,7 +16,7 @@ The crate is published on crates.io as **`liminal-rs`** (the bare `liminal` name
 
 ```toml
 [dependencies]
-liminal = { package = "liminal-rs", version = "0.2.2" }
+liminal = { package = "liminal-rs", version = "0.5.0" }
 ```
 
 ```rust
@@ -26,11 +26,12 @@ use liminal::conversation::ConversationHandle;
 
 ## Crates
 
-| Crate (crates.io) | `use` as | Description |
-|-------------------|----------|-------------|
-| `liminal-rs` | `liminal` | Core library — channels, conversations, durability, routing, backpressure, protocol |
-| `liminal-sdk` | `liminal_sdk` | Application-facing SDK traits for building liminal clients (no_std-capable) |
-| `liminal-server` | `liminal_server` | Standalone server for the liminal bus |
+| Crate (crates.io) | `use` as | Version | License | Description |
+|-------------------|----------|---------|---------|-------------|
+| `liminal-rs` | `liminal` | 0.5.0 | AGPL-3.0-only | Core library — channels, conversations, durability, routing, backpressure, protocol |
+| `liminal-protocol` | `liminal_protocol` | 0.3.2 | Apache-2.0 | Shared wire and lifecycle types (no_std-capable) |
+| `liminal-sdk` | `liminal_sdk` | 0.5.0 | Apache-2.0 | Application-facing SDK traits for building liminal clients (no_std-capable) |
+| `liminal-server` | `liminal_server` | 0.5.0 | AGPL-3.0-only | Standalone server for the liminal bus |
 
 ## SDKs
 
@@ -64,9 +65,21 @@ crates/liminal/src/
 
 ## Requirements
 
-- Rust 1.85+
-- Depends on beamr 0.11.0 and haematite 0.4.0
+- Rust 1.85+ (edition 2024)
+- Depends on beamr 0.16.1 (with the `readiness` feature) and haematite 0.7.0
 
 ## License
 
-AGPL-3.0-only
+Liminal is **split-licensed** — the client surface is Apache-2.0, the servers are
+AGPL-3.0-only:
+
+- **Apache-2.0** — `liminal-protocol`, `liminal-sdk`, and the TypeScript SDK
+  `@ablative/liminal` with its WASM protocol bridge. These link into *your*
+  application without copyleft obligations. Full text ships in each package
+  (`LICENSE-APACHE` in the crates, `LICENSE` in the npm package).
+- **AGPL-3.0-only** — `liminal-rs` (the `crates/liminal` core) and
+  `liminal-server`. Full text at [`LICENSE`](LICENSE).
+
+Commercial licensing for the server components is available from Ablative —
+contact <tom@ablative.com.au>. The full rule, and the reasoning behind it, is in
+[`LICENSING.md`](LICENSING.md).
