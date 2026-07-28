@@ -1,0 +1,88 @@
+   Compiling unicode-ident v1.0.24
+   Compiling fnv v1.0.7
+   Compiling getrandom v0.3.4
+   Compiling bit-vec v0.8.0
+   Compiling gimli v0.33.0
+   Compiling proc-macro2 v1.0.106
+   Compiling bit-set v0.8.0
+   Compiling fancy-regex v0.18.0
+   Compiling quote v1.0.45
+   Compiling syn v2.0.117
+   Compiling cranelift-codegen v0.131.2
+   Compiling synstructure v0.13.2
+   Compiling zerofrom-derive v0.1.7
+   Compiling yoke-derive v0.8.2
+   Compiling serde_derive v1.0.228
+   Compiling zerovec-derive v0.11.3
+   Compiling displaydoc v0.2.6
+   Compiling ref-cast-impl v1.0.25
+   Compiling tokio-macros v2.7.0
+   Compiling thiserror-impl v2.0.18
+   Compiling tracing-attributes v0.1.31
+   Compiling async-trait v0.1.89
+   Compiling clap_derive v4.6.1
+   Compiling ref-cast v1.0.25
+   Compiling tokio v1.52.3
+   Compiling zerofrom v0.1.8
+   Compiling tracing v0.1.44
+   Compiling thiserror v2.0.18
+   Compiling clap v4.6.1
+   Compiling serde v1.0.228
+   Compiling yoke v0.8.3
+   Compiling tungstenite v0.30.0
+   Compiling cranelift-native v0.131.2
+   Compiling cranelift-module v0.131.2
+   Compiling cranelift-frontend v0.131.2
+   Compiling cranelift-jit v0.131.2
+   Compiling ahash v0.8.12
+   Compiling fluent-uri v0.4.1
+   Compiling email_address v0.2.9
+   Compiling serde_spanned v0.6.9
+   Compiling toml_datetime v0.6.11
+   Compiling trybuild v1.0.118
+   Compiling toml_edit v0.22.27
+   Compiling beamr v0.16.1
+   Compiling referencing v0.46.5
+   Compiling zerovec v0.11.6
+   Compiling zerotrie v0.2.4
+   Compiling toml v0.8.23
+   Compiling tinystr v0.8.3
+   Compiling potential_utf v0.1.5
+   Compiling icu_collections v2.2.0
+   Compiling icu_locale_core v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling idna_adapter v1.2.2
+   Compiling idna v1.1.0
+   Compiling jsonschema v0.46.5
+   Compiling haematite v0.7.0
+   Compiling liminal-rs v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/srv-008/crates/liminal)
+   Compiling liminal-sdk v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/srv-008/crates/liminal-sdk)
+   Compiling liminal-server v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/srv-008/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.41s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-890e78002e438f0d)
+
+running 4 tests
+test cluster::membership::tests::delta_is_empty_by_default ... ok
+test cluster::membership::tests::first_poll_of_empty_table_yields_no_peers ... ok
+test cluster::membership::tests::peer_names_resolve_through_the_atom_table ... ok
+test cluster::membership::tests::armed_membership_observes_a_join_without_sampling ... FAILED
+
+failures:
+
+---- cluster::membership::tests::armed_membership_observes_a_join_without_sampling stdout ----
+
+thread 'cluster::membership::tests::armed_membership_observes_a_join_without_sampling' (2156342) panicked at crates/liminal-server/src/cluster/membership.rs:500:9:
+assertion `left == right` failed: an armed membership source must observe the join the instant beamr installs it, without any sampling of the connection table
+  left: 0
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    cluster::membership::tests::armed_membership_observes_a_join_without_sampling
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 574 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-server --lib`

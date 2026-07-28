@@ -1,0 +1,164 @@
+{
+  "id": "SRV-008",
+  "cluster": "server",
+  "title": "Retire cluster membership polling with ordered events",
+  "depends_on": [
+    "SRV-005"
+  ],
+  "blocked_by": [],
+  "gates_closed": [
+    "PARTICIPANT-CONTRACT-R15-GATE — SATISFIED 2026-07-28 as PARTICIPANT-CONTRACT R18. `docs/design/PARTICIPANT-CONTRACT.md:1-8` on main (1a0b60c) reads: 'Status: R18 RATIFIED AS FROZEN SOURCE MATERIAL — both keys of the LAW 3 two-key gate turned 2026-07-28: Hermes Crumpet (liminal domain owner, 2026-07-28) and Waffles the Terrible (reviewer of record, coordinator seat, 2026-07-28...)'. The contract gate that fenced dispatch is therefore CLOSED. R1's PENDING-CONTRACT-HASH labelling discipline still binds any fixture-derived number this brief later introduces; SRV-008 as implemented introduces none (it derives no number, equality, or budget from the participant contract).",
+    "BEAMR-ASK-ATOMIC-INITIAL-VIEW-ORDERED-DELTAS — SATISFIED. beamr shipped `ConnectionManager::subscribe_connection_events_with_snapshot` in 0.14.0; verified at the bytes in the workspace-locked 0.16.1 (`Cargo.lock` beamr 0.16.1) at `~/.cargo/registry/src/index.crates.io-*/beamr-0.16.1/src/distribution/connection.rs:863-870` and `.../connection_events.rs:472-531`. Its doc states the atomicity directly: 'Before this method returns, `callback` is invoked on the calling thread with a synthetic `ConnectionEvent::Up`(node, generation, peer_creation) for every currently live peer (down links excluded), then registered. Snapshot, synthetic delivery, and registration all happen while holding the event-dispatch gate, so no real event interleaves between them: the subscriber observes a per-node stream satisfying INV-ALTERNATION from its first synthetic Up, missing no session and seeing none twice.' The delivery/ordering contract that supplies the rest of R2's ask is `connection_events.rs:7-89`: INV-ALTERNATION (per node `Up(g1) Down(g1) Up(g2) …`, strictly increasing generations), INV-EXACTLY-ONCE (exactly one Up and one Down per generation while the manager lives; a session live at manager teardown gets no Down), INV-TOTAL-ORDER (all subscribers observe one global sequence via a single-drainer queue; subscribers in registration order, legacy down-slot last), INV-SYNC (delivery is synchronous with the transition — 'pg-purge therefore remains strictly synchronous-on-socket-drop'), INV-NO-REPLAY (no replay for late subscribers; `subscribe_connection_events_with_snapshot` is 'the blessed late-subscriber path'). Duplicate/coalescing policy is therefore fixed upstream: there are NO duplicates and NO coalescing to choose — generation is the identity, and the synthetic Ups are subscriber-local and never enter the global queue."
+  ],
+  "new_constraints": [
+    "INV-SUB-DISCIPLINE (beamr `connection_events.rs:59-70`, verbatim: 'callbacks MUST NOT block, MUST NOT perform socket I/O, and MUST capture only `Weak` handles to scheduler state. A blocked callback stalls reads, writes, heartbeats, accepts AND concurrent transition callers for EVERY peer. Brief bounded acquisition of short-hold locks (process slot mutexes, as the scheduler's own subscriber does) is acceptable.'). Additionally, `connection.rs:855-858`: 'Do NOT call this from inside a subscriber callback on the same manager: the reentrancy check then registers and returns the subscription WITHOUT any synthetic events'. BINDING ON THIS BRIEF: the membership subscriber callback SHALL NOT block, SHALL NOT perform socket I/O, SHALL capture only `Weak` handles, and the subscribe call SHALL NOT be made from inside a subscriber callback. Because `ClusterSync::on_peer_join` performs socket I/O (`crates/liminal-server/src/cluster/sync.rs:242-247` → `backfill_member:183-195` → `write_frame` → `write_raw_blocking:268-293`, which drives an async `write_raw` to completion, blocking the calling thread), R4's backfill CANNOT run in the callback: the callback SHALL hand the event to a consumer owned by the membership component through a non-blocking queue, and the consumer SHALL run the backfill off the delivery thread."
+  ],
+  "checklist": [],
+  "stories": [],
+  "design_anchor": [
+    "2. Cluster membership `PollLoop`",
+    "A. Dependency map",
+    "B. Brief grouping proposal for post-key-turn server briefs"
+  ],
+  "purpose": "DISPATCH-READY (re-pinned 2026-07-28 at main 1a0b60c; both `gates_closed` entries verified at the bytes). Implement the standalone membership-event-source retirement selected by `LAW1-POLLING-RETIREMENT.md` section `B. Brief grouping proposal for post-key-turn server briefs`: replace beamr connected-node snapshots, set diffs, stop-flag sampling, and sleep with an atomic initial view and ordered pushed deltas. The banked scout pack reverified every cited membership range at fe3f7ec; every tree cite below was re-verified against main 1a0b60c on 2026-07-28 and drifted ranges were corrected in place (drift list in `cite_repin`). Contract-fixture values are intentionally absent: this brief derives no number, equality, or budget from the participant contract, so no PENDING-CONTRACT-HASH label is owed.",
+  "task": "Implement against the now-shipped beamr API `ConnectionManager::subscribe_connection_events_with_snapshot` (0.14.0+; workspace-locked at 0.16.1). Preserve the startup view, ordered join/leave effects, R5 peer-join backfill, beamr's already-occupied synchronous node-down purge hook, and explicit shutdown. Scope is `crates/liminal-server/src/cluster/membership.rs`, `crates/liminal-server/src/cluster/sync.rs`, runtime wiring, and focused unit/real-cluster tests. The upstream API is now CHOSEN (see `gates_closed`); duplicate and coalescing policy are fixed upstream by INV-EXACTLY-ONCE + INV-ALTERNATION and are not open choices. The buffering/overflow policy remains this brief's to choose and MUST be documented (see R3). All tree claims are attributed to the LAW-1 paper and the banked scout pack's fe3f7ec citation-drift pass, as corrected by the 2026-07-28 re-pin.",
+  "cite_repin": [
+    "2026-07-28 re-pin against main 1a0b60c. VERIFIED UNCHANGED: `membership.rs:5-22` (why-polling module docs), `membership.rs:32` (ConnectionManager import), `membership.rs:40-44` (poll constant + doc), `membership.rs:112-128` (the snapshot/diff sampler), `membership.rs:198-230` (poll-thread struct + loop), `process_wake_tests.rs:43-65` (park-flip inversion precedent).",
+    "DRIFT CORRECTED: `membership.rs:391-403` → `:396-403` (391-395 is the neighbouring `delta_is_empty_by_default` test, not the tombstone target). `sync.rs:241-247` → `:242-247` (241 is the `impl ClusterSync {` line). `sync.rs:249-260` → `:249-261`. `cluster_two_node.rs:26-39` → `:26-40`. `cluster_two_node.rs:128-146` → `:128-147`. `cluster_two_node.rs:228-247` → `:228-248`. `cluster_two_node.rs:228-291` → `:228-248,250-308` (the node-drop test now ends at 308)."
+  ],
+  "requirements": [
+    {
+      "id": "R1",
+      "title": "Hold the contract gate and keyed socket register",
+      "spec": "CONTRACT GATE: CLOSED. PARTICIPANT-CONTRACT R18 was RATIFIED 2026-07-28 with both LAW 3 keys turned (Hermes Crumpet, liminal domain owner; Waffles the Terrible, reviewer of record) — see the Status block at `docs/design/PARTICIPANT-CONTRACT.md:1-8` on main 1a0b60c. f9f9bc2 is superseded as provisional provenance by the ratified R18 text.\n\nKeep socket references in this additive keyed register; later additions SHALL append rows without restructuring R2-R6.\n\n| key | status at 2026-07-28 re-pin | required use |\n|---|---|---|\n| `«MEMBERSHIP-EVENT-SOURCE»` | CLOSED — filled by beamr `subscribe_connection_events_with_snapshot` (see `gates_closed`) | Atomic initial membership plus ordered deltas and explicit source shutdown; no snapshot cadence qualifies. |\n| `INV-SUB-DISCIPLINE` | NEW, binding (see `new_constraints`) | The subscriber callback SHALL NOT block, SHALL NOT perform socket I/O, SHALL capture only `Weak` handles, and SHALL NOT be the site of the subscribe call. |\n| `FENCED: DCR-RECOVERY-ARM` | remains non-dependent | No requirement depends on `DetachedCredentialRecovery` or `«RETENTION-UNITS»`; if a membership/fate interaction ever arises it slots here as an added row. |\n| `<future-socket-key>` | additive slot | Append any new keyed socket without renumbering or reshaping this brief. |\n\nAny fixture-derived number, equality, or budget introduced later SHALL still be labelled `PENDING-CONTRACT-HASH` and cite its provenance. SRV-008 as specified introduces none.",
+      "acceptance": [
+        "The socket register remains keyed and a new r15 socket can be appended without changing R2-R6.",
+        "No dependency, requirement, or verification criterion relies on the DCR recovery arm.",
+        "A source review finds no unmarked participant-contract fixture-derived number, equality, or budget; every such later insertion is labelled PENDING-CONTRACT-HASH and provisional to f9f9bc2."
+      ],
+      "files": {
+        "create": [],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R2",
+      "title": "Specify the atomic initial-view and ordered-delta handoff",
+      "spec": "SATISFIED UPSTREAM — the chosen source is `beamr::distribution::connection::ConnectionManager::subscribe_connection_events_with_snapshot` (0.14.0+, workspace-locked 0.16.1). It atomically returns an initial membership view and a continuation that cannot lose a join or leave across handoff: snapshot, synthetic-Up delivery, and registration all happen under the event-dispatch gate, so no real event interleaves (`connection.rs:839-870`). Order, duplication, coalescing, close/error, and shutdown are defined by `connection_events.rs:7-89` — INV-ALTERNATION, INV-EXACTLY-ONCE, INV-TOTAL-ORDER, INV-SYNC, INV-UP-VISIBILITY, INV-DOWN-VISIBILITY, INV-FRAME-ORDER, INV-NO-REPLAY — and it is not a timer-driven snapshot/diff API. Duplicates and coalescing are eliminated by construction (generation is the per-peer identity; synthetic Ups are subscriber-local and never enter the global queue), so there is no duplicate/coalescing policy left for liminal to choose. Resubscription is unnecessary: the subscription lives as long as the manager and is torn down by `unsubscribe_connection_events`. The only policy this brief owns is the LOCAL handoff buffer between the callback and the consumer (R3). The retired liminal-side limitation is pinned at `crates/liminal-server/src/cluster/membership.rs:32,112-128`, and the original ask is in `LAW1-POLLING-RETIREMENT.md:153-183,565,569-573` (banked scout pack reverified at fe3f7ec).",
+      "acceptance": [
+        "A join or leave concurrent with initial-view acquisition appears exactly in the defined initial-or-delta side of the handoff and is not lost.",
+        "Rapid join, leave, and rejoin are observed in the selected ordering with explicitly tested duplicate/coalescing behavior.",
+        "Backend close, overflow, error, and local shutdown each produce a defined terminal or recovery outcome without a sampling fallback."
+      ],
+      "files": {
+        "create": [],
+        "modify": [],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R3",
+      "title": "Consume membership deltas and explicit shutdown",
+      "spec": "WHEN the selected source yields its initial view or an ordered membership delta, THE SYSTEM SHALL apply that fact through the existing membership consumer. WHILE the backend and local owner are silent, THE SYSTEM SHALL remain blocked until a delta, source fate, or explicit shutdown. THE SYSTEM SHALL NOT invoke `poll_once`, diff `connected_nodes()` snapshots, sample a stop flag, or sleep. The retirement family is `crates/liminal-server/src/cluster/membership.rs:40-44,112-128,198-230` (LAW-1 paper section `2. Cluster membership PollLoop`; banked scout pack reverified at fe3f7ec).\n\nHANDOFF BUFFER AND OVERFLOW RULE (this brief's only remaining policy choice, per R2). Because INV-SUB-DISCIPLINE forbids blocking and socket I/O in the callback, and R4's backfill performs socket I/O, the callback SHALL enqueue the event on a local FIFO owned by the membership component and wake a consumer that runs the effects off the delivery thread. The chosen rule is LOSSLESS-UNBOUNDED-WITH-LOUD-DEPTH, and it SHALL be documented at the production site:\n\n* Dropping is FORBIDDEN. INV-NO-REPLAY means a dropped join delta is lost forever, permanently costing that peer its R5 backfill; a dropped leave delta permanently corrupts the tracked set. Lossy delivery is therefore not admissible.\n* Blocking the producer is FORBIDDEN by INV-SUB-DISCIPLINE ('A blocked callback stalls reads, writes, heartbeats, accepts AND concurrent transition callers for EVERY peer').\n* Lossless and non-blocking jointly force an unbounded FIFO. Its growth is not unbounded in practice: an entry is produced only by a real connection-table transition, so depth is bounded by the number of transitions outstanding against a consumer that does nothing but drain. The tradeoff is DISCLOSED, not silent: the component SHALL expose the queue's high-water depth and SHALL warn once per episode above a documented threshold, so pathological growth is loud.\n* The authoritative peer SET is mutated in the callback under a short-hold mutex (explicitly permitted: 'Brief bounded acquisition of short-hold locks ... is acceptable'), so `peers()`/`peer_names()` are correct the instant the transition call returns (INV-SYNC) and cannot be skewed by consumer lag. The FIFO carries only the EFFECT notifications (logging, R5 backfill, leave logging).\n* Terminal outcomes: explicit shutdown SHALL set a shutdown flag, wake the consumer, join it, and unsubscribe from the hub. Manager teardown delivers no Down for still-live sessions (INV-EXACTLY-ONCE exception); this is a defined terminal outcome, not a gap to be papered over with a sampling fallback.",
+      "acceptance": [
+        "Startup establishes membership from the atomic initial view before consuming the continuation.",
+        "Explicit shutdown wakes and joins the consumer even when no membership event is pending.",
+        "A stable backend performs no repeated table snapshot, tracked-set diff, consumer wake, or stop-flag sample after subscription."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/cluster/membership.rs",
+          "crates/liminal-server/src/server/runtime.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R4",
+      "title": "Preserve join backfill and the existing leave purge hook",
+      "spec": "WHEN an ordered join delta is applied, THE SYSTEM SHALL retain `ClusterSync::on_peer_join` subscription re-advertisement at `crates/liminal-server/src/cluster/sync.rs:242-247`. Because that path performs socket I/O, it SHALL run on the consumer, never in the subscriber callback (INV-SUB-DISCIPLINE). WHEN a leave delta is observed, THE SYSTEM SHALL preserve logging/consumer semantics without replacing or competing with beamr's scheduler-owned synchronous pg purge hook described at `crates/liminal-server/src/cluster/membership.rs:5-22`; `ClusterSync::on_peer_leave` remains downstream at `crates/liminal-server/src/cluster/sync.rs:249-261`. Note that the ordering the purge relies on is now upstream-guaranteed rather than incidental: INV-SCHED-FIRST (`connection_events.rs:71-76`) states 'the scheduler registers its composed subscriber at construction, before any embedder can subscribe; within it, pg-purge strictly precedes noconnection delivery', so liminal's later subscription always observes post-purge pg state. THE SYSTEM SHALL NOT infer that the legacy leave hook supplies join ordering or the atomic initial handoff (banked scout pack, reverified at fe3f7ec).",
+      "acceptance": [
+        "A late join receives existing local subscription advertisements through the pushed join event path.",
+        "Node-down still purges remote members synchronously through beamr's occupied hook, independent of consumer scheduling.",
+        "Join/leave logging and peer inspection remain correct without a periodic tracked-set diff."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/cluster/membership.rs",
+          "crates/liminal-server/src/cluster/sync.rs",
+          "crates/liminal-server/tests/cluster_two_node.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R5",
+      "title": "Replace snapshot-cadence tests with event barriers",
+      "spec": "Rewrite current tests so membership transitions are released and observed through deterministic source barriers. Tombstone `first_poll_of_empty_table_yields_no_peers` and its direct `poll_once` contract at `crates/liminal-server/src/cluster/membership.rs:396-403`. Rewrite the real-cluster eventual helper at `crates/liminal-server/tests/cluster_two_node.rs:26-40`, the membership wait at `:128-147`, and the late-join cadence wording at `:228-248` while retaining backfill and node-drop outcomes (banked scout pack, reverified at fe3f7ec; ranges corrected by the 2026-07-28 re-pin). Unit-level barriers SHALL use a real loopback `ConnectionManager` pair (`ConnectionManager::listen` + `connect`) rather than a mock: INV-SYNC makes the join observable with no sleep and no retry the moment the connect call returns, which is exactly the barrier this brief needs.",
+      "acceptance": [
+        "The initial empty view is covered through the new source contract rather than a direct `poll_once` unit test.",
+        "Late join backfill starts from an injected/delivered join barrier and retains its cross-node subscription assertion.",
+        "Node-drop cleanup remains independently covered as the synchronous beamr purge behavior, not as evidence for a membership poll."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/cluster/membership.rs",
+          "crates/liminal-server/tests/cluster_two_node.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    },
+    {
+      "id": "R6",
+      "title": "Prove membership quiescence and remove the poll family",
+      "spec": "Add counter-backed quiescence coverage following the park-flip inversion precedent at `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65`. Delete the poll constant, snapshot change-detection role, `PollLoop`, and stop/load/sleep implementation at `crates/liminal-server/src/cluster/membership.rs:40-44,112-128,198-230`. Any by-design backend watcher or helper cost SHALL receive an evidence-derived bound and SHALL NOT be filled with a skeleton default.\n\nIDLE-COST FIXTURE LAW (estate standard, binding here): the quiescence oracle SHALL be run against a LIVE process, not a sleeping one. It SHALL prove that UNRELATED counters GROW across the soak while the membership unit's wake counter stays FLAT. A soak in which nothing at all moves proves only that the test slept. The oracle therefore belongs in the real two-node cluster, where live sockets, read loops, and heartbeats are running and cross-node message delivery supplies the growing unrelated counter.\n\nSOURCE GUARD: add an absence proof over this module's own production source mirroring `crates/liminal-server/src/server/listener.rs:344-361`, asserting the retired identifiers never reappear.",
+      "acceptance": [
+        "`stable_membership_source_has_zero_consumer_wakes` arms the source, holds the backend stable, and asserts source-snapshot and consumer-wake counters remain flat until shutdown.",
+        "A source search finds no production membership-family `PollLoop`, `POLL_INTERVAL`, `poll_once`, or `run_poll_loop` change-detection path.",
+        "No hidden heartbeat, scan, or timer is accepted as the source of membership change."
+      ],
+      "files": {
+        "create": [],
+        "modify": [
+          "crates/liminal-server/src/cluster/membership.rs",
+          "crates/liminal-server/tests/cluster_two_node.rs"
+        ],
+        "delete": []
+      },
+      "checklist": [],
+      "stories": []
+    }
+  ],
+  "boundaries": [
+    "The participant-contract two-key gate is CLOSED (R18 ratified 2026-07-28); dispatch is permitted. R18 is implementation authority only for what it actually ratifies — this brief depends on none of its fixtures.",
+    "SHALL NOT introduce an unmarked participant-contract fixture-derived number, equality, or budget; label each such later value PENDING-CONTRACT-HASH and cite its provenance.",
+    "FENCED: DCR-RECOVERY-ARM — no current requirement depends on it; any future membership/fate interaction is appended to the keyed socket register.",
+    "SHALL NOT re-open the upstream API choice: `subscribe_connection_events_with_snapshot` is selected and duplicate/coalescing/resubscription policy is fixed upstream. The LOCAL handoff buffer policy IS chosen here (R3) and SHALL be documented at the production site rather than left implicit.",
+    "SHALL NOT block, perform socket I/O, or capture strong handles inside the subscriber callback, and SHALL NOT call subscribe from inside a subscriber callback (INV-SUB-DISCIPLINE).",
+    "SHALL NOT replace or take ownership of beamr's scheduler-owned synchronous node-down purge hook.",
+    "SHALL NOT merge this backend-ordering retirement into listener readiness, scheduler reply waits, or SDK reader cancellation.",
+    "SHALL NOT absorb unrelated growth-section families or claim that the repository sweep certifies dependency-internal wake sources."
+  ],
+  "verification": [
+    "MEMBERSHIP QUIESCENCE — implement `stable_membership_source_has_zero_consumer_wakes` with a source arm barrier and flat snapshot/wake counters, using `crates/liminal-server/src/server/connection/process_wake_tests.rs:43-65` as the inversion precedent; per R6's idle-cost fixture law the soak SHALL also assert an unrelated counter GROWS on the same live process. Paper section `2.7 Requirement — idle-cost lens`, source facts reverified by the banked scout pack at fe3f7ec.",
+    "MEMBERSHIP TOMBSTONE — delete the direct `poll_once` test at `crates/liminal-server/src/cluster/membership.rs:396-403`; preserve empty-initial-view coverage through the new atomic source contract.",
+    "ORDERING MATRIX — race join/leave across initial handoff, rapid join-leave-rejoin, source close, and shutdown before/with/after a delta using deterministic barriers. Duplicates and coalescing are proven ABSENT BY CONSTRUCTION upstream (INV-EXACTLY-ONCE per generation; subscriber-local synthetic Ups) rather than tested for a liminal-side policy that does not exist; overflow is proven by the documented lossless rule, not by a drop path.",
+    "REAL-CLUSTER INVERSION — rewrite `crates/liminal-server/tests/cluster_two_node.rs:26-40,128-147,228-248,250-308` so event barriers replace eventual membership polling while late-join backfill and synchronous node-drop purge assertions remain.",
+    "DELETION CHECK — production membership code has no `PollLoop`, `POLL_INTERVAL`, `poll_once`, `run_poll_loop`, stop-flag sampling, snapshot diff cadence, or sleep family identified at `crates/liminal-server/src/cluster/membership.rs:40-44,112-128,198-230`. Pinned by an in-module source-guard test mirroring `crates/liminal-server/src/server/listener.rs:344-361`.",
+    "DOCUMENT GATE — CLOSED 2026-07-28: R18's two-key evidence is recorded at `docs/design/PARTICIPANT-CONTRACT.md:1-8`, the DCR fenced hole remains non-dependent, and this brief introduces no contract-derived value requiring a PENDING-CONTRACT-HASH label."
+  ]
+}
