@@ -527,6 +527,16 @@ asserting `FORCE_CLOSE_POLL_INTERVAL` absent (`:345`). Note the health endpoint
 > production source. **W4 is now six-ninths; F7–F9 remain** (F8+F9 are
 > SDK-010's dispatched scope under the PUSH-HANDSHAKE-DEADLINE ruling; F7 is
 > unclaimed).
+>
+> **Forward correction (2026-07-28, fold seat):** F8+F9 retired by the SDK-010
+> landing — merge `35c9b61`, evidence `f88d3f1` (1806/0/42 under pinned
+> rustc 1.97.1). One named 5 s `SETUP_TIMEOUT` per synchronous control-frame
+> reply, control exchange only, then `set_read_timeout(None)` blocking steady
+> state across all three readers (TCP push, TCP subscription, WS); both
+> directions red-pinned in committed `gate-logs/extras/red-sdk010.log`;
+> source-guard tombstones `*_source_has_no_retired_reader_poll_family` in each
+> reader module plus a constant-fork guard. **W4 is now eight-ninths; F7 alone
+> remains, unclaimed.**
 
 - **F6** cluster membership — `cluster/membership.rs:44`
   `const POLL_INTERVAL: Duration = Duration::from_millis(250)`; `run_poll_loop`
@@ -536,9 +546,10 @@ asserting `FORCE_CLOSE_POLL_INTERVAL` absent (`:345`). Note the health endpoint
   `const LIVENESS_POLL = 10ms`; `poll_reply` loops `recv_timeout` at `:76-83`.
   (Path moved from `liminal-server` to `liminal`.)
 - **F8** SDK TCP push reader — `liminal-sdk/src/remote/tcp/push_client.rs:56`
-  `READER_POLL_TIMEOUT = 100ms`, armed `:574`.
+  `READER_POLL_TIMEOUT = 100ms`, armed `:574`. **[RETIRED at `35c9b61` — see
+  the correction above.]**
 - **F9** SDK TCP subscription reader — `liminal-sdk/src/remote/tcp/subscription.rs:47`,
-  armed `:230`.
+  armed `:230`. **[RETIRED at `35c9b61` — see the correction above.]**
 
 **The brief itself was never updated after the build.**
 `W4-LAW1-POLLING-RETIREMENT.md:5-8` still says "It is a **docs-only lane** …
@@ -775,8 +786,8 @@ the bytes, 2026-07-28:
 | `:386` | "Health accept is polled." | **STALE** — F3 retired by `772922f`; the cited path `server/health/endpoint.rs` also moved to `health/endpoint.rs` |
 | `:387` | "Shutdown drain and settle are polled." | **STALE** — F4+F5 retired by `778f1f4` |
 | `:388` | "Channel command reply liveness is polled." | accurate — F7, `channel/actor/wait.rs:24,:76-83` (path moved to `crates/liminal`) |
-| `:389` | "The SDK push reader polls for local shutdown." | accurate — F8, `tcp/push_client.rs:56,:574` |
-| `:390` | "The SDK subscription reader polls for local shutdown." | accurate — F9, `tcp/subscription.rs:47,:230` |
+| `:389` | "The SDK push reader polls for local shutdown." | accurate at the sweep's base `1a0b60c`; **STALE since `35c9b61`** — F8 retired by SDK-010 (see the W4 correction block) |
+| `:390` | "The SDK subscription reader polls for local shutdown." | accurate at the sweep's base `1a0b60c`; **STALE since `35c9b61`** — F9 retired by SDK-010 (see the W4 correction block) |
 | `:391` | "The synchronous durability bridge repeatedly polls without honoring a waker." | accurate in substance — `durability/bridge.rs:52` (`MAX_POLLS = 8`), loop + `yield_now` at `:87-93`; cited line ranges drifted |
 | `:392` | "The push-reply public wait contract blesses caller-side timeout re-arm." | accurate in substance — `receive` now at `supervisor.rs:807`, `receive_deadlined` still loops `try_take_reply` + `recv_timeout` at `:849-877`; cited range `533-636` drifted |
 | `:393` | "Subscription setup samples a total deadline through repeated read timeouts." | accurate — `tcp/subscription.rs:389-393` |
@@ -921,6 +932,10 @@ family.
   row A-7 above and is expressly NOT folded into this lane.
 - **Boundary:** F7 (`crates/liminal/src/channel/actor/wait.rs`) stays unclaimed.
   This lane takes W4 from six-ninths to eight-ninths, not to nine.
+- **Discharged (2026-07-28, fold seat):** the build landed — merge `35c9b61`,
+  evidence `f88d3f1`. The truing this annotation promised ("trued forward at
+  the fold") is carried in the W4 correction block, the F8/F9 row markers, the
+  A-4 rows, and the standing footer above.
 
 ## Companion registers (not duplicated here)
 
@@ -958,8 +973,9 @@ close**:
 - **W3** — CLOSED r1.4; closure verifies, with one census-location imprecision
   corrected forward.
 - **W4** — **five-ninths done** at the sweep's base; **six-ninths since
-  `048e17a` same day** (F6 retired by SRV-008). F1–F6 retired; **F7–F9
-  remain** — F8+F9 dispatched as SDK-010, F7 unclaimed. Not dischargeable as
+  `048e17a` same day** (F6 retired by SRV-008); **eight-ninths since
+  `35c9b61` (2026-07-28)** — F8+F9 retired by the SDK-010 landing. F1–F6 and
+  F8+F9 retired; **F7 alone remains**, unclaimed. Not dischargeable as
   written.
 - **W5** — **CLOSED before the row was authored** (`fb11ff6`, 2026-07-18). Row
   retained as this register's worked example of stale-at-authorship.

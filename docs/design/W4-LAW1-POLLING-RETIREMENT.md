@@ -15,10 +15,13 @@
 > Beyond this brief's own W4-NOW scope, the out-of-wave families have since
 > moved: **F6** (cluster membership) retired 2026-07-28 by the SRV-008 lane
 > (main `048e17a` — ordered connection events, red-pinned, source-guarded);
-> **F8+F9** (SDK TCP push + subscription readers) are dispatched as SDK-010
+> **F8+F9** (SDK TCP push + subscription readers) were dispatched as SDK-010
 > under the PUSH-HANDSHAKE-DEADLINE ruling (Waffles, coordinator seat,
-> 2026-07-28); **F7** (channel command-reply liveness, now in
-> `crates/liminal/src/channel/actor/wait.rs`) remains open and unclaimed.
+> 2026-07-28) and **retired the same day by its landing** (merge `35c9b61`,
+> evidence `f88d3f1`: one named 5 s setup deadline, blocking steady state,
+> all three readers); **F7** (channel command-reply liveness, now in
+> `crates/liminal/src/channel/actor/wait.rs`) remains open and unclaimed —
+> the sole open family.
 > This brief remains the design of record for what it ruled; read its
 > present-tense build claims through this header.
 
