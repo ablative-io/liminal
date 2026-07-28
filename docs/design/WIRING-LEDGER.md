@@ -480,10 +480,24 @@ asserting `FORCE_CLOSE_POLL_INTERVAL` absent (`:345`). Note the health endpoint
 **moved**: `server/health/endpoint.rs` → `health/endpoint.rs:23-25`.
 
 **STILL OPEN at the bytes (F6–F9), unchanged:**
+
+> **Same-day forward correction — F6 RETIRED at `048e17a` (2026-07-28).** The
+> sweep's F6 bullet below was true at its base `1a0b60c`; the SRV-008 lane
+> landed hours later and retired it: membership now rides beamr's ordered
+> connection events (`subscribe_connection_events_with_snapshot`), red pin
+> `armed_membership_observes_a_join_without_sampling` + committed red log
+> `gate-logs/extras/red-srv008.log`, zero-wake soak oracle
+> `stable_membership_source_has_zero_consumer_wakes`, and a source-guard
+> tombstone (`membership_source_has_no_retired_poll_family`) asserting
+> `POLL_INTERVAL` / `poll_once` / `thread::sleep` / `run_poll_loop` absent from
+> production source. **W4 is now six-ninths; F7–F9 remain** (F8+F9 are
+> SDK-010's dispatched scope under the PUSH-HANDSHAKE-DEADLINE ruling; F7 is
+> unclaimed).
+
 - **F6** cluster membership — `cluster/membership.rs:44`
   `const POLL_INTERVAL: Duration = Duration::from_millis(250)`; `run_poll_loop`
   at `:225-228` calls `membership.poll_once()` then `std::thread::sleep`;
-  spawned `:211`.
+  spawned `:211`. **[RETIRED same day — see the correction above.]**
 - **F7** channel command-reply liveness — `crates/liminal/src/channel/actor/wait.rs:24`
   `const LIVENESS_POLL = 10ms`; `poll_reply` loops `recv_timeout` at `:76-83`.
   (Path moved from `liminal-server` to `liminal`.)
@@ -723,7 +737,7 @@ the bytes, 2026-07-28:
 | contract line | OBSERVES | status |
 | --- | --- | --- |
 | `:384` | "The current listener already has the banned polling shape." | **STALE** — F1 retired by `e76d5af` (2026-07-22) |
-| `:385` | "Cluster membership is polled." | accurate — F6, `cluster/membership.rs:44,:211,:225-228` |
+| `:385` | "Cluster membership is polled." | accurate at the sweep's base `1a0b60c`; **STALE since `048e17a` same day** — F6 retired by SRV-008 (see the W4 correction block) |
 | `:386` | "Health accept is polled." | **STALE** — F3 retired by `772922f`; the cited path `server/health/endpoint.rs` also moved to `health/endpoint.rs` |
 | `:387` | "Shutdown drain and settle are polled." | **STALE** — F4+F5 retired by `778f1f4` |
 | `:388` | "Channel command reply liveness is polled." | accurate — F7, `channel/actor/wait.rs:24,:76-83` (path moved to `crates/liminal`) |
@@ -848,8 +862,10 @@ close**:
   divergence refusal in production. Ripe for a closure ruling.
 - **W3** — CLOSED r1.4; closure verifies, with one census-location imprecision
   corrected forward.
-- **W4** — **five-ninths done.** F1–F5 retired 2026-07-22; **F6–F9 remain and
-  need their own wave.** Not dischargeable as written.
+- **W4** — **five-ninths done** at the sweep's base; **six-ninths since
+  `048e17a` same day** (F6 retired by SRV-008). F1–F6 retired; **F7–F9
+  remain** — F8+F9 dispatched as SDK-010, F7 unclaimed. Not dischargeable as
+  written.
 - **W5** — **CLOSED before the row was authored** (`fb11ff6`, 2026-07-18). Row
   retained as this register's worked example of stale-at-authorship.
 - **W6** — still open, but it is a **transport** lane, not an API lane: the
