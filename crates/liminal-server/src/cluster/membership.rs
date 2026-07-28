@@ -451,8 +451,8 @@ struct MembershipConsumer {
 
 impl MembershipConsumer {
     /// Applies whatever the atomic initial view produced, on the CALLING thread,
-    /// before any continuation is consumed. Returns the peers it admitted so
-    /// bring-up can log them.
+    /// before any continuation is consumed — so bring-up logs the established
+    /// membership and backfills each seed before the consumer thread exists.
     fn prime(membership: &Membership, sync: &ClusterSync) {
         for delta in membership.take_pending() {
             apply_delta(membership, sync, delta);
