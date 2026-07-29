@@ -1,4 +1,5 @@
 use std::io;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -45,6 +46,9 @@ fn init_tracing() {
     drop(
         tracing_subscriber::fmt()
             .with_env_filter(filter)
+            // Colour only when a human is watching: non-tty stderr must stay
+            // byte-clean because it is teed into committed gate/evidence logs.
+            .with_ansi(io::stderr().is_terminal())
             .with_writer(io::stderr)
             .try_init(),
     );
