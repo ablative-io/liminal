@@ -110,6 +110,17 @@ pub struct RemoteConfig {
 impl RemoteConfig {
     /// Creates remote configuration with a required server address and pool config.
     ///
+    /// **The returned configuration is NOT connected.** It carries a placeholder
+    /// transport that owns no socket, and every publish, subscribe,
+    /// conversation, and resume operation performed through it refuses with
+    /// [`SdkError::NotConnected`]. Call `connect_tcp`, `connect_tcp_with_auth`,
+    /// `connect_websocket`, or `connect_websocket_with_auth` to install a live
+    /// transport first.
+    ///
+    /// This is deliberate loudness. The placeholder used to encode each frame,
+    /// discard it, and return a synthesised `Accept`, so a caller who forgot to
+    /// connect saw nothing but green results for messages that reached no wire.
+    ///
     /// # Errors
     ///
     /// Returns [`SdkError`] if the address or pool configuration is invalid.

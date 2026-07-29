@@ -36,6 +36,12 @@ struct RemoteChannelState {
 }
 
 /// Channel handle that communicates through SDK-internal wire protocol transport.
+///
+/// The handle inherits whatever transport its [`RemoteConfig`] carries. A config
+/// straight out of `RemoteConfig::new` has never been connected, so every
+/// operation on a handle built from it refuses with
+/// [`SdkError::NotConnected`] rather than reporting a success that reached no
+/// wire. Connect the config first.
 #[derive(Clone, Debug)]
 pub struct RemoteChannelHandle {
     server_address: ServerAddress,
@@ -251,6 +257,11 @@ impl RemoteChannelHandle {
 }
 
 /// Conversation handle that communicates through SDK-internal wire protocol transport.
+///
+/// As with [`RemoteChannelHandle`], a handle built from a config that was never
+/// connected refuses every send, request, and receive with
+/// [`SdkError::NotConnected`] instead of reporting a success that reached no
+/// wire.
 #[derive(Clone, Debug)]
 pub struct RemoteConversationHandle {
     server_address: ServerAddress,

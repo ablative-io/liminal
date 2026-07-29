@@ -3,7 +3,7 @@ use serde::Serialize;
 use super::*;
 use crate::{
     ChannelHandle, ConnectionPoolConfig, ConnectionState, EmbeddedConfig, PressureResponse,
-    ResumeRequest, SchemaMetadata, SchemaValidate,
+    SchemaMetadata, SchemaValidate,
 };
 
 #[derive(Serialize)]
@@ -24,6 +24,14 @@ fn remote_config_requires_server_address() {
     assert!(RemoteConfig::new(" ", "events", "conversation", pool_config).is_err());
 }
 
+/// The builder still selects the mode from configuration alone, and the same
+/// application code still runs against either handle.
+///
+/// What this no longer asserts is that either mode ACCEPTS. It used to demand
+/// `PressureResponse::Accept` from both, which was a proof of fake success on
+/// both sides: the embedded default backend discarded the message, and the
+/// remote config was never connected to anything. The mode selection is the
+/// claim; the per-mode outcome is now each void's own typed refusal.
 #[test]
 fn builder_switches_channel_mode_by_config() -> Result<(), SdkError> {
     let embedded = SdkConfig::embedded(EmbeddedConfig::new("events", "conversation"));
@@ -34,11 +42,28 @@ fn builder_switches_channel_mode_by_config() -> Result<(), SdkError> {
         ConnectionPoolConfig::new(1, 10, 16),
     )?);
 
-    publish_with_generic_handle(&build_channel_handle(&embedded)?)?;
-    publish_with_generic_handle(&build_channel_handle(&remote)?)?;
+    assert_eq!(
+        publish_with_generic_handle(&build_channel_handle(&embedded)?)?,
+        PressureResponse::Accept
+    );
+
+    let remote_result = publish_with_generic_handle(&build_channel_handle(&remote)?);
+    assert!(
+        matches!(remote_result, Err(SdkError::NotConnected { .. })),
+        "a remote handle built from an unconnected config must refuse, got {remote_result:?}"
+    );
     Ok(())
 }
 
+/// The lifecycle transition and the recovery bookkeeping still run on
+/// reconnect; the never-connected transport now refuses to carry the resume.
+///
+/// This test used to read the resume requests out of `connected()`'s `Ok`. That
+/// `Ok` was fake: `resume` encoded a Resume frame and threw it away. The
+/// transition itself is still observable, so the lifecycle half of the claim is
+/// kept and the transport half becomes the refusal. Resume-request CONTENT is
+/// pinned without a transport by the `SubscriptionRecovery` and connection-pool
+/// suites, and end to end over a real socket by the server e2e tests.
 #[test]
 fn remote_handle_uses_lifecycle_and_recovery_on_reconnect() -> Result<(), SdkError> {
     let config = RemoteConfig::new(
@@ -52,21 +77,19 @@ fn remote_handle_uses_lifecycle_and_recovery_on_reconnect() -> Result<(), SdkErr
 
     handle.acknowledge(subscription_id, 7)?;
     handle.reconnect_started()?;
-    let resume_requests = handle.connected()?;
+    let resume_result = handle.connected();
 
-    assert_eq!(handle.connection_state(), ConnectionState::Connected);
-    assert_eq!(
-        resume_requests,
-        vec![ResumeRequest::new(subscription_id, 8)]
+    assert!(
+        matches!(resume_result, Err(SdkError::NotConnected { .. })),
+        "resume over a never-connected transport must refuse, got {resume_result:?}"
     );
+    assert_eq!(handle.connection_state(), ConnectionState::Connected);
     Ok(())
 }
 
-fn publish_with_generic_handle<H>(handle: &H) -> Result<(), SdkError>
+fn publish_with_generic_handle<H>(handle: &H) -> Result<PressureResponse, SdkError>
 where
     H: ChannelHandle,
 {
-    let response = handle.publish(TestMessage { id: 1 })?;
-    assert_eq!(response, PressureResponse::Accept);
-    Ok(())
+    handle.publish(TestMessage { id: 1 })
 }

@@ -37,10 +37,10 @@ pub(super) trait RemoteTransport:
     /// Publishes and reports a genuine delivery ack (and optional dedup key).
     ///
     /// Returns a [`DeliveryAck`] whose `is_accepted` reflects whether a subscriber
-    /// genuinely received the message. The default in-process transport cannot
-    /// observe a real subscriber, so it reports a protocol error rather than
-    /// faking acceptance; the TCP transport reads the delivery flag the server
-    /// sets on the publish ack.
+    /// genuinely received the message. The default unconnected transport cannot
+    /// observe a real subscriber, so it refuses with [`SdkError::NotConnected`]
+    /// rather than faking acceptance; the TCP transport reads the delivery flag
+    /// the server sets on the publish ack.
     ///
     /// # Errors
     ///
@@ -67,8 +67,9 @@ pub(super) trait RemoteTransport:
     /// Sends a conversation request and blocks for its correlated reply payload.
     ///
     /// Returns the serialized reply bytes the server delivered for this
-    /// conversation. The default in-process transport has no socket, so it
-    /// reports a protocol error; the real TCP transport performs the round trip.
+    /// conversation. The default unconnected transport has no socket, so it
+    /// refuses with [`SdkError::NotConnected`]; the real TCP transport performs
+    /// the round trip.
     ///
     /// # Errors
     ///
@@ -87,96 +88,76 @@ pub(super) trait RemoteTransport:
     ) -> Result<(), SdkError>;
 }
 
-/// SDK-internal protocol transport boundary. Wire frames never appear in public APIs.
+/// The transport `RemoteConfig::new` installs before any real connection — and
+/// it REFUSES every operation.
+///
+/// This type owns no socket. It is the placeholder a `RemoteConfig` carries
+/// between construction and a successful `connect_tcp` / `connect_websocket`,
+/// and every method on it returns [`SdkError::NotConnected`] naming the
+/// operation that refused.
+///
+/// It used to encode a wire frame, discard it through `black_box`, and return a
+/// synthesised `Accept`, so a caller who never connected a transport received
+/// green results for messages that reached no wire at all. Nothing is encoded
+/// now: a frame nobody sends is work nobody asked for, and reporting success
+/// for it is the defect this refusal retires.
 #[derive(Clone, Debug, Default)]
 pub(super) struct ProtocolRemoteTransport;
+
+/// Builds the refusal every unconnected-transport operation returns.
+fn not_connected(operation: &str) -> SdkError {
+    SdkError::NotConnected {
+        operation: operation.to_string(),
+    }
+}
 
 impl RemoteTransport for ProtocolRemoteTransport {
     fn publish(
         &self,
-        server_address: &ServerAddress,
-        request: &WirePublishRequest,
+        _server_address: &ServerAddress,
+        _request: &WirePublishRequest,
     ) -> Result<PressureResponse, SdkError> {
-        let endpoint = server_address.as_str();
-        let frame = request.to_frame();
-        let encoded = encode_frame(&frame)?;
-        core::hint::black_box((endpoint, encoded));
-        decode_backpressure(FRAME_TYPE_ACCEPT, Duration::ZERO, String::new()).map(map_backpressure)
+        Err(not_connected("publish"))
     }
 
     fn publish_with_delivery(
         &self,
-        server_address: &ServerAddress,
-        request: &WirePublishRequest,
+        _server_address: &ServerAddress,
+        _request: &WirePublishRequest,
     ) -> Result<DeliveryAck, SdkError> {
-        let endpoint = server_address.as_str();
-        let frame = request.to_frame();
-        let encoded = encode_frame(&frame)?;
-        core::hint::black_box((endpoint, encoded));
-        // The in-process transport never opens a socket, so it cannot observe a
-        // genuine subscriber delivery. Report this honestly rather than
-        // synthesising an acceptance the way the backpressure-only `publish` does;
-        // a true delivery ack is the TCP transport's job.
-        Err(SdkError::Protocol {
-            description: "delivery ack requires the TCP transport; the in-process transport \
-                          cannot observe a genuine subscriber delivery"
-                .to_string(),
-        })
+        Err(not_connected("publish_with_idempotency_key"))
     }
 
     fn subscribe(
         &self,
-        server_address: &ServerAddress,
-        request: &WireSubscribeRequest,
+        _server_address: &ServerAddress,
+        _request: &WireSubscribeRequest,
     ) -> Result<(), SdkError> {
-        let endpoint = server_address.as_str();
-        let frame = request.to_frame();
-        let encoded = encode_frame(&frame)?;
-        core::hint::black_box((endpoint, encoded));
-        Ok(())
+        Err(not_connected("subscribe"))
     }
 
     fn send_conversation(
         &self,
-        server_address: &ServerAddress,
-        request: &WireConversationRequest,
+        _server_address: &ServerAddress,
+        _request: &WireConversationRequest,
     ) -> Result<(), SdkError> {
-        let endpoint = server_address.as_str();
-        let frame = request.to_frame();
-        let encoded = encode_frame(&frame)?;
-        core::hint::black_box((endpoint, encoded));
-        Ok(())
+        Err(not_connected("conversation send"))
     }
 
     fn request_reply_conversation(
         &self,
-        server_address: &ServerAddress,
-        request: &WireConversationRequest,
+        _server_address: &ServerAddress,
+        _request: &WireConversationRequest,
     ) -> Result<Vec<u8>, SdkError> {
-        let endpoint = server_address.as_str();
-        let frame = request.to_frame();
-        let encoded = encode_frame(&frame)?;
-        core::hint::black_box((endpoint, encoded));
-        // The in-process transport never opens a socket, so it cannot carry a
-        // correlated reply back. Report this honestly rather than synthesising a
-        // fake reply; the real round trip is the TCP transport's job.
-        Err(SdkError::Protocol {
-            description: "request/reply requires the TCP transport; the in-process transport \
-                          cannot carry a correlated reply"
-                .to_string(),
-        })
+        Err(not_connected("conversation request/reply"))
     }
 
     fn resume(
         &self,
-        server_address: &ServerAddress,
-        request: &WireResumeRequest,
+        _server_address: &ServerAddress,
+        _request: &WireResumeRequest,
     ) -> Result<(), SdkError> {
-        let endpoint = server_address.as_str();
-        let frame = request.to_frame();
-        let encoded = encode_frame(&frame)?;
-        core::hint::black_box((endpoint, encoded));
-        Ok(())
+        Err(not_connected("resume"))
     }
 }
 
@@ -224,6 +205,7 @@ impl WirePublishRequest {
         self.idempotency_key.as_deref()
     }
 
+    #[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
     fn to_frame(&self) -> WireFrame {
         WireFrame::Publish {
             channel: self.channel.clone(),
@@ -281,6 +263,7 @@ impl WireSubscribeRequest {
         })
     }
 
+    #[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
     fn to_frame(&self) -> WireFrame {
         WireFrame::Subscribe {
             channel: self.channel.clone(),
@@ -321,6 +304,7 @@ impl WireConversationRequest {
         })
     }
 
+    #[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
     fn to_frame(&self) -> WireFrame {
         WireFrame::ConversationMessage {
             conversation_id: self.conversation_id.as_str().to_string(),
@@ -357,6 +341,7 @@ impl WireResumeRequest {
         }
     }
 
+    #[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
     const fn to_frame(&self) -> WireFrame {
         WireFrame::Resume {
             subscription_id: self.subscription_id.get(),
@@ -377,6 +362,22 @@ impl WireResumeRequest {
     }
 }
 
+/// The SDK's own byte encoding of a wire frame.
+///
+/// RETAINED BUT UNCALLED IN PRODUCTION. This encoder and everything below it
+/// (`encode_frame`, `encode_payload`, `push_field`, `WireBackpressure`, the
+/// backpressure decode, and every constant in `protocol::constants`) existed to
+/// serve exactly one caller: `ProtocolRemoteTransport`, which framed a message
+/// and then threw the bytes away. Now that the unconnected transport refuses
+/// instead, this path has no production caller left — the real transports
+/// (`remote::tcp`, `remote::websocket`) speak the canonical codec from the
+/// `liminal` crate, not this one.
+///
+/// It is kept, not deleted: whether the SDK should carry a second frame encoder
+/// at all is a design question, not a question this refusal answers. The `allow`
+/// makes the orphaning visible rather than letting the encoder quietly look
+/// load-bearing. Its shape is still pinned by this module's own tests.
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see the note above")]
 #[derive(Debug)]
 enum WireFrame {
     Publish {
@@ -401,6 +402,7 @@ enum WireFrame {
     },
 }
 
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
 impl WireFrame {
     const fn frame_type(&self) -> u8 {
         match self {
@@ -421,6 +423,7 @@ impl WireFrame {
     }
 }
 
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
 #[derive(Debug)]
 enum WireBackpressure {
     Accept { credit: u32 },
@@ -428,6 +431,7 @@ enum WireBackpressure {
     Reject { reason: String },
 }
 
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
 fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, SdkError> {
     let mut payload = Vec::new();
     encode_payload(frame, &mut payload)?;
@@ -444,6 +448,7 @@ fn encode_frame(frame: &WireFrame) -> Result<Vec<u8>, SdkError> {
     Ok(bytes)
 }
 
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
 fn encode_payload(frame: &WireFrame, bytes: &mut Vec<u8>) -> Result<(), SdkError> {
     match frame {
         WireFrame::Publish {
@@ -486,6 +491,7 @@ fn encode_payload(frame: &WireFrame, bytes: &mut Vec<u8>) -> Result<(), SdkError
     Ok(())
 }
 
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
 fn push_field(bytes: &mut Vec<u8>, field: &[u8]) -> Result<(), SdkError> {
     let len = u32::try_from(field.len()).map_err(|source| SdkError::Protocol {
         description: format!("wire field exceeds protocol length: {source}"),
@@ -495,6 +501,7 @@ fn push_field(bytes: &mut Vec<u8>, field: &[u8]) -> Result<(), SdkError> {
     Ok(())
 }
 
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
 fn map_backpressure(backpressure: WireBackpressure) -> PressureResponse {
     match backpressure {
         WireBackpressure::Accept { credit } => {
@@ -506,6 +513,7 @@ fn map_backpressure(backpressure: WireBackpressure) -> PressureResponse {
     }
 }
 
+#[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see WireFrame")]
 fn decode_backpressure(
     kind: u8,
     retry_after: Duration,
