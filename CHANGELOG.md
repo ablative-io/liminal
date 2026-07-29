@@ -6,8 +6,55 @@ All notable changes to liminal are recorded here. Versions follow semver;
 ## 0.5.1 — 2026-07-29
 
 `liminal-rs` 0.5.1, `liminal-server` 0.5.1, `liminal-sdk` 0.5.1;
-`liminal-protocol` 0.3.2 (unchanged). `liminal-rs` and `liminal-server`:
-no changes in shipped surface; lockstep version bump.
+`liminal-protocol` 0.3.2 (unchanged).
+
+All changes below are additive or internal: no public item was added, removed
+or resignatured in `liminal-rs` or `liminal-server`, the wire protocol did not
+move, and the readiness contract did not move. That is why this is a patch
+release and not a minor one.
+
+### Added
+
+- **The server logs.** `liminal-server` installs a stderr `tracing` subscriber
+  at startup (`ae3abd0` red, `ba43b92` fix). Before this the binary ran from
+  boot to shutdown printing nothing, and its 120 `tracing` events — connection
+  failures, drain timeouts, durable-flush failures among them — were dropped by
+  the no-op global dispatcher. Filtered by `RUST_LOG`; the default when the
+  variable is unset is `warn,liminal_server=info,liminal=info`. Colour is
+  emitted only when stderr is a terminal, so piped output stays byte-clean
+  (`925b863`).
+- **An empty `RUST_LOG` means total silence, including `error` events.**
+  `RUST_LOG=""` is a valid but empty directive set — it is *not* "use the
+  default". This is upstream `env-filter` semantics and is kept deliberately.
+  Unset the variable rather than emptying it if you want the default back.
+- **Bootable from a repository checkout.** `config/liminal.example.toml` is a
+  complete, commented, working configuration, kept honest by a test that parses
+  it through the real loader (`7bd2c23` red, `93f114d` fix). README gains a
+  Usage quickstart covering the run line, the thirteen `LIMINAL_*` overrides,
+  the health and metrics routes, and the `persistence_path` trap: the directory
+  must already exist and is never created for you, so a path typo fails startup
+  instead of quietly minting a new directory.
+  **Stated precisely, because "shipped" would overclaim it: that file lives at
+  the repository root, outside every crate, so it is NOT carried inside the
+  published `liminal-server` crate.** An operator who installs from crates.io
+  gets a binary that requires `--config` with five mandatory keys and no
+  defaults, and must copy the example out of the repository to write one. The
+  quickstart's `cargo build -p liminal-server` line is likewise a workspace
+  command and assumes a checkout. Making the *published crate* self-sufficient
+  is follow-up work and is not claimed here.
+
+### Changed
+
+- **Cluster membership is driven by ordered events, not polling** (SRV-008;
+  `9d87e32` red, `25e8ed5` fix). The poll interval, sampling entry point, poll
+  thread and snapshot/diff change detection are gone; membership now arms
+  beamr's connection-event stream with an atomic initial view. Effects still run
+  through the same `apply_delta` funnel. **All of the deleted machinery was
+  private — no public item changed**, which is why this is not a breaking
+  change. The one observable difference is a strict improvement: a node that
+  dials its seeds previously had an empty membership view until a poll tick
+  sampled the table, and now has an exact view the instant `Node::start`
+  returns. That removes a staleness window; it does not change a contract.
 
 ### Fixed
 
@@ -21,6 +68,37 @@ no changes in shipped surface; lockstep version bump.
   control-frame reply latency exceeds 100 ms no longer fails setup — retrying
   a 100 ms window is not equivalent to one long window. This cures the frame
   announcer's 1-in-2 boot crash.
+
+### Internal
+
+Neither item below is observable to anyone installing from crates.io. Both are
+recorded because a reader diffing 0.5.0 against this tag finds production files
+changed under them, and an entry that does not account for those files makes
+that reader repeat the investigation that produced this paragraph.
+
+- **The build toolchain is pinned at 1.97.1** (`cb1bb50`), and the pin carried
+  behaviour-identical lint and trybuild collateral across seventeen files
+  (`358742b`) — four of them production: `durability/bridge.rs` and
+  `routing/function/execute/actor.rs` in `liminal-rs`, `cluster/discovery.rs`
+  and `server/participant/production/outbox_replay.rs` in `liminal-server`.
+  The edits are manual no-op wakers replaced with `std`'s `Waker::noop()`,
+  `map_or_else(f, identity)` narrowed to `unwrap_or_else(f)`, `loop`/`let-else`
+  rewritten as `while-let`, `Duration` millisecond literals in tests written as
+  whole seconds, and re-blessed trybuild stderr (same error code, same span,
+  wording only). **The minimum supported Rust version did not move: it remains
+  1.85, as `Cargo.toml` and the README both still state** — `Waker::noop()`
+  stabilized in 1.85, so the collateral stays inside the declared floor.
+  `rust-toolchain.toml` lives at the repository root, outside every crate, so
+  like the example config it is not carried inside any published crate: it
+  binds anyone building from a checkout and nobody building against the
+  registry.
+- **`liminal-protocol` is not republished, and its source is not identical to
+  published 0.3.2.** The crate took one behaviour-identical edit from that same
+  collateral — the `map_or_else`/`unwrap_or_else` narrowing in
+  `wire/server_codec.rs`, plus a redundant pattern binding dropped in a test.
+  No public item changed and the encoding did not move, so 0.3.2 is left
+  standing rather than re-cut; "unchanged" in the header above refers to the
+  version, which is what the other three crates depend on.
 
 ### Notes
 
