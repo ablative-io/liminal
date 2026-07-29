@@ -1,4 +1,4 @@
-//! Loud-refusal pins for the three success-reporting voids in `liminal-sdk`.
+//! Loud-refusal pins for the four success-reporting voids in `liminal-sdk`.
 //!
 //! Each void used to hand the caller a green result while nothing reached any
 //! wire and nothing was ever delivered:
@@ -9,7 +9,11 @@
 //!   immediately and permanently dry, so `while let Some(m) = sub.next().await`
 //!   exited at once while the server pumped `Deliver` frames;
 //! * (c) the embedded backends `EmbeddedConfig::new` installs by default
-//!   discarded the message and reported `Accept`.
+//!   discarded the message and reported `Accept`;
+//! * (d) typed `EmbeddedChannelHandle::subscribe` returned the same
+//!   instantly-dry stream as (b), with no in-process delivery path behind it at
+//!   all — the silent sibling left standing while (a), (b), and (c) were made
+//!   to refuse.
 //!
 //! These pins assert the typed refusals that replaced them. They are the
 //! oracle for "refuses loudly instead of succeeding at nothing" — the scope is
@@ -212,5 +216,72 @@ fn direct_embedded_conversation_send_refuses_and_names_the_b1_seam() -> Result<(
             "the default embedded conversation backend",
             &format!("{result:?}"),
         )),
+    }
+}
+
+// ---- void (d): embedded typed subscribe returning an instantly-dry stream ----
+
+/// The embedded twin of void (b), and the harder lie of the two: the remote
+/// handle at least had a working lower-level surface to point at, while embedded
+/// mode has no in-process delivery path behind `subscribe` at all.
+/// `EmbeddedChannelBackend` declares `publish` and nothing else, so no backend a
+/// caller installs can feed this stream — an empty stream here reads as
+/// "subscribed, nothing published yet" forever.
+#[test]
+fn embedded_subscribe_refuses_instead_of_returning_a_dry_stream() -> Result<(), SdkError> {
+    let config = EmbeddedConfig::new("events", "conversation");
+    let handle = EmbeddedChannelHandle::new(&config);
+
+    let subscription = handle.subscribe::<VoidMessage>();
+    let mut subscription = pin!(subscription);
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+
+    let first = subscription.as_mut().poll_next(&mut context);
+    let second = subscription.as_mut().poll_next(&mut context);
+
+    match first {
+        Poll::Ready(Some(Err(SdkError::Unwired {
+            surface,
+            alternative,
+            ..
+        }))) => {
+            assert!(
+                surface.contains("subscribe"),
+                "the refusal must name the surface that refused, got {surface}"
+            );
+            assert!(
+                surface.contains("embedded"),
+                "the refusal must name WHICH subscribe refused, got {surface}"
+            );
+            assert!(
+                alternative.contains("SubscriptionStream"),
+                "the refusal must point at a surface that genuinely delivers, got {alternative}"
+            );
+            assert!(
+                !alternative.contains("with_channel_backend"),
+                "EmbeddedChannelBackend has publish and no subscription surface, so an \
+                 installed backend cannot deliver a subscription; the refusal must not send \
+                 the caller there for delivery, got {alternative}"
+            );
+            assert!(
+                matches!(&second, Poll::Ready(None)),
+                "the refusal must be one item and then end, got {second:?} on the second poll"
+            );
+            Ok(())
+        }
+        Poll::Ready(None) => Err(refusal_expected(
+            "embedded typed subscribe",
+            "an instantly-dry stream (Ready(None))",
+        )),
+        Poll::Ready(Some(Err(other))) => Err(refusal_expected(
+            "embedded typed subscribe",
+            &format!("the wrong typed error: {other}"),
+        )),
+        Poll::Ready(Some(Ok(_))) => Err(refusal_expected(
+            "embedded typed subscribe",
+            "a buffered message it cannot have received",
+        )),
+        Poll::Pending => Err(refusal_expected("embedded typed subscribe", "a parked stream")),
     }
 }
