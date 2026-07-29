@@ -27,13 +27,21 @@ release and not a minor one.
   `RUST_LOG=""` is a valid but empty directive set — it is *not* "use the
   default". This is upstream `env-filter` semantics and is kept deliberately.
   Unset the variable rather than emptying it if you want the default back.
-- **Bootable from shipped materials.** `config/liminal.example.toml` is a
+- **Bootable from a repository checkout.** `config/liminal.example.toml` is a
   complete, commented, working configuration, kept honest by a test that parses
   it through the real loader (`7bd2c23` red, `93f114d` fix). README gains a
   Usage quickstart covering the run line, the thirteen `LIMINAL_*` overrides,
   the health and metrics routes, and the `persistence_path` trap: the directory
   must already exist and is never created for you, so a path typo fails startup
   instead of quietly minting a new directory.
+  **Stated precisely, because "shipped" would overclaim it: that file lives at
+  the repository root, outside every crate, so it is NOT carried inside the
+  published `liminal-server` crate.** An operator who installs from crates.io
+  gets a binary that requires `--config` with five mandatory keys and no
+  defaults, and must copy the example out of the repository to write one. The
+  quickstart's `cargo build -p liminal-server` line is likewise a workspace
+  command and assumes a checkout. Making the *published crate* self-sufficient
+  is follow-up work and is not claimed here.
 
 ### Changed
 
