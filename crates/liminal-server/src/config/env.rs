@@ -497,6 +497,33 @@ mod tests {
     }
 
     #[test]
+    fn unrecognized_liminal_key_is_ignored_but_warned() -> Result<(), Box<dyn std::error::Error>> {
+        let config = sample_config()?;
+        let original_address = config.listen_address;
+
+        let log = crate::test_log::CapturedLog::default();
+        // Typo'd key: `LIMINAL_LISTEN_ADDR`, not the supported `..._ADDRESS`.
+        let config = log.capture(|| {
+            apply_env_overrides_from(config, vec![env_pair("LIMINAL_LISTEN_ADDR", "x")])
+        })?;
+
+        // Behaviour unchanged: the override is ignored, the config still Ok.
+        assert_eq!(config.listen_address, original_address);
+
+        let output = log.contents();
+        assert!(
+            output.contains("WARN"),
+            "an unrecognized LIMINAL_ key must be warned about, got: {output}"
+        );
+        assert!(
+            output.contains("LIMINAL_LISTEN_ADDR"),
+            "the warn must name the unrecognized key, got: {output}"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn invalid_listen_address_override_returns_config_load()
     -> Result<(), Box<dyn std::error::Error>> {
         let config = sample_config()?;
