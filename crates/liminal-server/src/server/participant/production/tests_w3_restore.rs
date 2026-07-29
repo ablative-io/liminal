@@ -596,3 +596,56 @@ fn pass_two_cursor_failure_maps_through_extension_log_error_and_drops_staged_sta
     }
     Ok(())
 }
+
+/// When an operation fails with a committed prefix staged, the handler replays
+/// and repairs before reporting. If that REPAIR also fails, the repair error was
+/// thrown away entirely (`Err(_) => { *owner = None; }`) and the caller received
+/// only the original operation error — so the reason durable state could not be
+/// reconciled existed nowhere at all. The sibling arm on the success path
+/// returns its replay error; this arm must at least compose it in.
+///
+/// The state is built from the existing W3 fixtures: the base stream is
+/// corrupted FIRST (a duplicated genesis payload, the same corruption
+/// `repair_then_later_failure` uses to fail a replay), then the outbox-append
+/// fault store makes the dispatch itself fail with impact staged. That drives
+/// the exact `Err` + staged + failing-replay arm.
+#[test]
+fn a_failed_post_failure_repair_is_composed_into_the_reported_error() -> Result<(), Box<dyn Error>>
+{
+    let inner = new_store()?;
+    let faults = Arc::new(OutboxAppendFaultStore::new(Arc::clone(&inner)));
+    let store: Arc<dyn DurableStore> = faults.clone();
+    let handler = seed_enrollment(&store)?;
+
+    // Corrupt the base stream BEFORE the failing dispatch, so the repair the
+    // error path performs cannot succeed.
+    let base = stream_payloads(&store, &operation_key())?;
+    let duplicated_genesis = base.first().cloned().ok_or("base stream missing genesis")?;
+    append_payload(
+        &store,
+        &operation_key(),
+        duplicated_genesis,
+        u64::try_from(base.len())?,
+    )?;
+
+    faults.set_fail(true);
+    let failure = dispatch(
+        &handler,
+        ConnectionIncarnation::new(CONVERSATION, 2),
+        enrollment(2),
+    )
+    .err()
+    .ok_or("the faulted outbox append must fail the dispatch")?
+    .to_string();
+    faults.set_fail(false);
+
+    assert!(
+        failure.contains("participant production operation failed"),
+        "the original operation error must still be reported, got: {failure}"
+    );
+    assert!(
+        failure.contains("post-failure replay and repair"),
+        "the discarded repair failure must be composed in, got: {failure}"
+    );
+    Ok(())
+}
