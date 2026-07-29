@@ -148,7 +148,7 @@ pub(super) fn apply_frame(
         // must never originate one. Ignore these (and any stray/unknown inbound
         // frame) rather than treating them as fatal so a confused or malicious
         // client cannot tear the connection down with a stray frame.
-        Frame::Push { .. }
+        frame @ (Frame::Push { .. }
         | Frame::Deliver { .. }
         | Frame::WorkerRegisterAck { .. }
         | Frame::Unknown { .. }
@@ -159,8 +159,43 @@ pub(super) fn apply_frame(
         | Frame::PublishAck { .. }
         | Frame::PublishError { .. }
         | Frame::ConversationError { .. }
-        | Frame::Pong { .. } => FrameAction::NoResponse,
+        | Frame::Pong { .. }) => {
+            warn_ignored_inbound_frame(ignored_inbound_frame_kind(&frame));
+            FrameAction::NoResponse
+        }
     }
+}
+
+/// Names the frame variant for the ignored-inbound warn. Kind names only — no
+/// payload is Debug-formatted, so a stray frame cannot spray opaque bytes into
+/// the log.
+const fn ignored_inbound_frame_kind(frame: &Frame) -> &'static str {
+    match frame {
+        Frame::Push { .. } => "push",
+        Frame::Deliver { .. } => "deliver",
+        Frame::WorkerRegisterAck { .. } => "worker_register_ack",
+        Frame::Unknown { .. } => "unknown",
+        Frame::ConnectAck { .. } => "connect_ack",
+        Frame::ConnectError { .. } => "connect_error",
+        Frame::SubscribeAck { .. } => "subscribe_ack",
+        Frame::SubscribeError { .. } => "subscribe_error",
+        Frame::PublishAck { .. } => "publish_ack",
+        Frame::PublishError { .. } => "publish_error",
+        Frame::ConversationError { .. } => "conversation_error",
+        Frame::Pong { .. } => "pong",
+        // Unreachable from the ignored arm (every other kind has its own
+        // dispatch above); named honestly rather than panicking.
+        _ => "other",
+    }
+}
+
+/// Logs the ignored stray inbound frame. The no-teardown semantics are the
+/// caller's; this is visibility only.
+fn warn_ignored_inbound_frame(kind: &'static str) {
+    tracing::warn!(
+        frame_kind = kind,
+        "ignored stray inbound frame; server-to-client-only or unknown frame kinds get no response and no teardown"
+    );
 }
 
 /// Applies the core protocol's single-use connection handshake.
