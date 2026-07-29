@@ -42,9 +42,10 @@ fn builder_switches_channel_mode_by_config() -> Result<(), SdkError> {
         ConnectionPoolConfig::new(1, 10, 16),
     )?);
 
-    assert_eq!(
-        publish_with_generic_handle(&build_channel_handle(&embedded)?)?,
-        PressureResponse::Accept
+    let embedded_result = publish_with_generic_handle(&build_channel_handle(&embedded)?);
+    assert!(
+        matches!(embedded_result, Err(SdkError::Unwired { .. })),
+        "the default embedded backend must refuse, got {embedded_result:?}"
     );
 
     let remote_result = publish_with_generic_handle(&build_channel_handle(&remote)?);

@@ -32,9 +32,10 @@ fn switching_between_embedded_and_remote_changes_only_config() -> Result<(), Sdk
         ConnectionPoolConfig::new(1, 10, 16),
     )?);
 
-    assert_eq!(
-        publish_with_same_application_code(&build_channel_handle(&embedded)?)?,
-        PressureResponse::Accept
+    let embedded_result = publish_with_same_application_code(&build_channel_handle(&embedded)?);
+    assert!(
+        matches!(embedded_result, Err(SdkError::Unwired { .. })),
+        "the default embedded backend must refuse, got {embedded_result:?}"
     );
 
     let remote_result = publish_with_same_application_code(&build_channel_handle(&remote)?);

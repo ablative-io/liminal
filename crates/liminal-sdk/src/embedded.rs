@@ -1,3 +1,4 @@
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::fmt;
@@ -194,27 +195,65 @@ pub trait EmbeddedConversationBackend: fmt::Debug + Send + Sync {
     fn send(&self, message: &dyn EmbeddedConversationMessage) -> Result<(), SdkError>;
 }
 
-/// Minimal in-process channel backend that accepts messages immediately.
+/// Ledger row that records why embedded mode has no in-process bus behind it.
+const B1_SEAM: &str = "seam B1 — Embedded/frame-conv integration \
+                       (docs/stack-review/liminal-ledger.md)";
+
+/// The channel backend [`EmbeddedConfig::new`] installs by default — and it
+/// REFUSES every publish.
+///
+/// Embedded mode has no in-process bus behind it. That absence is deliberate
+/// and recorded: it is seam **B1**, "Embedded/frame-conv integration", in
+/// `docs/stack-review/liminal-ledger.md`, which makes shared-scheduler
+/// construction on the `liminal` core crate the blessed path and leaves this
+/// backend as a labelled seam until then.
+///
+/// What it must NOT be is a seam that lies. It used to discard the message and
+/// return [`PressureResponse::Accept`], so every embedded publish reported
+/// success while nothing was delivered to anyone. It now returns
+/// [`SdkError::Unwired`] naming the B1 seam and
+/// [`EmbeddedConfig::with_channel_backend`], which is how a caller installs a
+/// backend that genuinely delivers.
 #[derive(Clone, Debug, Default)]
 pub struct DirectEmbeddedChannelBackend;
 
 impl EmbeddedChannelBackend for DirectEmbeddedChannelBackend {
     fn publish(&self, message: &dyn EmbeddedChannelMessage) -> Result<PressureResponse, SdkError> {
-        let schema = message.schema_metadata();
-        core::hint::black_box(&schema);
-        Ok(PressureResponse::Accept)
+        Err(SdkError::Unwired {
+            surface: format!(
+                "the default embedded channel backend (publish of {})",
+                message.type_name()
+            ),
+            seam: B1_SEAM.to_string(),
+            alternative: "install an in-process backend that genuinely delivers with \
+                          EmbeddedConfig::with_channel_backend"
+                .to_string(),
+        })
     }
 }
 
-/// Minimal in-process conversation backend that accepts sends immediately.
+/// The conversation backend [`EmbeddedConfig::new`] installs by default — and it
+/// REFUSES every send.
+///
+/// The sibling of [`DirectEmbeddedChannelBackend`] and the same seam: it used to
+/// discard the message and return `Ok(())`, reporting a delivery that never
+/// happened. It now returns [`SdkError::Unwired`] naming the B1 seam and
+/// [`EmbeddedConfig::with_conversation_backend`].
 #[derive(Clone, Debug, Default)]
 pub struct DirectEmbeddedConversationBackend;
 
 impl EmbeddedConversationBackend for DirectEmbeddedConversationBackend {
     fn send(&self, message: &dyn EmbeddedConversationMessage) -> Result<(), SdkError> {
-        let type_name = message.type_name();
-        core::hint::black_box(type_name);
-        Ok(())
+        Err(SdkError::Unwired {
+            surface: format!(
+                "the default embedded conversation backend (send of {})",
+                message.type_name()
+            ),
+            seam: B1_SEAM.to_string(),
+            alternative: "install an in-process backend that genuinely delivers with \
+                          EmbeddedConfig::with_conversation_backend"
+                .to_string(),
+        })
     }
 }
 
@@ -233,6 +272,14 @@ pub struct EmbeddedConfig {
 
 impl EmbeddedConfig {
     /// Creates embedded configuration without requiring a server address.
+    ///
+    /// **The default backends REFUSE.** Both
+    /// [`DirectEmbeddedChannelBackend`] and [`DirectEmbeddedConversationBackend`]
+    /// return [`SdkError::Unwired`] naming seam B1: embedded mode has no
+    /// in-process bus behind it, and this configuration will not pretend
+    /// otherwise by reporting an `Accept` nothing delivered. Install real
+    /// backends with [`with_channel_backend`](Self::with_channel_backend) and
+    /// [`with_conversation_backend`](Self::with_conversation_backend).
     #[must_use]
     pub fn new(
         channel_name: impl Into<String>,
