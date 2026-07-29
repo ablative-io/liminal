@@ -1,0 +1,28 @@
+22:13:38Z === STRANGER WALK START | fresh CARGO_HOME=/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/stranger-walk/cargo-home ===
+22:13:38Z claim acquired pid=23391
+22:14:09Z [P1] PASS — README package-alias dep + both use lines compile from crates.io
+22:14:58Z [P2] PASS — cargo install liminal-server@0.5.1 from registry
+22:15:03Z claim released early (compiles done, pid 23391)
+22:15:03Z unpacked liminal-rs from liminal-rs-0.5.1.crate
+22:15:03Z unpacked liminal-sdk from liminal-sdk-0.5.1.crate
+22:15:03Z unpacked liminal-server from liminal-server-0.5.1.crate
+22:15:03Z [P3] PASS — server sources present; config/liminal.example.toml ABSENT and rust-toolchain.toml ABSENT (ruled+disclosed; asserted positively; NOT a stop)
+22:15:03Z P4: liminal-rs == tag bytes (outside cargo-generated files)
+22:15:03Z P4: liminal-sdk == tag bytes (outside cargo-generated files)
+22:15:03Z P4: liminal-server == tag bytes (outside cargo-generated files)
+22:15:03Z [P4] PASS — published sources byte-match tag b250da9 across all unpacked crates (cargo-generated files excluded)
+22:15:04Z [P5] PASS — installed binary boots against the repo's example config (the CHANGELOG's stranger path)
+22:15:04Z [P6] PASS — routes 200/200/200(text/plain;version=0.0.4)/404/405 and server LOGS to stderr on startup under default filter
+22:15:07Z [N1] PASS — no --config — failed closed (log: N1.log)
+22:15:10Z [N2] PASS — unknown key = startup error — failed closed (log: N2.log)
+22:15:13Z [N3] PASS — persistence_path at nonexistent dir — failed closed (log: N3.log)
+22:15:13Z N3b: directory NOT created (correct)
+22:15:13Z N3 message text: 
+22:15:16Z [N4] PASS — listen == health_listen — failed closed (log: N4.log)
+22:15:20Z [N5] PASS — RUST_LOG="" = total silence including startup events
+22:15:23Z [N6-listen_address] PASS — mandatory key listen_address omitted — failed closed (log: N6-listen_address.log)
+22:15:26Z [N6-health_listen_address] PASS — mandatory key health_listen_address omitted — failed closed (log: N6-health_listen_address.log)
+22:15:29Z [N6-drain_timeout_ms] PASS — mandatory key drain_timeout_ms omitted — failed closed (log: N6-drain_timeout_ms.log)
+22:15:32Z [N6-channels] PASS — mandatory key channels omitted — failed closed (log: N6-channels.log)
+22:15:35Z [N6-routing_rules] PASS — mandatory key routing_rules omitted — failed closed (log: N6-routing_rules.log)
+22:15:35Z === WALK COMPLETE: PASS=16 FAIL=0 ===

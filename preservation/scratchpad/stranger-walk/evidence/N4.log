@@ -1,0 +1,1 @@
+Error: configuration validation failed: health_listen_address: must differ from listen_address for probe isolation

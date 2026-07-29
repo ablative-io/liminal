@@ -1,0 +1,5 @@
+listen_address = "127.0.0.1:47311"
+health_listen_address = "127.0.0.1:47312"
+drain_timeout_ms = 5000
+channels = []
+routing_rules = []

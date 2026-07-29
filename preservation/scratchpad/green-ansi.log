@@ -1,0 +1,8 @@
+   Compiling liminal-server v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-tracing/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.42s
+────────────
+ Nextest run ID 62c4cefa-3ddd-4306-9745-598fcfba6b7a with nextest profile: default
+    Starting 1 test across 12 binaries (651 tests skipped)
+        PASS [   1.355s] (1/1) liminal-server::tracing_output_e2e spawned_server_reports_startup_on_stderr
+────────────
+     Summary [   1.356s] 1 test run: 1 passed, 651 skipped

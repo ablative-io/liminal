@@ -1,0 +1,7 @@
+────────────
+ Nextest run ID b7e2059e-1b1d-46ca-bed6-8fa349d591f9 with nextest profile: default
+    Starting 2 tests across 2 binaries
+        PASS [   0.017s] (1/2) leakprobe::probe clean_control
+        LEAK [   0.219s] (2/2) leakprobe::probe deliberate_leaker
+────────────
+     Summary [   0.220s] 2 tests run: 2 passed (1 leaky), 0 skipped

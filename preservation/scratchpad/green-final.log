@@ -1,0 +1,9 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.09s
+────────────
+ Nextest run ID 03c008a6-d7fc-4b81-9cd1-b9867fdfcc76 with nextest profile: default
+    Starting 1 test across 12 binaries (651 tests skipped)
+        PASS [   1.053s] (1/1) liminal-server::tracing_output_e2e spawned_server_reports_startup_on_stderr
+────────────
+     Summary [   1.054s] 1 test run: 1 passed, 651 skipped

@@ -1,0 +1,6 @@
+Error: configuration load failed: failed to parse configuration file '/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/stranger-walk/n6-routing_rules.toml': TOML parse error at line 61, column 3
+   |
+61 | [[routing_rules_disabled]]
+   |   ^^^^^^^^^^^^^^^^^^^^^^
+unknown field `routing_rules_disabled`, expected one of `listen_address`, `health_listen_address`, `drain_timeout_ms`, `channels`, `routing_rules`, `persistence_path`, `cluster`, `auth`, `services`, `limits`, `websocket`, `participant`
+

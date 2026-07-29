@@ -1,0 +1,159 @@
+    Checking liminal-rs v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/crates/liminal)
+error: this pattern is unneeded as the `..` pattern can match that element
+   --> crates/liminal-protocol/src/client/resume_tests.rs:365:9
+    |
+365 | /         permit: _,
+366 | |         ..
+    | |________^ help: remove it
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#unneeded_wildcard_pattern
+    = note: `-D clippy::unneeded-wildcard-pattern` implied by `-D clippy::all`
+--
+
+error: unused "map closure" when calling `Option::map_or_else` value
+    --> crates/liminal-protocol/src/wire/server_codec.rs:2530:45
+     |
+2530 |               let current_observer_progress = current.map_or_else(
+     |  _____________________________________________^
+2531 | |                 || {
+2532 | |                     decoder.invalidate();
+2533 | |                     0
+2534 | |                 },
+--
+
+error: could not compile `liminal-protocol` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `liminal-protocol` (lib test) due to 2 previous errors
+error: manual implementation of a no-op waker
+   --> crates/liminal/src/durability/conversation/tests.rs:328:6
+    |
+328 | impl Wake for NoopWaker {
+    |      ^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+    = note: `-D clippy::manual-noop-waker` implied by `-D clippy::all`
+--
+
+error: manual implementation of a no-op waker
+   --> crates/liminal/src/durability/cursor/tests.rs:328:6
+    |
+328 | impl Wake for NoopWaker {
+    |      ^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+
+error: constructing a `Duration` using a smaller unit when a larger unit would be more readable
+   --> crates/liminal/src/durability/dedup/tests.rs:151:9
+    |
+151 |         Duration::from_millis(60_000),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#duration_suboptimal_units
+    = note: `-D clippy::duration-suboptimal-units` implied by `-D clippy::pedantic`
+    = help: to override `-D clippy::pedantic` add `#[allow(clippy::duration_suboptimal_units)]`
+--
+
+error: constructing a `Duration` using a smaller unit when a larger unit would be more readable
+   --> crates/liminal/src/durability/dedup/tests.rs:152:9
+    |
+152 |         Duration::from_millis(5_000),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#duration_suboptimal_units
+help: try using from_secs
+    |
+--
+
+error: constructing a `Duration` using a smaller unit when a larger unit would be more readable
+   --> crates/liminal/src/durability/dedup/tests.rs:154:42
+    |
+154 |     assert_eq!(sweeper.sweep_interval(), Duration::from_millis(5_000));
+    |                                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#duration_suboptimal_units
+help: try using from_secs
+    |
+--
+
+error: constructing a `Duration` using a smaller unit when a larger unit would be more readable
+   --> crates/liminal/src/durability/dedup/tests.rs:183:9
+    |
+183 |         Duration::from_millis(60_000),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#duration_suboptimal_units
+help: try using from_secs
+    |
+--
+
+error: constructing a `Duration` using a smaller unit when a larger unit would be more readable
+   --> crates/liminal/src/durability/dedup/tests.rs:184:9
+    |
+184 |         Duration::from_millis(5_000),
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#duration_suboptimal_units
+help: try using from_secs
+    |
+--
+
+error: manual implementation of a no-op waker
+   --> crates/liminal/src/durability/dedup/tests.rs:520:6
+    |
+520 | impl Wake for NoopWaker {
+    |      ^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+
+error: manual implementation of a no-op waker
+   --> crates/liminal/src/durability/recovery/tests.rs:425:6
+    |
+425 | impl Wake for NoopWaker {
+    |      ^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+
+error: manual implementation of a no-op waker
+   --> crates/liminal/src/durability/replay/tests.rs:290:6
+    |
+290 | impl Wake for NoopWaker {
+    |      ^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+
+error: manual implementation of a no-op waker
+  --> crates/liminal/src/durability/bridge.rs:98:6
+   |
+98 | impl Wake for NoopWaker {
+   |      ^^^^
+   |
+   = help: use `std::task::Waker::noop()` instead
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+   = note: `-D clippy::manual-noop-waker` implied by `-D clippy::all`
+--
+
+error: could not compile `liminal-rs` (lib) due to 1 previous error
+error: manual implementation of a no-op waker
+  --> crates/liminal/src/durability/bridge.rs:98:6
+   |
+98 | impl Wake for NoopWaker {
+   |      ^^^^
+   |
+   = help: use `std::task::Waker::noop()` instead
+   = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+
+error: manual implementation of a no-op waker
+   --> crates/liminal/src/routing/function/execute/actor.rs:228:10
+    |
+228 |     impl Wake for NoopWake {
+    |          ^^^^
+    |
+    = help: use `std::task::Waker::noop()` instead
+    = help: for further information visit https://rust-lang.github.io/rust-clippy/rust-1.97.0/index.html#manual_noop_waker
+
+error: could not compile `liminal-rs` (lib test) due to 12 previous errors

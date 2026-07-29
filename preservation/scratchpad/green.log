@@ -1,0 +1,7 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.12s
+────────────
+ Nextest run ID e448eaa9-241e-4f68-b92a-9a46afcf75b7 with nextest profile: default
+    Starting 1 test across 11 binaries (651 tests skipped)
+        PASS [   0.009s] (1/1) liminal-server config::file::tests::shipped_example_config_loads_through_the_real_loader
+────────────
+     Summary [   0.009s] 1 test run: 1 passed, 651 skipped

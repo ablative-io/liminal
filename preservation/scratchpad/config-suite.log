@@ -1,0 +1,70 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.07s
+────────────
+ Nextest run ID 3f4d2b79-95d7-45bb-8a3b-cfe404b83172 with nextest profile: default
+    Starting 64 tests across 11 binaries (588 tests skipped)
+        PASS [   0.011s] ( 1/64) liminal-server config::env::tests::persistence_path_override_replaces_file_value
+        PASS [   0.011s] ( 2/64) liminal-server config::env::tests::auth_token_override_replaces_existing_token
+        PASS [   0.011s] ( 3/64) liminal-server config::env::tests::websocket_empty_origin_list_override_is_fail_closed
+        PASS [   0.011s] ( 4/64) liminal-server config::env::tests::invalid_drain_timeout_override_returns_config_load
+        PASS [   0.011s] ( 5/64) liminal-server config::env::tests::cluster_override_without_cluster_section_returns_validation_error
+        PASS [   0.011s] ( 6/64) liminal-server config::env::tests::cluster_listen_address_and_cookie_overrides_replace_values
+        PASS [   0.012s] ( 7/64) liminal-server config::env::tests::health_listen_address_override_replaces_file_value
+        PASS [   0.012s] ( 8/64) liminal-server config::env::tests::invalid_health_listen_address_override_returns_config_load
+        PASS [   0.012s] ( 9/64) liminal-server config::env::tests::drain_timeout_override_replaces_file_value
+        PASS [   0.011s] (10/64) liminal-server config::env::tests::listen_address_override_replaces_file_value
+        PASS [   0.012s] (11/64) liminal-server config::env::tests::cluster_listen_address_override_without_cluster_section_returns_validation_error
+        PASS [   0.012s] (12/64) liminal-server config::env::tests::auth_token_override_creates_missing_auth_section
+        PASS [   0.012s] (13/64) liminal-server config::env::tests::invalid_listen_address_override_returns_config_load
+        PASS [   0.012s] (14/64) liminal-server config::env::tests::absent_environment_variables_leave_config_unchanged
+        PASS [   0.012s] (15/64) liminal-server config::env::tests::websocket_origin_list_with_empty_entry_is_refused
+        PASS [   0.012s] (16/64) liminal-server config::env::tests::cluster_overrides_replace_existing_cluster_values
+        PASS [   0.012s] (17/64) liminal-server config::env::tests::websocket_override_without_declared_section_is_refused
+        PASS [   0.013s] (18/64) liminal-server config::env::tests::file_then_env_then_validate_pipeline_gives_env_precedence
+        PASS [   0.010s] (19/64) liminal-server config::file::tests::missing_file_returns_config_load
+        PASS [   0.010s] (20/64) liminal-server config::validation::tests::default_limits_pass_validation_and_carry_signed_numbers
+        PASS [   0.011s] (21/64) liminal-server config::env::tests::websocket_overrides_replace_declared_section_values
+        PASS [   0.011s] (22/64) liminal-server config::file::tests::malformed_toml_returns_config_load_with_parse_details
+        PASS [   0.010s] (23/64) liminal-server config::validation::tests::invalid_health_listen_address_reports_field_name
+        PASS [   0.011s] (24/64) liminal-server config::validation::tests::absent_auth_section_passes_validation
+        PASS [   0.010s] (25/64) liminal-server config::validation::tests::invalid_listen_address_reports_field_name
+        PASS [   0.011s] (26/64) liminal-server config::file::tests::valid_toml_parses_into_server_config
+        PASS [   0.012s] (27/64) liminal-server config::file::tests::unknown_fields_return_config_load
+        PASS [   0.011s] (28/64) liminal-server config::validation::tests::duplicate_channel_names_are_listed
+        PASS [   0.011s] (29/64) liminal-server config::validation::tests::default_profile_is_full_and_passes_validation
+        PASS [   0.012s] (30/64) liminal-server config::file::tests::shipped_example_config_loads_through_the_real_loader
+        PASS [   0.011s] (31/64) liminal-server config::validation::tests::matching_health_and_main_listen_addresses_are_rejected
+        PASS [   0.012s] (32/64) liminal-server config::file::tests::websocket_section_parses_and_absent_section_stays_none
+        PASS [   0.011s] (33/64) liminal-server config::validation::tests::empty_auth_token_is_rejected
+        PASS [   0.011s] (34/64) liminal-server config::validation::tests::file_persistence_path_is_rejected
+        PASS [   0.012s] (35/64) liminal-server config::validation::tests::invalid_json_schema_ref_reports_validation_error
+        PASS [   0.021s] (36/64) liminal-server config::validation::tests::absolute_schema_ref_is_loaded_and_parsed
+        PASS [   0.011s] (37/64) liminal-server config::validation::tests::matching_health_and_main_listen_ports_are_rejected
+        PASS [   0.010s] (38/64) liminal-server config::validation::tests::valid_config_passes_validation
+        PASS [   0.010s] (39/64) liminal-server config::validation::tests::unknown_profile_is_a_validation_error
+        PASS [   0.010s] (40/64) liminal-server config::validation::tests::present_non_empty_auth_token_passes_validation
+        PASS [   0.010s] (41/64) liminal-server config::validation::tests::multiple_validation_errors_are_reported_together
+        PASS [   0.011s] (42/64) liminal-server config::validation::tests::unreachable_persistence_path_reports_path
+        PASS [   0.011s] (43/64) liminal-server config::validation::tests::provenance_ttl_shorter_than_receipt_is_a_typed_config_error
+        PASS [   0.011s] (44/64) liminal-server config::validation::tests::routing_rules_reference_configured_channels
+        PASS [   0.011s] (45/64) liminal-server config::validation::tests::undersized_wire_frame_limit_is_a_typed_config_error
+        PASS [   0.010s] (46/64) liminal-server config::validation::tests::websocket_duplicate_origin_is_a_typed_config_error
+        PASS [   0.010s] (47/64) liminal-server config::validation::tests::websocket_address_conflicts_are_typed_config_errors
+        PASS [   0.010s] (48/64) liminal-server config::validation::tests::valid_participant_section_passes_validation
+        PASS [   0.011s] (49/64) liminal-server config::validation::tests::missing_schema_ref_file_reports_validation_error
+        PASS [   0.010s] (50/64) liminal-server config::validation::tests::valid_websocket_section_passes_validation
+        PASS [   0.010s] (51/64) liminal-server config::validation::tests::websocket_absent_ping_interval_means_disabled_and_valid
+        PASS [   0.017s] (52/64) liminal-server config::validation::tests::relative_schema_ref_resolves_against_base_dir
+        PASS [   0.017s] (53/64) liminal-server config::validation::tests::valid_json_invalid_schema_ref_reports_validation_error
+        PASS [   0.009s] (54/64) liminal-server config::validation::tests::worker_front_door_rejects_participant_section
+        PASS [   0.010s] (55/64) liminal-server config::validation::tests::websocket_zero_port_is_a_typed_config_error
+        PASS [   0.009s] (56/64) liminal-server config::validation::tests::worker_front_door_profile_with_empty_topology_passes
+        PASS [   0.010s] (57/64) liminal-server config::validation::tests::worker_front_door_profile_rejects_channels_persistence_and_cluster
+        PASS [   0.009s] (58/64) liminal-server config::validation::tests::zero_limits_are_typed_config_errors
+        PASS [   0.010s] (59/64) liminal-server config::validation::tests::websocket_zero_ping_interval_is_a_typed_config_error
+        PASS [   0.010s] (60/64) liminal-server config::validation::tests::websocket_malformed_origin_entries_are_typed_config_errors
+        PASS [   0.009s] (61/64) liminal-server config::validation::tests::zero_participant_values_are_typed_config_errors
+        PASS [   0.010s] (62/64) liminal-server config::validation::tests::zero_drain_timeout_is_rejected
+        PASS [   0.011s] (63/64) liminal-server config::validation::tests::websocket_empty_origin_list_is_valid_fail_closed_configuration
+        PASS [   0.011s] (64/64) liminal-server config::validation::tests::websocket_path_rules_are_typed_config_errors
+────────────
+     Summary [   0.044s] 64 tests run: 64 passed, 588 skipped

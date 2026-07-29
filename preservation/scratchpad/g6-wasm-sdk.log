@@ -1,0 +1,29 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling serde_core v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.150
+   Compiling serde v1.0.228
+   Compiling thiserror v2.0.18
+    Checking memchr v2.8.2
+    Checking itoa v1.0.18
+    Checking futures-core v0.3.32
+    Checking spin v0.9.8
+   Compiling syn v2.0.117
+   Compiling thiserror-impl v2.0.18
+   Compiling serde_derive v1.0.228
+    Checking liminal-sdk v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/srv-008/crates/liminal-sdk)
+warning: field `idempotency_key` is never read
+   --> crates/liminal-sdk/src/remote/protocol.rs:188:5
+    |
+184 | pub(super) struct WirePublishRequest {
+    |                   ------------------ field in this struct
+...
+188 |     idempotency_key: Option<String>,
+    |     ^^^^^^^^^^^^^^^
+    |
+    = note: `WirePublishRequest` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `liminal-sdk` (lib) generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 4.57s

@@ -1,0 +1,25 @@
+    Checking log v0.4.32
+    Checking tracing-core v0.1.36
+    Checking sharded-slab v0.1.7
+    Checking matchers v0.2.0
+    Checking thread_local v1.1.10
+    Checking liminal-protocol v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-tracing/crates/liminal-protocol)
+    Checking nu-ansi-term v0.50.3
+    Checking regalloc2 v0.15.1
+    Checking mio v1.2.1
+    Checking tungstenite v0.30.0
+    Checking tracing v0.1.44
+    Checking tracing-log v0.2.0
+    Checking tokio v1.52.3
+    Checking tracing-subscriber v0.3.23
+    Checking cranelift-codegen v0.131.2
+    Checking cranelift-module v0.131.2
+    Checking cranelift-native v0.131.2
+    Checking cranelift-frontend v0.131.2
+    Checking cranelift-jit v0.131.2
+    Checking beamr v0.16.1
+    Checking haematite v0.7.0
+    Checking liminal-rs v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-tracing/crates/liminal)
+    Checking liminal-sdk v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-tracing/crates/liminal-sdk)
+    Checking liminal-server v0.5.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-tracing/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 16.30s

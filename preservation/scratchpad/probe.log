@@ -1,0 +1,10 @@
+[2m2026-07-29T16:20:13.955511Z[0m [32m INFO[0m [2mliminal_server::server::listener[0m[2m:[0m liminal server listener bound [3mlisten_address[0m[2m=[0m127.0.0.1:47311
+[2m2026-07-29T16:20:13.955708Z[0m [34mDEBUG[0m [2mliminal_server::server::runtime[0m[2m:[0m liminal server configuration validated [3mconfig_path[0m[2m=[0m/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/cfg/server.toml [3mlisten_address[0m[2m=[0m127.0.0.1:47311 [3mhealth_listen_address[0m[2m=[0m127.0.0.1:47312
+[2m2026-07-29T16:20:13.955735Z[0m [32m INFO[0m [2mliminal_server::server::runtime[0m[2m:[0m liminal server started [3mlisten_address[0m[2m=[0m127.0.0.1:47311 [3mhealth_listen_address[0m[2m=[0m127.0.0.1:47312
+[2m2026-07-29T16:20:14.145000Z[0m [34mDEBUG[0m [2mliminal_server::server::connection::supervisor[0m[2m:[0m connection readiness deregistration acknowledged [3mregistered_fd[0m[2m=[0m13
+[2m2026-07-29T16:20:14.456294Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m received shutdown signal [3msignal[0m[2m=[0m15
+[2m2026-07-29T16:20:14.456394Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m shutdown requested
+[2m2026-07-29T16:20:14.456437Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m starting graceful shutdown sequence [3mdrain_timeout[0m[2m=[0m5s
+[2m2026-07-29T16:20:14.456853Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m flushing durable channel state
+[2m2026-07-29T16:20:14.456875Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m durable channel state flushed
+[2m2026-07-29T16:20:14.457822Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m graceful shutdown sequence complete

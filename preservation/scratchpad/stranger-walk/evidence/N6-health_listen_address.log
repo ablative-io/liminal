@@ -1,0 +1,6 @@
+Error: configuration load failed: failed to parse configuration file '/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/stranger-walk/n6-health_listen_address.toml': TOML parse error at line 1, column 1
+  |
+1 | # liminal-server — example configuration
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+missing field `health_listen_address`
+

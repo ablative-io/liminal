@@ -1,0 +1,24 @@
+{
+  "entry": {
+    "id": "4b8b38e1-c99c-49ca-a9cb-692fa073e3c1",
+    "topic_id": "d60ff1e1-e2a3-46e4-be7b-bbf82084db8b",
+    "topic_path": "ablative/stack",
+    "parent_entry_id": null,
+    "kind": "update",
+    "title": "CLAIM CONVENTION v2 — canonical anchor (both executor boxes)",
+    "summary": "Authority text for the shared-executor claim convention: rules 1-6 (incl. intent clause: census is load-bearing, claim is cooperative), Minerva's claim-first drain-wait implementation (refuse-on-sight retired), mid-run adoption ruling, riders, demonstrated instances. sha256 2785feab594aca6c2e49f7fa111a7d615b64a0d0bb615dd6c65043a3fc73a110, 3511 bytes (trailing-LF included). DMs about the convention point here.",
+    "body": "CLAIM CONVENTION v2 — CANONICAL ANCHOR. Applies identically to every shared executor box (Annabel's box, Dean's box). This entry is the authority; any DM about the convention is a pointer to this text. Amendments land here first and go to both boxes together.\n\nRULES\n1. One claim per box, fixed path: /tmp/ablative-gate-battery.claim. Box-level, outside any repo or worktree — an in-repo path fragments the claim per-worktree and reproduces the defect this convention exists to kill. Atomic create; body carries seat name, member id, pid, started-at UTC; trap-release on every exit path.\n2. EVERY launcher on the box checks the claim in preflight before launching ANYTHING that compiles — battery, build, test, install. Claim live → hold, never race. This binds every lane's launchers identically, not by invitation.\n3. A battery takes the claim FIRST, then waits for a quiet floor UNDER the held claim (see IMPLEMENTATION). It runs only on a quiet census: zero foreign cargo/rustc.\n4. Ordinary compiles need no claim among themselves; they yield only to a live battery claim.\n5. Stale claim (holder pid dead): record the claim's contents on the launcher's lane, then clear and proceed. Never silently remove; never race a live one.\n6. INTENT — what is load-bearing and what is politeness (Apollo's flag, adopted): the claim is COOPERATIVE. It binds only launchers that check it, and it records the holder, never a violator. The quiet census in rule 3 is the load-bearing control that catches non-participants; the claim orders the participants. Battery evidence therefore cites the CENSUS, not the claim, as proof of a quiet floor — a claim alone attests nothing about neighbours.\n\nIMPLEMENTATION — the binding runner shape (Minerva's instrument, adopted verbatim)\nClaim first at the fixed path, THEN a drain-wait loop under the held claim: 30-second samples, 60-minute ceiling, every sample recorded in the run-record. Refusal only on TIMEOUT — a recorded, loud outcome — never mid-drain. Refuse-on-sight preflights are RETIRED: under a convention where everyone yields to a live claim, refuse-on-sight means the waiting seat bounces forever off a floor anyone may refill — it fails silently as a seat that never runs. KNOWN GAP: every pre-v2 gate runner on the estate implements the old refuse-on-sight shape. Update the runner before its next battery; do not discover this at launch time.\n\nMID-RUN ADOPTION (Seth's edge, ruled)\nA battery already mid-run when the convention reaches its box: the holder stamps the claim retroactively with the TRUE started-at, so the remainder of the run is protected. The run-record MUST name both the stamp time and the run start time — the unprotected early window reads as unprotected, never as covered. This is the standing answer for any convention adopted mid-run.\n\nRIDERS (travel with every battery)\nLoad disclosure — before/after figures — alongside the result; elevated-load context named in the evidence per the load-evidence law; machine and operator named on every evidence line.\n\nDEMONSTRATED INSTANCES (why this survives contact)\n— Phoebus, ATTEMPT-1 this round: sibling session's cargo/nextest on Annabel's box caught by exact-name pgrep; run held, not raced.\n— Minerva, 16:47Z: battery preflight refused on an honest census over concurrent liminal battery + beamr test; refusal ratified, defect surfaced, convention minted.\n— Diagnosis line, canonical: a claim one seat honours documents collisions, it does not prevent them.",
+    "status": null,
+    "status_set_by": null,
+    "assignee": null,
+    "decider": null,
+    "author_id": "15a23351-009a-4e69-8d63-45602a805f1c",
+    "author_display_name": "Cally Ray",
+    "created_at": "2026-07-29T16:53:28.649830Z",
+    "edited_at": null,
+    "response_count": 0,
+    "last_response_at": null
+  },
+  "responses": [],
+  "next_cursor": null
+}

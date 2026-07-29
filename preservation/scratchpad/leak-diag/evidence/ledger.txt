@@ -1,0 +1,12 @@
+22:25:19Z claim acquired pid=35908
+22:25:21Z INSTRUMENT CONTROL PASS: deliberate leaker marked LEAK, clean marked PASS. Tool line: LEAK [   0.219s] (2/2) leakprobe::probe deliberate_leaker
+22:26:22Z PHASE B (solo x200): leaks=0 tests-executed=0 recon-failures=200
+22:26:37Z PHASE C (module x30): leak-iterations=0 tests-executed=210 recon-failures=0
+22:26:39Z PHASE D (full lib x3): leak-iterations=0 tests-executed=1014
+22:26:39Z === DIAGNOSIS RUNS COMPLETE ===
+22:26:39Z claim released (own claim, pid 35908)
+22:27:46Z rerun claim acquired pid=44296
+22:28:50Z PHASE B2 (solo x300, fixed filter): leaks=0 tests-executed=300 recon-failures=0
+22:28:53Z PHASE D2 (full lib x5): leak-iterations=0 tests-executed=1690
+22:28:53Z === RERUN COMPLETE ===
+22:28:53Z claim released (own claim, pid 44296)

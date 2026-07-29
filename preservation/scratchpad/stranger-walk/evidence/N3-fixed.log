@@ -1,0 +1,1 @@
+Error: configuration validation failed: persistence_path '/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/stranger-walk/does-not-exist/nested': path is unreachable: No such file or directory (os error 2)

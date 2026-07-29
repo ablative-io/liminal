@@ -1,0 +1,8 @@
+2026-07-29T22:15:03.937284Z  INFO liminal_server::server::listener: liminal server listener bound listen_address=127.0.0.1:8080
+2026-07-29T22:15:03.937452Z  INFO liminal_server::server::runtime: liminal server started listen_address=127.0.0.1:8080 health_listen_address=127.0.0.1:8081
+2026-07-29T22:15:04.480963Z  INFO liminal_server::server::shutdown: received shutdown signal signal=15
+2026-07-29T22:15:04.480978Z  INFO liminal_server::server::shutdown: shutdown requested
+2026-07-29T22:15:04.480997Z  INFO liminal_server::server::shutdown: starting graceful shutdown sequence drain_timeout=30s
+2026-07-29T22:15:04.481176Z  INFO liminal_server::server::shutdown: flushing durable channel state
+2026-07-29T22:15:04.500460Z  INFO liminal_server::server::shutdown: durable channel state flushed
+2026-07-29T22:15:04.500996Z  INFO liminal_server::server::shutdown: graceful shutdown sequence complete

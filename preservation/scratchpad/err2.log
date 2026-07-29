@@ -1,0 +1,8 @@
+[2m2026-07-29T16:18:19.507125Z[0m [32m INFO[0m [2mliminal_server::server::listener[0m[2m:[0m liminal server listener bound [3mlisten_address[0m[2m=[0m127.0.0.1:47311
+[2m2026-07-29T16:18:19.507258Z[0m [32m INFO[0m [2mliminal_server::server::runtime[0m[2m:[0m liminal server started [3mlisten_address[0m[2m=[0m127.0.0.1:47311 [3mhealth_listen_address[0m[2m=[0m127.0.0.1:47312
+[2m2026-07-29T16:18:19.711401Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m received shutdown signal [3msignal[0m[2m=[0m15
+[2m2026-07-29T16:18:19.711510Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m shutdown requested
+[2m2026-07-29T16:18:19.711544Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m starting graceful shutdown sequence [3mdrain_timeout[0m[2m=[0m5s
+[2m2026-07-29T16:18:19.711958Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m flushing durable channel state
+[2m2026-07-29T16:18:19.711981Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m durable channel state flushed
+[2m2026-07-29T16:18:19.712824Z[0m [32m INFO[0m [2mliminal_server::server::shutdown[0m[2m:[0m graceful shutdown sequence complete

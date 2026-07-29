@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.13s
+────────────
+ Nextest run ID 6ff09805-a717-43cd-a8e0-4e6554384740 with nextest profile: default
+    Starting 1 test across 11 binaries (651 tests skipped)
+        FAIL [   0.006s] (1/1) liminal-server config::file::tests::shipped_example_config_loads_through_the_real_loader
+  stdout ───
+
+    running 1 test
+    test config::file::tests::shipped_example_config_loads_through_the_real_loader ... FAILED
+
+    failures:
+
+    failures:
+        config::file::tests::shipped_example_config_loads_through_the_real_loader
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 584 filtered out; finished in 0.00s
+
+  stderr ───
+    Error: "the shipped example config '/Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-boot/crates/liminal-server/../../config/liminal.example.toml' must load and validate through the real loader: configuration load failed: failed to read configuration file '/Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-boot/crates/liminal-server/../../config/liminal.example.toml': No such file or directory (os error 2)"
+
+  Cancelling due to test failure: 
+────────────
+     Summary [   0.007s] 1 test run: 0 passed, 1 failed, 651 skipped
+        FAIL [   0.006s] (1/1) liminal-server config::file::tests::shipped_example_config_loads_through_the_real_loader
+error: test run failed

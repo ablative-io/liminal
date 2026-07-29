@@ -1,0 +1,6 @@
+{"type":"suite","event":"started","test_count":2,"nextest":{"crate":"leakprobe","test_binary":"probe","kind":"test"}}
+{"type":"test","event":"started","name":"leakprobe::probe$clean_control"}
+{"type":"test","event":"started","name":"leakprobe::probe$deliberate_leaker"}
+{"type":"test","event":"ok","name":"leakprobe::probe$clean_control","exec_time":0.016558167}
+{"type":"test","event":"ok","name":"leakprobe::probe$deliberate_leaker","exec_time":0.219315625}
+{"type":"suite","event":"ok","passed":2,"failed":0,"ignored":0,"measured":0,"filtered_out":0,"exec_time":0.235873792,"nextest":{"crate":"leakprobe","test_binary":"probe","kind":"test"}}

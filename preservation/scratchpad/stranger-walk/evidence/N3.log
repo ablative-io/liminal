@@ -1,0 +1,6 @@
+Error: configuration load failed: failed to parse configuration file '/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/stranger-walk/n3.toml': TOML parse error at line 163, column 1
+    |
+163 | persistence_path = "/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/stranger-walk/does-not-exist/nested"
+    | ^^^^^^^^^^^^^^^^
+unknown field `persistence_path`, expected one of `source_channel`, `target_channel`, `predicate`
+

@@ -1,0 +1,103 @@
+#!/bin/bash
+# NEUTRALIZED 2026-07-29 ~18:45Z by Mercury Toast (…bda) — claim-blind compile launcher
+# found in the estate-wide sweep (Cally directive via Hermes 18:39Z). Predates the claim
+# convention; superseded by canon r3 + deltas. Original bytes preserved beside this file
+# as gate-amended.sh.pre-neutralize.bytes. Refusal at launch, not a label (Artemis's law).
+echo "RETIRED: this launcher is claim-blind (no /tmp/ablative-gate-battery.claim preflight). Use the canon runner. Original: gate-amended.sh.pre-neutralize.bytes" >&2
+exit 86
+# Canonical gate script (Waffles, ablative/comms 77c02142) with ruled amendments:
+#   A4: nextest leg drops --all-targets (clippy leg KEEPS it for compile coverage)
+#   A5: no 2>/dev/null anywhere — raw stderr flows to the committed log
+# Completion marker: the nextest summary line MUST appear in the log or the run is RED.
+cd /Users/annabel/Developer/ablative/stack/liminal || exit 2
+
+echo "=== GATE RUN start $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+echo "=== toolchain: $(rustc --version) | $(cargo --version) ==="
+echo "=== load before: $(uptime) ==="
+
+echo "=== LEG 1: cargo check ==="
+cargo check \
+  --workspace \
+  --all-targets \
+  --message-format=json \
+  --keep-going |
+jq -c '
+  select(.reason == "compiler-message")
+  | select(.message.level == "error" or .message.level == "warning")
+  | {
+      type: "clippy",
+      level: .message.level,
+      file: (
+        [.message.spans[]? | select(.is_primary)][0].file_name
+        // .message.spans[0]?.file_name
+        // "unknown"
+      ),
+      line: (
+        [.message.spans[]? | select(.is_primary)][0].line_start
+        // .message.spans[0]?.line_start
+        // null
+      ),
+      column: (
+        [.message.spans[]? | select(.is_primary)][0].column_start
+        // .message.spans[0]?.column_start
+        // null
+      ),
+      lint: (.message.code.code // "compile-error"),
+      message: .message.message
+    }
+'
+echo "=== LEG 1 pipestatus: ${PIPESTATUS[*]} | load: $(uptime) ==="
+
+echo "=== LEG 2: cargo clippy ==="
+cargo clippy \
+  --workspace \
+  --all-targets \
+  --message-format=json \
+  --keep-going \
+  -- \
+  -D warnings |
+jq -c '
+  select(.reason == "compiler-message")
+  | select(.message.level == "error" or .message.level == "warning")
+  | {
+      type: "clippy",
+      level: .message.level,
+      file: (
+        [.message.spans[]? | select(.is_primary)][0].file_name
+        // .message.spans[0]?.file_name
+        // "unknown"
+      ),
+      line: (
+        [.message.spans[]? | select(.is_primary)][0].line_start
+        // .message.spans[0]?.line_start
+        // null
+      ),
+      column: (
+        [.message.spans[]? | select(.is_primary)][0].column_start
+        // .message.spans[0]?.column_start
+        // null
+      ),
+      lint: (.message.code.code // "compile-error"),
+      message: .message.message
+    }
+'
+echo "=== LEG 2 pipestatus: ${PIPESTATUS[*]} | load: $(uptime) ==="
+
+echo "=== LEG 3: cargo nextest (A4: no --all-targets) ==="
+NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 \
+  cargo nextest run \
+    --workspace \
+    --cargo-quiet \
+    --message-format libtest-json-plus \
+    --no-fail-fast |
+jq -c '
+  select(.type == "test" and .event == "failed")
+  | {
+      type: "nextest",
+      test: .name,
+      stdout: (.stdout // ""),
+      message: "test failed"
+    }
+'
+echo "=== LEG 3 pipestatus: ${PIPESTATUS[*]} | load: $(uptime) ==="
+echo "=== GATE RUN end $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="

@@ -1,0 +1,7 @@
+[package]
+name = "stranger-consumer"
+version = "0.0.1"
+edition = "2021"
+
+[dependencies]
+liminal = { package = "liminal-rs", version = "0.5.1" }

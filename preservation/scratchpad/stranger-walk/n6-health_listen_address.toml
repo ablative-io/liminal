@@ -1,0 +1,161 @@
+# liminal-server — example configuration
+#
+# A complete, working starting point. Copy it, edit it, boot it:
+#
+#     cargo run -p liminal-server -- --config config/liminal.example.toml
+#
+# The schema is STRICT: unknown keys are a startup error, not a warning, and
+# the five keys below the next comment carry no defaults — omit one and the
+# server refuses to start. Everything else is optional; an omitted optional
+# section is genuinely absent, never a half-configured subsystem.
+#
+# Every value here is also reachable from the environment (`LIMINAL_*`) — see
+# the Usage section of README.md for the full list and the override rules.
+
+# ---------------------------------------------------------------------------
+# Required — no defaults
+# ---------------------------------------------------------------------------
+
+# Client wire protocol listener. This is the port SDK clients connect to.
+# The port must be non-zero (no ephemeral-port binding from config).
+listen_address = "127.0.0.1:8080"
+
+# Health/metrics HTTP listener. MUST be a different port from listen_address:
+# probe traffic is deliberately isolated from client traffic, and a shared port
+# is a validation error. Serves GET /health, GET /ready, and GET /metrics.
+
+
+# Graceful shutdown budget: how long established connections are given to
+# finish draining after SIGINT/SIGTERM before the server stops waiting.
+# Must be greater than zero.
+drain_timeout_ms = 30000
+
+# Channel topology. At least the key must be present (`channels = []` is legal
+# but useless); names must be non-empty and unique across the file.
+[[channels]]
+name = "orders"
+# `durable = true` routes this channel's messages through the durable store.
+# With no `persistence_path` set (see below) that store is EPHEMERAL: it is
+# created at boot and removed at exit, so messages do not survive a restart.
+durable = true
+# Optional JSON Schema validating every message published to this channel.
+# The path resolves relative to the directory holding THIS file (absolute
+# paths are used verbatim). Startup reads, JSON-parses, and schema-compiles
+# the document — a missing, unreadable, non-JSON, or non-compiling file is a
+# startup error. Omitted (as here) the channel keeps the permissive empty
+# schema `{}` and accepts any JSON payload. Uncomment once you ship the file:
+# schema_ref = "schemas/orders.json"
+
+[[channels]]
+name = "orders-audit"
+durable = false
+
+# Routing rules. The key is MANDATORY — omit it and the server will not start —
+# so it is populated here rather than left as `routing_rules = []`.
+#
+# HONEST STATUS: these rules are fully validated at startup (both channel names
+# must name channels declared above; the optional predicate is parsed) but are
+# NOT yet consumed by the delivery path. Declaring one changes nothing about
+# where messages go today. This mirrors README's Status line: predicate routing
+# exists as a tested subsystem not yet wired into delivery.
+[[routing_rules]]
+source_channel = "orders"
+target_channel = "orders-audit"
+# predicate = "true"
+
+# ---------------------------------------------------------------------------
+# Optional — every section below may be deleted entirely
+# ---------------------------------------------------------------------------
+
+# Durable state directory.
+#
+# DELIBERATELY COMMENTED OUT so this file validates from any fresh checkout.
+# THE TRAP: startup validation requires this directory to ALREADY EXIST and be
+# writable — it is never created for you (deliberate upstream hardening: the
+# haematite engine fences its store into a pre-existing directory rather than
+# `create_dir_all`-ing a path typo into existence). Point it at a directory
+# that does not exist and the server refuses to start with
+# `persistence_path '...': path is unreachable`.
+#
+# Create the directory first, then uncomment. The store itself is created one
+# level below, at `<persistence_path>/durability`.
+#
+# With this key absent the server still runs — durable channels simply use an
+# ephemeral store that leaves no residue and survives no restart.
+#
+# persistence_path = "/var/lib/liminal"
+
+# Shared bearer token required on every client `Connect` handshake. Absent, the
+# server is OPEN (any client may connect). This is a single shared secret, not
+# an ACL system; an empty token is a validation error rather than a silent
+# no-op gate. Prefer supplying it as `LIMINAL_AUTH_TOKEN` from the environment
+# — that variable may create this section on its own, so the secret need not be
+# committed to a config file.
+#
+# [auth]
+# token = "replace-me"
+
+# Service construction profile. "full" (the default when this section is
+# absent) builds the channel, conversation, and durability services. The only
+# other value is "worker-front-door", a capability-scoped deployment that
+# builds the connection supervisor alone and rejects ordinary channel and
+# conversation traffic. Any other value is a startup error.
+#
+# [services]
+# profile = "full"
+
+# Operational bounds. Every key has a signed default, shown here as its actual
+# value — an absent section leaves all of them in force. Zero is never legal
+# for any of them: an unbounded cap is not a configurable state.
+#
+# [limits]
+# max_connections = 256
+# max_subscriptions_per_connection = 32
+# max_conversations_per_connection = 32
+# max_pending_pushes_per_connection = 32
+# max_pending_conversation_replies_per_connection = 32
+# max_pending_replies_per_conversation = 8
+# max_connection_inbox_bytes = 4194304        # 4 MiB, shared across one connection's inboxes
+# max_subscription_inbox_depth = 256
+
+# Sibling WebSocket acceptor carrying the same wire protocol (one binary
+# message per frame). Absent, NO HTTP/WebSocket listener is started at all.
+# `listen_address` and `path` are required inside the section and must not
+# collide with any other listener; `path` is one exact absolute path with no
+# query or fragment.
+#
+# The deployment contract is raw `ws://` behind a TLS-terminating proxy that
+# owns public `wss://` — liminal grows no TLS stack, and the same proxy is
+# expected to enforce pre-upgrade read timeouts and handshake rate limits.
+#
+# `allowed_origins` FAILS CLOSED: absent or empty refuses every upgrade that
+# carries an `Origin` header (native clients that send none are unaffected).
+# Entries are byte-exact serialized origins — `scheme://host[:port]`, no
+# trailing slash. `ping_interval_ms` is disabled unless set; a configured zero
+# is a validation error, not "disabled".
+#
+# [websocket]
+# listen_address = "127.0.0.1:8090"
+# path = "/liminal"
+# allowed_origins = ["https://app.example.com"]
+# ping_interval_ms = 30000
+
+# Beamr distribution cluster membership. Absent, the node runs standalone.
+# A clustered node listens on TWO ports: `listen_address` above for clients and
+# this one for peer distribution traffic (they must differ). Every node in a
+# cluster must share the same `cookie`, which defaults to "beamr-cookie" when
+# omitted — change it for anything but a laptop.
+#
+# [cluster]
+# node_name = "node-a"
+# listen_address = "127.0.0.1:9000"
+# seed_nodes = ["127.0.0.1:9001"]
+# cookie = "beamr-cookie"
+
+# Participant lifecycle activation. Advanced, and deliberately not documented
+# here: the section turns on the participant protocol and EVERY field inside it
+# is required with no default. See the `ParticipantConfig` rustdoc in
+# `crates/liminal-server/src/config/types.rs` before enabling it.
+#
+# [participant]
+# ...
