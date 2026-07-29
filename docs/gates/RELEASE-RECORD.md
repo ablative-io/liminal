@@ -22,9 +22,19 @@ direction. This file is the pattern; liminal is the worked example.
 | **The git tag** | **under-reports** — a published version with no tag | liminal ≥10 distinct versions untagged; haematite 9 published / 5 tags; **frame 28 published / 1 tag** |
 | | **over-reports** — a tag implying a release that never happened | beamr `v0.8.3`, `v0.12.1` (the latter was the FIFO starvation fix, tagged, publish never authorised) |
 | **The tagged manifest** | **is a different document entirely** — `cargo publish` rewrites it | liminal-server 0.5.1: **30 `workspace = true` lines in the repo → 0 published**; `path` stripped from **all 24** published dependency tables |
-| **The release commit subject** | **asserts a publish that never happened** — in prose, in the history, where nothing can contradict it | beamr `0e7c060`, *"release: beamr 0.12.1 — FIFO owner pop ships to crates.io consumers"*. **It did not ship.** |
+| **The release commit subject (a)** | **asserts a publish that never happened** — in prose, in the history, where nothing can contradict it | beamr `0e7c060`, *"release: beamr 0.12.1 — FIFO owner pop ships to crates.io consumers"*. **It did not ship.** |
+| **The release commit subject (b)** | **names a version that existed only IN-TREE** — true of the manifest, false of the registry | frame `a69585e`, *"frame-host 0.2.2 → 0.3.0"*. `0.2.2` was real in the tree and **never reached crates.io**; the registry's predecessor of `0.3.0` is `0.2.1` |
 | **The published artifact** | — | the only one a consumer resolves against |
 | **★ The YANK FLAG** | **is MUTABLE, lives ONLY at the registry, and has NO GIT RECORD** | haematite `0.4.1`/`0.5.0` request `^0.13.0` and resolve correctly **only because `0.13.1` and `0.13.2` are yanked** |
+
+**(b) is the subtler one and likely the commoner** (Athena Zooper Dooper):
+**every abandoned version bump leaves one behind.** It is not a lie and it is
+not detectable by asking whether the author believed it — both documents it
+cites are internally consistent. It is **reason two wearing the fourth
+document's clothes**: accurate about the manifest, false about the artifact.
+The false inference is specific — anyone reconstructing frame-host's history
+from subjects gets `… → 0.2.2 → 0.3.0` and concludes either that `0.2.2`
+shipped or that `0.2.1` did not, **and `0.2.1` is the one that exists.**
 
 **⇒ RULED (Cally, `c220e131`): for "what does published version X require",
 read the REGISTRY'S OWN DEPENDENCY METADATA. And state which of the five
@@ -227,7 +237,15 @@ liminal-protocol  ( 5)  0.2.0 0.2.1 0.3.0 0.3.1 0.3.2
   `liminal-v0.5.1` have no `liminal-protocol` counterpart — that is the
   lockstep point below, not a Direction-2 instance.)
 - **DIRECTION 3 — holes in the published sequence: NONE** within any minor
-  series, every crate, `yanked` checked on all 45 entries. Athena's mechanism
+  series, every crate, `yanked` checked on all 45 entries.
+  **⚠️ A HOLE IS NOT YET A FINDING — IT HAS AT LEAST TWO CAUSES, AND THEY ARE
+  DISTINGUISHABLE ONLY IN GIT HISTORY** (Athena, who tested the tempting
+  unification and refuted it on frame's own bytes): a version that **existed
+  in-tree and never published** (frame-host `0.2.2`, which leaves a release
+  commit subject behind), versus **a number never used at all** — `frame-cli
+  0.4.1`, where `git log --all -S'version = "0.4.1"'` returns nothing. **Same
+  appearance at the registry, different diagnosis, and only one of them means
+  anybody did anything.** Report the cause, not the gap. Athena's mechanism
   (`frame-cli` published `0.4.0` and `0.4.2`, never `0.4.1`, absent not
   yanked) does not reproduce here. **Carry that mechanism as LATENT, not as a
   live break: she measured that nothing in frame actually pins `=0.4.1`
