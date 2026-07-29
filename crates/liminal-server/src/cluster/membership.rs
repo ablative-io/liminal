@@ -642,7 +642,7 @@ pub fn start(
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::{Membership, MembershipDelta};
+    use super::{Membership, MembershipConsumer, MembershipDelta};
     use beamr::atom::AtomTable;
     use beamr::distribution::connection::{AcceptHandle, ConnectionManager};
     use beamr::distribution::connection_events::{ConnectionEvent, ConnectionGeneration};
@@ -747,6 +747,33 @@ mod tests {
     #[test]
     fn delta_is_empty_by_default() {
         assert!(MembershipDelta::default().is_empty());
+    }
+
+    /// A consumer thread that panicked must not be reaped silently: `stop()`'s
+    /// join sees the Err and must warn.
+    #[test]
+    fn stop_warns_when_the_consumer_thread_panicked() {
+        let atoms = Arc::new(AtomTable::with_common_atoms());
+        let membership = Membership::new(empty_manager(&atoms), Arc::clone(&atoms));
+        // Stand a panicked thread in for the consumer: join() yields the same
+        // Err a panicking run_consumer would produce.
+        let handle = std::thread::spawn(|| panic!("simulated consumer panic"));
+        while !handle.is_finished() {
+            std::thread::yield_now();
+        }
+        let consumer = MembershipConsumer {
+            membership,
+            handle: Some(handle),
+        };
+
+        let log = crate::test_log::CapturedLog::default();
+        log.capture(|| consumer.stop());
+
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains("membership consumer thread panicked"),
+            "expected a warn about the panicked consumer thread, got: {output}"
+        );
     }
 
     /// SRV-008 R5 tombstone replacement. `first_poll_of_empty_table_yields_no_peers`
