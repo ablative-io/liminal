@@ -910,8 +910,10 @@ Evidence, all verified at this branch's bytes:
   lifecycle is real and working (`src/connection/lifecycle.rs`); only
   CONVERSATION lifecycle is absent. The shared word makes the SDK look more
   complete than it is.
-- Census trap: a bare grep for `ConversationEvent` returns 218 hits across
-  THREE distinct families — the SDK enum (`conversation.rs:50`), the core
+- Census trap: a bare grep for `ConversationEvent` returns 218 matching lines
+  across `crates/**/*.rs` (the scope is part of the count — repo-wide the same
+  grep returns 264, sweeping docs JSON and the TS SDK in; `-w` returns 145),
+  spread over THREE distinct families — the SDK enum (`conversation.rs:50`), the core
   durability enum (`crates/liminal/src/durability/conversation.rs:15`), and
   the protocol wire/replay family (`ConversationEventBody`,
   `crates/liminal-protocol/src/lifecycle/conversation.rs:271`) — so raw hit
