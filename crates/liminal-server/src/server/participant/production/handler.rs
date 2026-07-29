@@ -397,6 +397,7 @@ impl ProductionParticipantHandler {
                 let staged = impact
                     .as_deref()
                     .is_some_and(DispatchImpactAccumulator::has_staged);
+                let mut repair_failure = None;
                 if staged {
                     match self.replay_and_repair(conversation_id, &log) {
                         Ok(reconciled) => {
@@ -406,8 +407,14 @@ impl ProductionParticipantHandler {
                                 impact.install_staged();
                             }
                         }
-                        Err(_) => {
+                        Err(repair_error) => {
+                            // The repair error is the ONLY account of why durable
+                            // state could not be reconciled; the operation error
+                            // below says nothing about it. Composed into the
+                            // reported error rather than discarded, mirroring the
+                            // success path's arm, which returns its replay error.
                             *owner = None;
+                            repair_failure = Some(repair_error);
                         }
                     }
                 } else {
@@ -415,7 +422,10 @@ impl ProductionParticipantHandler {
                     // part-consumed owner and replay durable truth next touch.
                     *owner = None;
                 }
-                (Err(state_error(&error)), durably_empty)
+                (
+                    Err(state_error_with_repair(&error, repair_failure.as_ref())),
+                    durably_empty,
+                )
             }
         };
         drop(owner);
@@ -646,6 +656,25 @@ pub(super) fn state_error(error: &StateError) -> ParticipantSemanticError {
     }
 }
 
+/// [`state_error`], plus the failure of the replay-and-repair the error path
+/// attempted. Both are needed: the operation error says what the caller's
+/// request hit, and the repair error is the only account of why durable state
+/// could not then be reconciled. `None` yields exactly [`state_error`].
+pub(super) fn state_error_with_repair(
+    error: &StateError,
+    repair: Option<&ParticipantSemanticError>,
+) -> ParticipantSemanticError {
+    repair.map_or_else(
+        || state_error(error),
+        |repair| ParticipantSemanticError::Internal {
+            message: format!(
+                "participant production operation failed: {error}; \
+                 its post-failure replay and repair also failed: {repair}"
+            ),
+        },
+    )
+}
+
 pub(super) fn log_error(error: &OperationLogError) -> ParticipantSemanticError {
     ParticipantSemanticError::Internal {
         message: format!("participant production log failed: {error}"),
@@ -663,5 +692,46 @@ pub(super) fn bridge_error(
 ) -> ParticipantSemanticError {
     ParticipantSemanticError::Internal {
         message: format!("participant durability bridge failed: {error}"),
+    }
+}
+
+#[cfg(test)]
+mod state_error_tests {
+    use super::{StateError, state_error, state_error_with_repair};
+    use crate::server::participant::ParticipantSemanticError;
+
+    /// With no repair failure the reported error is byte-identical to what
+    /// `state_error` always produced: the composition adds nothing on the
+    /// overwhelmingly common path.
+    #[test]
+    fn no_repair_failure_reports_exactly_the_operation_error() {
+        let operation = StateError::ShellUnavailable;
+        assert_eq!(
+            state_error_with_repair(&operation, None).to_string(),
+            state_error(&operation).to_string()
+        );
+    }
+
+    /// When the post-failure replay ALSO failed, both accounts survive. The
+    /// operation error says what the caller's request hit; the repair error is
+    /// the only account of why durable state could not then be reconciled, and
+    /// it used to be discarded outright.
+    #[test]
+    fn a_repair_failure_is_composed_alongside_the_operation_error() {
+        let operation = StateError::FrontierUnavailable;
+        let repair = ParticipantSemanticError::Internal {
+            message: "Unit 2 extension row ended before row_kind".to_owned(),
+        };
+
+        let composed = state_error_with_repair(&operation, Some(&repair)).to_string();
+
+        assert!(
+            composed.contains("conversation executable frontier authority is unavailable"),
+            "the operation error must survive, got: {composed}"
+        );
+        assert!(
+            composed.contains("Unit 2 extension row ended before row_kind"),
+            "the repair error must survive, got: {composed}"
+        );
     }
 }
