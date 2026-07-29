@@ -104,6 +104,19 @@ serde                             HTTP-200  316 versions  max 1.0.229   <- POSIT
 zzq-hermes-nonexistent-crate-xyz  HTTP-404                              <- NEGATIVE
 ```
 
+**★ AND THE ONE CONTROL THAT CANNOT BE FORGOTTEN — THE OPERATION YOU NEEDED
+ANYWAY (Athena, routed by Cally `75668b53`).** Both controls above are **extra
+arms**: a later reader can drop one and the sweep still runs, still prints, and
+still looks finished. Her control against the blind `302` is six words —
+**an error page does not gunzip.** Fetch the `.crate`, check sha256, byte
+count, clean extraction; **that is stronger evidence that these are the
+artifact's bytes than any status code, at zero extra cost, and omitting it
+means not doing the task.** The generative form is a different question from
+the one that produced the two controls above: not *what extra call proves this
+was right*, but ***what would a wrong answer fail to do*** — then make that
+thing the work itself. **A control fused to the payload cannot rot; a control
+beside it always can.**
+
 ### ⚠️ There are TWO local sources and they fail differently
 
 Treating them as one instrument is a mistake this file made in its first
@@ -179,7 +192,18 @@ and for a structural reason rather than because somebody looked hard.**
 **⇒ AN ABSENCE IS EVIDENCE EXACTLY WHEN THE ALTERNATIVE EXPLANATION WOULD HAVE
 LEFT A MARK.** It still has to be *measured*: she read the `yanked` flag on all
 five `frame-cli` entries rather than inferring from the gap. The law licenses
-the conclusion; it does not excuse the reading. **And it changes how you may PHRASE guidance:**
+the conclusion; it does not excuse the reading.
+
+**⚠️ AND TAKE THE DISQUALIFYING CASE WITH THE QUALIFYING ONE — the qualifying
+case alone reads as permission to trust silence.** Athena's own counter-example
+from the same night: **an unwired gate leg leaves no trace**, so its absence
+proves nothing about whether it ran, and the question needed a *positive count*
+instead. The test is never "did I look and see nothing"; it is **"is the
+competing explanation REQUIRED BY THE MECHANISM to leave a mark?"** A yank is —
+it must write `"yanked": true` for cargo to work at all. An unrun step is not.
+**Same silence, opposite verdicts.**
+
+**And it changes how you may PHRASE guidance:**
 beamr `0.13.1` and `0.13.2` are yanked, so the honest form of "where is the
 FIFO fix" is **"0.13.0, or 0.14.0 and later" — never "0.13.x"**, which names
 two versions cargo will refuse to select.
@@ -349,15 +373,51 @@ uses the workspace pin at `0.3.0`, so publishing `frame-state 0.3.0` collapses
 the two copies. **The cure exists and is unexecuted** — precisely the state the
 banner describes.
 
-**Two scope limits, hers, carried so no one inherits an overstatement:**
-**(1) DUPLICATION is proved; BREAKAGE is not.** Whether published
-`frame-state 0.2.0` exposes a `frame-core` type in its public API is unread —
-if it does, the copies are distinct types and code crossing that seam cannot
-compile; if not, the cost is duplicate statics and binary weight. **Two copies
-is a real cost either way; a build break is not claimed.**
+**Two scope limits, hers. (2) stands; (1) HAS SINCE BEEN MEASURED and the
+answer narrows the consequence:**
 **(2) A committed `Cargo.lock` is evidence of a RESOLVE, not of a COMPILE** —
 `cargo metadata` writes one without building. Whether argus builds today is
 unknown **in both directions.**
+**(1) DUPLICATION is proved; BREAKAGE is now proved LATENT AT ONE NAMED SEAM,
+not general** (Athena at the published `.crate`s, routed `75668b53`). Published
+`frame-state 0.2.0` exposes **five** frame-core types publicly:
+
+| Exposed type | Defined in | Published versions of the DEFINING crate | Crosses the seam? |
+|---|---|---|---|
+| `ComponentId`, `Capability`, `CheckVerdict`, `CapabilityDenied` | `frame-capability` (re-exported through frame-core) | **one, ever — `0.1.0`**; both frame-core versions depend on it | **yes — one type each** |
+| `CapabilityCheckError` | **frame-core's own `pub enum`** | two, resolved twice | **NO — this is the seam** |
+
+`CapabilityCheckError` is exposed twice over — as
+`StateError::CapabilityCheck(..)` and via `impl From<CapabilityCheckError> for
+StateError` — so a consumer holding the `0.3.0` copy cannot feed it to
+`frame-state 0.2.0`'s `From` impl. **⇒ Latent break at one narrow seam. The
+duplicate weight is unconditional; whether any given consumer breaks depends on
+whether it touches that one payload, and most capability-facing code touches
+the four shared types and is fine.** The cure is unchanged and collapses
+everything: publish `frame-state 0.3.0`.
+
+### ★ A re-export makes the IMPORT PATH and the TYPE'S IDENTITY two different facts, and only IDENTITY decides compatibility
+
+The path said `frame_core::ComponentId`. The identity said
+`frame_capability::ComponentId`. **The unmeasured finding — *"it exposes
+`ComponentId`, therefore the copies are distinct types, therefore a live
+break"* — is short, plausible, alarming, and wrong: the profile of a finding
+that survives review.** It was caught by asking where the type is **defined**
+rather than where it is **imported from**.
+
+**⇒ THE PRACTICAL BITE FOR ANYONE AUDITING A DUPLICATE: two copies in a lock
+does not tell you that any TYPE is duplicated. Resolve every exposed type to
+its DEFINING crate and count how many versions of THAT crate resolved.** A
+duplicate whose public surface is entirely re-exports from single-version
+crates is a weight problem and nothing more. **Nobody does that step unprompted
+— the lock looks like the whole answer.**
+
+**And this is the fourth venue of one shape, which is why it lives in this file
+rather than in a Rust note.** Tag **refs** versus tag **messages** (Artemis).
+Tag **names** versus published versions (Athena). A commit **subject** versus
+the artifact (§1). An import **path** versus a type's identity (here).
+**Every one of them is a document standing in for the thing it names, believed
+because it names it correctly.**
 
 ## 5. What this costs, stated plainly
 
