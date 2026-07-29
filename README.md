@@ -8,7 +8,7 @@ A messaging system where conversations — not individual messages — are the f
 
 ## Status
 
-**v0.5.0** (`liminal-rs` / `liminal-server` / `liminal-sdk` 0.5.0; `liminal-protocol` 0.3.2). Core messaging, channels, schema validation, durable mailboxes, and the wire protocol are implemented and tested. Backpressure and predicate routing exist as tested subsystems not yet wired into the delivery path; the Aion integration is a set of protocol-level seams (worker registration, push dispatch, observability drain) consumed by the external `aion` crates. See `CHANGELOG.md` for the release record and `docs/stack-review/` for the honest state map.
+**v0.5.1** (`liminal-rs` / `liminal-server` / `liminal-sdk` 0.5.1; `liminal-protocol` 0.3.2). Core messaging, channels, schema validation, durable mailboxes, and the wire protocol are implemented and tested. Backpressure and predicate routing exist as tested subsystems not yet wired into the delivery path; the Aion integration is a set of protocol-level seams (worker registration, push dispatch, observability drain) consumed by the external `aion` crates. See `CHANGELOG.md` for the release record and `docs/stack-review/` for the honest state map.
 
 ## Install
 
@@ -16,7 +16,7 @@ The crate is published on crates.io as **`liminal-rs`** (the bare `liminal` name
 
 ```toml
 [dependencies]
-liminal = { package = "liminal-rs", version = "0.5.0" }
+liminal = { package = "liminal-rs", version = "0.5.1" }
 ```
 
 ```rust
@@ -115,10 +115,10 @@ than emptying it if you want the default back.
 
 | Crate (crates.io) | `use` as | Version | License | Description |
 |-------------------|----------|---------|---------|-------------|
-| `liminal-rs` | `liminal` | 0.5.0 | AGPL-3.0-only | Core library — channels, conversations, durability, routing, backpressure, protocol |
+| `liminal-rs` | `liminal` | 0.5.1 | AGPL-3.0-only | Core library — channels, conversations, durability, routing, backpressure, protocol |
 | `liminal-protocol` | `liminal_protocol` | 0.3.2 | Apache-2.0 | Shared wire and lifecycle types (no_std-capable) |
-| `liminal-sdk` | `liminal_sdk` | 0.5.0 | Apache-2.0 | Application-facing SDK traits for building liminal clients (no_std-capable) |
-| `liminal-server` | `liminal_server` | 0.5.0 | AGPL-3.0-only | Standalone server for the liminal bus |
+| `liminal-sdk` | `liminal_sdk` | 0.5.1 | Apache-2.0 | Application-facing SDK traits for building liminal clients (no_std-capable) |
+| `liminal-server` | `liminal_server` | 0.5.1 | AGPL-3.0-only | Standalone server for the liminal bus |
 
 ## SDKs
 
