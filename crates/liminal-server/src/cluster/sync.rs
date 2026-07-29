@@ -272,7 +272,12 @@ fn write_raw_blocking(
     let connection = Arc::clone(connection);
     let frame = frame.to_vec();
     let write = async move {
-        let _ = connection.write_raw(&frame).await;
+        // A lost distribution write is a silently dropped cross-node fan-out
+        // or R5 backfill; the connection teardown side effects are write_raw's
+        // own, but the loss itself must be visible here.
+        if let Err(error) = connection.write_raw(&frame).await {
+            tracing::warn!(%error, "cross-node distribution write failed");
+        }
     };
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         if matches!(
