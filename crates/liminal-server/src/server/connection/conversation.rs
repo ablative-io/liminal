@@ -19,7 +19,12 @@ use liminal::protocol::{
     CausalContext as ProtocolCausalContext, MessageEnvelope, SchemaId as ProtocolSchemaId,
 };
 
+use super::supervisor::recover_lock;
 use crate::ServerError;
+
+/// Lock names carried into [`recover_lock`]'s poison-recovery ERROR.
+const CRASH_CACHE: &str = "conversation crash-observation cache";
+const EXIT_CHANNEL: &str = "conversation participant-EXIT channel";
 
 /// Marker for library conversation state owned by a single connection process.
 pub trait ConversationResource: std::fmt::Debug + Send {
@@ -227,39 +232,175 @@ impl LiminalConversationResource {
 ///
 /// [`poll_exit_signal`]: LiminalConversationResource::poll_exit_signal
 /// [`await_crash`]: LiminalConversationResource::await_crash
+/// A DISCONNECTED channel is a crash OBSERVATION, not the absence of one: the
+/// sender lives inside the actor's trapped-EXIT handler, so its disconnection
+/// means the participant actor is gone. Both guards recover from poison for the
+/// same reason — the EXIT signal is one-shot and only replayable from the cache,
+/// so a masked guard loses the crash permanently. Every one of these paths used
+/// to collapse to "no crash", which is how a connection kept forwarding
+/// conversation messages into a vanished participant.
 fn observe_exit(
     crash_observed: &Mutex<Option<Instant>>,
     exit_rx: &Mutex<mpsc::Receiver<Instant>>,
     wait: Option<Duration>,
 ) -> Option<Instant> {
-    if let Ok(cached) = crash_observed.lock()
-        && let Some(instant) = *cached
-    {
+    // Bound to a local so the guard is released before the receive below takes
+    // the other lock — the two are never held together.
+    let cached = *recover_lock(crash_observed, CRASH_CACHE);
+    if let Some(instant) = cached {
         return Some(instant);
     }
-    let received = exit_rx.lock().map_or(None, |rx| {
+    let received = {
+        let rx = recover_lock(exit_rx, EXIT_CHANNEL);
         wait.map_or_else(
-            || rx.try_recv().ok(),
-            |timeout| rx.recv_timeout(timeout).ok(),
+            || match rx.try_recv() {
+                Ok(instant) => Some(instant),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(vanished_actor_instant()),
+            },
+            |timeout| match rx.recv_timeout(timeout) {
+                Ok(instant) => Some(instant),
+                Err(mpsc::RecvTimeoutError::Timeout) => None,
+                Err(mpsc::RecvTimeoutError::Disconnected) => Some(vanished_actor_instant()),
+            },
         )
-    });
-    if let Some(instant) = received
-        && let Ok(mut cached) = crash_observed.lock()
-    {
-        *cached = Some(instant);
+    };
+    if let Some(instant) = received {
+        *recover_lock(crash_observed, CRASH_CACHE) = Some(instant);
     }
     received
 }
 
+/// The observation time for a crash inferred from a disconnected EXIT channel.
+/// The handler never got to send its own instant, so this is the earliest moment
+/// the host can honestly claim to have seen the crash. Warned once — the cache
+/// replays every later observation without re-entering this path.
+fn vanished_actor_instant() -> Instant {
+    tracing::warn!(
+        "conversation exit channel disconnected; the participant actor is gone \
+         and is reported as crashed"
+    );
+    Instant::now()
+}
+
 /// Maps one actor state query to "this conversation has structurally failed".
-const fn state_reads_failed(state: &Result<ConversationState, LiminalError>) -> bool {
-    matches!(
-        state,
-        Ok(ConversationState {
-            current_phase: ConversationPhase::Failed,
-            ..
-        })
-    )
+///
+/// An `Err` is treated as FAILED, not as healthy. A cleanly closed or finalized
+/// conversation still answers `Ok` from its host-side snapshot, and the query
+/// blocks on an unbounded `wait_for` rather than a timeout, so an `Err` here is
+/// never a clean close and never a transient slow-actor sample — it is
+/// `ensure_running` failing, the command queue refusing, or the response channel
+/// closing under the query. All three mean the actor is unreachable.
+fn state_reads_failed(state: &Result<ConversationState, LiminalError>) -> bool {
+    match state {
+        Ok(state) => matches!(state.current_phase, ConversationPhase::Failed),
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "conversation actor could not service a state query; treating the \
+                 unreachable actor as failed"
+            );
+            true
+        }
+    }
+}
+
+impl ConversationResource for LiminalConversationResource {
+    fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
+        // If the participant has already crashed (structural EXIT observed),
+        // refuse the message rather than forwarding into a failed conversation.
+        if self.poll_exit_signal().is_some() || self.actor_phase_failed() {
+            return Err(ServerError::ListenerAccept {
+                message: format!(
+                    "conversation participant {} crashed; message rejected",
+                    self.participant.get()
+                ),
+            });
+        }
+        let payload = envelope.payload.clone();
+        let message = Envelope::new(payload, None, SchemaId::new(), PublisherId::default());
+        self.actor
+            .handle()
+            .send(message)
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("conversation message delivery failed: {error}"),
+            })
+    }
+
+    fn participant_pids(&self) -> Vec<u64> {
+        vec![self.participant.get()]
+    }
+
+    fn has_detected_crash(&self) -> bool {
+        self.poll_exit_signal().is_some() || self.actor_phase_failed()
+    }
+
+    fn await_crash(&self, timeout: Duration) -> Option<Instant> {
+        // Event-driven: park on the exit notifier; the actor's trapped-EXIT
+        // handler wakes us the instant the participant's link fires. No polling.
+        observe_exit(&self.crash_observed, &self.exit_rx, Some(timeout))
+    }
+
+    fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError> {
+        // The participant produced a reply that the conversation actor delivered
+        // back into the conversation; drain it (bounded). This is the reply leg
+        // of the request-reply path — proof the participant genuinely processed
+        // the forwarded message, not just that it was linked.
+        let reply =
+            self.actor
+                .receive_timeout(timeout)
+                .map_err(|error| ServerError::ListenerAccept {
+                    message: format!("conversation reply receive failed: {error}"),
+                })?;
+        Ok(MessageEnvelope::new(
+            ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
+            ProtocolCausalContext::independent(),
+            reply.payload,
+        ))
+    }
+
+    fn try_receive_reply(&self) -> Option<MessageEnvelope> {
+        // Non-blocking host-side drain of one buffered participant reply, framed
+        // as the wire reply envelope (schema/causal metadata are not bridged in
+        // v1, matching the removed blocking `receive_reply`).
+        let reply = self.actor.try_take_reply()?;
+        Some(MessageEnvelope::new(
+            ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
+            ProtocolCausalContext::independent(),
+            reply.payload,
+        ))
+    }
+
+    fn has_pending_reply(&self) -> bool {
+        self.actor.has_pending_reply()
+    }
+
+    fn register_reply_notifier(&self, notifier: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.actor.register_reply_notifier(notifier);
+    }
+
+    fn close(self: Box<Self>) -> Result<(), ServerError> {
+        let Self { actor, .. } = *self;
+        // A crashed (Failed) conversation cannot transition to Closed; tearing
+        // down its handle is sufficient and is not an error.
+        if matches!(
+            actor.state().map(|state| state.current_phase),
+            Ok(ConversationPhase::Failed)
+        ) {
+            actor.handle().close().ok();
+            return Ok(());
+        }
+        actor
+            .handle()
+            .close()
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("conversation close failed: {error}"),
+            })
+    }
+
+    fn finalize(self: Box<Self>) {
+        self.actor.finalize();
+    }
 }
 
 #[cfg(test)]
@@ -417,103 +558,5 @@ mod tests {
         assert!(state_reads_failed(&Ok(state_with(
             ConversationPhase::Failed
         ))));
-    }
-}
-
-impl ConversationResource for LiminalConversationResource {
-    fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
-        // If the participant has already crashed (structural EXIT observed),
-        // refuse the message rather than forwarding into a failed conversation.
-        if self.poll_exit_signal().is_some() || self.actor_phase_failed() {
-            return Err(ServerError::ListenerAccept {
-                message: format!(
-                    "conversation participant {} crashed; message rejected",
-                    self.participant.get()
-                ),
-            });
-        }
-        let payload = envelope.payload.clone();
-        let message = Envelope::new(payload, None, SchemaId::new(), PublisherId::default());
-        self.actor
-            .handle()
-            .send(message)
-            .map_err(|error| ServerError::ListenerAccept {
-                message: format!("conversation message delivery failed: {error}"),
-            })
-    }
-
-    fn participant_pids(&self) -> Vec<u64> {
-        vec![self.participant.get()]
-    }
-
-    fn has_detected_crash(&self) -> bool {
-        self.poll_exit_signal().is_some() || self.actor_phase_failed()
-    }
-
-    fn await_crash(&self, timeout: Duration) -> Option<Instant> {
-        // Event-driven: park on the exit notifier; the actor's trapped-EXIT
-        // handler wakes us the instant the participant's link fires. No polling.
-        observe_exit(&self.crash_observed, &self.exit_rx, Some(timeout))
-    }
-
-    fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError> {
-        // The participant produced a reply that the conversation actor delivered
-        // back into the conversation; drain it (bounded). This is the reply leg
-        // of the request-reply path — proof the participant genuinely processed
-        // the forwarded message, not just that it was linked.
-        let reply =
-            self.actor
-                .receive_timeout(timeout)
-                .map_err(|error| ServerError::ListenerAccept {
-                    message: format!("conversation reply receive failed: {error}"),
-                })?;
-        Ok(MessageEnvelope::new(
-            ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
-            ProtocolCausalContext::independent(),
-            reply.payload,
-        ))
-    }
-
-    fn try_receive_reply(&self) -> Option<MessageEnvelope> {
-        // Non-blocking host-side drain of one buffered participant reply, framed
-        // as the wire reply envelope (schema/causal metadata are not bridged in
-        // v1, matching the removed blocking `receive_reply`).
-        let reply = self.actor.try_take_reply()?;
-        Some(MessageEnvelope::new(
-            ProtocolSchemaId::new([0; ProtocolSchemaId::WIRE_LEN]),
-            ProtocolCausalContext::independent(),
-            reply.payload,
-        ))
-    }
-
-    fn has_pending_reply(&self) -> bool {
-        self.actor.has_pending_reply()
-    }
-
-    fn register_reply_notifier(&self, notifier: std::sync::Arc<dyn Fn() + Send + Sync>) {
-        self.actor.register_reply_notifier(notifier);
-    }
-
-    fn close(self: Box<Self>) -> Result<(), ServerError> {
-        let Self { actor, .. } = *self;
-        // A crashed (Failed) conversation cannot transition to Closed; tearing
-        // down its handle is sufficient and is not an error.
-        if matches!(
-            actor.state().map(|state| state.current_phase),
-            Ok(ConversationPhase::Failed)
-        ) {
-            actor.handle().close().ok();
-            return Ok(());
-        }
-        actor
-            .handle()
-            .close()
-            .map_err(|error| ServerError::ListenerAccept {
-                message: format!("conversation close failed: {error}"),
-            })
-    }
-
-    fn finalize(self: Box<Self>) {
-        self.actor.finalize();
     }
 }
