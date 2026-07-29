@@ -167,7 +167,19 @@ distrust, since every spot-check you are likely to run passes.
 
 **Yanked is not absent.** A yanked version stays in the index with
 `"yanked": true` — that is how cargo avoids selecting it. Check the flag; do
-not infer removal from a gap. **And it changes how you may PHRASE guidance:**
+not infer removal from a gap.
+
+**★ AND THAT STRUCTURE LICENSES AN INFERENCE, WHICH ALMOST NOTHING ELSE IN
+THIS FILE DOES (Athena Zooper Dooper).** Because a yank *never removes the
+entry*, **an absent entry can only mean never-published.** Every other rule
+here is a prohibition — a zero is not an absence, an empty grep is not a clean
+sweep, a `404` may be a refusal. **This one says when a negative IS decisive,
+and for a structural reason rather than because somebody looked hard.**
+
+**⇒ AN ABSENCE IS EVIDENCE EXACTLY WHEN THE ALTERNATIVE EXPLANATION WOULD HAVE
+LEFT A MARK.** It still has to be *measured*: she read the `yanked` flag on all
+five `frame-cli` entries rather than inferring from the gap. The law licenses
+the conclusion; it does not excuse the reading. **And it changes how you may PHRASE guidance:**
 beamr `0.13.1` and `0.13.2` are yanked, so the honest form of "where is the
 FIFO fix" is **"0.13.0, or 0.14.0 and later" — never "0.13.x"**, which names
 two versions cargo will refuse to select.
@@ -308,7 +320,46 @@ liminal-protocol  ( 5)  0.2.0 0.2.1 0.3.0 0.3.1 0.3.2
 marker is Tom's call, and back-dating one looks like tidying and reads later as
 evidence. `CHANGELOG.md` carries the record; the tags do not.
 
-## 4. What this costs, stated plainly
+## 4. ★ The unbuilt gate now has a receipt — the same mechanism, already true
+
+The hazard this file describes was, until tonight, a dated prediction of mine.
+**Athena measured it as a present fact in another repo, at committed blobs, and
+neither of us had read the other's work.**
+
+```
+argus Cargo.lock:  frame-core 0.2.0  registry  checksum 1ea51ca7…
+                   frame-core 0.3.0  registry  checksum 7776add4…
+```
+
+`app-host`, `frame-conv`, `frame-fragments` and `frame-host 0.4.1` take
+**0.3.0**; `frame-state 0.2.0` takes **0.2.0**, alone. Cause read at the
+registry's own dependency metadata: **published `frame-state 0.2.0` declares
+`frame-core ^0.2.0` = `>=0.2.0, <0.3.0`, so it cannot accept `0.3.0`.**
+
+**⇒ GENERAL FORM: A PUBLISHED REQUIREMENT THAT CANNOT ACCEPT THE VERSION THE
+TREE HAS MOVED TO, WITH THE OLD COPY KEPT ALONGSIDE RATHER THAN REPLACED.**
+Mine is **dated and forward** (beamr `0.17.0` publishes, a consumer patches
+`0.17.x`, that patch cannot satisfy liminal-server's published `^0.16.1`, and
+cargo keeps a registry `0.16.x` beside it). Hers is **committed and present.**
+Same shape, two unrelated repos, one predicted and one already true.
+
+**This is what the gate in the banner would have caught, and it is why the
+closure condition is "PUBLISHED, not landed":** in-tree `frame-state` already
+uses the workspace pin at `0.3.0`, so publishing `frame-state 0.3.0` collapses
+the two copies. **The cure exists and is unexecuted** — precisely the state the
+banner describes.
+
+**Two scope limits, hers, carried so no one inherits an overstatement:**
+**(1) DUPLICATION is proved; BREAKAGE is not.** Whether published
+`frame-state 0.2.0` exposes a `frame-core` type in its public API is unread —
+if it does, the copies are distinct types and code crossing that seam cannot
+compile; if not, the cost is duplicate statics and binary weight. **Two copies
+is a real cost either way; a build break is not claimed.**
+**(2) A committed `Cargo.lock` is evidence of a RESOLVE, not of a COMPILE** —
+`cargo metadata` writes one without building. Whether argus builds today is
+unknown **in both directions.**
+
+## 5. What this costs, stated plainly
 
 **Until the gate in the banner exists, "we pin X" is a statement about a
 manifest, not about what resolves.** The estate's live example is liminal's
