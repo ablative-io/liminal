@@ -1659,10 +1659,7 @@ impl ConnectionRuntime {
     /// notifier through (R3/R1(vi)).
     pub(super) fn ready_waker(&self, pid: u64) -> Option<super::wake::ReadyWaker> {
         let scheduler = self.scheduler.upgrade()?;
-        let ready_pending = self
-            .records
-            .lock()
-            .ok()?
+        let ready_pending = recover_lock(&self.records, CONNECTION_REGISTRY)
             .get(&pid)
             .map(|record| Arc::clone(&record.ready_pending))?;
         Some(super::wake::ReadyWaker::new(
@@ -1675,33 +1672,23 @@ impl ConnectionRuntime {
 
     /// Acknowledges READY edges whose mailbox atoms were drained before this slice.
     pub(super) fn acknowledge_ready(&self, pid: u64) {
-        if let Ok(records) = self.records.lock()
-            && let Some(record) = records.get(&pid)
-        {
+        if let Some(record) = recover_lock(&self.records, CONNECTION_REGISTRY).get(&pid) {
             record.ready_pending.store(false, Ordering::Release);
         }
     }
 
     /// Reports a READY edge queued while the current process snapshot is executing.
     pub(super) fn ready_pending(&self, pid: u64) -> bool {
-        self.records
-            .lock()
-            .ok()
-            .and_then(|records| {
-                records
-                    .get(&pid)
-                    .map(|record| record.ready_pending.load(Ordering::Acquire))
-            })
-            .unwrap_or(false)
+        recover_lock(&self.records, CONNECTION_REGISTRY)
+            .get(&pid)
+            .is_some_and(|record| record.ready_pending.load(Ordering::Acquire))
     }
 
     /// FIX A-ii: marks `pid` as executing a slice — not parked, so not yet
     /// delivery-quiescent. Reuses the registry lock the slice already takes for
     /// `is_registered`; it never touches the barrier condvar.
     pub(super) fn mark_running(&self, pid: u64) {
-        if let Ok(records) = self.records.lock()
-            && let Some(record) = records.get(&pid)
-        {
+        if let Some(record) = recover_lock(&self.records, CONNECTION_REGISTRY).get(&pid) {
             record.parked.store(false, Ordering::Release);
         }
     }
@@ -1712,9 +1699,7 @@ impl ConnectionRuntime {
     /// entirely in normal operation, so a park off the shutdown path is just one
     /// flag store.
     pub(super) fn mark_parked(&self, pid: u64) {
-        if let Ok(records) = self.records.lock()
-            && let Some(record) = records.get(&pid)
-        {
+        if let Some(record) = recover_lock(&self.records, CONNECTION_REGISTRY).get(&pid) {
             record.parked.store(true, Ordering::Release);
         }
         if self.settle_armed.load(Ordering::Acquire) {
@@ -1728,7 +1713,8 @@ impl ConnectionRuntime {
     /// can never be missed by a waiter holding the mutex across its re-check.
     fn signal_settle_changed(&self) {
         {
-            let mut generation = recover_lock(&self.settle_generation);
+            let mut generation =
+                recover_lock(&self.settle_generation, "delivery-quiescence generation");
             *generation = generation.wrapping_add(1);
         }
         self.settle_changed.notify_all();
@@ -1736,7 +1722,7 @@ impl ConnectionRuntime {
 
     /// Reads the current delivery-quiescence generation under its mutex.
     fn settle_generation_snapshot(&self) -> u64 {
-        *recover_lock(&self.settle_generation)
+        *recover_lock(&self.settle_generation, "delivery-quiescence generation")
     }
 
     /// True when every tracked connection is parked with no pending READY edge —
@@ -1744,12 +1730,12 @@ impl ConnectionRuntime {
     /// and no fan-out wake is still in flight. An empty registry is trivially
     /// quiescent.
     fn all_connections_delivery_quiesced(&self) -> bool {
-        let Ok(records) = self.records.lock() else {
-            return false;
-        };
-        records.values().all(|record| {
-            record.parked.load(Ordering::Acquire) && !record.ready_pending.load(Ordering::Acquire)
-        })
+        recover_lock(&self.records, CONNECTION_REGISTRY)
+            .values()
+            .all(|record| {
+                record.parked.load(Ordering::Acquire)
+                    && !record.ready_pending.load(Ordering::Acquire)
+            })
     }
 
     /// FIX A-ii: wakes every tracked connection once so it drains its socket and
@@ -1762,11 +1748,10 @@ impl ConnectionRuntime {
     /// its slice (reading and admitting any buffered publish, whose admission then
     /// fires its subscribers in turn) and re-parked.
     fn wake_all_connections_for_flush(&self) {
-        let pids: Vec<u64> = self
-            .records
-            .lock()
-            .map(|records| records.keys().copied().collect())
-            .unwrap_or_default();
+        let pids: Vec<u64> = recover_lock(&self.records, CONNECTION_REGISTRY)
+            .keys()
+            .copied()
+            .collect();
         for pid in pids {
             if let Some(waker) = self.ready_waker(pid) {
                 waker.fire();
@@ -1799,7 +1784,7 @@ impl ConnectionRuntime {
             let outcome = self
                 .settle_changed
                 .wait_timeout_while(
-                    recover_lock(&self.settle_generation),
+                    recover_lock(&self.settle_generation, "delivery-quiescence generation"),
                     remaining,
                     |current| *current == snapshot,
                 )
@@ -2450,7 +2435,7 @@ impl ConnectionRuntime {
         // in another critical section cannot leave the HashMap itself in a
         // partial state; only our bookkeeping invariants could be stale, and
         // removal restores them). Admission (`register_push`) stays fail-closed.
-        let mut slots = recover_lock(&self.push_replies);
+        let mut slots = recover_lock(&self.push_replies, "push reply slot registry");
         let Some(pending) = slots.get(&correlation_id) else {
             return PushSlotDisposition::Absent;
         };
@@ -2480,7 +2465,7 @@ impl ConnectionRuntime {
     pub(super) fn cancel_push(&self, correlation_id: u64) -> bool {
         // S4: reclamation recovers a poisoned guard — a rollback that silently
         // skipped its removal would strand the slot and its cap admission.
-        recover_lock(&self.push_replies)
+        recover_lock(&self.push_replies, "push reply slot registry")
             .remove(&correlation_id)
             .is_some()
     }
@@ -2494,7 +2479,8 @@ impl ConnectionRuntime {
     fn cancel_pushes_for_connection(&self, pid: u64) {
         // S4: the close sweep is the reclamation of last resort ("connection
         // close at the latest") — it must complete on a poisoned map too.
-        recover_lock(&self.push_replies).retain(|_correlation_id, pending| pending.pid != pid);
+        recover_lock(&self.push_replies, "push reply slot registry")
+            .retain(|_correlation_id, pending| pending.pid != pid);
     }
 
     /// S3 second half (shape (b), check-after-insert): pre-publication
@@ -2542,14 +2528,14 @@ impl ConnectionRuntime {
     /// expiry, a consumed reply, and connection close each release exactly one.
     #[cfg(test)]
     pub(super) fn pending_push_count(&self) -> usize {
-        recover_lock(&self.push_replies).len()
+        recover_lock(&self.push_replies, "push reply slot registry").len()
     }
 
     /// Reserved push reply slots owned by connection `pid` — the exact quantity
     /// the §5 `max_pending_pushes_per_connection` cap counts (test instrument).
     #[cfg(test)]
     pub(super) fn pending_push_count_for(&self, pid: u64) -> usize {
-        recover_lock(&self.push_replies)
+        recover_lock(&self.push_replies, "push reply slot registry")
             .values()
             .filter(|pending| pending.pid == pid)
             .count()
@@ -2565,7 +2551,7 @@ impl ConnectionRuntime {
         // S4: delivery-plus-removal recovers a poisoned guard — dropping a real
         // reply (and stranding its slot) because an unrelated critical section
         // panicked would kill reclamation and exact cap accounting.
-        let mut slots = recover_lock(&self.push_replies);
+        let mut slots = recover_lock(&self.push_replies, "push reply slot registry");
         if let Some(pending) = slots.remove(&correlation_id) {
             // The send stays under the registry lock so removal and delivery are
             // one atomic step: a timed-out awaiter that observes the slot gone
@@ -2769,10 +2755,9 @@ impl ConnectionRuntime {
         let Some(scheduler) = self.scheduler.upgrade() else {
             return;
         };
-        if let Ok(mut wheel) = scheduler.timers().lock() {
-            for timer in timers {
-                wheel.cancel(timer);
-            }
+        let mut wheel = recover_lock(scheduler.timers(), "scheduler timer wheel");
+        for timer in timers {
+            wheel.cancel(timer);
         }
     }
 
@@ -2860,52 +2845,39 @@ impl ConnectionRuntime {
     }
 
     fn contains(&self, pid: u64) -> bool {
-        self.records
-            .lock()
-            .is_ok_and(|records| records.contains_key(&pid))
+        recover_lock(&self.records, CONNECTION_REGISTRY).contains_key(&pid)
     }
 
     #[cfg(test)]
     fn readiness_registration_count(&self) -> usize {
-        self.records.lock().map_or(0, |records| {
-            records
-                .values()
-                .filter(|record| record.readiness.is_some())
-                .count()
-        })
+        recover_lock(&self.records, CONNECTION_REGISTRY)
+            .values()
+            .filter(|record| record.readiness.is_some())
+            .count()
     }
 
     #[cfg(test)]
     fn readiness_fd(&self, pid: u64) -> Option<RawFd> {
-        self.records
-            .lock()
-            .ok()?
+        recover_lock(&self.records, CONNECTION_REGISTRY)
             .get(&pid)
             .and_then(|record| record.readiness.map(|registration| registration.fd))
     }
 
     #[cfg(test)]
     fn readiness_token(&self, pid: u64) -> Option<ReadinessToken> {
-        self.records
-            .lock()
-            .ok()?
+        recover_lock(&self.records, CONNECTION_REGISTRY)
             .get(&pid)
             .and_then(|record| record.readiness.map(|registration| registration.token))
     }
 
     fn active_connections(&self) -> Vec<ActiveConnection> {
-        self.records.lock().map_or_else(
-            |_| Vec::new(),
-            |records| {
-                records
-                    .iter()
-                    .map(|(&pid, record)| ActiveConnection {
-                        pid,
-                        peer_addr: record.peer_addr,
-                    })
-                    .collect()
-            },
-        )
+        recover_lock(&self.records, CONNECTION_REGISTRY)
+            .iter()
+            .map(|(&pid, record)| ActiveConnection {
+                pid,
+                peer_addr: record.peer_addr,
+            })
+            .collect()
     }
 
     /// Reads the complete active-connection incarnation set under the
@@ -2932,16 +2904,16 @@ impl ConnectionRuntime {
     }
 
     pub(super) fn pop_control(&self, pid: u64) -> Option<ConnectionControl> {
-        let mut controls = self.controls.lock().ok()?;
+        let mut controls = recover_lock(&self.controls, CONTROL_QUEUE);
         let index = controls.iter().position(|queued| queued.pid == pid)?;
         Some(controls.remove(index).control)
     }
 
     /// Non-consuming final-probe query for controls enqueued after mailbox drain.
     pub(super) fn has_control(&self, pid: u64) -> bool {
-        self.controls
-            .lock()
-            .is_ok_and(|controls| controls.iter().any(|queued| queued.pid == pid))
+        recover_lock(&self.controls, CONTROL_QUEUE)
+            .iter()
+            .any(|queued| queued.pid == pid)
     }
 
     /// Pulls a queued-but-unconsumed control back out of the queue. Returns
@@ -2952,9 +2924,7 @@ impl ConnectionRuntime {
     /// runtime-unique correlation id, so this can never remove a different
     /// push's entry and misreport.
     fn remove_control(&self, pid: u64, control: &ConnectionControl) -> bool {
-        let Ok(mut controls) = self.controls.lock() else {
-            return false;
-        };
+        let mut controls = recover_lock(&self.controls, CONTROL_QUEUE);
         let Some(index) = controls
             .iter()
             .position(|queued| queued.pid == pid && &queued.control == control)
@@ -2966,7 +2936,7 @@ impl ConnectionRuntime {
     }
 
     fn active_count(&self) -> usize {
-        self.records.lock().map_or(0, |records| records.len())
+        recover_lock(&self.records, CONNECTION_REGISTRY).len()
     }
 
     /// Removes the connection record for `pid` and, in the same close step, drops
@@ -2990,11 +2960,7 @@ impl ConnectionRuntime {
     /// the slot and it leaked past connection close. The two locks are taken
     /// strictly sequentially (never nested), so no lock-order inversion.
     fn remove(&self, pid: u64) -> Option<ConnectionRecord> {
-        let mut removed = self
-            .records
-            .lock()
-            .ok()
-            .and_then(|mut records| records.remove(&pid));
+        let mut removed = recover_lock(&self.records, CONNECTION_REGISTRY).remove(&pid);
         self.cancel_pushes_for_connection(pid);
         if let Some(registration) = removed.as_mut().and_then(|record| record.readiness.take()) {
             if let Some(scheduler) = self.scheduler.upgrade() {
@@ -3042,7 +3008,8 @@ impl ConnectionRuntime {
         // published before the notify — the Condvar lost-wakeup contract holds
         // without notifying under the guard.
         {
-            let mut generation = recover_lock(&self.drain_generation);
+            let mut generation =
+                recover_lock(&self.drain_generation, "connection-removal generation");
             *generation = generation.wrapping_add(1);
         }
         self.drain_removed.notify_all();
@@ -3082,7 +3049,7 @@ impl ConnectionRuntime {
 
     /// Reads the current removal generation under its mutex.
     fn drain_generation_snapshot(&self) -> u64 {
-        *recover_lock(&self.drain_generation)
+        *recover_lock(&self.drain_generation, "connection-removal generation")
     }
 
     /// Parks on the removal `Condvar` for at most `timeout`, but only while no
@@ -3094,9 +3061,11 @@ impl ConnectionRuntime {
     fn park_until_removed_or(&self, snapshot: u64, timeout: Duration) {
         let outcome = self
             .drain_removed
-            .wait_timeout_while(recover_lock(&self.drain_generation), timeout, |current| {
-                *current == snapshot
-            })
+            .wait_timeout_while(
+                recover_lock(&self.drain_generation, "connection-removal generation"),
+                timeout,
+                |current| *current == snapshot,
+            )
             .unwrap_or_else(PoisonError::into_inner);
         // A non-timed-out return means the predicate went false — a real removal
         // bumped the generation and woke this park (as opposed to the deadline).
@@ -3176,6 +3145,11 @@ struct QueuedConnectionControl {
     control: ConnectionControl,
 }
 
+/// Lock names carried into [`recover_lock`]'s poison-recovery ERROR, so an
+/// operator reading the log knows WHICH critical section panicked.
+const CONNECTION_REGISTRY: &str = "connection registry";
+const CONTROL_QUEUE: &str = "connection control queue";
+
 fn lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> Result<MutexGuard<'a, T>, ServerError> {
     mutex.lock().map_err(|error| ServerError::ListenerAccept {
         message: format!("{context} unavailable: {error}"),
@@ -3183,12 +3157,22 @@ fn lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> Result<MutexGuard<'a, T>, 
 }
 
 /// Locks `mutex`, RECOVERING a poisoned guard instead of failing (S4). For
-/// lifecycle-cleanup paths only (reply delivery, expiry, cancellation, the
-/// close sweep): removal-style operations are sound on a recovered map, and a
-/// cleanup that silently skipped its removal would strand slots and their §5
-/// cap admissions forever. Admission paths keep the fail-closed [`lock`].
-fn recover_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+/// lifecycle-cleanup and state-report paths (reply delivery, expiry,
+/// cancellation, the close sweep, registry counts and membership): removal-style
+/// operations are sound on a recovered map, and a cleanup that silently skipped
+/// its removal — or a count that read the poison as an empty registry — would
+/// strand slots and their §5 cap admissions forever, or declare a drain complete
+/// under live connections. Admission paths keep the fail-closed [`lock`].
+///
+/// The recovery is loud: `context` names the lock, and the ERROR is emitted at
+/// the recovery point ONLY, so one poisoned critical section produces one line
+/// per operation that steps over it rather than a line per stack layer.
+pub(super) fn recover_lock<'a, T>(mutex: &'a Mutex<T>, context: &str) -> MutexGuard<'a, T> {
+    mutex.lock().unwrap_or_else(|poisoned| {
+        tracing::error!(
+            lock = context,
+            "recovered a poisoned lock; a critical section panicked while holding it"
+        );
+        poisoned.into_inner()
+    })
 }

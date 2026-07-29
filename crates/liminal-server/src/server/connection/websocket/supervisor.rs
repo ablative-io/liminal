@@ -21,8 +21,14 @@ use beamr::native::native_process::NativeHandlerFactory;
 use tungstenite::protocol::{Role, WebSocket};
 
 use super::super::ConnectionSupervisor;
+use super::super::supervisor::recover_lock;
 use super::process::WebSocketConnectionProcess;
 use super::{AcceptorSettings, HandshakeOutcome, perform_upgrade, pinned_protocol_config};
+
+/// Lock names carried into [`recover_lock`]'s poison-recovery ERROR.
+const INFLIGHT_REGISTRY: &str = "websocket in-flight handshake registry";
+const WORKER_REGISTRY: &str = "websocket handshake worker registry";
+const COMPLETION_COUNT: &str = "websocket handshake completion count";
 
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
@@ -174,15 +180,16 @@ impl HandshakeSupervisor {
     /// one by shutting its socket down, and joins every live worker.
     pub(super) fn stop(&self) {
         self.inner.stopping.store(true, Ordering::SeqCst);
-        if let Ok(mut inflight) = self.inner.inflight.lock() {
-            for (handshake_id, guard) in inflight.drain() {
-                if let Err(error) = guard.shutdown(std::net::Shutdown::Both) {
-                    tracing::debug!(
-                        handshake_id,
-                        %error,
-                        "in-flight handshake socket shutdown failed (already closed)"
-                    );
-                }
+        // Recovered, not skipped: reading a poisoned registry as "nothing in
+        // flight" would leave every blocked worker's socket open, so the join
+        // pass below would have nothing to unblock them.
+        for (handshake_id, guard) in recover_lock(&self.inner.inflight, INFLIGHT_REGISTRY).drain() {
+            if let Err(error) = guard.shutdown(std::net::Shutdown::Both) {
+                tracing::debug!(
+                    handshake_id,
+                    %error,
+                    "in-flight handshake socket shutdown failed (already closed)"
+                );
             }
         }
         // First pass joins every live worker. Second pass clears the inert
@@ -201,17 +208,17 @@ impl HandshakeShared {
     /// this install), the tombstone is removed and the now-finished handle is
     /// dropped (detached) instead of stored, netting the record back to zero.
     fn install_handle(&self, handshake_id: u64, worker: JoinHandle<()>) {
-        if let Ok(mut workers) = self.workers.lock() {
-            match workers.entry(handshake_id) {
-                Entry::Occupied(entry) => {
-                    // The completion delivery beat this install: net the record
-                    // away and drop the finished thread's handle.
-                    entry.remove();
-                    drop(worker);
-                }
-                Entry::Vacant(entry) => {
-                    entry.insert(WorkerRecord::Live(worker));
-                }
+        // Recovered, not skipped: a skipped install drops the join handle, so
+        // the worker is detached and `stop` can never join it.
+        match recover_lock(&self.workers, WORKER_REGISTRY).entry(handshake_id) {
+            Entry::Occupied(entry) => {
+                // The completion delivery beat this install: net the record
+                // away and drop the finished thread's handle.
+                entry.remove();
+                drop(worker);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(WorkerRecord::Live(worker));
             }
         }
     }
@@ -222,45 +229,44 @@ impl HandshakeShared {
     /// unwind. A thread never joins itself, so a live record's handle is dropped
     /// (detached) here — the thread is already returning.
     fn complete_worker(&self, handshake_id: u64) {
-        if let Ok(mut workers) = self.workers.lock() {
-            match workers.entry(handshake_id) {
-                Entry::Occupied(entry) => {
-                    // The install already landed: remove the live record and drop
-                    // this worker's own handle.
-                    entry.remove();
-                }
-                Entry::Vacant(entry) => {
-                    // Completion won the race against the install; leave a
-                    // tombstone for `install_handle` to net away.
-                    entry.insert(WorkerRecord::CompletedBeforeInstall);
-                }
+        // Recovered, not skipped: a skipped delivery strands the record (and,
+        // below, loses the accounting a `stop` waiter is parked on).
+        match recover_lock(&self.workers, WORKER_REGISTRY).entry(handshake_id) {
+            Entry::Occupied(entry) => {
+                // The install already landed: remove the live record and drop
+                // this worker's own handle.
+                entry.remove();
+            }
+            Entry::Vacant(entry) => {
+                // Completion won the race against the install; leave a
+                // tombstone for `install_handle` to net away.
+                entry.insert(WorkerRecord::CompletedBeforeInstall);
             }
         }
         // Account the delivery AFTER the record mutation, then wake any waiter,
         // so an observer that sees the incremented count also sees the reclaimed
         // record.
-        if let Ok(mut completions) = self.completions.lock() {
+        {
+            let mut completions = recover_lock(&self.completions, COMPLETION_COUNT);
             *completions = completions.saturating_add(1);
-            self.completion_signal.notify_all();
         }
+        self.completion_signal.notify_all();
     }
 
     /// Drains the worker registry, joining every `Live` handle and discarding
     /// `CompletedBeforeInstall` tombstones. Used by [`HandshakeSupervisor::stop`]
     /// to reclaim live workers with no liveness scan.
     fn drain_and_join_live(&self) {
-        let live: Vec<(u64, JoinHandle<()>)> = self.workers.lock().map_or_else(
-            |_| Vec::new(),
-            |mut workers| {
-                let mut handles = Vec::new();
-                for (handshake_id, record) in workers.drain() {
-                    if let WorkerRecord::Live(handle) = record {
-                        handles.push((handshake_id, handle));
-                    }
-                }
-                handles
-            },
-        );
+        // Recovered, not skipped: reading a poisoned registry as empty abandons
+        // every live worker unjoined, which is exactly the leak `stop` exists to
+        // prevent.
+        let live: Vec<(u64, JoinHandle<()>)> = recover_lock(&self.workers, WORKER_REGISTRY)
+            .drain()
+            .filter_map(|(handshake_id, record)| match record {
+                WorkerRecord::Live(handle) => Some((handshake_id, handle)),
+                WorkerRecord::CompletedBeforeInstall => None,
+            })
+            .collect();
         for (handshake_id, handle) in live {
             if handle.join().is_err() {
                 tracing::error!(handshake_id, "websocket handshake worker panicked");
@@ -370,9 +376,9 @@ impl HandshakeShared {
     }
 
     fn remove_inflight(&self, handshake_id: u64) {
-        if let Ok(mut inflight) = self.inflight.lock() {
-            inflight.remove(&handshake_id);
-        }
+        // Recovered, not skipped: a skipped removal keeps the host-held socket
+        // duplicate alive for the life of the acceptor, leaking the fd.
+        recover_lock(&self.inflight, INFLIGHT_REGISTRY).remove(&handshake_id);
     }
 }
 
@@ -381,16 +387,14 @@ impl HandshakeSupervisor {
     /// Number of worker records currently held. Test observation of the
     /// registry size for the completion-delivery oracle.
     fn worker_record_count(&self) -> usize {
-        self.inner.workers.lock().map_or(0, |workers| workers.len())
+        recover_lock(&self.inner.workers, WORKER_REGISTRY).len()
     }
 
     /// Blocks until at least `target` completions have been delivered, waking on
     /// the completion signal (TOLD — never a poll, never a timed sample). Used
     /// by the oracle to await reclamation without a timing-based assertion.
     fn wait_for_completions(&self, target: u64) {
-        let Ok(guard) = self.inner.completions.lock() else {
-            return;
-        };
+        let guard = recover_lock(&self.inner.completions, COMPLETION_COUNT);
         let _held = self
             .inner
             .completion_signal

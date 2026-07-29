@@ -2335,8 +2335,8 @@ fn poisoned_registry_still_reclaims_and_expires() -> Result<(), Box<dyn std::err
 // test; the unwrap can only fail if the fresh lock is somehow already poisoned.
 #[allow(clippy::unwrap_used, clippy::panic)]
 #[test]
-fn poisoned_connection_registry_still_counts_and_removes()
--> Result<(), Box<dyn std::error::Error>> {
+fn poisoned_connection_registry_still_counts_and_removes() -> Result<(), Box<dyn std::error::Error>>
+{
     let runtime = std::sync::Arc::new(ConnectionRuntime::for_tests(std::sync::Arc::new(
         FlushFailingServices,
     )));
@@ -2359,7 +2359,10 @@ fn poisoned_connection_registry_still_counts_and_removes()
     })
     .join();
     assert!(runtime.records.is_poisoned(), "the registry is poisoned");
-    assert!(runtime.controls.is_poisoned(), "the control queue is poisoned");
+    assert!(
+        runtime.controls.is_poisoned(),
+        "the control queue is poisoned"
+    );
 
     // The drain barrier's input. A masked zero here reports drain-complete with
     // two live connections still tracked.
