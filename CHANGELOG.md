@@ -69,6 +69,37 @@ release and not a minor one.
   a 100 ms window is not equivalent to one long window. This cures the frame
   announcer's 1-in-2 boot crash.
 
+### Internal
+
+Neither item below is observable to anyone installing from crates.io. Both are
+recorded because a reader diffing 0.5.0 against this tag finds production files
+changed under them, and an entry that does not account for those files makes
+that reader repeat the investigation that produced this paragraph.
+
+- **The build toolchain is pinned at 1.97.1** (`cb1bb50`), and the pin carried
+  behaviour-identical lint and trybuild collateral across seventeen files
+  (`358742b`) — four of them production: `durability/bridge.rs` and
+  `routing/function/execute/actor.rs` in `liminal-rs`, `cluster/discovery.rs`
+  and `server/participant/production/outbox_replay.rs` in `liminal-server`.
+  The edits are manual no-op wakers replaced with `std`'s `Waker::noop()`,
+  `map_or_else(f, identity)` narrowed to `unwrap_or_else(f)`, `loop`/`let-else`
+  rewritten as `while-let`, `Duration` millisecond literals in tests written as
+  whole seconds, and re-blessed trybuild stderr (same error code, same span,
+  wording only). **The minimum supported Rust version did not move: it remains
+  1.85, as `Cargo.toml` and the README both still state** — `Waker::noop()`
+  stabilized in 1.85, so the collateral stays inside the declared floor.
+  `rust-toolchain.toml` lives at the repository root, outside every crate, so
+  like the example config it is not carried inside any published crate: it
+  binds anyone building from a checkout and nobody building against the
+  registry.
+- **`liminal-protocol` is not republished, and its source is not identical to
+  published 0.3.2.** The crate took one behaviour-identical edit from that same
+  collateral — the `map_or_else`/`unwrap_or_else` narrowing in
+  `wire/server_codec.rs`, plus a redundant pattern binding dropped in a test.
+  No public item changed and the encoding did not move, so 0.3.2 is left
+  standing rather than re-cut; "unchanged" in the header above refers to the
+  version, which is what the other three crates depend on.
+
 ### Notes
 
 - **Non-Rust SDK claims remain untrue in this cut.** The Gleam SDK's FFI
