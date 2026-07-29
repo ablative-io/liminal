@@ -2361,3 +2361,63 @@ fn open_refusals_preserve_the_request_stream_id() -> Result<(), ServerError> {
     assert!(message.contains("open failed under test"));
     Ok(())
 }
+
+/// A complete participant service and a durable connection incarnation are ONE
+/// activation invariant; either alone is internal configuration drift. Both
+/// mismatch arms close the connection, and closing is right — but they did it
+/// with no log at all, while the sibling semantic-failure arm in the same match
+/// warns. An operator saw connections dropping at the handshake with nothing to
+/// read. The close semantics are pinned here too, so the warn cannot be traded
+/// for a behaviour change.
+#[test]
+fn partial_activation_close_names_the_configuration_drift() {
+    // A runtime with no participant service, driven by a process state that
+    // carries an incarnation: the `(None, Some(_))` half of the invariant.
+    let incarnation = ConnectionIncarnation::new(7, 3);
+
+    let (runtime, _services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState {
+        connection_incarnation: Some(incarnation),
+        ..ConnectionProcessState::default()
+    };
+    let log = crate::test_log::CapturedLog::default();
+    let action = log.capture(|| apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[])));
+    assert!(
+        matches!(action, FrameAction::Close),
+        "the handshake must still fail closed on partial activation, got {action:?}"
+    );
+    assert!(
+        !state.authenticated,
+        "a partial-activation close must not publish handshake state"
+    );
+    let output = log.contents();
+    assert!(
+        output.contains("WARN") && output.contains("partial participant activation"),
+        "the handshake close must name the configuration drift, got: {output}"
+    );
+
+    // The same invariant on the participant dispatch boundary.
+    let (runtime, _services) = runtime_with(RecordingServices::default());
+    let mut state = ConnectionProcessState {
+        connection_incarnation: Some(incarnation),
+        authenticated: true,
+        ..ConnectionProcessState::default()
+    };
+    let participant_frame = Frame::Unknown {
+        type_id: PARTICIPANT_FRAME_TYPE,
+        flags: 0,
+        stream_id: 0,
+        payload: Vec::new(),
+    };
+    let log = crate::test_log::CapturedLog::default();
+    let action = log.capture(|| apply_frame(TEST_PID, &runtime, &mut state, participant_frame));
+    assert!(
+        matches!(action, FrameAction::Close),
+        "participant dispatch must still fail closed on partial activation, got {action:?}"
+    );
+    let output = log.contents();
+    assert!(
+        output.contains("WARN") && output.contains("partial participant activation"),
+        "the dispatch close must name the configuration drift, got: {output}"
+    );
+}
