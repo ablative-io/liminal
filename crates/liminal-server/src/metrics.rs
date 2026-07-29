@@ -156,8 +156,7 @@ mod tests {
     /// A failed family registration must not vanish: `register` returns None
     /// (unchanged) AND warns with the underlying registration error.
     #[test]
-    fn register_warns_when_a_family_registration_fails()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn register_warns_when_a_family_registration_fails() -> Result<(), Box<dyn std::error::Error>> {
         let registry = MetricsRegistry::new();
         // Pre-register the gauge's name as a COUNTER so the gauge registration
         // fails with an incompatible-kind error.

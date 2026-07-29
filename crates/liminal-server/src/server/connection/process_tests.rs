@@ -1585,9 +1585,29 @@ fn publish_after_rejected_connect_is_still_closed() {
 /// `NoResponse` semantics (a confused or malicious client must not be able to
 /// tear the connection down with a stray frame), but each one must emit a warn
 /// naming the frame kind instead of vanishing silently.
+fn assert_ignored_inbound_frame_warns(cases: Vec<(Frame, &str)>) {
+    for (frame, kind) in cases {
+        let (runtime, _services) = runtime_with(RecordingServices::default());
+        let mut state = ConnectionProcessState::default();
+        let log = crate::test_log::CapturedLog::default();
+
+        let action = log.capture(|| apply_frame(TEST_PID, &runtime, &mut state, frame));
+
+        assert!(
+            matches!(action, FrameAction::NoResponse),
+            "frame kind `{kind}`: the no-teardown NoResponse semantics must hold"
+        );
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains(kind),
+            "frame kind `{kind}`: expected a warn naming the kind, got: {output}"
+        );
+    }
+}
+
 #[test]
-fn ignored_inbound_frames_warn_with_frame_kind() {
-    let cases: Vec<(Frame, &str)> = vec![
+fn ignored_server_originated_frames_warn_with_frame_kind() {
+    assert_ignored_inbound_frame_warns(vec![
         (
             Frame::Push {
                 flags: 0,
@@ -1639,6 +1659,12 @@ fn ignored_inbound_frames_warn_with_frame_kind() {
             },
             "connect_error",
         ),
+    ]);
+}
+
+#[test]
+fn ignored_response_frames_warn_with_frame_kind() {
+    assert_ignored_inbound_frame_warns(vec![
         (
             Frame::SubscribeAck {
                 flags: 0,
@@ -1685,25 +1711,7 @@ fn ignored_inbound_frames_warn_with_frame_kind() {
             "conversation_error",
         ),
         (Frame::Pong { flags: 0 }, "pong"),
-    ];
-
-    for (frame, kind) in cases {
-        let (runtime, _services) = runtime_with(RecordingServices::default());
-        let mut state = ConnectionProcessState::default();
-        let log = crate::test_log::CapturedLog::default();
-
-        let action = log.capture(|| apply_frame(TEST_PID, &runtime, &mut state, frame));
-
-        assert!(
-            matches!(action, FrameAction::NoResponse),
-            "frame kind `{kind}`: the no-teardown NoResponse semantics must hold"
-        );
-        let output = log.contents();
-        assert!(
-            output.contains("WARN") && output.contains(kind),
-            "frame kind `{kind}`: expected a warn naming the kind, got: {output}"
-        );
-    }
+    ]);
 }
 
 fn envelope(payload: Vec<u8>) -> MessageEnvelope {

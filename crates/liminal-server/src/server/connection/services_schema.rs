@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(resolved.protocol_id, schema_id_from_bytes(b"{}"));
     }
 
-    /// A channel that DECLARED a schema_ref but has no loaded schema is a config
+    /// A channel that DECLARED a `schema_ref` but has no loaded schema is a config
     /// that skipped validation, silently running permissive — that must be
     /// warned about, naming the channel. Resolution itself stays permissive.
     #[test]

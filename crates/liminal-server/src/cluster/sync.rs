@@ -375,7 +375,7 @@ mod tests {
     /// A failed cross-node distribution write must be warned about, never
     /// silently discarded (message fan-out and R5 backfill would be lost with
     /// no trace). Drives the REAL write path: a live loopback link (the
-    /// membership tests' LivePair pattern), whose write half is then
+    /// membership tests' `LivePair` pattern), whose write half is then
     /// deterministically taken down via the public `mark_down_write_timeout`
     /// seam so `write_raw` yields `NotConnected`.
     #[test]
@@ -397,12 +397,14 @@ mod tests {
             1,
         );
         peer.set_runtime_handle(runtime.handle().clone());
-        let _accept = runtime
+        // Kept alive for the whole test: dropping the accept handle would tear
+        // the loopback link down underneath the write below.
+        let accept = runtime
             .block_on(peer.listen("127.0.0.1:0".parse().expect("loopback addr")))
             .expect("peer binds a loopback listener");
 
         let mut routes = HashMap::new();
-        routes.insert(PEER_NAME.to_owned(), _accept.local_addr());
+        routes.insert(PEER_NAME.to_owned(), accept.local_addr());
         let dialer_atoms = Arc::new(AtomTable::with_common_atoms());
         let dialer = ConnectionManager::new(
             Arc::clone(&dialer_atoms),

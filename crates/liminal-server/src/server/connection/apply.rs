@@ -159,11 +159,15 @@ pub(super) fn apply_frame(
         | Frame::PublishAck { .. }
         | Frame::PublishError { .. }
         | Frame::ConversationError { .. }
-        | Frame::Pong { .. }) => {
-            warn_ignored_inbound_frame(ignored_inbound_frame_kind(&frame));
-            FrameAction::NoResponse
-        }
+        | Frame::Pong { .. }) => ignore_stray_inbound_frame(&frame),
     }
+}
+
+/// The catch-all's body: warns with the frame-kind name, then keeps the
+/// no-teardown `NoResponse` semantics.
+fn ignore_stray_inbound_frame(frame: &Frame) -> FrameAction {
+    warn_ignored_inbound_frame(ignored_inbound_frame_kind(frame));
+    FrameAction::NoResponse
 }
 
 /// Names the frame variant for the ignored-inbound warn. Kind names only — no

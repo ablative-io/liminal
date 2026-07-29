@@ -55,17 +55,19 @@ impl ShutdownHandle {
         let Ok(mut guard) = self.inner.wait_lock.lock() else {
             // Behaviour unchanged (return as if shutdown was requested), but a
             // poisoned lock must not masquerade silently as a completed wait.
-            tracing::error!("shutdown wait lock poisoned; returning from wait as if shutdown was requested");
+            tracing::error!(
+                "shutdown wait lock poisoned; returning from wait as if shutdown was requested"
+            );
             return;
         };
         while !self.is_initiated() {
-            match self.inner.waiter.wait(guard) {
-                Ok(next_guard) => guard = next_guard,
-                Err(_) => {
-                    tracing::error!("shutdown wait condvar reacquired a poisoned lock; returning from wait as if shutdown was requested");
-                    return;
-                }
-            }
+            let Ok(next_guard) = self.inner.waiter.wait(guard) else {
+                tracing::error!(
+                    "shutdown wait condvar reacquired a poisoned lock; returning from wait as if shutdown was requested"
+                );
+                return;
+            };
+            guard = next_guard;
         }
     }
 
@@ -368,8 +370,8 @@ mod tests {
     /// when the lock has been poisoned after it parked: `initiate()` must never
     /// silently skip the wake.
     #[test]
-    fn notify_on_poisoned_lock_still_wakes_parked_waiter()
-    -> Result<(), Box<dyn std::error::Error>> {
+    fn notify_on_poisoned_lock_still_wakes_parked_waiter() -> Result<(), Box<dyn std::error::Error>>
+    {
         let handle = ShutdownHandle::new();
         let waiter = handle.clone();
         let (sender, receiver) = std::sync::mpsc::channel();

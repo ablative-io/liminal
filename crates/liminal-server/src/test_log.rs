@@ -9,13 +9,13 @@ use tracing_subscriber::fmt::MakeWriter;
 
 /// Cloneable capture buffer usable as a `tracing_subscriber` fmt writer.
 #[derive(Clone, Default)]
-pub(crate) struct CapturedLog {
+pub struct CapturedLog {
     buffer: Arc<Mutex<Vec<u8>>>,
 }
 
 impl CapturedLog {
     /// Everything written so far, lossily decoded for assertion messages.
-    pub(crate) fn contents(&self) -> String {
+    pub fn contents(&self) -> String {
         let buffer = self
             .buffer
             .lock()
@@ -26,7 +26,7 @@ impl CapturedLog {
     /// Runs `operation` with a plain fmt subscriber writing into this buffer
     /// installed as the THREAD-default subscriber — only events emitted on the
     /// calling thread are captured.
-    pub(crate) fn capture<T>(&self, operation: impl FnOnce() -> T) -> T {
+    pub fn capture<T>(&self, operation: impl FnOnce() -> T) -> T {
         let subscriber = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::TRACE)
             .with_ansi(false)
@@ -48,7 +48,7 @@ impl<'writer> MakeWriter<'writer> for CapturedLog {
 
 /// Per-event writer handed out by [`CapturedLog::make_writer`]; appends to the
 /// shared buffer under its mutex.
-pub(crate) struct CapturedLogWriter {
+pub struct CapturedLogWriter {
     buffer: Arc<Mutex<Vec<u8>>>,
 }
 
