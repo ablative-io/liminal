@@ -316,6 +316,64 @@ mod tests {
         Ok(())
     }
 
+    /// Poisons the handle's `wait_lock` by panicking a thread while it holds
+    /// the guard.
+    #[allow(clippy::panic)]
+    fn poison_wait_lock(handle: &ShutdownHandle) {
+        let poisoner = handle.clone();
+        let outcome = thread::spawn(move || {
+            let _guard = poisoner.inner.wait_lock.lock();
+            panic!("poison the shutdown wait lock");
+        })
+        .join();
+        assert!(outcome.is_err(), "the poisoner thread must have panicked");
+    }
+
+    /// A poisoned wait lock must not silently masquerade as a completed
+    /// shutdown: `wait()` still returns (behaviour unchanged) but logs at
+    /// error level.
+    #[test]
+    fn wait_on_poisoned_lock_returns_and_logs_error() {
+        let handle = ShutdownHandle::new();
+        poison_wait_lock(&handle);
+
+        let log = crate::test_log::CapturedLog::default();
+        log.capture(|| handle.wait());
+
+        let output = log.contents();
+        assert!(
+            output.contains("ERROR"),
+            "a poisoned wait lock must be logged at error level, got: {output}"
+        );
+    }
+
+    /// A waiter already parked in `wait()` must still be woken by `notify()`
+    /// when the lock has been poisoned after it parked: `initiate()` must never
+    /// silently skip the wake.
+    #[test]
+    fn notify_on_poisoned_lock_still_wakes_parked_waiter()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let handle = ShutdownHandle::new();
+        let waiter = handle.clone();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            waiter.wait();
+            let _ = sender.send(());
+        });
+        // Give the waiter time to park on the condvar (it releases the lock
+        // while parked, so the poisoner below can take it).
+        thread::sleep(Duration::from_millis(50));
+        poison_wait_lock(&handle);
+
+        assert!(handle.initiate());
+
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "a parked waiter must wake after notify under a poisoned lock")?;
+        worker.join().map_err(|_| "wait worker panicked")?;
+        Ok(())
+    }
+
     #[test]
     fn drain_returns_immediately_when_no_connections_are_active()
     -> Result<(), Box<dyn std::error::Error>> {
