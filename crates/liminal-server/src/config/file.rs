@@ -42,14 +42,66 @@ pub(crate) fn load_config(path: impl AsRef<Path>) -> Result<ServerConfig, Server
 #[cfg(test)]
 mod tests {
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use crate::ServerError;
 
-    use super::load_from_file;
+    use super::{load_config, load_from_file};
 
     static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+    /// Absolute path to the config example shipped in the repository.
+    ///
+    /// Resolved from `CARGO_MANIFEST_DIR` (`<repo>/crates/liminal-server`) rather
+    /// than the process working directory, so the test finds the file identically
+    /// under `cargo test`, `cargo nextest`, and any invocation directory.
+    fn shipped_example_config_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("config")
+            .join("liminal.example.toml")
+    }
+
+    /// The shipped example must boot-load through the SAME entry point the binary
+    /// uses — `load_config` (file parse + environment overrides + validation), the
+    /// one `server::runtime::run` calls. This is the anti-rot pin: an example that
+    /// drifts from the schema, names an unknown field, or references a channel that
+    /// does not exist stops the build here rather than at a newcomer's first boot.
+    #[test]
+    fn shipped_example_config_loads_through_the_real_loader()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = shipped_example_config_path();
+        let config = load_config(&path).map_err(|error| {
+            format!(
+                "the shipped example config '{}' must load and validate through the real loader: \
+                 {error}",
+                path.display()
+            )
+        })?;
+
+        // A newcomer's first boot needs at least one channel and the mandatory
+        // routing_rules key populated, not an empty husk.
+        assert!(
+            !config.channels.is_empty(),
+            "the example must declare at least one channel"
+        );
+        assert!(
+            !config.routing_rules.is_empty(),
+            "the example must exercise the mandatory routing_rules key"
+        );
+        // `persistence_path` must stay unset in the shipped file: validation
+        // requires the directory to already exist, so pinning one would make the
+        // example fail to validate on every checkout that lacks it.
+        assert!(
+            config.persistence_path.is_none(),
+            "the example must not pin a persistence_path — validation requires the \
+             directory to exist, which no fresh checkout can guarantee"
+        );
+
+        Ok(())
+    }
 
     fn valid_toml() -> &'static str {
         r#"
