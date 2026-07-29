@@ -65,7 +65,9 @@ total lines                       3600   =  3528 + 72 (36 suites x 2)
 value precisely because it looks like a test count and would survive review as
 a new baseline. A count with a stated denominator can still be a count of two
 things added together — the partition is a separate obligation from the count
-(Cally Ray, ratified estate-wide 2026-07-29 at topic entry `27c11415`).
+(Cally Ray, §7 of topic entry `27c11415`, ratified estate-wide 2026-07-29 and
+still standing; **note that Amendment One of that same entry was later
+withdrawn in full at `ab13367a` — cite the section, not the entry**).
 
 ## How to consume it
 
@@ -126,14 +128,19 @@ gate names its own additions), never pattern-matched.
   same self-version strings. The executable code is therefore identical across
   the two runs (the sole reachable difference is `CARGO_PKG_VERSION`, which
   cannot leak a process), and the
-  observation appears in exactly one of them. **By the intersection rule —
-  present in both ⇒ tree-determined, present in one ⇒ not tree-determined —
-  the leak falls in the symmetric difference and is NOT tree-determined.**
+  observation appears in exactly one of them. **An observation that varies
+  across two executions of identical code is not caused by that code.** That
+  is the whole argument and it rests on no ruling: the leak is NOT
+  tree-determined.
   That is positive proof of non-determinism, whereas 338 clean executions were
   only failure to reproduce, and no number of clean runs proves absence. **The
-  same-tree premise is the load-bearing half and it is MEASURED here, not
-  assumed** — an intersection argument over two runs of *different* trees
-  proves nothing at all. **TRIPWIRE, binding on future sweeps:** if `Command::new` or
+  identical-code premise is the load-bearing half and it is MEASURED here in
+  two independent ways (`.rs` delta and lock delta), not assumed** — the same
+  argument over two runs of *different* code proves nothing, because the
+  difference is then equally explained by the change itself. That precondition
+  is what failed elsewhere in the estate on this same night and cost a
+  stack-lead ruling its full retraction (`ab13367a`), which is why it is
+  measured here rather than asserted. **TRIPWIRE, binding on future sweeps:** if `Command::new` or
   `process::Command` ever appears anywhere under `crates/liminal`, the
   disposition EXPIRES and the observation re-opens; likewise on any recurrence
   of LEAK in any future battery, on any test.
