@@ -1,0 +1,6 @@
+    Checking liminal-protocol v0.3.2 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/release-0.5.1/crates/liminal-protocol)
+    Checking liminal-rs v0.5.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/release-0.5.1/crates/liminal)
+    Checking liminal-ts-wasm v0.3.0 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/release-0.5.1/sdks/liminal-ts/wasm-src)
+    Checking liminal-sdk v0.5.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/release-0.5.1/crates/liminal-sdk)
+    Checking liminal-server v0.5.1 (/Users/annabel/Developer/ablative/stack/liminal/.worktrees/release-0.5.1/crates/liminal-server)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 11.76s

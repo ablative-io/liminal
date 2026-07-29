@@ -1,0 +1,4 @@
+2026-07-29T21:25:08Z claim acquired, phase=draining
+2026-07-29T21:25:08Z floor quiet at census; phase=running
+2026-07-29T21:28:40Z battery complete; exits check=0 clippy=0 nextest=0
+2026-07-29T21:28:40Z claim released (own claim, pid 70061)
