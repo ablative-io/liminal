@@ -367,6 +367,67 @@ mod tests {
         assert!(sync.remote_targets("orders").is_empty());
     }
 
+    /// A failed cross-node distribution write must be warned about, never
+    /// silently discarded (message fan-out and R5 backfill would be lost with
+    /// no trace). Drives the REAL write path: a live loopback link (the
+    /// membership tests' LivePair pattern), whose write half is then
+    /// deterministically taken down via the public `mark_down_write_timeout`
+    /// seam so `write_raw` yields `NotConnected`.
+    #[test]
+    fn distribution_write_failure_warns() {
+        const COOKIE: &str = "sync-write-cookie";
+        const PEER_NAME: &str = "sync-peer@127.0.0.1";
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("build loopback test runtime");
+
+        let peer_atoms = Arc::new(AtomTable::with_common_atoms());
+        let peer = ConnectionManager::new(
+            peer_atoms,
+            Arc::new(StaticResolver::new(HashMap::new())),
+            COOKIE,
+            PEER_NAME,
+            1,
+        );
+        peer.set_runtime_handle(runtime.handle().clone());
+        let _accept = runtime
+            .block_on(peer.listen("127.0.0.1:0".parse().expect("loopback addr")))
+            .expect("peer binds a loopback listener");
+
+        let mut routes = HashMap::new();
+        routes.insert(PEER_NAME.to_owned(), _accept.local_addr());
+        let dialer_atoms = Arc::new(AtomTable::with_common_atoms());
+        let dialer = ConnectionManager::new(
+            Arc::clone(&dialer_atoms),
+            Arc::new(StaticResolver::new(routes)),
+            COOKIE,
+            "sync-dialer@127.0.0.1",
+            1,
+        );
+        dialer.set_runtime_handle(runtime.handle().clone());
+        runtime
+            .block_on(dialer.connect(PEER_NAME))
+            .expect("loopback handshake succeeds");
+
+        let peer_node = dialer_atoms.intern(PEER_NAME);
+        let connection = dialer
+            .get_connection(peer_node)
+            .expect("dialer holds the live connection");
+        // Take the write half down; the next write_raw returns NotConnected.
+        connection.mark_down_write_timeout();
+
+        let log = crate::test_log::CapturedLog::default();
+        log.capture(|| super::write_raw_blocking(&connection, b"frame-bytes"));
+
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains("cross-node distribution write failed"),
+            "expected the discarded write error to be warned about, got: {output}"
+        );
+    }
+
     #[test]
     fn remote_targets_reflect_applied_remote_joins() {
         let (sync, pg, atoms) = sync_fixture();
