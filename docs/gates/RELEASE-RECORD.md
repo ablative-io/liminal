@@ -66,14 +66,60 @@ serde                             HTTP-200  316 versions  max 1.0.229   <- POSIT
 zzq-hermes-nonexistent-crate-xyz  HTTP-404                              <- NEGATIVE
 ```
 
-**⚠️ DO NOT SUBSTITUTE THE LOCAL CARGO CACHE. It is a FLOOR, not a census —
-and it manufactures false findings, which I proved on this repo tonight.**
-Reading `~/.cargo/registry/src/` gave liminal-server 13 versions **with `0.3.2`
-absent**, which reads exactly like a §3 sequence hole. The registry shows **14
-versions with `0.3.2` present**: the box had simply never fetched it. The cache
-is authoritative for *what was downloaded* and for nothing else. It remains the
-right instrument for **the published manifest of a version you already have**
-(offline, no `403` exposure) — a different question.
+### ⚠️ There are TWO local sources and they fail differently
+
+Treating them as one instrument is a mistake this file made in its first
+version (caught by Athena Zooper Dooper on frame's bytes). Measured three ways
+on `liminal-server`, whose true count is **14**:
+
+```
+live registry (index.crates.io, UA set, ± controls)   14   <- truth
+~/.cargo/registry/src/  (.crate / src cache)          13   <- FABRICATES a hole at 0.3.2
+~/.cargo/registry/index/*/.cache/  (index cache)      14   <- agreed; mtime 2026-07-30T08:03:45Z
+```
+
+- **`.crate` / `src` cache = what THIS BOX DOWNLOADED.** It carries no
+  completeness claim of any kind, so **no caveat rescues it** — it is not a
+  version census and cannot be made into one. **Inadmissible for existence
+  questions.** It remains correct for a different question: **the published
+  manifest of a version you already hold** (offline, no `403` exposure).
+- **Index cache = what the index said WHEN LAST FETCHED.** It misses only
+  versions published since its mtime, which makes it a **bounded** claim —
+  *"true as of `stat`"* — and therefore admissible **if and only if the mtime
+  is quoted beside the result.** That converts an unbounded assertion into a
+  dated one, the same move as the VOID exit in `baseline-compare.py`: it gives
+  *"I could not validly answer"* somewhere to live.
+
+**The index cache is the more seductive of the two.** It is literally the
+index, so it carries the highest apparent authority of any local source while
+going stale silently — nothing about reading it feels like reading a cache.
+The `.crate` cache at least announces itself as one by name.
+
+**⇒ REFINEMENT MEASURED HERE: the mtime is PER CRATE FILE, not per sweep.**
+liminal's four index-cache entries span **a week**:
+
+```
+liminal-rs        2026-07-30T08:01:22Z      liminal-sdk       2026-07-30T08:02:22Z
+liminal-server    2026-07-30T08:03:45Z      liminal-protocol  2026-07-23T16:28:20Z
+```
+
+`liminal-protocol`'s entry is **seven days stale** while its siblings are
+minutes old. It happens to be correct — which is luck, not a property. **So
+"the index cache is fresh" is not a statement anyone can make about a sweep;
+the bound must be quoted per crate.**
+
+**⇒ A Direction-3 sequence hole is CONFIRMED ONLY AT THE LIVE REGISTRY.**
+Neither local source qualifies, for the two different reasons above.
+
+**And the reason this matters more than an ordinary caveat (Athena's, and it
+is the sharpest thing in this file):** on frame, the `.crate` cache fabricated
+a false hole at `0.1.0` **sitting directly beside a true hole at `0.4.1`, in
+identical form** — and it was exactly correct for three of the four crates,
+wrong only on the one carrying the mechanism under investigation. **A wrong
+result standing next to a right one is worse than a wrong result alone,
+because the right one launders it.** An instrument that agrees with the truth
+everywhere except the case you are investigating is the hardest kind to
+distrust, since every spot-check you are likely to run passes.
 
 **Yanked is not absent.** A yanked version stays in the index with
 `"yanked": true` — that is how cargo avoids selecting it. Check the flag; do
