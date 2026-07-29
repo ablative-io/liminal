@@ -12,6 +12,16 @@ consumed, not admired.
 
 ## The pin (machine-consumable)
 
+**Each field has exactly one role. A consumer that compares a RECORD field
+false-REDs on every run, forever, on every box** — `summary_line` alone carries
+a wall-clock duration. The partition is part of the pin, not commentary on it:
+
+| Role | Fields | Meaning |
+|------|--------|---------|
+| **COMPARE** | `tests_started`, `tests_ok`, `tests_failed`, `tests_ignored`, `suites` | The predicate. Drift in either direction is RED. |
+| **REQUIRE** | `baseline_tree`, `toolchain`, `cargo`, `command` | Preconditions. A mismatch does not fail the gate — it makes the comparison **void**, which must be reported as such and never as a pass. |
+| **RECORD** | `summary_line`, `machine`, `operator`, `measured_at`, `runner`, `evidence_branch`, `sibling_run` | Provenance. Print, never compare. |
+
 ```
 baseline_tree      = c9218279a5c187c977161ea3d1d9eb2e07d6379b
 baseline_tree_short = c921827
@@ -37,6 +47,26 @@ Reconciliation held at the source run, four ways: test-level started (1764)
 equals ok (1764) + failed (0) + ignored (0); the 36 suite-level sums agree;
 nextest Summary totals agree; JSON `ignored` equals Summary `skipped` (0).
 
+## ⚠️ How to extract the numbers — the raw stream is TWO POPULATIONS SUMMED
+
+`libtest-json-plus` emits `"event":"started"` for **suites as well as tests**.
+Counting the raw event yields a plausible, wrong number. Measured at the
+committed evidence (`origin/evidence/main-baseline-battery @ 67810be`,
+`gate-evidence/nextest.json.log`, 594364 bytes, 3600 lines):
+
+```
+grep -c '"event":"started"'   ->  1800   <- WRONG: 1764 tests + 36 suites
+grep -c '"type":"test"'       ->  3528   =  1764 x 2 (started + ok)
+total lines                       3600   =  3528 + 72 (36 suites x 2)
+```
+
+1764 + 36 = 1800 and 3528 + 72 = 3600, both closing with no remainder.
+**Filter on `"type":"test"` BEFORE counting events.** 1800 is the dangerous
+value precisely because it looks like a test count and would survive review as
+a new baseline. A count with a stated denominator can still be a count of two
+things added together — the partition is a separate obligation from the count
+(Cally Ray, ratified estate-wide 2026-07-29 at topic entry `27c11415`).
+
 ## How to consume it
 
 Run the pinned command at the tree under gate, under the pinned toolchain,
@@ -48,6 +78,21 @@ gate names its own additions), never pattern-matched.
 
 ## Known limits, carried with the number
 
+- **⚠️ SIX ARTIFACTS IN THE CITED EVIDENCE BRANCHES ARE ZERO BYTES**, on
+  **both** `evidence/main-baseline-battery @ 67810be` and
+  `evidence/release-0.5.1-battery @ fbf444c` (blob sizes from
+  `git ls-tree -r -l`): `gate-evidence/nextest.extract.jsonl`,
+  `check.extract.jsonl`, `clippy.extract.jsonl`, `census-at-start.txt`,
+  `census-at-end.txt`, `gate-logs/fmt.log`. Two consequences, and they are not
+  the same severity. **The extracts are the machine-readable layer a consumer
+  naturally reaches for, and they are empty** — the numbers in this pin are
+  derivable, but only from the 594KB `nextest.json.log` beside them, so read
+  that and not the file whose name says `extract`. **The two census files are
+  worse in kind: an empty census cannot distinguish "no actors" from "could
+  not look", and it renders as QUIET** — the tool-absence class, failing
+  toward harm. Neither defect touches the counts, which reconcile four ways
+  above; both are disclosed rather than repaired here because repairing them
+  means re-running a battery, and the counts do not need one.
 - **Doc tests are not covered** — the canonical battery script has no
   doc-test leg (the runner's own disclosure line).
 - **The census quiet is a BOUNDARY claim, not a throughout claim** — the
@@ -67,7 +112,28 @@ gate names its own additions), never pattern-matched.
   "Leaky" is not a count term; it does not affect this denominator.
   Disposition (lane entry `39142c52-a6bf-4248-b4ba-630061f70717`): carried as
   known-unknown, no battery slot spent — a structural impossibility beats
-  another sample. **TRIPWIRE, binding on future sweeps:** if `Command::new` or
+  another sample.
+  **UPGRADED 2026-07-30 from unreproduced to CLASSIFIED, and the two are
+  different logical objects.** The baseline run (tree `c921827`) carried the
+  leak; the sibling run (tree `62d9b80`) did not. **The `.rs` delta between
+  those two trees is ZERO** — `git diff --numstat c921827 62d9b80 -- '*.rs'`
+  reports 0 files, +0/-0; the whole delta is 7 files, all manifests and docs
+  (`CHANGELOG.md`, `Cargo.lock`, `README.md`, four `Cargo.toml`). **Zero `.rs`
+  delta is NOT sufficient on its own — a `Cargo.lock` move can change the code
+  that actually runs — so the lock was checked too: its delta is 3 lines,
+  `version = "0.5.0"` → `"0.5.1"` on liminal's own three path crates, with no
+  third-party dependency moving at all**; the manifests carry nothing but the
+  same self-version strings. The executable code is therefore identical across
+  the two runs (the sole reachable difference is `CARGO_PKG_VERSION`, which
+  cannot leak a process), and the
+  observation appears in exactly one of them. **By the intersection rule —
+  present in both ⇒ tree-determined, present in one ⇒ not tree-determined —
+  the leak falls in the symmetric difference and is NOT tree-determined.**
+  That is positive proof of non-determinism, whereas 338 clean executions were
+  only failure to reproduce, and no number of clean runs proves absence. **The
+  same-tree premise is the load-bearing half and it is MEASURED here, not
+  assumed** — an intersection argument over two runs of *different* trees
+  proves nothing at all. **TRIPWIRE, binding on future sweeps:** if `Command::new` or
   `process::Command` ever appears anywhere under `crates/liminal`, the
   disposition EXPIRES and the observation re-opens; likewise on any recurrence
   of LEAK in any future battery, on any test.
