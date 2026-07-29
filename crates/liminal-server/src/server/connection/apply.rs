@@ -202,6 +202,25 @@ fn warn_ignored_inbound_frame(kind: &'static str) {
     );
 }
 
+/// Names a broken activation invariant at the point it closes the connection.
+///
+/// A complete participant service and a durable connection incarnation are one
+/// invariant; either alone is internal configuration drift, not a client fault.
+/// Closing is correct — the alternative is fabricating a lifecycle outcome — but
+/// closing SILENTLY left an operator watching connections drop at the handshake
+/// with nothing to read, while the sibling semantic-failure arm in the same
+/// match already warned.
+fn warn_partial_activation(stage: &'static str, service_installed: bool) {
+    tracing::warn!(
+        stage,
+        service_installed,
+        connection_incarnation_present = !service_installed,
+        "closing on partial participant activation; a complete participant service \
+         and a durable connection incarnation are one invariant and exactly one is \
+         present (internal configuration drift, not a client fault)"
+    );
+}
+
 /// Applies the core protocol's single-use connection handshake.
 fn connect_once(
     runtime: &ConnectionRuntime,
@@ -254,7 +273,13 @@ fn participant_frame_response(
         // A complete service and a durable connection incarnation are one
         // activation invariant. Any mismatch is internal configuration drift;
         // close without fabricating a lifecycle outcome.
-        (Some(_), None) | (None, Some(_)) => FrameAction::Close,
+        (Some(_), None) | (None, Some(_)) => {
+            warn_partial_activation(
+                "participant frame dispatch",
+                runtime.participant_service().is_some(),
+            );
+            FrameAction::Close
+        }
     }
 }
 
@@ -271,10 +296,26 @@ fn participant_frame_without_service(state: &ConnectionProcessState, frame: &Fra
         ParticipantIngress::Request(_) | ParticipantIngress::InvalidGenericFrame => {
             FrameAction::Close
         }
-        ParticipantIngress::Rejected(rejection) => encode_server_value(
-            liminal_protocol::wire::ServerValue::ParticipantTransportRejected(rejection),
-        )
-        .map_or(FrameAction::Close, FrameAction::RespondThenClose),
+        ParticipantIngress::Rejected(rejection) => {
+            let reason = format!("{:?}", rejection.reason);
+            match encode_server_value(
+                liminal_protocol::wire::ServerValue::ParticipantTransportRejected(rejection),
+            ) {
+                Ok(response) => FrameAction::RespondThenClose(response),
+                Err(error) => {
+                    // The client gets a bare close instead of the typed rejection
+                    // it was owed, so neither the encode failure nor the reason it
+                    // was rejected exists anywhere unless logged here.
+                    tracing::warn!(
+                        rejection_reason = %reason,
+                        ?error,
+                        "participant transport rejection could not be encoded; closing \
+                         without telling the client why"
+                    );
+                    FrameAction::Close
+                }
+            }
+        }
     }
 }
 
@@ -429,7 +470,13 @@ fn connect_response(
             (None, None) => (crate::server::participant::ParticipantSession::default(), 0),
             // Fail closed on impossible partial activation without inventing a
             // participant response.
-            (Some(_), None) | (None, Some(_)) => return FrameAction::Close,
+            (Some(_), None) | (None, Some(_)) => {
+                warn_partial_activation(
+                    "connection handshake",
+                    runtime.participant_service().is_some(),
+                );
+                return FrameAction::Close;
+            }
         };
 
     // Publish handshake state only after authentication, version negotiation,
