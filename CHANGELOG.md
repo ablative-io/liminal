@@ -3,6 +3,48 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## Unreleased
+
+### Breaking
+
+- **SDK: four silent voids now refuse loudly instead of reporting success**
+  (front-door fix wave, Leg C; red pins `5db4bc9` and `c0e9806`, fixes
+  `46c56d9`, `e6bf32e`, `2db784e`, `0e9c58d`). Each of these surfaces used
+  to hand the caller a green result while nothing reached any wire and
+  nothing was ever delivered. Code that relied on that fake success now
+  observes typed errors:
+  - **The transport `RemoteConfig::new` installs refuses every operation** —
+    publish (keyed and unkeyed), subscribe, conversation send, conversation
+    request/reply, and resume — with the new `SdkError::NotConnected` naming
+    the operation, instead of encoding a frame, discarding it, and
+    synthesising `Accept`. Connect first: `connect_tcp` /
+    `connect_websocket` (or their `_with_auth` forms).
+  - **Typed `RemoteChannelHandle::subscribe` refuses instead of returning an
+    instantly-dry stream.** The returned stream yields exactly one
+    `Err(SdkError::Unwired)` and then ends, and no wire `Subscribe` is
+    performed on behalf of a stream that could never deliver (previously the
+    handle subscribed on the server and then returned a permanently empty
+    stream, so a receive loop exited at once while the server pumped
+    `Deliver` frames at nothing). For real delivery use
+    `SubscriptionStream::open` plus `SubscriptionStream::recv_timeout`, or
+    `WebSocketSubscriptionStream::open` on the WebSocket transport.
+  - **The default embedded backends refuse every publish and send** —
+    `DirectEmbeddedChannelBackend` and `DirectEmbeddedConversationBackend`
+    return `SdkError::Unwired` naming seam B1
+    (`docs/stack-review/liminal-ledger.md`), instead of discarding the
+    message and reporting `Accept` / `Ok`. Install a backend that genuinely
+    delivers with `EmbeddedConfig::with_channel_backend` /
+    `with_conversation_backend`.
+  - **Typed `EmbeddedChannelHandle::subscribe` refuses the same way** —
+    one `Err(SdkError::Unwired)` item, then end — instead of returning a
+    permanently empty stream that read as "subscribed, nothing published
+    yet". Embedded mode has no in-process delivery path behind this surface
+    (the embedded backend trait is publish-only), and the refusal says so
+    rather than pointing at an install that could not feed it.
+  - **Two new public `SdkError` variants**: `NotConnected { operation }` and
+    `Unwired { surface, seam, alternative }`. `SdkError` is not
+    `#[non_exhaustive]`, so exhaustive matches on it must add arms.
+
 ## 0.5.0 — 2026-07-28
 
 `liminal-rs` 0.5.0, `liminal-server` 0.5.0, `liminal-sdk` 0.5.0;
