@@ -119,10 +119,10 @@ fn global_or_install() -> Option<&'static MetricsRegistry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CONNECTIONS_ACTIVE, DELIVERIES_TOTAL, PUBLISHES_TOTAL, connection_spawned,
-        deliveries_recorded, init, publish_accepted,
+        CONNECTIONS_ACTIVE, DELIVERIES_TOTAL, PUBLISHES_TOTAL, ServerMetrics, connection_spawned,
+        deliveries_recorded, init, no_labels, publish_accepted,
     };
-    use liminal::metrics::{global_registry, render};
+    use liminal::metrics::{MetricsRegistry, global_registry, render};
 
     #[test]
     fn init_registers_the_three_server_families_on_the_global_registry()
@@ -139,6 +139,32 @@ mod tests {
         assert!(exposition.contains(CONNECTIONS_ACTIVE));
         assert!(exposition.contains(PUBLISHES_TOTAL));
         assert!(exposition.contains(DELIVERIES_TOTAL));
+
+        Ok(())
+    }
+
+    /// A failed family registration must not vanish: `register` returns None
+    /// (unchanged) AND warns with the underlying registration error.
+    #[test]
+    fn register_warns_when_a_family_registration_fails()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let registry = MetricsRegistry::new();
+        // Pre-register the gauge's name as a COUNTER so the gauge registration
+        // fails with an incompatible-kind error.
+        registry.register_counter(CONNECTIONS_ACTIVE, no_labels())?;
+
+        let log = crate::test_log::CapturedLog::default();
+        let metrics = log.capture(|| ServerMetrics::register(&registry));
+
+        assert!(
+            metrics.is_none(),
+            "a failed registration must still yield None"
+        );
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains(CONNECTIONS_ACTIVE),
+            "expected a warn carrying the registration error, got: {output}"
+        );
 
         Ok(())
     }
