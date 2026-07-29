@@ -1027,4 +1027,38 @@ mod tests {
         // No connections, so no names — but the accessor must not panic.
         assert!(membership.peer_names().is_empty());
     }
+
+    /// `peer_names` DROPS a peer whose atom this table cannot resolve, while
+    /// `Membership::name` renders the same atom as `<atom N>`. The two disagree,
+    /// and the disagreement is silent: every log line built from `peer_names`
+    /// under-reports the cluster, so a three-node cluster with one unresolvable
+    /// peer reads as a healthy two-node cluster rather than as a resolution
+    /// problem. Peers arrive as atoms interned by the distribution manager, so
+    /// an id this table has never seen is exactly the production shape.
+    #[test]
+    fn peer_names_render_an_unresolvable_atom_rather_than_dropping_it() {
+        let atoms = Arc::new(AtomTable::with_common_atoms());
+        let membership = Membership::new(empty_manager(&atoms), Arc::clone(&atoms));
+
+        // An atom minted in a DIFFERENT table: a valid id here, but one this
+        // table cannot resolve.
+        let foreign_table = AtomTable::with_common_atoms();
+        let unresolvable = foreign_table.intern("peer-known-only-to-another-table");
+        assert!(
+            atoms.resolve(unresolvable).is_none(),
+            "the fixture must produce an atom this table cannot resolve"
+        );
+        membership.lock_peers().insert(unresolvable);
+
+        assert_eq!(
+            membership.peers().len(),
+            1,
+            "the peer is tracked, whatever its name resolves to"
+        );
+        assert_eq!(
+            membership.peer_names(),
+            vec![membership.name(unresolvable)],
+            "peer_names must agree with Membership::name and keep the peer"
+        );
+    }
 }
