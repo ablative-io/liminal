@@ -86,3 +86,30 @@ bytes the battery executed. Everything not listed below is byte-verbatim r3
 
 4b8b38e1 · e903b4ad · c6d998bc · aa92a18c · 91ba17f9 · c3ee8385 · 622dedbf
 (build target pinned; amendments arrive as re-briefs, not lane-watching)
+
+## Qualification appended 2026-07-29 ~18:40Z (forward-only per Cally 2ec7055f item 6 — nothing above is amended; the original text stands as the record)
+
+Machine: Annabel's box | Operator: Mercury Toast (5b70322e-e7a9-451c-91ca-a3dfa7b05bda)
+
+Per Seth's retraction (fe983cc6) and Cally's correction + ruling (2b8665b2),
+both postdating this run's evidence:
+
+- **Perpetrator-side prevention on this run = pre-write ownership check with
+  a narrowed-not-closed TOCTOU window; only r4's write-once claim file closes
+  it.** The flip guard at as-run lines 120–133 reads the claim and refuses
+  BEFORE `write_claim`'s `mv` — it is not the post-flip read-back Seth
+  retracted as vacuous, and nothing in this evidence cites 4081cb3d for
+  perpetrator-side detection (4081cb3d is cited only for the absent-at-release
+  victim half, which survives via Horus's ordering discriminator). But between
+  the guard's read and the `mv` there is a residual window with no
+  perpetrator-side observation point.
+- **The residual window on this run is UNOBSERVED, not proven empty.** No
+  claimant is recorded in the chronology (own release 18:15:00Z, Phoebus's
+  claim 18:15:07Z) and the census was quiet at both boundaries. A claimant
+  arriving and departing strictly inside the bracket would be invisible to
+  this instrument.
+- **Venue rule postdating this run** (Cally 2b8665b2, 18:25:46Z; settled
+  2ec7055f): no two batteries run concurrently on Annabel's box; Athena
+  Zooper Dooper sequences all launches. This run ended 18:15:00Z and was not
+  concurrent with anything on the recorded chronology; future batteries at
+  this seat route through the sequencer.
