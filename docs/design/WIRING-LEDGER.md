@@ -874,6 +874,171 @@ future sweep will re-flag if nobody writes them down.
 - **Owner:** unassigned. Recorded under no-row-no-dormancy so the residue has a
   row rather than sitting nameless.
 
+### A-8 — Conversation lifecycle is UNOBSERVABLE; the fix is a public API break
+
+**All three conversation handles hand back a lifecycle stream that ends
+instantly and forever, against a trait doc promising observation** —
+`EmptyLifecycleStream` (`crates/liminal-sdk/src/embedded.rs:124`) has
+`poll_next` = `Ready(None)` immediately and permanently (`embedded.rs:131-134`),
+and it is the `LifecycleStream` for `EmbeddedConversationHandle`
+(`embedded.rs:476/496`), `RemoteConversationHandle`
+(`remote/handles.rs:354/373`), and `SdkConversationHandle`
+(`remote/handles.rs:514/537`), while `ChannelHandle`'s sibling trait doc at
+`conversation.rs:118-119` says "Observes lifecycle events for this
+conversation." Leg D trues the docs; THIS row carries the behaviour. Same
+silent-success class as the four voids Leg C closed; found as Leg C's STOP
+finding and split-ruled by the lane owner (doc half to Leg D, behaviour half
+here).
+
+Evidence, all verified at this branch's bytes:
+- (a) Refusing requires changing `Stream::Item` from `ConversationEvent` to a
+  fallible type — a public break with a design fork: change the Item type, add
+  a fallible constructor, or refuse at construction.
+- (b) `SdkSubscription::is_empty` (`embedded.rs:91`) reads misleadingly at call
+  sites for refusing streams ("no pending setup error" is its true meaning).
+- (c) `SdkSubscription::empty()` has no in-crate caller beyond the `Default`
+  impl since Leg C.
+- (d) `EmptyLifecycleStream` is public but NOT re-exported from `lib.rs`
+  (the `embedded` re-export at `lib.rs:21` omits it), yet appears in the
+  public `LifecycleStream` associated types at `remote/handles.rs:354/514`.
+- (e) The conformance case that appears to attest lifecycle is hollow:
+  `tests/conformance.rs:116` dispatches `conversation.open_message_close` to
+  `observe_conversation_lifecycle()` (`:218`), which constructs
+  `ConversationEvent` values directly — it never builds a handle and never
+  calls `lifecycle()`. Making it real requires the behaviour.
+- Discriminator (Osiris's, recorded so nobody re-derives it): CONNECTION
+  lifecycle is real and working (`src/connection/lifecycle.rs`); only
+  CONVERSATION lifecycle is absent. The shared word makes the SDK look more
+  complete than it is.
+- Census trap: a bare grep for `ConversationEvent` returns 218 hits across
+  THREE distinct families — the SDK enum (`conversation.rs:50`), the core
+  durability enum (`crates/liminal/src/durability/conversation.rs:15`), and
+  the protocol wire/replay family (`ConversationEventBody`,
+  `crates/liminal-protocol/src/lifecycle/conversation.rs:271`) — so raw hit
+  counts overstate construction.
+- Sequencing consequence of the Leg C `#[non_exhaustive]` finding: `SdkError`
+  is not `#[non_exhaustive]`, and the next cut ALREADY breaks exhaustive
+  matches (two new variants, recorded in `## Unreleased`). The next cut is
+  therefore the free window to add `#[non_exhaustive]` itself — adding it
+  while matches are already breaking costs downstream nothing extra; adding it
+  in a later quiet release breaks them a second time for no benefit.
+
+- **Owner:** liminal lane owner (design ruling required before any build).
+- **Trigger:** the design fork in (a) is decided; not foldable into an
+  honesty-not-features leg.
+
+### A-9 — The Rust typed-subscribe gap had NO ledger row (W6 does not cover it)
+
+**Until this row, nothing in this register recorded the Rust typed-subscribe
+absence — and W6, the row a reader would reach for, is the BROWSER
+conversation surface, a different absence.** This row exists so the next
+reader is not sent to W6 by mistake; the Leg C dispatch brief made exactly
+that miscite and this row is that error's repair, recorded as the lane
+owner's.
+
+Where it now fails loudly (Leg C): `unwired_typed_subscribe()` at
+`crates/liminal-sdk/src/remote/handles.rs:37-47` — refusal text states
+plainly "no ledger row records this gap; W6 is the browser conversation
+surface, not this" — returned by `RemoteChannelHandle::subscribe`
+(`remote/handles.rs:204`) and both arms of `SdkChannelHandle::subscribe`
+(`remote/handles.rs:460`); the embedded twin refuses at
+`EmbeddedChannelHandle::subscribe` with its own no-row statement
+(`embedded.rs`, Leg C ruling iv). Refusal messages may now cite THIS row.
+
+- **What building it means:** typed subscribe delivery over the wire — the
+  working lower-level surface (`SubscriptionStream::open`/`recv_timeout`,
+  `WebSocketSubscriptionStream::open`) is the foundation; the typed surface
+  wraps it or stays a refusal.
+- **Owner:** unassigned. Depends on the same design fork as A-10's condition.
+
+### A-10 — Second wire encoder: RETAINED, with a named condition
+
+**Leg C's refusal of void (a) orphaned an entire second frame encoder whose
+sole production consumer was the never-connected transport — and the encoder
+is deliberately retained, not deleted.** The lane owner's design call, made
+not deferred: deleting an encoder is structural capability removal,
+categorically outside a leg guarded honesty-not-features.
+
+Evidence: the dead-code delta on the Leg C branch is **16 annotations**
+(15 item-level in `crates/liminal-sdk/src/remote/protocol.rs`, 1 module-scope
+in `remote/protocol/constants.rs`), branch 27 minus main 11, verified
+independently at both the operator's and the dispatcher's bytes after an
+initial count of 13 was wrong. The annotations are `#[allow(dead_code,
+reason = ...)]` rather than `#[expect]`, with the deviation justified in-code:
+the encoder IS exercised under `cfg(test)`, so an expectation would be
+unfulfilled in test builds while required in lib builds. Each carries its
+`reason =`.
+
+- **The named condition:** the encoder's fate depends on whether
+  `ProtocolRemoteTransport` ever gets a real socket — an open lane, not a
+  Leg C question. If it does, the retained wire half (see
+  `RemoteTransport::subscribe` and the `WireFrame` family) is its foundation;
+  if it is ruled never-to-connect, deletion becomes an honest cleanup with
+  this row as its authorization trail.
+- **Owner:** liminal lane owner.
+
+### A-11 — `liminal-ts-wasm` at 0.3.0 is POLICY, not oversight
+
+**The wasm bridge crate versions independently of the lockstep trio, on
+purpose, and until this row that policy was written nowhere** — which is why
+Leg F's executor was right to refuse to decide it.
+
+Evidence at the bytes: `sdks/liminal-ts/wasm-src/Cargo.toml:3-4` — `version =
+"0.3.0"`, `publish = false` — and it is a REAL workspace member (root
+`Cargo.toml:7`), so it compiles under `cargo check --workspace` but never
+reaches the registry. Its version is not a user-facing fact and does not move
+with the trio.
+
+Census correction recorded with it: the tree carries **eight version-bearing
+files, not six** — the four crate manifests (`crates/liminal`,
+`liminal-sdk`, `liminal-server`, `liminal-protocol`), the wasm bridge manifest
+above, `sdks/liminal-ts/package.json` (0.3.3), `sdks/liminal-gleam/gleam.toml`
+(0.1.0), and `Cargo.lock` carrying the workspace trio's versions. Only the
+trio moves in lockstep; protocol moves on its own schedule; the TS package,
+the Gleam package, and the wasm bridge each carry their own number.
+
+- **Owner:** release process (this row IS the disposition — recorded policy).
+
+### A-12 — Durability reads: correctly written here, mislabelled upstream
+
+**A reader auditing liminal's durability read path will find nothing wrong and
+must not conclude the system tells the whole truth — an upstream defect makes
+an unreadable node surface as an error whose type and text say the data is
+ABSENT.** A loud failure wearing the wrong label.
+
+Our side, verified at these bytes (`crates/liminal/src/durability/store.rs:147-155`):
+errors propagate via `?` as `DurabilityError` (both `map_err`s), `Ok(None)` is
+reached only on genuine reported absence, and a value shorter than its
+timestamp width returns `Err(CorruptEvent)` — never a quiet `None`. There is
+no collapse in liminal.
+
+The exposure: haematite's tree layer maps `NodeGet{hash, source}` →
+`TreeError::MissingNode{hash}` — the CAUSE is discarded but the error-ness is
+kept, and every intermediate layer propagates it as `Err`. So an unreadable
+node reaches an operator as an error reading "missing node." Operator cost,
+the reason this earns a row: **wrong remedy** (hunting data corruption while a
+disk is failing) and **wrong retry semantics** (`MissingNode` is permanent; an
+I/O fault is often transient — a correct consumer retries the one it should
+escalate and escalates the one it should retry). The cause is unrecoverable at
+our layer because it is dropped one frame after being deliberately captured —
+a liminal reader cannot diagnose this from liminal source.
+
+Correction recorded in the row, forward-only, as the lane owner's: the first
+framing of this finding claimed SILENT DATA LOSS (unreadable node returned as
+`Ok(None)`) and was refuted at the upstream seat's bytes within minutes —
+every layer between the tree and our call keeps the `Err`. The corrected,
+smaller finding above is what stands. A row that quietly shipped the corrected
+version would hide that the estate's cross-lane check worked.
+
+- **Disposition:** pin is `haematite = "0.7.0"` (root `Cargo.toml:42`).
+  Upstream fix shape is ruled — `TreeError` gains a variant under
+  `#[non_exhaustive]` — so OUR matches should expect a new variant. When the
+  fixed version publishes, re-pin as a CORRECTNESS re-pin, not a routine bump.
+  A consumer-side red (a durable read whose underlying node is unreadable must
+  surface an error distinguishable from "node absent") is the upstream seat's
+  to build, dispatched separately after the tag.
+- **Owner:** liminal lane owner (re-pin); upstream seat (fix + red).
+
 ### PUSH-HANDSHAKE-DEADLINE — the ruling that scopes SDK-010 (2026-07-28)
 
 **Ruled by Waffles the Terrible, coordinator seat, 2026-07-28**, approved as
@@ -986,3 +1151,13 @@ close**:
 - **W7** — still open and unchanged in substance; line citations refreshed. The
   HARD shared W3/W7 trigger on unbounded outbox history still binds.
 - **A-7** — new residue row (three test-helper reap loops), unassigned.
+- **A-8** — conversation lifecycle unobservable; public-API design fork, owner
+  liminal lane.
+- **A-9** — Rust typed-subscribe gap now has its row (W6 never covered it);
+  refusals may cite it.
+- **A-10** — second wire encoder retained under 16 documented allows; fate
+  rides the ProtocolRemoteTransport socket question.
+- **A-11** — `liminal-ts-wasm` versions independently by policy; eight
+  version-bearing files, not six.
+- **A-12** — durability reads clean here, mislabelled upstream (haematite
+  MissingNode masks unreadable); correctness re-pin owed on the fix.
