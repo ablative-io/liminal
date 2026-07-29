@@ -3190,3 +3190,88 @@ fn closed_connection_releases_its_admission_slot() -> Result<(), Box<dyn std::er
     supervisor.shutdown();
     Ok(())
 }
+
+/// The reclaim reactor is the SOLE source of crash reclamation for a connection
+/// process that dies without running a final slice (the shutdown-drain scan that
+/// once backstopped it was retired by W4 leg 3). Its subscription ending is
+/// therefore the end of that capability, and it must not slip away unsaid — the
+/// sibling "subscription unavailable" branch already `error!`s at startup, so a
+/// mid-flight loss cannot be the one silent case.
+#[test]
+fn reclaim_reactor_names_the_reason_it_stops() -> Result<(), Box<dyn std::error::Error>> {
+    let scheduler = beamr::scheduler::Scheduler::with_services(
+        beamr::scheduler::SchedulerConfig {
+            thread_count: Some(1),
+            ..beamr::scheduler::SchedulerConfig::default()
+        },
+        beamr::scheduler::SchedulerServices::from_config().owned_readiness(),
+        Arc::new(beamr::module::ModuleRegistry::new()),
+    )
+    .map_err(|message| format!("scheduler startup failed: {message}"))?;
+    let subscription = scheduler
+        .subscribe_exit_events()
+        .ok_or("the scheduler must offer an exit-event subscription")?;
+    // Drop the scheduler and its event publisher: the reactor's next receive
+    // observes the disconnect, which is exactly how it ends in production.
+    drop(scheduler);
+
+    let log = crate::test_log::CapturedLog::default();
+    log.capture(|| {
+        super::run_reclaim_reactor(
+            &subscription,
+            &std::sync::Weak::new(),
+            &std::sync::Weak::new(),
+        );
+    });
+
+    let output = log.contents();
+    assert!(
+        output.contains("WARN") && output.contains("reclamation reactor"),
+        "the reactor must name the reason it stopped, got: {output}"
+    );
+    Ok(())
+}
+
+/// A control that could not be QUEUED is not evidence that the process is dead.
+/// Both close paths reported "process is not live" for every enqueue failure,
+/// so a poisoned control queue — a genuine server fault — was rendered as a
+/// routine dead-process skip and its error thrown away.
+// The deliberate panic-while-holding-the-guard IS the poisoning mechanism under
+// test; the unwrap can only fail if the fresh lock is somehow already poisoned.
+#[allow(clippy::unwrap_used, clippy::panic)]
+#[test]
+fn a_refused_control_queue_is_not_reported_as_a_dead_process()
+-> Result<(), Box<dyn std::error::Error>> {
+    let supervisor = ConnectionSupervisor::new()?;
+    let (_client, server) = tcp_pair()?;
+    let handle = supervisor.spawn_connection(server)?;
+    let pid = handle.pid();
+
+    let poisoner = Arc::clone(&supervisor.inner);
+    let _ = thread::spawn(move || {
+        let _guard = poisoner.runtime.controls.lock().unwrap();
+        panic!("deliberately poison the control queue");
+    })
+    .join();
+    assert!(
+        supervisor.inner.runtime.controls.is_poisoned(),
+        "the control queue is poisoned"
+    );
+
+    let log = crate::test_log::CapturedLog::default();
+    log.capture(|| supervisor.force_close_active_connections());
+
+    let output = log.contents();
+    assert!(
+        output.contains("control queue"),
+        "the real cause — the refused control queue — must be named, got: {output}"
+    );
+    assert!(
+        !output.contains("process is not live"),
+        "a live process whose control queue refused the entry must not be \
+         reported as dead, got: {output}"
+    );
+    let _ = pid;
+    supervisor.shutdown();
+    Ok(())
+}
