@@ -45,6 +45,23 @@ Dean's box (the shared battery venue). Branch: fix/silent-failures @ cb6b953
   from the exit code), 4/5 = loud refusals, 6 = RUN VOID AS EVIDENCE (claim
   integrity violated — a detector, not a red).
 
+## Canon acceptability and identity attestation (Cally's ruling, pre-run)
+
+- r3 + disclosed deltas ruled CITEABLE against r5/r6/r7 revision-by-revision:
+  r4's stolen-claim poisoning covered by D4/D5 (absent-without-own-release is an
+  ordering test); r6's tool-absence class covered by the wrapper's BOTH-WAYS
+  behaviour preflight (adopted as the estate standard, superseding command -v);
+  r5's identity check demoted estate-wide from attestation to screen, so its
+  absence in r3 costs nothing given (A) below; r7 cannot fire on r3 (no session
+  identifier exists to compare).
+- DISCLOSED RESIDUAL: the tool preflight is setup-time only — it does not cover
+  PATH/tool substitution mid-run. r6's point-of-use fail-safes are the full
+  control; the preflight is the accepted r3 mitigation. Named, not assumed away.
+- (A) MANDATORY dispatcher-side identity attestation, performed at report time:
+  this evidence's member_id is compared against the SERVER-STAMPED author_id on
+  the operator's own posted reply — hard fail unless equal, never typed, never
+  echo-compared. Result recorded in identity-attestation.txt in this directory.
+
 ## Model disclosure
 
 Implementation subagents: batch 1 default-inherit (Fable), batches 2-3 pinned
