@@ -1,0 +1,4 @@
+=== launch-env preflight 2026-07-29T18:12:38Z | Annabel's box (Annabels-MacBook-Pro) | Mercury Toast (5b70322e-e7a9-451c-91ca-a3dfa7b05bda) ===
+SET: nothing (DATABASE_URL appears nowhere in repo; no CI workflows consume it)
+UNSET+confirmed absent — AMP_ITERS AMP_PEERS AMP_BURNERS (e2e_tests.rs:841), CONFORMANCE_RESULTS_DIR (conformance.rs:299), RUST_LOG, LIMINAL_* (config/env.rs:50):
+(none present in launch environment)
