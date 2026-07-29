@@ -9,7 +9,8 @@
 use std::sync::OnceLock;
 
 use liminal::metrics::{
-    CounterHandle, GaugeHandle, MetricsRegistry, global_registry, install_global_registry,
+    CounterHandle, GaugeHandle, MetricRegistrationError, MetricsRegistry, global_registry,
+    install_global_registry,
 };
 
 const CONNECTIONS_ACTIVE: &str = "liminal_connections_active";
@@ -36,6 +37,9 @@ pub fn init() {
         return;
     }
     let Some(registry) = global_or_install() else {
+        tracing::warn!(
+            "global metrics registry could not be installed or read back; server metrics stay disabled"
+        );
         return;
     };
     if let Some(metrics) = ServerMetrics::register(registry) {
@@ -81,19 +85,25 @@ pub fn deliveries_recorded(count: u64) {
 
 impl ServerMetrics {
     fn register(registry: &MetricsRegistry) -> Option<Self> {
-        let connections_active = registry
-            .register_gauge(CONNECTIONS_ACTIVE, no_labels())
-            .ok()?;
-        let publishes_total = registry
-            .register_counter(PUBLISHES_TOTAL, no_labels())
-            .ok()?;
-        let deliveries_total = registry
-            .register_counter(DELIVERIES_TOTAL, no_labels())
-            .ok()?;
-        Some(Self {
-            connections_active,
-            publishes_total,
-            deliveries_total,
+        match Self::try_register(registry) {
+            Ok(metrics) => Some(metrics),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    "server metrics family registration failed; metrics recording stays disabled"
+                );
+                None
+            }
+        }
+    }
+
+    /// The fallible half of [`Self::register`], split out so the error is
+    /// available for the warn instead of being discarded by `.ok()?`.
+    fn try_register(registry: &MetricsRegistry) -> Result<Self, MetricRegistrationError> {
+        Ok(Self {
+            connections_active: registry.register_gauge(CONNECTIONS_ACTIVE, no_labels())?,
+            publishes_total: registry.register_counter(PUBLISHES_TOTAL, no_labels())?,
+            deliveries_total: registry.register_counter(DELIVERIES_TOTAL, no_labels())?,
         })
     }
 }
