@@ -111,9 +111,27 @@ impl ObserverPublicationTarget {
             was_empty
         };
         if should_wake {
-            self.waker.fire();
+            warn_if_undelivered(self.waker.fire(), "observer progress");
         }
         Ok(true)
+    }
+}
+
+/// Reports a READY marker the connection scheduler did not accept.
+///
+/// The caller returns `Ok(true)` — the publication IS queued in the inbox — so
+/// an undelivered wake leaves that work with nothing scheduled to drain it.
+/// `fire()` returning `false` normally means the connection is already tearing
+/// down, where the lost wake is correct (R5); the point of saying so is that
+/// the benign case and a genuinely stranded publication are otherwise
+/// indistinguishable from outside.
+fn warn_if_undelivered(delivered: bool, publication_kind: &'static str) {
+    if !delivered {
+        tracing::warn!(
+            publication_kind,
+            "participant ready wake was not delivered; the publication is queued with \
+             no scheduled drain (usual cause: the connection is already tearing down)"
+        );
     }
 }
 
@@ -383,7 +401,7 @@ impl ParticipantPublicationRegistry {
         if should_wake {
             #[cfg(test)]
             self.ready_fires.fetch_add(1, Ordering::SeqCst);
-            waker.fire();
+            warn_if_undelivered(waker.fire(), "conversation ready");
         }
         Ok(true)
     }
