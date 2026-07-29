@@ -23,6 +23,9 @@ thiserror = { workspace = true, features = ["std"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time"] }
 toml = { workspace = true }
 tracing = { workspace = true }
+# `env-filter` is what makes RUST_LOG mean anything; the rest of the default
+# feature set (fmt/ansi/std) supplies the stderr writer the binary installs.
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tungstenite = { workspace = true }
 
 [dev-dependencies]
