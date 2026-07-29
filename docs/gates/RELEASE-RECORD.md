@@ -1,4 +1,4 @@
-# The release record — four documents, four failure directions
+# The release record — five documents, five failure directions
 
 **Owner: Hermes Crumpet (liminal). Assigned by Cally Ray at topic entry
 `c220e131`, 2026-07-29.**
@@ -15,7 +15,7 @@ direction. This file is the pattern; liminal is the worked example.
 > read "the reconciliation is clean" as "the pin is safe" — it means someone
 > looked once, by hand, on one day, and wrote down what they saw.
 
-## 1. Three documents claim to describe a release, and they disagree
+## 1. Five documents claim to describe a release, and they disagree
 
 | Document | Fails how | Measured instance |
 |---|---|---|
@@ -24,10 +24,27 @@ direction. This file is the pattern; liminal is the worked example.
 | **The tagged manifest** | **is a different document entirely** — `cargo publish` rewrites it | liminal-server 0.5.1: **30 `workspace = true` lines in the repo → 0 published**; `path` stripped from **all 24** published dependency tables |
 | **The release commit subject** | **asserts a publish that never happened** — in prose, in the history, where nothing can contradict it | beamr `0e7c060`, *"release: beamr 0.12.1 — FIFO owner pop ships to crates.io consumers"*. **It did not ship.** |
 | **The published artifact** | — | the only one a consumer resolves against |
+| **★ The YANK FLAG** | **is MUTABLE, lives ONLY at the registry, and has NO GIT RECORD** | haematite `0.4.1`/`0.5.0` request `^0.13.0` and resolve correctly **only because `0.13.1` and `0.13.2` are yanked** |
 
 **⇒ RULED (Cally, `c220e131`): for "what does published version X require",
-read the REGISTRY'S OWN DEPENDENCY METADATA. And state which of the three
+read the REGISTRY'S OWN DEPENDENCY METADATA. And state which of the five
 documents you read** — the search-scope law applied to release identity.
+
+**★ FOUR OF THE FIVE ARE APPROXIMATELY IMMUTABLE. THE ONE THAT DECIDES WHAT
+ACTUALLY RESOLVES CAN CHANGE WITHOUT A COMMIT** (Cally, `4c399944`). A yank is
+registry-side, mutable, and leaves **no git record at all** — so a manifest
+whose resolution is correct today can resolve differently tomorrow with nothing
+in any repo having changed. haematite `0.4.1`/`0.5.0` are the live case: they
+request `^0.13.0`, which admits `0.13.0`, `0.13.1` and `0.13.2`, and they land
+on the fixed `0.13.0` **solely because the other two are withdrawn.** Unyank
+either, or hold a lock predating the yank, and the same manifest resolves onto
+different code.
+
+**⇒ A RESOLUTION CLAIM CARRIES A TIMESTAMP OR IT IS NOT A CLAIM.** *"We pin X"*
+was already only a statement about a manifest. It is also a statement about a
+Tuesday. **Every table in this file is therefore dated, including liminal's
+`0 yanked` — that is a reading taken on 2026-07-30, not a property of the
+crates.**
 
 **The tagged-manifest reason is the worse one, because it survives every fix
 to the tagging problem.** Even a perfectly tagged repo does not hold its own
@@ -110,6 +127,12 @@ the bound must be quoted per crate.**
 
 **⇒ A Direction-3 sequence hole is CONFIRMED ONLY AT THE LIVE REGISTRY.**
 Neither local source qualifies, for the two different reasons above.
+
+**⇒ AND THE GENERAL FORM, which is why "lower bound, honestly flagged" was not
+sufficient honesty: A PARTIAL VIEW DOES NOT MERELY UNDERCOUNT — ITS ARTIFACTS
+IMITATE FINDINGS, AND THEY IMITATE THE FINDING YOU MOST RECENTLY LEARNED TO
+LOOK FOR** (Cally's phrasing of my own case, and better than mine). My cache
+gap appeared within the hour of the sequence-hole mechanism being published.
 
 **And the reason this matters more than an ordinary caveat (Athena's, and it
 is the sharpest thing in this file):** on frame, the `.crate` cache fabricated
@@ -232,6 +255,24 @@ a tag.** The day beamr `0.17.0` publishes and a consumer patches beamr to a
 registry `0.16.x` beside it: **two copies of beamr in one build, the tests
 green against the patched one.** That prediction is only as good as the
 requirement it rests on, which is why the requirement was read at the artifact.
+
+## 6. Using this file elsewhere
+
+**A CONTROL IS ONLY A CONTROL IN THE VENUE IT WAS CHOSEN FOR, and relocation
+silently voids it** (Artemis Peach, after a beamr-derived needle and both its
+control arms returned `0` and `0` when pasted into haematite — two zero arms
+being indistinguishable from a broken instrument, by this estate's own rule).
+
+So, for anyone copying §2: **the two registry controls are venue-independent** —
+`serde` and a nonsense name are global to crates.io and travel intact.
+**Everything else here does not.** The tag pattern is liminal's, the denominator
+is liminal's workspace, and the mtimes are this box's. **Re-derive them; do not
+paste them.**
+
+**Per-repo tag↔publish reconciliation across the estate is owned by Artemis
+Peach** (Cally, `4c399944`) — beamr is the repo where all five documents are
+known to lie. This file is the pattern; her sweep is the execution. **Measure
+and report; tag nothing.**
 
 Related: [`BASELINE-CENSUS.md`](BASELINE-CENSUS.md) and its runner
 `scripts/baseline-compare.py`, which is the same move one layer down — a pin
