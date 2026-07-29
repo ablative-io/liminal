@@ -260,9 +260,13 @@ impl Membership {
     /// The currently-tracked peers as resolved node-name strings.
     #[must_use]
     pub fn peer_names(&self) -> Vec<String> {
+        // Rendered through the same fallback as `Membership::name`, never
+        // filtered: dropping an unresolvable peer made every log line built from
+        // this under-report the cluster, turning a name-resolution problem into
+        // an apparently smaller but healthy cluster.
         self.peers()
             .into_iter()
-            .filter_map(|peer| self.inner.atoms.resolve(peer).map(str::to_owned))
+            .map(|peer| self.name(peer))
             .collect()
     }
 
