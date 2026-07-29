@@ -92,7 +92,17 @@ pub fn build_channel_cluster(
 /// A non-zero node-incarnation value for beamr distribution. Derived from the
 /// process start time so two incarnations of the same node name on one host get
 /// distinct creations; never zero (beamr reserves 0 for "unknown creation").
+///
+/// The distinct-incarnations property holds only while the clock reads after the
+/// epoch. A clock fault — a host set before 1970 — folds every incarnation to the
+/// same constant value, and beamr then cannot tell a restarted node from its own
+/// predecessor. That case is not detected here and not reported; the non-zero
+/// guarantee still holds, which is what keeps distribution functioning at all.
 fn node_creation() -> u32 {
+    // A pre-epoch clock yields `Err` and is folded to 0 (hence to the constant 1
+    // below) rather than refused: distribution needs SOME non-zero creation to
+    // start, and there is no better value to invent. This is the exact case in
+    // which two incarnations become indistinguishable.
     let since_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |duration| duration.as_secs());

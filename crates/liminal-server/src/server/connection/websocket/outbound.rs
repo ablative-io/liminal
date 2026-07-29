@@ -189,6 +189,14 @@ impl WebSocketOutbound {
                 // the front so ordering is preserved; structurally this can
                 // only occur if transport-control bytes are wedged, which the
                 // flush-first loop retries next slice.
+                //
+                // A non-Binary message falls through without requeue and without
+                // a word. It is unreachable by construction — this queue only
+                // ever holds `Binary`, and the returned message is the one this
+                // type handed to tungstenite. If it were ever reached, the
+                // `WouldBlockWithResidue` returned below would be a false claim:
+                // the message would have been dropped rather than held back, and
+                // the caller would keep waiting for a frame nothing still owns.
                 if let Message::Binary(bytes) = *message {
                     self.in_flight = None;
                     self.queue.push_front(bytes.to_vec());

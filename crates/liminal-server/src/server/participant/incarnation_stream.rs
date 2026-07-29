@@ -727,6 +727,14 @@ impl IncarnationStream {
             maximum_references: self.maximum_references,
             header,
             next_sequence: replayed.next_sequence,
+            // A replay that carried no generation record falls back to
+            // generation 0, and the two cases that produce it are
+            // indistinguishable here: a legitimate cold start, which has none
+            // yet, and a durable stream truncated before its generation record,
+            // whose real generation is unknown and higher. Nothing at this point
+            // can tell them apart — the evidence that would separate them is the
+            // very record that is missing — so the truncated stream restarts
+            // numbering from 0 without a word.
             generation: replayed
                 .generation
                 .unwrap_or_else(|| AllocationGeneration::new(0, header.server_incarnation)),

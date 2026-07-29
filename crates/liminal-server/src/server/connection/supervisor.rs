@@ -1122,6 +1122,11 @@ impl SupervisorInner {
             .map_err(|error| ServerError::ListenerAccept {
                 message: format!("failed to configure connection stream: {error}"),
             })?;
+        // A failed `peer_addr` is folded to `None` rather than refusing the
+        // accept: an unidentifiable peer is still a serviceable connection. The
+        // cost is paid in triage, not in service — every later log line for this
+        // connection reports `peer_addr=None`, so nothing that happens on it can
+        // be tied back to a remote endpoint.
         let peer_addr = stream.peer_addr().ok();
         // The host-held duplicate keeps the fd alive until the single record-removal
         // path has synchronously deregistered readiness. External process death can

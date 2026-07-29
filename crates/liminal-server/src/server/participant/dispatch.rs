@@ -309,6 +309,12 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     /// Startup calls this after all retained Opens complete and before publishing
     /// the incarnation authority, scheduler, listener, or new admission.
     ///
+    /// The default performs NO repair and reports success, so startup proceeds as
+    /// if there were nothing left over from the prior incarnation. That is correct
+    /// only for an implementor that holds no durable bindings. Any implementor with
+    /// real restart semantics MUST override this — inheriting the default leaves
+    /// stale bindings in place and says nothing about them.
+    ///
     /// # Errors
     ///
     /// Returns a semantic failure while startup still owns all publication seams.
@@ -323,6 +329,12 @@ pub trait ParticipantSemanticHandler: core::fmt::Debug + Send + Sync {
     /// Reports whether any listed conversation currently contains a Bound slot
     /// owned by this exact connection. Terminal decode funnels use this query to
     /// distinguish bound-only `ProtocolError` from pre-auth/detached/internal paths.
+    ///
+    /// The default answers "unbound" unconditionally, without inspecting anything,
+    /// so every caller is told this connection owns no Bound slot. That is correct
+    /// only for an implementor that can never hold one. Any implementor with real
+    /// binding semantics MUST override this — inheriting the default silently
+    /// routes genuinely bound connections down the unbound funnel.
     ///
     /// # Errors
     ///

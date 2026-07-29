@@ -320,6 +320,13 @@ impl ConnectionProcess {
                 // from earlier slices to a half-closed peer) before we let the stream
                 // drop, mirroring the ForceClose drain. The buffered-writer refactor
                 // removed this on the EOF path; without it, queued responses are lost.
+                //
+                // The drain error is discarded, and what is lost with it is the
+                // residue this call could not write — the peer never sees those
+                // frames. That is accepted because the peer has already closed
+                // its write half, so the residue had nowhere to go regardless,
+                // and this path is past the close decision: retrying or sleeping
+                // to shrink the window is forbidden here.
                 let _ = self.drain_outbound();
                 if let Err(error) =
                     self.complete_connection_fate(ConnectionFateClass::ConnectionLost)
@@ -455,6 +462,13 @@ impl ConnectionProcess {
     }
 
     fn finish_fate_close(&mut self, pid: u64, class: ConnectionFateClass) -> SliceStep {
+        // One unbudgeted, nonblocking drain; the outcome is deliberately not
+        // consulted. What a `WouldBlock` loses is the unwritten tail of the
+        // terminal response — the client may read a truncated final frame. The
+        // close decision is already taken by the time we are here, so there is
+        // nothing to reconsider, and this path may not sleep, poll or retry to
+        // widen the attempt. The loss window closes with the peer's own
+        // half-close.
         let _ = self.drain_outbound_for_close();
         if let Err(error) = self.complete_connection_fate(class) {
             return self.fail_fate(pid, &error);
@@ -468,7 +482,10 @@ impl ConnectionProcess {
         // Multiple responses may already precede the terminal frame. Make one
         // unbudgeted, nonblocking drain so the ordinary 8 KiB slice budget cannot
         // deterministically truncate it. `WouldBlock` remains best-effort: never
-        // sleep, poll, or retry.
+        // sleep, poll, or retry. What that forfeits is the residue after the
+        // socket buffer fills — the client may miss the tail of its own close
+        // response. Accepted: the close is already decided, and the loss window
+        // is the peer's half-close, not something this process can outwait.
         let _ = self.drain_outbound_for_close();
         self.release_conversations();
         self.runtime.finish(pid);
@@ -719,6 +736,11 @@ impl ConnectionProcess {
                 self.notify_shutdown(pid, false);
                 // Flush the enqueued `Disconnect` (and any residue) before the
                 // stream is dropped; best-effort, since we are stopping regardless.
+                // A failure here loses the `Disconnect` itself, and the client
+                // learns of the shutdown from the dropped socket instead of from
+                // the frame. Accepted: the force-close decision is taken, and a
+                // retry or sleep on this path would hold the whole shutdown drain
+                // hostage to one unresponsive peer.
                 let _ = self.drain_outbound();
                 if let Err(error) =
                     self.complete_connection_fate(ConnectionFateClass::ServerShutdown)
@@ -1010,6 +1032,13 @@ fn read_available(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<ReadSt
     match stream.read(&mut chunk) {
         Ok(0) => Ok(ReadStatus::Closed),
         Ok(bytes_read) => {
+            // `unwrap_or(&[])` masks exactly one case: a `Read` implementation
+            // reporting more bytes read than the buffer it was given can hold.
+            // That is a broken `Read`, and with a correct one the slice is
+            // structurally always in range. The masked outcome — silently
+            // appending nothing instead of panicking on the out-of-range slice —
+            // is preferred to taking a connection process down over a defect
+            // that cannot originate in this crate.
             buffer.extend_from_slice(chunk.get(..bytes_read).unwrap_or(&[]));
             Ok(ReadStatus::Read)
         }

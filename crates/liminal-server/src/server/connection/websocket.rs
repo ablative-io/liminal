@@ -344,6 +344,12 @@ fn read_upgrade_request(
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         };
+        // `unwrap_or(&[])` masks exactly one case: a `Read` implementation
+        // reporting a count larger than the buffer it was handed. With a correct
+        // `Read` the slice is structurally always in range. Appending nothing is
+        // preferred to panicking mid-upgrade over a defect that cannot originate
+        // here; the request head then falls short and the upgrade fails on its
+        // own terms.
         head.extend_from_slice(chunk.get(..read).unwrap_or(&[]));
         if head.len() > MAX_UPGRADE_REQUEST_BYTES {
             return Ok(Err(UpgradeRefusal::OversizedRequestHead {

@@ -616,6 +616,13 @@ fn unsubscribe_response(
         // never flushes a stale delivery.
         state.delivery_seqs.remove(&subscription_id);
         state.held_deliveries.remove(&subscription_id);
+        // The wire stays silent about this failure on purpose. The server warns,
+        // so the fault is not lost, but the client-visible contract for
+        // `Unsubscribe` is removal from THIS connection's state — which the
+        // `remove` calls above have already completed unconditionally. The
+        // adapter-side teardown is the server's own bookkeeping; reporting its
+        // failure would tell the client its subscription is still live when, as
+        // far as this connection is concerned, it is not.
         if let Err(error) = services.unsubscribe(subscription) {
             tracing::warn!(subscription_id, %error, "liminal unsubscribe failed");
         }

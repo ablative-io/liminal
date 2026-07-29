@@ -139,6 +139,12 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
     let participant_fatal = supervisor.participant_service_fatal();
     drop(websocket_listener);
     drop(signal_registration);
+    // Error PRECEDENCE, chosen deliberately: the health endpoint is torn down
+    // before the drain result is raised, so a health-shutdown failure takes the
+    // exit code and the drain/flush error never reaches the caller. The teardown
+    // has to happen either way, and the masked error is not lost — every drain
+    // and flush failure is already `error!`-logged where it occurs, so the exit
+    // code is the only thing that goes missing.
     health_server.shutdown()?;
     shutdown_result?;
     participant_fatal?.map_or(Ok(()), |fatal| {

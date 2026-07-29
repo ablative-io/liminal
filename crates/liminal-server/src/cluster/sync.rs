@@ -170,8 +170,15 @@ impl ClusterSync {
     /// Writes a pre-encoded distribution frame to `node`'s connection, if live.
     fn write_frame(&self, node: Atom, frame: &[u8]) {
         let Some(connection) = self.inner.connections.get_connection(node) else {
-            // No live link: the peer departed between snapshot and send, or its
-            // membership is stale. Nothing to do — R6 cleanup removes it shortly.
+            // No live link, so the frame is dropped here and nothing above is
+            // told. Both causes are accepted. A peer that DEPARTED between the
+            // membership snapshot and this send is owed nothing — the frame was
+            // addressed to a node that is gone. A STALE membership entry names a
+            // node that never had a link, and that delivery is genuinely lost:
+            // no retry is possible against an entry that resolves to no
+            // connection. The loss window is bounded by R6 cleanup, which drops
+            // the stale entry shortly, after which the node stops being selected
+            // at all.
             return;
         };
         write_raw_blocking(&connection, frame);

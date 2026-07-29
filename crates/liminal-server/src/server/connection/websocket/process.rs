@@ -549,6 +549,11 @@ impl WebSocketConnectionProcess {
     }
 
     fn finish_fate_close(&mut self, pid: u64, class: ConnectionFateClass) -> SliceStep {
+        // Unbudgeted best-effort drain; the outcome is deliberately dropped.
+        // What is lost is the unsent tail of the terminal response, which the
+        // client will not receive before the close frame. The close decision is
+        // already taken here, and retrying or sleeping is forbidden on this
+        // path; the loss window is the peer's own half-close.
         let _ = self.drain_outbound(None);
         if let Err(error) = self.complete_connection_fate(class) {
             return self.fail_fate(pid, &error);
@@ -560,6 +565,13 @@ impl WebSocketConnectionProcess {
     /// best-effort drain (so terminal responses are not truncated by the slice
     /// budget), a best-effort transport close frame, then the shared cleanup.
     fn finish_normal_close(&mut self, pid: u64) -> SliceStep {
+        // The drain outcome is discarded: a `WouldBlock` here loses the residue
+        // after the socket buffer fills, so the client can miss the tail of its
+        // own close response. Accepted because the close is already decided and
+        // this path may not sleep, poll or retry — the loss window is the peer's
+        // half-close. The close frame and flush below are silent for the same
+        // reason and are only debug-logged: what they lose is the courtesy
+        // close-handshake, after which the dropped socket says the same thing.
         let _ = self.drain_outbound(None);
         if let Some(socket) = self.socket.as_mut() {
             if let Err(error) = socket.close(Some(CloseFrame {
@@ -895,6 +907,11 @@ impl WebSocketConnectionProcess {
             }
             ConnectionControl::ForceClose => {
                 self.notify_shutdown(pid, false);
+                // A failed drain loses the enqueued `Disconnect`, and the client
+                // learns of the shutdown from the transport instead of the frame.
+                // Accepted: the force-close decision is taken, and a retry or
+                // sleep here would hold the whole shutdown drain hostage to one
+                // unresponsive peer.
                 let _ = self.drain_outbound(None);
                 if let Err(error) =
                     self.complete_connection_fate(ConnectionFateClass::ServerShutdown)
@@ -905,6 +922,12 @@ impl WebSocketConnectionProcess {
                     });
                 }
                 if let Some(socket) = self.socket.as_mut() {
+                    // Both errors are discarded, unlike the debug-logged pair on
+                    // the normal-close path: at server shutdown the only thing
+                    // lost is the courtesy `Away` close handshake, and the peer
+                    // reads the same shutdown from the dropped socket a moment
+                    // later. Nothing on this path may sleep or retry to complete
+                    // the handshake.
                     let _ = socket.close(Some(CloseFrame {
                         code: CloseCode::Away,
                         reason: "server shutdown".into(),
