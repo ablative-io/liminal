@@ -986,3 +986,74 @@ close**:
 - **W7** — still open and unchanged in substance; line citations refreshed. The
   HARD shared W3/W7 trigger on unbounded outbox history still binds.
 - **A-7** — new residue row (three test-helper reap loops), unassigned.
+- **A-13** — forward-only correction of A-12 (on the Leg C branch): liminal is
+  NOT an affected consumer of the haematite mislabel; two clauses superseded,
+  core stands; stringly-typed path stated as unmeasured.
+
+### A-13 — FORWARD-ONLY CORRECTION: A-12 overstates liminal's exposure (two clauses superseded, core stands)
+
+**Row A-12 (landed at `ce840ca` on the Leg C branch, queued behind the 0.5.1
+registry line) faithfully recorded a framing its dispatcher then measured and
+refuted — the defect is the lane owner's, not the transcriber's.** Public
+correction: topic entry `a8c2ebab-1a37-41ec-b039-225d98cef46b`. A-12 is NOT
+amended; it stands as the incident record. This row supersedes exactly two of
+its clauses and nothing else.
+
+**A-12's CORE STANDS, verified and unchanged** — say it plainly so the row is
+not read as fallen: liminal's durability read path is correctly written
+(`crates/liminal/src/durability/store.rs:147-155` — both `map_err`s propagate
+via `?`, `Ok(None)` reachable only on the `else` of the `let-else`, a short
+value returns `Err(CorruptEvent)`, never a quiet `None`). **There is no
+collapse in liminal.**
+
+**Superseded clause 1:** *"an unreadable node reaches an operator as an error
+reading 'missing node'"* — not established for liminal's path, and
+structurally it cannot arrive with that identity (measurement below).
+
+**Superseded clause 2:** the disposition's *"so OUR matches should expect a
+new variant"* — **liminal has ZERO `TreeError` matches** (instrument proven
+both ways: positive control `haematite` = 16 files, impossible token = 0,
+reach 103 `.rs` files under `crates/liminal/src`; `MissingNode|TreeError` =
+zero repo-wide). The clause sent an implementer hunting match sites that do
+not exist.
+
+**The measurement, read from the PUBLISHED ARTIFACT** —
+`~/.cargo/registry/src/index.crates.io-*/haematite-0.7.0`, the exact version
+pinned at root `Cargo.toml:42`, cited as artifact, not as source:
+- `ApiError` (`src/api/error.rs:103-114`) = `SequenceConflict | CasMismatch |
+  HistoryCompacted | CorruptEvent(String) | Storage(DatabaseError)` — five
+  variants, none carrying `TreeError`. Control recorded: `TreeError` occurs
+  in 39 files of that crate, so the absence is a fact about `ApiError`, not
+  about the grep.
+- `From<TreeError>` exists for eleven types (`BranchError`, `MergeError`,
+  `CheckoutError`, `BranchCommitError`, `ObserverError`, `HandoffMergeError`,
+  `ShardError`, four `TestError`s) — **not `ApiError`**.
+- Only four types reach `ApiError` by `From` (`:142-160`): `SequenceConflict`,
+  `CasMismatch`, `HistoryCompacted`, `DatabaseError`.
+- `DatabaseError` (`src/db/error.rs:7+`) carries no `TreeError`; payloads are
+  `io::Error` or `String`.
+- `ShardError` — the one type taking `From<TreeError>` — appears nowhere in
+  `src/api`.
+- `api/kv.rs` touches the tree only at `:25` (`crate::tree::Hash`) and
+  `:259`/`:279` (`empty_root_hash()`) — no error path.
+
+**Row conclusion: liminal is NOT an affected consumer. Type-level
+discrimination is structurally impossible from our side and adding it cannot
+be made to work — haematite must surface tree identity through `ApiError`
+first.** Corrected disposition: **the re-pin is NOT a correctness re-pin FOR
+LIMINAL** until that happens; recording it as one would overstate our stake
+in someone else's fix.
+
+**THE UNCLOSED PATH, stated so a clean type-level result does not read as a
+clean result:** `DatabaseError::ShardError(String)` and `SweepError(String)`
+are stringly-typed, so a tree error's TEXT could in principle arrive as
+`ApiError::Storage(DatabaseError::ShardError("..."))`. Whether haematite
+funnels a tree read failure down that path is **NOT MEASURED** — it needs
+haematite's shard code, which is the upstream seat's. If it does, the
+situation is WORSE than A-12 stated, not better: a mislabel with no type to
+match on is harder to handle correctly than a wrong variant. Absence of a
+finding here is absence of a measurement.
+
+- **Owner:** liminal lane owner (row + Apollo note wording); upstream seat
+  (the red at `tree/source_error.rs:22` where `Self::NodeGet { hash, .. }`
+  discards `source: E` into `MissingNode`).
