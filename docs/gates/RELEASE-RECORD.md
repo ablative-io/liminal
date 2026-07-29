@@ -1,4 +1,4 @@
-# The release record — five documents, five failure directions
+# The release record — six documents, and only one of them lies
 
 **Owner: Hermes Crumpet (liminal). Assigned by Cally Ray at topic entry
 `c220e131`, 2026-07-29.**
@@ -15,7 +15,7 @@ direction. This file is the pattern; liminal is the worked example.
 > read "the reconciliation is clean" as "the pin is safe" — it means someone
 > looked once, by hand, on one day, and wrote down what they saw.
 
-## 1. Five documents claim to describe a release, and they disagree
+## 1. Six documents claim to describe a release, and they disagree
 
 | Document | Fails how | Measured instance |
 |---|---|---|
@@ -25,6 +25,7 @@ direction. This file is the pattern; liminal is the worked example.
 | **The release commit subject (a)** | **asserts a publish that never happened** — in prose, in the history, where nothing can contradict it | beamr `0e7c060`, *"release: beamr 0.12.1 — FIFO owner pop ships to crates.io consumers"*. **It did not ship.** |
 | **The release commit subject (b)** | **names a version that existed only IN-TREE** — true of the manifest, false of the registry | frame `a69585e`, *"frame-host 0.2.2 → 0.3.0"*. `0.2.2` was real in the tree and **never reached crates.io**; the registry's predecessor of `0.3.0` is `0.2.1` |
 | **The published artifact** | — | the only one a consumer resolves against |
+| **★ The ANNOTATED TAG MESSAGE** | **is usually the HONEST one — and is structurally ABSENT on a lightweight tag** | beamr `v0.8.3` and `v0.12.1` both read *"git-only release, never published to crates.io"*, written at tag time. **liminal: 2 of 4 tags are LIGHTWEIGHT — no object, no message, no author** |
 | **★ The YANK FLAG** | **is MUTABLE, lives ONLY at the registry, and has NO GIT RECORD** | haematite `0.4.1`/`0.5.0` request `^0.13.0` and resolve correctly **only because `0.13.1` and `0.13.2` are yanked** |
 
 **(b) is the subtler one and likely the commoner** (Athena Zooper Dooper):
@@ -80,6 +81,16 @@ parsed `403` reads as *not published* for every crate asked about.
 
 - **POSITIVE control** (Cally) — a crate known published, **in the result
   set**, not beside it. Proves the instrument can **see**.
+- **⚠️ THIRD FACE OF THE SAME FAULT (Waffles, caught in his own first run): the
+  crates.io DOWNLOAD endpoint 302s blindly for nonexistent versions, so a probe
+  that does not follow redirects PASSES ITS NEGATIVE CONTROL FALSELY.** One
+  fault, three faces — **a probe that reports success because it never reached
+  the question**: (1) `403` with no `User-Agent`; (2) `EMPTY-200` from a mirror
+  or proxy; (3) blind `302` on the download endpoint. **The third is the worst
+  because it breaks the fix:** someone who reads this file, adds a negative
+  control, and points it at the download endpoint ends up **more confident and
+  equally blind. A control that cannot fail is decoration.** Every measurement
+  in this file used the sparse **metadata** endpoint, which is unaffected.
 - **NEGATIVE control** (Athena Zooper Dooper) — a name known absent, which
   must return **`HTTP-404`**, not `EMPTY-200`. **Proves the instrument can
   DISCRIMINATE.** A positive control alone does not: an `EMPTY-200` is exactly
@@ -178,10 +189,45 @@ beamr's two tags with no published version.** So a consumer told to upgrade to
 `0.12.1` cannot resolve it, and a `^0.12` requirement resolves to `0.12.0` —
 **the LIFO build the fix existed to remove.**
 
-**⇒ The record of the fix reproduces the incident's own mechanism.** This is
-why the reconciliation is a tracked defect and not a documentation chore: four
-documents asserted a release, three of them agreed with each other, and only
-the fourth — the artifact — was right.
+**⚠️ MY ORIGINAL GLOSS ON THIS EXHIBIT WAS WRONG AND IS WITHDRAWN.** I wrote
+*"the record of the fix reproduces the incident's own mechanism — four
+documents asserted a release, three agreed with each other, and only the
+artifact was right."* **That is true of the commit subject and false of the
+record as a whole.** Cally withdrew it at `b488c872` after Artemis read the one
+field neither of them had: **the annotated tag messages on both beamr phantoms
+say *"git-only release, never published to crates.io."*** Annabel had recorded
+the truth at tag time, in the only place nobody thought to look.
+
+**HONEST SCOREBOARD FOR BEAMR:** registry **correct** · tag ref **misleading in
+isolation** · tag MESSAGE **correct on both phantoms** · commit subject **wrong
+once** · changelog **correct** · yank flag **correct but mutable**.
+**⇒ ONE beamr document has ever lied, once. The rest are each partial in a
+stated way.** What survives is smaller, real, and still worth a gate: **one
+release commit announces a fix shipped to consumers that was never published,
+contradicted by its own tag message.**
+
+**⇒ AND THE INSTRUMENT LESSON, WHICH IS THE PORTABLE PART: `git tag -l` GIVES
+REFS, AND READING REFS IS NOT READING TAGS.** An annotated tag is a document
+with an author, a date and prose — **the only one in this set that records
+INTENT rather than STATE.** Every Direction-2 result on this estate, mine
+included, was computed from refs.
+
+**⇒ MEASURED HERE, AND IT LIMITS THE REMEDY: the honest document is OPTIONAL
+INFRASTRUCTURE.** liminal's four tags:
+
+```
+liminal-v0.2.0  ANNOTATED   "liminal-rs / liminal-sdk / liminal-server 0.2.0 (first crates.io release)"
+liminal-v0.5.1  ANNOTATED   "liminal 0.5.1"
+liminal-v0.2.1  LIGHTWEIGHT  no object, no message, no author, no date
+liminal-v0.2.3  LIGHTWEIGHT  no object, no message, no author, no date
+```
+
+**Half of liminal's tags cannot carry intent at all — there is no object to
+read.** "Check the tag message" is not a remedy where no message can exist, so
+a repo's Direction-2 exposure depends on a choice made at tag time, years
+earlier, by whoever typed `git tag` instead of `git tag -a`. (Note also that
+`v0.2.0`'s message names **three** crates: `liminal-protocol` versions
+independently and was not part of that release.)
 
 ### Build the denominator before taking the difference
 
