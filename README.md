@@ -24,6 +24,93 @@ use liminal::channel::ChannelHandle;
 use liminal::conversation::ConversationHandle;
 ```
 
+## Usage
+
+Build the standalone server and run it against the shipped example configuration:
+
+```bash
+cargo build --release -p liminal-server
+./target/release/liminal-server --config config/liminal.example.toml
+```
+
+`--config` is required: there is no implicit configuration path, and the five
+mandatory keys (`listen_address`, `health_listen_address`, `drain_timeout_ms`,
+`channels`, `routing_rules`) carry no defaults.
+[`config/liminal.example.toml`](config/liminal.example.toml) is a complete,
+commented starting point — copy it, edit it, keep it under version control. The
+schema is strict: an unknown key is a startup error, not a warning. Note that
+`routing_rules` is mandatory and fully validated, but is not yet consumed by the
+delivery path (see Status).
+
+The example binds the client wire protocol on `127.0.0.1:8080` and the health
+endpoints on `127.0.0.1:8081`; the two must be different ports, so probe traffic
+stays isolated from client traffic. `SIGINT` or `SIGTERM` begins a graceful drain
+bounded by `drain_timeout_ms`.
+
+### Health and metrics
+
+The health listener speaks plain HTTP on `health_listen_address` and serves three
+`GET` routes. Any other path answers `404`; any other method on these paths
+answers `405`.
+
+| Route | Response |
+|-------|----------|
+| `GET /health` | Liveness. Always `200` with `{"status":"healthy","message":null}` — if the process can answer, it is alive. |
+| `GET /ready` | Readiness. `200` with `{"ready":true,"unmet_conditions":[]}` once configuration has loaded, the wire listener is bound, and — when `[cluster]` is configured — membership is established. Otherwise `503`, naming the unmet conditions. |
+| `GET /metrics` | Prometheus text exposition (`text/plain; version=0.0.4`) of the process metrics registry. Always `200`; the body is empty when no registry is installed, so a scraper still observes a live target. |
+
+### Environment overrides
+
+Thirteen `LIMINAL_*` variables override file values. They are applied after the
+file is parsed and before validation runs, so an override is held to exactly the
+same rules as a value written in the file.
+
+| Variable | Overrides |
+|----------|-----------|
+| `LIMINAL_LISTEN_ADDRESS` | `listen_address` |
+| `LIMINAL_HEALTH_LISTEN_ADDRESS` | `health_listen_address` |
+| `LIMINAL_DRAIN_TIMEOUT_MS` | `drain_timeout_ms` |
+| `LIMINAL_PERSISTENCE_PATH` | `persistence_path` |
+| `LIMINAL_AUTH_TOKEN` | `auth.token` |
+| `LIMINAL_CLUSTER_NODE_NAME` | `cluster.node_name` |
+| `LIMINAL_CLUSTER_LISTEN_ADDRESS` | `cluster.listen_address` |
+| `LIMINAL_CLUSTER_SEED_NODES` | `cluster.seed_nodes` (comma-separated) |
+| `LIMINAL_CLUSTER_COOKIE` | `cluster.cookie` |
+| `LIMINAL_WEBSOCKET_LISTEN_ADDRESS` | `websocket.listen_address` |
+| `LIMINAL_WEBSOCKET_PATH` | `websocket.path` |
+| `LIMINAL_WEBSOCKET_ALLOWED_ORIGINS` | `websocket.allowed_origins` (comma-separated) |
+| `LIMINAL_WEBSOCKET_PING_INTERVAL_MS` | `websocket.ping_interval_ms` |
+
+Two asymmetries are deliberate. `LIMINAL_AUTH_TOKEN` *may* create an absent
+`[auth]` section — a single scalar secret belongs in the environment rather than
+a committed file. The cluster and websocket variables refuse to fabricate a
+section the file did not declare, because a partially specified listener is worse
+than no listener.
+
+### Durable state
+
+`persistence_path` is optional. Absent, durable channels use an ephemeral store
+that leaves no residue and survives no restart. Set it and startup requires the
+directory to **already exist** and be writable — it is never created for you, so
+a path typo fails startup with `path is unreachable` instead of quietly minting a
+new directory. The store itself is created one level below, at
+`<persistence_path>/durability`. The example ships this key commented out so it
+validates from any fresh checkout.
+
+### Logging
+
+The server logs through `tracing`, filtered by `RUST_LOG`. When the variable is
+unset the default filter is:
+
+```
+warn,liminal_server=info,liminal=info
+```
+
+An **empty** `RUST_LOG` is not "use the default". `RUST_LOG=""` is a valid but
+empty directive set, and it means total silence — including `error` events. That
+is upstream `env-filter` semantics, kept deliberately. Unset the variable rather
+than emptying it if you want the default back.
+
 ## Crates
 
 | Crate (crates.io) | `use` as | Version | License | Description |
