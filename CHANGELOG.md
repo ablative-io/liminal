@@ -3,6 +3,40 @@
 All notable changes to liminal are recorded here. Versions follow semver;
 `liminal-rs`, `liminal-server`, and `liminal-sdk` are published in lockstep.
 
+## 0.5.1 — 2026-07-29
+
+`liminal-rs` 0.5.1, `liminal-server` 0.5.1, `liminal-sdk` 0.5.1;
+`liminal-protocol` 0.3.2 (unchanged). `liminal-rs` and `liminal-server`:
+no changes in shipped surface; lockstep version bump.
+
+### Fixed
+
+- **SDK: one named 5 s setup deadline across all three readers** (SDK-010;
+  red pins `847bfb3`, fix `b54cf7b`). The push, TCP-subscription, and
+  WebSocket-subscription readers now run every post-connect setup read under
+  the single named `SETUP_TIMEOUT` of 5 s — the estate's already-ratified
+  value, generalized and named — replacing the unnamed 100 ms reader-poll
+  quantum that had been serving as the setup deadline by accident; steady-state
+  reads block rather than poll. Operator-visible consequence: a peer whose
+  control-frame reply latency exceeds 100 ms no longer fails setup — retrying
+  a 100 ms window is not equivalent to one long window. This cures the frame
+  announcer's 1-in-2 boot crash.
+
+### Notes
+
+- **Non-Rust SDK claims remain untrue in this cut.** The Gleam SDK's FFI
+  module exists nowhere in the repo, so every Gleam I/O call fails at load;
+  the TypeScript `Channel`/`Connection` API still dead-ends on a missing
+  transport. Frame consumes the Rust SDK, so the cure above is unaffected.
+  Truing these claims is in flight (front-door fix wave, Leg D) and lands in
+  the following release.
+- **The tag gap stands, deliberately.** Release tags stop at `liminal-v0.2.3`;
+  0.4.x and 0.5.0 remain untagged (ledger A-6). Retro-tagging history is out
+  of scope for an unblocking release; the item stays open for a calm day.
+- This entry records SDK-010 at its landing (`b54cf7b`): the change shipped
+  after 0.5.0's notes were cut and is recorded here, dated to this release,
+  never backdated.
+
 ## 0.5.0 — 2026-07-28
 
 `liminal-rs` 0.5.0, `liminal-server` 0.5.0, `liminal-sdk` 0.5.0;
