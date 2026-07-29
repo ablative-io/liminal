@@ -53,12 +53,18 @@ impl ShutdownHandle {
             return;
         }
         let Ok(mut guard) = self.inner.wait_lock.lock() else {
+            // Behaviour unchanged (return as if shutdown was requested), but a
+            // poisoned lock must not masquerade silently as a completed wait.
+            tracing::error!("shutdown wait lock poisoned; returning from wait as if shutdown was requested");
             return;
         };
         while !self.is_initiated() {
             match self.inner.waiter.wait(guard) {
                 Ok(next_guard) => guard = next_guard,
-                Err(_) => return,
+                Err(_) => {
+                    tracing::error!("shutdown wait condvar reacquired a poisoned lock; returning from wait as if shutdown was requested");
+                    return;
+                }
             }
         }
     }
@@ -102,8 +108,19 @@ impl ShutdownState {
     }
 
     fn notify(&self) {
-        if let Ok(_guard) = self.wait_lock.lock() {
-            self.waiter.notify_all();
+        match self.wait_lock.lock() {
+            Ok(_guard) => self.waiter.notify_all(),
+            Err(poisoned) => {
+                tracing::error!("shutdown wait lock poisoned; notifying waiters anyway");
+                // Recover the guard from the poison so the notify_all still
+                // runs under the lock: a bare notify-without-lock could race a
+                // waiter between its under-the-lock `is_initiated` check and
+                // its park, losing the wake. Holding the recovered guard keeps
+                // the initiate-sets-flag-then-notify ordering airtight while a
+                // parked waiter (which released the lock) is still woken.
+                let _guard = poisoned.into_inner();
+                self.waiter.notify_all();
+            }
         }
     }
 }
@@ -131,7 +148,7 @@ impl Drop for SignalShutdownRegistration {
             return;
         };
         if worker.join().is_err() {
-            tracing::debug!("shutdown signal worker terminated unexpectedly");
+            tracing::warn!("shutdown signal worker terminated unexpectedly");
         }
     }
 }
