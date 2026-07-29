@@ -1,0 +1,19 @@
+=== RED PROOF at c0e9806 2026-07-29T18:19:16Z | Annabel's box | Mercury Toast (…bda) ===
+preflight: claim absent (first attempt 18:17Z held on Phoebus's live claim 18:15:07Z — recorded)
+c0e98061af70fa115e0269890a5154ade3e9e708
+    failures:
+
+    failures:
+        embedded_subscribe_refuses_instead_of_returning_a_dry_stream
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+  stderr ───
+    Error: Protocol { description: "embedded typed subscribe must refuse loudly, got an instantly-dry stream (Ready(None))" }
+
+────────────
+     Summary [   0.020s] 1 test run: 0 passed, 1 failed, 137 skipped
+        FAIL [   0.016s] (1/1) liminal-sdk::loud_refusals embedded_subscribe_refuses_instead_of_returning_a_dry_stream
+error: test run failed
+red-proof exit: 
+=== back on branch f92908d ===

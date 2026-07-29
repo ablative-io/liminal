@@ -1,0 +1,5 @@
+=== toolchain stamp 2026-07-29T18:17:29Z | Annabel's box | Mercury Toast (…bda) ===
+disclosure: canon r3 carries no version-stamp line; stamped at the operator's hands immediately post-run, same seat, same tree
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+enforced at the tree: rust-toolchain.toml pins 1.97.1 (override shown by rustup: 1.97.1-aarch64-apple-darwin)
