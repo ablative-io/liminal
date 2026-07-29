@@ -262,6 +262,164 @@ const fn state_reads_failed(state: &Result<ConversationState, LiminalError>) -> 
     )
 }
 
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, mpsc};
+    use std::time::{Duration, Instant};
+
+    use liminal::LiminalError;
+    use liminal::channel::ChannelMode;
+    use liminal::conversation::{ConversationPhase, ConversationState};
+
+    use super::{observe_exit, state_reads_failed};
+
+    /// A crash-detection fixture: the two mutexes `observe_exit` reads, plus the
+    /// live sender the actor's trapped-EXIT handler would own.
+    fn exit_channel() -> (
+        mpsc::SyncSender<Instant>,
+        Mutex<Option<Instant>>,
+        Mutex<mpsc::Receiver<Instant>>,
+    ) {
+        let (tx, rx) = mpsc::sync_channel::<Instant>(1);
+        (tx, Mutex::new(None), Mutex::new(rx))
+    }
+
+    fn state_with(current_phase: ConversationPhase) -> ConversationState {
+        ConversationState {
+            current_phase,
+            context: Vec::new(),
+            deadline: None,
+            participants: Vec::new(),
+            mode: ChannelMode::Ephemeral,
+        }
+    }
+
+    /// THE site-2 headline. The exit sender lives inside the actor's trapped-EXIT
+    /// handler, so a DISCONNECTED channel means that actor is gone — which is a
+    /// crash observation, not the absence of one. Reading `Disconnected` as "no
+    /// crash" is what let a connection keep forwarding conversation messages into
+    /// a vanished participant.
+    #[test]
+    fn a_dropped_exit_sender_is_a_crash_observation() {
+        let (tx, crash_observed, exit_rx) = exit_channel();
+        drop(tx);
+
+        let observed = observe_exit(&crash_observed, &exit_rx, None);
+
+        assert!(
+            observed.is_some(),
+            "a vanished participant actor must read as a crash, not as no-crash"
+        );
+    }
+
+    /// The same claim on the blocking leg, which additionally must not burn the
+    /// caller's whole timeout before reporting a crash that has already happened.
+    #[test]
+    fn a_dropped_exit_sender_ends_the_crash_wait_immediately() {
+        let (tx, crash_observed, exit_rx) = exit_channel();
+        drop(tx);
+
+        let started = Instant::now();
+        let observed = observe_exit(&crash_observed, &exit_rx, Some(Duration::from_secs(30)));
+        let elapsed = started.elapsed();
+
+        assert!(
+            observed.is_some(),
+            "a vanished participant actor must read as a crash on the blocking leg too"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "the crash is already observable; the wait must not run to its bound (took {elapsed:?})"
+        );
+    }
+
+    /// The observation is one-shot, so a poisoned cache must not lose it: the
+    /// instant is stored on the first observation and replayed on every later
+    /// one, poisoned guard or not.
+    // The deliberate panic-while-holding-the-guard IS the poisoning mechanism
+    // under test.
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    #[test]
+    fn a_poisoned_crash_cache_still_replays_the_observation() {
+        let (tx, crash_observed, exit_rx) = exit_channel();
+        let fired = Instant::now();
+        tx.send(fired).unwrap();
+        let first = observe_exit(&crash_observed, &exit_rx, None);
+        assert_eq!(first, Some(fired), "the EXIT instant is observed once");
+
+        let crash_observed = std::sync::Arc::new(crash_observed);
+        let poisoner = std::sync::Arc::clone(&crash_observed);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("deliberately poison the crash-observation cache");
+        })
+        .join();
+        assert!(crash_observed.is_poisoned(), "the cache is poisoned");
+
+        assert_eq!(
+            observe_exit(&crash_observed, &exit_rx, None),
+            Some(fired),
+            "a poisoned cache must replay the one-shot crash, not report health"
+        );
+    }
+
+    /// A poisoned exit-channel guard must not swallow a crash that has already
+    /// been delivered into the channel.
+    // The deliberate panic-while-holding-the-guard IS the poisoning mechanism
+    // under test.
+    #[allow(clippy::unwrap_used, clippy::panic)]
+    #[test]
+    fn a_poisoned_exit_channel_guard_still_observes_the_crash() {
+        let (tx, crash_observed, exit_rx) = exit_channel();
+        let fired = Instant::now();
+        tx.send(fired).unwrap();
+
+        let exit_rx = std::sync::Arc::new(exit_rx);
+        let poisoner = std::sync::Arc::clone(&exit_rx);
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("deliberately poison the exit channel guard");
+        })
+        .join();
+        assert!(exit_rx.is_poisoned(), "the exit channel guard is poisoned");
+
+        assert_eq!(
+            observe_exit(&crash_observed, &exit_rx, None),
+            Some(fired),
+            "a poisoned guard must not swallow a delivered crash signal"
+        );
+    }
+
+    /// A state query the actor cannot service means the actor is unreachable —
+    /// it has no live process to answer, and a cleanly closed or finalized
+    /// conversation still answers `Ok` from its host-side snapshot. Reading that
+    /// `Err` as "not failed" reports a conversation whose actor is gone as
+    /// healthy.
+    #[test]
+    fn an_unserviceable_state_query_reads_as_failed() {
+        let unreachable = Err(LiminalError::ConversationFailed {
+            message: "state query response channel closed".to_owned(),
+        });
+
+        assert!(
+            state_reads_failed(&unreachable),
+            "an actor that cannot answer a state query must not read as healthy"
+        );
+    }
+
+    /// The healthy path is untouched: a live phase is not a failure, and the
+    /// structurally-set `Failed` phase still is.
+    #[test]
+    fn live_phases_still_read_healthy_and_failed_still_reads_failed() {
+        assert!(!state_reads_failed(&Ok(state_with(
+            ConversationPhase::Active
+        ))));
+        assert!(state_reads_failed(&Ok(state_with(
+            ConversationPhase::Failed
+        ))));
+    }
+}
+
 impl ConversationResource for LiminalConversationResource {
     fn message(&self, envelope: &MessageEnvelope) -> Result<(), ServerError> {
         // If the participant has already crashed (structural EXIT observed),
