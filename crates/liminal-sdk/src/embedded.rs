@@ -176,6 +176,11 @@ impl<T> core::future::Future for ReadyResult<T> {
 }
 
 /// Direct in-process channel backend used by embedded handles.
+///
+/// Publish only. There is no subscribe or deliver method here and never has
+/// been, which is why [`ChannelHandle::subscribe`] on an
+/// [`EmbeddedChannelHandle`] has no delivery path to reach and refuses instead
+/// of returning a stream nothing can feed.
 pub trait EmbeddedChannelBackend: fmt::Debug + Send + Sync {
     /// Publishes a typed message reference without protocol framing or wire encoding.
     ///
@@ -198,6 +203,39 @@ pub trait EmbeddedConversationBackend: fmt::Debug + Send + Sync {
 /// Ledger row that records why embedded mode has no in-process bus behind it.
 const B1_SEAM: &str = "seam B1 — Embedded/frame-conv integration \
                        (docs/stack-review/liminal-ledger.md)";
+
+/// The refusal embedded typed `subscribe` returns instead of an instantly-dry
+/// stream.
+///
+/// Embedded typed subscribe delivery is unimplemented, and unimplemented in a
+/// stronger sense than the publish seam beside it: publish at least has a
+/// backend trait a caller can implement, while [`EmbeddedChannelBackend`]
+/// declares `publish` and nothing else. There is no subscribe or deliver method
+/// on it, so no backend installed through
+/// [`EmbeddedConfig::with_channel_backend`] can feed a subscription either.
+/// Nothing in this crate delivers a message to an embedded subscriber.
+///
+/// No ledger row records this gap. B1 — the row named by [`B1_SEAM`], and the
+/// row this module already cites for the default backends — is about the SDK's
+/// no-op embedded *backend*, i.e. the publish/send seam that a shared-scheduler
+/// `liminal`-core integration would fill; read at
+/// `docs/stack-review/liminal-ledger.md` it says nothing about subscription
+/// delivery, and the backend it describes has no subscription surface to fill.
+/// This refusal says so rather than borrowing a row that does not cover it.
+fn unwired_embedded_subscribe() -> SdkError {
+    SdkError::Unwired {
+        surface: "typed subscribe delivery (ChannelHandle::subscribe on an embedded handle)"
+            .to_string(),
+        seam: "no ledger row records this gap; B1 covers the no-op embedded backend, which is \
+               publish-only and has no subscription surface at all"
+            .to_string(),
+        alternative: "embedded mode has no in-process delivery path to point at. For real \
+                      delivery use a remote handle against a running server: \
+                      SubscriptionStream::open plus SubscriptionStream::recv_timeout, or \
+                      WebSocketSubscriptionStream::open on the WebSocket transport"
+            .to_string(),
+    }
+}
 
 /// The channel backend [`EmbeddedConfig::new`] installs by default — and it
 /// REFUSES every publish.
@@ -294,6 +332,11 @@ impl EmbeddedConfig {
     }
 
     /// Replaces the direct in-process channel backend.
+    ///
+    /// This installs a publish path and nothing else: [`EmbeddedChannelBackend`]
+    /// has no subscribe or deliver method, so a backend installed here does not
+    /// give [`ChannelHandle::subscribe`] a delivery path — that surface refuses
+    /// either way.
     #[must_use]
     pub fn with_channel_backend(mut self, backend: Arc<dyn EmbeddedChannelBackend>) -> Self {
         self.channel_backend = backend;
@@ -312,6 +355,11 @@ impl EmbeddedConfig {
 }
 
 /// Channel handle that publishes through direct in-process references.
+///
+/// Publishes — and only publishes. [`ChannelHandle::subscribe`] on this handle
+/// REFUSES with [`SdkError::Unwired`]: embedded mode has no in-process delivery
+/// path, and this handle will not hand back an empty stream that looks like a
+/// live subscription with nothing on it yet.
 #[derive(Clone, Debug)]
 pub struct EmbeddedChannelHandle {
     channel_name: String,
@@ -354,11 +402,30 @@ impl ChannelHandle for EmbeddedChannelHandle {
         self.backend.publish(&message)
     }
 
+    /// REFUSES. Embedded typed subscription delivery is unimplemented.
+    ///
+    /// The returned stream yields exactly one item — `Err(SdkError::Unwired)` —
+    /// and then ends. It touches no backend, because there is no backend method
+    /// it could touch.
+    ///
+    /// What this replaces reported a success it could not have had. The old body
+    /// returned [`SdkSubscription::empty`], a stream whose `poll_next` is
+    /// `Ready(None)` immediately and forever, so a caller's
+    /// `while let Some(m) = sub.next().await` exited on the first poll and read
+    /// as "subscribed, nothing published yet" — indistinguishable from a quiet
+    /// channel, and permanent.
+    ///
+    /// There is no in-process alternative to point at: [`EmbeddedChannelBackend`]
+    /// is publish-only, so a backend installed through
+    /// [`EmbeddedConfig::with_channel_backend`] gives this surface nothing. For
+    /// real delivery use a remote handle against a running server —
+    /// `SubscriptionStream::open` plus `SubscriptionStream::recv_timeout`, or
+    /// `WebSocketSubscriptionStream::open` on the WebSocket transport.
     fn subscribe<M>(&self) -> Self::Subscription<M>
     where
         M: DeserializeOwned,
     {
-        SdkSubscription::empty()
+        SdkSubscription::error(unwired_embedded_subscribe())
     }
 
     fn request_reply<Req, Resp>(&self, request: Req) -> ReadyResult<Resp>

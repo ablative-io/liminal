@@ -445,13 +445,18 @@ impl ChannelHandle for SdkChannelHandle {
         }
     }
 
-    /// Subscribes through the selected mode.
+    /// BOTH ARMS REFUSE. Typed subscription delivery is not implemented in
+    /// either deployment mode, so whichever mode configuration selected, the
+    /// returned stream yields exactly one `Err(SdkError::Unwired)` and then
+    /// ends.
     ///
-    /// The remote arm REFUSES with `SdkError::Unwired`: typed subscription
-    /// delivery is not implemented, and the refusal names
-    /// `SubscriptionStream::open` as the surface that works. The embedded arm
-    /// returns a locally empty stream, which is what embedded mode has always
-    /// meant here.
+    /// The remote arm's refusal names `SubscriptionStream::open` as the surface
+    /// that works. The embedded arm's names the same remote surface, because
+    /// embedded mode has no in-process delivery path to offer instead. That arm
+    /// used to return a locally empty stream — described here as "what embedded
+    /// mode has always meant", which was true of the implementation and
+    /// misleading to a caller: an empty stream is indistinguishable from a live
+    /// subscription on a quiet channel.
     fn subscribe<M>(&self) -> Self::Subscription<M>
     where
         M: DeserializeOwned,
