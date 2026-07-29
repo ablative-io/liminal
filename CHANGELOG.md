@@ -6,8 +6,47 @@ All notable changes to liminal are recorded here. Versions follow semver;
 ## 0.5.1 — 2026-07-29
 
 `liminal-rs` 0.5.1, `liminal-server` 0.5.1, `liminal-sdk` 0.5.1;
-`liminal-protocol` 0.3.2 (unchanged). `liminal-rs` and `liminal-server`:
-no changes in shipped surface; lockstep version bump.
+`liminal-protocol` 0.3.2 (unchanged).
+
+All changes below are additive or internal: no public item was added, removed
+or resignatured in `liminal-rs` or `liminal-server`, the wire protocol did not
+move, and the readiness contract did not move. That is why this is a patch
+release and not a minor one.
+
+### Added
+
+- **The server logs.** `liminal-server` installs a stderr `tracing` subscriber
+  at startup (`ae3abd0` red, `ba43b92` fix). Before this the binary ran from
+  boot to shutdown printing nothing, and its 120 `tracing` events — connection
+  failures, drain timeouts, durable-flush failures among them — were dropped by
+  the no-op global dispatcher. Filtered by `RUST_LOG`; the default when the
+  variable is unset is `warn,liminal_server=info,liminal=info`. Colour is
+  emitted only when stderr is a terminal, so piped output stays byte-clean
+  (`925b863`).
+- **An empty `RUST_LOG` means total silence, including `error` events.**
+  `RUST_LOG=""` is a valid but empty directive set — it is *not* "use the
+  default". This is upstream `env-filter` semantics and is kept deliberately.
+  Unset the variable rather than emptying it if you want the default back.
+- **Bootable from shipped materials.** `config/liminal.example.toml` is a
+  complete, commented, working configuration, kept honest by a test that parses
+  it through the real loader (`7bd2c23` red, `93f114d` fix). README gains a
+  Usage quickstart covering the run line, the thirteen `LIMINAL_*` overrides,
+  the health and metrics routes, and the `persistence_path` trap: the directory
+  must already exist and is never created for you, so a path typo fails startup
+  instead of quietly minting a new directory.
+
+### Changed
+
+- **Cluster membership is driven by ordered events, not polling** (SRV-008;
+  `9d87e32` red, `25e8ed5` fix). The poll interval, sampling entry point, poll
+  thread and snapshot/diff change detection are gone; membership now arms
+  beamr's connection-event stream with an atomic initial view. Effects still run
+  through the same `apply_delta` funnel. **All of the deleted machinery was
+  private — no public item changed**, which is why this is not a breaking
+  change. The one observable difference is a strict improvement: a node that
+  dials its seeds previously had an empty membership view until a poll tick
+  sampled the table, and now has an exact view the instant `Node::start`
+  returns. That removes a staleness window; it does not change a contract.
 
 ### Fixed
 
