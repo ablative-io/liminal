@@ -462,12 +462,23 @@ impl MembershipConsumer {
     /// Spawns the consumer for the ordered continuation.
     fn start(membership: Membership, sync: ClusterSync) -> Self {
         let membership_for_thread = membership.clone();
-        let handle = std::thread::Builder::new()
+        let handle = match std::thread::Builder::new()
             .name("liminal-cluster-membership".to_owned())
             .spawn(move || {
                 run_consumer(&membership_for_thread, &sync);
-            })
-            .ok();
+            }) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                // Control flow unchanged (a None handle, as before): the
+                // cluster runs on without a consumer, but that must be loud —
+                // no membership effect will ever be applied.
+                tracing::error!(
+                    %error,
+                    "failed to spawn cluster membership consumer thread; membership effects will not be applied"
+                );
+                None
+            }
+        };
         Self { membership, handle }
     }
 
@@ -475,7 +486,9 @@ impl MembershipConsumer {
     fn stop(mut self) {
         self.membership.signal_shutdown();
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                tracing::warn!("cluster membership consumer thread panicked");
+            }
         }
     }
 }
