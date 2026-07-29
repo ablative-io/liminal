@@ -24,9 +24,28 @@ pub use super::participant::RemoteParticipantHandle;
 use super::config::SdkConfig;
 use super::protocol::{
     RemoteTransport, WireConversationRequest, WirePublishRequest, WireResumeRequest,
-    WireSubscribeRequest, deserialize_payload,
+    deserialize_payload,
 };
-use super::{RemoteConfig, ServerAddress, connection_error};
+use super::{RemoteConfig, ServerAddress};
+
+/// The refusal typed `subscribe` returns instead of an instantly-dry stream.
+///
+/// No ledger row records this gap: `WIRING-LEDGER.md`'s W6 is the BROWSER
+/// conversation surface (a TypeScript transport lane), not the Rust typed
+/// subscription, and nothing else in `docs/` names it. The refusal says so
+/// rather than borrowing a row that does not cover it.
+fn unwired_typed_subscribe() -> SdkError {
+    SdkError::Unwired {
+        surface: "typed subscribe delivery (ChannelHandle::subscribe on a remote handle)"
+            .to_string(),
+        seam: "no ledger row records this gap; W6 is the browser conversation surface, not this"
+            .to_string(),
+        alternative: "for real delivery use SubscriptionStream::open plus \
+                      SubscriptionStream::recv_timeout, or \
+                      WebSocketSubscriptionStream::open on the WebSocket transport"
+            .to_string(),
+    }
+}
 
 #[derive(Debug)]
 struct RemoteChannelState {
@@ -166,29 +185,27 @@ impl ChannelHandle for RemoteChannelHandle {
         self.transport.publish(&self.server_address, &request)
     }
 
+    /// REFUSES. Typed subscription delivery is not implemented on this handle.
+    ///
+    /// The returned stream yields exactly one item — `Err(SdkError::Unwired)` —
+    /// and then ends. It does not touch the transport, so no `Subscribe` is left
+    /// outstanding on the server for a stream that could never deliver.
+    ///
+    /// What this replaces was worse than unimplemented. The old body performed
+    /// the real wire `Subscribe`, registered a subscription in the pool, and
+    /// then returned `SdkSubscription::empty()` — a stream whose `poll_next` is
+    /// `Ready(None)` immediately and forever. A caller's
+    /// `while let Some(m) = sub.next().await` exited on the first poll while the
+    /// server pumped `Deliver` frames at a connection nothing was reading.
+    ///
+    /// For real delivery use the lower-level surface that works today:
+    /// `SubscriptionStream::open` plus `SubscriptionStream::recv_timeout` (or
+    /// `WebSocketSubscriptionStream::open` on the WebSocket transport).
     fn subscribe<M>(&self) -> Self::Subscription<M>
     where
         M: DeserializeOwned,
     {
-        let outcome = self.track_subscription().and_then(|subscription_id| {
-            let connection_id = self
-                .state
-                .lock()
-                .pool
-                .connection_for_subscription(subscription_id)
-                .ok_or_else(|| connection_error("subscription was not assigned to the pool"))?;
-            let request = WireSubscribeRequest::new(
-                &self.channel_name,
-                subscription_id,
-                connection_id.get(),
-            )?;
-            self.transport.subscribe(&self.server_address, &request)
-        });
-
-        match outcome {
-            Ok(()) => SdkSubscription::empty(),
-            Err(error) => SdkSubscription::error(error),
-        }
+        SdkSubscription::error(unwired_typed_subscribe())
     }
 
     fn request_reply<Req, Resp>(&self, request: Req) -> ReadyResult<Resp>
@@ -428,6 +445,13 @@ impl ChannelHandle for SdkChannelHandle {
         }
     }
 
+    /// Subscribes through the selected mode.
+    ///
+    /// The remote arm REFUSES with `SdkError::Unwired`: typed subscription
+    /// delivery is not implemented, and the refusal names
+    /// `SubscriptionStream::open` as the surface that works. The embedded arm
+    /// returns a locally empty stream, which is what embedded mode has always
+    /// meant here.
     fn subscribe<M>(&self) -> Self::Subscription<M>
     where
         M: DeserializeOwned,

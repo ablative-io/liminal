@@ -68,7 +68,12 @@ pub trait ChannelHandle: core::fmt::Debug + Send + Sync {
     /// Subscribes to typed channel messages.
     ///
     /// Subscription and delivery failures are surfaced to the application as
-    /// [`SdkError`] items in the returned stream.
+    /// [`SdkError`] items in the returned stream. An implementation that has no
+    /// delivery path behind this surface REFUSES the same way — it yields one
+    /// [`SdkError::Unwired`] item naming the surface that does work — rather
+    /// than handing back a stream that ends immediately and looks drained.
+    /// Consult the concrete handle's documentation before writing a receive
+    /// loop against it.
     fn subscribe<M>(&self) -> Self::Subscription<M>
     where
         M: DeserializeOwned;

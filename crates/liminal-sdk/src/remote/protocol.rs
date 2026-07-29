@@ -52,6 +52,18 @@ pub(super) trait RemoteTransport:
         request: &WirePublishRequest,
     ) -> Result<DeliveryAck, SdkError>;
 
+    /// Sends a `Subscribe` for `request` and waits for the server's ack.
+    ///
+    /// UNCALLED IN PRODUCTION since typed subscribe began refusing: the typed
+    /// surface no longer touches the transport, so nothing reaches this method.
+    /// Retained across all three transports because it is the wire half a future
+    /// typed-subscription seam would build on; whether that seam is built is a
+    /// design ruling, not this refusal's business.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError`] when the subscribe cannot be sent or is rejected.
+    #[allow(dead_code, reason = "wire half retained for a future typed-subscription seam")]
     fn subscribe(
         &self,
         server_address: &ServerAddress,
@@ -234,6 +246,11 @@ impl WirePublishRequest {
     }
 }
 
+/// The wire form of a `Subscribe`.
+///
+/// UNCALLED IN PRODUCTION — see [`RemoteTransport::subscribe`]. Retained with
+/// that method as the wire half of a future typed-subscription seam.
+#[allow(dead_code, reason = "wire half retained for a future typed-subscription seam")]
 #[derive(Debug)]
 pub(super) struct WireSubscribeRequest {
     channel: String,
@@ -241,6 +258,7 @@ pub(super) struct WireSubscribeRequest {
     stream_id: u32,
 }
 
+#[allow(dead_code, reason = "wire half retained for a future typed-subscription seam")]
 impl WireSubscribeRequest {
     pub(super) fn new(
         channel: &str,
@@ -376,7 +394,10 @@ impl WireResumeRequest {
 /// It is kept, not deleted: whether the SDK should carry a second frame encoder
 /// at all is a design question, not a question this refusal answers. The `allow`
 /// makes the orphaning visible rather than letting the encoder quietly look
-/// load-bearing. Its shape is still pinned by this module's own tests.
+/// load-bearing. Its shape is still pinned by this module's own tests — which is
+/// also why these are `allow` and not the self-cleaning `expect`: under
+/// `cfg(test)` the encoder IS used, so an expectation would go unfulfilled in
+/// the test build while being required in the lib build.
 #[allow(dead_code, reason = "orphaned by the unconnected-transport refusal; see the note above")]
 #[derive(Debug)]
 enum WireFrame {

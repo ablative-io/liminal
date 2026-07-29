@@ -28,7 +28,7 @@ use liminal::protocol::WorkerRegistration;
 use liminal_sdk::{
     ChannelHandle, ConnectionPoolConfig, ConversationHandle, DeliveryAck, PressureResponse,
     PushClient, RemoteChannelHandle, RemoteConfig, RemoteConversationHandle, SchemaMetadata,
-    SchemaValidate, SdkConfig, build_channel_handle, build_conversation_handle,
+    SchemaValidate, SdkConfig, SubscriptionStream, build_channel_handle, build_conversation_handle,
 };
 use liminal_server::ServerError;
 use liminal_server::config::{
@@ -389,26 +389,52 @@ fn sdk_tcp_client_publishes_over_real_socket() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// A real subscription over a real socket, plus the refusal that replaced the
+/// typed shortcut to it.
+///
+/// This test used to poll `handle.subscribe::<OrderPlaced>()` and assert
+/// `Ready(None)`, reading the empty stream as "the live round trip succeeded and
+/// nothing is buffered yet". That reading was wrong: the stream was
+/// `SdkSubscription::empty()`, which is `Ready(None)` immediately and forever
+/// whatever the server does — a subscriber's receive loop would exit at once
+/// while `Deliver` frames arrived at the connection. The old assertion could not
+/// tell a working subscription from a dead one, so it is replaced by two that
+/// can:
+///
+/// * `SubscriptionStream::open` proves the `Subscribe` -> `SubscribeAck` round
+///   trip actually crosses the socket (the server assigns the id it returns);
+/// * the typed surface refuses with `SdkError::Unwired` and points at that same
+///   working surface, so nobody reaches for the dry stream again.
 #[test]
 fn sdk_tcp_client_subscribes_over_real_socket() -> Result<(), Box<dyn Error>> {
     let server = RunningServer::start()?;
     let client = connect_client(server.address())?;
 
-    // subscribe() returns a Stream that surfaces any setup error as its first
-    // item. The real transport only yields an error-free subscription after the
-    // server answers SubscribeAck over the socket, so polling the stream once
-    // returns None (no pending error). A SubscribeError or a dead socket would
-    // instead surface Some(Err(..)). The mock returned an empty stream without
-    // sending any bytes; here the empty result is the product of a live round trip.
+    // The real round trip: this opens its own socket, handshakes, sends
+    // Subscribe, and only returns once the server answered SubscribeAck with a
+    // server-assigned subscription id.
+    let stream = SubscriptionStream::open(&server.address().to_string(), CHANNEL, Vec::new())?;
+    let _ = stream.subscription_id();
+
+    // The typed surface is a refusal, not a subscription.
     let handle = build_channel_handle(&client)?;
     let subscription = handle.subscribe::<OrderPlaced>();
     let mut subscription = pin!(subscription);
     let waker = Waker::noop();
     let mut context = Context::from_waker(waker);
     match subscription.as_mut().poll_next(&mut context) {
-        Poll::Ready(None) => {}
+        Poll::Ready(Some(Err(liminal_sdk::SdkError::Unwired { alternative, .. }))) => {
+            if !alternative.contains("SubscriptionStream") {
+                return Err(
+                    format!("the refusal must name the working surface: {alternative}").into(),
+                );
+            }
+        }
+        Poll::Ready(None) => {
+            return Err("typed subscribe returned an instantly-dry stream".into());
+        }
         Poll::Ready(Some(Err(error))) => {
-            return Err(format!("subscribe surfaced a setup error: {error}").into());
+            return Err(format!("typed subscribe surfaced the wrong error: {error}").into());
         }
         Poll::Ready(Some(Ok(_))) => {
             return Err("subscribe unexpectedly yielded a buffered message".into());
@@ -420,6 +446,7 @@ fn sdk_tcp_client_subscribes_over_real_socket() -> Result<(), Box<dyn Error>> {
     let response = handle.publish(OrderPlaced { id: 2 })?;
     assert_eq!(response, PressureResponse::Accept);
 
+    drop(stream);
     server.shutdown()?;
     Ok(())
 }
@@ -572,22 +599,13 @@ fn sdk_tcp_publish_with_idempotency_key_reports_genuine_delivery_ack() -> Result
     let handle = RemoteChannelHandle::new(&config)?;
 
     // Register a subscriber on the channel so a delivery is genuinely observable.
-    // Polling the subscription once drives the Subscribe -> SubscribeAck round trip
-    // (the server adds a subscriber to the channel fan-out).
-    let subscription = handle.subscribe::<OrderPlaced>();
-    let mut subscription = pin!(subscription);
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    match subscription.as_mut().poll_next(&mut context) {
-        Poll::Ready(None) => {}
-        Poll::Ready(Some(Err(error))) => {
-            return Err(format!("subscribe surfaced a setup error: {error}").into());
-        }
-        Poll::Ready(Some(Ok(_))) => {
-            return Err("subscribe unexpectedly yielded a buffered message".into());
-        }
-        Poll::Pending => return Err("subscribe stream parked unexpectedly".into()),
-    }
+    // This used to go through `handle.subscribe::<OrderPlaced>()`, which was
+    // being used for its WIRE SIDE EFFECT alone — the stream it returned could
+    // never deliver anything. That surface refuses now, so the subscriber is
+    // registered through the surface that genuinely works: `open` returns only
+    // after the server answered SubscribeAck and added this subscriber to the
+    // channel fan-out, and the stream is held live for the publishes below.
+    let subscriber = SubscriptionStream::open(&server.address().to_string(), CHANNEL, Vec::new())?;
 
     // First keyed publish: fresh claim + a live subscriber => genuine delivery.
     let first: DeliveryAck =
@@ -606,6 +624,7 @@ fn sdk_tcp_publish_with_idempotency_key_reports_genuine_delivery_ack() -> Result
         "a duplicate idempotency key must report a non-delivery ack"
     );
 
+    drop(subscriber);
     server.shutdown()?;
     Ok(())
 }
@@ -734,21 +753,11 @@ fn sdk_tcp_real_schema_rejects_invalid_and_delivers_valid() -> Result<(), Box<dy
     let handle = RemoteChannelHandle::new(&config)?;
 
     // Register a subscriber so a genuine delivery of the valid publish is
-    // observable through the delivery ack.
-    let subscription = handle.subscribe::<SchemaValidEvent>();
-    let mut subscription = pin!(subscription);
-    let waker = Waker::noop();
-    let mut context = Context::from_waker(waker);
-    match subscription.as_mut().poll_next(&mut context) {
-        Poll::Ready(None) => {}
-        Poll::Ready(Some(Err(error))) => {
-            return Err(format!("subscribe surfaced a setup error: {error}").into());
-        }
-        Poll::Ready(Some(Ok(_))) => {
-            return Err("subscribe unexpectedly yielded a buffered message".into());
-        }
-        Poll::Pending => return Err("subscribe stream parked unexpectedly".into()),
-    }
+    // observable through the delivery ack. This used the typed
+    // `handle.subscribe::<SchemaValidEvent>()` for its wire side effect alone;
+    // that surface refuses now, so the subscriber is registered through
+    // `SubscriptionStream::open`, which genuinely joins the channel fan-out.
+    let subscriber = SubscriptionStream::open(&server.address().to_string(), CHANNEL, Vec::new())?;
 
     // A schema-invalid publish must be rejected by the server's channel schema and
     // surface as an error to the SDK caller.
@@ -771,6 +780,7 @@ fn sdk_tcp_real_schema_rejects_invalid_and_delivers_valid() -> Result<(), Box<dy
         "a schema-valid publish with a subscriber must report a genuine delivery ack"
     );
 
+    drop(subscriber);
     server.shutdown()?;
     Ok(())
 }
