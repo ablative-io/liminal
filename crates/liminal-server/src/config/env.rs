@@ -123,7 +123,15 @@ where
                 let token = env_string(AUTH_TOKEN, &value)?;
                 config.auth = Some(super::types::AuthConfig { token });
             }
-            _ => {}
+            unrecognized_key => {
+                // A LIMINAL_-prefixed key the server does not support is almost
+                // always a typo'd override; stay ignored (behaviour unchanged)
+                // but say so instead of silently dropping it.
+                tracing::warn!(
+                    key = %unrecognized_key,
+                    "unrecognized LIMINAL_ environment variable ignored; supported keys are unchanged"
+                );
+            }
         }
     }
 
