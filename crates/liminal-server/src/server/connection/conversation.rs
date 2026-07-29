@@ -9,8 +9,11 @@
 use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use liminal::LiminalError;
 use liminal::channel::SchemaId;
-use liminal::conversation::{ConversationActor, ConversationPhase, ParticipantPid};
+use liminal::conversation::{
+    ConversationActor, ConversationPhase, ConversationState, ParticipantPid,
+};
 use liminal::envelope::{Envelope, PublisherId};
 use liminal::protocol::{
     CausalContext as ProtocolCausalContext, MessageEnvelope, SchemaId as ProtocolSchemaId,
@@ -206,34 +209,57 @@ impl LiminalConversationResource {
     /// the EXIT handler. This reads an already-fired structural event; it never
     /// sleeps or samples participant liveness.
     fn poll_exit_signal(&self) -> Option<Instant> {
-        if let Ok(cached) = self.crash_observed.lock() {
-            if let Some(instant) = *cached {
-                return Some(instant);
-            }
-        }
-        let received = self.exit_rx.lock().map_or(None, |rx| rx.try_recv().ok());
-        self.cache(received);
-        received
-    }
-
-    /// Caches an observed crash instant so the one-shot signal is replayable.
-    fn cache(&self, instant: Option<Instant>) {
-        if let Some(instant) = instant {
-            if let Ok(mut cached) = self.crash_observed.lock() {
-                *cached = Some(instant);
-            }
-        }
+        observe_exit(&self.crash_observed, &self.exit_rx, None)
     }
 
     /// True when the actor's structurally-tracked phase is `Failed`, which the
     /// trapped-EXIT handler sets under `CrashPolicy::Fail`. This is a structural
     /// state read, not a liveness sample.
     fn actor_phase_failed(&self) -> bool {
-        matches!(
-            self.actor.state().map(|state| state.current_phase),
-            Ok(ConversationPhase::Failed)
-        )
+        state_reads_failed(&self.actor.state())
     }
+}
+
+/// Reads the one-shot participant-EXIT signal, caching the observed instant so
+/// repeated observations replay it. `wait` bounds a blocking receive; `None`
+/// polls without blocking. The single seam behind both [`poll_exit_signal`] and
+/// [`await_crash`].
+///
+/// [`poll_exit_signal`]: LiminalConversationResource::poll_exit_signal
+/// [`await_crash`]: LiminalConversationResource::await_crash
+fn observe_exit(
+    crash_observed: &Mutex<Option<Instant>>,
+    exit_rx: &Mutex<mpsc::Receiver<Instant>>,
+    wait: Option<Duration>,
+) -> Option<Instant> {
+    if let Ok(cached) = crash_observed.lock()
+        && let Some(instant) = *cached
+    {
+        return Some(instant);
+    }
+    let received = exit_rx.lock().map_or(None, |rx| {
+        wait.map_or_else(
+            || rx.try_recv().ok(),
+            |timeout| rx.recv_timeout(timeout).ok(),
+        )
+    });
+    if let Some(instant) = received
+        && let Ok(mut cached) = crash_observed.lock()
+    {
+        *cached = Some(instant);
+    }
+    received
+}
+
+/// Maps one actor state query to "this conversation has structurally failed".
+const fn state_reads_failed(state: &Result<ConversationState, LiminalError>) -> bool {
+    matches!(
+        state,
+        Ok(ConversationState {
+            current_phase: ConversationPhase::Failed,
+            ..
+        })
+    )
 }
 
 impl ConversationResource for LiminalConversationResource {
@@ -267,17 +293,9 @@ impl ConversationResource for LiminalConversationResource {
     }
 
     fn await_crash(&self, timeout: Duration) -> Option<Instant> {
-        if let Some(instant) = self.poll_exit_signal() {
-            return Some(instant);
-        }
         // Event-driven: park on the exit notifier; the actor's trapped-EXIT
         // handler wakes us the instant the participant's link fires. No polling.
-        let received = self
-            .exit_rx
-            .lock()
-            .map_or(None, |rx| rx.recv_timeout(timeout).ok());
-        self.cache(received);
-        received
+        observe_exit(&self.crash_observed, &self.exit_rx, Some(timeout))
     }
 
     fn receive_reply(&self, timeout: Duration) -> Result<MessageEnvelope, ServerError> {
