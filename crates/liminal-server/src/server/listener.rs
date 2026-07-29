@@ -89,8 +89,19 @@ impl ServerListener {
         // than admitting it — at most one spurious accept per interrupt. If the
         // worker already exited (a real accept then flag check), the listener is
         // gone and this connect fails fast; the join then returns immediately.
-        if let Ok(waker) = TcpStream::connect(self.interrupt_target) {
-            drop(waker);
+        // A failed connect is EXPECTED when the worker already exited (the
+        // listener is gone). It is NOT expected while the worker is still
+        // parked in `accept` — there the interrupt is the only thing that can
+        // wake it, so the join below blocks forever. Naming it turns a silent
+        // shutdown deadlock into a diagnosable condition.
+        match TcpStream::connect(self.interrupt_target) {
+            Ok(waker) => drop(waker),
+            Err(error) => tracing::warn!(
+                interrupt_target = %self.interrupt_target,
+                %error,
+                "listener accept interrupt could not connect; the accept worker will \
+                 only stop if it has already exited"
+            ),
         }
         worker.join().map_err(|_| ServerError::ListenerAccept {
             message: "listener accept worker terminated unexpectedly".to_owned(),
@@ -196,7 +207,7 @@ fn accept_loop(
     shed_count: &AtomicU64,
 ) -> Result<(), ServerError> {
     // One reserve descriptor held for the shed-with-spare-fd EMFILE policy.
-    let mut reserve = listener.try_clone().ok();
+    let mut reserve = acquire_reserve_descriptor(listener, "connection listener");
     while !shutdown.load(Ordering::SeqCst) {
         accept_attempts.fetch_add(1, Ordering::SeqCst);
         match listener.accept() {
@@ -226,6 +237,30 @@ fn accept_loop(
     Ok(())
 }
 
+/// Acquires the shed-with-spare-fd reserve descriptor, naming a failure instead
+/// of returning a bare `None`. `None` DISABLES the shed policy — the next
+/// EMFILE/ENFILE has no descriptor to free, so the listener stops admitting
+/// while pressure persists — and it is exactly the condition an operator cannot
+/// diagnose from the outside. Shared with the sibling WebSocket and health
+/// listeners, which hold the same reserve.
+pub(crate) fn acquire_reserve_descriptor(
+    listener: &TcpListener,
+    listener_name: &str,
+) -> Option<TcpListener> {
+    match listener.try_clone() {
+        Ok(reserve) => Some(reserve),
+        Err(error) => {
+            tracing::warn!(
+                listener = listener_name,
+                %error,
+                "reserve descriptor unavailable; fd-exhaustion shedding is disabled \
+                 until it can be re-established"
+            );
+            None
+        }
+    }
+}
+
 /// Shed-with-spare-fd (§4.1, RULED): under EMFILE/ENFILE the reserve descriptor
 /// is released so this one accept has a slot; the connection is accepted and
 /// immediately shed loudly (typed log + counter), then the reserve is
@@ -244,7 +279,7 @@ pub(crate) fn shed_on_fd_exhaustion(
         // pressure). Nothing to free; leave the connection pending for the next
         // wait rather than spin, and try to re-establish the reserve.
         tracing::warn!(%error, "listener fd exhaustion with no reserve descriptor available");
-        *reserve = listener.try_clone().ok();
+        *reserve = acquire_reserve_descriptor(listener, "fd-exhaustion reserve re-establishment");
         return;
     }
     match listener.accept() {
@@ -263,7 +298,7 @@ pub(crate) fn shed_on_fd_exhaustion(
     }
     // Re-establish the reserve for the next exhaustion (the shed above freed a
     // descriptor, so this normally succeeds).
-    *reserve = listener.try_clone().ok();
+    *reserve = acquire_reserve_descriptor(listener, "fd-exhaustion reserve re-establishment");
 }
 
 fn is_transient_accept_error(error: &std::io::Error) -> bool {

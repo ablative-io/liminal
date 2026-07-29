@@ -6,7 +6,9 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::ServerError;
-use crate::server::listener::{loopback_interrupt_target, shed_on_fd_exhaustion};
+use crate::server::listener::{
+    acquire_reserve_descriptor, loopback_interrupt_target, shed_on_fd_exhaustion,
+};
 
 use super::checks::{SharedReadinessState, health_check, readiness_check};
 
@@ -105,9 +107,17 @@ impl HealthServerHandle {
         // (spurious) socket rather than serving it — at most one spurious accept
         // per interrupt. If the worker already exited (a real accept then flag
         // check), the listener is gone and this connect fails fast; the join then
-        // returns immediately.
-        if let Ok(waker) = TcpStream::connect(self.interrupt_target) {
-            drop(waker);
+        // returns immediately. A failure while the worker is still parked in
+        // `accept` is the other case, and there nothing else will wake it — the
+        // join below blocks forever, so it is named rather than swallowed.
+        match TcpStream::connect(self.interrupt_target) {
+            Ok(waker) => drop(waker),
+            Err(error) => tracing::warn!(
+                interrupt_target = %self.interrupt_target,
+                %error,
+                "health endpoint accept interrupt could not connect; the accept \
+                 worker will only stop if it has already exited"
+            ),
         }
 
         worker.join().map_err(|_| ServerError::HealthEndpoint {
@@ -218,7 +228,7 @@ fn serve(
 ) -> Result<(), ServerError> {
     // One reserve descriptor held for the shed-with-spare-fd EMFILE policy,
     // reusing the leg-1 helper.
-    let mut reserve = listener.try_clone().ok();
+    let mut reserve = acquire_reserve_descriptor(listener, "health endpoint listener");
     while !shutdown.load(Ordering::SeqCst) {
         accept_attempts.fetch_add(1, Ordering::SeqCst);
         match listener.accept() {
@@ -236,7 +246,21 @@ fn serve(
                     if shutdown.load(Ordering::SeqCst) {
                         false
                     } else {
-                        *slot = stream.try_clone().ok();
+                        // A failed clone leaves the slot empty while the request
+                        // is still served: `stop_worker` then finds nothing to
+                        // interrupt, so shutdown must wait out this request's
+                        // read timeout instead of cutting it short.
+                        *slot = match stream.try_clone() {
+                            Ok(clone) => Some(clone),
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    "health endpoint request stream could not be retained; \
+                                     shutdown cannot interrupt this request"
+                                );
+                                None
+                            }
+                        };
                         true
                     }
                 };

@@ -19,7 +19,9 @@ use super::AcceptorSettings;
 use super::supervisor::HandshakeSupervisor;
 use crate::ServerError;
 use crate::config::types::WebSocketConfig;
-use crate::server::listener::{loopback_interrupt_target, shed_on_fd_exhaustion};
+use crate::server::listener::{
+    acquire_reserve_descriptor, loopback_interrupt_target, shed_on_fd_exhaustion,
+};
 
 #[cfg(test)]
 #[path = "listener_tests.rs"]
@@ -156,9 +158,18 @@ impl WebSocketListener {
         // Explicit cross-platform interrupt (mirrors the main listener): a single
         // self-connect wakes the blocked `accept`; the worker sheds the woken
         // socket via its post-accept shutdown recheck. If the worker already
-        // exited, the listener is gone and this connect fails fast.
-        if let Ok(waker) = TcpStream::connect(self.interrupt_target) {
-            drop(waker);
+        // exited, the listener is gone and this connect fails fast. A failure
+        // while the worker is still parked in `accept` is the other case, and
+        // there nothing else will wake it — the join below blocks forever, so it
+        // is named rather than swallowed.
+        match TcpStream::connect(self.interrupt_target) {
+            Ok(waker) => drop(waker),
+            Err(error) => tracing::warn!(
+                interrupt_target = %self.interrupt_target,
+                %error,
+                "websocket listener accept interrupt could not connect; the accept \
+                 worker will only stop if it has already exited"
+            ),
         }
         worker.join().map_err(|_| ServerError::ListenerAccept {
             message: "websocket listener accept worker terminated unexpectedly".to_owned(),
@@ -194,7 +205,7 @@ fn accept_loop(
     shed_count: &AtomicU64,
 ) -> Result<(), ServerError> {
     // One reserve descriptor held for the shed-with-spare-fd EMFILE policy.
-    let mut reserve = listener.try_clone().ok();
+    let mut reserve = acquire_reserve_descriptor(listener, "websocket connection listener");
     while !shutdown.load(Ordering::SeqCst) {
         accept_attempts.fetch_add(1, Ordering::SeqCst);
         match listener.accept() {
