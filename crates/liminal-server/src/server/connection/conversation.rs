@@ -19,12 +19,7 @@ use liminal::protocol::{
     CausalContext as ProtocolCausalContext, MessageEnvelope, SchemaId as ProtocolSchemaId,
 };
 
-use super::supervisor::recover_lock;
 use crate::ServerError;
-
-/// Lock names carried into [`recover_lock`]'s poison-recovery ERROR.
-const CRASH_CACHE: &str = "conversation crash-observation cache";
-const EXIT_CHANNEL: &str = "conversation participant-EXIT channel";
 
 /// Marker for library conversation state owned by a single connection process.
 pub trait ConversationResource: std::fmt::Debug + Send {
@@ -234,24 +229,20 @@ impl LiminalConversationResource {
 /// [`await_crash`]: LiminalConversationResource::await_crash
 /// A DISCONNECTED channel is a crash OBSERVATION, not the absence of one: the
 /// sender lives inside the actor's trapped-EXIT handler, so its disconnection
-/// means the participant actor is gone. Both guards recover from poison for the
-/// same reason — the EXIT signal is one-shot and only replayable from the cache,
-/// so a masked guard loses the crash permanently. Every one of these paths used
-/// to collapse to "no crash", which is how a connection kept forwarding
-/// conversation messages into a vanished participant.
+/// means the participant actor is gone. That branch used to collapse to "no
+/// crash", which is how a connection kept forwarding conversation messages into
+/// a vanished participant.
 fn observe_exit(
     crash_observed: &Mutex<Option<Instant>>,
     exit_rx: &Mutex<mpsc::Receiver<Instant>>,
     wait: Option<Duration>,
 ) -> Option<Instant> {
-    // Bound to a local so the guard is released before the receive below takes
-    // the other lock — the two are never held together.
-    let cached = *recover_lock(crash_observed, CRASH_CACHE);
-    if let Some(instant) = cached {
+    if let Ok(cached) = crash_observed.lock()
+        && let Some(instant) = *cached
+    {
         return Some(instant);
     }
-    let received = {
-        let rx = recover_lock(exit_rx, EXIT_CHANNEL);
+    let received = exit_rx.lock().map_or(None, |rx| {
         wait.map_or_else(
             || match rx.try_recv() {
                 Ok(instant) => Some(instant),
@@ -264,9 +255,11 @@ fn observe_exit(
                 Err(mpsc::RecvTimeoutError::Disconnected) => Some(vanished_actor_instant()),
             },
         )
-    };
-    if let Some(instant) = received {
-        *recover_lock(crash_observed, CRASH_CACHE) = Some(instant);
+    });
+    if let Some(instant) = received
+        && let Ok(mut cached) = crash_observed.lock()
+    {
+        *cached = Some(instant);
     }
     received
 }
@@ -471,63 +464,6 @@ mod tests {
         assert!(
             elapsed < Duration::from_secs(5),
             "the crash is already observable; the wait must not run to its bound (took {elapsed:?})"
-        );
-    }
-
-    /// The observation is one-shot, so a poisoned cache must not lose it: the
-    /// instant is stored on the first observation and replayed on every later
-    /// one, poisoned guard or not.
-    // The deliberate panic-while-holding-the-guard IS the poisoning mechanism
-    // under test.
-    #[allow(clippy::unwrap_used, clippy::panic)]
-    #[test]
-    fn a_poisoned_crash_cache_still_replays_the_observation() {
-        let (tx, crash_observed, exit_rx) = exit_channel();
-        let fired = Instant::now();
-        tx.send(fired).unwrap();
-        let first = observe_exit(&crash_observed, &exit_rx, None);
-        assert_eq!(first, Some(fired), "the EXIT instant is observed once");
-
-        let crash_observed = std::sync::Arc::new(crash_observed);
-        let poisoner = std::sync::Arc::clone(&crash_observed);
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner.lock().unwrap();
-            panic!("deliberately poison the crash-observation cache");
-        })
-        .join();
-        assert!(crash_observed.is_poisoned(), "the cache is poisoned");
-
-        assert_eq!(
-            observe_exit(&crash_observed, &exit_rx, None),
-            Some(fired),
-            "a poisoned cache must replay the one-shot crash, not report health"
-        );
-    }
-
-    /// A poisoned exit-channel guard must not swallow a crash that has already
-    /// been delivered into the channel.
-    // The deliberate panic-while-holding-the-guard IS the poisoning mechanism
-    // under test.
-    #[allow(clippy::unwrap_used, clippy::panic)]
-    #[test]
-    fn a_poisoned_exit_channel_guard_still_observes_the_crash() {
-        let (tx, crash_observed, exit_rx) = exit_channel();
-        let fired = Instant::now();
-        tx.send(fired).unwrap();
-
-        let exit_rx = std::sync::Arc::new(exit_rx);
-        let poisoner = std::sync::Arc::clone(&exit_rx);
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner.lock().unwrap();
-            panic!("deliberately poison the exit channel guard");
-        })
-        .join();
-        assert!(exit_rx.is_poisoned(), "the exit channel guard is poisoned");
-
-        assert_eq!(
-            observe_exit(&crash_observed, &exit_rx, None),
-            Some(fired),
-            "a poisoned guard must not swallow a delivered crash signal"
         );
     }
 

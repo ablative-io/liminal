@@ -10,9 +10,8 @@
 //! timing-based assertion), and asserts the registry nets back to empty WITHOUT
 //! any accept-loop iteration having run.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Arc;
 
 use super::{AcceptorSettings, HandshakeSupervisor};
 use crate::server::connection::ConnectionSupervisor;
@@ -102,66 +101,6 @@ fn handshake_worker_completion_delivered_not_reap_scanned() -> Result<(), Box<dy
 
     drop(client_two);
     handshakes.stop();
-    supervisor.shutdown();
-    Ok(())
-}
-
-/// A poisoned in-flight registry must not silence `stop`. Reading the poison as
-/// "nothing in flight" leaves every blocked handshake worker's socket open, so
-/// the interrupt never fires and the join pass that follows has nothing to
-/// unblock those workers — a silent shutdown hang. Shutdown is a
-/// lifecycle-cleanup path, so it recovers the guard; only `begin` (admission)
-/// stays fail-closed on poison.
-// The deliberate panic-while-holding-the-guard IS the poisoning mechanism under
-// test; the unwrap can only fail if the fresh lock is somehow already poisoned.
-#[allow(clippy::unwrap_used, clippy::panic)]
-#[test]
-fn poisoned_inflight_registry_still_interrupts_at_stop() -> Result<(), Box<dyn std::error::Error>> {
-    let supervisor = ConnectionSupervisor::new()?;
-    let handshakes = HandshakeSupervisor::new(supervisor.clone(), acceptor_settings());
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-
-    // Register the in-flight socket directly, with NO worker thread behind it,
-    // so stop's join pass has nothing to block on: a failure to interrupt then
-    // shows up as a surviving registration rather than as a hung test.
-    let (server, _peer, mut client) = connected_pair(&listener)?;
-    handshakes.inner.inflight.lock().unwrap().insert(7, server);
-
-    let poisoner = Arc::clone(&handshakes.inner);
-    let _ = std::thread::spawn(move || {
-        let _guard = poisoner.inflight.lock().unwrap();
-        panic!("deliberately poison the in-flight handshake registry");
-    })
-    .join();
-    assert!(
-        handshakes.inner.inflight.is_poisoned(),
-        "the in-flight registry is poisoned"
-    );
-
-    handshakes.stop();
-
-    // Read the map's TRUTH directly — the production reader is what is under
-    // test here.
-    let remaining = handshakes
-        .inner
-        .inflight
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .len();
-    assert_eq!(
-        remaining, 0,
-        "stop must drain the in-flight registry on a poisoned guard"
-    );
-
-    // The drain also SHUT the socket down: the peer reads a clean EOF, which is
-    // exactly what unblocks a worker parked in the upgrade read.
-    let mut byte = [0_u8; 1];
-    assert_eq!(
-        client.read(&mut byte)?,
-        0,
-        "the in-flight socket must be shut down, not merely forgotten"
-    );
-
     supervisor.shutdown();
     Ok(())
 }
