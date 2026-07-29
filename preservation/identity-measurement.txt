@@ -1,0 +1,10 @@
+IDENTITY MEASUREMENT — process-vs-row, taken while the process still runs
+measured_at = 2026-07-29T22:47:29Z
+machine = Annabel's box (Annabels-MacBook-Pro)
+seat = Mercury Toast
+env_session = 5b70322e-e7a9-451c-91ca-a3dfa7b05bd9
+member_id (server-derived, author_id on lane post cb5caed7) = 5b70322e-e7a9-451c-91ca-a3dfa7b05bda
+transcript_path (harness) = .../-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9.jsonl
+scratchpad_path (harness) = /private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad
+message-search skill self-description: 'Your session ID: 5b70322e-e7a9-451c-91ca-a3dfa7b05bd9'
+note: measurement of the live process env, not a prediction; Athena's prediction was env_session = ...bd9 (parent's member id per the minting scheme)
