@@ -450,4 +450,80 @@ mod tests {
         assert_eq!(wake_count.load(Ordering::SeqCst), idle_count);
         Ok(())
     }
+
+    /// A waker whose connection scheduler is gone: `fire()` reports `false`.
+    /// This is the real production shape — the waker holds the scheduler weakly
+    /// precisely so it can outlive it — reached here by dropping the scheduler.
+    fn dead_waker() -> Result<ReadyWaker, Box<dyn std::error::Error>> {
+        let scheduler = Arc::new(
+            beamr::scheduler::Scheduler::with_services(
+                beamr::scheduler::SchedulerConfig {
+                    thread_count: Some(1),
+                    ..beamr::scheduler::SchedulerConfig::default()
+                },
+                beamr::scheduler::SchedulerServices::from_config().owned_readiness(),
+                Arc::new(beamr::module::ModuleRegistry::new()),
+            )
+            .map_err(|message| format!("scheduler startup failed: {message}"))?,
+        );
+        let waker = ReadyWaker::new(
+            &scheduler,
+            1,
+            beamr::atom::Atom::OK,
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        drop(scheduler);
+        assert!(
+            !waker.fire(),
+            "a scheduler-less waker must report no delivery"
+        );
+        Ok(waker)
+    }
+
+    /// Both publication paths return `Ok(true)` — "accepted, and the connection
+    /// will be woken" — while discarding `fire()`'s report that the wake was NOT
+    /// delivered. The queued work then sits in the inbox with nothing scheduled
+    /// to drain it. Usually that is a connection already tearing down and the
+    /// lost wake is correct, but it is never currently DISTINGUISHABLE from a
+    /// stranded publication, because nothing is said either way.
+    #[test]
+    fn an_undelivered_ready_wake_is_reported() -> Result<(), Box<dyn std::error::Error>> {
+        let incarnation = ConnectionIncarnation::new(21, 5);
+        let registry = ParticipantPublicationRegistry::default();
+        let inbox = ParticipantPublicationInbox::new(3);
+        registry.register(incarnation, &inbox, dead_waker()?)?;
+
+        // Leg 1: the conversation-ready notification.
+        let log = crate::test_log::CapturedLog::default();
+        let accepted = log.capture(|| registry.notify(incarnation, 7))?;
+        assert!(accepted, "the publication is still accepted into the inbox");
+        assert!(inbox.has_pending()?, "and it is genuinely queued");
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains("ready wake was not delivered"),
+            "an undelivered wake must be reported, got: {output}"
+        );
+
+        // Leg 2: the observer-progress transfer, which fires the same waker.
+        let ready = inbox.take_ready()?;
+        assert_eq!(ready.conversations, vec![7]);
+        let target = registry
+            .observer_target(incarnation)?
+            .ok_or("the live registration must yield an observer target")?;
+        let log = crate::test_log::CapturedLog::default();
+        let accepted = log.capture(|| {
+            target.publish(super::ObserverPublication {
+                conversation_id: 7,
+                refused_epoch: 1,
+                observer_progress: 2,
+            })
+        })?;
+        assert!(accepted, "the observer publication is still accepted");
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains("ready wake was not delivered"),
+            "an undelivered observer wake must be reported, got: {output}"
+        );
+        Ok(())
+    }
 }
