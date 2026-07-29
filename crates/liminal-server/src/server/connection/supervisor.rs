@@ -310,10 +310,11 @@ impl ConnectionSupervisor {
                 .inner
                 .enqueue_control(connection.pid, ConnectionControl::ForceClose)
             {
+                // Observation, not diagnosis — see `broadcast_control`.
                 tracing::warn!(
                     connection_pid = connection.pid,
                     peer_addr = ?connection.peer_addr,
-                    "failed to request forceful connection close; process is not live"
+                    "forceful connection close was not published to the process"
                 );
             }
         }
@@ -468,16 +469,21 @@ impl ConnectionSupervisor {
                 runtime: Arc::downgrade(&self.inner.runtime),
             })
         } else {
-            // The process is gone AND the control provably never reached a
-            // consumer: `enqueue_control` returns false only when its failed-wake
-            // rollback REMOVED the queued control (S8 — an entry a drain already
-            // consumed counts as published and returns true, with the slot
-            // lifecycle carrying the delivery truth). Dropping the now-unreachable
-            // reply slot here therefore keeps the publication invariant exact on
-            // every `Err` path.
+            // The control provably never reached a consumer: `enqueue_control`
+            // returns false only when the control was never queued at all, or
+            // when its failed-wake rollback REMOVED the queued control (S8 — an
+            // entry a drain already consumed counts as published and returns
+            // true, with the slot lifecycle carrying the delivery truth).
+            // Dropping the now-unreachable reply slot here therefore keeps the
+            // publication invariant exact on every `Err` path. The message
+            // states that outcome rather than naming a cause this branch cannot
+            // distinguish — the refused-queue case has already warned with its
+            // own error.
             self.inner.runtime.cancel_push(correlation_id);
             Err(ServerError::ListenerAccept {
-                message: format!("cannot push to connection process {pid}: process is not live"),
+                message: format!(
+                    "cannot push to connection process {pid}: the control was not published"
+                ),
             })
         }
     }
@@ -966,7 +972,17 @@ fn run_reclaim_reactor(
                 };
                 runtime.reap_crashed(&scheduler);
             }
-            Err(_) => return,
+            Err(error) => {
+                // The sole crash-reclamation source for a process that dies
+                // without a final slice is ending. Named at the same volume as
+                // the startup branch that finds no subscription at all.
+                tracing::warn!(
+                    %error,
+                    "connection reclamation reactor stopping; external-termination \
+                     reclamation has no further TOLD exit source"
+                );
+                return;
+            }
         }
     }
 }
@@ -1240,11 +1256,14 @@ impl SupervisorInner {
     fn broadcast_control(&self, control: &ConnectionControl) {
         for connection in self.runtime.active_connections() {
             if !self.enqueue_control(connection.pid, control.clone()) {
+                // Observation, not diagnosis: the routine cause is a process
+                // that is no longer live, but a refused control queue reaches
+                // here too and has already warned with its own error.
                 tracing::debug!(
                     connection_pid = connection.pid,
                     peer_addr = ?connection.peer_addr,
                     ?control,
-                    "connection control message skipped because process is not live"
+                    "connection control message was not published to the process"
                 );
             }
         }
@@ -1272,7 +1291,16 @@ impl SupervisorInner {
         // the queue, so a non-`Copy` (push) control can still be located and pulled
         // back out if the scheduler wakeup fails.
         let removal_key = control.clone();
-        if self.runtime.push_control(pid, control).is_err() {
+        if let Err(error) = self.runtime.push_control(pid, control) {
+            // The cause is only knowable HERE. Callers see a bare `false` and
+            // used to render every one of them as "process is not live", which
+            // is a lie about a live process whose control queue refused the
+            // entry — and it discarded the one error that said what happened.
+            tracing::warn!(
+                connection_pid = pid,
+                %error,
+                "connection control queue refused the entry; the control was never queued"
+            );
             return false;
         }
         // Deterministic test seam in the insert->wake window (S8 staging).
