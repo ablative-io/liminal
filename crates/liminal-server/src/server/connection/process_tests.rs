@@ -1581,6 +1581,131 @@ fn publish_after_rejected_connect_is_still_closed() {
     ));
 }
 
+/// Stray server-to-client-only / unknown inbound frames keep the no-teardown
+/// `NoResponse` semantics (a confused or malicious client must not be able to
+/// tear the connection down with a stray frame), but each one must emit a warn
+/// naming the frame kind instead of vanishing silently.
+#[test]
+fn ignored_inbound_frames_warn_with_frame_kind() {
+    let cases: Vec<(Frame, &str)> = vec![
+        (
+            Frame::Push {
+                flags: 0,
+                stream_id: 1,
+                correlation_id: 7,
+                payload: Vec::new(),
+            },
+            "push",
+        ),
+        (
+            Frame::Deliver {
+                flags: 0,
+                stream_id: 1,
+                delivery_seq: 1,
+                envelope: envelope(b"stray".to_vec()),
+            },
+            "deliver",
+        ),
+        (
+            Frame::WorkerRegisterAck {
+                flags: 0,
+                outcome: WorkerRegisterOutcome::Accepted,
+            },
+            "worker_register_ack",
+        ),
+        (
+            // NOT the participant frame type: that arm has its own dispatch.
+            Frame::Unknown {
+                type_id: 0x7E,
+                flags: 0,
+                stream_id: 0,
+                payload: Vec::new(),
+            },
+            "unknown",
+        ),
+        (
+            Frame::ConnectAck {
+                flags: 0,
+                selected_version: SUPPORTED_PROTOCOL,
+                capabilities: 0,
+            },
+            "connect_ack",
+        ),
+        (
+            Frame::ConnectError {
+                flags: 0,
+                reason_code: 1,
+                message: None,
+            },
+            "connect_error",
+        ),
+        (
+            Frame::SubscribeAck {
+                flags: 0,
+                stream_id: 1,
+                subscription_id: 7,
+                selected_schema: schema_id(),
+            },
+            "subscribe_ack",
+        ),
+        (
+            Frame::SubscribeError {
+                flags: 0,
+                stream_id: 1,
+                reason_code: 1,
+                message: None,
+            },
+            "subscribe_error",
+        ),
+        (
+            Frame::PublishAck {
+                flags: 0,
+                stream_id: 1,
+                message_id: 7,
+            },
+            "publish_ack",
+        ),
+        (
+            Frame::PublishError {
+                flags: 0,
+                stream_id: 1,
+                reason_code: 1,
+                message: None,
+            },
+            "publish_error",
+        ),
+        (
+            Frame::ConversationError {
+                flags: 0,
+                stream_id: 1,
+                conversation_id: 7,
+                reason_code: 1,
+                message: None,
+            },
+            "conversation_error",
+        ),
+        (Frame::Pong { flags: 0 }, "pong"),
+    ];
+
+    for (frame, kind) in cases {
+        let (runtime, _services) = runtime_with(RecordingServices::default());
+        let mut state = ConnectionProcessState::default();
+        let log = crate::test_log::CapturedLog::default();
+
+        let action = log.capture(|| apply_frame(TEST_PID, &runtime, &mut state, frame));
+
+        assert!(
+            matches!(action, FrameAction::NoResponse),
+            "frame kind `{kind}`: the no-teardown NoResponse semantics must hold"
+        );
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains(kind),
+            "frame kind `{kind}`: expected a warn naming the kind, got: {output}"
+        );
+    }
+}
+
 fn envelope(payload: Vec<u8>) -> MessageEnvelope {
     MessageEnvelope::new(schema_id(), CausalContext::independent(), payload)
 }
