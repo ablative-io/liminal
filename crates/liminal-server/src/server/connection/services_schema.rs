@@ -28,6 +28,17 @@ const EMPTY_SCHEMA_BYTES: &[u8] = b"{}";
 /// never validated) keeps the permissive empty schema `{}` that accepts any JSON
 /// payload, deriving its protocol id from the `{}` bytes.
 pub(super) fn resolve_channel_schema(channel: &ChannelDef) -> ChannelSchema {
+    // A DECLARED schema_ref with no loaded schema means this config skipped
+    // validation (which loads the ref or fails): the channel silently runs
+    // permissive against the operator's declared intent, so say so. The
+    // legitimate `schema_ref: None` case stays silent, and resolution itself is
+    // unchanged either way.
+    if channel.schema_ref.is_some() && channel.loaded_schema.is_none() {
+        tracing::warn!(
+            channel = %channel.name,
+            "channel declares a schema_ref but no schema was loaded; running permissive (config skipped validation)"
+        );
+    }
     channel.loaded_schema.as_ref().map_or_else(
         || ChannelSchema {
             document: Value::Object(serde_json::Map::new()),
