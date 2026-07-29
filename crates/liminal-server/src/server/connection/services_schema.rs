@@ -114,4 +114,35 @@ mod tests {
         assert_eq!(resolved.document, serde_json::json!({}));
         assert_eq!(resolved.protocol_id, schema_id_from_bytes(b"{}"));
     }
+
+    /// A channel that DECLARED a schema_ref but has no loaded schema is a config
+    /// that skipped validation, silently running permissive — that must be
+    /// warned about, naming the channel. Resolution itself stays permissive.
+    #[test]
+    fn declared_but_unloaded_schema_warns_naming_the_channel() {
+        let log = crate::test_log::CapturedLog::default();
+
+        let resolved = log.capture(|| resolve_channel_schema(&channel(Some("orders.json"), None)));
+
+        assert_eq!(resolved.document, serde_json::json!({}));
+        let output = log.contents();
+        assert!(
+            output.contains("WARN") && output.contains("orders"),
+            "expected a warn naming the channel, got: {output}"
+        );
+    }
+
+    /// Control: the legitimate `schema_ref: None` case stays silent.
+    #[test]
+    fn schema_less_channel_resolves_without_warning() {
+        let log = crate::test_log::CapturedLog::default();
+
+        let _resolved = log.capture(|| resolve_channel_schema(&channel(None, None)));
+
+        let output = log.contents();
+        assert!(
+            !output.contains("WARN"),
+            "a schema-less channel must resolve silently, got: {output}"
+        );
+    }
 }
