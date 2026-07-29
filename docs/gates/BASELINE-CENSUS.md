@@ -71,6 +71,27 @@ withdrawn in full at `ab13367a` — cite the section, not the entry**).
 
 ## How to consume it
 
+**The runner is `scripts/baseline-compare.py`, and it reads this file** — so
+the pin stays the single source of truth and cannot drift from its consumer:
+
+```
+python3 scripts/baseline-compare.py <nextest.json.log> \
+    [--toolchain "<rustc -V of this run>"] [--tree <sha>] [--expect-total N]
+```
+
+Exit codes: **0 PASS · 1 RED · 2 instrument/usage error · 3 VOID.** It parses
+the JSON rather than matching text, so the suite/test population split and the
+compact-vs-spaced byte form cannot mislead it. It **refuses** rather than
+reports on an empty stream, an unparseable line, or a run that disagrees with
+itself — a dead producer and an empty world are the same number, so a zero is
+never compared. `--expect-total` is the stated-in-advance denominator for a
+tree whose `.rs` files moved, and it is echoed in the verdict.
+
+Proven both ways against committed evidence before first use: the baseline and
+release-tip streams PASS; a toolchain mismatch VOIDs; `--expect-total 1772`
+against the 1764 run REDs naming `-8`; empty, corrupt, and five-tests-missing
+streams are each refused with the correct diagnosis.
+
 Run the pinned command at the tree under gate, under the pinned toolchain,
 and compare `tests run` / `passed` / `skipped` against the block. If the diff
 from `baseline_tree` to the gated tree touches zero `.rs` files, the counts
