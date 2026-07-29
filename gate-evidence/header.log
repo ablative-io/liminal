@@ -1,0 +1,27 @@
+=== RELEASE BATTERY HEADER 2026-07-29T21:21:29Z | run=main-baseline ===
+machine: Annabel's box (Annabels-MacBook-Pro) | operator: Mercury Toast (5b70322e-e7a9-451c-91ca-a3dfa7b05bda)
+--- assertion 1: Seth's two-directional tool preflight ---
+resolved: pgrep -> /usr/bin/pgrep
+resolved: ps -> /bin/ps
+resolved: sed -> /usr/bin/sed
+pgrep discriminates (same-user population): pgrep -x sleep -> own child pid 58256 (real pid, not silence)
+disclosed limit: pgrep blind to ROOT-owned processes on this box (launchd probe silent; ps -p 1 sees it); census population = same-user processes, which is where compiles live
+/private/tmp/claude-501/-Users-annabel-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/release-battery-header.sh: line 31: 58256 Terminated: 15          sleep 397
+ps discriminates ALIVE: ps -p 58250 (own shell) -> ALIVE
+ps discriminates DEAD: ps -p 999999 -> DEAD
+--- assertion 2: denominator identity (two-run form; per-run record) ---
+tree under battery: c9218279a5c187c977161ea3d1d9eb2e07d6379b (c921827 merge: record SDK-010 under 0.5.1 — the cure frame consumes)
+range c921827..62d9b80: 7 paths, 0 .rs files
+identity: run-1 (c921827) count MUST equal run-2 (62d9b80) count exactly; drift either way = RED, both numbers reported, no diagnosis
+--- assertion 3 (pre-registered): four-way reconciliation asserted at THIS run post-Summary ---
+started == ok+failed+ignored; suite totals agree; nextest totals agree; JSON ignored == Summary skipped
+--- assertion 4 (pre-registered): exits from COMPLETE.marker = PIPESTATUS[0] x3, not Summary alone ---
+--- runner pin: hash + mode ---
+runner: /Users/annabel/Developer/ablative/stack/liminal/.worktrees/leg-sdk/gate-evidence/canon-r3-local-d4.as-run.sh
+sha256: 82ea8eac3f9e0bf576d784bc20fa1c410fd48a94ebfc765aeb6d816abcbc49f9
+mode: committed 100644 (non-executable) -> invoked as: bash <path>
+--- MEMBER_ID kind check (load-bearing: r3 line 20 takes env unvalidated) ---
+MEMBER_ID == server-derived member id (…bda): OK
+--- launch-env absences ---
+confirmed absent: AMP_ITERS/AMP_PEERS/AMP_BURNERS, CONFORMANCE_RESULTS_DIR, RUST_LOG, LIMINAL_*, DATABASE_URL; SET: nothing
+=== HEADER COMPLETE 2026-07-29T21:21:29Z: all pre-claim assertions PASSED — claim may be taken ===

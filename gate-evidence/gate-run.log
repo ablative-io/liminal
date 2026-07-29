@@ -1,0 +1,17 @@
+ 7:21  up 3 days, 15:18, 1 user, load averages: 2.28 3.09 2.46
+2026-07-29T21:21:29Z claim acquired, phase=draining
+2026-07-29T21:21:29Z floor quiet at census; phase=running
+     Summary [ 130.895s] 1764 tests run: 1764 passed (3 slow, 1 leaky), 0 skipped
+DOC TESTS: NOT COVERED by this battery (no doc-test leg in the canonical script)
+ 7:25  up 3 days, 15:22, 1 user, load averages: 3.74 3.71 2.88
+battery=COMPLETE
+seat=Mercury Toast
+member_id=5b70322e-e7a9-451c-91ca-a3dfa7b05bda
+pid=58281
+started_at=2026-07-29T21:21:29Z
+finished_at=2026-07-29T21:25:08Z
+check_exit=0
+clippy_exit=0
+nextest_exit=0
+2026-07-29T21:25:08Z battery complete; exits check=0 clippy=0 nextest=0
+2026-07-29T21:25:08Z claim released (own claim, pid 58281)

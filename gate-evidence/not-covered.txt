@@ -1,0 +1,1 @@
+DOC TESTS: NOT COVERED by this battery (no doc-test leg in the canonical script)
