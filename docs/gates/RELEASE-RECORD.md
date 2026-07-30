@@ -463,7 +463,7 @@ not general** (Athena at the published `.crate`s, routed `75668b53`). Published
 
 | Exposed type | Defined in | Published versions of the DEFINING crate | Crosses the seam? |
 |---|---|---|---|
-| `ComponentId`, `Capability`, `CheckVerdict`, `CapabilityDenied` | `frame-capability` (re-exported through frame-core) | **one, ever — `0.1.0`**; both frame-core versions depend on it. **⚠️ AN INVARIANT NOTHING DECLARES — see below** | **yes — one type each, FOR AS LONG AS THAT HOLDS** |
+| `ComponentId`, `Capability`, `CheckVerdict`, `CapabilityDenied` | `frame-capability` (re-exported through frame-core) | **one, ever — `0.1.0`**, and **all three published frame-cores require `^0.1.0`**, which is the actual cause — see the withdrawal below | **yes — one type each** |
 | `CapabilityCheckError` | **frame-core's own `pub enum`** | two, resolved twice | **NO — this is the seam** |
 
 `CapabilityCheckError` is exposed twice over — as
@@ -483,30 +483,76 @@ surface-level count of shared types predicts nothing on its own — she killed
 her own earlier *four-of-five-shared* inference with this, on the grounds that
 it reached the right answer **by an invalid route.**
 
-### ⚠️ ★ A SINGLE-VERSION CRATE IS AN INVARIANT NOTHING DECLARED — and this changes what §4 is about
+### ⚠️ WITHDRAWN: "a frame-capability publish splits the seam." THE OBSERVATION WAS TRUE, THE MECHANISM WAS INVENTED
 
-**The four types in the table above cross the seam for exactly one reason:
-`frame-capability` has published exactly one version, ever.** A `ComponentId`
-minted through frame-core `0.3.0` satisfies a `frame-state 0.2.0` parameter
-expecting one through `0.2.0` **because there is only one `frame-capability`
-for both to route to.** Nothing anywhere states that this must remain true.
-There is no pin expressing it, no test asserting it, and no diagnostic that
-fires when it stops.
+**`0efd23f` claimed that publishing `frame-capability 0.2.0` would convert four
+types that cross the seam into four that do not, and called it the strongest
+argument in this file. It is false and it is withdrawn.** It stood for about
+three minutes. **Annotated rather than deleted, because the defect is the
+file's own subject.**
 
-**⇒ THE PUBLISH THAT BREAKS IT WILL LOOK COMPLETELY ROUTINE.** `frame-capability
-0.2.0` is an ordinary release by every document in §1 — a clean subject, a
-correct manifest, an honest tag — and it silently converts *four types that
-cross the seam* into *four types that do not*, turning a narrow latent break
-into a wide one, in a repo whose lock nobody re-reads on someone else's
-release.
+**Measured at `index.crates.io` by me, 2026-07-30, User-Agent set, positive
+control `serde` = `HTTP-200`/316 versions and negative control
+`zzq-hermes-nonexistent-crate-xyz` = `HTTP-404` in the same run** (independently
+of Athena, who measured it first and whose result this reproduces):
 
-**This is the strongest argument in the file for the gate in the banner**,
-because it is the case where every one of the six documents reads clean and the
-resolved graph is what moved. **Cally has frozen `frame-capability`'s RELEASE
-until the re-pin wave lands** — the crate is open, publishing it comes to him
-first. **That is a human holding an invariant no machine is holding**, which is
-precisely the shape this file exists to make visible: it works, it is not
-durable, and it does not survive him being unavailable.
+```
+frame-core 0.1.0  ->  frame-capability ^0.1.0
+frame-core 0.2.0  ->  frame-capability ^0.1.0
+frame-core 0.3.0  ->  frame-capability ^0.1.0
+frame-capability published: 0.1.0 only (yanked=false)
+```
+
+**All three published frame-cores require the SAME range**, and `^0.1.0` on a
+`0.x` crate is `>=0.1.0, <0.2.0`. So `frame-capability 0.1.z` unifies to one
+copy and the four types stay one type each; **`frame-capability 0.2.0` is
+outside every requirement in the graph and nothing can resolve to it without a
+manifest change. The fuse I described is INERT.**
+
+**★ THE DEFECT, AND IT IS WHY THIS STAYS IN THE FILE: I READ A STATE AND
+INFERRED A RULE.** "One published version, ever" was **true**, sitting in plain
+sight, and it is a *coincidence of the present state* — the **cause** is
+frame-core's requirement range, one `curl` away, which nobody read. **A true
+observation with an invented mechanism attached is not a weaker claim than a
+false one; it is a false one wearing evidence.** Every existing law here guards
+against a document that misnames its object. **This is the case where the
+DOCUMENT WAS ACCURATE AND THE INFERENCE FROM IT WAS NOT** — and the accurate
+document is what made it persuasive.
+
+**The real invariant is about the other crate: ★ EVERY frame-core IN THE GRAPH
+REQUIRES THE SAME SEMVER-COMPATIBLE frame-capability RANGE.** That is a fact
+about **frame-core's manifest**, not about frame-capability's release history.
+**⇒ The fuse needs two frame-cores with semver-INCOMPATIBLE requirements
+resolved simultaneously** — a future frame-core requiring `^0.2.0` while an
+older one requiring `^0.1.0` is still in the graph, which is exactly argus's
+`frame-state 0.2.0 → frame-core 0.2.0` leg. **So the routine-looking publish
+that lights it is a frame-core publish, not a frame-capability one.**
+
+**And the guard is one checkable line rather than a hold** (relayed, ref named,
+not measured by me — frame is not my repo): the workspace pin at
+`3def5a1:Cargo.toml:66`, `frame-capability = { version = "0.1.0", path = ... }`,
+inherited by every frame crate via `workspace = true`. **If that string moves to
+`0.2.0` while any older frame-core stays published, the split becomes real.**
+
+### ★ A HOLD IS A HUMAN STANDING WHERE A GATE SHOULD BE
+
+**The one thing from the withdrawn claim that survives, promoted because it is
+better than the case that prompted it.** A release hold **looks like
+enforcement, has no release condition a machine can check, and fails silently
+the moment its holder is unavailable.**
+
+**And the sharper form, which this incident supplies and the general statement
+does not: the hold was not even holding the right variable.** It guarded
+`frame-capability`, a crate that cannot cause the fault. **A gate on
+`Cargo.toml:66` would have been CHECKABLE AND WRONG-IF-WRONG; the hold was
+UNCHECKABLE AND WRONG, and nothing about it could ever have said so.**
+
+**⇒ That is the strongest argument in this file for the gate in the banner, and
+it points at the holder rather than at any crate.** The shape stands intact —
+**every one of the six documents reads clean and the RESOLVED GRAPH is what
+moved** — with the correct trigger (a frame-core requirement bump) and the
+correct guard (a pinned string a battery can diff). **Same shape, right crate,
+measured.**
 
 ### ★ A re-export makes the IMPORT PATH and the TYPE'S IDENTITY two different facts, and only IDENTITY decides compatibility
 
