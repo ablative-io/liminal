@@ -246,6 +246,51 @@ become wasted work. **`SdkError` is not to be touched until (a) is answered.**
 
 ---
 
+## 4.1 RULED SHAPE AND THE CONSUMER SURFACE (build spec)
+
+**Ruled by Cally, on Athena's ergonomic measurement: ARGUMENT AT A NEW ENTRY
+POINT.** `RemoteConfig` is never stored or reused in frame — built fresh per
+attach and consumed on the next statement — so no field is forced. **0.5.2
+exists; SDK-011 stays off the wave.**
+
+**The consumers use TWO distinct families**, measured at venue `3def5a1`:
+
+| family | callers | current entry points |
+|---|---|---|
+| `PushClient` assoc. fns | `frame-host/src/announcer.rs:211`, `frame-view/src/publish/transport.rs:37` | `connect(address)`, `connect_with_auth(address, token)` |
+| `RemoteConfig` methods | `frame-conv/src/handle/attach.rs:47` | `connect_tcp`, `connect_tcp_with_auth`, `connect_websocket`, `connect_websocket_with_auth` |
+
+⇒ **the additive surface must cover both, or the boot-storm callsite — the
+announcer, which is the whole reason for the deadline — cannot set one.**
+`PushClient` is the family in the contended path.
+
+**Internally the deadline must reach the six `SETUP_TIMEOUT` consumers**
+(`remote.rs:64` is `pub(crate) const`; call sites in
+`tcp/subscription.rs`, `tcp/push_client.rs`, `websocket/subscription.rs`).
+**The constant stays as the default so behaviour is unchanged when the new
+entry points are not used.**
+
+**Every new public type is born `#[non_exhaustive]`** — free at birth, major
+forever after.
+
+---
+
+## 4.2 ⛔ EXECUTION CANNOT HAPPEN AT THIS SEAT
+
+**This seat cannot compile, test, or run a battery** — Tom's standing order, the
+same constraint that disqualified it as the frame publish executor. **SDK-011 is
+implementation work across the SDK's TCP and WebSocket setup paths plus tests.**
+
+**Code written here could not be compiled, could not be tested, and landing it
+on main would be a false green of exactly the class this document exists to
+prevent** — an artifact that looks complete and has never been executed once.
+
+⇒ **DESIGN AND SPEC AT THIS SEAT; BUILD AND BATTERY AT AN EXECUTOR SEAT.**
+Mercury demonstrably compiles (16/16 stranger-install at a credential-free seat)
+and is this seat's executor. **This is the usage doctrine, not a preference.**
+
+---
+
 ## 5. BLOCKING QUESTIONS — FRAME'S HALF, NOT TO BE INFERRED
 
 **(a) DECIDES EVERYTHING.** Does frame need to distinguish a setup timeout
