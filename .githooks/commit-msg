@@ -30,8 +30,23 @@
 #
 #   1. COMPOSE     write it, do not build it out of a shell string.
 #   2. RETAIN      cat > f <<'EOF'   -- the QUOTES are the whole control. An
-#                  editor or any non-shell-parsing tool also qualifies.
+#                  editor, a file-write tool, or printf '%s' with the text as an
+#                  ARGUMENT also qualify.  ⛔ NOT `echo`, NOT `print`, NOT
+#                  printf "$TEXT" (text in the FORMAT position is interpreted).
 #   3. COMMIT      git commit --cleanup=verbatim -F f
+#
+# ★ THE `echo` BAN IS A THIRD FACTOR, BELOW THE OTHER TWO, AND IT IS NOT SHELL
+# EXPANSION AT ALL -- it fires with expansion fully OFF. Measured AT THIS SEAT,
+# interpreter named: zsh 5.9 (/bin/zsh). On the single literal `a\nb  100% x`:
+#     echo          a \n b ...   14 bytes  -- backslash-n became a REAL NEWLINE
+#     printf '%s'   a \ n b ...  15 bytes  -- literal, faithful
+#     <<'EOF'       a \ n b ...  15 bytes  -- literal, faithful
+# Under zsh, `echo` interprets backslash escapes by default; under bash it does
+# not. So a retained message carrying \n, \t or \\ is silently rewritten with no
+# substitution involved. (Cally measured it; Apollo found the printf-format half.)
+# ⇒ A MEASUREMENT ABOUT AN INTERPRETER'S BEHAVIOUR MUST NAME THE INTERPRETER, OR
+#   IT IS AN UNLABELLED RUN. Every earlier table on this was taken in bash and
+#   labelled as if general; this seat composes in zsh, and the `echo` row flips.
 #
 # ★ STEP 2 WAS THE UNNAMED NOUN, and skipping it makes the audit REPORT SUCCESS.
 # `echo "a \`x\` b" > keep.txt` corrupts AT WRITE TIME; -F then lands that file
