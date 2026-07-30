@@ -116,14 +116,46 @@ gate names its own additions), never pattern-matched.
 
   | Artifact | Measurement | Class |
   |---|---|---|
-  | `gate-logs/fmt.log` | `cargo fmt --all --check` **exit 0**, and `report.json` records `log_sha256 = e3b0c442…` — **the sha256 of the empty string** | **NOT A DEFECT.** Empty is the correct output, and its emptiness is **already asserted** |
+  | `gate-logs/fmt.log` | **belongs to a DIFFERENT RUN — see the two-runs finding below** | **NOT PART OF THIS BATTERY AT ALL** |
   | `clippy.extract.jsonl` | `clippy.json.log` = 374 lines, **zero `compiler-message` records** | **LEGITIMATELY EMPTY, NOT ASSERTED** — clean run ⇒ empty extract is right, but nothing records that it was *observed* |
   | `check.extract.jsonl` | `check.json.log` = 374 lines, **zero diagnostics** | same |
   | `nextest.extract.jsonl` | **1764 tests ran** | **BROKEN** — empty is impossible here |
   | `census-at-start.txt` / `census-at-end.txt` | — | **BROKEN, AND WORST IN KIND:** an empty census cannot distinguish *no actors* from *could not look*, and it renders as QUIET — the tool-absence class, failing toward harm |
 
-  **⇒ THE DISCRIMINATOR IS NOT FILE SIZE, IT IS WHETHER EMPTY IS A LEGAL
-  OUTCOME FOR THAT PRODUCER** — and for the two that are legal, nothing in the
+- **🔴 THE CITED EVIDENCE BRANCH CONTAINS TWO DIFFERENT RUNS, AND NOTHING IN IT
+  SAYS SO.** Found 2026-07-30 while checking a claim I had made about one of
+  these files. `gate-evidence/` and `gate-logs/` describe **different
+  batteries, on different boxes, with different toolchains**:
+
+  | | `gate-evidence/*` | `gate-logs/report.json`, `fmt.log`, `clippy.log`, `tests.log` |
+  |---|---|---|
+  | when | **2026-07-29** 21:21→21:29Z | **2026-07-28** 05:09→05:17Z |
+  | who / where | **Mercury Toast, Annabel's box**, pid 58281 | **`Toms-MacBook-Pro.local`** |
+  | branch | the baseline battery | **`feat/handshake-protocol`** |
+  | commit | **`c921827`** (this pin's `baseline_tree`) | **`4c2a4d8`** — an *ancestor*, verified with `git merge-base --is-ancestor` |
+  | rustc | **1.97.1** (the pinned toolchain) | **1.92.0** |
+
+  **⇒ ANYONE READING `gate-logs/report.json` FOR THIS BATTERY'S PROVENANCE GETS
+  THE WRONG BOX, THE WRONG BRANCH, THE WRONG COMMIT AND THE WRONG TOOLCHAIN** —
+  and it is a valid, complete, internally consistent document, so nothing about
+  it looks wrong. **The counts are unaffected**: they derive from
+  `gate-evidence/nextest.json.log` (594364 bytes, the 07-29 run), not from
+  `gate-logs/tests.log` (203667 bytes, the 07-28 run) — **the size split is
+  itself the tell.**
+
+  **★ THIS IS A CLASS NO FRAMING, TRAILER, OR SIZE GUARD CATCHES.** Every such
+  check answers *"did the producer finish writing this?"* — and this artifact's
+  producer finished perfectly, **a day earlier, on another machine.**
+  ⇒ **A COMPLETENESS CHECK CANNOT ANSWER AN IDENTITY QUESTION. The frame must
+  carry the RUN'S IDENTITY — tree sha, claim pid, `started_at` — and the
+  consumer must compare it to the run it believes it is reading.** Without
+  that, a stale artifact is indistinguishable from a fresh one by construction.
+  **Whether these files were carried deliberately or left behind, nothing in
+  the branch distinguishes them, and only `report.json`'s own metadata reveals
+  it** — which is to say, only by reading the thing you were trying to trust.
+
+  **⇒ AND THE FILE-SIZE POINT BELOW STILL STANDS ON ITS OWN: THE DISCRIMINATOR
+  IS NOT FILE SIZE, IT IS WHETHER EMPTY IS A LEGAL OUTCOME FOR THAT PRODUCER** — and for the two that are legal, nothing in the
   evidence says the emptiness was measured rather than suffered. **A blanket
   size guard would false-RED the clean clippy and check runs**, which is why
   the fix is a trailer asserting an explicit count and not a non-zero check.
