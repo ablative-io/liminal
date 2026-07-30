@@ -18,6 +18,31 @@
 # the only detector -- and that is a habit, not a control, and habits are not
 # inheritable.
 #
+# ★ AND THAT HABIT DOES NOT EVEN COVER DELETION. Deletion is not always loud.
+# Cally's finding (his own table had suppressed stderr with 2>/dev/null -- our
+# forbidden pattern, in the measurement whose only sentinel IS stderr).
+# Re-measured here, interpreter and stdin BOTH named -- zsh 5.9:
+#
+#   stdin at EOF (/dev/null):
+#     test true false   exit SILENT: 0 bytes out, 0 bytes err.  UNDETECTABLE.
+#     seq join          72 / 115 bytes on stderr.               detectable.
+#   stdin OPEN (a pipe -- what an interactive substitution actually inherits):
+#     jq                BLOCKS FOREVER. The commit never returns.
+#
+# ⇒ `test` is in the undetectable half and is the most-backticked token in this
+#   estate. ARM 1's doubled-space scar is the ONLY signal that can catch it,
+#   which makes the --no-verify discipline on arm 1 load-bearing rather than
+#   fussy. The factor is NOT whether the token names a real command; `host`,
+#   `join` and `seq` all exist and are loud because they print usage errors.
+#   THE FACTOR IS WHETHER THE COMMAND WRITES TO STDERR WITH NO ARGUMENTS.
+#
+# ⇒ AND THE ANSWER DEPENDS ON WHAT STDIN IS ATTACHED TO. A substitution
+#   inherits the parsing shell's stdin, which differs between an interactive
+#   terminal, a script, a CI runner and an agent harness. `jq` is SILENT at EOF
+#   and HANGS on an open pipe -- same token, two different classes, no code
+#   change. A measurement of substitution behaviour must name the interpreter
+#   AND the stdin attachment, or it is an unlabelled run.
+#
 # ★ AND THERE IS NO SWEEP THAT FIXES THIS, because an ESCAPED backtick survives
 # `-m` as a literal: a message can land SHOWING backticks and still have had
 # other pairs consumed. ⇒ THE SET OF COMMIT MESSAGES PROVABLY SAFE FROM THEIR
