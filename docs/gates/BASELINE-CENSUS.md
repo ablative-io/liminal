@@ -106,16 +106,32 @@ gate names its own additions), never pattern-matched.
   `evidence/release-0.5.1-battery @ fbf444c` (blob sizes from
   `git ls-tree -r -l`): `gate-evidence/nextest.extract.jsonl`,
   `check.extract.jsonl`, `clippy.extract.jsonl`, `census-at-start.txt`,
-  `census-at-end.txt`, `gate-logs/fmt.log`. Two consequences, and they are not
-  the same severity. **The extracts are the machine-readable layer a consumer
-  naturally reaches for, and they are empty** — the numbers in this pin are
-  derivable, but only from the 594KB `nextest.json.log` beside them, so read
-  that and not the file whose name says `extract`. **The two census files are
-  worse in kind: an empty census cannot distinguish "no actors" from "could
-  not look", and it renders as QUIET** — the tool-absence class, failing
-  toward harm. Neither defect touches the counts, which reconcile four ways
-  above; both are disclosed rather than repaired here because repairing them
-  means re-running a battery, and the counts do not need one.
+  `census-at-end.txt`, `gate-logs/fmt.log`.
+
+  **⚠️ CORRECTED 2026-07-30 — I FILED THESE AS SIX DEFECTS AND THEY ARE THREE
+  DIFFERENT THINGS. I read a state (six empty files) and inferred a rule (six
+  faults), which is the same error I withdrew four hours earlier in
+  `RELEASE-RECORD.md` §4.** Measured at the evidence, not re-read from my own
+  note:
+
+  | Artifact | Measurement | Class |
+  |---|---|---|
+  | `gate-logs/fmt.log` | `cargo fmt --all --check` **exit 0**, and `report.json` records `log_sha256 = e3b0c442…` — **the sha256 of the empty string** | **NOT A DEFECT.** Empty is the correct output, and its emptiness is **already asserted** |
+  | `clippy.extract.jsonl` | `clippy.json.log` = 374 lines, **zero `compiler-message` records** | **LEGITIMATELY EMPTY, NOT ASSERTED** — clean run ⇒ empty extract is right, but nothing records that it was *observed* |
+  | `check.extract.jsonl` | `check.json.log` = 374 lines, **zero diagnostics** | same |
+  | `nextest.extract.jsonl` | **1764 tests ran** | **BROKEN** — empty is impossible here |
+  | `census-at-start.txt` / `census-at-end.txt` | — | **BROKEN, AND WORST IN KIND:** an empty census cannot distinguish *no actors* from *could not look*, and it renders as QUIET — the tool-absence class, failing toward harm |
+
+  **⇒ THE DISCRIMINATOR IS NOT FILE SIZE, IT IS WHETHER EMPTY IS A LEGAL
+  OUTCOME FOR THAT PRODUCER** — and for the two that are legal, nothing in the
+  evidence says the emptiness was measured rather than suffered. **A blanket
+  size guard would false-RED the clean clippy and check runs**, which is why
+  the fix is a trailer asserting an explicit count and not a non-zero check.
+  The numbers in this pin are derivable only from the 594KB
+  `nextest.json.log`, so read that and not the file whose name says `extract`.
+  None of this touches the counts, which reconcile four ways above; disclosed
+  rather than repaired because repairing means re-running a battery, and the
+  counts do not need one.
 - **Doc tests are not covered** — the canonical battery script has no
   doc-test leg (the runner's own disclosure line).
 - **The census quiet is a BOUNDARY claim, not a throughout claim** — the
