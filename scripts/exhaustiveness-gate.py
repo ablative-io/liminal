@@ -126,17 +126,60 @@ def census() -> tuple[int, int]:
             raise RuntimeError(f"git grep failed: {out.stderr.strip()}")
         return out.stdout.splitlines()
 
-    enums = sum(1 for l in grep("pub enum") if l.lstrip().startswith("pub enum"))
-    attrs = sum(1 for l in grep("non_exhaustive")
-                if l.lstrip().startswith("#[non_exhaustive]"))
-    # Positive control: the instrument must find a token that IS there. A zero
+    def leads(line: str, token: str) -> bool:
+        """THE predicate. Both controls below exercise THIS, not just grep."""
+        return line.lstrip().startswith(token)
+
+    enums = sum(1 for l in grep("pub enum") if leads(l, "pub enum"))
+    attrs = sum(1 for l in grep("non_exhaustive") if leads(l, "#[non_exhaustive]"))
+
+    # ---- CONTROLS: ONE OF EACH. A POSITIVE ALONE CANNOT DETECT A DEAD ONE. ---
+    #
+    # A harness that answers yes to everything answers yes to the positive
+    # control too. Only a negative control can catch that, and the tell is
+    # UNIFORMITY ACROSS THE AXIS THAT IS SUPPOSED TO DISCRIMINATE. Learned the
+    # hard way the same night this arm was added: a stdin-blocking probe of mine
+    # returned "blocks" for every token including three shell builtins that
+    # cannot block, and its positive control passed cleanly both times.
+    #
+    # POSITIVE (reach): the instrument must find a token that IS there. A zero
     # from a blind grep and a true absence are the same integer otherwise.
-    control = sum(1 for l in grep("pub struct")
-                  if l.lstrip().startswith("pub struct"))
-    if control == 0:
+    reach = sum(1 for l in grep("pub struct") if leads(l, "pub struct"))
+    if reach == 0:
         raise RuntimeError("positive control failed: 0 `pub struct` in "
                            f"{SRC} -- grep is blind, refusing to report a zero")
-    print(f"  census (positive control: {control} `pub struct` found)")
+
+    # NEGATIVE (discrimination): the instrument must be able to return ZERO.
+    absent = grep("zzq_liminal_absent_token_xyz")
+    if absent:
+        raise RuntimeError(f"negative control failed: {len(absent)} hits for a "
+                           "token that cannot exist -- grep is matching too "
+                           "much, refusing to report any count")
+
+    # PARTITION (the arm that actually protects the verdict). The dangerous
+    # direction is `attrs` reading HIGH: if the leading-token partition breaks,
+    # doc-comment PROSE mentioning non_exhaustive counts as a real attribute and
+    # this gate PASSES a breaking bump that carries none. Fail-open, and neither
+    # control above can see it -- both would still pass. So run the predicate
+    # over fixed lines whose answer is known, one that must count and two that
+    # must not. Synthetic on purpose: a repo-sourced sample only licenses a
+    # claim if it is SHOWN to contain the failure mode, and nothing guarantees
+    # this tree currently holds a mid-line mention.
+    for line, token, want in (
+        ("    #[non_exhaustive]",             "#[non_exhaustive]", True),
+        ("/// see #[non_exhaustive] above",   "#[non_exhaustive]", False),
+        ("// TODO add #[non_exhaustive]",     "#[non_exhaustive]", False),
+        ("pub enum Verb {",                   "pub enum",          True),
+        ("// a pub enum is not a pub enum",   "pub enum",          False),
+    ):
+        if leads(line, token) is not want:
+            raise RuntimeError(
+                f"partition control failed: leads({line!r}, {token!r}) returned "
+                f"{not want}, expected {want} -- the leading-token partition is "
+                "broken and prose would be counted as an attribute")
+
+    print(f"  census controls: POSITIVE {reach} `pub struct` found | "
+          f"NEGATIVE 0 hits for an impossible token | PARTITION 5/5")
     return enums, attrs
 
 
