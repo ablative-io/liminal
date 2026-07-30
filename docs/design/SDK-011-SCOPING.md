@@ -61,10 +61,41 @@ and WebSocket transports, and pinned by name in three tests.
 
 ## 3. THE SPLIT
 
+> ### ⚠️ 3.0 CORRECTION — THE FIRST DRAFT OF THIS SECTION WAS WRONG
+>
+> §3 originally read *"configurable setup deadline (builder/**config**…)"* and
+> called it additive. **Putting the deadline on `RemoteConfig` is BREAKING**, so
+> that draft had both halves major and no additive half at all.
+>
+> `crates/liminal-sdk/src/remote.rs:93` — `RemoteConfig` has **four public
+> fields and no private field**, no `#[non_exhaustive]`. Semver reference:
+> **"Major: adding a public field when no private field exists."** Adding a
+> *private* field is equally breaking here, because the rule that makes it minor
+> requires **at least one private field to already exist**. Struct literals break
+> either way. `ConnectionPoolConfig` (`connection/pool.rs:16`) has the same
+> all-public shape and the same constraint.
+>
+> **⇒ THE API SHAPE DECIDES THE SEMVER CLASS. That turns question (c) from a
+> matter of taste into a release-planning question.**
+>
+> - deadline as an **argument at a new entry point** → **adding a public fn is
+>   MINOR** → genuinely additive, ships 0.5.2.
+> - deadline as a **field on `RemoteConfig`** → **MAJOR** → no additive half
+>   exists; the whole of SDK-011 joins 0.6.0.
+
 | half | change | semver | ships as |
 |---|---|---|---|
-| **additive** | configurable setup deadline (builder/config, default stays the ratified 5 s) | minor | **0.5.2** — caret consumers float to it |
+| **additive** | setup deadline as an argument on a **new entry point**; every existing type keeps its construction shape; default stays the ratified 5 s | minor | **0.5.2** — caret consumers float to it |
 | **breaking** | `#[non_exhaustive]` on `SdkError` **+** the typed timeout variant | **major** | **0.6.0** — every consumer re-pins |
+
+### 3.2 AND FRAME NOT BREAKING IS A STATE, NOT A LICENCE
+
+At the venue, `crates/frame-conv/src/handle/attach.rs:33` builds config via
+**`RemoteConfig::new(...)`, not a struct literal** — so a new field would not
+break *frame* in practice. **That is not permission.** It is semver-major for
+every consumer we do not control, and "the one consumer I checked happens to be
+safe" is exactly the reasoning behind a claim I withdrew last week: **a true
+observation with an invented rule is a false claim wearing evidence.**
 
 ### ★ 3.1 THE TWO BREAKING ITEMS MUST RIDE THE SAME BUMP
 
@@ -73,6 +104,30 @@ spent and the attribute is still absent — so the next variant breaks again, an
 the one after that.** One bump buys the variant *and* makes every future variant
 additive permanently. **This is the cheapest moment that window will ever
 close.**
+
+---
+
+## 3.3 🔴 AN INERT KNOB ALREADY EXISTS, AND IT IS IN THIS EXACT AREA
+
+`ConnectionPoolConfig::timeout_millis` (`connection/pool.rs:20`) is
+**WRITE-ONLY**. Its only three occurrences in the Rust workspace are its
+declaration, its `new()` parameter, and its assignment. **It is never read —
+anywhere.** Verified with a positive control (`max_connections`, which *is* read
+elsewhere, proving the search can find reads).
+
+⇒ **a caller who sets `timeout_millis` reasonably believes they configured a
+timeout, and nothing happens.** No error, no warning, no effect. Same family as
+everything else this week: **a mechanism that appears to work and is silent.**
+
+This matters to SDK-011's remit: shipping a *second* timeout knob beside a dead
+one would leave two fields, one live and one inert, distinguishable only by
+reading the source. **Either wire it or delete it as part of this work** —
+deleting a public field is major and would ride 0.6.0; wiring it is a behaviour
+change on a field nobody can currently be depending on for effect.
+
+> ⚠️ A search for `timeout_millis` across the tree also returns hits in
+> `sdks/liminal-gleam` — **a different field of the same name in another SDK.**
+> Namespace confusion again, caught only because the control was in place.
 
 ---
 
