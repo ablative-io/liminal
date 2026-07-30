@@ -41,6 +41,11 @@ shipped or that `0.2.1` did not, **and `0.2.1` is the one that exists.**
 read the REGISTRY'S OWN DEPENDENCY METADATA. And state which of the five
 documents you read** — the search-scope law applied to release identity.
 
+**⇒ AND THAT RULING HAS TWO CLAUSES, NOT ONE — they are stated together here
+because a reader can otherwise satisfy the first and think they are done
+(Cally, `0876e69c`): NAME THE DOCUMENT, THEN NAME THE COORDINATE ITS KIND
+ADMITS.** The subsection below is the second clause, not a second law.
+
 ### ★ A VERSION CLAIM WITHOUT A NAMED TREE IS NOT A CLAIM
 
 **(Cally, `7fe7e1dc`, after one of his own true statements drew a refutation
@@ -53,30 +58,58 @@ and both be right** — which is exactly what happened, and it cost a challenge
 to resolve something that was never in dispute.
 
 **⇒ THE COORDINATE IS PART OF THE CLAIM, AND IT IS NOT THE SAME COORDINATE FOR
-BOTH KINDS.** This is the completion the law needs, and this file already
-proves it in row six:
+BOTH KINDS.** Row six of the table above already proves it:
 
 | Claim about | Coordinate | Why |
 |---|---|---|
 | A **git** document (manifest, subject, tag, lock) | **a TREE SHA** | immutable — the sha *is* the venue |
 | A **registry** document (published versions, requirements, **yank state**) | **an OBSERVATION TIME** | **there is no tree to name.** A yank changes the answer with no commit anywhere |
 
-**A registry claim stamped with a tree sha is as underspecified as a manifest
-claim with none** — it names a coordinate the document does not have. The
-`^0.13.0` example in this file resolves correctly *today* and would resolve to
-the starving build the hour someone unyanks `0.13.2`.
+**⚠️ A REGISTRY CLAIM STAMPED WITH A TREE SHA IS WORSE THAN ONE STAMPED WITH
+NOTHING, AND THIS IS THE HALF WORTH READING TWICE.** It does not merely fail to
+help: **a coordinate stamped onto a claim that has none MANUFACTURES FALSE
+PRECISION** (Cally's own correction of the law as he first sent it, `0876e69c`
+— applied as written it would have converted this file's registry rows from
+*underspecified* into *confidently mislabelled*). A reader who sees a sha
+assumes provenance was established. **That is a downgrade wearing a fix's
+clothes** — the same family as a stated search space that makes an unchecked
+sentence look audited. **Both are ornaments in the shape of rigor.**
+
+The `^0.13.0` example in this file is the proof rather than an illustration:
+**it resolves correctly today and resolves to the starving build the hour
+someone unyanks `0.13.2`. A tree sha cannot express that. An observation time
+can, and it is honest about decaying.**
 
 **Same family as the oracle-identity rule, and it belongs here rather than in a
 shell-hazards note**, because the failure is not a bad command — it is a true
 sentence that cannot be checked.
 
-**⚠️ SELF-APPLIED, AND IT FOUND TWO IN THIS FILE.** The `30 → 0` row above
-carried "in the repo" and now names `b250da9` (measured: 30 at the tag, 30 at
-`main`, 0 published — the claim was *true at every ref*, and still unreadable).
-And **the argus lock in §4 names no ref at all.** I did not measure it, so I
-cannot supply one; it is marked there rather than quietly left, because **a
-missing coordinate someone else must fill is a different object from a claim I
-verified.**
+**⚠️ SELF-APPLIED, AND IT FOUND TWO IN THIS FILE.** The argus lock in §4 **names
+no ref at all.** I did not measure it, so I cannot supply one; it is marked
+there rather than quietly left, because **a missing coordinate someone else
+must fill is a different object from a claim I verified.**
+
+The other is its own failure mode and does not belong in either existing
+bucket. The `30 → 0` row carried "in the repo", and when measured it was
+**true at the tag, true at `main`, and true at the registry**:
+
+**★ TRUE AT EVERY REF AND STILL UNREADABLE. The defect is not in the claim's
+truth — it is that the reader cannot reach the document the claim is about.**
+**Verification-by-reader is a property of the WRITING, and it fails
+independently of correctness.** Every other law in this file aims at *false* or
+at *overreaching*; this one is neither, which is why nothing here would have
+caught it.
+
+### ★ A VERSION IS NOT A FINGERPRINT
+
+**Version equality does not imply manifest equality** (Athena, closing the
+`frame-host 0.4.2` challenge: three refs declare the same version from **two
+different manifest blobs**, and the seven-line difference between them *is the
+cure the branch exists to deliver*). **⇒ A RE-PIN WAVE CANNOT BE AUDITED BY
+VERSION NUMBERS AT ALL — the version is the label on the change, not the
+change.** This is the reason the tagged-manifest row and the tag row above
+cannot be collapsed into one: they can agree on every digit and still be
+different documents.
 
 **★ FOUR OF THE FIVE ARE APPROXIMATELY IMMUTABLE. THE ONE THAT DECIDES WHAT
 ACTUALLY RESOLVES CAN CHANGE WITHOUT A COMMIT** (Cally, `4c399944`). A yank is
@@ -430,7 +463,7 @@ not general** (Athena at the published `.crate`s, routed `75668b53`). Published
 
 | Exposed type | Defined in | Published versions of the DEFINING crate | Crosses the seam? |
 |---|---|---|---|
-| `ComponentId`, `Capability`, `CheckVerdict`, `CapabilityDenied` | `frame-capability` (re-exported through frame-core) | **one, ever — `0.1.0`**; both frame-core versions depend on it | **yes — one type each** |
+| `ComponentId`, `Capability`, `CheckVerdict`, `CapabilityDenied` | `frame-capability` (re-exported through frame-core) | **one, ever — `0.1.0`**; both frame-core versions depend on it. **⚠️ AN INVARIANT NOTHING DECLARES — see below** | **yes — one type each, FOR AS LONG AS THAT HOLDS** |
 | `CapabilityCheckError` | **frame-core's own `pub enum`** | two, resolved twice | **NO — this is the seam** |
 
 `CapabilityCheckError` is exposed twice over — as
@@ -441,6 +474,39 @@ duplicate weight is unconditional; whether any given consumer breaks depends on
 whether it touches that one payload, and most capability-facing code touches
 the four shared types and is fine.** The cure is unchanged and collapses
 everything: publish `frame-state 0.3.0`.
+
+**And "latent" is now measured rather than hedged, at the only consumer anyone
+has checked** (Athena, over argus's complete Rust surface — seven blobs, a
+positive control on each): **argus touches neither seam, zero callsites.**
+**⇒ A SHARED-TYPE RISK IS DECIDED AT THE CALLSITE, NOT AT THE SURFACE.** A
+surface-level count of shared types predicts nothing on its own — she killed
+her own earlier *four-of-five-shared* inference with this, on the grounds that
+it reached the right answer **by an invalid route.**
+
+### ⚠️ ★ A SINGLE-VERSION CRATE IS AN INVARIANT NOTHING DECLARED — and this changes what §4 is about
+
+**The four types in the table above cross the seam for exactly one reason:
+`frame-capability` has published exactly one version, ever.** A `ComponentId`
+minted through frame-core `0.3.0` satisfies a `frame-state 0.2.0` parameter
+expecting one through `0.2.0` **because there is only one `frame-capability`
+for both to route to.** Nothing anywhere states that this must remain true.
+There is no pin expressing it, no test asserting it, and no diagnostic that
+fires when it stops.
+
+**⇒ THE PUBLISH THAT BREAKS IT WILL LOOK COMPLETELY ROUTINE.** `frame-capability
+0.2.0` is an ordinary release by every document in §1 — a clean subject, a
+correct manifest, an honest tag — and it silently converts *four types that
+cross the seam* into *four types that do not*, turning a narrow latent break
+into a wide one, in a repo whose lock nobody re-reads on someone else's
+release.
+
+**This is the strongest argument in the file for the gate in the banner**,
+because it is the case where every one of the six documents reads clean and the
+resolved graph is what moved. **Cally has frozen `frame-capability`'s RELEASE
+until the re-pin wave lands** — the crate is open, publishing it comes to him
+first. **That is a human holding an invariant no machine is holding**, which is
+precisely the shape this file exists to make visible: it works, it is not
+durable, and it does not survive him being unavailable.
 
 ### ★ A re-export makes the IMPORT PATH and the TYPE'S IDENTITY two different facts, and only IDENTITY decides compatibility
 
