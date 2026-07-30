@@ -14,6 +14,10 @@ const NAMED_SETUP_DEADLINE: Duration = Duration::from_secs(5);
 /// under test — not a proof device standing in for a real signal.
 const SLOW_BUT_ANSWERED: Duration = Duration::from_millis(250);
 
+/// A caller-selected deadline short enough to distinguish it from the default
+/// while leaving ample room for a loopback connect and one control-frame write.
+const CUSTOM_SETUP_DEADLINE: Duration = Duration::from_millis(100);
+
 /// Blocks reading `socket` until one complete frame decodes, discarding it. Used
 /// by the fake servers below to consume the client's `Connect` frame.
 fn read_and_discard_one(socket: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<(), SdkError> {
@@ -147,6 +151,87 @@ fn the_push_reader_carries_no_read_window_in_steady_state() -> Result<(), SdkErr
         "the push reader must block with no read window once the control exchange \
          is over; a Some(_) here is a cadence, whatever its period"
     );
+    drop(client);
+    server.join().ok();
+    Ok(())
+}
+
+/// SDK-011 — a caller-selected setup deadline reaches both the per-read socket
+/// window and the wall-clock deadline for the control-frame reply.
+///
+/// If either site keeps the five-second default, this silent peer holds the call
+/// until that default and the upper-bound assertion fails. The lower bound keeps
+/// the test honest in the other direction: accepting the value must not turn the
+/// deadline into an immediate refusal.
+#[test]
+fn a_supplied_setup_deadline_bounds_the_control_frame_reply() -> Result<(), SdkError> {
+    let (listener, address) = bind_fake_server()?;
+    let server = std::thread::spawn(move || -> Result<(), SdkError> {
+        let (mut socket, _peer) = listener.accept().map_err(|source| SdkError::Connection {
+            description: format!("fake push server accept failed: {source}"),
+        })?;
+        let mut buffer = Vec::new();
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        // Never answer. Hold the socket until the refused client closes it, so
+        // the selected deadline — not an EOF — is what ends the client's wait.
+        let mut scratch = [0_u8; 512];
+        while socket.read(&mut scratch).unwrap_or(0) > 0 {}
+        Ok(())
+    });
+
+    let started = Instant::now();
+    let outcome =
+        PushClient::with_setup_deadline(&address, CUSTOM_SETUP_DEADLINE).connect();
+    let elapsed = started.elapsed();
+    server.join().ok();
+
+    assert!(
+        matches!(outcome, Err(SdkError::Connection { .. })),
+        "a silent peer must be refused with a typed connection error, got {outcome:?}"
+    );
+    assert!(
+        elapsed >= CUSTOM_SETUP_DEADLINE,
+        "the refusal must not precede the caller's {CUSTOM_SETUP_DEADLINE:?} setup \
+         deadline; it arrived in {elapsed:?}"
+    );
+    assert!(
+        elapsed < NAMED_SETUP_DEADLINE,
+        "the caller's {CUSTOM_SETUP_DEADLINE:?} setup deadline must replace the \
+         {NAMED_SETUP_DEADLINE:?} default at both deadline sites; refusal took {elapsed:?}"
+    );
+    Ok(())
+}
+
+/// SDK-011 — the caller-selected setup deadline is phase-local. Once the
+/// handshake succeeds, the background reader's live socket must carry no read
+/// timeout at all.
+#[test]
+fn a_supplied_setup_deadline_is_disarmed_before_the_reader_starts() -> Result<(), SdkError> {
+    let (listener, address) = bind_fake_server()?;
+    let server = std::thread::spawn(move || -> Result<(), SdkError> {
+        let (mut socket, _peer) = listener.accept().map_err(|source| SdkError::Connection {
+            description: format!("fake push server accept failed: {source}"),
+        })?;
+        let mut buffer = Vec::new();
+        read_and_discard_one(&mut socket, &mut buffer)?;
+        write_frame(&mut socket, &connect_ack())?;
+        let mut scratch = [0_u8; 512];
+        while socket.read(&mut scratch).unwrap_or(0) > 0 {}
+        Ok(())
+    });
+
+    let client = PushClient::with_setup_deadline(&address, CUSTOM_SETUP_DEADLINE).connect()?;
+    let observed = client
+        .writer
+        .lock()
+        .map_err(|error| SdkError::Connection {
+            description: format!("push writer lock poisoned: {error}"),
+        })?
+        .read_timeout()
+        .map_err(|source| SdkError::Connection {
+            description: format!("failed to read the push socket read timeout: {source}"),
+        })?;
+    assert_eq!(observed, None, "a setup deadline must not survive setup");
     drop(client);
     server.join().ok();
     Ok(())
