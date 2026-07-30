@@ -125,6 +125,60 @@ reading the source. **Either wire it or delete it as part of this work** —
 deleting a public field is major and would ride 0.6.0; wiring it is a behaviour
 change on a field nobody can currently be depending on for effect.
 
+### 3.3.1 ⛔ DOES `timeout_millis` COVER THE SETUP DEADLINE? **NO — AND WIRING IT THERE IS HAZARDOUS**
+
+Asked as the cheapest possible outcome: if the existing field already means what
+SDK-011 needs, this is *wire the knob*, with no API change and no
+0.5.2-vs-0.6.0 question. **Measured, and it does not.**
+
+1. **Its own doc says something broader.** `connection/pool.rs:20` —
+   *"Per-connection **operation** timeout."* An operation timeout bounds reads,
+   writes and requests; a setup deadline bounds a handshake. **Wiring it to
+   setup would narrow a documented meaning.**
+2. **Frame independently reads it as an operation window.** At the venue,
+   `crates/frame-conv/src/handle/attach.rs:37` passes
+   **`attachment.operation_window_millis`** into that slot. Frame's own name for
+   the value it supplies is *operation window*. **Two parties, same reading,
+   neither of them "setup".**
+3. **★ THE VALUES MAKE IT UNSAFE.** Every caller supplied a number while the
+   field was inert: `ConnectionPoolConfig::new(1, 10, 16)` in frame's
+   `tests/support/raw.rs:69` and across liminal's own e2e suites, and
+   `new(1, 1, 8)` in `production/e2e_sdk_tests.rs:49`. **Wiring
+   `timeout_millis` to the setup deadline would set it to 10 ms — or 1 ms —
+   against a ratified 5 s.** A 500× reduction.
+
+⇒ **THAT IS THE EXACT DEFECT SDK-010 EXISTED TO FIX**, recreated: *a constant
+used as a deadline it was never sized for.* SDK-010's was 100 ms; this would be
+10 ms. **And in frame's production path it would silently bind the setup
+deadline to a knob frame set for a different purpose.**
+
+**⇒ REFUSED, with the measurement.** SDK-011 does not wire this field.
+
+### 3.3.2 THE FINDING IS BIGGER THAN ONE FIELD — SIBLING CONTROL
+
+The right control is not another crate's identically-named field (my first
+attempt used `max_connections` from liminal-**server**'s `LimitsConfig` — a
+different struct, so it proved only that grep works). **The sharp control is the
+siblings of this same struct:**
+
+| field | reads outside `pool.rs` | read inside |
+|---|---|---|
+| `max_connections` | **0** | once, in `validate()` (non-zero check) |
+| `timeout_millis` | **0** | never |
+| `buffer_size` | **0** | never |
+
+⇒ **`ConnectionPoolConfig` is almost entirely ornamental**, not one dead field.
+`ConnectionPool::new(config.pool_config)` (`remote/handles.rs:59`) takes it and
+nothing consumes the values. **This is the ornamental-surface class at TYPE
+scope, and it deserves its own task rather than being smuggled into SDK-011.**
+
+**Recommended instead of wiring, all additive:** correct the doc comment — it
+currently asserts a semantic the field does not have, and *that* is the actual
+untruth — and mark the field deprecated so its inertness is visible at compile
+time rather than only by reading the source. Removal rides 0.6.0. **No caller's
+behaviour changes, and nobody is left unable to tell whether their value ever
+did anything.**
+
 > ⚠️ A search for `timeout_millis` across the tree also returns hits in
 > `sdks/liminal-gleam` — **a different field of the same name in another SDK.**
 > Namespace confusion again, caught only because the control was in place.
