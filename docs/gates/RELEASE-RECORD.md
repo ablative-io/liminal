@@ -11,9 +11,18 @@ direction. This file is the pattern; liminal is the worked example.
 > **⚠️ THIS DOCUMENT IS THE WEAKER HALF, AND SAYING SO IS PART OF ITS JOB.**
 > A document tells a careful reader what to check. **The strong half is a gate
 > that refuses a pin whose resolved version was never verified at the
-> registry, and that gate DOES NOT EXIST.** Nothing below closes it. Do not
-> read "the reconciliation is clean" as "the pin is safe" — it means someone
-> looked once, by hand, on one day, and wrote down what they saw.
+> registry.**
+>
+> **✅ THAT GATE NOW EXISTS: `scripts/pin-registry-gate.py`.** It checks every
+> registry-sourced package in `Cargo.lock` for existence and yank state, with
+> both controls in-band, and **VOIDs rather than passing when it cannot look.**
+> Proven on six arms before first use (PASS / RED-absent / RED-yanked /
+> ERROR-empty / ERROR-corrupt / **VOID-unreachable**).
+>
+> **★ IT FAILED ON ITS FIRST REAL RUN, AND THE FINDING WAS ALREADY IN THE
+> TREE:** liminal's committed `Cargo.lock` pins **`spin 0.9.8`, which is
+> YANKED.** See §7. **Every claim below still means someone looked once, by
+> hand, on one day — but the lock is now checkable by machine.**
 
 ## 1. Six documents claim to describe a release, and they disagree
 
@@ -610,3 +619,63 @@ and report; tag nothing.**
 Related: [`BASELINE-CENSUS.md`](BASELINE-CENSUS.md) and its runner
 `scripts/baseline-compare.py`, which is the same move one layer down — a pin
 no runner mechanically compares is an instruction, not a control.
+
+## 7. ★ THE GATE'S FIRST RUN FOUND A YANKED PIN IN OUR OWN LOCK
+
+**`scripts/pin-registry-gate.py Cargo.lock` → RED, 1 of 296.** Nobody had ever
+checked, because until tonight there was nothing to check with.
+
+```
+[YANKED] spin 0.9.8: YANKED at the registry
+controls in-band: serde HTTP-200 316 versions | zzq-... HTTP-404
+```
+
+Measured at `index.crates.io`, User-Agent set, 2026-07-30:
+
+| Fact | Value |
+|---|---|
+| Declared at `Cargo.toml:50` (workspace), used by `crates/liminal-sdk/Cargo.toml:32` | `spin = "0.9"` ⇒ `>=0.9.0, <0.10.0` |
+| Yanked in that range | `0.9.0` … `0.9.8` — **all nine** |
+| Unyanked in that range | **`0.9.9`, and it is the only selectable version** |
+| Our committed lock pins | **`0.9.8` — yanked** |
+| Published `liminal-sdk` versions requiring `^0.9` | **all 13**, `0.2.0` through `0.5.1` |
+
+**⇒ THE TWO RESOLUTION PATHS DISAGREE, AND ONLY ONE OF THEM IS TESTED.**
+A **fresh resolve** — a stranger running `cargo add liminal-sdk` — takes
+`0.9.9` and works, **which is exactly why the 16/16 stranger-install came back
+clean.** A **`--locked` build** — CI, `cargo install --locked`, any
+reproducible-build path — takes the lock, and the lock says `0.9.8`.
+**The green we already banked was measured on the path that cannot see this.**
+
+**This is row six of §1 arriving in our own repo.** The yank flag is mutable,
+lives only at the registry, and has **no git record** — so no tag, manifest,
+commit subject, or annotated message could ever have shown it, and no amount of
+re-reading the tree would have found it. **It is also the exact case the
+banner's "someone looked once, by hand, on one day" was written about**, and
+the hand-look never happened because the tool did not exist.
+
+**Not fixed here, deliberately.** The repair is `cargo update -p spin`, a
+resolver run plus a battery to prove nothing moved — **neither belongs at a
+coordinating seat, and the lock change must ride a run that can prove it.**
+Filed, with the gate that will keep failing until it does.
+
+## 8. The second gate — a task that became a trigger
+
+**`scripts/exhaustiveness-gate.py`.** `liminal-protocol` carries **268 `pub
+enum` declarations and zero `#[non_exhaustive]`** (partitioned count, positive
+control `pub struct` = 336; **268 is an UPPER BOUND** — module visibility and
+re-export reachability are unresolved).
+
+**The trigger is the correction worth keeping.** Adding the attribute later is
+a **major** change and has been since the *first* publish — the classification
+flipped once and **does not compound per release**, so "every release makes it
+worse" is the wrong mechanism. What decays is blast radius, scope, and **the
+number of breaking cuts left to ride on.** ⇒ **it can only ride a BREAKING
+bump, and for a `0.x` crate that is the MINOR** — `0.3.2 → 0.3.3` is a
+*compatible* update every consumer takes automatically, so shipping the
+attribute there would break them inside a range they were promised was safe.
+
+**The gate fires on `0.3.x → 0.4.0`, not on "the next version bump"**, and
+demands either the attribute or a written refusal naming what was accepted.
+Read from `share/doc/rust/html/cargo/reference/semver.html`, which ships with
+the toolchain — **a citable file, not a recollection.**
