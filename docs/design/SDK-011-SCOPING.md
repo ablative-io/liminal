@@ -228,6 +228,50 @@ the ambiguity exactly as faithfully as it preserves the meaning. **Only the type
 seam removes it** — which is a second, independent argument for putting
 `#[non_exhaustive]` with ASK-2's variant.
 
+### 3.4.1 REACHABILITY: ANSWERED **NO** — AND THE INVARIANT THAT KEEPS IT NO
+
+Athena resolved what this seat could only bound. **The paths are disjoint by
+type:** the ambiguous setup sites live in `PushClient` and `SubscriptionStream`
+(used by frame-host and frame-view, which have **no classifier** — they stringify
+for a human). The classifier lives in frame-conv on a **third** type,
+`RemoteParticipantHandle`, whose receive path does no setup. Frame never drives
+`reconnect_participant`; it only destructures a verdict at `pump.rs:327`.
+
+> ## ⛔ LOAD-BEARING INVARIANT OF LIMINAL, UNTIL ASK-2 LANDS
+>
+> ### `receive_participant` MUST NOT RECONNECT INTERNALLY.
+>
+> **NOT REACHED IS NOT UNREACHABLE.** Two routes make the hazard live:
+> frame starts driving reconnect (frame's change, frame's diff), **or the SDK's
+> receive path is changed here to reconnect internally — in which case frame's
+> classifier silently begins receiving SETUP errors and THE FRAME DIFF IS
+> EMPTY.**
+>
+> **The second route is ours to not take by accident, and it is invisible from
+> the consumer's side.** Any change that lets a reconnect run inside a receive
+> reopens §3.4's ambiguity with no signal anywhere downstream.
+> **Tripwire task filed. Do not close it before ASK-2.**
+
+### 3.4.2 ASK-2's FOUR OBLIGATIONS (all four, or the deletion is partial)
+
+1. map `os error 35` (EAGAIN/EWOULDBLOCK) to a typed outcome
+2. map `Resource temporarily unavailable` likewise
+3. map `timed out` — **to TWO distinct outcomes: setup-failure and
+   quantum-elapse.** ★ *One string is currently doing both jobs; a typed seam
+   that collapses them carries the defect through the deletion and nobody
+   notices, because the string branch is gone.* (Athena's, and the most easily
+   missed.)
+4. serve **both** consumers: frame branching **fate** (elapse vs death), and
+   Manifold distinguishing **stop-retrying vs keep-retrying**
+   (`manifold-node` attach path, disclosed at its `attach.rs:19-27`, which chose
+   retry-forever as the honest response to an undiscriminable error).
+
+**Anything less is a branch REDUCED, not retired** — and a partial deletion
+described as a deletion is the worst artefact available here. Frame's own doc
+asserting *"it becomes a typed match the day ASK-2 lands"* is **the author of one
+side asserting a future equivalence never held against ASK-2's actual shape. A
+prose comment is not an oracle.**
+
 ### CONSTRAINT ON THIS WORK — BINDING
 
 1. **Do not modify strings 1–5.** They are load-bearing in a consumer, with no
