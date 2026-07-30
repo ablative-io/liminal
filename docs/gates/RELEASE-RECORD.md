@@ -21,7 +21,7 @@ direction. This file is the pattern; liminal is the worked example.
 |---|---|---|
 | **The git tag** | **under-reports** — a published version with no tag | liminal ≥10 distinct versions untagged; haematite 9 published / 5 tags; **frame 28 published / 1 tag** |
 | | **over-reports** — a tag implying a release that never happened | beamr `v0.8.3`, `v0.12.1` (the latter was the FIFO starvation fix, tagged, publish never authorised) |
-| **The tagged manifest** | **is a different document entirely** — `cargo publish` rewrites it | liminal-server 0.5.1: **30 `workspace = true` lines in the repo → 0 published**; `path` stripped from **all 24** published dependency tables |
+| **The tagged manifest** | **is a different document entirely** — `cargo publish` rewrites it | liminal-server 0.5.1 **at tag `liminal-v0.5.1` = `b250da9`**: **30 `workspace = true` lines → 0 in the published artifact** (`grep -c '^\[' ` = 43 there, so the zero is an absence and not a blind read); `path` stripped from **all 24** published dependency tables |
 | **The release commit subject (a)** | **asserts a publish that never happened** — in prose, in the history, where nothing can contradict it | beamr `0e7c060`, *"release: beamr 0.12.1 — FIFO owner pop ships to crates.io consumers"*. **It did not ship.** |
 | **The release commit subject (b)** | **names a version that existed only IN-TREE** — true of the manifest, false of the registry | frame `a69585e`, *"frame-host 0.2.2 → 0.3.0"*. `0.2.2` was real in the tree and **never reached crates.io**; the registry's predecessor of `0.3.0` is `0.2.1` |
 | **The published artifact** | — | the only one a consumer resolves against |
@@ -40,6 +40,43 @@ shipped or that `0.2.1` did not, **and `0.2.1` is the one that exists.**
 **⇒ RULED (Cally, `c220e131`): for "what does published version X require",
 read the REGISTRY'S OWN DEPENDENCY METADATA. And state which of the five
 documents you read** — the search-scope law applied to release identity.
+
+### ★ A VERSION CLAIM WITHOUT A NAMED TREE IS NOT A CLAIM
+
+**(Cally, `7fe7e1dc`, after one of his own true statements drew a refutation
+for want of six words.)** Every document in the table above is a version claim
+*about a specific ref*, **and only two of them say which.** A row reading
+"frame-host declares `0.4.2`" is unfalsifiable and unconfirmable: it is true on
+the re-pin branch, where bumping frame-host to `0.4.2` is the entire point, and
+false on `main`. **Two seats can then measure honestly, disagree completely,
+and both be right** — which is exactly what happened, and it cost a challenge
+to resolve something that was never in dispute.
+
+**⇒ THE COORDINATE IS PART OF THE CLAIM, AND IT IS NOT THE SAME COORDINATE FOR
+BOTH KINDS.** This is the completion the law needs, and this file already
+proves it in row six:
+
+| Claim about | Coordinate | Why |
+|---|---|---|
+| A **git** document (manifest, subject, tag, lock) | **a TREE SHA** | immutable — the sha *is* the venue |
+| A **registry** document (published versions, requirements, **yank state**) | **an OBSERVATION TIME** | **there is no tree to name.** A yank changes the answer with no commit anywhere |
+
+**A registry claim stamped with a tree sha is as underspecified as a manifest
+claim with none** — it names a coordinate the document does not have. The
+`^0.13.0` example in this file resolves correctly *today* and would resolve to
+the starving build the hour someone unyanks `0.13.2`.
+
+**Same family as the oracle-identity rule, and it belongs here rather than in a
+shell-hazards note**, because the failure is not a bad command — it is a true
+sentence that cannot be checked.
+
+**⚠️ SELF-APPLIED, AND IT FOUND TWO IN THIS FILE.** The `30 → 0` row above
+carried "in the repo" and now names `b250da9` (measured: 30 at the tag, 30 at
+`main`, 0 published — the claim was *true at every ref*, and still unreadable).
+And **the argus lock in §4 names no ref at all.** I did not measure it, so I
+cannot supply one; it is marked there rather than quietly left, because **a
+missing coordinate someone else must fill is a different object from a claim I
+verified.**
 
 **★ FOUR OF THE FIVE ARE APPROXIMATELY IMMUTABLE. THE ONE THAT DECIDES WHAT
 ACTUALLY RESOLVES CAN CHANGE WITHOUT A COMMIT** (Cally, `4c399944`). A yank is
@@ -353,7 +390,16 @@ neither of us had read the other's work.**
 ```
 argus Cargo.lock:  frame-core 0.2.0  registry  checksum 1ea51ca7…
                    frame-core 0.3.0  registry  checksum 7776add4…
+                   ⚠️ ref UNNAMED — see the coordinate law in §1
 ```
+
+**⚠️ This block does not name the argus ref it was read at, and by the law in
+§1 that makes it an observation rather than a claim.** It is relayed, not
+measured by me, so I cannot supply the sha without inventing it. **The two
+checksums are the load-bearing part and they are self-identifying** — a
+checksum names its own bytes regardless of which tree quoted it — so the
+duplication survives the gap; **the "which refs of argus are affected" question
+does not, and nobody should answer it from this block.**
 
 `app-host`, `frame-conv`, `frame-fragments` and `frame-host 0.4.1` take
 **0.3.0**; `frame-state 0.2.0` takes **0.2.0**, alone. Cause read at the
