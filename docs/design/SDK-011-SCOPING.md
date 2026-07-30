@@ -131,6 +131,60 @@ change on a field nobody can currently be depending on for effect.
 
 ---
 
+## 3.4 🔴 FROZEN STRINGS — AND THE TOKEN IS ALREADY AMBIGUOUS
+
+Athena found that frame string-matches liminal's error **text**. Verified at
+frame's own bytes, venue `3def5a1`,
+`crates/frame-conv/src/seam.rs:38-52` — `classify_receive_error` branches on
+`sdk_error.to_string().contains("timed out")` (with `"os error 35"` and
+`"Resource temporarily unavailable"`) to choose **`QuantumElapsed`**, documented
+there as *"an elapse is NOT a connection fate — the same connection serves
+afterwards."* Everything else falls to `ConnectionFate`.
+
+**Census of `"timed out"` in `liminal-sdk` (non-test):** five messages.
+
+| # | location | path |
+|---|---|---|
+| 1 | `websocket/connection/exchange.rs:183` | exchange |
+| 2 | `websocket/connection/exchange.rs:200` | exchange |
+| 3 | `websocket/subscription.rs:363` (`setup_exchange`) | **SETUP** |
+| 4 | `tcp/subscription.rs:427` (`read_one_frame`) | **SETUP** |
+| 5 | `tcp/push_client.rs:757` (`read_one_frame`) | **SETUP** |
+
+`read_one_frame` is called only from handshake call sites
+(`subscription.rs:267,304`, `push_client.rs:583,614`), so 3–5 are setup-only.
+
+### ★ THE DEFECT IS NOT FRAGILITY, IT IS AMBIGUITY
+
+**`"timed out"` is doing discriminating work while carrying two opposite
+meanings**: a steady-state quantum elapse (*connection is fine, re-arm*) and a
+**setup failure** (*the connection never established*). Frame's classifier reads
+both as `QuantumElapsed`. `participant.rs` carries reconnect-permit machinery
+(`RemoteReconnectPermitOutcome`, `reconnect_attempt`), which is precisely the
+route by which a **post-reconnect setup failure** could surface into the
+receive-side classifier.
+
+**I could not resolve reachability by static reading, and this seat cannot run
+tests — so this is stated as an OPEN HAZARD, not a confirmed bug.** But the
+direction of the risk is one-way: a failed setup misread as a benign elapse
+means frame keeps using a connection that never came up.
+
+⇒ **NO REWORDING DISCIPLINE CAN FIX THIS.** "Do not change error text" preserves
+the ambiguity exactly as faithfully as it preserves the meaning. **Only the typed
+seam removes it** — which is a second, independent argument for putting
+`#[non_exhaustive]` with ASK-2's variant.
+
+### CONSTRAINT ON THIS WORK — BINDING
+
+1. **Do not modify strings 1–5.** They are load-bearing in a consumer, with no
+   semver protection: a reword shipped as a patch is a silent behaviour change.
+2. **No new message may contain `"timed out"`** unless it denotes a genuine
+   benign elapse on a path that can reach `Transport`.
+3. The additive deadline must change **when** a timeout fires, never **what it
+   says**.
+
+---
+
 ## 4. WHAT IS SAFE TO BUILD NOW
 
 **The additive half only.** It is correct under either answer in §5 and cannot
