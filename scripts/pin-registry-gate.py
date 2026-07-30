@@ -136,9 +136,40 @@ def run_controls(timeout: float) -> None:
                    f"expected 404 -- the instrument cannot discriminate "
                    f"absent from present")
 
+    # ⚠️ THE PAIR ABOVE REACHES A DIFFERENT NOUN FROM THE VERDICT (Cally,
+    # `9b69242a`). serde-200 vs nonsense-404 is PRESENT vs ABSENT. The RED this
+    # gate emits is about YANKED vs LIVE. A gate that reaches crates.io, parses
+    # the version list correctly, and then drops or misreads `yanked` passes
+    # both of those controls on every single run. The six fixture arms cover it
+    # by design, before first use; nothing covered it IN-BAND, during the run
+    # that produces the verdict -- and the in-band pair is what makes a given
+    # run's output trustworthy rather than the suite's design.
+    #
+    # Closed at zero cost, out of the body already fetched: the positive
+    # control crate carries BOTH populations, so the operation we needed
+    # anyway is the control. Asserted as populations rather than as named
+    # versions, because a specific version can be UNYANKED -- "yanked is
+    # monotonic" is very nearly true and not exactly true. Either failure
+    # direction is caught: if `yanked` always reads False the yanked arm is
+    # empty; if it always reads True the live arm is. And it fails VOID (loud),
+    # never PASS.
+    yanked = [v["vers"] for v in versions if v["yanked"]]
+    live = [v["vers"] for v in versions if not v["yanked"]]
+    if not yanked:
+        raise Void(f"yank-field control: {POSITIVE_CONTROL} reports ZERO "
+                   f"yanked versions of {len(versions)} -- the `yanked` field "
+                   f"is not being read, and a yanked pin would pass silently")
+    if not live:
+        raise Void(f"yank-field control: {POSITIVE_CONTROL} reports ZERO live "
+                   f"versions of {len(versions)} -- `yanked` reads true for "
+                   f"everything, so every pin would falsely RED")
+
     print(f"  POSITIVE  {POSITIVE_CONTROL:<34} HTTP-200  "
           f"{len(versions)} versions")
     print(f"  NEGATIVE  {NEGATIVE_CONTROL:<34} HTTP-404")
+    print(f"  YANK-FIELD {POSITIVE_CONTROL:<33} {len(yanked)} yanked "
+          f"({', '.join(yanked[:3])}) / {len(live)} live  <- discriminates the "
+          f"noun the verdict names")
 
 
 def load_lock(path: str) -> tuple[list[dict], list[dict]]:
