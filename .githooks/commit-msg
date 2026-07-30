@@ -23,12 +23,35 @@
 # other pairs consumed. ⇒ THE SET OF COMMIT MESSAGES PROVABLY SAFE FROM THEIR
 # OWN BYTES IS EMPTY.
 #
-# WHAT IS ACTUALLY COMPLETE:
-#   git commit -F <file>   the file is never shell-parsed  -- capability removal
-#   the retained <file>    hashed against the landed text  -- the ONLY decidable
-#                          evidence, and only because the INPUT was kept.
-#                          For a lossy channel the discriminator lives in the
-#                          INPUT, never the output.
+# WHAT IS ACTUALLY COMPLETE -- ALL THREE STEPS, OR NONE:
+#
+#   THE TEXT MUST NOT BE PARSED BY A SHELL AT ANY POINT BETWEEN YOUR FINGERS AND
+#   THE RECORD. There are THREE such points. We named two and controlled two.
+#
+#   1. COMPOSE     write it, do not build it out of a shell string.
+#   2. RETAIN      cat > f <<'EOF'   -- the QUOTES are the whole control. An
+#                  editor or any non-shell-parsing tool also qualifies.
+#   3. COMMIT      git commit --cleanup=verbatim -F f
+#
+# ★ STEP 2 WAS THE UNNAMED NOUN, and skipping it makes the audit REPORT SUCCESS.
+# `echo "a \`x\` b" > keep.txt` corrupts AT WRITE TIME; -F then lands that file
+# byte-for-byte; the audit compares two copies of THE SAME CORRUPTION and agrees
+# perfectly. Measured: retained=[before SPLICED after] landed=[before SPLICED
+# after] AUDIT=PASS, with a positive control firing on an unrelated file.
+# ⇒ THE TWO CONTROLS WERE NEVER INDEPENDENT. A CONTROL THAT AGREES EXACTLY WITH
+#   ITS SUBJECT IS NOT A PASS -- IT IS A REPORT THAT THE EXPERIMENT DID NOT
+#   HAPPEN. (Cally, from his own seat, correcting a rule he had sent me.)
+#
+# ★ AND `-F` ALONE IS NOT BYTE-FAITHFUL, which fails the OTHER way. Measured
+# here: git's DEFAULT cleanup strips trailing whitespace and collapses runs of
+# blank lines -- 38 bytes retained -> 32 bytes landed, different sha256. So the
+# audit FALSE-REDS on any message carrying either. `--cleanup=verbatim` lands
+# the file identical. The earlier IDENTICAL result at 0afe173 was luck: that
+# message happened to contain neither, so default cleanup was a no-op.
+#
+# Only with all three steps is the hash of the retained input against the landed
+# text decidable evidence -- and it is decidable only because the INPUT was kept.
+# For a lossy channel the discriminator lives in the INPUT, never the output.
 #
 # This hook is the backstop for the day someone forgets and the substitution
 # happens to FAIL. That is worth having. It is not coverage.
@@ -54,8 +77,8 @@
 # ⚠️ HONEST LIMITS, because a control whose reach is overstated is worse than none:
 #   - false NEGATIVE: a deleted word at a line start or before punctuation may
 #     leave no double space. This does not prove a message is intact.
-#   - false POSITIVE: deliberate column alignment in a body. Use `-F -` and a
-#     heredoc, which is the actual fix; this hook is the backstop for forgetting.
+#   - false POSITIVE: deliberate column alignment in a body. Use the three-step
+#     form above, which is the actual fix; this hook backstops forgetting it.
 #
 # ENABLE (per clone, NOT automatic -- `.git/hooks` is not versioned and this
 # directory is, so the hook travels but the wiring does not):
@@ -70,10 +93,13 @@ fail() {
     echo "" >&2
     grep -nE "$2" "$msg_file" | sed 's/^/  /' >&2
     echo "" >&2
-    echo "  THE FIX IS THE CAPABILITY REMOVAL, NOT THIS HOOK:" >&2
-    echo "    git commit -F - <<'MSG'      <- the QUOTES on the delimiter are" >&2
-    echo "    ...                             the whole control. An UNQUOTED" >&2
-    echo "    MSG                             heredoc substitutes exactly as -m does." >&2
+    echo "  THE FIX IS THE CAPABILITY REMOVAL, NOT THIS HOOK -- ALL THREE STEPS:" >&2
+    echo "    cat > msg.txt <<'MSG'        <- the QUOTES on the delimiter are the" >&2
+    echo "    ...                             whole control. An UNQUOTED heredoc" >&2
+    echo "    MSG                             substitutes exactly as -m does." >&2
+    echo "    git commit --cleanup=verbatim -F msg.txt" >&2
+    echo "    (retain msg.txt: without a file kept there is nothing to audit, and" >&2
+    echo "     without --cleanup=verbatim the audit false-REDs on trailing space)" >&2
     echo "  If the text is deliberate: git commit --no-verify" >&2
     exit 1
 }
