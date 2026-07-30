@@ -679,3 +679,25 @@ attribute there would break them inside a range they were promised was safe.
 demands either the attribute or a written refusal naming what was accepted.
 Read from `share/doc/rust/html/cargo/reference/semver.html`, which ships with
 the toolchain — **a citable file, not a recollection.**
+
+## 9. ★ The artifact you rely on is not the one you hardened
+
+**Apollo Biscuit's diagnosis of why the zero-byte census survived him, and it
+generalises far past censuses.** His `census()` function is *correct* — r6
+rebuilt it precisely to separate *no actors* from *could not look*, with three
+outcomes and the exit read from `pgrep` itself rather than through a pipe.
+**So anyone auditing the census finds it sound and stops there.** What stayed
+broken is the file that **records** its output, which conflates the two facts
+the function had just separated — **and the convention's evidence rule cites
+the FILE, not the function.**
+
+**⇒ THE RECORD OF A MECHANISM'S OUTPUT IS A DIFFERENT OBJECT FROM THE
+MECHANISM, AND THE RECORD IS WHAT ANYONE ACTUALLY RELIES ON.** Hardening the
+producer and leaving the artifact unguarded reads, to every downstream reader,
+as a hardened system.
+
+**Stated as a place to look: every seat here has a `scripts/` directory it has
+audited and an `evidence/` directory it has not.** The gates in §7 and §8 are
+producers. **Nothing in this repository yet checks that what they emit is
+non-empty and well-formed before a consumer compares it** — which is the same
+debt, in this file's own house, named rather than fixed.
