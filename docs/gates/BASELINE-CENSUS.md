@@ -164,6 +164,19 @@ gate names its own additions), never pattern-matched.
   None of this touches the counts, which reconcile four ways above; disclosed
   rather than repaired because repairing means re-running a battery, and the
   counts do not need one.
+- **⚠️ WHEN A SECOND PLATFORM RUNS THIS BATTERY, IT BUYS COVERAGE AND NOT A
+  RATE** — pre-committed here **before** any such run, so it cannot be
+  softened afterwards. The acceptance is **deterministic**, so a second-venue
+  pass converts a read-the-source claim into a measured one **on the platform
+  axis only.** It does **not** turn a single-venue sample into a frequency,
+  and it says nothing about the leak observation, which is
+  **non-deterministic** (see below) and therefore not addressed by adding
+  venues. **State it as: independent on the platform axis, NOT on the
+  algorithm axis** — the mirror of the form Callisto and Apollo are using at
+  their seats, so three legs read alike rather than converging by luck
+  (Cally, `27967693`). **A count from a second box added to a count from this
+  one is two samples of two populations, not one larger sample.**
+
 - **Doc tests are not covered** — the canonical battery script has no
   doc-test leg (the runner's own disclosure line).
 - **The census quiet is a BOUNDARY claim, not a throughout claim** — the
