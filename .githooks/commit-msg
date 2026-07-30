@@ -1,4 +1,39 @@
 #!/usr/bin/env bash
+# ⚠️⚠️ READ THE CEILING BEFORE TRUSTING ANY VERDICT THIS HOOK EMITS.
+#
+# BOTH ARMS ARE NAMED PARTIALS AGAINST ONE PREDICATE: **FAILED substitution.**
+# They do NOT detect substitution. Nothing can, downstream.
+#
+#   `date`  `pwd`  `env`  `git`  `cargo`   -- all SUCCEED. Exit 0, nothing on
+#   stderr, no deleted word, no doubled space, and the spliced text is
+#   well-formed prose. THE SUCCESSFUL SUBSTITUTION IS SILENT ON EVERY CHANNEL
+#   AT ONCE, including this hook.
+#
+# Measured by Apollo, re-derived by Cally with a positive control (`db4592ea`):
+# `git commit -m "..." 2>err` leaves err EMPTY -- the expansion happens in the
+# PARSING shell, so a command-level redirect attaches to the wrong process, and
+# a shell function cannot reach it either because the caller expands the
+# backticks before the body runs. In interactive use the parsing shell is the
+# operator's terminal, which is why a human noticing `command not found` was
+# the only detector -- and that is a habit, not a control, and habits are not
+# inheritable.
+#
+# ★ AND THERE IS NO SWEEP THAT FIXES THIS, because an ESCAPED backtick survives
+# `-m` as a literal: a message can land SHOWING backticks and still have had
+# other pairs consumed. ⇒ THE SET OF COMMIT MESSAGES PROVABLY SAFE FROM THEIR
+# OWN BYTES IS EMPTY.
+#
+# WHAT IS ACTUALLY COMPLETE:
+#   git commit -F <file>   the file is never shell-parsed  -- capability removal
+#   the retained <file>    hashed against the landed text  -- the ONLY decidable
+#                          evidence, and only because the INPUT was kept.
+#                          For a lossy channel the discriminator lives in the
+#                          INPUT, never the output.
+#
+# This hook is the backstop for the day someone forgets and the substitution
+# happens to FAIL. That is worth having. It is not coverage.
+#
+# ---------------------------------------------------------------------------
 # Refuse a commit message bearing the TRACE of shell word-deletion.
 #
 # WHY THIS SHAPE AND NOT THE OBVIOUS ONE.
