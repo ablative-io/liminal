@@ -30,13 +30,65 @@ set -euo pipefail
 msg_file="$1"
 
 # Ignore comment lines and the diff git appends under --verbose.
-if grep -nE '^[^#].*[^ ]  +[^ ]' "$msg_file" | grep -qv '^[0-9]*:#'; then
-    echo "commit-msg REFUSED: doubled space mid-line -- the trace a shell" >&2
-    echo "  substitution leaves when it DELETES a backticked word." >&2
+fail() {
+    echo "commit-msg REFUSED: $1" >&2
     echo "" >&2
-    grep -nE '^[^#].*[^ ]  +[^ ]' "$msg_file" | sed 's/^/  /' >&2
+    grep -nE "$2" "$msg_file" | sed 's/^/  /' >&2
     echo "" >&2
-    echo "  If a word is missing: rewrite with  git commit -F -  and a heredoc." >&2
-    echo "  If the spacing is deliberate: git commit --no-verify" >&2
+    echo "  THE FIX IS THE CAPABILITY REMOVAL, NOT THIS HOOK:" >&2
+    echo "    git commit -F - <<'MSG'      <- the QUOTES on the delimiter are" >&2
+    echo "    ...                             the whole control. An UNQUOTED" >&2
+    echo "    MSG                             heredoc substitutes exactly as -m does." >&2
+    echo "  If the text is deliberate: git commit --no-verify" >&2
     exit 1
+}
+
+# ---- ARM 1: DELETION. Leaves EXACTLY TWO spaces mid-line. --------------------
+#
+# EXACTLY two, not "two or more", and that distinction is what makes this arm
+# usable. Deleting a token from `a \`x\` b` yields "a" + "" + "b" separated by
+# the two surviving single spaces -> EXACTLY 2. Column alignment in a message
+# body uses 3+. The first draft matched `  +` and refused two consecutive
+# commits of my own -- both times on deliberately aligned tables.
+#
+# ⚠️ AND THAT MATTERED MORE THAN THE FALSE POSITIVES DID: a control whose
+# escape hatch you reach for every time is worse than no control, because
+# --no-verify stops being a decision and becomes a reflex. The fix is to make
+# the arm discriminate, never to get better at bypassing it.
+#
+# Cost, stated: a deletion inside an already-aligned run of spaces is missed.
+SCAR='^[^#].*[^ ] {2}[^ ]'
+if grep -qE "$SCAR" "$msg_file"; then
+    fail "doubled space mid-line -- the trace a shell substitution leaves when
+  it DELETES a backticked word (\`yanked\`, \`status\`, \`floor\`, \`host\`,
+  \`test\` and \`emitted\` all substitute to nothing)." "$SCAR"
+fi
+
+# ---- ARM 2: INSERTION. Leaves NO scar, and is the more dangerous half. -------
+#
+# (Cally, `93e5bcb1`, who enumerated the classes.) A backticked token does not
+# only vanish. Some SPLICE THEIR STDOUT INTO THE MESSAGE, well-formed and
+# plausible, with no doubled space for arm 1 to find:
+#
+#     `date`  -> a timestamp that reads exactly like a deliberate one
+#     `pwd`   -> an absolute path
+#     `git`   -> its entire usage manual
+#
+# A spontaneously generated timestamp inside an evidence commit is the worst
+# case at this estate, where the recurring question is WHICH RUN AN ARTIFACT IS
+# FROM. See BASELINE-CENSUS.md: an evidence branch already carries a report
+# from a different battery, and nothing about it looked wrong.
+#
+# All three patterns are HEURISTIC and none is complete. This arm narrows the
+# window; it does not close it. The quoted heredoc closes it.
+# NOTE the timestamp branch is NOT anchored to ^. It was, on the first draft,
+# and it silently passed a mid-line stamp -- a false negative on the single
+# most dangerous insertion. Caught only by testing the arm rather than
+# shipping it. An anchored pattern is a control scoped to where you happened
+# to picture the fault appearing.
+INSERT='(^|[^a-zA-Z/])/(Users|home|opt|usr|private|etc|var)/|These are common Git commands|^[Uu]sage: |[A-Z][a-z]{2} [A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2}'
+if grep -qE "$INSERT" "$msg_file"; then
+    fail "content that looks SPLICED IN by a shell substitution -- an absolute
+  path, a bare timestamp, or a usage-manual header. Insertion leaves no gap,
+  so arm 1 cannot see it." "$INSERT"
 fi
