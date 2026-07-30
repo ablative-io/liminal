@@ -19,20 +19,55 @@ this brief is the build order, that document is the reasoning and the refusals.
 ```rust
 // NEW TYPE — born #[non_exhaustive] (estate rule: free at birth, major forever after)
 #[non_exhaustive]
-pub struct RemoteConnect { /* config + deadline */ }
+pub struct PendingConnect { /* config + deadline */ }
 
 impl RemoteConfig {
     /// Additive. Carries an explicit setup deadline into the connect step.
-    pub fn with_setup_deadline(self, deadline: Duration) -> RemoteConnect;
+    pub fn with_setup_deadline(self, deadline: Duration) -> PendingConnect;
 }
 
-impl RemoteConnect {
+impl PendingConnect {
+    // ⛔ EVERY ONE OF THESE RETURNS RemoteConfig. SEE 1.1.1 — NOT NEGOTIABLE.
     pub fn connect_tcp(self) -> Result<RemoteConfig, SdkError>;
     pub fn connect_tcp_with_auth(self, auth_token: &[u8]) -> Result<RemoteConfig, SdkError>;
     pub fn connect_websocket(self) -> Result<RemoteConfig, SdkError>;
     pub fn connect_websocket_with_auth(self, auth_token: &[u8]) -> Result<RemoteConfig, SdkError>;
 }
 ```
+
+### 1.1.1 ⛔ THE RETURN TYPE IS `RemoteConfig`. RETURNING THE NEW TYPE BREAKS FRAME.
+
+**Athena's constraint, measured at frame's callsites against the published SDK.
+This would have surfaced as a failed build on the one executor handoff we have.**
+
+**`RemoteConfig` is not a builder discarded at connect — it is the handle's
+constructor argument and it carries the live transport:**
+
+- `remote.rs:145` — `connect_tcp(mut self) -> Result<Self, SdkError>` mutates
+  `self.transport` and **returns Self**.
+- `participant.rs:267` — `RemoteParticipantHandle::new(config: &RemoteConfig, ..)`
+- `participant.rs:276` — `::restore(config: &RemoteConfig, ..)`
+
+Frame consumes it exactly that way at **three** sites — `attach.rs:145-146`
+(`new`), `attach.rs:202-204` (`restore`), `leave.rs:124` — and frame's own
+`attach::connect` returns `Result<RemoteConfig, AttachError>`, handing the
+**connected** config onward by reference.
+
+⇒ **if `connect_*` returned `PendingConnect`, frame stops compiling at all three
+handle-construction sites.** That is a **type in a signature**, not an
+incidental construction style — **a real break, and it does NOT fall to the
+caution we applied to `attach.rs:33`.** Returning `RemoteConfig` leaves frame
+untouched and makes the intended chain a one-liner at `attach.rs:32-49`:
+
+```rust
+RemoteConfig::new(..)?.with_setup_deadline(deadline).connect_tcp()?
+```
+
+**On the name:** Athena flagged (correctly) that a type called `RemoteConnect`
+whose methods return `RemoteConfig` reads as a surprise. **`PendingConnect` is
+chosen so the return type is the obvious one** — a *pending connect*, when
+performed, yields the connected config; it was never a thing you were meant to
+keep. **The name is adjustable by the implementer; the return type is not.**
 
 ### 1.2 ⚠️ THE SECOND FAMILY — DO NOT SKIP IT
 
