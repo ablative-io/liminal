@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Refuse a commit message bearing the TRACE of shell word-deletion.
+#
+# WHY THIS SHAPE AND NOT THE OBVIOUS ONE.
+# The obvious hook -- "refuse a message containing backticks" -- CANNOT FIRE.
+# `git commit -m "...\`ident\`..."` is a shell context: the substitution happens
+# in the shell, BEFORE git is invoked, so by the time any hook runs the
+# backticks are already gone and the message looks clean. The control has to be
+# downstream of the corruption, and the only thing downstream is the SCAR.
+#
+# Deleting a word from `a \`x\` b` leaves `a  b` -- a doubled space mid-line.
+# That is what this refuses. It detects the TRACE, not the cause, and says so.
+#
+# Measured on the real instance (commit d957605, which is why this exists):
+#   "drops or misreads  passes both"
+#   "if  always reads false the yanked arm is empty"
+# Both would have been refused here.
+#
+# ⚠️ HONEST LIMITS, because a control whose reach is overstated is worse than none:
+#   - false NEGATIVE: a deleted word at a line start or before punctuation may
+#     leave no double space. This does not prove a message is intact.
+#   - false POSITIVE: deliberate column alignment in a body. Use `-F -` and a
+#     heredoc, which is the actual fix; this hook is the backstop for forgetting.
+#
+# ENABLE (per clone, NOT automatic -- `.git/hooks` is not versioned and this
+# directory is, so the hook travels but the wiring does not):
+#     git config core.hooksPath .githooks
+set -euo pipefail
+
+msg_file="$1"
+
+# Ignore comment lines and the diff git appends under --verbose.
+if grep -nE '^[^#].*[^ ]  +[^ ]' "$msg_file" | grep -qv '^[0-9]*:#'; then
+    echo "commit-msg REFUSED: doubled space mid-line -- the trace a shell" >&2
+    echo "  substitution leaves when it DELETES a backticked word." >&2
+    echo "" >&2
+    grep -nE '^[^#].*[^ ]  +[^ ]' "$msg_file" | sed 's/^/  /' >&2
+    echo "" >&2
+    echo "  If a word is missing: rewrite with  git commit -F -  and a heredoc." >&2
+    echo "  If the spacing is deliberate: git commit --no-verify" >&2
+    exit 1
+fi

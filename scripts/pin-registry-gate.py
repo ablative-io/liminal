@@ -136,6 +136,15 @@ def run_controls(timeout: float) -> None:
                    f"expected 404 -- the instrument cannot discriminate "
                    f"absent from present")
 
+    # ⚠️ THIS COMMENT IS THE AUTHORITATIVE RATIONALE FOR THE ARM BELOW.
+    # Commit d957605's message, which introduced it, LOST TWO `yanked` tokens
+    # to shell substitution (`git commit -m` with backticks is a shell
+    # context). Two of its sentences read as grammatical with their subject
+    # deleted, and nothing in the message marks the loss. It cannot be
+    # repaired without force-pushing main, so the pointer lives here instead --
+    # in the copy someone opens when they touch this code, rather than in a
+    # note under refs/notes/* that no default fetch would bring them.
+    #
     # ⚠️ THE PAIR ABOVE REACHES A DIFFERENT NOUN FROM THE VERDICT (Cally,
     # `9b69242a`). serde-200 vs nonsense-404 is PRESENT vs ABSENT. The RED this
     # gate emits is about YANKED vs LIVE. A gate that reaches crates.io, parses
