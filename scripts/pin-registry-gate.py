@@ -259,3 +259,16 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# ⚠️ WHAT THIS GATE IS NOT INDEPENDENT ON (Cally, `e4df7b63`, and he is right):
+#
+#   ALGORITHM AXIS -- NOT HELD. This is ONE implementation. The in-band
+#   controls (serde HTTP-200/316 versions, zzq-... HTTP-404) are REACH
+#   controls: they prove the instrument can see and can discriminate. They are
+#   NOT a second algorithm computing the same answer a different way, and a
+#   logic error in check() would pass both of them.
+#
+#   PLATFORM AXIS -- NOT HELD. One box, one Python, one network path.
+#
+# So a PASS here means "one implementation, on one box, at one observation
+# time, could not find a problem." That is worth having and it is not a rate.

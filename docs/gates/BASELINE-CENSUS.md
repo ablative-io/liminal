@@ -172,10 +172,28 @@ gate names its own additions), never pattern-matched.
   and it says nothing about the leak observation, which is
   **non-deterministic** (see below) and therefore not addressed by adding
   venues. **State it as: independent on the platform axis, NOT on the
-  algorithm axis** — the mirror of the form Callisto and Apollo are using at
-  their seats, so three legs read alike rather than converging by luck
-  (Cally, `27967693`). **A count from a second box added to a count from this
-  one is two samples of two populations, not one larger sample.**
+  algorithm axis** — the **mirror** of Callisto's, and deliberately so: hers is
+  *two implementations, one machine* ⇒ she holds the **algorithm** axis and not
+  the platform one; this leg would be *one implementation, two machines* ⇒ the
+  **platform** axis and not the algorithm one. **Same FORM — name the axis you
+  have and the one you do not — opposite CONTENT, because the profiles are
+  opposite** (Cally, `27967693`). **A count from a second box added to a count
+  from this one is two samples of two populations, not one larger sample.**
+
+  **⚠️ AMENDED `05f951b` → here, visibly rather than silently, and the reason is
+  the amendment's own subject (Cally, `e4df7b63`): A PRE-COMMITMENT MECHANISM
+  PRESERVES WHATEVER IT LOCKS IN, INCLUDING AN ERROR. "Cannot be softened
+  later" is also "cannot be corrected later without visible effort" — so the
+  pre-commitment must be verified AT THE MOMENT OF WRITING, because from then
+  on the mechanism protects it.** What `05f951b` got wrong was not the axis; it
+  was **conditional throughout — every sentence about what a future run would
+  buy, and no sentence about what this seat holds TODAY**, which a reader can
+  take as a standing claim. Stated plainly, so it cannot be:
+
+  **⇒ TODAY LIMINAL HOLDS NEITHER AXIS FOR THIS BATTERY. One implementation,
+  one venue, one toolchain, one dependency resolution — and for Leg C and #39,
+  no venue at all.** The pin block above is a single-venue sample and nothing
+  in this file makes it more than that.
 
 - **Doc tests are not covered** — the canonical battery script has no
   doc-test leg (the runner's own disclosure line).
