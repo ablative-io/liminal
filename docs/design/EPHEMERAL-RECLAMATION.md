@@ -46,12 +46,30 @@ Three constraints, each traceable to a datum in task #3:
    released on fd close — **the kernel drops it on any process death,
    including SIGKILL.** That makes lock-based liveness exact where every
    heuristic is approximate.
-2. **The mechanism is signal-agnostic.** The kill-arm datum licenses only
-   "the TempDir guard does not drop under the harness stop path"; the
-   clean-SIGTERM leg is unmeasured. Boot-time reclamation never asks WHY an
-   orphan exists, so its safety story does not depend on the unmeasured leg —
-   which is an argument FOR boot-time and AGAINST exit-path hardening, whose
-   correctness would depend on exactly that signal inventory.
+2. **The mechanism is signal-agnostic — and the signal question is now
+   MEASURED CLOSED (2026-07-31 11:16Z, upgrading this section).** The
+   kill-arm datum (`dBddZ4`, harness stop) had left the clean-SIGTERM leg
+   open. It is open no longer: the gallery app-host on 6010 received a
+   SIGTERM and drained **provably gracefully** — logged component stop,
+   "durable state flushed", "graceful shutdown sequence complete" — and
+   `liminal-durability-XkxShj` is PRESENT, NO HOLDER, FULL SIZE
+   (331,620 KiB; Waffles ~5 min post-shutdown, Cally independently at
+   ~11:22Z, same number to the kilobyte, lsof empty both times).
+   **Shutdown flavor does not discriminate: no observed exit path cleans.**
+   Two different host binaries (frame-host, app-host), same embedded
+   liminal, same outcome — so this is not one host's quirk. ⇒ Boot-time
+   reclamation is not belt-and-braces; **it is the only cleaner that
+   exists** (Waffles' framing, adopted).
+   **Mechanism note, so a future host fix cannot quietly retire this
+   design:** a graceful drain that still leaves the dir means the hosts'
+   exit paths never REACH the guard's destructor — a clean Rust drop of the
+   last store handle does remove the dir (that is the designed path, and
+   liminal's own lifecycle tests exercise it). The open question is
+   relocated, not answered: destructors skipped at exit (`process::exit`
+   after the shutdown sequence) or a handle held to the end of the process.
+   Even a host that fixes its exit path only shrinks the population —
+   SIGKILL and panic-keep remain — so the reclaimer stays load-bearing
+   regardless of that question's answer.
 3. **A reclaimer must OWN its population.** The estate's no-sweep order
    exists because a prefix match over shared system temp cannot distinguish
    our residue from a stranger's directory, and two of the "leaked" dirs were
@@ -225,9 +243,11 @@ breaks a test instead of silently un-arming the reclaimer.
 
 ## 5. ACCEPTANCE — the forensic pair that exists on disk today
 
-**Fixture (claimed, ruled in task #3):** `dBddZ4` — a genuine ~140 MiB
-production-scale orphan of exactly the reclaimable class — plus its two live
-neighbours as in-situ negative controls.
+**Fixtures (claimed, ruled in task #3):** `dBddZ4` (~140 MiB, kill-arm
+provenance) and `XkxShj` (~331 MiB, graceful-SIGTERM provenance, preserved
+under the same no-sweep ledger entry) — the two exit-path flavors, so the
+acceptance run proves the reclaimer over BOTH observed orphan classes — plus
+the live neighbours as in-situ negative controls.
 
 **Arm 2 acceptance, on the box where the fixture lives, post-freeze, under
 named GO:** operator invokes legacy reclaim naming the system-temp
