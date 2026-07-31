@@ -62,27 +62,50 @@ Three constraints, each traceable to a datum in task #3:
 
 ### 3.1 The claim-then-delete primitive (haematite's own discipline, reused)
 
-For a candidate directory: attempt the exclusive writer-lock acquisition,
-non-blocking.
+Haematite's own module doc states the liveness thesis in its own words
+(second-reader verification, `db/lock.rs`): release is kernel-owned on fd
+close by design — "a crashed writer leaves only an inert, unlocked,
+content-free lockfile whose presence means nothing." And the primitive is
+well-defined over the real residue population, measured (names-only listing,
+within the evidence rules): **the husks contain `writer.lock` +
+`config.json`** — Arm 2's husk path is real, not hopeful.
 
-- **Lock held elsewhere** (`DataDirLocked`-shaped refusal) ⇒ a live writer
-  owns it ⇒ **leave it, count it, log it as live.**
-- **Lock acquired** ⇒ no live writer exists ⇒ **delete the directory while
-  still holding the lock**, then release. This is precisely haematite's
-  failed-create discipline (`db.rs:130-132`: removal happens "while still
-  holding the writer lock — it can never delete a concurrent writer's live
-  dir"), so the claim and the delete are one atomic ownership, no TOCTOU.
+For a candidate directory, probe `<dir>/writer.lock` and classify into
+exactly one of **five verdicts** — the first three are the common cases, the
+last two exist so a race or a fault can never masquerade as either:
+
+- **`live-skipped`** — lock held elsewhere (`DataDirLocked`-shaped refusal)
+  ⇒ a live writer owns it ⇒ leave it, count it.
+- **`reclaimed`** — lock acquired ⇒ no live writer exists ⇒ **delete the
+  directory while still holding the lock**, then release. This is precisely
+  haematite's failed-create discipline (`db.rs:130-132`: removal happens
+  "while still holding the writer lock — it can never delete a concurrent
+  writer's live dir"), so the claim and the delete are one atomic ownership,
+  no TOCTOU.
+- **`no-lockfile-skipped`** — `writer.lock` ABSENT. This is the pre-create
+  window: the guard TempDir exists but `Database::create` has not yet
+  reached its lock acquisition. The dir must NOT be reclaimed, and —
+  binding — **the probe must never open-with-create**: haematite's own
+  acquisition opens creating-if-absent (`db/lock.rs:71`), so a reclaimer
+  that O_CREAT-locks the path would make the legitimate creator's acquire
+  fail `DataDirLocked` at mint. Probe existence without creating; absent ⇒
+  skip and count under this verdict's own name.
+- **`vanished`** — ENOENT mid-probe: the owner finished its teardown, or a
+  concurrent reclaimer won the claim. Benign; its own verdict, **distinct
+  from `refused`**, so the §5 zero-refused clause cannot convert a benign
+  race into a STOP.
+- **`refused`** — a real error (permissions, IO fault, unrecognised state).
+  Never silent, always carries the error text.
 
 Reclamation obeys the sensitive-residue rules: the reclaimer **stats, locks,
 and deletes — it never opens store contents** (existence-and-holder only),
 and disposition is **deletion, never archive** (the residue is message
 content under a `durable=false` promise).
 
-Each candidate produces exactly one loud log line: path, verdict
-(`reclaimed` / `live-skipped` / `refused`), and for refusals the error. A
-sweep summary counts all three. **No silent outcomes** — a reclaimer that
-cannot look must say so, not report a clean world (the blocked-instrument
-law).
+Each candidate produces exactly one loud log line: path and verdict, with
+the error text on refusals. A sweep summary counts all five verdicts. **No
+silent outcomes** — a reclaimer that cannot look must say so, not report a
+clean world (the blocked-instrument law).
 
 ### 3.2 Arm 1 — automatic boot sweep over a server-owned root
 
@@ -107,6 +130,15 @@ the root directory for process lifetime, is the ONLY mint path
 outlives every store minted from it, which is the D3-adjacent invariant the
 `:419-428` comment demands. Frame consumes the same type; its consumer-facing
 doc lands in `frame-host`'s module docs (frame's thread, not this one).
+
+**The mid-create race, named:** on a shared root the sweep can meet a
+sibling store MID-CREATE (§5's own acceptance runs a second live server
+under the same root). The §3.1 `no-lockfile-skipped` rule IS the
+resolution: in the pre-create window the dir has no `writer.lock` and the
+sweep skips it without touching the path; from the moment the creator's
+lock acquisition lands, the dir reads `live-skipped`. There is no instant
+at which a legitimately-minting store is claimable — so the acceptance's
+"second server survives" clause covers mid-create, not just post-create.
 
 **Interplay with the designed panic leak:** `EphemeralGuard::drop` leaks the
 directory deliberately when the store's drop panics (`store.rs:284`,
@@ -176,10 +208,14 @@ population. PASS requires ALL of:
 - Every dir with a live holder (the manifold surface's store, the current
   boot's store): **live-skipped** — present afterwards, holders intact.
 - The husk population: reclaimed, counted, the count reported against the
-  census taken immediately before the run.
+  census taken immediately before the run — and **the census and the tool's
+  population must share a DOMAIN: same predicate, same root** (the
+  count-domain law), or the comparison silently compares two populations.
 - Zero `refused` verdicts — **a refusal instead of a reclaim is a STOP back
   to design** (F8's clause, same reason: a mechanism that cannot handle the
-  real case is not amended in the field).
+  real case is not amended in the field). `vanished` and
+  `no-lockfile-skipped` are NOT refusals (§3.1) and do not trip this
+  clause.
 
 The passing run IS the fixture's disposition: deletion-never-archive,
 satisfied by the mechanism under test. **Before/after censuses are taken by
@@ -192,12 +228,23 @@ server's boot sweep; a panic-path `keep()` dir is reclaimed at next boot only
 after its process dies. Red-first, loud teed logs, no silencing redirections,
 suite-count tell before trusting green.
 
-## 6. OPEN QUESTIONS FOR REVIEW
+## 6. RULED (Cally's second-reader pass, 2026-07-31)
 
-1. Config shape for the root (sibling-of-persistence vs explicit
-   `ephemeral_root`; refuse-vs-mint when absent).
-2. The haematite ask (§3.4): file now as an issue, or carry the interim +
-   conformance pin until the next natural haematite cut?
-3. Arm 2's surface: server subcommand vs standalone binary. A subcommand
-   inherits the server's config parsing (fewer paths to drift); a standalone
-   binary can run without a server present. Lean: subcommand.
+1. **Root config: explicit `ephemeral_root`, and the server REFUSES at boot
+   when ephemeral minting is needed and it is absent.** Sibling-of-persistence
+   is dead code in the only case that mints — the ephemeral branch fires
+   exactly when `persistence_path` is `None`, so there is nothing to be
+   sibling of. A derived default root is the same bug one level up: an
+   un-chosen location for `durable=false` payload bytes. The refusal message
+   names the one-line fix. ⚠️ **This changes bare-boot behaviour, so it is
+   flagged to Tom as a veto-window item at the change's landing** — not
+   decided silently. Frame picks the config up at its re-pin, the
+   already-ruled inheritance path.
+2. **The haematite ask is filed with Apollo now** — filing starts his clock
+   without coupling ours; the §3.4 interim + conformance pin carries
+   independently until his next natural cut. Explicitly NOT tied to the
+   corrected re-pin trigger (both #31 and #56), which is about error-type
+   survival and moves on its own evidence.
+3. **Arm 2 is a server subcommand.** Config-parsing inheritance beats
+   standalone's only advantage, since a subcommand runs without a live
+   server anyway.
