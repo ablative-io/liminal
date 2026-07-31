@@ -19,6 +19,10 @@
 //! request/reply [`Connection`] (which couples a single read to a single write)
 //! completely untouched — the push path is additive, not a rewrite.
 
+mod pending_connect;
+
+pub use pending_connect::PendingPushConnect;
+
 use alloc::format;
 use alloc::string::ToString;
 use alloc::sync::Arc;
@@ -124,6 +128,18 @@ pub struct PushClient {
 }
 
 impl PushClient {
+    /// Prepares a push-client connection whose synchronous setup replies use
+    /// `deadline` instead of the default five-second setup duration.
+    ///
+    /// This does not open a socket. Configure optional authentication or worker
+    /// registration on the returned value, then call
+    /// [`PendingPushConnect::connect`]. See [`PendingPushConnect`] for the exact
+    /// per-read and per-control-exchange bounds.
+    #[must_use]
+    pub const fn with_setup_deadline(address: &str, deadline: Duration) -> PendingPushConnect<'_> {
+        PendingPushConnect::new(address, deadline)
+    }
+
     /// Connects to `address`, performs the protocol handshake, and starts the
     /// background reader that drains inbound server pushes.
     ///
@@ -150,9 +166,7 @@ impl PushClient {
     ///
     /// [`connect`]: Self::connect
     pub fn connect_with_auth(address: &str, auth_token: &[u8]) -> Result<Self, SdkError> {
-        let mut stream = connect_socket(address)?;
-        handshake(&mut stream, auth_token)?;
-        Self::start_reader(stream)
+        Self::connect_configured(address, auth_token, None, SETUP_TIMEOUT)
     }
 
     /// Connects, performs the handshake, then synchronously registers this client
@@ -198,9 +212,20 @@ impl PushClient {
         registration: WorkerRegistration,
         auth_token: &[u8],
     ) -> Result<Self, SdkError> {
-        let mut stream = connect_socket(address)?;
-        handshake(&mut stream, auth_token)?;
-        register(&mut stream, registration)?;
+        Self::connect_configured(address, auth_token, Some(registration), SETUP_TIMEOUT)
+    }
+
+    fn connect_configured(
+        address: &str,
+        auth_token: &[u8],
+        registration: Option<WorkerRegistration>,
+        setup_deadline: Duration,
+    ) -> Result<Self, SdkError> {
+        let mut stream = connect_socket(address, setup_deadline)?;
+        handshake(&mut stream, auth_token, setup_deadline)?;
+        if let Some(registration) = registration {
+            register(&mut stream, registration, setup_deadline)?;
+        }
         Self::start_reader(stream)
     }
 
@@ -538,9 +563,9 @@ impl Drop for PushClient {
     }
 }
 
-/// Opens and configures the push-client socket (Nagle off, the named setup
-/// deadline on reads, a bounded write timeout) before any framing.
-fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
+/// Opens and configures the push-client socket (Nagle off, the caller-selected
+/// maximum wait for one setup read, a bounded write timeout) before any framing.
+fn connect_socket(address: &str, setup_deadline: Duration) -> Result<TcpStream, SdkError> {
     let stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
         description: format!("failed to connect push client to {address}: {source}"),
     })?;
@@ -555,7 +580,7 @@ fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
     // thread, and `start_reader` takes it back off before the background reader
     // ever sees the socket.
     stream
-        .set_read_timeout(Some(SETUP_TIMEOUT))
+        .set_read_timeout(Some(setup_deadline))
         .map_err(|source| SdkError::Connection {
             description: format!("failed to set the push setup deadline for {address}: {source}"),
         })?;
@@ -573,14 +598,18 @@ fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
 ///
 /// A `Rejected` ack maps to a typed [`SdkError::Protocol`] carrying the server's
 /// reason; any non-ack reply is a protocol error.
-fn register(stream: &mut TcpStream, registration: WorkerRegistration) -> Result<(), SdkError> {
+fn register(
+    stream: &mut TcpStream,
+    registration: WorkerRegistration,
+    setup_deadline: Duration,
+) -> Result<(), SdkError> {
     let frame = Frame::WorkerRegister {
         flags: 0,
         registration,
     };
     write_frame(stream, &frame)?;
     let mut buffer = Vec::new();
-    match read_one_frame(stream, &mut buffer)? {
+    match read_one_frame(stream, &mut buffer, setup_deadline)? {
         Frame::WorkerRegisterAck {
             outcome: WorkerRegisterOutcome::Accepted,
             ..
@@ -602,7 +631,11 @@ fn register(stream: &mut TcpStream, registration: WorkerRegistration) -> Result<
 
 /// Drives the client handshake (`Connect` -> `ConnectAck`) on a fresh socket,
 /// carrying `auth_token` (empty for an open, non-auth server).
-fn handshake(stream: &mut TcpStream, auth_token: &[u8]) -> Result<(), SdkError> {
+fn handshake(
+    stream: &mut TcpStream,
+    auth_token: &[u8],
+    setup_deadline: Duration,
+) -> Result<(), SdkError> {
     let connect = Frame::Connect {
         flags: 0,
         min_version: CLIENT_MIN_VERSION,
@@ -611,7 +644,7 @@ fn handshake(stream: &mut TcpStream, auth_token: &[u8]) -> Result<(), SdkError> 
     };
     write_frame(stream, &connect)?;
     let mut buffer = Vec::new();
-    match read_one_frame(stream, &mut buffer)? {
+    match read_one_frame(stream, &mut buffer, setup_deadline)? {
         Frame::ConnectAck { .. } => Ok(()),
         Frame::ConnectError {
             reason_code,
@@ -729,7 +762,7 @@ fn next_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, Sdk
     }
 }
 
-/// Reads one complete control-frame reply under the named [`SETUP_TIMEOUT`]
+/// Reads one complete control-frame reply under the caller-selected wall-clock
 /// deadline — used for the synchronous handshake and worker-registration replies,
 /// on the calling thread, before the background reader starts.
 ///
@@ -738,8 +771,12 @@ fn next_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, Sdk
 /// shape this replaces died on the FIRST elapsed window, which — composed with a
 /// 100 ms reader poll cadence armed before the handshake — made connect fatal to
 /// any peer slower than 100 ms. Nobody chose that.
-fn read_one_frame(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<Frame, SdkError> {
-    let deadline = Instant::now() + SETUP_TIMEOUT;
+fn read_one_frame(
+    stream: &mut TcpStream,
+    buffer: &mut Vec<u8>,
+    setup_deadline: Duration,
+) -> Result<Frame, SdkError> {
+    let deadline = Instant::now() + setup_deadline;
     loop {
         match decode(buffer) {
             Ok((frame, consumed)) => {

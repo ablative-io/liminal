@@ -180,8 +180,7 @@ fn a_supplied_setup_deadline_bounds_the_control_frame_reply() -> Result<(), SdkE
     });
 
     let started = Instant::now();
-    let outcome =
-        PushClient::with_setup_deadline(&address, CUSTOM_SETUP_DEADLINE).connect();
+    let outcome = PushClient::with_setup_deadline(&address, CUSTOM_SETUP_DEADLINE).connect();
     let elapsed = started.elapsed();
     server.join().ok();
 

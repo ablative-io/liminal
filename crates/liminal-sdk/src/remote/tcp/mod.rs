@@ -21,7 +21,9 @@ mod push_client;
 mod subscription;
 
 pub use flush::{FlushMode, FlushOutcome, PublishRejection};
-pub use push_client::{OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame};
+pub use push_client::{
+    OBSERVABILITY_CHANNEL, PendingPushConnect, PushClient, PushWriter, PushedFrame,
+};
 pub use subscription::{DeliveredMessage, SubscriptionStream};
 
 use alloc::format;
