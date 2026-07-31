@@ -143,6 +143,12 @@ class, which both real-world exhibits inhabit):
   **`reclaimed-lockless`** — its own verdict name, so the counts always
   show which discipline fired. The check is an existence-and-holder
   measurement (lsof-class), never a content read.
+- **The census instrument's OWN failure is a named arm (R4): if holder
+  enumeration is unavailable or errors, the verdict is `refused` — never
+  assumed-no-holder.** The blocked-instrument law applies everywhere, but
+  this is the ONE site where a silent false "no holder" performs removal
+  under live workers, so it gets its own arm rather than a general
+  citation: no lsof-class answer, no deletion, ever.
 - **Evidence status, labelled honestly (Athena's own labelling, kept):**
   the fd predicate is **DERIVED FROM MECHANISM, NOT DEMONSTRATED BY
   SAMPLE.** On every observable store the fd predicate and the unsound
@@ -185,11 +191,12 @@ and disposition is **deletion, never archive** (the residue is message
 content under a `durable=false` promise).
 
 Each candidate produces exactly one loud log line: path and verdict, with
-the error text on refusals. A sweep summary counts all six verdicts
-(`reclaimed` / `reclaimed-lockless` / `live-skipped` / `vanished` /
-`refused`, with `live-skipped` reported per-discipline). **No silent
-outcomes** — a reclaimer that cannot look must say so, not report a clean
-world (the blocked-instrument law).
+the error text on refusals. A sweep summary reports **five verdict names in
+six buckets** — `reclaimed` / `reclaimed-lockless` / `live-skipped` (split
+per-discipline, two buckets) / `vanished` / `refused` — so the count and
+its domain agree on the page. **No silent outcomes** — a reclaimer that
+cannot look must say so, not report a clean world (the blocked-instrument
+law).
 
 ### 3.2 Arm 1 — automatic boot sweep over a server-owned root
 
@@ -244,6 +251,27 @@ never across store lifetime, so it serializes nothing in steady state.
 "Second server survives" then covers mid-create by mechanism rather than
 by verdict-set accident.
 
+**The root lock is PINNED, not gestured at (R3)** — this document refuses
+unpinned locks one section down, so its own second lock meets the same bar:
+
+- **(a) Mechanism class:** an OS advisory fd lock, kernel-released on
+  process death, and **RAII-released on EVERY mint-window failure path** —
+  panic, failed `writer.lock` acquisition, any error return. Without that
+  property a wedged mint silently deadlocks every future boot sweep; the
+  release-on-all-paths behaviour is itself a red-first test.
+- **(b) Creation discipline:** created by `EphemeralRoot` at root creation,
+  exactly once — **no later actor ever probes it with O_CREAT**, the same
+  rule the store lockfile carries.
+- **(c) Name and location:** at the root, under a name the sweep's
+  `liminal-durability-*` candidate predicate structurally cannot match
+  (e.g. `.ephemeral-root.lock` — dotted, un-prefixed; final name at
+  implementation, the non-matching property is the requirement).
+- **(d) Anchor discipline:** the regular-file refusal applies — a root
+  lock that is a symlink or special file is `refused` before any open.
+- **(e) Conformance pin:** the same test class as `writer.lock`'s (§3.4) —
+  a test creates a root and asserts the lock file's path, so a rename
+  breaks a test instead of silently un-serializing mint from sweep.
+
 **Interplay with the designed panic leak:** `EphemeralGuard::drop` leaks the
 directory deliberately when the store's drop panics (`store.rs:284`,
 `dir.keep()`) because removal under possibly-live workers is corruption. The
@@ -266,6 +294,18 @@ automatic sweep widens to system temp.** Arm 2 is how the standing no-sweep
 order eventually lifts: not an `rm -rf`, but a lock-disciplined tool run
 under operator authority, leaving live stores standing by proof rather than
 by luck.
+
+**The vouching has teeth (R5) — it is a RUN CONDITION, not a sentiment: no
+ephemeral-minting process starts or restarts for the run's duration.** The
+threat is concrete and has a name: 99844-class pre-design binaries mint
+into exactly the swept population on restart. A restart mid-run creates a
+fresh lockless, fd-less dir inside its mid-mint window — with no root lock
+to protect it, the lock-absent discipline would reclaim it out from under
+the creator. So the acceptance run RECORDS the condition as checked: a
+process census (which ephemeral-minting processes exist) taken before and
+after the run, **sharing its count-domain with the population census** —
+same box, same predicate class — so "no creator started" is a measured
+sentence, not an assumed one.
 
 ### 3.4 The lock-protocol pin — cross-crate, so it must be a CONTROL
 
@@ -346,18 +386,28 @@ the sampling law wearing filesystem clothes.
 named GO:** operator invokes legacy reclaim naming the system-temp
 population. PASS requires ALL of:
 
-- `dBddZ4`: **reclaimed** — absent afterwards, its log line naming the path.
+- `dBddZ4`: **`reclaimed-lockless`, via the lock-absent discipline** —
+  absent afterwards, its log line naming path, verdict, and discipline. It
+  is a shards-only orphan (measured at three hands), so a run reporting
+  plain `reclaimed` for it has either misclassified or collapsed the count
+  separation the verdict split exists for — **the expected verdict names
+  the expected discipline, per fixture.**
+- `XkxShj`: **`reclaimed-lockless`, via the lock-absent discipline** — same
+  clause, its own bullet; the graceful-provenance fixture must be SEEN to
+  exercise the same discipline, not assumed covered by its sibling.
+- The husk population (lock + config, no shards): **`reclaimed`, via the
+  lock-present discipline** — the atomic claim-then-delete's own receipt.
 - Every dir with a live holder (the manifold surface's store, the current
-  boot's store): **live-skipped** — present afterwards, holders intact.
-- The husk population: reclaimed, counted, the count reported against the
-  census taken immediately before the run — and **the census and the tool's
-  population must share a DOMAIN: same predicate, same root** (the
-  count-domain law), or the comparison silently compares two populations.
+  boot's store): **`live-skipped`** — present afterwards, holders intact.
+- The husk count reported against the census taken immediately before the
+  run — and **the census and the tool's population must share a DOMAIN:
+  same predicate, same root** (the count-domain law), or the comparison
+  silently compares two populations.
 - Zero `refused` verdicts — **a refusal instead of a reclaim is a STOP back
   to design** (F8's clause, same reason: a mechanism that cannot handle the
-  real case is not amended in the field). `vanished` and
-  `no-lockfile-skipped` are NOT refusals (§3.1) and do not trip this
-  clause.
+  real case is not amended in the field). `vanished` is NOT a refusal
+  (§3.1) and does not trip this clause; `live-skipped` outcomes are the
+  negative controls passing, not failures.
 
 The passing run IS the fixture's disposition: deletion-never-archive,
 satisfied by the mechanism under test. **Before/after censuses are taken by
