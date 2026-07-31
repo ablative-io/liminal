@@ -75,6 +75,29 @@ and WebSocket transports, and pinned by name in three tests.
 > either way. `ConnectionPoolConfig` (`connection/pool.rs:16`) has the same
 > all-public shape and the same constraint.
 >
+> #### 🔴 3.0.1 CORRECTION TO THE CORRECTION (Artemis erratum 4, verified here)
+>
+> **The field census above is FALSE of `RemoteConfig`.** Measured at `92e65ce`:
+> four public **plus TWO PRIVATE** — `transport: Arc<dyn RemoteTransport>`
+> (`remote.rs:102`) and `websocket: Option<..>` under `#[cfg(feature = "std")]`
+> (`:106-107`). By this section's own quoted rule, **the semver conclusion
+> INVERTS for `RemoteConfig`**: private fields exist, downstream struct literals
+> are already impossible, an added field would be **MINOR**. The census is true
+> only of `ConnectionPoolConfig` — one sentence bundled two structs and was
+> correct for one.
+>
+> **The prohibition on a deadline field SURVIVES on the ground that was never
+> semver:** a setup deadline is meaningful only DURING connect, and
+> `RemoteConfig` **outlives connect** — it is the handle's constructor argument,
+> held after the transport is live. A `setup_deadline` field would sit there
+> permanently describing a phase that has ended. The pending type stays right;
+> only the stated reason falls.
+>
+> **How the false census happened is the lesson:** the count came from reading
+> the *visible field list* at the struct head — the two private fields sit
+> below the public ones, one behind a `cfg` gate. **A census of a struct is a
+> census of the whole struct body, cfg-gated members included.**
+>
 > **⇒ THE API SHAPE DECIDES THE SEMVER CLASS. That turns question (c) from a
 > matter of taste into a release-planning question.**
 >

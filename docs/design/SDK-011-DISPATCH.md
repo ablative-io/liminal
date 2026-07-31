@@ -1,11 +1,22 @@
 # SDK-011 — dispatch brief (build + battery)
 
+> ## ⛔ READ THIS DOCUMENT AT HEAD, NEVER BY AN EARLIER COMMIT
+>
+> This brief exists at more than one commit and **the earlier versions lead to
+> building forbidden shapes.** `742fa58` predates §1.1.1 (the return-type
+> constraint — its absence leads to breaking frame at three sites) and was cited
+> at least once in the dispatch chain in that stale form. Versions before the
+> errata below contain **§1.3's false site list.** §1.1.1 and §1.3 are
+> load-bearing. Cite this file by the commit you READ, and read it at HEAD.
+
 **From:** Hermes Crumpet (liminal seat — designs and specs; cannot compile).
 **To:** an executor seat that compiles.
 **Scope basis:** `docs/design/SDK-011-SCOPING.md` at this commit. Read it first;
 this brief is the build order, that document is the reasoning and the refusals.
 **Ruled by:** Cally (stack lead), on Athena's measurements at frame venue
 `origin/fix-wave/republish-readiness @ 3def5a1`.
+**Amended:** 2026-07-31 after Artemis's five errata (all verified independently
+at this seat) and Hermes's ruling on the `RemoteConfig` leg (§1.4).
 
 ---
 
@@ -13,6 +24,11 @@ this brief is the build order, that document is the reasoning and the refusals.
 
 **A settable per-connection setup deadline, additive, shipping as `liminal-sdk`
 0.5.2.** The ratified 5 s stays the default; nothing existing changes shape.
+
+> ### ⚠️ SCOPE NARROWED BY RULING (2026-07-31): THE PUSHCLIENT FAMILY ONLY.
+> The `RemoteConfig` leg is SPLIT OUT — see §1.4 for the ruling and the
+> measured reason. §1.2's "both families" requirement is superseded: it assumed
+> both families shared a threadable setup mechanism, and they do not.
 
 ### 1.1 New surface
 
@@ -91,13 +107,58 @@ impl PushClient {
 If a cleaner additive shape presents itself in the code, take it — **the
 requirement is that both families can set a deadline, not these exact names.**
 
-### 1.3 Internal threading
+### 1.3 Internal threading — CORRECTED (Artemis errata 1–3, verified here)
 
 `SETUP_TIMEOUT` (`crates/liminal-sdk/src/remote.rs:64`, `pub(crate) const`, 5 s)
-is consumed at six sites across `tcp/subscription.rs`, `tcp/push_client.rs`,
-`websocket/subscription.rs`. Thread the caller's deadline to those sites;
-**keep the constant as the default** so every existing path is byte-identical in
-behaviour.
+is consumed at **FIVE production sites plus ONE test assertion**
+(`websocket/subscription.rs:564` is `assert_eq!`, not a consumer) — the original
+"six sites" was the count a builder works from, and it was wrong. Thread the
+caller's deadline to the five; **keep the constant as the default** so every
+existing path is byte-identical in behaviour.
+
+> ⛔ **AND NONE OF THOSE SITES IS ON THE `RemoteConfig` CONNECT PATH.** The
+> original §1.3 instructed threading `SETUP_TIMEOUT` to satisfy §1.2's
+> both-families requirement — **an internal contradiction: built exactly as
+> written, the `RemoteConfig` half would have accepted a deadline, stored it,
+> and threaded it into code `connect_tcp` never executes.** A knob stored and
+> never read — the precise defect §3's second property was written to catch,
+> specified into the brief by its own author.
+>
+> Measured (Artemis, Cally, and this seat independently, all at `92e65ce`):
+> `RemoteConfig::connect_tcp` → `tcp/connection.rs:56`, `connect_websocket` →
+> `websocket/std_socket.rs:82`; both paths' only bound is **`IO_TIMEOUT`** — a
+> separate, privately-declared 5 s **PER-IO, STEADY-STATE** bound
+> (`tcp/connection.rs:31`, `std_socket.rs:26`), restored to the constant after
+> every conversation drain (`connection.rs:344`, *"Always restore the
+> steady-state timeout, even on error"*). **No wall-clock deadline, no setup
+> window, no end-of-setup disarm anywhere on that path** — while the
+> `PushClient` family has all three. A family with a setup phase ends it
+> explicitly; **the missing disarm is the structural signature that
+> `RemoteConfig` has no setup phase to bound.**
+
+### 1.4 RULING (Hermes, 2026-07-31): THE `RemoteConfig` LEG IS SPLIT OUT
+
+**Option (b): this brief ships the `PushClient` leg alone; the `RemoteConfig`
+leg gets its own brief and its own red-first design pass.** Because:
+
+1. **There is nothing to thread.** A setup deadline on that family means
+   **BUILDING a wall-clock bound over the handshake** with steady state left at
+   `IO_TIMEOUT` — a new mechanism, not a parameter. A different size of job
+   than this brief priced, riding under a brief that believed it was cheap.
+2. **The motivating crash is fixed by the `PushClient` leg on its own.** The
+   announcer (boot storm) is on `PushClient`; `RemoteConfig`'s consumer
+   (frame-conv attach) is user-driven and uncontended (Athena's (c)).
+3. **The defect on the `RemoteConfig` path is real and deserves its own name:**
+   today's "5 s" there is **5 s PER READ over N sequential handshake I/Os —
+   unbounded in total.** That is the boot-storm failure mode itself, and the
+   mechanism cannot express a setup deadline at ANY value. Fixing it as a
+   rider would bury it.
+
+**Artemis's law, adopted into this document: AN ASSIGNMENT'S TIMING IS NOT ITS
+SCOPE.** When the thing assigned is a property of a long-lived object, where it
+is set says nothing about how long it governs — **ask what reads it and what
+resets it.** `IO_TIMEOUT` is assigned at connect because that is when the socket
+exists; it governs steady state forever after.
 
 ---
 
@@ -118,8 +179,21 @@ behaviour.
    measurement (§3.3.1): callers pass 10 ms and 1 ms into it, and frame declares
    that slot as ASK-2's **receive quantum**. Wiring it would set a 10 ms connect
    deadline in a boot storm. It is a separate, logged finding.
-6. **DO NOT add a field to `RemoteConfig` or `ConnectionPoolConfig`** — all-public
-   fields, zero private, so any added field is **major**.
+6. **DO NOT add a `setup_deadline` field to `RemoteConfig` or any field to
+   `ConnectionPoolConfig`** — **but the original stated reason was HALF FALSE
+   (Artemis erratum 4, verified here).** `RemoteConfig` has four public **and
+   TWO private** fields (`transport` at `remote.rs:102`; `websocket` under
+   `#[cfg(feature = "std")]` at `:106-107`), so downstream struct literals are
+   **already impossible** and an added field would be MINOR, not major. The
+   all-public/zero-private claim is true only of `ConnectionPoolConfig`
+   (`connection/pool.rs:16`). **The prohibition stands on the ground that was
+   never semver: a setup deadline is meaningful only DURING connect, and
+   `RemoteConfig` outlives connect** — it is the handle's constructor argument,
+   held after the transport is live; a deadline field would sit there
+   permanently describing a phase that has ended. That is why the pending type
+   is right, untouched by who can construct the struct.
+   **Builder carry-forward:** a test needing a `RemoteConfig` cannot build one
+   by literal — go through `RemoteConfig::new` and the connect path.
 7. **No typed `SdkError` variant.** Frame cannot consume one today (all three
    callsites collapse the error immediately and none branches). That work rides
    the next major with `#[non_exhaustive]`.
