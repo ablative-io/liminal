@@ -1,0 +1,203 @@
+# Ephemeral-store reclamation — design pass (task #3, design leg)
+
+**Status: DESIGN DRAFT for review — not a dispatch.** No executor, no GO; any
+build waits on the freeze doctrine like everything else.
+**Author:** Hermes Crumpet (liminal seat).
+**Evidence base:** task #3's metadata holds the full investigation record —
+the 571-dir partition, the pre-registered redeploy experiment (fired
+2026-07-31 08:23Z), and the rulings this design binds to. This document is
+the mechanism; that record is the why.
+
+> ⚠️ **READ THIS AT HEAD.** A commit hash citing this file names the tree it
+> read, not the current ruling.
+
+---
+
+## 1. THE TWO FINDINGS, AS RULED
+
+**1a. The ephemeral branch is INTENDED.** `open_ephemeral`
+(`crates/liminal/src/durability/store.rs:407`) is ungated production API,
+re-exported at `durability/mod.rs`, and the server reaches it at
+`build_durable_store` (`crates/liminal-server/src/server/connection/services.rs:901-905`,
+`None => open_ephemeral(..)` when no `persistence_path` is configured).
+`durable = false` is a **retention contract, not an
+implementation-medium declaration** — a disk-backed store honouring it is
+legitimate. The design below does not remove this branch.
+
+**1b. Crash residue breaks the promise WITH PAYLOADS.** Conversation payloads
+reach the store with no durability gate in the append plumbing
+(`crates/liminal-server/src/server/participant/aggregate.rs:228`). A store
+that outlives its process is `durable=false` message content persisting on
+disk — privacy-shaped, and measured live: the 2026-07-31 kill arm left
+`dBddZ4` as a full-size orphan (140,840 KiB, present, no holder). Today the
+residue bound is **unbounded**. The design's deliverable is an honest bound:
+**ephemeral residue survives at most until the next server boot.**
+
+## 2. WHAT THE MEASUREMENTS BIND
+
+Three constraints, each traceable to a datum in task #3:
+
+1. **Liveness is decided by the writer lock and NOTHING else.** The orphan
+   `dBddZ4` SHRANK during shutdown (168,008 → 140,840 KiB over ~40 s) with
+   its guard never dropping — orphans are not byte-frozen, so **quiescence
+   heuristics (stable size, mtime age) are structurally invalid** liveness
+   tests. Haematite's writer lock is an OS advisory lock on
+   `<data_dir>/writer.lock` (haematite `db/lock.rs:7`, `LOCK_FILE` at `:37`),
+   released on fd close — **the kernel drops it on any process death,
+   including SIGKILL.** That makes lock-based liveness exact where every
+   heuristic is approximate.
+2. **The mechanism is signal-agnostic.** The kill-arm datum licenses only
+   "the TempDir guard does not drop under the harness stop path"; the
+   clean-SIGTERM leg is unmeasured. Boot-time reclamation never asks WHY an
+   orphan exists, so its safety story does not depend on the unmeasured leg —
+   which is an argument FOR boot-time and AGAINST exit-path hardening, whose
+   correctness would depend on exactly that signal inventory.
+3. **A reclaimer must OWN its population.** The estate's no-sweep order
+   exists because a prefix match over shared system temp cannot distinguish
+   our residue from a stranger's directory, and two of the "leaked" dirs were
+   a LIVE DATABASE. **The automatic sweep must be scoped to a root only we
+   write under — never the shared system temp dir.**
+
+## 3. THE MECHANISM
+
+### 3.1 The claim-then-delete primitive (haematite's own discipline, reused)
+
+For a candidate directory: attempt the exclusive writer-lock acquisition,
+non-blocking.
+
+- **Lock held elsewhere** (`DataDirLocked`-shaped refusal) ⇒ a live writer
+  owns it ⇒ **leave it, count it, log it as live.**
+- **Lock acquired** ⇒ no live writer exists ⇒ **delete the directory while
+  still holding the lock**, then release. This is precisely haematite's
+  failed-create discipline (`db.rs:130-132`: removal happens "while still
+  holding the writer lock — it can never delete a concurrent writer's live
+  dir"), so the claim and the delete are one atomic ownership, no TOCTOU.
+
+Reclamation obeys the sensitive-residue rules: the reclaimer **stats, locks,
+and deletes — it never opens store contents** (existence-and-holder only),
+and disposition is **deletion, never archive** (the residue is message
+content under a `durable=false` promise).
+
+Each candidate produces exactly one loud log line: path, verdict
+(`reclaimed` / `live-skipped` / `refused`), and for refusals the error. A
+sweep summary counts all three. **No silent outcomes** — a reclaimer that
+cannot look must say so, not report a clean world (the blocked-instrument
+law).
+
+### 3.2 Arm 1 — automatic boot sweep over a server-owned root
+
+Production ephemeral stores move from system temp to a **server-owned
+ephemeral root** (config-derived; shape for review: sibling of
+`persistence_path` when configured, else an explicit `ephemeral_root`, no
+silent fallback to system temp). At boot, before minting its own store, the
+server sweeps `liminal-durability-*` entries under that root with the §3.1
+primitive. Population ownership makes the sweep safe by construction: nothing
+else writes there, so prefix-match false positives are structurally excluded
+rather than heuristically unlikely.
+
+This requires the rooted mint in production — which is the deferred
+root-ownership question at `store.rs:419-428`: `open_ephemeral_rooted` is
+test-gated (`:433`) because a rooted store's PARENT lifetime is the caller's
+problem, "deferred until a real embedder need arrives." **The need has now
+arrived twice** (frame, and the server itself). Ruled shape: an
+`EphemeralRoot` handle — created once per server process, non-`Clone`, owns
+the root directory for process lifetime, is the ONLY mint path
+(`EphemeralRoot::open_store(..)`), and carries the boot sweep
+(`EphemeralRoot::reclaim_orphans()`). The token's existence proves the parent
+outlives every store minted from it, which is the D3-adjacent invariant the
+`:419-428` comment demands. Frame consumes the same type; its consumer-facing
+doc lands in `frame-host`'s module docs (frame's thread, not this one).
+
+**Interplay with the designed panic leak:** `EphemeralGuard::drop` leaks the
+directory deliberately when the store's drop panics (`store.rs:284`,
+`dir.keep()`) because removal under possibly-live workers is corruption. The
+boot sweep completes that story instead of contradicting it: while any
+panicked process's workers still hold the lock, the sweep skips the dir; once
+the process dies, the fd closes and the next boot reclaims it. The leak
+comment's "visible residue is diagnosable" window becomes **one boot cycle**,
+which is the same honest bound as §1b.
+
+### 3.3 Arm 2 — explicit legacy reclaim over a NAMED path
+
+The boot sweep must never touch system temp (§2.3) — but the existing
+residue (567 husks + `dBddZ4`) lives exactly there, minted by pre-design
+binaries. Arm 2 is a one-time, **operator-invoked** reclaim: the operator
+names the population root explicitly (flag or subcommand — surface for
+review), and the tool applies the identical §3.1 primitive with the identical
+logging. The operator's explicit naming is the authorisation the automatic
+arm derives from population ownership; **there is no silent path by which the
+automatic sweep widens to system temp.** Arm 2 is how the standing no-sweep
+order eventually lifts: not an `rm -rf`, but a lock-disciplined tool run
+under operator authority, leaving live stores standing by proof rather than
+by luck.
+
+### 3.4 The lock-protocol pin — cross-crate, so it must be a CONTROL
+
+`writer.lock` is haematite's internal contract (`LOCK_FILE` is
+`pub(super)`); liminal cannot call haematite's lock module. Preferred
+resolution: **haematite exposes the primitive** (a
+`Database::reclaim_if_orphaned(path)`-shaped API) — a cross-repo ask to file
+with Apollo, on its own clock, independent of the corrected re-pin trigger.
+Interim: liminal performs the same advisory-lock acquisition on
+`<dir>/writer.lock` via the same std file-locking API haematite uses. That
+interim carries a pin — the lock file's name and location — which no code
+would mechanically compare, and a pin nobody compares is an instruction, not
+a control. **Binding: a conformance test mints a real store and asserts
+`writer.lock` exists at the expected path within it**, so a haematite rename
+breaks a test instead of silently un-arming the reclaimer.
+
+## 4. WHAT THIS DESIGN DOES NOT DO
+
+- Does not remove or gate the ephemeral branch (§1a — intended).
+- Does not touch the battery-minted dirs problem: liminal's own tests routing
+  through `open_ephemeral_rooted` under `target/` is the **mechanical leg**,
+  tracked separately in task #3 — and its brief has an unread input (the
+  aion-awl record at `e866f723`) that must be read before that leg moves; the
+  collective resolver is unreachable from this seat, so that read is not
+  claimable here and is named rather than skipped.
+- Does not decide the version class of the server/liminal changes — the
+  `EphemeralRoot` API is additive but the config surface may not be;
+  classification happens at the change, per the version-bump three-classes
+  rule.
+- Does not lift the no-sweep order. Only a green Arm-2 acceptance run does
+  that, and only for the population it names.
+
+## 5. ACCEPTANCE — the forensic pair that exists on disk today
+
+**Fixture (claimed, ruled in task #3):** `dBddZ4` — a genuine ~140 MiB
+production-scale orphan of exactly the reclaimable class — plus its two live
+neighbours as in-situ negative controls.
+
+**Arm 2 acceptance, on the box where the fixture lives, post-freeze, under
+named GO:** operator invokes legacy reclaim naming the system-temp
+population. PASS requires ALL of:
+
+- `dBddZ4`: **reclaimed** — absent afterwards, its log line naming the path.
+- Every dir with a live holder (the manifold surface's store, the current
+  boot's store): **live-skipped** — present afterwards, holders intact.
+- The husk population: reclaimed, counted, the count reported against the
+  census taken immediately before the run.
+- Zero `refused` verdicts — **a refusal instead of a reclaim is a STOP back
+  to design** (F8's clause, same reason: a mechanism that cannot handle the
+  real case is not amended in the field).
+
+The passing run IS the fixture's disposition: deletion-never-archive,
+satisfied by the mechanism under test. **Before/after censuses are taken by
+existence-and-holder only.**
+
+**Arm 1 acceptance, synthetic, any venue:** under a fresh `EphemeralRoot` —
+clean drop leaves nothing; SIGKILL leaves an orphan which the next boot
+reclaims; a second live server's store under the same root survives the first
+server's boot sweep; a panic-path `keep()` dir is reclaimed at next boot only
+after its process dies. Red-first, loud teed logs, no silencing redirections,
+suite-count tell before trusting green.
+
+## 6. OPEN QUESTIONS FOR REVIEW
+
+1. Config shape for the root (sibling-of-persistence vs explicit
+   `ephemeral_root`; refuse-vs-mint when absent).
+2. The haematite ask (§3.4): file now as an issue, or carry the interim +
+   conformance pin until the next natural haematite cut?
+3. Arm 2's surface: server subcommand vs standalone binary. A subcommand
+   inherits the server's config parsing (fewer paths to drift); a standalone
+   binary can run without a server present. Lean: subcommand.
