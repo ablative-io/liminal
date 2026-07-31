@@ -58,18 +58,35 @@ Three constraints, each traceable to a datum in task #3:
    **Shutdown flavor does not discriminate: no observed exit path cleans.**
    Two different host binaries (frame-host, app-host), same embedded
    liminal, same outcome — so this is not one host's quirk. ⇒ Boot-time
-   reclamation is not belt-and-braces; **it is the only cleaner that
-   exists** (Waffles' framing, adopted).
-   **Mechanism note, so a future host fix cannot quietly retire this
-   design:** a graceful drain that still leaves the dir means the hosts'
-   exit paths never REACH the guard's destructor — a clean Rust drop of the
-   last store handle does remove the dir (that is the designed path, and
-   liminal's own lifecycle tests exercise it). The open question is
-   relocated, not answered: destructors skipped at exit (`process::exit`
-   after the shutdown sequence) or a handle held to the end of the process.
-   Even a host that fixes its exit path only shrinks the population —
-   SIGKILL and panic-keep remain — so the reclaimer stays load-bearing
-   regardless of that question's answer.
+   reclamation is not belt-and-braces; **it is the only cleaner over every
+   OBSERVED exit path** (Waffles' framing with the tested-path qualifier —
+   the source has a clean path that cleans, and liminal's lifecycle tests
+   exercise it; the claim is about the measured population, not every path
+   that exists).
+   **The mechanism census, CLOSED 2026-07-31 (three candidate mechanisms,
+   three seats, one afternoon):** *(a) drop-ran-and-panicked* — REFUTED on
+   the graceful leg: the panic path's sanctioned leak prints a signature
+   (`store.rs:270-293`, `dir.keep()` at `:284`, log line "ephemeral store
+   drop panicked; leaking its directory…"), and that line is ABSENT from
+   the app-host log (instrument credible: 141 raw lines, lower-severity
+   tracing present throughout). *(b) drop-never-ran* — REFUTED on BOTH
+   legs, structurally: a live control store holds `config.json` + shards +
+   `writer.lock`; **both real orphans hold shards ONLY** — deletion ran and
+   stopped partway, so Drop ran. *(c) drop-ran, removal failed SILENTLY,
+   partial* — **CONFIRMED on both legs.** `tempfile`'s `TempDir::drop` is
+   `let _ = remove_dir_all(self.path())` (tempfile-3.27.0 `dir/mod.rs`,
+   Result DISCARDED — verified independently at three seats); `close()`
+   exists for callers who want the error. The absent grep is thereby
+   positively explained: `let _` swallows the error, no line by
+   construction. **The upstream fix — the clean path calls
+   `TempDir::close()` explicitly and LOGS the error — is task #5, a
+   confirmed-defect fix with two production receipts**: the impl's doc says
+   the directory "is removed"; the mechanism says "removal is attempted and
+   errors vanish." Even with that fix landed, SIGKILL and panic-keep
+   remain, and a host exit fix only shrinks the population — so the
+   reclaimer is load-bearing on every branch, **including the measured one
+   where every destructor runs perfectly and production data is silently
+   half-deleted.**
 3. **A reclaimer must OWN its population.** The estate's no-sweep order
    exists because a prefix match over shared system temp cannot distinguish
    our residue from a stranger's directory, and two of the "leaked" dirs were
@@ -88,32 +105,79 @@ well-defined over the real residue population, measured (names-only listing,
 within the evidence rules): **the husks contain `writer.lock` +
 `config.json`** — Arm 2's husk path is real, not hopeful.
 
-For a candidate directory, probe `<dir>/writer.lock` and classify into
-exactly one of **five verdicts** — the first three are the common cases, the
-last two exist so a race or a fault can never masquerade as either:
+⚠️ **REVISED 2026-07-31 after the mechanism census closed — the earlier
+five-verdict set had a defect the measurements exposed: it read
+absence-of-lock as the pre-create window and skipped such dirs forever.
+But confirmed mechanism (c) means REAL orphans are PARTIALLY DELETED
+stores — both real-world exhibits are shards-only, `writer.lock` and
+`config.json` already gone — so the old rule would have skipped the
+design's own acceptance fixtures unreclaimed, permanently.** Absence of
+the lock is not absence of an owner: partial deletion removes the lockfile
+while a live writer's flock survives on the unlinked inode, invisible to
+any new probe. Two disciplines therefore exist, selected by what the probe
+finds:
+
+**Lock-present discipline** (`writer.lock` exists as a regular file — the
+husk class measured earlier is exactly this):
 
 - **`live-skipped`** — lock held elsewhere (`DataDirLocked`-shaped refusal)
   ⇒ a live writer owns it ⇒ leave it, count it.
-- **`reclaimed`** — lock acquired ⇒ no live writer exists ⇒ **delete the
-  directory while still holding the lock**, then release. This is precisely
-  haematite's failed-create discipline (`db.rs:130-132`: removal happens
-  "while still holding the writer lock — it can never delete a concurrent
-  writer's live dir"), so the claim and the delete are one atomic ownership,
-  no TOCTOU.
-- **`no-lockfile-skipped`** — `writer.lock` ABSENT. This is the pre-create
-  window: the guard TempDir exists but `Database::create` has not yet
-  reached its lock acquisition. The dir must NOT be reclaimed, and —
-  binding — **the probe must never open-with-create**: haematite's own
-  acquisition opens creating-if-absent (`db/lock.rs:71`), so a reclaimer
-  that O_CREAT-locks the path would make the legitimate creator's acquire
-  fail `DataDirLocked` at mint. Probe existence without creating; absent ⇒
-  skip and count under this verdict's own name.
+- **`reclaimed`** — lock acquired ⇒ no live writer ⇒ **delete the directory
+  while still holding the lock**, then release: haematite's failed-create
+  discipline (`db.rs:130-132`), atomic ownership, no TOCTOU.
+
+**Lock-absent discipline** (no `writer.lock` — the partially-deleted orphan
+class, which both real-world exhibits inhabit):
+
+- ⛔ **LOCK-ABSENCE IS NEVER PERMISSION — the damage is self-confirming**
+  (Athena's sharpening, adopted as the discipline's first rule). Partial
+  deletion MANUFACTURES exactly the signature a lockfile-keyed reclaimer
+  would read as "no owner": `remove_dir_all` deletes the lockfile early in
+  its walk, while shard workers can still be live behind it. A reclaimer
+  that fires on lock-absence performs **removal under live workers** —
+  precisely the corruption `store.rs:261-263` deliberately leaks to avoid,
+  undone at exactly the moment the author's choice exists to protect.
+- The positive liveness predicate is therefore: **any open fd under the
+  directory = ALIVE — never the absence of a file that removal deletes
+  first.** Holder present ⇒ **`live-skipped`**. No holder ⇒
+  **`reclaimed-lockless`** — its own verdict name, so the counts always
+  show which discipline fired. The check is an existence-and-holder
+  measurement (lsof-class), never a content read.
+- **Evidence status, labelled honestly (Athena's own labelling, kept):**
+  the fd predicate is **DERIVED FROM MECHANISM, NOT DEMONSTRATED BY
+  SAMPLE.** On every observable store the fd predicate and the unsound
+  lockfile predicate AGREE (live control: fds present, lock present; both
+  orphans: fds absent, lock absent) — the state where they differ, lock
+  deleted while shard workers still hold fds, is the transient window
+  inside a failing drop and has never been sampled. The derivation: fds
+  are what the kernel tracks, and the mid-deletion window provably has
+  them while provably lacking the lockfile. Build against the derivation;
+  do not cite the agreeing sample as proof of superiority.
+- Deletion without a lock to hold is safe ONLY under the per-arm mint
+  guarantee (§3.2's root-level serialization for Arm 1; operator-vouched
+  dead population for Arm 2) — this discipline is never valid over a
+  population where a legitimate creator could be mid-mint.
+- **Binding, unchanged: the probe must never open-with-create** —
+  haematite's acquisition opens creating-if-absent (`db/lock.rs:71`), so an
+  O_CREAT probe would make a legitimate creator's acquire fail
+  `DataDirLocked` at mint.
+
+**Both disciplines share:**
+
 - **`vanished`** — ENOENT mid-probe: the owner finished its teardown, or a
-  concurrent reclaimer won the claim. Benign; its own verdict, **distinct
-  from `refused`**, so the §5 zero-refused clause cannot convert a benign
-  race into a STOP.
-- **`refused`** — a real error (permissions, IO fault, unrecognised state).
+  concurrent reclaimer won. Benign; **distinct from `refused`**, so the §5
+  zero-refused clause cannot convert a benign race into a STOP.
+- **`refused`** — a real error (permissions, IO fault, a `writer.lock` that
+  is not a regular file per the symlink-anchor rule, unrecognised state).
   Never silent, always carries the error text.
+
+**The pre-create window is no longer inferred from the dir's contents** —
+a freshly-minted empty dir and an almost-fully-deleted orphan are
+indistinguishable from the outside, so the protection moves up a level:
+Arm 1 serializes mint against sweep at the root (§3.2); Arm 2's population
+contains no live creators by the operator's explicit vouching. **This
+paragraph is NEW DESIGN absorbed under measurement pressure and needs its
+own review pass** — flagged, not slipped in.
 
 Reclamation obeys the sensitive-residue rules: the reclaimer **stats, locks,
 and deletes — it never opens store contents** (existence-and-holder only),
@@ -121,9 +185,11 @@ and disposition is **deletion, never archive** (the residue is message
 content under a `durable=false` promise).
 
 Each candidate produces exactly one loud log line: path and verdict, with
-the error text on refusals. A sweep summary counts all five verdicts. **No
-silent outcomes** — a reclaimer that cannot look must say so, not report a
-clean world (the blocked-instrument law).
+the error text on refusals. A sweep summary counts all six verdicts
+(`reclaimed` / `reclaimed-lockless` / `live-skipped` / `vanished` /
+`refused`, with `live-skipped` reported per-discipline). **No silent
+outcomes** — a reclaimer that cannot look must say so, not report a clean
+world (the blocked-instrument law).
 
 ### 3.2 Arm 1 — automatic boot sweep over a server-owned root
 
@@ -136,6 +202,18 @@ server sweeps `liminal-durability-*` entries under that root with the §3.1
 primitive. Population ownership makes the sweep safe by construction: nothing
 else writes there, so prefix-match false positives are structurally excluded
 rather than heuristically unlikely.
+
+**The production receipt for this arm (2026-07-31, the JJuaBk case):** a
+live production server on Tom's own box held its runtime ephemeral store in
+a system-temp TempDir — the exact class this section removes — and the
+mechanism-(c) exit path was live on it. Blast radius stayed at 4 KiB only
+because that store happened to be empty (the real data was safe on durable
+disk; measured by full lsof, closed at zero residual cost, insurance-copied
+by Waffles). **The class was live on production and the absence of written
+data is the only thing that kept it free** — that is why a server must
+never hold its runtime root in a TempDir, stated with a case rather than a
+hypothesis. The class defect rides to Tom as a design item with this arm
+as the named remedy.
 
 This requires the rooted mint in production — which is the deferred
 root-ownership question at `store.rs:419-428`: `open_ephemeral_rooted` is
@@ -150,14 +228,21 @@ outlives every store minted from it, which is the D3-adjacent invariant the
 `:419-428` comment demands. Frame consumes the same type; its consumer-facing
 doc lands in `frame-host`'s module docs (frame's thread, not this one).
 
-**The mid-create race, named:** on a shared root the sweep can meet a
-sibling store MID-CREATE (§5's own acceptance runs a second live server
-under the same root). The §3.1 `no-lockfile-skipped` rule IS the
-resolution: in the pre-create window the dir has no `writer.lock` and the
-sweep skips it without touching the path; from the moment the creator's
-lock acquisition lands, the dir reads `live-skipped`. There is no instant
-at which a legitimately-minting store is claimable — so the acceptance's
-"second server survives" clause covers mid-create, not just post-create.
+**The mid-create race, named — resolution REVISED with the §3.1 rework:**
+on a shared root the sweep can meet a sibling store MID-CREATE (§5's own
+acceptance runs a second live server under the same root). The earlier
+resolution (skip any lockless dir) died with the old verdict set — real
+orphans are lockless, so it protected the mint window by abandoning the
+mission. Replacement, **new design, flagged for review with the §3.1
+rework:** `EphemeralRoot` carries a ROOT-LEVEL lock that serializes mint
+against sweep — a mint holds it from TempDir creation until the store's
+own `writer.lock` acquisition lands; the sweep holds it exclusively for
+the sweep's duration. A dir observed lockless DURING a sweep is therefore
+provably not mid-mint, which is what licenses the lock-absent discipline
+inside Arm 1. The root lock is held across the mint WINDOW only (sub-second),
+never across store lifetime, so it serializes nothing in steady state.
+"Second server survives" then covers mid-create by mechanism rather than
+by verdict-set accident.
 
 **Interplay with the designed panic leak:** `EphemeralGuard::drop` leaks the
 directory deliberately when the store's drop panics (`store.rs:284`,
@@ -247,7 +332,15 @@ breaks a test instead of silently un-arming the reclaimer.
 provenance) and `XkxShj` (~331 MiB, graceful-SIGTERM provenance, preserved
 under the same no-sweep ledger entry) — the two exit-path flavors, so the
 acceptance run proves the reclaimer over BOTH observed orphan classes — plus
-the live neighbours as in-situ negative controls.
+the live neighbours as in-situ negative controls. **Both fixtures are
+DAMAGED ARTIFACTS, and that is what makes them faithful:** confirmed
+mechanism (c) means the real reclaim class is partially-deleted stores
+(both exhibits are shards-only, lock and config already gone), and they
+exercise the §3.1 lock-absent discipline — the one the original verdict
+set could not serve. **Any SYNTHETIC fixture must likewise be a partially
+deleted store, not a complete one** — a complete-store fixture tests the
+easy discipline and licenses nothing about the real population, which is
+the sampling law wearing filesystem clothes.
 
 **Arm 2 acceptance, on the box where the fixture lives, post-freeze, under
 named GO:** operator invokes legacy reclaim naming the system-temp
