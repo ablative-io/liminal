@@ -110,9 +110,10 @@ clean world (the blocked-instrument law).
 ### 3.2 Arm 1 — automatic boot sweep over a server-owned root
 
 Production ephemeral stores move from system temp to a **server-owned
-ephemeral root** (config-derived; shape for review: sibling of
-`persistence_path` when configured, else an explicit `ephemeral_root`, no
-silent fallback to system temp). At boot, before minting its own store, the
+ephemeral root** — an explicit `ephemeral_root` config value, refuse-at-boot
+when absent, no silent fallback to system temp (RULED, §6.1; the
+sibling-of-persistence shape is dead code in the only case that mints and is
+not an option). At boot, before minting its own store, the
 server sweeps `liminal-durability-*` entries under that root with the §3.1
 primitive. Population ownership makes the sweep safe by construction: nothing
 else writes there, so prefix-match false positives are structurally excluded
@@ -166,12 +167,40 @@ by luck.
 ### 3.4 The lock-protocol pin — cross-crate, so it must be a CONTROL
 
 `writer.lock` is haematite's internal contract (`LOCK_FILE` is
-`pub(super)`); liminal cannot call haematite's lock module. Preferred
-resolution: **haematite exposes the primitive** (a
-`Database::reclaim_if_orphaned(path)`-shaped API) — a cross-repo ask to file
-with Apollo, on its own clock, independent of the corrected re-pin trigger.
-Interim: liminal performs the same advisory-lock acquisition on
-`<dir>/writer.lock` via the same std file-locking API haematite uses. That
+`pub(super)`); liminal cannot call haematite's lock module. The preferred
+resolution is a haematite-exposed primitive — **asked, and RULED by Apollo
+2026-07-31 (his tracker's #67, next natural cut, 0.8.0-class, no executor
+floor so no landing date; both cites verified at his bytes, main @
+`72176a8`):**
+
+- **The name follows the mechanism, not the wish: `delete_if_unlocked`, NOT
+  `reclaim_if_orphaned`.** Apollo's finding, and it binds this document too:
+  *unlocked does not imply orphaned.* A cleanly-closed durable store leaves
+  an inert unlocked `writer.lock` byte-identical to a crashed ephemeral
+  one — and he measured that **no durability field exists in haematite's
+  on-disk config**, so the orphan/dormant discriminator does not exist on
+  disk today. The *is-this-an-orphan* judgment is therefore the CALLER's,
+  made from context haematite lacks — which is exactly what this design's
+  population ownership supplies: haematite tests locks; liminal's owned
+  root + `liminal-durability-` mint provenance is what upgrades "unlocked"
+  to "orphan". **Neither half alone licenses a deletion.** (For Arm 2 the
+  same division holds: the operator's explicit naming of the population is
+  the orphan judgment, and only `ephemeral_tempdir` ever writes that prefix
+  under system temp.)
+- **Returns a `#[non_exhaustive]` enum, never a bool** — distinct arms for
+  deleted / live-writer / refused-no-anchor / dir-vanished / typed errors,
+  matching this document's five-verdict discipline from the other side.
+- **The anchor discipline transfers to the INTERIM probe, binding:** a
+  `writer.lock` that is not a regular file (symlink, special) is refused
+  BEFORE any open (haematite `lock.rs:76-80`) — a reclaimer that follows a
+  symlink deletes something outside the dir it thinks it is clearing. The
+  §3.1 probe inherits this as a `refused` arm.
+- A durability field in `config.json` — making *orphaned* genuinely testable
+  from the directory alone — is a separate, larger haematite change, noted
+  and not bundled.
+
+Interim until #67 lands: liminal performs the same advisory-lock acquisition
+on `<dir>/writer.lock` via the same std file-locking API haematite uses. That
 interim carries a pin — the lock file's name and location — which no code
 would mechanically compare, and a pin nobody compares is an instruction, not
 a control. **Binding: a conformance test mints a real store and asserts
