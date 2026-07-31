@@ -59,7 +59,8 @@ impl RemoteConfig {
 
 impl PendingConnect {
     // ⛔ ALL FOUR RETURN RemoteConfig — frame constructs handles from it at
-    // three sites (attach.rs:145-146, attach.rs:202-204, leave.rs:124).
+    // three sites (frame-conv/src/handle/attach.rs:145-146, handle/attach.rs:202-204,
+    // handle/leave.rs:124 — paths a grep will actually hit).
     pub fn connect_tcp(self) -> Result<RemoteConfig, SdkError>;
     pub fn connect_tcp_with_auth(self, auth_token: &[u8]) -> Result<RemoteConfig, SdkError>;
     pub fn connect_websocket(self) -> Result<RemoteConfig, SdkError>;
@@ -88,6 +89,8 @@ not an instant elapse — do not lean on it).
 
 `TcpStream::connect_timeout` requires a resolved `SocketAddr`, so the
 mechanism resolves first, then attempts candidates each under `remaining`.
+**The §3.1 pre-step check applies PER CANDIDATE: `remaining == 0` mid-list is
+expiry with the fixed §3.5 wording — never "finish the list".**
 
 **HONESTY SECTION (Tom's no-silent-tradeoffs rule): DNS resolution itself is
 outside the budget.** `std` offers no timeout on `getaddrinfo`; resolution
@@ -101,9 +104,13 @@ and either can be revisited on its own merits later.
 
 ### 3.3 Handshake IO: narrow to `remaining`, recomputed per IO
 
-Before each setup-phase read/write, set the stream timeout to `remaining`
-(recomputed each time, monotonically shrinking), so the per-IO bound and the
-total bound are the same object during setup. On ANY exit from the setup
+Before each setup-phase read/write, set the stream timeout to `remaining` **in
+BOTH directions — `set_read_timeout` AND `set_write_timeout`** (recomputed each
+time, monotonically shrinking), so the per-IO bound and the total bound are the
+same object during setup. The setup sequence *writes* (the `Connect` frame) as
+well as reads, and `:66`/`:71` arm both with `IO_TIMEOUT`; narrowing only the
+read side leaves a stalled write burning 5 s per attempt against a 100 ms
+budget — the §1 unbounded-total defect reintroduced on the other direction. On ANY exit from the setup
 sequence — success or failure — restore `IO_TIMEOUT` on **both** read and
 write before returning (the invariant `:344` already models, and the LAW-1
 comment at `remote.rs:55-57` states: a deadline that outlives its exchange is
@@ -143,7 +150,27 @@ Therefore, binding:
    substrings. Wording adjustable ONLY under the constraint that it must not
    contain `"timed out"`, `"os error 35"`, or `"Resource temporarily
    unavailable"` — and a unit test pins that property (§5).
-2. Non-deadline connect failures (refused, unreachable, handshake rejection)
+2. **THE FIXED WORDING HAS EXACTLY ONE PRODUCER** (Cally's second-reader
+   binding). Expiry can fire at three step classes — `connect_timeout`
+   establish, narrowed handshake IO, `remaining == 0` fail-fast — across two
+   transports: five-plus sites. If each formats its own message, one site can
+   keep interpolating `{source}` with no compile error, and a single
+   text-pinning test goes green against whichever site it happens to
+   exercise — vacuously green at the shape it was written for. Required
+   shape: **one function produces the deadline-expiry message; every expiry
+   site routes through it; the text-pin test targets THAT function; and each
+   per-site mechanism test asserts its error IS the fixed-wording one.** That
+   converts "the string must not contain X" from a property of one instance
+   into a property of the only producer.
+3. **The constraint binds the string frame SEES, which is the `Display`
+   output, not the `description` field.** Measured: `SdkError::Connection`
+   displays as `"connection error: {description}"`
+   (`crates/liminal-sdk/src/error.rs:11`) — the prefix contains none of the
+   three matched substrings, so pinning the description suffices **today**;
+   the text-pin test must nonetheless assert on `error.to_string()` (the
+   surface frame matches), so a future Display change cannot silently
+   invalidate the pin.
+4. Non-deadline connect failures (refused, unreachable, handshake rejection)
    keep today's formats **unchanged, byte for byte** — those strings are
    frozen (SDK-011-DISPATCH §2.1).
 
@@ -157,8 +184,12 @@ receive quantum) · no field added to `RemoteConfig` or `ConnectionPoolConfig`
 ## 4. HOW TO VERIFY — the part that makes it real
 
 - **Red-first** for each named unit.
-- **Default-unchanged:** the plain `connect_*` path still shows OS-default
-  establish + 5 s per-IO. The whole promise is "additive".
+- **Default-unchanged, scoped to what a test can prove:** no test can observe
+  the *absence* of a bound in finite time, so the establish-step half is
+  asserted **structurally** — the default path constructs no `PendingConnect`
+  and routes through the untouched plain-connect arm — alongside the frozen
+  error-string tests. The 5 s per-IO half stays directly testable. The whole
+  promise is "additive".
 - **Deadline honoured, both transports:** a listener that `accept()`s and then
   sends nothing must fail in ~deadline wall-clock — not at 5 s × N reads. This
   is the slow-loris case §1 proves is unbounded today; it is the test that
@@ -167,8 +198,12 @@ receive quantum) · no field added to `RemoteConfig` or `ConnectionPoolConfig`
 - **Steady-state restore:** after a deadline-bounded connect **succeeds**, read
   and write timeouts both equal `IO_TIMEOUT`; after one **fails**, no stream
   survives to carry a narrowed timeout into steady state.
-- **Text-pinning test:** the deadline-expiry message contains none of frame's
-  three matched substrings (§3.5). This test is load-bearing, not cosmetic.
+- **Text-pinning test, aimed at the single producer:** the §3.5 producer
+  function's output — asserted via `error.to_string()`, the surface frame
+  matches — contains none of frame's three substrings, and each per-site
+  mechanism test asserts its error IS the fixed-wording one. This pair is
+  load-bearing, not cosmetic: pinning one site while another interpolates
+  `{source}` is a vacuous green.
 - **Battery with the pinned denominator** (`scripts/baseline-compare.py`),
   suite-count tell before trusting green, teed full logs, no silencing
   redirections on evidence.
