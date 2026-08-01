@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use liminal::durability::bridge::block_on;
 use liminal::durability::DurableStore;
+use liminal_protocol::lifecycle::BindingState;
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, Generation, ParticipantAck, ServerValue,
 };
@@ -206,6 +207,76 @@ fn assert_observer_progress_cleared_the_marker(
     Ok(())
 }
 
+/// STEP 0 DISCRIMINATOR (ruling 413f8725). Diagnostic only — this is not the
+/// rework, it is the measurement that decides whether a rework is authored at
+/// all.
+///
+/// `prepare_connection_fate_transaction` (`connection_fate.rs:70-96`) filters
+/// to slots that are BOUND and whose binding epoch names the exact
+/// `ConnectionIncarnation` the work item carries. An empty match set is not an
+/// error: the transaction completes `Ok` having done nothing. Both units pass
+/// on `Ok`, so a no-op departure and a genuinely discharged one are
+/// indistinguishable at the unit's own assertions — which is precisely how
+/// they came back green.
+///
+/// Two outcomes, and they mean opposite things:
+///   * this fires  → the hypothesis is CONFIRMED (the slot is not Bound for
+///     that incarnation, so the departure was a no-op) and the rework is
+///     authorized;
+///   * this passes → the hypothesis is FALSE. The slot WAS Bound, the target
+///     set was non-empty, and the unit went green anyway. That is a different
+///     and deeper class and it goes back to the design gate before anything
+///     else is built.
+fn assert_peer_is_bound_for_its_departure(
+    handler: &ProductionParticipantHandler,
+    roles: &IncidentRoles,
+) -> Result<(), Box<dyn Error>> {
+    let cell = handler.cell(roles.conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "F8 step-0 discriminator owner lock was poisoned")?;
+    let authority = owner
+        .as_ref()
+        .ok_or("F8 step-0 discriminator conversation owner was absent")?;
+    let binding = authority
+        .slots
+        .get(&roles.peer_participant)
+        .map(|slot| slot.binding);
+    drop(owner);
+    let Some(binding) = binding else {
+        return Err(format!(
+            "STEP 0 CONFIRMS THE HYPOTHESIS: participant {} has no slot at all in conversation \
+             {}, so the departure names a target that cannot be matched and completes Ok having \
+             done nothing",
+            roles.peer_participant, roles.conversation_id
+        )
+        .into());
+    };
+    let BindingState::Bound(active) = binding else {
+        return Err(format!(
+            "STEP 0 CONFIRMS THE HYPOTHESIS: participant {}'s slot is {binding:?}, not Bound, so \
+             prepare_connection_fate_transaction matches an EMPTY target set and the departure \
+             completes Ok having done nothing. The peer never departs, its cursor never reaches \
+             the high watermark, minimum_remaining_cursor stays below the marker at {}, and the \
+             floor cannot cross it no matter how far hard observer progress is lifted.",
+            roles.peer_participant, roles.marker_delivery_seq
+        )
+        .into());
+    };
+    let bound_incarnation = active.binding_epoch.connection_incarnation;
+    if bound_incarnation != roles.peer_connection {
+        return Err(format!(
+            "STEP 0 CONFIRMS THE HYPOTHESIS: participant {} is Bound, but to incarnation \
+             {bound_incarnation:?}, while the departure work item names {:?}. The filter matches \
+             on the EXACT incarnation, so the target set is empty and the departure completes Ok \
+             having done nothing.",
+            roles.peer_participant, roles.peer_connection
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn connection_lost(
     open_sequence: u64,
     connection_incarnation: ConnectionIncarnation,
@@ -272,6 +343,7 @@ fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
         .into());
     }
     assert_observer_progress_cleared_the_marker(&fixture.handler, &roles)?;
+    assert_peer_is_bound_for_its_departure(&fixture.handler, &roles)?;
 
     let consumer: &dyn ParticipantSemanticHandler = &fixture.handler;
     consumer
