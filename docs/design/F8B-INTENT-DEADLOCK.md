@@ -663,6 +663,16 @@ token also retires the frontier and marks the replayed authority
   `:204-212`): Closed ⇒ `tokens` empty ∧ frontier `None` ∧ closed-marker
   set. Bare `tokens`-empty-with-frontier-`Some` **remains a refusal** —
   the tripwire is untouched for every shape that is not the sealed one.
+  *Build measurement (leg 3): the mechanism surfaced a THIRD
+  tokens-empty-as-never-enrolled site this ruling had not named —
+  `replay_and_repair`'s observer-progress refusal (`handler.rs:495`,
+  "unenrolled conversation projected observer progress"), which refused a
+  sealed conversation whose durable witnesses are truth. It gains the same
+  clause, with bare tokens-empty-with-witnesses remaining a refusal for
+  the never-enrolled shape. Recorded so the ruled count reads measured:
+  three sites, not two — the builder's mechanism found what the ruling's
+  enumeration missed, which is the enumeration lesson of §6.5 taken again
+  one seat later.*
 - **Closed is distinguishable from never-enrolled.** Without R-SEAL,
   zeroing the frontier would leave the conversation byte-indistinguishable
   from a Genesis-only one (`replay_genesis` at `state.rs:648-669` installs
