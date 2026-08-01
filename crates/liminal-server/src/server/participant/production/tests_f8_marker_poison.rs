@@ -421,6 +421,11 @@ struct AuthoritySample {
     owner_pending_fate: bool,
     observer_progress: u64,
     retained_marker_seqs: Vec<u64>,
+    /// The witness that a floor computation actually RAN and installed a
+    /// result. `install_binding_fate_transition` sets `retained_floor` to the
+    /// measured `resulting_floor`, so a move here is the observable footprint
+    /// of the computation at `binding_fate.rs:428-450` having been reached.
+    retained_floor: Option<u128>,
 }
 
 fn sample_authority(
@@ -472,9 +477,30 @@ fn sample_authority(
                     .collect()
             })
             .unwrap_or_default(),
+        retained_floor: authority
+            .frontier()
+            .map(|frontier| frontier.frontiers().retained_floor()),
     };
     drop(guard);
     Ok(sample)
+}
+
+/// Counts durable Died rows naming one participant. A Died row is the footprint
+/// of `complete_target` having actually reached its append at
+/// `connection_fate.rs:256` for that target — which is what separates "the fate
+/// ran" from "the work item matched nothing and returned Ok".
+fn died_rows_for(
+    store: &Arc<dyn DurableStore>,
+    conversation_id: u64,
+    participant_id: u64,
+) -> Result<usize, Box<dyn Error>> {
+    Ok(operation_rows(store, conversation_id)?
+        .iter()
+        .filter(|operation| match operation {
+            StoredOperation::Died { row } => row.participant_id == participant_id,
+            _ => false,
+        })
+        .count())
 }
 
 /// INSTRUMENT LANE (joint gate 0c32310e + 96c62924). This is NOT a verdict on
@@ -587,6 +613,161 @@ fn f8_instrument_lane_brackets_the_departure_fate() -> Result<(), Box<dyn Error>
          BEFORE departure: {before:?}\n\
          AFTER  departure: {after:?}\n\
          === END INSTRUMENT READING ===",
+        roles.marker_delivery_seq,
+        roles.peer_participant,
+        roles.owner_participant,
+        roles.peer_ack_through_seq,
+    )
+    .into())
+}
+
+/// INSTRUMENT LANE #2 (joint gate f063b3e9). What did the OWNER's fate actually
+/// do? Read-only; no fix, no classification of the leg.
+///
+/// THE ANSWER IS FIVE-WAY, NOT BOOLEAN. `validate_binding_fate_floor`
+/// (liminal-protocol `binding_fate.rs`) has THREE Err exits BEFORE it computes
+/// anything — `Binding` at :407, `Terminal` at :421, `ObserverProgress` at :426
+/// — and only then reaches the computation at :428-450. A reached/not-reached
+/// boolean would collapse four distinct outcomes into one and would be the
+/// loud/silent trap wearing instrument clothes.
+///
+/// HOW EACH OF THE FIVE IS OBSERVED, without touching production code:
+///   * the three early refusals, BY NAME — a refusal reaches the server as
+///     `StateError::invariant("binding-fate measurement refused: {error:?}")`
+///     (`binding_fate_completion.rs:108-110`), so the variant's own name
+///     travels in the returned error text;
+///   * COMPUTATION REACHED, with its measured floor — `retained_floor` is set
+///     to the computed `resulting_floor` by
+///     `install_binding_fate_transition`, so a move in `retained_floor` is the
+///     computation's own footprint and its new value IS the measured floor;
+///   * NEVER INVOKED — no Died row for the owner appears, meaning
+///     `complete_target` never reached its append at `connection_fate.rs:256`
+///     for that target; or a Died row exists but the intent is still sitting in
+///     `pending_specific_fates`, which is the deferral exit at
+///     `binding_fate_completion.rs:66-77` returning Ok without measuring.
+///
+/// POSITIVE CONTROL, condition of citation: the PEER's fate is known to reach
+/// the computation and decline correctly. This instrument must demonstrably SEE
+/// that — `retained_floor` must move across the peer's departure — before its
+/// word about the owner counts for anything.
+#[test]
+fn f8_instrument_lane_2_what_did_the_owners_fate_do() -> Result<(), Box<dyn Error>> {
+    let fixture = prepare_marker_fixture()?;
+    let roles = incident_roles(&fixture)?;
+    assert_unacked_marker_prestate(&fixture.handler, &roles)?;
+    let store = Arc::clone(&fixture.store);
+
+    let acked = dispatch_tracked(
+        &fixture.handler,
+        roles.peer_connection,
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id: roles.conversation_id,
+            participant_id: roles.peer_participant,
+            capability_generation: Generation::ONE,
+            through_seq: roles.peer_ack_through_seq,
+        }),
+    )?;
+    if !matches!(acked, ServerValue::AckCommitted(_)) {
+        return Err(format!("instrument 2: the peer ack did not commit: {acked:?}").into());
+    }
+
+    // ---- POSITIVE CONTROL: watch the PEER's fate reach the computation ----
+    let before_peer = sample_authority(&fixture.handler, &roles)?;
+    let consumer: &dyn ParticipantSemanticHandler = &fixture.handler;
+    let peer_departure = consumer.handle_connection_fate(connection_lost(
+        PEER_OPEN_SEQUENCE,
+        roles.peer_connection,
+        roles.conversation_id,
+    ));
+    let after_peer = sample_authority(&fixture.handler, &roles)?;
+    let peer_died_rows = died_rows_for(&store, roles.conversation_id, roles.peer_participant)?;
+    let control = match (before_peer.retained_floor, after_peer.retained_floor) {
+        (Some(before), Some(after)) if after != before => format!(
+            "PASS — the peer's fate moved retained_floor {before} -> {after}, and left \
+             {peer_died_rows} Died row(s). This instrument demonstrably sees a floor computation \
+             happen, so its reading on the owner below is CITABLE. (peer departure returned \
+             {peer_departure:?})"
+        ),
+        (before, after) => format!(
+            "FAIL — retained_floor did not move across the peer's departure ({before:?} -> \
+             {after:?}), so this instrument has NOT shown it can observe a floor computation. \
+             Everything below is NOT CITABLE. (peer departure returned {peer_departure:?})"
+        ),
+    };
+
+    // ---- THE MEASUREMENT: the OWNER's fate ----
+    let before_owner = sample_authority(&fixture.handler, &roles)?;
+    let owner_died_rows_before =
+        died_rows_for(&store, roles.conversation_id, roles.owner_participant)?;
+    let owner_departure = consumer.handle_connection_fate(connection_lost(
+        OWNER_OPEN_SEQUENCE,
+        roles.owner_connection,
+        roles.conversation_id,
+    ));
+    let after_owner = sample_authority(&fixture.handler, &roles)?;
+    let owner_died_rows_after =
+        died_rows_for(&store, roles.conversation_id, roles.owner_participant)?;
+    let owner_row_delta = owner_died_rows_after.saturating_sub(owner_died_rows_before);
+
+    let five_way = match &owner_departure {
+        Err(error) => {
+            let text = error.to_string();
+            let named = ["Binding", "Terminal", "ObserverProgress", "OwnerTransition"]
+                .into_iter()
+                .find(|name| text.contains(name))
+                .unwrap_or("<no known variant name found in the error text>");
+            format!(
+                "EARLY Err EXIT / REFUSAL, BY NAME: {named}\n  full error text: {text}"
+            )
+        }
+        Ok(()) => {
+            if after_owner.owner_pending_fate {
+                format!(
+                    "NEVER MEASURED — DEFERRED: the owner's intent is STILL in \
+                     pending_specific_fates after a departure that returned Ok. That is the \
+                     `binding_fate_completion.rs:66-77` exit: an Ordinary intent with no \
+                     committed terminal is re-inserted and returns Ok WITHOUT measuring. Died \
+                     rows for the owner: {owner_died_rows_before} -> {owner_died_rows_after}."
+                )
+            } else if owner_row_delta == 0 {
+                format!(
+                    "NEVER INVOKED: the departure returned Ok and appended NO Died row for the \
+                     owner ({owner_died_rows_before} -> {owner_died_rows_after}), so \
+                     `complete_target` never reached its append at connection_fate.rs:256 for \
+                     this target — the work item matched an empty target set."
+                )
+            } else {
+                match (before_owner.retained_floor, after_owner.retained_floor) {
+                    (Some(before), Some(after)) if after != before => format!(
+                        "COMPUTATION REACHED AND SUCCEEDED — MEASURED FLOOR = {after} \
+                         (retained_floor {before} -> {after}); marker sits at {}. Died rows for \
+                         the owner: {owner_died_rows_before} -> {owner_died_rows_after}.",
+                        roles.marker_delivery_seq
+                    ),
+                    (before, after) => format!(
+                        "COMPUTATION REACHED, FLOOR UNCHANGED: retained_floor {before:?} -> \
+                         {after:?} while a Died row WAS appended \
+                         ({owner_died_rows_before} -> {owner_died_rows_after}). The fate ran and \
+                         installed no new floor; marker sits at {}.",
+                        roles.marker_delivery_seq
+                    ),
+                }
+            }
+        }
+    };
+
+    Err(format!(
+        "=== F8 INSTRUMENT LANE #2 READING (not a test failure; reports by returning Err so the \
+         reading reaches the teed log under the fixed tier-1 string) ===\n\
+         POSITIVE CONTROL (peer's fate reaches the computation): {control}\n\
+         FIVE-WAY ANSWER FOR THE OWNER'S FATE: {five_way}\n\
+         marker_delivery_seq={} peer={} owner={} peer_ack_through_seq={}\n\
+         BEFORE peer departure : {before_peer:?}\n\
+         AFTER  peer departure : {after_peer:?}\n\
+         BEFORE owner departure: {before_owner:?}\n\
+         AFTER  owner departure: {after_owner:?}\n\
+         === END INSTRUMENT #2 READING ===",
         roles.marker_delivery_seq,
         roles.peer_participant,
         roles.owner_participant,
