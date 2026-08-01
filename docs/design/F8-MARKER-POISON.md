@@ -202,7 +202,16 @@ the first consumer. It survived.
 The control — a census that finds nothing has to prove it can find something —
 is **`BindingFateTerminal`, which the identical search style finds used in
 server files** (`production/binding_fate_completion.rs:4`, `:451`, `:454`,
-`:459`, `:462`). ⚠️ The pre-`09cfa49` text of this section also named
+`:459`, `:462`). **Membership predicate, stated because two honest counters
+disagreed on it:** those five are WHOLE-IDENTIFIER matches (`git grep -nw`).
+A substring counter returns 8 raw server lines, because it sweeps in
+`BindingFateTerminalRestore` (`fenced_attach_codec.rs:5`, `:311`, `:321`) — a
+DISTINCT type that merely carries this one's name as a prefix. A count of a
+spelling is not a count of a construct; the control's liveness — the only
+thing this number is for — is robust under either predicate, but the
+enumeration above is the identifier's, not the spelling's. (The main census is
+directionally safe against the same trap: a substring sweep can only
+OVERcount consumers, and it still found zero.) ⚠️ The pre-`09cfa49` text of this section also named
 `BindingFateMeasurementRefused` as a control. **That was wrong and is
 withdrawn.** Re-run at both commits, `BindingFateMeasurementRefused` appears
 in server files at NEITHER (`git grep -n BindingFateMeasurementRefused 92e65ce
