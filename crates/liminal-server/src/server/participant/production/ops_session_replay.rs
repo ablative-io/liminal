@@ -104,7 +104,20 @@ impl ConversationAuthority {
                 break;
             }
         }
-        if authority.tokens.is_empty() {
+        // F8B R-SEAL (§6.6). Closed carries its own clause: Closed => tokens
+        // empty AND frontier None AND marker set. The clause is a
+        // CONJUNCTION check, not a relaxation — a seal that retired the
+        // frontier but kept a token, or set the marker without retiring the
+        // frontier, is refused here. Bare tokens-empty-with-frontier-Some
+        // REMAINS the original refusal for every shape that is not the sealed
+        // one; the corruption tripwire is not widened.
+        if authority.is_closed() {
+            if !authority.tokens.is_empty() || authority.frontier().is_some() {
+                return Err(RestoreError::Semantic(StateError::invariant(
+                    "sealed conversation retained enrollment tokens or an executable frontier",
+                )));
+            }
+        } else if authority.tokens.is_empty() {
             if authority.frontier().is_some() {
                 return Err(RestoreError::Semantic(StateError::invariant(
                     "durably empty conversation rebuilt an executable frontier",
@@ -203,7 +216,17 @@ impl ConversationAuthority {
                 break;
             }
         }
-        if authority.tokens.is_empty() {
+        // F8B R-SEAL (§6.6) — the twin of the clause in `replay` above. Both
+        // seats carry it because both are load-bearing: the production restore
+        // and the equivalence oracle must agree on what a Closed conversation
+        // looks like, or the oracle would report drift on every sealed store.
+        if authority.is_closed() {
+            if !authority.tokens.is_empty() || authority.frontier().is_some() {
+                return Err(StateError::invariant(
+                    "sealed conversation retained enrollment tokens or an executable frontier",
+                ));
+            }
+        } else if authority.tokens.is_empty() {
             if authority.frontier().is_some() {
                 return Err(StateError::invariant(
                     "durably empty conversation rebuilt an executable frontier",

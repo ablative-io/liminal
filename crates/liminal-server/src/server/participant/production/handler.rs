@@ -482,7 +482,17 @@ impl ProductionParticipantHandler {
             .repair_pending_specific_fates(&appender)
             .map_err(|error| state_error(&error))?;
         let observer_witnesses = replayed.take_observer_progress_witnesses();
-        if !replayed.tokens.is_empty() {
+        // F8B R-SEAL (§6.6). This is the THIRD site that reads `tokens` empty
+        // as "never enrolled" — the two the ruling names are the replay
+        // invariant twins. A Closed conversation is the state that proxy never
+        // anticipated: no tokens, but a log full of records, terminals and
+        // drain rows whose observer-progress witnesses are durable truth. It
+        // must reconcile exactly as an enrolled conversation does, or the
+        // handler's observer state is left behind its own durable log — the
+        // failure §6.2's post-drain reconciliation exists to prevent. Bare
+        // tokens-empty-with-witnesses REMAINS a refusal for the never-enrolled
+        // shape.
+        if !replayed.tokens.is_empty() || replayed.is_closed() {
             self.reconcile_observer_progress(
                 conversation_id,
                 &observer_witnesses,
@@ -661,10 +671,17 @@ impl DurableAppend for LogAppender<'_> {
 }
 
 pub(super) fn state_error(error: &StateError) -> ParticipantSemanticError {
-    // The one refusal that must not be flattened. Every other state failure is
-    // a diagnostic string because nothing downstream branches on it.
+    // The two refusals that must not be flattened. Every other state failure
+    // is a diagnostic string because nothing downstream branches on it.
     if let StateError::BindingTerminalAdmissionRefused { error } = error {
         return ParticipantSemanticError::BindingTerminalAdmissionRefused { error: *error };
+    }
+    // F8B R-SEAL (§6.6): a late arrival must be able to tell a sealed
+    // conversation from every other failure by type, not by substring.
+    if let StateError::ConversationSealed { conversation_id } = error {
+        return ParticipantSemanticError::ConversationSealed {
+            conversation_id: *conversation_id,
+        };
     }
     ParticipantSemanticError::Internal {
         message: format!("participant production operation failed: {error}"),

@@ -30,8 +30,8 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use liminal::durability::DurableStore;
 use liminal::durability::bridge::block_on;
+use liminal::durability::{DurableStore, open_ephemeral};
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, ServerValue,
 };
@@ -43,11 +43,12 @@ use crate::server::participant::{
 
 use super::ProductionParticipantHandler;
 use super::boot_drain::BootDrainVerdict;
+use super::handler::LogAppender;
 use super::log::{
     DecodedStoredOperation, OperationLog, OperationLogError, StoredOperation,
     StoredTerminalDisposition,
 };
-use super::state::DurableAppend;
+use super::state::{ConversationAuthority, DurableAppend};
 use super::tests::test_participant_config;
 use super::tests_w1b_pending_died_restart::pending_restart_fixture;
 
@@ -344,6 +345,81 @@ fn a_sealed_conversation_does_not_refuse_its_neighbours() -> Result<(), Box<dyn 
     )?;
     if !matches!(bound, ServerValue::EnrollBound(_)) {
         return Err(format!("a sealed neighbour refused an unrelated enrollment: {bound:?}").into());
+    }
+    Ok(())
+}
+
+/// §6.6 red-first unit 3 — the DISCRIMINATOR. It passes today, so it could not
+/// be red-committed; it lands with the fix as a pinning test, and that
+/// departure from §6.2's red-first discipline is stated in the fix commit
+/// rather than smoothed over.
+///
+/// A Genesis-only conversation is legal and reachable: the crash window
+/// between the genesis append and the enrollment's own append leaves exactly
+/// these bytes. It holds NO tokens and NO frontier — byte-indistinguishable
+/// from a sealed conversation in both, which is precisely why the closed
+/// marker has to carry the difference.
+///
+/// WHAT THIS PIN GUARDS, AND HOW TO CHECK THE GUARD STILL BITES: the
+/// Genesis-only pinning test is non-vacuous because a WRONG-KEYED seal — one
+/// keyed on tokens-empty + frontier-None instead of on the closed marker —
+/// would refuse Genesis-only enrollment and turn the pin red. A reader who
+/// changes what the seal is keyed on should re-run this test EXPECTING it to
+/// fail; if it still passes, the guard has stopped biting and the pin is
+/// worthless.
+#[test]
+fn a_genesis_only_conversation_still_enrolls_as_ordinary_flow() -> Result<(), Box<dyn Error>> {
+    const GENESIS_ONLY: u64 = 811;
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+
+    // Mint the crash window: the genesis append lands, the enrollment's own
+    // append never does. `ensure_genesis` through a real `LogAppender` also
+    // registers the conversation, exactly as the live enrollment path does.
+    {
+        let writer = ProductionParticipantHandler::new(Arc::clone(&store), seal_config())?;
+        let log = OperationLog::new(Arc::clone(&store), GENESIS_ONLY);
+        let appender = LogAppender {
+            log: &log,
+            registry: &writer.registry,
+            conversation_id: GENESIS_ONLY,
+        };
+        let mut authority = ConversationAuthority::empty(GENESIS_ONLY);
+        authority.ensure_genesis(&appender)?;
+        if authority.next_log_sequence != 1 {
+            return Err("the genesis-only cut appended more than the genesis row".into());
+        }
+        drop(writer);
+    }
+
+    let booted = ProductionParticipantHandler::new(Arc::clone(&store), seal_config())?;
+    let cell = booted.cell(GENESIS_ONLY)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "genesis-only owner lock was poisoned")?;
+    let authority = owner.as_ref().ok_or("genesis-only owner was absent")?;
+    // The prestate this pin exists for: indistinguishable from a seal in
+    // tokens and frontier, distinguishable ONLY by the marker.
+    if !authority.tokens.is_empty() || authority.frontier().is_some() {
+        return Err("the genesis-only prestate is not the tokens-empty frontier-None shape".into());
+    }
+    if authority.is_closed() {
+        return Err("a genesis-only conversation was marked Closed".into());
+    }
+    drop(owner);
+
+    let bound = booted.handle(
+        ParticipantConnectionContext::new(ConnectionIncarnation::new(0xF9, 1)),
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: GENESIS_ONLY,
+            enrollment_token: EnrollmentToken::new([0xFA; 16]),
+        }),
+    )?;
+    if !matches!(bound, ServerValue::EnrollBound(_)) {
+        return Err(format!(
+            "a Genesis-only conversation did not enroll as ordinary flow: {bound:?}"
+        )
+        .into());
     }
     Ok(())
 }

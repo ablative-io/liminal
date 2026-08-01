@@ -385,9 +385,25 @@ impl ConversationAuthority {
     /// maps to anything (the stage-8 occupancy audit requires live-or-retired
     /// for every mapped token), later probes answer `ParticipantUnknown`, and
     /// a re-enrollment with the same token mints a fresh identity.
+    ///
+    /// F8B R-SEAL (§6.6). This is the workspace's ONLY production site that
+    /// removes an enrollment token, so it is the only site at which a
+    /// conversation can lose its last one — and when it does, the SAME apply
+    /// closes the conversation. The tokens-empty outcome is a NEW branch, not
+    /// a repurposed one: no store in existence can hold a final-token-erasing
+    /// drain row, because a live drain structurally requires a still-bound
+    /// publisher whose own token survives it and no released binary contains a
+    /// boot drain. There are no old bytes whose meaning changes here.
+    ///
+    /// Live and replay reach this one call, so the closure is deterministic
+    /// and seamless across seats: whatever the live apply decided, every later
+    /// replay of the same row decides again, identically.
     fn release_drained_binding_slot(&mut self, participant_id: u64) {
         self.slots.remove(&participant_id);
         self.tokens.retain(|_, mapped| *mapped != participant_id);
+        if self.tokens.is_empty() {
+            self.seal_closed_conversation();
+        }
     }
 
     /// Commits the drained pending Detached residence IN PLACE — the S-16

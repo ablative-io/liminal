@@ -291,6 +291,18 @@ pub(super) enum StateError {
         /// Exact protocol refusal reason.
         error: BindingTerminalAdmitError,
     },
+    /// F8B R-SEAL (§6.6): the conversation is Closed and cannot admit a new
+    /// identity.
+    ///
+    /// This refusal must not be flattened into a diagnostic string at
+    /// `handler.rs`'s `state_error`, because the whole point of the closure is
+    /// that a late arrival can tell a sealed conversation from every other
+    /// failure BY TYPE.
+    #[error("participant conversation {conversation_id} is sealed")]
+    ConversationSealed {
+        /// Conversation whose closure refused the request.
+        conversation_id: u64,
+    },
     /// A protocol transition rejected inputs the log claims committed, or a
     /// live invariant the crate makes unreachable was observed.
     #[error("participant production invariant violated: {message}")]
@@ -432,6 +444,27 @@ impl ConversationAuthority {
     /// Whether F8B R-SEAL has closed this conversation (§6.6).
     pub(super) const fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    /// F8B R-SEAL (§6.6): closes the conversation whose FINAL enrollment token
+    /// a Died-flavor drain just erased — the frontier is retired and the closed
+    /// marker set, together, in the one call the live apply and every replay
+    /// share.
+    ///
+    /// Derived, never appended. A seal written as a second durable row would
+    /// leave a crash window — drain row durable, seal row not — that rebuilds
+    /// exactly the `tokens`-empty-with-a-frontier state the closure exists to
+    /// prevent. Retiring the frontier here and marking in the same breath is
+    /// what makes the pair unbreakable: there is no instant at which one holds
+    /// without the other, on any seat.
+    ///
+    /// The marker is what distinguishes Closed from Genesis-only, which are
+    /// otherwise identical in `tokens` and frontier ownership; without it the
+    /// next enrollment would silently re-open a conversation whose log holds
+    /// records, terminals and drain rows.
+    pub(super) fn seal_closed_conversation(&mut self) {
+        self.obligation_debt_dispatch = None;
+        self.closed = true;
     }
 
     /// Borrows the executable frontier through the sole coupled owner.
