@@ -52,6 +52,62 @@ fn restarted_handler(
     )?)
 }
 
+/// The three facts about the owner boot actually installed that R-BOOT-DRAIN
+/// and R-SEAL are measured against: the lane it left, the slots it kept, and
+/// whether it closed the conversation.
+struct InstalledOwnerFacts {
+    lane: Vec<ImmutableSequenceCandidate>,
+    slots: Vec<u64>,
+    closed: bool,
+}
+
+fn installed_owner_facts(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+) -> Result<InstalledOwnerFacts, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "installed owner lock was poisoned")?;
+    let authority = owner.as_ref().ok_or("installed owner was absent")?;
+    let facts = InstalledOwnerFacts {
+        lane: authority.frontier().map_or_else(Vec::new, |frontier| {
+            frontier
+                .frontiers()
+                .sequence()
+                .immutable_candidates()
+                .to_vec()
+        }),
+        slots: authority.slots.keys().copied().collect(),
+        closed: authority.is_closed(),
+    };
+    drop(owner);
+    Ok(facts)
+}
+
+/// The Died-flavor boot-drain posture (F8B §6.2, §6.6): boot emptied the lane
+/// and ERASED the drained identity, and did not seal, because another
+/// enrollment token survives.
+fn assert_boot_drained_and_released(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    drained_participant: u64,
+) -> Result<(), Box<dyn Error>> {
+    let booted = installed_owner_facts(handler, conversation_id)?;
+    if !booted.lane.is_empty() {
+        return Err(
+            format!("boot left the restored candidate lane occupied: {:?}", booted.lane).into(),
+        );
+    }
+    if booted.slots.contains(&drained_participant) {
+        return Err("boot drained the terminal without releasing the victim's slot".into());
+    }
+    if booted.closed {
+        return Err("the drain sealed a conversation whose peer still holds a token".into());
+    }
+    Ok(())
+}
+
 /// Reads every durable operation row at and after `from_sequence`.
 fn rows_from(
     fixture: &PendingRestartFixture,
@@ -74,15 +130,27 @@ fn rows_from(
 /// The S-2 redrawn pin: a valid publish that encounters the crash-restored
 /// `PendingFinalization(Died)` residence COMMITS after the candidate-lane
 /// terminal drain — not a refusal, not a torn connection.
+///
+/// CONVERTED for F8B R-BOOT-DRAIN (§6.2, authorized in §6.6). The residence no
+/// longer survives the restart: boot drains the lane before any retained
+/// connection-fate `Open` replays, so the drain that this pin measured at
+/// publish time now happens at boot time. The pin itself is unchanged — the
+/// publish still commits, and every durable assertion below still describes
+/// the same three appended rows — so the prestate census moves to the durable
+/// bytes as the crash left them, and the post-restart posture becomes the
+/// DRAINED one.
 #[test]
 fn valid_publish_during_pending_finalization_residence_commits_after_drain()
 -> Result<(), Box<dyn Error>> {
     let fixture = pending_restart_fixture()?;
-    let restarted = restarted_handler(&fixture)?;
 
-    // Crash-restore residence: cold replay rests the victim in Pending Died.
-    let replayed = restarted.replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
-    let victim = replayed
+    // Crash-restore residence, read from the durable bytes BEFORE boot touches
+    // them: the victim rests in Pending Died with its terminal in the lane.
+    // This is the prestate the boot drain consumes.
+    let crashed = fixture
+        .handler
+        .replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
+    let victim = crashed
         .slots
         .get(&fixture.participant_id)
         .ok_or("restore omitted the pending participant")?;
@@ -92,6 +160,13 @@ fn valid_publish_during_pending_finalization_residence_commits_after_drain()
     ) {
         return Err("restore did not rest the victim in PendingFinalization(Died)".into());
     }
+
+    let restarted = restarted_handler(&fixture)?;
+
+    // (0) R-BOOT-DRAIN's posture: the restart itself emptied the lane and
+    // released the victim's slot, and did NOT seal (§6.6) — the peer's
+    // enrollment token survives the Died drain.
+    assert_boot_drained_and_released(&restarted, fixture.conversation_id, fixture.participant_id)?;
 
     // (1) A VALID publish from the still-bound peer commits; the dispatch does
     // not fail closed and no refusal is selected.
@@ -453,12 +528,19 @@ fn second_pending_terminal_cannot_join_the_candidate_lane() -> Result<(), Box<dy
 ///   observer-backpressure refusal body in the frozen R-D1 register would be
 ///   fabricated for this prestate — the contract's total simulation admits no
 ///   truthful refusal here.
+///
+/// CONVERTED for F8B R-BOOT-DRAIN (§6.2, authorized in §6.6): the census is
+/// taken from the durable bytes as the crash left them, because a restart no
+/// longer preserves the residence — boot drains it. Constructing a handler
+/// over these bytes IS that drain, so the census must precede it. The
+/// post-restart half of the pin then asserts the drained posture: boot
+/// consumed exactly the candidate the census names.
 #[test]
 fn residence_frontier_census_sole_terminal_candidate_closure_clear() -> Result<(), Box<dyn Error>> {
     let fixture = pending_restart_fixture()?;
-    let restarted = restarted_handler(&fixture)?;
-    let mut replayed =
-        restarted.replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
+    let mut replayed = fixture
+        .handler
+        .replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
     let owner = replayed.take_frontier()?;
     let candidates = owner.frontiers().sequence().immutable_candidates().to_vec();
     let (_, accounting, _, _) = owner.into_parts();
@@ -487,6 +569,20 @@ fn residence_frontier_census_sole_terminal_candidate_closure_clear() -> Result<(
             accounting.state()
         )
         .into());
+    }
+
+    // R-BOOT-DRAIN: boot consumes exactly the candidate this census names, and
+    // releases exactly that identity's slot. Asserting it here keeps the census
+    // tied to the drain it exists to justify, instead of describing a prestate
+    // nothing reaches any more.
+    let sole_owner = terminal.participant_index;
+    let restarted = restarted_handler(&fixture)?;
+    let booted = installed_owner_facts(&restarted, fixture.conversation_id)?;
+    if !booted.lane.is_empty() {
+        return Err(format!("boot left the censused candidate in the lane: {:?}", booted.lane).into());
+    }
+    if booted.slots.contains(&sole_owner) {
+        return Err("boot drained the censused candidate without releasing its slot".into());
     }
     Ok(())
 }

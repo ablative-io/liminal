@@ -79,7 +79,7 @@ pub struct ProductionParticipantHandler {
     /// Durable registry of created conversations: one row appended before
     /// each conversation's genesis append, read at startup to enumerate
     /// every durable conversation for the capacity restore.
-    registry: ConversationRegistry,
+    pub(super) registry: ConversationRegistry,
     /// Exact W2 work observation points, isolated per handler and test-only.
     #[cfg(test)]
     pub(super) obligation_dispatch_work: ObligationDispatchWorkCounters,
@@ -247,12 +247,32 @@ impl ProductionParticipantHandler {
                 })?;
             if owner.is_none() {
                 let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
-                let replayed = self.replay_and_repair(conversation_id, &log)?;
+                let mut replayed = self.replay_and_repair(conversation_id, &log)?;
                 let durably_empty = replayed.next_log_sequence == 0;
                 if durably_empty {
                     drop(owner);
                     self.evict_uncommitted(conversation_id, &cell)?;
                     continue;
+                }
+                // R-BOOT-DRAIN (F8B §6.2): empty this conversation's
+                // immutable-candidate lane before any retained connection-fate
+                // `Open` replays, and before the owner is installed. The drain
+                // lives HERE and not in `replay_and_repair`, which has four
+                // live non-boot callers whose behaviour must not change.
+                let verdict =
+                    self.drain_restored_candidate_lane(conversation_id, &mut replayed, &log);
+                let drained = verdict.drained_any();
+                verdict.observe()?;
+                if drained {
+                    // The drain appended durable rows, so the restored owner is
+                    // now behind its own log: it recorded new observer-progress
+                    // projections and it released a binding slot the capacity
+                    // ledger was folded against. Re-running `replay_and_repair`
+                    // performs BOTH repairs — the observer reconciliation at
+                    // :464-477 and the capacity re-fold at :484-496 — from
+                    // durable truth, exactly as every other post-append
+                    // reconciliation in this handler does.
+                    replayed = self.replay_and_repair(conversation_id, &log)?;
                 }
                 *owner = Some(replayed);
             }
@@ -462,7 +482,17 @@ impl ProductionParticipantHandler {
             .repair_pending_specific_fates(&appender)
             .map_err(|error| state_error(&error))?;
         let observer_witnesses = replayed.take_observer_progress_witnesses();
-        if !replayed.tokens.is_empty() {
+        // F8B R-SEAL (§6.6). This is the THIRD site that reads `tokens` empty
+        // as "never enrolled" — the two the ruling names are the replay
+        // invariant twins. A Closed conversation is the state that proxy never
+        // anticipated: no tokens, but a log full of records, terminals and
+        // drain rows whose observer-progress witnesses are durable truth. It
+        // must reconcile exactly as an enrolled conversation does, or the
+        // handler's observer state is left behind its own durable log — the
+        // failure §6.2's post-drain reconciliation exists to prevent. Bare
+        // tokens-empty-with-witnesses REMAINS a refusal for the never-enrolled
+        // shape.
+        if !replayed.tokens.is_empty() || replayed.is_closed() {
             self.reconcile_observer_progress(
                 conversation_id,
                 &observer_witnesses,
@@ -621,10 +651,10 @@ impl ProductionParticipantHandler {
 /// conversation-creating append (genesis at sequence zero) is preceded by a
 /// durable registry row, so startup can enumerate every conversation stream
 /// that exists.
-struct LogAppender<'a> {
-    log: &'a OperationLog,
-    registry: &'a ConversationRegistry,
-    conversation_id: ConversationId,
+pub(super) struct LogAppender<'a> {
+    pub(super) log: &'a OperationLog,
+    pub(super) registry: &'a ConversationRegistry,
+    pub(super) conversation_id: ConversationId,
 }
 
 impl DurableAppend for LogAppender<'_> {
@@ -641,10 +671,17 @@ impl DurableAppend for LogAppender<'_> {
 }
 
 pub(super) fn state_error(error: &StateError) -> ParticipantSemanticError {
-    // The one refusal that must not be flattened. Every other state failure is
-    // a diagnostic string because nothing downstream branches on it.
+    // The two refusals that must not be flattened. Every other state failure
+    // is a diagnostic string because nothing downstream branches on it.
     if let StateError::BindingTerminalAdmissionRefused { error } = error {
         return ParticipantSemanticError::BindingTerminalAdmissionRefused { error: *error };
+    }
+    // F8B R-SEAL (§6.6): a late arrival must be able to tell a sealed
+    // conversation from every other failure by type, not by substring.
+    if let StateError::ConversationSealed { conversation_id } = error {
+        return ParticipantSemanticError::ConversationSealed {
+            conversation_id: *conversation_id,
+        };
     }
     ParticipantSemanticError::Internal {
         message: format!("participant production operation failed: {error}"),

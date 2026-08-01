@@ -15,6 +15,7 @@
 
 mod barrier;
 mod binding_fate_completion;
+mod boot_drain;
 mod capacity;
 mod connection_fate;
 mod connection_fate_allocation;
@@ -99,6 +100,10 @@ mod tests_capacity_attach;
 mod tests_config_d2;
 #[cfg(test)]
 mod tests_delivery_acceptance;
+#[cfg(test)]
+mod tests_f8b_boot_drain;
+#[cfg(test)]
+mod tests_f8b_seal;
 #[cfg(test)]
 mod tests_f8b_typed_refusal;
 #[cfg(test)]

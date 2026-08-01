@@ -8,6 +8,7 @@ use liminal_protocol::wire::{
 };
 
 use super::ProductionParticipantHandler;
+use super::log::OperationLog;
 use super::outbox::RetainedAuthorityMeasurements;
 use super::outbox_log::{OutboxLog, OutboxRow, StoredMarkerAckCommitted};
 use super::tests::dispatch;
@@ -268,6 +269,41 @@ struct CompleteMarkerSnapshot {
     observer_progress: u64,
     frontier: String,
     outbox: String,
+    /// F8B: how many immutable candidates the owner's lane holds. A cold
+    /// restart now drains them (R-BOOT-DRAIN), so this is the one field whose
+    /// live and cold readings are designed to differ.
+    lane_candidates: usize,
+    /// The restored frontier's closure state — the "owner variant" this pin is
+    /// named for, read structurally instead of off the debug rendering.
+    owner_variant: String,
+}
+
+/// The marker pin's own subject — exactly what its name claims and nothing
+/// else: the OWNER VARIANT (the restored frontier's closure state) and the
+/// DISPATCH CURSOR the `MarkerAck` reconciled, plus the durable observer
+/// progress that cursor is measured against. These survive a cold restart
+/// untouched whether or not that restart drains a lane.
+///
+/// The outbox is deliberately NOT here. A marker drain produces its own
+/// projection, so a restart that drains adds live records, obligations and
+/// charged bytes to the outbox owner — a designed effect of R-BOOT-DRAIN, not
+/// a drift. The outbox is still asserted whole on the no-drain interleaving,
+/// where a restart must change nothing at all.
+#[derive(Debug, PartialEq, Eq)]
+struct MarkerPinSubject {
+    cursor: u64,
+    observer_progress: u64,
+    owner_variant: String,
+}
+
+impl CompleteMarkerSnapshot {
+    fn pin_subject(&self) -> MarkerPinSubject {
+        MarkerPinSubject {
+            cursor: self.cursor,
+            observer_progress: self.observer_progress,
+            owner_variant: self.owner_variant.clone(),
+        }
+    }
 }
 
 fn complete_marker_snapshot(
@@ -296,14 +332,24 @@ fn complete_marker_snapshot(
         observer_progress: authority.observer_progress,
         frontier: format!("{:?}", authority.obligation_debt_dispatch),
         outbox: format!("{:?}", authority.outbox),
+        lane_candidates: authority.frontier().map_or(0, |frontier| {
+            frontier.frontiers().sequence().immutable_candidates().len()
+        }),
+        owner_variant: authority.frontier().map_or_else(
+            || "None".to_owned(),
+            |frontier| format!("{:?}", frontier.closure_accounting().state()),
+        ),
     };
     drop(owner);
     Ok(snapshot)
 }
 
+/// Returns how many immutable candidates the cold restart's boot drain
+/// consumed, so the caller can prove the two interleavings together exercise
+/// the drain at all.
 fn assert_marker_base_interleaving(
     interleaving: MarkerBaseInterleaving,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<u64, Box<dyn Error>> {
     let fixture = prepare_marker_fixture()?;
     let outbox_log = OutboxLog::new(
         Arc::clone(&fixture.store),
@@ -383,20 +429,100 @@ fn assert_marker_base_interleaving(
     let participant_id = fixture.target_participant;
     let live_snapshot =
         complete_marker_snapshot(&fixture.handler, conversation_id, participant_id)?;
+    // The lane a COLD REPLAY of these durable bytes rebuilds — which is the
+    // prestate boot drains, and is NOT the live owner's lane: measured here,
+    // the live owner rests with an empty lane while its own replay rebuilds a
+    // marker candidate. Boot consumes that candidate; the assertions below
+    // hold the drain to exactly it.
+    let replayed_lane = {
+        let log = OperationLog::new(Arc::clone(&fixture.store), conversation_id);
+        // `replay_and_repair`, not the frozen aggregate oracle: this is the
+        // exact authority `restore_all_conversations` hands the boot drain.
+        let replayed = fixture.handler.replay_and_repair(conversation_id, &log)?;
+        replayed.frontier().map_or(0, |frontier| {
+            frontier.frontiers().sequence().immutable_candidates().len()
+        })
+    };
     let store = Arc::clone(&fixture.store);
     drop(fixture);
 
     let reopened = ProductionParticipantHandler::new(store, marker_fixture_config())?;
     let cold_snapshot = complete_marker_snapshot(&reopened, conversation_id, participant_id)?;
-    assert_eq!(cold_snapshot, live_snapshot);
-    Ok(())
+
+    // CONVERTED for F8B R-BOOT-DRAIN (§6.2, authorized in §6.6). A cold restart
+    // no longer leaves the marker lane occupied: boot drains it before any
+    // retained connection-fate `Open` replays. So the whole-snapshot equality
+    // this pin used to assert is no longer the truth about a restart, and
+    // asserting it would be asserting that R-BOOT-DRAIN did not happen.
+    //
+    // The pin's own subject is unchanged and still asserted whole: the
+    // delivery cursor the MarkerAck reconciled, the durable observer progress,
+    // and the outbox owner all survive the restart byte-identical. What moves
+    // is the lane and the allocations the drain of that lane consumes — and
+    // that movement is asserted EXACTLY, not merely tolerated.
+    assert_eq!(cold_snapshot.pin_subject(), live_snapshot.pin_subject());
+
+    assert_restart_drained_exactly(&live_snapshot, &cold_snapshot, replayed_lane)
 }
 
+/// The restart half of the converted marker pin: whatever the cold replay
+/// rebuilt in the lane, boot drained exactly that and moved exactly what a
+/// drain of it moves.
+fn assert_restart_drained_exactly(
+    live_snapshot: &CompleteMarkerSnapshot,
+    cold_snapshot: &CompleteMarkerSnapshot,
+    replayed_lane: usize,
+) -> Result<u64, Box<dyn Error>> {
+    let drained = u64::try_from(replayed_lane)?;
+    assert_eq!(
+        cold_snapshot.lane_candidates, 0,
+        "boot left the restored marker lane occupied"
+    );
+    // One durable drain row and one delivery sequence per marker head — N
+    // markers need N drains — and the transaction order does not move, because
+    // the marker drain consumes the candidate's already-allocated position.
+    assert_eq!(
+        cold_snapshot.next_log_sequence,
+        live_snapshot.next_log_sequence + drained
+    );
+    assert_eq!(cold_snapshot.next_seq, live_snapshot.next_seq + drained);
+    assert_eq!(cold_snapshot.next_order, live_snapshot.next_order);
+    if drained == 0 {
+        // Nothing to drain: the restart must be a total no-op, asserted whole
+        // exactly as this pin asserted it before R-BOOT-DRAIN existed.
+        assert_eq!(cold_snapshot, live_snapshot);
+    }
+    Ok(drained)
+}
+
+/// CONVERTED for F8B R-BOOT-DRAIN (§6.2, authorized in §6.6). A cold restart no
+/// longer leaves the restored marker lane occupied, so the whole-snapshot
+/// live-equals-cold equality this pin asserted is no longer the truth about a
+/// restart — asserting it would assert that the boot drain did not happen.
+/// The pin's own subject (cursor, observer progress, outbox) is still asserted
+/// whole; what the drain moves is asserted exactly, per candidate consumed.
+///
+/// MEASURED, and the reason the drain count is returned rather than assumed:
+/// the two interleavings differ. `AckFirst` restores with an EMPTY lane and its
+/// restart is a total no-op — the original equality, still asserted for it.
+/// `AckBetween` restores with a marker candidate that boot drains. Neither
+/// alone covers both halves of the posture, so the coverage is asserted here,
+/// where both are visible.
 #[test]
 fn marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor() -> Result<(), Box<dyn Error>>
 {
-    assert_marker_base_interleaving(MarkerBaseInterleaving::AckFirst)?;
-    assert_marker_base_interleaving(MarkerBaseInterleaving::AckBetween)
+    let ack_first = assert_marker_base_interleaving(MarkerBaseInterleaving::AckFirst)?;
+    let ack_between = assert_marker_base_interleaving(MarkerBaseInterleaving::AckBetween)?;
+    let drained = ack_first
+        .checked_add(ack_between)
+        .ok_or("marker drain count overflowed")?;
+    assert!(
+        drained > 0,
+        "neither marker interleaving restored an occupied lane, so this pin no longer \
+         exercises the boot drain it was converted for (AckFirst {ack_first}, \
+         AckBetween {ack_between})"
+    );
+    Ok(())
 }
 
 #[test]

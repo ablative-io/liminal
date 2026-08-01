@@ -1,0 +1,11 @@
+   Compiling liminal-server v0.5.1 (/private/tmp/claude-501/-Users-tom-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/wt-f8b-leg2/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.50s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-1bedfbfc535af821)
+
+running 3 tests
+test server::participant::production::tests_marker_ack::marker_covered_outbox_accounting_stays_bounded_until_real_discharge ... ok
+test server::participant::production::tests_marker_ack::marker_ack_requires_exact_offered_binding_testimony ... ok
+test server::participant::production::tests_marker_ack::marker_ack_preserves_owner_variant_and_reconciles_dispatch_cursor ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 593 filtered out; finished in 6.15s
+

@@ -1,0 +1,12 @@
+   Compiling liminal-server v0.5.1 (/private/tmp/claude-501/-Users-tom-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/wt-f8b-leg2/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.18s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-1bedfbfc535af821)
+
+running 4 tests
+test server::participant::production::tests_restore_window::second_pending_terminal_cannot_join_the_candidate_lane ... ok
+test server::participant::production::tests_restore_window::residence_frontier_census_sole_terminal_candidate_closure_clear ... ok
+test server::participant::production::tests_restore_window::terminal_drain_appends_leave_shaped_finalizer_transaction ... ok
+test server::participant::production::tests_restore_window::valid_publish_during_pending_finalization_residence_commits_after_drain ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 592 filtered out; finished in 1.80s
+
