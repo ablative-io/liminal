@@ -408,6 +408,193 @@ fn assert_owner_is_bound_for_its_departure(
     Ok(())
 }
 
+/// One sample of everything the instrument lane needs, taken at one instant
+/// under one lock acquisition so the fields cannot drift against each other.
+#[derive(Debug)]
+struct AuthoritySample {
+    high_watermark: Option<u64>,
+    peer_cursor: Option<u64>,
+    peer_binding: Option<BindingState>,
+    peer_pending_fate: bool,
+    owner_cursor: Option<u64>,
+    owner_binding: Option<BindingState>,
+    owner_pending_fate: bool,
+    observer_progress: u64,
+    retained_marker_seqs: Vec<u64>,
+}
+
+fn sample_authority(
+    handler: &ProductionParticipantHandler,
+    roles: &IncidentRoles,
+) -> Result<AuthoritySample, Box<dyn Error>> {
+    let cell = handler.cell(roles.conversation_id)?;
+    let guard = cell
+        .lock()
+        .map_err(|_| "F8 instrument sample owner lock was poisoned")?;
+    let authority = guard
+        .as_ref()
+        .ok_or("F8 instrument sample conversation owner was absent")?;
+    let sample = AuthoritySample {
+        high_watermark: authority
+            .frontier()
+            .map(|frontier| frontier.frontiers().sequence().ledger().high_watermark()),
+        peer_cursor: authority
+            .slots
+            .get(&roles.peer_participant)
+            .map(|slot| slot.member.cursor()),
+        peer_binding: authority
+            .slots
+            .get(&roles.peer_participant)
+            .map(|slot| slot.binding),
+        peer_pending_fate: authority
+            .pending_specific_fates
+            .contains_key(&roles.peer_participant),
+        owner_cursor: authority
+            .slots
+            .get(&roles.owner_participant)
+            .map(|slot| slot.member.cursor()),
+        owner_binding: authority
+            .slots
+            .get(&roles.owner_participant)
+            .map(|slot| slot.binding),
+        owner_pending_fate: authority
+            .pending_specific_fates
+            .contains_key(&roles.owner_participant),
+        observer_progress: authority.observer_progress,
+        retained_marker_seqs: authority
+            .frontier()
+            .map(|frontier| {
+                frontier
+                    .frontiers()
+                    .retained_marker_records()
+                    .iter()
+                    .map(|record| record.delivery_seq)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    drop(guard);
+    Ok(sample)
+}
+
+/// INSTRUMENT LANE (joint gate 0c32310e + 96c62924). This is NOT a verdict on
+/// the leg and NOT a fix — it is a measurement that always reports, so that its
+/// reading lands in the teed log where it can be cited.
+///
+/// WHY IT EXISTS. The step-0b check sampled the cursor and the watermark AFTER
+/// the departure returned, and reported cursor 9 against watermark 10. Two
+/// readings fit that: §1's premise is conditional, or the departure's own
+/// durable Died row advanced the watermark 9→10 between the fate computing
+/// `resulting_cursor` and my sample. The old instrument cannot separate them,
+/// so it cannot be cited for either.
+///
+/// WHAT THIS ONE DOES DIFFERENTLY. It brackets the departure: the watermark is
+/// captured BEFORE the call and again AFTER, so the 9→10 advance is MEASURED
+/// rather than inferred from sampling order. The discriminator is then exact —
+/// if the post-departure cursor equals the PRE-departure watermark, the fate
+/// did set the cursor to the watermark it could see, and the premise holds.
+///
+/// POSITIVE CONTROL, and the reading is void without it: the instrument must
+/// demonstrably SEE the advance it is being asked to rule on. If the watermark
+/// does not move across the departure, this instrument has not proven it can
+/// observe the very event whose timing is in question, and it says so instead
+/// of returning a verdict it has not earned.
+#[test]
+fn f8_instrument_lane_brackets_the_departure_fate() -> Result<(), Box<dyn Error>> {
+    let fixture = prepare_marker_fixture()?;
+    let roles = incident_roles(&fixture)?;
+    assert_unacked_marker_prestate(&fixture.handler, &roles)?;
+
+    let acked = dispatch_tracked(
+        &fixture.handler,
+        roles.peer_connection,
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id: roles.conversation_id,
+            participant_id: roles.peer_participant,
+            capability_generation: Generation::ONE,
+            through_seq: roles.peer_ack_through_seq,
+        }),
+    )?;
+    if !matches!(acked, ServerValue::AckCommitted(_)) {
+        return Err(format!("instrument lane: the peer ack did not commit: {acked:?}").into());
+    }
+
+    let before = sample_authority(&fixture.handler, &roles)?;
+    let consumer: &dyn ParticipantSemanticHandler = &fixture.handler;
+    let departure = consumer.handle_connection_fate(connection_lost(
+        PEER_OPEN_SEQUENCE,
+        roles.peer_connection,
+        roles.conversation_id,
+    ));
+    let after = sample_authority(&fixture.handler, &roles)?;
+
+    // LEAD 2, measured INDEPENDENTLY rather than behind a first-Err: its
+    // silence must be a reading, not an absence.
+    let owner_bound_for_departure = match after.owner_binding {
+        Some(BindingState::Bound(active)) => {
+            if active.binding_epoch.connection_incarnation == roles.owner_connection {
+                "YES — Bound to the exact incarnation its departure names".to_string()
+            } else {
+                format!(
+                    "NO — Bound to {:?}, but its departure names {:?} (owner-side no-op)",
+                    active.binding_epoch.connection_incarnation, roles.owner_connection
+                )
+            }
+        }
+        other => format!("NO — owner slot is {other:?}, not Bound (owner-side no-op)"),
+    };
+
+    let (Some(w_before), Some(w_after)) = (before.high_watermark, after.high_watermark) else {
+        return Err(format!(
+            "INSTRUMENT VOID: no frontier to read a watermark from. before={before:?} after={after:?}"
+        )
+        .into());
+    };
+    let control = if w_after > w_before {
+        format!("PASS — the watermark advanced {w_before} -> {w_after} across the departure, so this instrument demonstrably observes the event whose timing is in question")
+    } else {
+        format!("FAIL — the watermark did NOT advance ({w_before} -> {w_after}). This instrument has not shown it can see the advance it is being asked to rule on, so its verdict below is NOT CITABLE")
+    };
+    let verdict = match after.peer_cursor {
+        Some(cursor) if cursor == w_before => format!(
+            "(ii) PREMISE HOLDS INSIDE THE FATE — post-departure cursor {cursor} EQUALS the \
+             PRE-departure watermark {w_before}. The fate did set the cursor to the watermark it \
+             could see; the 9->10 style gap is the departure's own Died row landing afterwards. \
+             The step-0b instrument was MIS-TIMED, not the design conditional."
+        ),
+        Some(cursor) if cursor == w_after => format!(
+            "AMBIGUOUS — post-departure cursor {cursor} equals the POST-departure watermark \
+             {w_after} and the watermark moved, so bracketing cannot separate the two instants \
+             here. Not citable for either exit."
+        ),
+        Some(cursor) => format!(
+            "(i) GAP PERSISTS INSIDE THE FATE — post-departure cursor {cursor} matches NEITHER \
+             the pre-departure watermark {w_before} NOR the post-departure watermark {w_after}. \
+             §1's premise does not hold even accounting for the Died row's advance."
+        ),
+        None => "INSTRUMENT VOID — the peer has no slot after departure".to_string(),
+    };
+
+    Err(format!(
+        "=== F8 INSTRUMENT LANE READING (not a test failure; this test reports by returning Err \
+         so its reading reaches the teed log under the fixed tier-1 string) ===\n\
+         departure call returned: {departure:?}\n\
+         POSITIVE CONTROL: {control}\n\
+         VERDICT: {verdict}\n\
+         LEAD 2 (owner Bound for its own departure, measured independently): {owner_bound_for_departure}\n\
+         marker_delivery_seq={} peer={} owner={} peer_ack_through_seq={}\n\
+         BEFORE departure: {before:?}\n\
+         AFTER  departure: {after:?}\n\
+         === END INSTRUMENT READING ===",
+        roles.marker_delivery_seq,
+        roles.peer_participant,
+        roles.owner_participant,
+        roles.peer_ack_through_seq,
+    )
+    .into())
+}
+
 fn connection_lost(
     open_sequence: u64,
     connection_incarnation: ConnectionIncarnation,
