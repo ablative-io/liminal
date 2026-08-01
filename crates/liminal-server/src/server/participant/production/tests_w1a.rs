@@ -256,12 +256,16 @@ fn live_leave_commit_projects_left_sequence_for_settled_and_pending_paths()
     Ok(())
 }
 
+/// The "one surviving producer" half of this test's name was carried by a
+/// trybuild case, which now lives in the crate's dedicated trybuild target as
+/// `trybuild_gate.rs::leave_projection_removal_stays_a_compile_error`. The case
+/// string is unchanged. What remains here is the runtime oracle — it cannot
+/// follow, because it drives a real `ProductionParticipantHandler` through
+/// crate-private seams that an integration target cannot reach, and making them
+/// public to enable a move would be an API change disguised as a move.
 #[test]
 fn leave_projection_has_one_surviving_producer_and_duplicate_injection_refuses()
 -> Result<(), Box<dyn Error>> {
-    let cases = trybuild::TestCases::new();
-    cases.compile_fail("tests/trybuild/plain_leave_projection_removed.rs");
-
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
     let conversation_id = 7_201;
