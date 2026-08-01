@@ -605,6 +605,28 @@ pub(super) fn ackgap_arm_probe(
         generation = bound.origin_binding_epoch().capability_generation;
     }
 
+    // THE THIRD ENROLMENT. `ack_marker_prefix` enrols a third participant
+    // (:215-224) BEFORE its through-3 ack (:227), and availability is derived
+    // from `all_obligations` -- delivered rows -- not from an empty outbox. A
+    // probe that acks through 3 after only TWO enrolments cannot reproduce the
+    // asymmetry it exists to explain: both arms would refuse at site 1, the
+    // control would correctly declare itself not citable, and the one priced
+    // discriminator run would buy nothing. So the probe now mirrors the real
+    // failing sequence exactly: enrol x2 -> [attach] -> enrol third -> ack 3.
+    // Both arms are identical through this point and differ ONLY in the attach.
+    let third_connection = ConnectionIncarnation::new(0xA7, 3);
+    let third = dispatch(
+        &handler,
+        third_connection,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([0xA0; 16]),
+        }),
+    )?;
+    if !matches!(third, ServerValue::EnrollBound(_)) {
+        return Err(format!("ackgap probe: third enrolment failed: {third:?}").into());
+    }
+
     let participant_id = members.first.participant_id();
     let (routing_nonzero, acknowledged_through, contiguously_available_through, obligations_debug) = {
         let cell = handler.cell(conversation_id)?;
