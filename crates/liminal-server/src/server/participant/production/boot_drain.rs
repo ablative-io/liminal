@@ -41,6 +41,12 @@ pub(super) enum BootDrainVerdict {
     Drained {
         /// Heads removed from this conversation's lane by this boot.
         drains: usize,
+        /// F8B R-SEAL (§6.6): whether one of those drains erased the
+        /// conversation's final enrollment token and closed it. Sealing is a
+        /// PROPERTY of a successful drain, never a fifth verdict — a verdict
+        /// enum that split them would let a log reader believe a seal happened
+        /// without a drain.
+        sealed: bool,
     },
     /// The lane was already empty when boot reached it.
     AlreadyEmpty,
@@ -83,9 +89,12 @@ impl BootDrainVerdict {
     /// `BindingTerminalAdmissionRefused` carrier does for lane occupancy.
     pub(super) fn observe(self) -> Result<(), ParticipantSemanticError> {
         match self {
-            Self::Drained { drains } => {
+            Self::Drained { drains, sealed } => {
+                // ONE event: the operator sees "drained AND sealed" together,
+                // per R-BOOT-VERDICT's no-silent-skip rule (§6.6).
                 tracing::info!(
                     drains,
+                    sealed,
                     "F8B boot drain emptied a restored immutable-candidate lane"
                 );
                 Ok(())
@@ -218,7 +227,13 @@ impl ProductionParticipantHandler {
         if drains == 0 {
             BootDrainVerdict::AlreadyEmpty
         } else {
-            BootDrainVerdict::Drained { drains }
+            // R-SEAL (§6.6): the marker the drain apply derives, read back
+            // rather than inferred here — the verdict reports what the apply
+            // decided, so live, replay and boot can never disagree.
+            BootDrainVerdict::Drained {
+                drains,
+                sealed: replayed.is_closed(),
+            }
         }
     }
 }

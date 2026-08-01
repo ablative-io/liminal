@@ -211,6 +211,24 @@ pub enum ParticipantSemanticError {
         /// The drain's own refusal text.
         reason: String,
     },
+    /// F8B R-SEAL: the conversation is Closed — a Died-flavor drain erased its
+    /// final enrollment token, so its log holds records, terminals and drain
+    /// rows but no live identity can ever be reached through it again.
+    ///
+    /// Enrollment answers with this NAMED refusal rather than falling through
+    /// to a fresh identity, which would silently re-open a conversation whose
+    /// history has already ended. On the wire it rides the existing
+    /// semantic-error framing; a protocol-native response value with its own
+    /// discriminant is deferred to a protocol-version leg (§9.8).
+    #[error(
+        "participant enrollment refused: conversation {conversation_id} is sealed — its final \
+         enrollment token was erased by a binding-terminal drain — \
+         docs/design/F8B-INTENT-DEADLOCK.md §6.6 R-SEAL"
+    )]
+    ConversationSealed {
+        /// Conversation whose closure refused the request.
+        conversation_id: ConversationId,
+    },
 }
 
 /// One semantic result paired with every dispatch effect durably installed by

@@ -208,6 +208,16 @@ pub(super) struct ConversationAuthority {
     pub(super) retired: BTreeMap<ParticipantId, RetiredIdentity<Digest, Digest, Digest>>,
     /// Permanent enrollment-token index.
     pub(super) tokens: BTreeMap<[u8; 16], ParticipantId>,
+    /// F8B R-SEAL closed marker (§6.6). Set by the Died-flavor drain apply that
+    /// erases this conversation's FINAL enrollment token, on the live apply and
+    /// on every replay alike, and never appended as a row of its own — closure
+    /// is derived from the rows so no crash window can separate the marker from
+    /// the drain that implies it.
+    ///
+    /// It carries the difference between a Closed conversation and a
+    /// Genesis-only one, which are otherwise byte-identical in `tokens` and
+    /// frontier ownership.
+    pub(super) closed: bool,
     /// Next unallocated transaction order.
     pub(super) next_order: TransactionOrder,
     /// Next unallocated delivery sequence.
@@ -340,6 +350,7 @@ impl ConversationAuthority {
             fate_occurrences: FateOccurrenceRouter::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),
+            closed: false,
             next_order: 0,
             next_seq: 1,
             next_participant: 0,
@@ -416,6 +427,11 @@ impl ConversationAuthority {
     /// Takes the shell for a consuming protocol decision.
     pub(super) fn take_shell(&mut self) -> Result<ParticipantConversation, StateError> {
         self.shell.take().ok_or(StateError::ShellUnavailable)
+    }
+
+    /// Whether F8B R-SEAL has closed this conversation (§6.6).
+    pub(super) const fn is_closed(&self) -> bool {
+        self.closed
     }
 
     /// Borrows the executable frontier through the sole coupled owner.

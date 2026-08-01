@@ -103,6 +103,8 @@ mod tests_delivery_acceptance;
 #[cfg(test)]
 mod tests_f8b_boot_drain;
 #[cfg(test)]
+mod tests_f8b_seal;
+#[cfg(test)]
 mod tests_f8b_typed_refusal;
 #[cfg(test)]
 mod tests_history;
