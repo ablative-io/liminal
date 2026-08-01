@@ -44,7 +44,10 @@ use crate::server::participant::{
 use super::ProductionParticipantHandler;
 use super::log::{DecodedStoredOperation, OperationLog, StoredOperation};
 use super::tests::dispatch_tracked;
-use super::tests_marker_ack_fixture::{MarkerFixture, marker_fixture_config, prepare_marker_fixture};
+use super::tests_marker_ack_fixture::{
+    MarkerFixture, attempt_marker_fixture_with_attaches, marker_fixture_config,
+    prepare_marker_fixture,
+};
 
 /// The durable `Open` the departing peer's fate completes under.
 const PEER_OPEN_SEQUENCE: u64 = 0xF801;
@@ -772,6 +775,84 @@ fn f8_instrument_lane_2_what_did_the_owners_fate_do() -> Result<(), Box<dyn Erro
         roles.peer_participant,
         roles.owner_participant,
         roles.peer_ack_through_seq,
+    )
+    .into())
+}
+
+/// F8 PRECONDITION MEASUREMENT (ruling a35c1cb7). Does the marker still drain
+/// under `marker_fixture_config` AS TUNED once the members have attached?
+///
+/// This gates whether attempt 2 may open at all. It is a measurement, not a
+/// rework: `prepare_marker_fixture` is untouched, no unit is reworked, no debt
+/// arithmetic is retuned, and attempt 2 is not opened.
+///
+/// WITNESS CHOICES, stated here because on this leg the witness is declared
+/// before the instrument is built:
+///
+///   * "THE MARKER DRAINED" is witnessed by `authority.last_marker_projection`
+///     surrendering a projection at the fourth commit — `state.rs:197`, taken
+///     with `.take()` inside `drive_marker_drain`. It is NON-IDEMPOTENT by
+///     construction: a one-shot value that exists only if a drain actually
+///     projected, consumed when read. It is an event, not a state that could
+///     legitimately sit still — which is the law banked after instrument #2
+///     disqualified itself for choosing `retained_floor` movement, a state
+///     that can correctly not move.
+///   * "THE ATTACHES LANDED" is witnessed by `slot.binding_fate.is_some()`.
+///     Part A proved that without a `CredentialAttach` no participant EVER
+///     holds one (`ops_attach.rs:331-337` is the sole mint; the other four
+///     sites are take-then-reinsert guards). So the appearance of these tokens
+///     IS the attach observed, and it is the same observable that attempt 2's
+///     mandatory arming assertion will use. If it is absent, this measurement
+///     never reached the state it exists to test and says so.
+#[test]
+fn f8_precondition_does_the_marker_still_drain_with_attaches_present()
+-> Result<(), Box<dyn Error>> {
+    let attempt = attempt_marker_fixture_with_attaches()?;
+
+    let control = if attempt.first_has_binding_fate && attempt.second_has_binding_fate {
+        "PASS — both members hold a binding-fate token after CredentialAttach, which Part A proved \
+         is impossible without one. The attaches landed and the measurement is testing the state \
+         it means to test."
+            .to_string()
+    } else {
+        format!(
+            "FAIL — binding-fate tokens after attach: first={} second={}. The attaches did not \
+             produce the state whose effect on the drain is being measured, so the drain result \
+             below is NOT CITABLE.",
+            attempt.first_has_binding_fate, attempt.second_has_binding_fate
+        )
+    };
+
+    let (verdict, detail) = match &attempt.drain {
+        Ok(fixture) => (
+            "EXIT (1) — THE MARKER STILL DRAINS WITH ATTACHES PRESENT",
+            format!(
+                "the drain surrendered its marker projection at delivery_seq {} in conversation \
+                 {}; target participant {}, catchup boundary {}. The config was used exactly as \
+                 tuned and nothing was retuned.",
+                fixture.marker_delivery.delivery_seq,
+                fixture.marker_delivery.conversation_id,
+                fixture.target_participant,
+                fixture.catchup_through_seq
+            ),
+        ),
+        Err(error) => (
+            "EXIT (2) — THE MARKER DOES NOT DRAIN WITH ATTACHES PRESENT",
+            format!(
+                "drive_marker_drain refused: {error}. Per the ruling this returns to the design \
+                 gate BEFORE any config retuning — retuning the debt arithmetic may not preserve \
+                 incident fidelity and may route to fallback (b) instead."
+            ),
+        ),
+    };
+
+    Err(format!(
+        "=== F8 PRECONDITION MEASUREMENT (not a test failure; reports by returning Err so its \
+         reading reaches the teed log under the fixed tier-1 string) ===\n\
+         POSITIVE CONTROL (attaches landed): {control}\n\
+         VERDICT: {verdict}\n\
+         DETAIL: {detail}\n\
+         === END PRECONDITION MEASUREMENT ==="
     )
     .into())
 }

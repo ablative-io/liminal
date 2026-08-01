@@ -5,10 +5,10 @@ use liminal::durability::bridge::block_on;
 use liminal::durability::{DurableStore, open_ephemeral};
 use liminal_protocol::lifecycle::{CapacityCounter, ConnectionConversationTracking};
 use liminal_protocol::wire::{
-    ClientRequest, ConnectionIncarnation, EnrollBound, EnrollmentRequest, EnrollmentToken,
-    Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck, ParticipantDelivery,
-    ParticipantId, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
-    RecordCommitted, ServerValue,
+    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
+    EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck,
+    ParticipantDelivery, ParticipantId, ParticipantRecord, RecordAdmission,
+    RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
 };
 
 use super::ProductionParticipantHandler;
@@ -441,6 +441,119 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
         catchup_participant: members.second.participant_id(),
         catchup_through_seq,
         marker_delivery,
+    })
+}
+
+/// Outcome of the F8 PRECONDITION MEASUREMENT (ruling a35c1cb7): does the
+/// marker still drain under `marker_fixture_config` AS TUNED once the members
+/// have attached?
+///
+/// This is a measurement, not a rework. `prepare_marker_fixture` above is
+/// untouched; this is an additive sibling that differs from it in exactly one
+/// respect — two `CredentialAttach` dispatches after enrolment — so any
+/// difference in outcome is attributable to the attaches and to nothing else.
+/// The config is used exactly as tuned; no debt arithmetic is retuned here.
+pub(super) struct AttachedDrainAttempt {
+    /// POSITIVE CONTROL that the attaches actually landed. Part A established
+    /// that without a `CredentialAttach` no participant ever holds a
+    /// binding-fate token (`ops_attach.rs:331-337` is the sole mint), so the
+    /// APPEARANCE of these tokens IS the attach observed. `false` here means
+    /// the measurement never got the state it was built to test.
+    pub(super) first_has_binding_fate: bool,
+    pub(super) second_has_binding_fate: bool,
+    /// The DRAIN WITNESS, non-idempotent by construction: `drive_marker_drain`
+    /// only returns `Ok` if `authority.last_marker_projection` surrendered a
+    /// marker projection at the fourth commit — a one-shot value consumed by
+    /// `.take()` that exists ONLY if a drain actually projected. It is an
+    /// event, not a state that could legitimately sit still.
+    pub(super) drain: Result<MarkerFixture, String>,
+}
+
+pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAttempt, Box<dyn Error>>
+{
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let config = marker_fixture_config();
+    let conversation_id = 0xA7;
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
+    let members = enroll_members(&handler, conversation_id)?;
+
+    // THE ONLY DIFFERENCE FROM `prepare_marker_fixture`.
+    for (connection, receipt) in [
+        (members.first_connection, &members.first),
+        (members.second_connection, &members.second),
+    ] {
+        let attached = dispatch(
+            &handler,
+            connection,
+            ClientRequest::CredentialAttach(CredentialAttachRequest {
+                conversation_id,
+                participant_id: receipt.participant_id(),
+                capability_generation: Generation::ONE,
+                attach_secret: receipt.attach_secret(),
+                attach_attempt_token: AttachAttemptToken::new([0xB1; 16]),
+                accept_marker_delivery_seq: None,
+            }),
+        )?;
+        if !matches!(attached, ServerValue::AttachBound(_)) {
+            return Err(format!(
+                "precondition measurement: participant {} did not attach: {attached:?}",
+                receipt.participant_id()
+            )
+            .into());
+        }
+    }
+
+    let (first_has_binding_fate, second_has_binding_fate) = {
+        let cell = handler.cell(conversation_id)?;
+        let guard = cell
+            .lock()
+            .map_err(|_| "precondition measurement owner lock was poisoned")?;
+        let authority = guard
+            .as_ref()
+            .ok_or("precondition measurement conversation owner was absent")?;
+        let has = |participant_id: ParticipantId| {
+            authority
+                .slots
+                .get(&participant_id)
+                .is_some_and(|slot| slot.binding_fate.is_some())
+        };
+        let pair = (
+            has(members.first.participant_id()),
+            has(members.second.participant_id()),
+        );
+        drop(guard);
+        pair
+    };
+
+    ack_marker_prefix(&handler, conversation_id, &members)?;
+    let drain = match drive_marker_drain(
+        &handler,
+        Arc::clone(&store),
+        &config,
+        conversation_id,
+        &members,
+    ) {
+        Ok((target_connection, target_participant, marker_delivery, catchup_through_seq)) => {
+            Ok(MarkerFixture {
+                handler,
+                store,
+                target_connection,
+                target_participant,
+                record_connection: members.first_connection,
+                record_participant: members.first.participant_id(),
+                catchup_connection: members.second_connection,
+                catchup_participant: members.second.participant_id(),
+                catchup_through_seq,
+                marker_delivery,
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    };
+
+    Ok(AttachedDrainAttempt {
+        first_has_binding_fate,
+        second_has_binding_fate,
+        drain,
     })
 }
 
