@@ -212,6 +212,23 @@ fn live_socket_publish_drains_pending_terminal_then_unclean_restart_serves()
 
     // And the drained conversation's durable truth replays with the drain
     // intact: the victim's slot is gone and no candidate survives.
+    //
+    // CONVERTED for F8B R-SEAL (§6.6, §9.9). Constructing this handler over the
+    // reopened server's bytes IS a boot, and its boot drain now empties the
+    // lane the reopened server's own startup fate left occupied — the terminal
+    // of the peer, which by then holds the conversation's LAST enrollment
+    // token. That drain seals the conversation, so the frontier this block used
+    // to require is deliberately retired and the candidate census below it is
+    // subsumed: a conversation with no frontier can hold no candidate.
+    //
+    // MEASURED BEFORE CONVERTING, per §9.9's obligation: this test's serve
+    // assertions target SERVE-OF-THE-SERVER, not serve-on-the-drained
+    // conversation. They are the reopen at `SocketFixture::start_with_config`
+    // above and the fresh connection enrolling conversation 603 — a DIFFERENT
+    // conversation. Neither is touched by this conversion, and both still
+    // assert exactly what they did before: the server reaches listening and
+    // every other conversation serves. What changes is only this block, which
+    // asserts the sealed conversation's own durable truth.
     let handler =
         ProductionParticipantHandler::new(reopened.durable_store(), small_retention_config())?;
     let log = OperationLog::new(reopened.durable_store(), CONVERSATION);
@@ -219,25 +236,14 @@ fn live_socket_publish_drains_pending_terminal_then_unclean_restart_serves()
     if replayed.slots.contains_key(&victim) {
         return Err("restart replay resurrected the drained victim's slot".into());
     }
-    let victim_candidates = replayed
-        .frontier()
-        .ok_or("restart replay lost its frontier")?
-        .frontiers()
-        .sequence()
-        .immutable_candidates()
-        .iter()
-        .filter(|candidate| {
-            matches!(
-                candidate,
-                liminal_protocol::lifecycle::ImmutableSequenceCandidate::BindingTerminal {
-                    owner,
-                    ..
-                } if owner.participant_index == victim
-            )
-        })
-        .count();
-    if victim_candidates != 0 {
-        return Err("restart replay resurrected the drained candidate".into());
+    if !replayed.is_closed() {
+        return Err("the last-identity boot drain did not seal the conversation".into());
+    }
+    if !replayed.tokens.is_empty() {
+        return Err("the sealed conversation retained enrollment tokens".into());
+    }
+    if replayed.frontier().is_some() {
+        return Err("the sealed conversation retained an executable frontier".into());
     }
     drop(fresh);
     reopened.stop();

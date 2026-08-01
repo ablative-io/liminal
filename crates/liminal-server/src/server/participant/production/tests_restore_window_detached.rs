@@ -43,6 +43,68 @@ use super::state::{DurableAppend, StateError};
 use super::tests::{dispatch_tracked, test_participant_config};
 use super::tests_w1b_pending_died_restart::{BoundDebtFixture, bound_debt_fixture};
 
+/// The facts about the owner boot actually installed that R-BOOT-DRAIN and
+/// R-SEAL are measured against: the lane it left, the slots and enrollment
+/// tokens it kept, and whether it closed the conversation.
+struct InstalledOwnerFacts {
+    lane: Vec<ImmutableSequenceCandidate>,
+    slots: Vec<u64>,
+    token_holders: Vec<u64>,
+    closed: bool,
+}
+
+fn installed_owner_facts(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+) -> Result<InstalledOwnerFacts, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "installed owner lock was poisoned")?;
+    let authority = owner.as_ref().ok_or("installed owner was absent")?;
+    let facts = InstalledOwnerFacts {
+        lane: authority.frontier().map_or_else(Vec::new, |frontier| {
+            frontier
+                .frontiers()
+                .sequence()
+                .immutable_candidates()
+                .to_vec()
+        }),
+        slots: authority.slots.keys().copied().collect(),
+        token_holders: authority.tokens.values().copied().collect(),
+        closed: authority.is_closed(),
+    };
+    drop(owner);
+    Ok(facts)
+}
+
+/// The Detached-flavor boot-drain posture (F8B §6.2, §6.6): boot emptied the
+/// lane and PRESERVED the drained identity's slot and enrollment token — the
+/// opposite of the Died drain's erasure, and the reason a Detached drain can
+/// never empty `tokens` and so can never seal.
+fn assert_boot_drained_and_preserved(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    drained_participant: u64,
+) -> Result<(), Box<dyn Error>> {
+    let booted = installed_owner_facts(handler, conversation_id)?;
+    if !booted.lane.is_empty() {
+        return Err(
+            format!("boot left the restored candidate lane occupied: {:?}", booted.lane).into(),
+        );
+    }
+    if !booted.slots.contains(&drained_participant) {
+        return Err("the boot Detached drain erased the victim's binding slot".into());
+    }
+    if !booted.token_holders.contains(&drained_participant) {
+        return Err("the boot Detached drain unmapped the victim's enrollment token".into());
+    }
+    if booted.closed {
+        return Err("a Detached drain sealed the conversation — it preserves tokens".into());
+    }
+    Ok(())
+}
+
 struct SourceOnlyAppender<'a> {
     log: &'a OperationLog,
     source_flushed: Cell<bool>,
@@ -261,15 +323,31 @@ fn publish(fixture: &PendingDetachedRestartFixture, token: u8, payload: Vec<u8>)
 /// `ParticipantUnknown`, never erased); the committed record's recipients
 /// INCLUDE the drained-to-Detached victim as a parked recipient; and a repeat
 /// publish commits with no further drain work.
+///
+/// CONVERTED for F8B R-BOOT-DRAIN (§6.2, authorized in §6.6). The residence no
+/// longer survives the restart: boot drains the lane before any retained
+/// connection-fate `Open` replays, so the faithful detach finalization this
+/// pin measured at publish time now happens at boot time. Every pin below is
+/// unchanged — the finalization is still faithful, the slot and token still
+/// survive, the publish still commits and still names the victim as a parked
+/// recipient — so the prestate census moves to the durable bytes as the crash
+/// left them, and the post-restart posture becomes the DRAINED one.
+///
+/// The contrast with the Died flavor is what R-SEAL turns on: a Detached drain
+/// PRESERVES the enrollment token, so it can never empty `tokens` and can never
+/// seal, no matter whose terminal it finalizes. This test asserts that
+/// directly.
 #[test]
 fn valid_publish_during_pending_detached_residence_commits_after_drain()
 -> Result<(), Box<dyn Error>> {
     let fixture = pending_detached_restart_fixture()?;
-    let restarted = restarted_handler(&fixture)?;
 
-    // Crash-restore residence: cold replay rests the victim in Pending Detached.
-    let replayed = restarted.replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
-    let victim = replayed
+    // Crash-restore residence, read from the durable bytes BEFORE boot touches
+    // them: the victim rests in Pending Detached with its terminal in the lane.
+    let crashed = fixture
+        .handler
+        .replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
+    let victim = crashed
         .slots
         .get(&fixture.participant_id)
         .ok_or("restore omitted the pending participant")?;
@@ -279,6 +357,14 @@ fn valid_publish_during_pending_detached_residence_commits_after_drain()
     ) {
         return Err("restore did not rest the victim in PendingFinalization(Detached)".into());
     }
+
+    let restarted = restarted_handler(&fixture)?;
+
+    // (pin 0) R-BOOT-DRAIN's posture, with the Detached flavor's own reading:
+    // the restart emptied the lane and settled the victim at committed
+    // Detached, keeping BOTH its slot and its enrollment token — so R-SEAL
+    // cannot fire here, and the conversation stays open.
+    assert_boot_drained_and_preserved(&restarted, fixture.conversation_id, fixture.participant_id)?;
 
     // (pin 2) A VALID publish from the still-bound peer commits: RecordCommitted,
     // no refusal, no torn connection.
@@ -618,12 +704,19 @@ fn token_mapped(
 /// observer-backpressure refusal body in the frozen R-D1 register would be
 /// fabricated for this prestate — the total simulation admits no truthful
 /// refusal and selects SUCCESS.
+///
+/// CONVERTED for F8B R-BOOT-DRAIN (§6.2, authorized in §6.6): the census is
+/// taken from the durable bytes as the crash left them, because a restart no
+/// longer preserves the residence — boot drains it, and constructing a handler
+/// over these bytes IS that drain. The post-restart half then asserts the
+/// drained posture: boot consumed exactly the candidate the census names, and
+/// settled its owner at committed Detached rather than erasing it.
 #[test]
 fn detached_residence_census_sole_terminal_candidate_closure_clear() -> Result<(), Box<dyn Error>> {
     let fixture = pending_detached_restart_fixture()?;
-    let restarted = restarted_handler(&fixture)?;
-    let mut replayed =
-        restarted.replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
+    let mut replayed = fixture
+        .handler
+        .replay_aggregate_reference(fixture.conversation_id, &fixture.log)?;
     let owner = replayed.take_frontier()?;
     let candidates = owner.frontiers().sequence().immutable_candidates().to_vec();
     let (_, accounting, _, _) = owner.into_parts();
@@ -652,6 +745,22 @@ fn detached_residence_census_sole_terminal_candidate_closure_clear() -> Result<(
             accounting.state()
         )
         .into());
+    }
+
+    // R-BOOT-DRAIN: boot consumes exactly the candidate this census names. The
+    // Detached flavor keeps its owner's slot and token, so the census's subject
+    // is still present afterwards — the opposite of the Died census's release,
+    // and the reason a Detached drain can never seal.
+    let sole_owner = terminal.participant_index;
+    let restarted = restarted_handler(&fixture)?;
+    let booted = installed_owner_facts(&restarted, fixture.conversation_id)?;
+    if !booted.lane.is_empty() {
+        return Err(
+            format!("boot left the censused candidate in the lane: {:?}", booted.lane).into(),
+        );
+    }
+    if !booted.slots.contains(&sole_owner) || !booted.token_holders.contains(&sole_owner) {
+        return Err("the boot Detached drain did not preserve the censused owner".into());
     }
     Ok(())
 }

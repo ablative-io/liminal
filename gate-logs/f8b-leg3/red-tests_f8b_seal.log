@@ -1,0 +1,33 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.37s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-1bedfbfc535af821)
+
+running 4 tests
+test server::participant::production::tests_f8b_seal::the_boot_drain_verdict_names_the_seal ... FAILED
+test server::participant::production::tests_f8b_seal::boot_draining_the_last_identity_seals_the_conversation ... FAILED
+test server::participant::production::tests_f8b_seal::a_sealed_conversation_does_not_refuse_its_neighbours ... FAILED
+test server::participant::production::tests_f8b_seal::enrollment_into_a_sealed_conversation_is_refused_by_type ... FAILED
+
+failures:
+
+---- server::participant::production::tests_f8b_seal::the_boot_drain_verdict_names_the_seal stdout ----
+Error: "the last-identity drain's verdict did not name the seal: Drained { drains: 1, sealed: false }"
+
+---- server::participant::production::tests_f8b_seal::boot_draining_the_last_identity_seals_the_conversation stdout ----
+Error: Internal { message: "participant production operation failed: participant production invariant violated: durably empty conversation rebuilt an executable frontier" }
+
+---- server::participant::production::tests_f8b_seal::a_sealed_conversation_does_not_refuse_its_neighbours stdout ----
+Error: Internal { message: "participant production operation failed: participant production invariant violated: durably empty conversation rebuilt an executable frontier" }
+
+---- server::participant::production::tests_f8b_seal::enrollment_into_a_sealed_conversation_is_refused_by_type stdout ----
+Error: Internal { message: "participant production operation failed: participant production invariant violated: durably empty conversation rebuilt an executable frontier" }
+
+
+failures:
+    server::participant::production::tests_f8b_seal::a_sealed_conversation_does_not_refuse_its_neighbours
+    server::participant::production::tests_f8b_seal::boot_draining_the_last_identity_seals_the_conversation
+    server::participant::production::tests_f8b_seal::enrollment_into_a_sealed_conversation_is_refused_by_type
+    server::participant::production::tests_f8b_seal::the_boot_drain_verdict_names_the_seal
+
+test result: FAILED. 0 passed; 4 failed; 0 ignored; 0 measured; 591 filtered out; finished in 1.70s
+
+error: test failed, to rerun pass `-p liminal-server --lib`

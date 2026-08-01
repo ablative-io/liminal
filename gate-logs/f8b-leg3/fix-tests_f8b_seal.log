@@ -1,0 +1,13 @@
+   Compiling liminal-server v0.5.1 (/private/tmp/claude-501/-Users-tom-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/wt-f8b-leg2/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.55s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-1bedfbfc535af821)
+
+running 5 tests
+test server::participant::production::tests_f8b_seal::a_genesis_only_conversation_still_enrolls_as_ordinary_flow ... ok
+test server::participant::production::tests_f8b_seal::the_boot_drain_verdict_names_the_seal ... ok
+test server::participant::production::tests_f8b_seal::enrollment_into_a_sealed_conversation_is_refused_by_type ... ok
+test server::participant::production::tests_f8b_seal::boot_draining_the_last_identity_seals_the_conversation ... ok
+test server::participant::production::tests_f8b_seal::a_sealed_conversation_does_not_refuse_its_neighbours ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 591 filtered out; finished in 2.76s
+

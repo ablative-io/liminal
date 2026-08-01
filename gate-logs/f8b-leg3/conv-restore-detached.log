@@ -1,0 +1,13 @@
+   Compiling liminal-server v0.5.1 (/private/tmp/claude-501/-Users-tom-Developer-ablative-stack-liminal/5b70322e-e7a9-451c-91ca-a3dfa7b05bd9/scratchpad/wt-f8b-leg2/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.37s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-1bedfbfc535af821)
+
+running 5 tests
+test server::participant::production::tests_restore_window_detached::detached_residence_census_sole_terminal_candidate_closure_clear ... ok
+test server::participant::production::tests_restore_window_detached::detached_drain_appends_detach_shaped_finalizer_transaction ... ok
+test server::participant::production::tests_restore_window_detached::valid_publish_during_pending_detached_residence_commits_after_drain ... ok
+test server::participant::production::tests_restore_window_detached::died_then_detached_candidates_drain_strictly_by_admission_order ... ok
+test server::participant::production::tests_restore_window_detached::drained_detached_victim_resumes_with_exact_secret ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 591 filtered out; finished in 2.24s
+

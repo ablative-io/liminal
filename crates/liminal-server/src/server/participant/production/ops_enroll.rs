@@ -64,6 +64,27 @@ impl ParticipantSlotAllocatorProof for ServerSlotProof {
 }
 
 impl ConversationAuthority {
+    /// F8B R-SEAL (§6.6): a Closed conversation refuses enrollment NAMED and
+    /// TYPED, ahead of every other classification.
+    ///
+    /// Falling through would mint a fresh identity on a log that already holds
+    /// records, terminals and drain rows — a silent re-open of a conversation
+    /// whose history has ended, which is the exact class of silent end this
+    /// design forbids. Emitted before it travels, so the operator sees it even
+    /// where an outer mapping reduces the error to its own phase text.
+    fn refuse_enrollment_if_sealed(&self) -> Result<(), StateError> {
+        if !self.is_closed() {
+            return Ok(());
+        }
+        tracing::warn!(
+            conversation_id = self.conversation_id,
+            "F8B R-SEAL refused enrollment into a sealed conversation"
+        );
+        Err(StateError::ConversationSealed {
+            conversation_id: self.conversation_id,
+        })
+    }
+
     /// Applies one enrollment request end to end.
     ///
     /// Every refusal (token replay, binding-slot occupancy) classifies over
@@ -80,23 +101,7 @@ impl ConversationAuthority {
         appender: &dyn DurableAppend,
         impact: &mut DispatchImpactAccumulator,
     ) -> Result<ArmOutcome, StateError> {
-        // F8B R-SEAL (§6.6): a Closed conversation refuses NAMED and TYPED,
-        // ahead of every other classification. Falling through would mint a
-        // fresh identity on a log that already holds records, terminals and
-        // drain rows — a silent re-open of a conversation whose history has
-        // ended, which is the exact class of silent end the design forbids.
-        // Emitted before it travels, so the operator sees it even where an
-        // outer mapping reduces the error to its own phase text.
-        if self.is_closed() {
-            let error = StateError::ConversationSealed {
-                conversation_id: self.conversation_id,
-            };
-            tracing::warn!(
-                conversation_id = self.conversation_id,
-                "F8B R-SEAL refused enrollment into a sealed conversation"
-            );
-            return Err(error);
-        }
+        self.refuse_enrollment_if_sealed()?;
         let token_bytes = request.enrollment_token.into_bytes();
         if let Some(participant_id) = self.tokens.get(&token_bytes).copied() {
             let slot = self.slots.get(&participant_id).ok_or_else(|| {
