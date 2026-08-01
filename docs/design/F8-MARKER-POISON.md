@@ -24,7 +24,7 @@ floor computation (blind to markers) yields a floor past M, the transition
 refuses it for crossing the marker (`Precedence`), and the refusal is collapsed
 to `OwnerTransition` with the cause discarded. **The Died row is already
 durable with an undischargeable intent. Every subsequent boot dies in
-`repair_pending_specific_fates` (`production/handler.rs:461`,
+`repair_pending_specific_fates` (`production/handler.rs:462`,
 `ParticipantStartupRestore`) before the server reaches listen.** One-row
 excision is a trap: `repair_unclean_server_restart` re-mints the same poisoned
 Died on the next boot. No in-band remedy exists.
@@ -168,6 +168,19 @@ leave **zero appended rows** (fails today: Died row present); §3.3 — a
 `Precedence` refusal must surface `OwnerTransition(Precedence)` (fails today:
 payload absent). And the no-new-poison property: after §3.1+§3.2, the incident
 sequence replayed from clean produces a discharged fate and a live boot.
+
+**⚠️ SCOPE OF THIS GREEN — MANDATORY NOTE. Everything above is evidence about
+INCIDENT 1 ONLY. It does not cover the 2026-08-01 connection-fate intent
+deadlock (incident 2), which fails at a different boot stage
+(`ConnectionIncarnationAuthority::startup`, not handler construction),
+surfaces a different error (`ParticipantIncarnation`, not
+`ParticipantStartupRestore`), and refuses on a guard with NO FLOOR INPUT —
+so §3.1's marker cap is provably inert on that path and §3.3's repair never
+reads the immutable-candidate lane. F8's fix landed verbatim leaves
+incident-2's store dead on every boot. See
+[`F8B-INTENT-DEADLOCK.md`](F8B-INTENT-DEADLOCK.md) — a separate document with
+a separate acceptance pair and a separate review thread. A green here must
+never be reported as a green there.**
 
 ## 6. WHAT THIS NOTE IS NOT
 
