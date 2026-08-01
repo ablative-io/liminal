@@ -233,13 +233,17 @@ fn two_marker_store() -> Result<Arc<dyn DurableStore>, Box<dyn Error>> {
         }),
     )?;
     if !matches!(committed, ServerValue::RecordCommitted(_)) {
-        return Err(format!("the two-marker fixture's record did not commit: {committed:?}").into());
+        return Err(
+            format!("the two-marker fixture's record did not commit: {committed:?}").into(),
+        );
     }
 
     // The fixture only proves what it is asserted to hold.
     let lane = installed_lane(&handler, MARKER_CONVERSATION)?;
-    let [ImmutableSequenceCandidate::Marker(_), ImmutableSequenceCandidate::Marker(_)] =
-        lane.as_slice()
+    let [
+        ImmutableSequenceCandidate::Marker(_),
+        ImmutableSequenceCandidate::Marker(_),
+    ] = lane.as_slice()
     else {
         return Err(format!(
             "the two-marker fixture no longer mints exactly two marker candidates: {lane:?}"

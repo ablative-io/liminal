@@ -15,6 +15,7 @@
 
 mod barrier;
 mod binding_fate_completion;
+mod boot_drain;
 mod capacity;
 mod connection_fate;
 mod connection_fate_allocation;

@@ -51,7 +51,7 @@ mod incarnation_stream_tests;
 mod transport_tests;
 
 pub use dispatch::{
-    ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
+    BootDrainRefusal, ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
     ParticipantConnectionContext, ParticipantConnectionConversations,
     ParticipantConnectionFateOutcome, ParticipantDispatch, ParticipantDispatchError,
     ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSemanticOutcome,

@@ -138,6 +138,28 @@ pub enum ParticipantServiceFatal {
     },
 }
 
+/// Why F8B boot recovery could not empty a restored conversation's
+/// immutable-candidate lane (`docs/design/F8B-INTENT-DEADLOCK.md` §6.2
+/// R-BOOT-VERDICT).
+///
+/// The discrimination is BY TYPE, for the same reason
+/// [`ParticipantSemanticError::BindingTerminalAdmissionRefused`] carries
+/// [`BindingTerminalAdmitError`]: a consumer deciding what a refused boot
+/// means must not read it out of a formatted message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BootDrainRefusal {
+    /// The lane head is a pending binding terminal under an armed
+    /// fenced-attach recovery block. The terminal drain refuses outright while
+    /// a recovery block is armed, and the only consumer of a recovery block is
+    /// a live fenced attach — which boot cannot perform. Such a store is not
+    /// repairable by the boot drain, and this verdict is the honest answer
+    /// rather than a repair.
+    RecoveryArmed,
+    /// Any other drain refusal: the head was reachable, the drain was
+    /// attempted, and the protocol refused the transition.
+    Shape,
+}
+
 /// Non-wire semantic service failure.
 ///
 /// A failure is terminal to the connection attempt. It is deliberately not
@@ -170,6 +192,24 @@ pub enum ParticipantSemanticError {
     BindingTerminalAdmissionRefused {
         /// Exact protocol refusal reason.
         error: BindingTerminalAdmitError,
+    },
+    /// F8B R-BOOT-VERDICT: boot recovery could not empty a restored
+    /// conversation's immutable-candidate lane, so the boot refuses HERE,
+    /// naming the conversation and the shape, instead of starting and dying
+    /// several collapses downstream on a retained `Open` it can never replay.
+    #[error(
+        "participant boot drain refused conversation {conversation_id} on lane head {candidate} \
+         ({refusal:?}): {reason} — docs/design/F8B-INTENT-DEADLOCK.md §6.2 R-BOOT-VERDICT"
+    )]
+    BootDrainRefused {
+        /// Conversation whose restored lane refused its drain.
+        conversation_id: ConversationId,
+        /// Typed reason, so a consumer never discriminates on a substring.
+        refusal: BootDrainRefusal,
+        /// Exact lane head that refused, rendered for the operator.
+        candidate: String,
+        /// The drain's own refusal text.
+        reason: String,
     },
 }
 
