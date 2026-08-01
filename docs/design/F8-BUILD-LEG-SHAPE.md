@@ -56,6 +56,62 @@ at the branch point —
 Suite counts recorded red and green (the suite-count tell); full teed logs;
 default target dirs only.
 
+## Battery pricing — amended after the 2026-08-01 abort
+
+**The abort, on the record (evidence superseded never rewritten).** The
+leg's first dispatch fired 06:53:34Z at 40.356 GiB free and was ABORTED at
+07:07:45Z by the dispatcher's own stop: the debit declared to the box
+sequencer said "one release-only build target ~0.69 GiB" while this leg's
+own brief specified `cargo test --workspace` — a debug, whole-workspace
+class with trybuild inside. Two surfaces, one author, disagreeing. The
+baseline battery's target measured **6.970 GiB at kill (10.1× the
+declaration)**; free crossed the sequencer's 35 escalate band; the
+dispatcher self-applied the authorisation-repricing law (a clearance priced
+at 0.69 against an actual of 5.8+ is void at the moment of knowing),
+concurrent with and independent of the sequencer's withdrawal. Teardown:
+`Removed 19560 files, 7.5GiB total` verbatim — note cargo prints decimal
+GB labelled "GiB" (7.5e9 B = 6.985 GiB, vs du's 6.970; the unit is part of
+the noun). Post-teardown free 40.088 GiB @07:09:34Z. Preserved evidence:
+the aborted baseline log at
+`~/.claude-de/projects/-Users-tom-Developer-ablative-stack-liminal/memory/f8b-beat-evidence-2026-08-01/f8-leg-aborted-baseline.log`.
+
+**The graver finding — "a green run does not audit its own gates" (ruled
+class name).** The killed executor's transcript showed its start gate NEVER
+RAN: the baseline was an ungated first cargo, five minutes old while the
+executor was still approaching the gate its brief demanded first. A gate
+declared but never executed is indistinguishable, from outside, from a gate
+that ran and passed; only the kill made it visible. Cure, with the gate
+seat's order-strengthening: every gate reading is teed into
+`gate-logs/gates.log` as execution proof, and the teed proof is
+**dispatcher-checked BEFORE the first cargo fires** — order is the
+property, and the stream's timestamps make it checkable. Implementation:
+the dispatch is two-phase — the executor sets up, takes and tees the gate
+reading, and STOPS; the dispatcher verifies the proof at the bytes and only
+then authorizes the build phase.
+
+**Two-tier battery, each tier declared by its literal command:**
+
+1. **Iteration tier** — red-first units and fix iteration run
+   `cargo test -p liminal-protocol -p liminal-server`
+   (scoped to the two affected crates). Small is a price, not an
+   exemption: this tier's first run executes under unpriced-conservative
+   gating and MEASURES its class; the measured actual is banked and prices
+   every subsequent scoped run.
+2. **Final tier** — exactly one
+   `cargo test --workspace`
+   at the leg's final tree (the estate's one-battery-at-the-final-tree
+   standard). Priced unpriced-conservative: measured floor 6.97-at-kill,
+   NO ceiling asserted, trybuild named as the unbounded rider, per-phase
+   value@instant gates observing the sequencer's 35 escalate / 25 floor
+   bands.
+
+**The command law (ruled on both boards).** The BRIEF is the only authoring
+surface for a battery command. The clearance request QUOTES it verbatim;
+the sequencer's grant quotes it back; the teardown reconciliation names the
+command ACTUALLY INVOKED. Four readings of one string — any divergence
+between them is a refusal, not a discrepancy to reconcile. Never again two
+surfaces stating one command.
+
 ## Sequencing and box discipline
 
 - Fresh branch off landed main `09cfa49`; worktree in executor scratchpad;
