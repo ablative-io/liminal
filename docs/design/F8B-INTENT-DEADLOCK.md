@@ -848,9 +848,12 @@ the same change as this file.
      `ClaimFrontiers::restore` (`claim_frontier.rs:2057-2065`) hardcodes
      `finish(None)` — the unarmed edge — and the `prevalidate` entry that
      can accept an armed stored edge is `#[cfg(any(test, feature =
-     "test-support"))]` (`:2069`). The only `finish(Some(..))` call in the
-     workspace is the test-support fixture
-     (`test_support_external/pending_fenced.rs:157`).
+     "test-support"))]` (`:2069`). Every `finish(Some(..))` call in the
+     workspace is test-gated — five hits: three in
+     `claim_frontier_tests.rs` (`:917`, `:1055`, `:1232`), two in the
+     test-support family (`test_support_external.rs:368`,
+     `test_support_external/pending_fenced.rs:157`). None is production
+     code.
 
    **Ruling on the arm (the unexecuted-branch law forbids silence):**
    `refused-recovery-armed` STAYS, relabelled a **defence-in-depth
