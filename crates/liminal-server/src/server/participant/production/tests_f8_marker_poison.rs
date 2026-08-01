@@ -45,6 +45,7 @@ use super::ProductionParticipantHandler;
 use super::log::{DecodedStoredOperation, OperationLog, StoredOperation};
 use super::tests::dispatch_tracked;
 use super::tests_marker_ack_fixture::{
+    AckGapArm, ackgap_arm_probe,
     MarkerFixture, attempt_marker_fixture_with_attaches, marker_fixture_config,
     prepare_marker_fixture,
 };
@@ -892,6 +893,91 @@ fn refuse_until_the_geometry_exists(roles: &IncidentRoles) -> Box<dyn Error> {
         roles.marker_delivery_seq, roles.peer_participant, roles.owner_participant
     )
     .into()
+}
+
+/// THE ACKGAP DISCRIMINATOR (Cally 84dc0265, answer space confirmed 083f4a01).
+/// The LAST fixture-incompatibility layer this lane chases; the tripwire behind
+/// it fires fallback (b) automatically if the remedy's re-run hits a new layer.
+///
+/// THE QUESTION: what post-attach state refuses an ack that the pre-attach
+/// state accepts from the same cursor 0.
+///
+/// THE PRE-AGREED WITNESS: which selector produced the refusal, and the
+/// deciding input's value, IN BOTH ARMS. The three AckGap producers, verified
+/// at e756069:
+///   SITE 1 `participant_ack.rs:221` -- `through_seq > contiguously_available_through`
+///   SITE 2 `participant_ack.rs:310` -- `!endpoint_is_obligation`
+///   SITE 3 `cursor_facts.rs:873`    -- `through_seq > candidate_high_watermark
+///                                       || !endpoint_available` (compound)
+/// and `endpoint_is_available`'s `?` Err exit reports BY ITS OWN NAME, since it
+/// is not an AckGap.
+///
+/// THE CONTROL, verbatim from the ruling: "if the instrument cannot observe the
+/// selector in the arm that ACCEPTS, it claims nothing." So the pre-attach arm
+/// reports the same observables and must show itself accepting.
+///
+/// DECLARED OBSERVABILITY LIMIT, not a silent substitution: site 2's
+/// `contains_endpoint` is `pub(in crate::lifecycle)` and cannot be called from
+/// this crate, so the obligation INDEX is reported and membership read from it
+/// rather than recomputed. Sites 1 and 4 (routing) are fully observable from
+/// the server side using production's own calls.
+#[test]
+fn f8_ackgap_discriminator_which_selector_refuses() -> Result<(), Box<dyn Error>> {
+    const THROUGH_SEQ: u64 = 3;
+    let pre = ackgap_arm_probe(false, THROUGH_SEQ)?;
+    let post = ackgap_arm_probe(true, THROUGH_SEQ)?;
+
+    let control = if pre.ack_outcome.contains("AckCommitted") {
+        "PASS — the pre-attach arm ACCEPTS and its selector inputs were observed. The instrument          can see the accepting arm, so its word on the refusing arm counts."
+    } else {
+        "FAIL — the pre-attach arm did not accept, so this instrument has NOT reproduced the          asymmetry it exists to explain. Everything below is NOT CITABLE."
+    };
+
+    let routing_verdict = if pre.routing_nonzero == post.routing_nonzero {
+        format!(
+            "NOT a routing difference — both arms take the same selector              (routing_nonzero={}). The discriminator is an INPUT to that selector, not the              choice of selector.",
+            pre.routing_nonzero
+        )
+    } else {
+        format!(
+            "(iv) SELECTOR-ROUTING DIFFERENCE — pre-attach routing_nonzero={}, post-attach              routing_nonzero={}. The arms run DIFFERENT SELECTORS implementing DIFFERENT RULES,              which is itself the discriminator: production branches at ops_acks.rs:51-56 on              `obligation_debt_dispatch().is_some_and(|s| s.episode().is_some())`.",
+            pre.routing_nonzero, post.routing_nonzero
+        )
+    };
+
+    let render = |a: &AckGapArm| {
+        format!(
+            "  {}
+    routing_nonzero (ops_acks.rs:51-56 predicate) = {}
+                 acknowledged_through = {}
+    contiguously_available_through = {:?}
+                 through_seq = {THROUGH_SEQ}  -> site-1 test `through_seq > available` = {}
+                 obligations index = {}
+    ack outcome = {}",
+            a.arm,
+            a.routing_nonzero,
+            a.acknowledged_through,
+            a.contiguously_available_through,
+            a.contiguously_available_through
+                .as_ref()
+                .map_or("<unknown>".to_owned(), |v| (THROUGH_SEQ > *v).to_string()),
+            a.obligations_debug,
+            a.ack_outcome
+        )
+    };
+
+    Err(format!(
+        "=== F8 ACKGAP DISCRIMINATOR (not a test failure; reports by returning Err so its reading          reaches the teed log under the fixed tier-1 string) ===
+         POSITIVE CONTROL (accepting arm observed): {control}
+         ROUTING (outcome iv): {routing_verdict}
+         ARMS:
+{}
+{}
+         === END ACKGAP DISCRIMINATOR ===",
+        render(&pre),
+        render(&post)
+    )
+    .into())
 }
 
 fn connection_lost(

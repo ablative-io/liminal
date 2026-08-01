@@ -550,6 +550,119 @@ pub(super) struct AttachedDrainAttempt {
     pub(super) drain: Result<MarkerFixture, String>,
 }
 
+/// One arm of the AckGap discriminator (Cally 84dc0265 / 083f4a01). Every field
+/// is read from the SERVER side using the same calls production makes, so the
+/// two arms are compared on identical observables.
+pub(super) struct AckGapArm {
+    pub(super) arm: &'static str,
+    /// OUTCOME (iv), the routing discriminator. This is the PRODUCTION
+    /// PREDICATE COPIED VERBATIM from `ops_acks.rs:51-56`, not a paraphrase of
+    /// it: `obligation_debt_dispatch().is_some_and(|s| s.episode().is_some())`.
+    /// True routes to the nonzero arm (selector sites 2/3); false routes to the
+    /// zero-debt arm (selector site 1). The two selectors implement DIFFERENT
+    /// RULES, so a routing difference between arms is itself an answer.
+    pub(super) routing_nonzero: bool,
+    /// Site 1's deciding input side: `through_seq > contiguously_available_through`
+    /// (`participant_ack.rs:221`). Both operands reported.
+    pub(super) acknowledged_through: u64,
+    pub(super) contiguously_available_through: Result<u64, String>,
+    /// Site 2's evidence. `contains_endpoint` is `pub(in crate::lifecycle)` and
+    /// therefore NOT callable from this crate, so the index itself is reported
+    /// and membership is read from it rather than recomputed. Declared, not
+    /// silently substituted.
+    pub(super) obligations_debug: String,
+    /// What the ack actually did, so the accepting arm proves it accepts.
+    pub(super) ack_outcome: String,
+}
+
+pub(super) fn ackgap_arm_probe(
+    attach: bool,
+    through_seq: u64,
+) -> Result<AckGapArm, Box<dyn Error>> {
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let config = marker_fixture_config();
+    let conversation_id = 0xA7;
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
+    let members = enroll_members(&handler, conversation_id)?;
+
+    let mut generation = Generation::ONE;
+    if attach {
+        let attached = dispatch(
+            &handler,
+            members.first_connection,
+            ClientRequest::CredentialAttach(CredentialAttachRequest {
+                conversation_id,
+                participant_id: members.first.participant_id(),
+                capability_generation: Generation::ONE,
+                attach_secret: members.first.attach_secret(),
+                attach_attempt_token: AttachAttemptToken::new([0xB2; 16]),
+                accept_marker_delivery_seq: None,
+            }),
+        )?;
+        let ServerValue::AttachBound(bound) = attached else {
+            return Err(format!("ackgap probe: first member did not attach: {attached:?}").into());
+        };
+        generation = bound.origin_binding_epoch().capability_generation;
+    }
+
+    let participant_id = members.first.participant_id();
+    let (routing_nonzero, acknowledged_through, contiguously_available_through, obligations_debug) = {
+        let cell = handler.cell(conversation_id)?;
+        let guard = cell
+            .lock()
+            .map_err(|_| "ackgap probe owner lock was poisoned")?;
+        let authority = guard
+            .as_ref()
+            .ok_or("ackgap probe conversation owner was absent")?;
+        // PRODUCTION PREDICATE, copied verbatim from ops_acks.rs:51-56.
+        let routing = authority
+            .obligation_debt_dispatch()
+            .is_some_and(|state| state.episode().is_some());
+        let acked = authority
+            .slots
+            .get(&participant_id)
+            .map_or(u64::MAX, |slot| slot.member.cursor());
+        let (available, obligations) = match authority.outbox.as_ref() {
+            Some(outbox) => match outbox.recipient_ack_obligations(participant_id, acked) {
+                Ok((obligations, available)) => {
+                    (Ok(available), format!("{obligations:?}"))
+                }
+                Err(error) => (Err(format!("{error:?}")), "<unavailable>".to_owned()),
+            },
+            None => (
+                Err("outbox absent".to_owned()),
+                "<no outbox>".to_owned(),
+            ),
+        };
+        let tuple = (routing, acked, available, obligations);
+        drop(guard);
+        tuple
+    };
+
+    let ack_outcome = match dispatch(
+        &handler,
+        members.first_connection,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id,
+            participant_id,
+            capability_generation: generation,
+            through_seq,
+        }),
+    ) {
+        Ok(value) => format!("{value:?}"),
+        Err(error) => format!("dispatch error: {error}"),
+    };
+
+    Ok(AckGapArm {
+        arm: if attach { "POST-ATTACH (refusing)" } else { "PRE-ATTACH (accepting, control)" },
+        routing_nonzero,
+        acknowledged_through,
+        contiguously_available_through,
+        obligations_debug,
+        ack_outcome,
+    })
+}
+
 fn member_cursors(
     handler: &ProductionParticipantHandler,
     conversation_id: u64,
