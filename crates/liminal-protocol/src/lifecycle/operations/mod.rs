@@ -11,6 +11,8 @@ mod participant_ack;
 mod record_admission;
 
 #[cfg(test)]
+mod binding_fate_f8_tests;
+#[cfg(test)]
 mod binding_fate_tests;
 #[cfg(test)]
 mod binding_terminal_tests;
