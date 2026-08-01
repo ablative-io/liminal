@@ -69,9 +69,16 @@ declaration)**; free crossed the sequencer's 35 escalate band; the
 dispatcher self-applied the authorisation-repricing law (a clearance priced
 at 0.69 against an actual of 5.8+ is void at the moment of knowing),
 concurrent with and independent of the sequencer's withdrawal. Teardown:
-`Removed 19560 files, 7.5GiB total` verbatim — note cargo prints decimal
-GB labelled "GiB" (7.5e9 B = 6.985 GiB, vs du's 6.970; the unit is part of
-the noun). Post-teardown free 40.088 GiB @07:09:34Z. Preserved evidence:
+`Removed 19560 files, 7.5GiB total` verbatim. ⛔ CORRECTION (superseded
+claim struck, not erased): this section first explained the cargo-vs-du gap
+as "cargo prints decimal GB labelled GiB" — FALSIFIED by a designed
+experiment (a sparse file of exactly 100,000,000 bytes: cargo clean printed
+`95.4MiB` = binary; cargo means GiB). The 0.53 GiB gap between cargo's
+8,053,063,680 B and du's 7,483,838,464 B is REAL and UNEXPLAINED, and is
+deliberately left unexplained: a reconciliation that lands too well is
+evidence about the fitter, not the fitted, and inventing a second neat
+explanation is the identical move to the first. Post-teardown free
+40.088 GiB @07:09:34Z. Preserved evidence:
 the aborted baseline log at
 `~/.claude-de/projects/-Users-tom-Developer-ablative-stack-liminal/memory/f8b-beat-evidence-2026-08-01/f8-leg-aborted-baseline.log`.
 
@@ -104,6 +111,26 @@ then authorizes the build phase.
    NO ceiling asserted, trybuild named as the unbounded rider, per-phase
    value@instant gates observing the sequencer's 35 escalate / 25 floor
    bands.
+
+**The granted price (sequencer, 2026-08-01 07:31Z — recorded so the grant
+and the brief read one string).** Tier 1: CLEARED, unpriced-conservative,
+HARD STOP at 4.0 GiB on the leg's target dir (`du -sk`, same path both
+ends) — priced to fit the box (4.0 from ~40 lands above the 35 band), not a
+prediction of the class; the run MEASURES the class and the settled du is
+banked. Tier 2: CLEARED with the 35 crossing PRE-ATTRIBUTED (sanctioned,
+band not moved); HARD STOP at whichever comes first — 12.0 GiB on the tree
+or free below 28. **The abort sits at 28, not the 25 floor: a floor reached
+is a floor breached — the stop needs margin to act inside** (observe,
+decide, halt, teardown all take wall-clock while the build keeps writing;
+28 gives 3 GiB of act-room). Nothing beyond these two tiers.
+
+**Gate artifacts (§8n.1, adopted).** An exit code is not evidence a gate
+ran; it is evidence something exited. Every gate emits a POSITIVE ARTIFACT
+and the report QUOTES the artifact, not the status — the df value@instant,
+the test count, the named crates, the duration. A declared-but-unexecuted
+gate then shows as a MISSING FIELD a form can check, not as silence.
+Tier 2's trybuild sub-run reports its CASE COUNT as its artifact — the
+unbounded rider must have an observable of its own.
 
 **The command law (ruled on both boards).** The BRIEF is the only authoring
 surface for a battery command. The clearance request QUOTES it verbatim;
