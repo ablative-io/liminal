@@ -277,6 +277,137 @@ fn assert_peer_is_bound_for_its_departure(
     Ok(())
 }
 
+/// STEP 0b, lead 1 (ruling b7dc92b2). Did the peer's departure actually MOVE
+/// the peer, and is §1's premise unconditional?
+///
+/// §1 states flatly that "the departing participant's cursor is set to the
+/// high watermark". `claim_frontier/binding_fate_transition.rs:45-49` in
+/// liminal-protocol makes that conditional on one flag:
+/// `resulting_cursor = if reserve_finalizer { cursor } else { high_watermark }`.
+/// Read at the bytes, `reserve_finalizer` is true ONLY for a Recovered intent
+/// carrying no terminal (`binding_fate_completion.rs:448-465` —
+/// `RecoveredAndReserveFinalizer` is that arm and only that arm), so an
+/// ORDINARY departure never reserves one and should land at the watermark.
+///
+/// But there is a second, earlier exit that moves nothing at all:
+/// `binding_fate_completion.rs:66-77` re-inserts an Ordinary intent whose
+/// terminal is not yet committed and returns `Ok` WITHOUT measuring. A
+/// departure down that path completes successfully, leaves the cursor where it
+/// was, and is indistinguishable at the call site from one that discharged.
+///
+/// So this measures the OUTCOME rather than trusting either reading: the fate
+/// must be gone from `pending_specific_fates` (it completed rather than
+/// deferring), and the cursor must have reached the watermark.
+fn assert_peer_actually_departed(
+    handler: &ProductionParticipantHandler,
+    roles: &IncidentRoles,
+) -> Result<(), Box<dyn Error>> {
+    let cell = handler.cell(roles.conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "F8 step-0b peer-departure owner lock was poisoned")?;
+    let authority = owner
+        .as_ref()
+        .ok_or("F8 step-0b peer-departure conversation owner was absent")?;
+    let still_pending = authority
+        .pending_specific_fates
+        .contains_key(&roles.peer_participant);
+    let cursor = authority
+        .slots
+        .get(&roles.peer_participant)
+        .map(|slot| slot.member.cursor());
+    let binding = authority
+        .slots
+        .get(&roles.peer_participant)
+        .map(|slot| slot.binding);
+    let high_watermark = authority
+        .frontier()
+        .map(|frontier| frontier.frontiers().sequence().ledger().high_watermark());
+    drop(owner);
+
+    if still_pending {
+        return Err(format!(
+            "STEP 0b LEAD 1 CONFIRMED — DEFERRED, NOT DISCHARGED: after its departure, peer {} \
+             STILL holds an open specific-fate intent. That is the `binding_fate_completion.rs:\
+             66-77` early exit: an Ordinary intent whose terminal is not yet committed is \
+             re-inserted and returns Ok WITHOUT measuring. The peer's cursor never moves, \
+             minimum_remaining_cursor stays below the marker at {}, and no floor can cross it. \
+             cursor={cursor:?} high_watermark={high_watermark:?} binding={binding:?}",
+            roles.peer_participant, roles.marker_delivery_seq
+        )
+        .into());
+    }
+    let (Some(cursor), Some(high_watermark)) = (cursor, high_watermark) else {
+        return Err(format!(
+            "STEP 0b LEAD 1: peer {} has no slot or the conversation has no frontier after \
+             departure — cursor={cursor:?} high_watermark={high_watermark:?}",
+            roles.peer_participant
+        )
+        .into());
+    };
+    if cursor != high_watermark {
+        return Err(format!(
+            "STEP 0b LEAD 1 CONFIRMED — §1's PREMISE IS CONDITIONAL: peer {} departed but its \
+             cursor is {cursor}, NOT the high watermark {high_watermark}. §1 asserts the \
+             departing participant's cursor IS set to the high watermark; at these bytes that \
+             holds only down some paths. binding={binding:?}, marker at {}.",
+            roles.peer_participant, roles.marker_delivery_seq
+        )
+        .into());
+    }
+    if cursor < roles.marker_delivery_seq {
+        return Err(format!(
+            "STEP 0b LEAD 1: peer {} reached the high watermark {high_watermark}, but that \
+             watermark is itself BELOW the marker at {} — so minimum_remaining_cursor cannot \
+             clear the marker and the incident is unreachable from this fixture's geometry",
+            roles.peer_participant, roles.marker_delivery_seq
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// STEP 0b, lead 2 (ruling b7dc92b2). Closes the owner side that step 0 left
+/// unmeasured: step 0 verified the PEER was Bound for its departure, and said
+/// so; the owner was never checked, and a no-op there produces the same green.
+fn assert_owner_is_bound_for_its_departure(
+    handler: &ProductionParticipantHandler,
+    roles: &IncidentRoles,
+) -> Result<(), Box<dyn Error>> {
+    let cell = handler.cell(roles.conversation_id)?;
+    let owner_cell = cell
+        .lock()
+        .map_err(|_| "F8 step-0b owner-side owner lock was poisoned")?;
+    let authority = owner_cell
+        .as_ref()
+        .ok_or("F8 step-0b owner-side conversation owner was absent")?;
+    let binding = authority
+        .slots
+        .get(&roles.owner_participant)
+        .map(|slot| slot.binding);
+    drop(owner_cell);
+    let Some(BindingState::Bound(active)) = binding else {
+        return Err(format!(
+            "STEP 0b LEAD 2 CONFIRMED — OWNER-SIDE NO-OP: marker owner {}'s slot is {binding:?}, \
+             not Bound, so its departure matches an EMPTY target set and completes Ok having \
+             done nothing. The measurement the units judge is never reached.",
+            roles.owner_participant
+        )
+        .into());
+    };
+    let bound_incarnation = active.binding_epoch.connection_incarnation;
+    if bound_incarnation != roles.owner_connection {
+        return Err(format!(
+            "STEP 0b LEAD 2 CONFIRMED — OWNER-SIDE NO-OP: marker owner {} is Bound to \
+             {bound_incarnation:?} but its departure names {:?}; the filter matches on the exact \
+             incarnation, so the target set is empty.",
+            roles.owner_participant, roles.owner_connection
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn connection_lost(
     open_sequence: u64,
     connection_incarnation: ConnectionIncarnation,
@@ -358,6 +489,10 @@ fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
                  exists to replay: {error}"
             )
         })?;
+
+    // STEP 0b (ruling b7dc92b2): both leads answered at this one instant.
+    assert_peer_actually_departed(&fixture.handler, &roles)?;
+    assert_owner_is_bound_for_its_departure(&fixture.handler, &roles)?;
 
     let rows_before_owner_drop = operation_rows(&fixture.store, roles.conversation_id)?;
     Ok(DepartedPeer {
