@@ -6,8 +6,18 @@
 //! about it. A compaction marker for P1 is minted and drained by
 //! `prepare_marker_fixture`, and P1 never MarkerAcks — no offer is recorded and
 //! no ack is dispatched, so the retained marker record stays replayable and
-//! P1's cursor stays below it. The peer then departs, which sets ITS cursor to
-//! the high watermark, now past the marker. P1's connection is lost last.
+//! P1's cursor stays below it. The peer acks past the marker, which lifts hard
+//! observer progress over it, and then departs, which sets ITS cursor to the
+//! high watermark. P1's connection is lost last.
+//!
+//! BOTH peer steps are load-bearing, and the first was MISSING when this file
+//! was first run at tree 6d18f51: the measured floor is capped by hard observer
+//! progress as well as by the minimum remaining cursor, so with observer
+//! progress at its initial 0 (`state.rs:371`) the floor could never reach the
+//! marker, and both units below printed `ok` while never once reaching the
+//! branch they exist to judge. They were born green. The arming condition is
+//! now ASSERTED before the incident is driven, so the fixture fails loudly
+//! rather than passing silently if it ever stops reproducing the defect.
 //!
 //! `complete_target` appends the durable Died row at `connection_fate.rs:256`
 //! and only then calls `open_specific_fate` at `:296`, whose measurement lives
@@ -21,14 +31,18 @@ use std::sync::Arc;
 
 use liminal::durability::bridge::block_on;
 use liminal::durability::DurableStore;
-use liminal_protocol::wire::ConnectionIncarnation;
+use liminal_protocol::wire::{
+    ClientRequest, ConnectionIncarnation, Generation, ParticipantAck, ServerValue,
+};
 
 use crate::server::participant::{
-    ConnectionFateClass, ConnectionFateWorkItem, ParticipantSemanticHandler,
+    ConnectionFateClass, ConnectionFateWorkItem, ParticipantConnectionConversations,
+    ParticipantSemanticHandler,
 };
 
 use super::ProductionParticipantHandler;
 use super::log::{DecodedStoredOperation, OperationLog, StoredOperation};
+use super::tests::dispatch_tracked;
 use super::tests_marker_ack_fixture::{MarkerFixture, marker_fixture_config, prepare_marker_fixture};
 
 /// The durable `Open` the departing peer's fate completes under.
@@ -66,6 +80,11 @@ struct IncidentRoles {
     owner_connection: ConnectionIncarnation,
     owner_participant: u64,
     peer_connection: ConnectionIncarnation,
+    peer_participant: u64,
+    /// The boundary the peer acks through. Must be at or past the marker: it is
+    /// what lifts hard observer progress over `marker_delivery_seq`, and
+    /// without that lift the floor can never reach the marker to cross it.
+    peer_ack_through_seq: u64,
 }
 
 /// Names the two identities by the role §1 gives them: the marker's OWNER,
@@ -87,12 +106,24 @@ fn incident_roles(fixture: &MarkerFixture) -> Result<IncidentRoles, Box<dyn Erro
     if peer_participant == owner_participant {
         return Err("the incident needs two distinct identities".into());
     }
+    let marker_delivery_seq = fixture.marker_delivery.delivery_seq;
+    let peer_ack_through_seq = fixture.catchup_through_seq;
+    if peer_ack_through_seq < marker_delivery_seq {
+        return Err(format!(
+            "the fixture's ack boundary {peer_ack_through_seq} is below the marker at \
+             {marker_delivery_seq}, so no ack can lift hard observer progress over the marker \
+             and the incident cannot be armed from this fixture"
+        )
+        .into());
+    }
     Ok(IncidentRoles {
         conversation_id: fixture.marker_delivery.conversation_id,
-        marker_delivery_seq: fixture.marker_delivery.delivery_seq,
+        marker_delivery_seq,
         owner_connection: fixture.target_connection,
         owner_participant,
         peer_connection,
+        peer_participant,
+        peer_ack_through_seq,
     })
 }
 
@@ -143,6 +174,38 @@ fn assert_unacked_marker_prestate(
     Ok(())
 }
 
+/// The non-vacuity guard this file was missing the first time it ran.
+///
+/// Both units previously passed while never reaching the branch they exist to
+/// judge, because hard observer progress was still 0 and the floor could not
+/// reach the marker. A fixture that silently stops arming its own defect is
+/// indistinguishable, from the outside, from a fixture whose defect is fixed —
+/// so the arming condition is now asserted rather than assumed.
+fn assert_observer_progress_cleared_the_marker(
+    handler: &ProductionParticipantHandler,
+    roles: &IncidentRoles,
+) -> Result<(), Box<dyn Error>> {
+    let cell = handler.cell(roles.conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "F8 observer-progress check owner lock was poisoned")?;
+    let authority = owner
+        .as_ref()
+        .ok_or("F8 observer-progress check conversation owner was absent")?;
+    let observer_progress = authority.observer_progress;
+    drop(owner);
+    if observer_progress < roles.marker_delivery_seq {
+        return Err(format!(
+            "hard observer progress is {observer_progress}, still below the marker at {} — the \
+             floor is capped under the marker, the transition has nothing to cross, and both \
+             units below would pass WITHOUT EVER WITNESSING THE DEFECT",
+            roles.marker_delivery_seq
+        )
+        .into());
+    }
+    Ok(())
+}
+
 fn connection_lost(
     open_sequence: u64,
     connection_incarnation: ConnectionIncarnation,
@@ -163,11 +226,52 @@ struct DepartedPeer {
 }
 
 /// Replays §1 up to the instant before P1 drops: marker drained and unacked,
-/// peer departed with its cursor at the high watermark.
+/// hard observer progress lifted past the marker, peer departed with its cursor
+/// at the high watermark.
+///
+/// THE ARMING STEP, and why it is not optional. The measured floor is
+/// `max(retained_floor, min(minimum_remaining_cursor, hard_observer_progress) + 1)`
+/// (`binding_fate.rs:436-442` feeding `algebra/floor.rs:20-34`), and the server
+/// passes `self.observer_progress` as that second input
+/// (`binding_fate_completion.rs:89`). It starts at 0 (`state.rs:371`). So the
+/// departed peer's cursor being past the marker is NECESSARY but not
+/// SUFFICIENT: while observer progress sits below the marker it caps the floor
+/// below the marker too, the transition never crosses anything, and the
+/// incident cannot occur. Both inputs must clear the marker.
+///
+/// The lift uses production's own path rather than a poked field: a participant
+/// ack projects hard observer progress from the acking participant's OWN
+/// `through_seq` (`operations/participant_ack.rs:37-40`,
+/// `ObserverProgressProjection::new(request.conversation_id, request.through_seq)`),
+/// and `record_observer_progress_projection` folds it in with `max`
+/// (`state.rs:393`). It is deliberately NOT gated by the slowest member, which
+/// is precisely why one peer ack can lift it over a marker its own owner has
+/// never acked.
 fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
     let fixture = prepare_marker_fixture()?;
     let roles = incident_roles(&fixture)?;
     assert_unacked_marker_prestate(&fixture.handler, &roles)?;
+
+    let acked = dispatch_tracked(
+        &fixture.handler,
+        roles.peer_connection,
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id: roles.conversation_id,
+            participant_id: roles.peer_participant,
+            capability_generation: Generation::ONE,
+            through_seq: roles.peer_ack_through_seq,
+        }),
+    )?;
+    if !matches!(acked, ServerValue::AckCommitted(_)) {
+        return Err(format!(
+            "the peer's ack through {} did not commit, so hard observer progress was never \
+             lifted over the marker at {} and the incident is not armed: {acked:?}",
+            roles.peer_ack_through_seq, roles.marker_delivery_seq
+        )
+        .into());
+    }
+    assert_observer_progress_cleared_the_marker(&fixture.handler, &roles)?;
 
     let consumer: &dyn ParticipantSemanticHandler = &fixture.handler;
     consumer
