@@ -468,9 +468,7 @@ pub(super) fn admit_terminal(
         BindingTerminalAdmission::Refused(refused) => {
             let error = refused.error();
             authority.install_frontier(refused.into_owner())?;
-            Err(StateError::invariant(format!(
-                "binding-terminal admission refused: {error:?}"
-            )))
+            Err(StateError::BindingTerminalAdmissionRefused { error })
         }
     }
 }

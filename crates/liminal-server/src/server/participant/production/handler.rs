@@ -641,6 +641,11 @@ impl DurableAppend for LogAppender<'_> {
 }
 
 pub(super) fn state_error(error: &StateError) -> ParticipantSemanticError {
+    // The one refusal that must not be flattened. Every other state failure is
+    // a diagnostic string because nothing downstream branches on it.
+    if let StateError::BindingTerminalAdmissionRefused { error } = error {
+        return ParticipantSemanticError::BindingTerminalAdmissionRefused { error: *error };
+    }
     ParticipantSemanticError::Internal {
         message: format!("participant production operation failed: {error}"),
     }

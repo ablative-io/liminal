@@ -1,5 +1,7 @@
 //! Lossless live connection-fate impact orchestration.
 
+use liminal_protocol::lifecycle::BindingTerminalAdmitError;
+
 use crate::server::participant::dispatch_impact::{DispatchImpact, DispatchImpactAccumulator};
 use crate::server::participant::{
     ConnectionFateWorkItem, ParticipantConnectionFateOutcome, ParticipantSemanticError,
@@ -34,6 +36,26 @@ impl ProductionParticipantHandler {
                 impacts.push(changed);
             }
             if let Err(error) = result {
+                if matches!(
+                    error,
+                    ParticipantSemanticError::BindingTerminalAdmissionRefused {
+                        error: BindingTerminalAdmitError::Precedence,
+                    }
+                ) {
+                    // The conversation's immutable-candidate lane is occupied.
+                    // The already-durable Open is the retry token, so the whole
+                    // work item is replayed later — by boot recovery at
+                    // connection/incarnation.rs:88, and once the lane drains at
+                    // its sole production emptier, ops_frontier.rs:142 on the
+                    // next successful publish. Latching the process-wide fatal
+                    // here would refuse that publish too, so the lane could
+                    // never drain and the replay could never converge. The
+                    // conversations already committed above are a no-op on
+                    // replay: their slots left Bound, so the re-run's prepared
+                    // target set for this connection is empty and appends
+                    // nothing. The typed refusal travels on unchanged.
+                    return ParticipantConnectionFateOutcome::new(Err(error), impacts);
+                }
                 let fatal = match self
                     .latch_connection_fate_fatal(work_item.open_sequence, conversation_id)
                 {

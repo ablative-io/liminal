@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use liminal::durability::DurableStore;
 use liminal::protocol::Frame;
-use liminal_protocol::lifecycle::ConnectionConversationTracking;
+use liminal_protocol::lifecycle::{BindingTerminalAdmitError, ConnectionConversationTracking};
 use liminal_protocol::wire::{
     BindingEpoch, ClientRequest, CodecError, ConnectionIncarnation, ConversationId,
     ObserverRecoveryHandshake, ParticipantId, ServerValue, ValidatedFrameLimit,
@@ -157,6 +157,20 @@ pub enum ParticipantSemanticError {
     /// A process-wide participant fatal has already latched.
     #[error(transparent)]
     ServiceFatal(ParticipantServiceFatal),
+    /// A keyed binding-terminal candidate was refused, carrying the protocol's
+    /// own reason rather than a formatted description of it.
+    ///
+    /// [`BindingTerminalAdmitError::Precedence`] is lane occupancy: the
+    /// conversation's immutable-candidate lane already holds a terminal
+    /// awaiting its drain. That is a designed structural boundary, and a
+    /// caller deciding whether to park or to treat the refusal as corruption
+    /// must be able to tell it from the five genuine authority defects by
+    /// type.
+    #[error("participant binding-terminal admission refused: {error:?}")]
+    BindingTerminalAdmissionRefused {
+        /// Exact protocol refusal reason.
+        error: BindingTerminalAdmitError,
+    },
 }
 
 /// One semantic result paired with every dispatch effect durably installed by

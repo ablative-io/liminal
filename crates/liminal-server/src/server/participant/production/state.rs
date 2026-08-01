@@ -11,7 +11,8 @@
 use std::collections::BTreeMap;
 
 use liminal_protocol::lifecycle::{
-    BindingState, ClosureState, CommittedDiedTerminal, ConversationDecision, ConversationGenesis,
+    BindingState, BindingTerminalAdmitError, ClosureState, CommittedDiedTerminal,
+    ConversationDecision, ConversationGenesis,
     ConversationRefusalReason, CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt,
     LiveFrontierOwner, LiveMember, NonzeroParticipantAckCommit, ObligationDebtDispatchState,
     ObligationDebtDispatchTransition, ObligationDebtOwnerError, ObserverProgressProjection,
@@ -267,6 +268,18 @@ pub(super) enum StateError {
     ReplayedEventDrift {
         /// Durable log sequence of the diverging entry.
         sequence: u64,
+    },
+    /// A keyed binding-terminal candidate was refused, with the protocol's own
+    /// reason preserved.
+    ///
+    /// `Precedence` here is lane occupancy: a structural boundary the
+    /// repository designed and tested, not corruption. The reason must survive
+    /// this seam by type, because the park-versus-fatal decision downstream is
+    /// not allowed to read it back out of a formatted message.
+    #[error("binding-terminal admission refused: {error:?}")]
+    BindingTerminalAdmissionRefused {
+        /// Exact protocol refusal reason.
+        error: BindingTerminalAdmitError,
     },
     /// A protocol transition rejected inputs the log claims committed, or a
     /// live invariant the crate makes unreachable was observed.

@@ -15,7 +15,8 @@ use std::sync::Arc;
 
 use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::{
-    BindingState, ClosureState, ImmutableSequenceCandidate, PendingFinalization,
+    BindingState, BindingTerminalAdmitError, ClosureState, ImmutableSequenceCandidate,
+    PendingFinalization,
 };
 use liminal_protocol::wire::{
     ClientRequest, EnrollmentRequest, EnrollmentToken, Generation, RecordAdmission,
@@ -410,22 +411,18 @@ fn second_pending_terminal_cannot_join_the_candidate_lane() -> Result<(), Box<dy
             tracked_conversations: Vec::new(),
         })
         .complete(authority, &StoreAppender { log });
-    let error = match outcome {
-        Ok(()) => {
-            return Err(
-                "two pending terminals joined the candidate lane — the multi-candidate \
-                 drain prestate has become mintable; extend the drain coverage to drain \
-                 both strictly by admission_order"
-                    .into(),
-            );
-        }
-        Err(error) => format!("{error:?}"),
+    let Err(super::state::StateError::BindingTerminalAdmissionRefused {
+        error: BindingTerminalAdmitError::Precedence,
+    }) = outcome
+    else {
+        return Err(format!(
+            "the candidate lane did not refuse the second pending terminal for lane \
+             occupancy — if it admitted, the multi-candidate drain prestate has become \
+             mintable and the drain coverage must extend to drain both strictly by \
+             admission_order: {outcome:?}"
+        )
+        .into());
     };
-    if !error.contains("binding-terminal admission refused") {
-        return Err(
-            format!("second pending terminal failed for an unexpected reason: {error}").into(),
-        );
-    }
     let candidates = authority
         .frontier()
         .ok_or("multi-candidate fate lost its frontier")?

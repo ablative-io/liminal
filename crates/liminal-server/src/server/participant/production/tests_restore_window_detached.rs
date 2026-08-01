@@ -20,7 +20,8 @@ use std::sync::Arc;
 
 use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::{
-    BindingState, ClosureState, ImmutableSequenceCandidate, PendingFinalization,
+    BindingState, BindingTerminalAdmitError, ClosureState, ImmutableSequenceCandidate,
+    PendingFinalization,
 };
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
@@ -38,7 +39,7 @@ use super::log::{
     StoredDetachedSource, StoredFinalizerPresentation, StoredOperation, StoredTerminalDisposition,
 };
 use super::outbox_log::{OutboxLog, OutboxRow, ProducedSourceKind};
-use super::state::DurableAppend;
+use super::state::{DurableAppend, StateError};
 use super::tests::{dispatch_tracked, test_participant_config};
 use super::tests_w1b_pending_died_restart::{BoundDebtFixture, bound_debt_fixture};
 
@@ -732,7 +733,7 @@ fn apply_fate_cut(
     connection: ConnectionIncarnation,
     class: ConnectionFateClass,
     open_sequence: u64,
-) -> Result<Result<u64, String>, Box<dyn Error>> {
+) -> Result<Result<u64, StateError>, Box<dyn Error>> {
     let cell = handler.cell(conversation_id)?;
     let mut owner = cell
         .lock()
@@ -750,7 +751,7 @@ fn apply_fate_cut(
     drop(owner);
     Ok(match outcome {
         Ok(()) => Ok(source_sequence),
-        Err(error) => Err(format!("{error:?}")),
+        Err(error) => Err(error),
     })
 }
 
@@ -932,9 +933,9 @@ fn died_then_detached_candidates_drain_strictly_by_admission_order() -> Result<(
 }
 
 /// Requires the mixed two-candidate mint to refuse at binding-terminal
-/// admission — the structural sole-candidate boundary — and trips loudly if
-/// the substrate ever widens it.
-fn require_candidate_lane_refusal(outcome: Result<u64, String>) -> Result<(), Box<dyn Error>> {
+/// admission for lane occupancy — the structural sole-candidate boundary — and
+/// trips loudly if the substrate ever widens it.
+fn require_candidate_lane_refusal(outcome: Result<u64, StateError>) -> Result<(), Box<dyn Error>> {
     match outcome {
         Ok(_) => Err(
             "a second (Detached) pending terminal joined the candidate lane — the \
@@ -942,9 +943,11 @@ fn require_candidate_lane_refusal(outcome: Result<u64, String>) -> Result<(), Bo
              drain coverage to drain both from one lane occupancy"
                 .into(),
         ),
-        Err(error) if error.contains("binding-terminal admission refused") => Ok(()),
+        Err(StateError::BindingTerminalAdmissionRefused {
+            error: BindingTerminalAdmitError::Precedence,
+        }) => Ok(()),
         Err(error) => Err(format!(
-            "second (Detached) pending terminal failed for an unexpected reason: {error}"
+            "second (Detached) pending terminal failed for an unexpected reason: {error:?}"
         )
         .into()),
     }
