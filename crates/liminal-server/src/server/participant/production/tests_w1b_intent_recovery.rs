@@ -27,14 +27,14 @@ const CONVERSATIONS: [u64; 4] = [101, 103, 107, 109];
 const FAILURE_CONVERSATION: u64 = CONVERSATIONS[2];
 
 #[derive(Debug)]
-struct FailOneStreamAppend {
+pub(super) struct FailOneStreamAppend {
     inner: Arc<dyn DurableStore>,
     target: Mutex<Option<String>>,
     fired: AtomicBool,
 }
 
 impl FailOneStreamAppend {
-    fn new(inner: Arc<dyn DurableStore>) -> Self {
+    pub(super) fn new(inner: Arc<dyn DurableStore>) -> Self {
         Self {
             inner,
             target: Mutex::new(None),
@@ -42,7 +42,7 @@ impl FailOneStreamAppend {
         }
     }
 
-    fn arm(&self, stream_key: String) -> Result<(), Box<dyn Error>> {
+    pub(super) fn arm(&self, stream_key: String) -> Result<(), Box<dyn Error>> {
         let mut target = self
             .target
             .lock()
@@ -53,7 +53,7 @@ impl FailOneStreamAppend {
         Ok(())
     }
 
-    fn fired(&self) -> bool {
+    pub(super) fn fired(&self) -> bool {
         self.fired.load(Ordering::SeqCst)
     }
 }

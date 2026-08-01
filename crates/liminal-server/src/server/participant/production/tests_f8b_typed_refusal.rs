@@ -10,19 +10,24 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use liminal::durability::{DurableStore, bridge::block_on};
+use liminal::durability::{DurableStore, bridge::block_on, open_ephemeral};
+use liminal_protocol::lifecycle::BindingTerminalAdmitError;
 use liminal_protocol::wire::{
-    ClientRequest, EnrollmentRequest, EnrollmentToken, Generation, RecordAdmission,
-    RecordAdmissionAttemptToken, ServerValue,
+    ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, Generation,
+    RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
 };
 
 use crate::server::participant::{
     ConnectionFateClass, ConnectionFateWorkItem, ParticipantConnectionConversations,
-    ParticipantSemanticHandler,
+    ParticipantSemanticError, ParticipantSemanticHandler,
 };
 
-use super::log::{DecodedStoredOperation, OperationLog, StoredOperation};
-use super::tests::dispatch_tracked;
+use super::ProductionParticipantHandler;
+use super::handler::state_error;
+use super::log::{DecodedStoredOperation, OperationLog, STREAM_PREFIX, StoredOperation};
+use super::state::StateError;
+use super::tests::{dispatch_tracked, test_participant_config};
+use super::tests_w1b_intent_recovery::FailOneStreamAppend;
 use super::tests_w1b_pending_died_restart::{PendingRestartFixture, pending_restart_fixture};
 
 /// The two conversations whose fate rows commit before the refusal. Both sort
@@ -190,6 +195,103 @@ fn partly_applied_connection_fate_reruns_its_committed_prefix_as_a_noop()
         return Err(
             "the drained conversation never committed its fate row for the replayed Open".into(),
         );
+    }
+    Ok(())
+}
+
+/// R-TYPED-REFUSAL, positive pole. `ConnectionIncarnationAuthority::startup`
+/// hands each unmatched durable `Open` to `&dyn ParticipantSemanticHandler`
+/// (`connection/incarnation.rs:87-88`) and must decide park-vs-fatal on what
+/// comes back. Lane occupancy has to arrive there BY TYPE — a decision taken
+/// on a substring of the formatted message is the same defect wearing a
+/// remedy's clothes.
+#[test]
+fn an_occupied_lane_refusal_reaches_the_recovery_consumer_typed() -> Result<(), Box<dyn Error>> {
+    let applied = partly_applied_fate()?;
+    let consumer: &dyn ParticipantSemanticHandler = &applied.fixture.handler;
+    let refused = consumer.handle_connection_fate(applied.work_item.clone());
+    let Err(ParticipantSemanticError::BindingTerminalAdmissionRefused {
+        error: BindingTerminalAdmitError::Precedence,
+    }) = refused
+    else {
+        return Err(format!(
+            "lane occupancy did not reach the recovery consumer as a typed Precedence \
+             refusal: {refused:?}"
+        )
+        .into());
+    };
+    Ok(())
+}
+
+/// R-TYPED-REFUSAL, negative pole ONE: a failure that is not an admission
+/// refusal at all must not wear the carrier. One injected durable append
+/// failure on the fate's own conversation stream, driven through the same
+/// four-site chain the positive pole uses.
+#[test]
+fn a_durable_append_failure_stays_outside_the_refusal_carrier() -> Result<(), Box<dyn Error>> {
+    const CONVERSATION: u64 = 211;
+    let inner: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let gated = Arc::new(FailOneStreamAppend::new(inner));
+    let store: Arc<dyn DurableStore> = gated.clone();
+    let handler = ProductionParticipantHandler::new(store, test_participant_config())?;
+    let connection_incarnation = ConnectionIncarnation::new(211, 1);
+    let enrolled = dispatch_tracked(
+        &handler,
+        connection_incarnation,
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id: CONVERSATION,
+            enrollment_token: EnrollmentToken::new([0xE1; 16]),
+        }),
+    )?;
+    if !matches!(enrolled, ServerValue::EnrollBound(_)) {
+        return Err(format!("the append-gate fixture did not bind: {enrolled:?}").into());
+    }
+    gated.arm(format!("{STREAM_PREFIX}{CONVERSATION}"))?;
+
+    let consumer: &dyn ParticipantSemanticHandler = &handler;
+    let failed = consumer.handle_connection_fate(ConnectionFateWorkItem {
+        open_sequence: 211,
+        connection_incarnation,
+        class: ConnectionFateClass::ConnectionLost,
+        tracked_conversations: vec![CONVERSATION],
+    });
+    if !gated.fired() {
+        return Err("the injected append gate never fired".into());
+    }
+    let Err(ParticipantSemanticError::Internal { .. }) = failed else {
+        return Err(format!(
+            "a durable append failure did not stay outside the refusal carrier: {failed:?}"
+        )
+        .into());
+    };
+    Ok(())
+}
+
+/// R-TYPED-REFUSAL, negative pole TWO: the carrier discriminates by the
+/// protocol's own reason, not by the seat that raised it. Every non-occupancy
+/// admission refusal travels the exact production mapping
+/// (`handler.rs` `state_error`) and arrives with its own reason intact, so a
+/// `Precedence` test at the consumer answers NO for all five.
+#[test]
+fn a_non_precedence_admission_refusal_keeps_its_own_reason() -> Result<(), Box<dyn Error>> {
+    for reason in [
+        BindingTerminalAdmitError::CandidateCharge,
+        BindingTerminalAdmitError::RetainedRecordLimit,
+        BindingTerminalAdmitError::Authority,
+        BindingTerminalAdmitError::Frontier,
+        BindingTerminalAdmitError::ClosureAccounting,
+    ] {
+        let carried = state_error(&StateError::BindingTerminalAdmissionRefused { error: reason });
+        let ParticipantSemanticError::BindingTerminalAdmissionRefused { error } = carried else {
+            return Err(format!("{reason:?} lost the typed carrier: {carried:?}").into());
+        };
+        if error != reason {
+            return Err(format!("the carrier rewrote {reason:?} as {error:?}").into());
+        }
+        if error == BindingTerminalAdmitError::Precedence {
+            return Err(format!("{reason:?} was misread as lane occupancy").into());
+        }
     }
     Ok(())
 }
