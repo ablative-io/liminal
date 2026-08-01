@@ -359,6 +359,16 @@ construction (`services.rs:385-393`, `handler.rs:137`) completes before
   it leaves the handler's observer state behind its own durable log.
   ⚠️ **This is the sharpest wiring edge in the requirement; a builder who
   finds the reconciliation not re-runnable from this seat stops and reports.**
+  *Review round 1 CLOSED it buildable as written:*
+  `record_observer_progress_projection` (`state.rs:344-362`, called from
+  `ops_terminal_drain.rs:356`) records into the exact state
+  `take_observer_progress_witnesses` surrenders, and
+  `reconcile_observer_progress` (`handler_observer_reconcile.rs:34`) is a
+  handler method reachable from `restore_all_conversations`' scope at
+  `:250-257`. One residual for the builder's first read: the witness state
+  has `begin_source`/`end_source` visit bracketing (`state.rs:386`, `:392`)
+  — whether boot-drain records must sit inside a bracketed visit is a
+  one-read check, and the STOP above covers it.
 - *Loop*: drain the **head** repeatedly until
   `authority.frontier()` (`state.rs:409`) reports
   `.frontiers().sequence().immutable_candidates()` empty — N markers need N
@@ -416,6 +426,13 @@ The minimum shape: a dedicated typed carrier for the refusal that survives
 F8 §3.3's requirement (`OwnerTransition(LiveFrontierError)`) applied to a
 **second, independent** seam — same disease, different site, and F8's patch
 does not reach it.
+
+**Companion obligation (review round 1, required):** the two existing
+substring assertions — `tests_restore_window.rs:424` and
+`tests_restore_window_detached.rs:945` — convert to **typed** assertions **in
+the same change** as the typed carrier. Left as substrings they stay
+load-bearing in the suite and the seam regrows with the tests blessing it: a
+check for the loud variant covering nothing of the silent one.
 
 **R-PARK-LOUD (named requirement — a silent park is fate loss on a delay).**
 A park is loud **at park time**, not at drain time and not by inference:
@@ -476,6 +493,13 @@ that a consumer is looking at a stale liveness view. R-PARK-DRAIN's producer
 must still be named in the code comment at the parking site even if the
 automatic replay is deferred.
 
+**Dispatch rule (review round 1):** the build dispatch brief DECLARES which
+shape it builds — interim or full — before the leg starts. The full shape's
+conversation→parked-opens lookup (parked intents live at the supervisor
+layer; the drain observation fires at the conversation layer) is a
+**design question that returns to the design seat** — a builder does not
+mint a supervisor-layer index on their own authority.
+
 ### 6.4 R-IDEMPOTENT-PREFIX — re-running a partly-applied fate converges
 
 **Requirement.** `apply_connection_fate_with_impacts`
@@ -495,31 +519,57 @@ marker.
 ### 6.5 R3 boundary — which `Precedence` sources stay backstops
 
 F8 §3.1's clause stands: *a reachable backstop firing is a bug report, not
-control flow.* After this cut the sources partition as follows.
+control flow.* **The population, measured (review round 1): exactly TEN raise
+sites of `LiveFrontierTransitionError::Precedence` in `liminal-protocol`,
+every one classified below — none implicit.** After this cut they partition
+as follows.
 
 **Becomes FLOW (expected, handled, never process-fatal):**
 
 - `apply_pending_binding_terminal` `Precedence` from a **non-empty
-  immutable-candidate lane** (`claim_frontier.rs:2450-2456`) → parked (§6.3),
-  drained at boot (§6.2). *This is the one tonight proved reachable.*
-- `apply_live_transition` `Precedence` from the same occupancy
-  (`:2380-2386`) reaching record admission → already flow today: it is
+  immutable-candidate lane** (`claim_frontier.rs:2455`, guard `:2450-2456`)
+  → parked (§6.3), drained at boot (§6.2). *This is the one tonight proved
+  reachable.*
+- `apply_live_transition` `Precedence` from the same occupancy (`:2385`,
+  guard `:2380-2386`) reaching record admission → already flow today: it is
   `RecordAdmissionDecision::DrainFirst` (`ops_frontier.rs:136-142`).
+
+**Becomes a NAMED REFUSAL (loud, honest, neither flow nor bug report):**
+
+- `validate_first_terminal_candidate`'s **armed-recovery** refusal
+  (`claim_frontier.rs:3525`) — at boot this is exactly R-BOOT-VERDICT's
+  `refused-recovery-armed` arm (§6.2, §9.2): the store refuses to boot
+  naming the reason. A firing on the *live* drain path (through
+  `ops_frontier.rs:142`) is report-worthy — a publish-path drain should
+  never meet an armed recovery block outside the fenced-attach window.
 
 **Stays a BACKSTOP (a firing is a bug report):**
 
-- `Precedence` from an **armed recovery block** at
-  `apply_live_fenced_attach` (`claim_frontier.rs:2522-2526`) — a fenced
-  attach without its own reserved blocks is a genuine authority defect.
-- `validate_first_terminal_candidate`'s **multi-candidate** refusal
-  (`claim_frontier.rs:3527`) — §5.1 shows mixed and multi lanes are
+- `apply_live_fenced_attach`'s two **missing-recovery-block** raises
+  (`claim_frontier.rs:2523` sequence, `:2526` order) — a fenced attach
+  without its own reserved blocks is a genuine authority defect.
+- `apply_live_fenced_attach`'s third raise (`:2542`): the lane is
+  **occupied and not the pending-fenced-terminal shape** the attach is
+  entitled to finalize — distinct semantics from the two above (the blocks
+  exist; the lane's occupant is wrong for this attach). Not the boot-drain's
+  problem: boot performs no fenced attach (§9.2).
+- `validate_first_terminal_candidate`'s **non-singleton-lane** refusal
+  (`claim_frontier.rs:3528`) — §5.1 shows mixed and multi lanes are
   unreachable by construction; a firing means that construction broke, and
   the two tests in §3.2 exist to catch exactly that. **Do not "fix" this by
   widening the drain**; report it.
-- `drain_next_marker_core`'s `BindingTerminalFirst`
-  (`claim_frontier.rs:3360-3362`) — mis-selection, same reasoning.
-- F8 §3.1's marker-crossing `Precedence` — unchanged, and untouched by this
-  document.
+- `validate_first_terminal_candidate`'s third raise (`:3536`): the head
+  candidate destructures as **not a binding terminal** (i.e. a `Marker`
+  reached the terminal-drain validator) — the mirror of the mis-selection
+  reasoning above, same rule: report, never widen.
+- F8 §3.1's two marker-crossing raises
+  (`claim_frontier/binding_fate_transition.rs:43`, `:91`) — unchanged, and
+  untouched by this document.
+
+*Population-purity clause:* `drain_next_marker_core`'s refusal at
+`claim_frontier.rs:3360-3362` raises **`BindingTerminalFirst`, not
+`Precedence`** — it is a sibling mis-selection backstop but sits OUTSIDE this
+population; named here so the ten-site count reads pure.
 
 ## 7. PROTOCOL SURFACE — SERVER-ONLY (R6)
 
