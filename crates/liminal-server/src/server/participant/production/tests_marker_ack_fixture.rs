@@ -534,12 +534,46 @@ pub(super) struct AttachedDrainAttempt {
     /// the measurement never got the state it was built to test.
     pub(super) first_has_binding_fate: bool,
     pub(super) second_has_binding_fate: bool,
+    /// A/B EVIDENCE for the AckGap's cause. My previous report attributed it to
+    /// "attach resets the persisted cursor to zero", inferred from the doc
+    /// comment at `wire/response.rs:653`. That was an inference, not a
+    /// measurement. These are the members' cursors after enrolment-only and
+    /// after enrol+attach, taken at the same point in the same sequence, so the
+    /// reset is either shown or refuted instead of assumed.
+    pub(super) cursors_enrolled_only: (u64, u64),
+    pub(super) cursors_after_attach: (u64, u64),
     /// The DRAIN WITNESS, non-idempotent by construction: `drive_marker_drain`
     /// only returns `Ok` if `authority.last_marker_projection` surrendered a
     /// marker projection at the fourth commit — a one-shot value consumed by
     /// `.take()` that exists ONLY if a drain actually projected. It is an
     /// event, not a state that could legitimately sit still.
     pub(super) drain: Result<MarkerFixture, String>,
+}
+
+fn member_cursors(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    members: &FixtureMembers,
+) -> Result<(u64, u64), Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let guard = cell
+        .lock()
+        .map_err(|_| "cursor probe owner lock was poisoned")?;
+    let authority = guard
+        .as_ref()
+        .ok_or("cursor probe conversation owner was absent")?;
+    let read = |participant_id: ParticipantId| {
+        authority
+            .slots
+            .get(&participant_id)
+            .map_or(u64::MAX, |slot| slot.member.cursor())
+    };
+    let pair = (
+        read(members.first.participant_id()),
+        read(members.second.participant_id()),
+    );
+    drop(guard);
+    Ok(pair)
 }
 
 pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAttempt, Box<dyn Error>>
@@ -549,6 +583,17 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
     let conversation_id = 0xA7;
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
     let members = enroll_members(&handler, conversation_id)?;
+
+    // A/B CONTROL ARM: an identically-built server taken to the SAME point with
+    // enrolment only and no attach, so the two cursor readings differ in exactly
+    // one respect.
+    let cursors_enrolled_only = {
+        let control_store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+        let control_handler =
+            ProductionParticipantHandler::new(Arc::clone(&control_store), marker_fixture_config())?;
+        let control_members = enroll_members(&control_handler, conversation_id)?;
+        member_cursors(&control_handler, conversation_id, &control_members)?
+    };
 
     // THE ONLY DIFFERENCE FROM `prepare_marker_fixture`: two CredentialAttach
     // dispatches, and the POST-ATTACH generation each one mints is captured so
@@ -590,6 +635,7 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
         second: *second_generation,
     };
 
+    let cursors_after_attach = member_cursors(&handler, conversation_id, &members)?;
     let (first_has_binding_fate, second_has_binding_fate) = {
         let cell = handler.cell(conversation_id)?;
         let guard = cell
@@ -649,6 +695,8 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
     Ok(AttachedDrainAttempt {
         first_has_binding_fate,
         second_has_binding_fate,
+        cursors_enrolled_only,
+        cursors_after_attach,
         drain,
     })
 }

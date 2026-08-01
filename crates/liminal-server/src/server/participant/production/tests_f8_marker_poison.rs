@@ -348,16 +348,13 @@ fn assert_peer_actually_departed(
         )
         .into());
     };
-    if cursor != high_watermark {
-        return Err(format!(
-            "STEP 0b LEAD 1 CONFIRMED — §1's PREMISE IS CONDITIONAL: peer {} departed but its \
-             cursor is {cursor}, NOT the high watermark {high_watermark}. §1 asserts the \
-             departing participant's cursor IS set to the high watermark; at these bytes that \
-             holds only down some paths. binding={binding:?}, marker at {}.",
-            roles.peer_participant, roles.marker_delivery_seq
-        )
-        .into());
-    }
+    // The cursor-versus-watermark assertion that used to stand here is GONE, not
+    // relaxed. It claimed §1's premise was conditional; instrument #1 refuted
+    // that with a PASSING positive control (post-departure cursor 9 equalled the
+    // PRE-departure watermark 9 — the fate set the cursor to the watermark it
+    // could see, and the apparent gap was the departure's own Died row landing
+    // afterwards). I withdrew the reading, so the assertion had to go with it:
+    // a red citing a refuted cause poisons every suite count that reads it.
     if cursor < roles.marker_delivery_seq {
         return Err(format!(
             "STEP 0b LEAD 1: peer {} reached the high watermark {high_watermark}, but that \
@@ -846,15 +843,55 @@ fn f8_precondition_does_the_marker_still_drain_with_attaches_present()
         ),
     };
 
+    let enrolled_only = attempt.cursors_enrolled_only;
+    let after_attach = attempt.cursors_after_attach;
     Err(format!(
         "=== F8 PRECONDITION MEASUREMENT (not a test failure; reports by returning Err so its \
          reading reaches the teed log under the fixed tier-1 string) ===\n\
          POSITIVE CONTROL (attaches landed): {control}\n\
+         A/B CURSOR EVIDENCE (tests the reset I previously INFERRED): enrolled-only \
+         {enrolled_only:?} vs after-attach {after_attach:?}\n\
          VERDICT: {verdict}\n\
          DETAIL: {detail}\n\
          === END PRECONDITION MEASUREMENT ==="
     )
     .into())
+}
+
+/// THE HONEST REFUSAL (ruling 94169870 item 3). These units are red, and this
+/// is the TRUE reason — replacing a refuted one rather than removing it and
+/// letting them drift back to a meaningless green.
+///
+/// WHY THE FIXTURE CANNOT YET EXPRESS THE INCIDENT. Part A established at the
+/// bytes that the sole mint of a binding-fate token is `CredentialAttach`
+/// (`ops_attach.rs:331-337`; the other four `slot.binding_fate = Some(..)`
+/// sites are take-then-reinsert guards that mint nothing), and that
+/// `tests_marker_ack_fixture.rs` performs ZERO `CredentialAttach`. Without a
+/// token, `connection_fate.rs:234-242` sets `specific_fate_intent = None`,
+/// `open_specific_fate` (`:296`) is never called, and the measurement (`:368`)
+/// never runs. §1's incident requires "P1's Died row carrying an open Ordinary
+/// intent". This fixture's Died rows carry no intent at all, so there is
+/// nothing here for these units to witness — they would pass for the same
+/// reason an empty room is quiet.
+///
+/// EXPIRY, named so this cannot age into drift: superseded by the amended
+/// §1-intent assertions — `slot.binding_fate.is_some()` for the target BEFORE
+/// the departure, and `pending_specific_fates` gaining that participant AFTER
+/// — when attempt 2 lands. If attempt 2 has landed and this is still here,
+/// this text is the defect.
+fn refuse_until_the_geometry_exists(roles: &IncidentRoles) -> Box<dyn Error> {
+    format!(
+        "F8 HONEST REFUSAL — THE FIXTURE CANNOT YET EXPRESS THE INCIDENT GEOMETRY. No \
+         binding-fate token is ever minted in this fixture (Part A: CredentialAttach at \
+         ops_attach.rs:331-337 is the sole mint, and tests_marker_ack_fixture.rs performs none), \
+         so every Died row it produces is INTENT-FREE, open_specific_fate is never called, and \
+         the binding-fate measurement never runs. §1 requires a Died carrying an OPEN ORDINARY \
+         INTENT; there is none here, so this unit has nothing to witness and a green would mean \
+         nothing. marker={} peer={} owner={}. Superseded by the §1-intent arming assertions when \
+         attempt 2 lands.",
+        roles.marker_delivery_seq, roles.peer_participant, roles.owner_participant
+    )
+    .into()
 }
 
 fn connection_lost(
@@ -898,6 +935,11 @@ struct DepartedPeer {
 /// (`state.rs:393`). It is deliberately NOT gated by the slowest member, which
 /// is precisely why one peer ack can lift it over a marker its own owner has
 /// never acked.
+// The tail below is unreachable while the honest refusal stands. It is kept
+// intact rather than deleted because it is exactly what attempt 2 re-enables
+// when the geometry exists: deleting it would make the refusal's expiry a
+// rewrite instead of a removal.
+#[allow(unreachable_code)]
 fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
     let fixture = prepare_marker_fixture()?;
     let roles = incident_roles(&fixture)?;
@@ -939,9 +981,15 @@ fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
             )
         })?;
 
-    // STEP 0b (ruling b7dc92b2): both leads answered at this one instant.
+    // STEP 0b (ruling b7dc92b2): both leads answered at this one instant. These
+    // two remain TRUE and stay as guards.
     assert_peer_actually_departed(&fixture.handler, &roles)?;
     assert_owner_is_bound_for_its_departure(&fixture.handler, &roles)?;
+
+    // Ruling 94169870 item 3: the units stay red, for the RIGHT reason. Every
+    // guard above has already run, so if the fixture ALSO breaks in some other
+    // way that failure is reported first and this refusal never masks it.
+    return Err(refuse_until_the_geometry_exists(&roles));
 
     let rows_before_owner_drop = operation_rows(&fixture.store, roles.conversation_id)?;
     Ok(DepartedPeer {
