@@ -416,6 +416,19 @@ forbidden.
    verdict naming the conversation — **not** with today's chain, and **not**
    silently. *Fails today* — the verdict does not exist.
 
+*Leg-2 amendment (branch `f8b-boot-drain` at `0f0ee8f`, STOP ratified):*
+units 1 and 2 are GREEN as built; unit 3 is **unconstructible through real
+state transitions** — the reachability question this note declared out of
+scope (§9.2) is answered in the negative, through GO #2's constructibility
+clause and without a synthesized state. See §9.2 as amended for the ruling
+on the now-unexercised `refused-recovery-armed` arm. The leg then measured
+a deeper defect the drain uncovers in the last-live-identity shape and
+STOPPED; that finding and its ruling are **§6.6 R-SEAL**, and the boot-drain
+verdict surface gains the field ruled there. The five restart-semantics
+tests the drain intentionally breaks are enumerated and authorized in §6.6;
+converting them before the R-SEAL ruling landed would have erased the
+finding's measurement.
+
 ### 6.3 R-PARK — live lane-occupancy `Precedence` parks, it does not fatal
 
 **Requirement.** When `handle_connection_fate` fails because the candidate
@@ -591,6 +604,134 @@ as follows.
 `Precedence`** — it is a sibling mis-selection backstop but sits OUTSIDE this
 population; named here so the ten-site count reads pure.
 
+### 6.6 R-SEAL — draining the final identity's terminal closes the conversation, durably and loudly
+
+*Added by the leg-2 amendment. This section rules the STOP measured on
+branch `f8b-boot-drain` (`0f0ee8f`); every coordinate below was verified
+independently at the dispatch seat before this ruling was written.*
+
+**The finding, measured.** `release_drained_binding_slot`
+(`ops_terminal_drain.rs:388-391`) erases the drained Died identity's slot
+**and its enrollment-token mapping** — and it is the **only** production
+site in the workspace that removes an enrollment token (one hit for
+`tokens.retain`/`remove`/`clear`; `Left` does not touch `tokens`). Replay
+refuses any conversation whose `tokens` is empty while a frontier survives
+(`ops_session_replay.rs:104-112`, twin `:204-212`: *"durably empty
+conversation rebuilt an executable frontier"*). A **live** drain can never
+mint that state: `persist_drain_first`'s sole production caller
+(`ops_frontier.rs:142`) is the record-admission path, which requires a
+still-bound publisher whose own token survives the drain. The **boot**
+drain has no such floor. When the restored lane's terminal belongs to the
+conversation's **last live identity**, the boot drain erases the final
+token and the conversation is durably unreplayable from that moment —
+witnessed by the existing acceptance test
+`e2e_terminal_drain::live_socket_publish_drains_pending_terminal_then_unclean_restart_serves`.
+R-BOOT-DRAIN as originally ruled would exchange a deadlock everyone can see
+for an unreplayability nobody can — the second failure destroys the
+evidence of itself.
+
+**Three readings, two rejected.**
+- *(a) Weaken the replay invariant* — REJECTED bare. The twins are a
+  corruption tripwire; a blanket relaxation repairs one shape by blinding
+  the estate to every other way `tokens`-empty-with-frontier can appear.
+  The tripwire stays; R-SEAL gives the legitimate state its own clause
+  instead.
+- *(b) Boot refuses the last-identity shape (`refused-shape`)* — REJECTED
+  as an endpoint. The acceptance test above encodes
+  last-identity-unclean-restart-**serves** as a documented requirement;
+  (b) converts a supported flow into a permanent refusal. It survives only
+  as the interim posture of the stopped branch.
+- *(c) Sealing* — RULED, in the derived form below.
+
+**The mechanism — derived closure, no new row type.** The apply of a
+Died-flavor drain row that erases the conversation's **final** enrollment
+token also retires the frontier and marks the replayed authority
+**Closed**. Closure is *derived from the rows*, not appended beside them:
+
+- **No append window.** A seal implemented as a second appended row leaves
+  a crash window (drain row durable, seal row not) that rebuilds exactly
+  the unreplayable state this section exists to kill. Derived closure has
+  no window: the same row that erases the last token closes the
+  conversation, on the live apply and on every replay, deterministically.
+- **Why changing an existing row's apply is safe.** No store in existence
+  can contain a final-token-erasing drain row: the sole token-removal site
+  is this apply, a live drain structurally requires a surviving bound
+  publisher, and no released binary contains a boot drain. The
+  tokens-empty outcome branch is **new**, not repurposed — there are no
+  old bytes whose meaning changes.
+- **The invariant twins gain the closed clause** (`ops_session_replay.rs:104-112`,
+  `:204-212`): Closed ⇒ `tokens` empty ∧ frontier `None` ∧ closed-marker
+  set. Bare `tokens`-empty-with-frontier-`Some` **remains a refusal** —
+  the tripwire is untouched for every shape that is not the sealed one.
+- **Closed is distinguishable from never-enrolled.** Without R-SEAL,
+  zeroing the frontier would leave the conversation byte-indistinguishable
+  from a Genesis-only one (`replay_genesis` at `state.rs:648-669` installs
+  no frontier; `install_frontier`'s `None` arm at `state.rs:456-459`
+  builds a fresh owner), and the next enrollment would **silently re-open
+  a conversation whose log holds records, terminals, and drain rows** —
+  the enroll path falls straight through to a fresh identity
+  (`ops_enroll.rs:74` lookup miss → `:396` frontier install → `:416` token
+  insert). That silent re-open is the exact class of silent end this
+  document's taxonomy forbids. The closed marker carries the difference.
+
+**What a late arrival meets — named, typed, never silent.**
+- *Enrollment into a Closed conversation:* a **named refusal**, typed at
+  the server seat — a new `ParticipantSemanticError` variant
+  (`ConversationSealed`), carried to the wire on the existing
+  semantic-error framing. The semver-major datum already on the release
+  ledger for this enum covers it; the `non_exhaustive` proposal stands.
+- *Attach/probe with an erased identity's token:* already answers **typed**
+  `ParticipantUnknown` — a normal `ServerValue` response, not an error
+  (struct `response.rs:277`, wire discriminant `0x0105` at
+  `wire/tags.rs:90`), short-circuited at `ops_attach.rs:74-77` with twins
+  in leave and acks. Unchanged by R-SEAL; what changes is that the path is
+  now *reachable*, where today replay refuses the whole conversation
+  before any handler runs.
+- *Wire honesty:* a protocol-native `ConversationSealed` response value
+  would need a new wire discriminant — a protocol change, deferred to a
+  protocol-version leg and recorded in §9. This leg's answer is typed at
+  the server boundary and rides existing framing; the doc says so rather
+  than implying wire-native vocabulary exists.
+
+**Verdict surface.** `BootDrainVerdict::Drained` gains `sealed: bool`,
+logged loudly — the operator sees "drained AND sealed" as one event, per
+R-BOOT-VERDICT's no-silent-skip rule. Sealing is not a fifth verdict: it is
+a property of a successful drain, and a verdict enum that split them would
+let a log reader believe a seal happened without a drain.
+
+**Acceptance-test posture.** The server keeps
+unclean-restart-**serves** — boot reaches listening, every other
+conversation serves. What the ruled semantics change is the sealed
+conversation's own answer: late arrivals meet the named refusal above, not
+a silent re-open. If the existing acceptance test's serve assertion targets
+the sealed conversation itself, its expectation **converts** to the named
+refusal — that conversion is part of the ruled semantics, not a
+regression, and the builder measures which of the two the test actually
+asserts before converting anything.
+
+**Red-first units (same discipline as §6.2's).**
+1. The STOP repro: boot-drain a last-live-identity terminal, then replay
+   the store. *Fails today* (on `f8b-boot-drain`) — replay refuses with
+   *"durably empty conversation rebuilt an executable frontier"*. Fixed:
+   boot reaches listening, the conversation is Closed, `Drained{sealed:
+   true}` in the log.
+2. Late arrival: enrollment into the Closed conversation receives the
+   typed `ConversationSealed` refusal. *Fails today* — the variant does
+   not exist and the conversation is unreachable.
+3. Discriminator: a Genesis-only conversation (crash between the Genesis
+   and `Enrolled` appends — legal, reachable) still accepts enrollment as
+   ordinary flow. *Guards against* a seal implementation keyed on
+   "tokens empty + frontier None" instead of on the closed marker.
+
+**The five conversions — authorized once R-SEAL lands, not before.**
+`tests_restore_window` ×2, `tests_restore_window_detached` ×2,
+`tests_marker_ack` ×1: each currently asserts restart-leaves-lane-occupied
+and each converts to assert the drained/sealed posture ruled here. The
+`e2e_terminal_drain` witness converts per the acceptance-test posture
+above. Conversion is part of the R-SEAL build leg — the same commit
+discipline as §6.3's companion obligation, so the tests and the semantics
+they bless move together.
+
 ## 7. PROTOCOL SURFACE — SERVER-ONLY (R6)
 
 **F8B needs no `liminal-protocol` change.** Measured, requirement by
@@ -666,9 +807,11 @@ first). Keep the bullets exact.**
    new binary listens.** Proves: the whole chain from real trigger to real
    recovery, without depending on a preserved store.
 
-**Plus the per-requirement red-first units** listed inline in §6.2, §6.3, and
-§6.4 — each must be committed **failing** against the current binary before
-its fix lands.
+**Plus the per-requirement red-first units** listed inline in §6.2, §6.3,
+§6.4, and §6.6 — each must be committed **failing** against the current
+binary before its fix lands. (§6.2's units 1–2 are already red-committed
+and greened on `f8b-boot-drain`; §6.6's unit 1 is red *on that branch*,
+which is the branch the R-SEAL leg builds from.)
 
 **⛔ RULED: refusal-instead-of-restore at fixture 2 or 3 is a STOP back to
 design.** It would mean the boot drain does not reach the lane the way this
@@ -691,17 +834,40 @@ the same change as this file.
    correctness trade.
 
 2. **A lane occupied by a pending terminal *and* an armed recovery block is
-   not repairable by the boot drain.** Measured, §5.3(ii):
-   `validate_first_terminal_candidate:3524-3526` refuses the drain while
-   `recovery.is_some()`, and the only consumer of a recovery block is a live
-   fenced attach (`claim_frontier.rs:2507`) that boot cannot perform.
-   R-BOOT-VERDICT's `refused-recovery-armed` verdict is the *honest* answer,
-   not a repair: such a store still refuses to boot, but it refuses **naming
-   the reason and this document** instead of dying six collapses downstream.
-   Whether that shape is reachable in production is **not established** —
-   this note establishes only that if it occurs, the remedy does not cover
-   it. Establishing reachability is out of scope here and should be a
-   separate question.
+   not repairable by the boot drain — and the shape is now ESTABLISHED
+   UNREACHABLE, in both directions that matter.** *(Amended by leg 2; the
+   original paragraph declared reachability out of scope.)* Measured, twice
+   independently, on `f8b-boot-drain`:
+   - *Live transitions cannot mint it.* Nothing constructs
+     `RecoveryQuartetStatus::Endowed` (both workspace occurrences are
+     `matches!` reads, `enrollment_closure.rs:256`/`:275`); every frontier
+     literal the live rebuild families produce hardcodes `recovery: None`;
+     and the pend guard (`claim_frontier.rs:2450-2456`) refuses on both
+     poles, so "arm then pend" and "pend then arm" are both barred.
+   - *The public storage-restore path cannot mint it either.*
+     `ClaimFrontiers::restore` (`claim_frontier.rs:2057-2065`) hardcodes
+     `finish(None)` — the unarmed edge — and the `prevalidate` entry that
+     can accept an armed stored edge is `#[cfg(any(test, feature =
+     "test-support"))]` (`:2069`). The only `finish(Some(..))` call in the
+     workspace is the test-support fixture
+     (`test_support_external/pending_fenced.rs:157`).
+
+   **Ruling on the arm (the unexecuted-branch law forbids silence):**
+   `refused-recovery-armed` STAYS, relabelled a **defence-in-depth
+   backstop**. Its justification is *not* a demonstrated storage path — no
+   real snapshot can carry the shape — but that the restore **validator**
+   accepts the shape as well-formed when handed it: the state is
+   representable, `finalizes_pending` (`claim_frontier.rs:2537-2543`)
+   deliberately permits it downstream, and a guard at the boot seat is the
+   honest posture toward a durable format whose validator is more
+   permissive than its writers. The arm gets a test under that label, and
+   the fixture **declares its provenance class**: the `pending_fenced`
+   fixtures are test-support-built stored-edge injection — **"corruption we
+   choose to survive," not "storage the system's own writer can hold"** —
+   because the armed edge enters through a test-gated entry point, not
+   through the persistence write path or the public restore API. This
+   document must never be read as implying the system's writer reaches the
+   shape; the §9.2 negative above is the evidence it cannot.
 
 3. **The observer-progress leg of the same question is CLOSED, negative.**
    Observer-progress-permanently-behind cannot preserve a lane occupant: the
@@ -729,6 +895,26 @@ the same change as this file.
 7. **§3.4's partial-application defect is named and required (§6.4) but its
    blast radius is not measured.** How many production fates span more than
    one tracked conversation is unknown at this seat.
+
+8. **The `ConversationSealed` refusal is typed at the server boundary
+   only.** *(Added by the leg-2 amendment.)* On the wire it rides the
+   existing semantic-error framing; a protocol-native response value with
+   its own discriminant (the `ParticipantUnknown` precedent, `0x0105`) is a
+   protocol change, deferred to a protocol-version leg. An SDK that wants
+   to discriminate sealed-vs-other refusals mechanically cannot do so from
+   the wire until that leg lands; naming this here is the difference
+   between a deferral and a seam.
+
+9. **R-SEAL changes what one existing acceptance test may be asserting.**
+   *(Added by the leg-2 amendment.)* If
+   `e2e_terminal_drain::live_socket_publish_drains_pending_terminal_then_unclean_restart_serves`
+   asserts serve-on-the-drained-conversation rather than
+   serve-of-the-server, its expectation converts from silent re-open to the
+   named refusal (§6.6 acceptance-test posture). The conversion is ruled
+   semantics, but the ruling was made without re-reading the test's
+   assertion at this seat — the builder measures before converting, and a
+   test that turns out to assert something *else* entirely is a STOP back
+   here, not a local improvisation.
 
 ## 10. WHAT THIS NOTE IS NOT
 
