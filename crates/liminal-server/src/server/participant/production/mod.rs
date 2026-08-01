@@ -100,6 +100,8 @@ mod tests_config_d2;
 #[cfg(test)]
 mod tests_delivery_acceptance;
 #[cfg(test)]
+mod tests_f8b_typed_refusal;
+#[cfg(test)]
 mod tests_history;
 #[cfg(test)]
 mod tests_layer2;
