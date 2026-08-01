@@ -187,6 +187,26 @@ drain needs a publish
 
 Permanent by construction, at every boot, with no in-band remedy.
 
+**AMENDED AT THE FOUNDATION LEG'S LANDING — the deadlock is NOT boot-only.
+RED-A (`9f549b9`, rc 101) measured it live at the handler seat with no
+restart involved:** a lane-occupancy refusal latched the process-wide
+participant fatal at the dispatch seat (`connection_fate_dispatch.rs`, the
+pre-fix `:37-38`), and that fatal then refused **the draining publish
+itself** —
+
+```
+Error: "dispatch did not respond: Fatal(Semantic(ServiceFatal(
+    ConnectionFateIntentIncomplete { open_sequence: 101, ... })))"
+```
+
+— so R-PARK-DRAIN's sole producer was unreachable the moment the condition
+it exists to reverse first occurred. The live half of the cycle needed no
+reboot to close; §6.4's convergence assertion (c) was unsatisfiable by
+construction while the latch stood. The foundation leg's dispatch-seat
+change (this branch: lane-occupancy `Precedence` returns typed without
+latching, per §6.5's never-process-fatal ruling applied at that seat)
+removes the live half; the boot half above stands until R-BOOT-DRAIN lands.
+
 ### 3.4 The tax: partial application has no defined semantics
 
 `apply_connection_fate_with_impacts`
