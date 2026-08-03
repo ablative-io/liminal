@@ -132,16 +132,23 @@ travel), and the round must verify that read rather than inherit it.
 
 # Part II — Design v1
 
-**Hermes Crumpet, 2026-08-03. Status: DESIGN v1 — written under the design
-round's rulings (stack lead's gate, 2026-08-03). Every file:line below was read
-at `96e342b` in the lane worktree before it was written down. Anything the round
-did not rule is marked LEAN.**
+**Hermes Crumpet, 2026-08-03. Status: DESIGN v1 — ACCEPTED at the design round
+with amendment v1a. Every file:line below was read at the lane worktree's bytes
+before it was written down (`96e342b` for v1, re-verified for v1a). NOTHING IN
+PART II IS OPEN: the round's one structural finding (F-v1-1) is resolved in
+§II.5(d) and all eight of v1's LEANs are ruled. §II.12 is the register.**
 
 Part I's open questions Q1–Q5 are closed by the round; Q6 (the version number)
 stays open by design and §II.10 prices it rather than answering it. Part II adds
 what Part I refused to invent: signatures, the state machine, the
 synchronisation, the error vocabulary, and the tests that make the whole thing
 falsifiable.
+
+**Amendment v1a (2026-08-03)** carries the round's verdict into the body rather
+than appending it: F-v1-1's mechanism is written up in §II.5(d) as decided, and
+each ruling replaces the LEAN it settles in the section that owned it. Two
+rulings changed the design — L5 closed the aggregate-cap gap, L8 reversed the
+enumerator omission — and both are recorded as reversals in §II.12.
 
 ## II.1 — The measured ground, extended
 
@@ -203,12 +210,24 @@ host already constructs it directly before handing it to
 its own `Arc<LiminalConnectionServices>` and coerces a clone into the trait
 object for the supervisor; registration is then called on the concrete `Arc`.
 
-**Not on the `ConnectionServices` trait.** The trait is public and implemented
-outside this file (`WorkerFrontDoorServices`). A required method breaks every
-external implementor; a defaulted method puts channel-registration vocabulary on
-a profile that serves no channels at all (`supports_channel_operations` →
-`false`, `services.rs:246-248`). Inherent methods on the one adapter that owns a
-channel map is the honest placement.
+**The REGISTRATION vocabulary does not go on the `ConnectionServices` trait.**
+The trait is public and implemented outside this file — `WorkerFrontDoorServices`
+implements it at
+`crates/liminal-server/src/server/connection/worker_front_door.rs:56`. A required
+method breaks every external implementor; a defaulted one would put
+*register/quiesce* vocabulary on a profile that serves no channels at all
+(`supports_channel_operations` → `false`, `services.rs:246-248`). Inherent
+methods on the one adapter that owns a channel map is the honest placement for
+registration.
+
+That objection is scoped to registration and **does not carry to the
+access-refusal path.** Admission is hot-path vocabulary the worker profile
+already answers — refusing channel operations is precisely what
+`supports_channel_operations` exists to say (`services.rs:246-248`). §II.5(d)
+therefore adds one *additive defaulted* trait method for admission, and the two
+placements are consistent rather than in tension: authority-moving APIs are
+inherent, per-frame admission is on the trait. Ruled explicitly by the stack lead
+at the design round.
 
 ```rust
 /// A channel to register at runtime. Mirrors exactly what the boot loop
@@ -294,8 +313,42 @@ impl LiminalConnectionServices {
     /// Returns [`ChannelRegistryError::RosterUnavailable`] only.
     pub fn channel_status(&self, name: &str)
         -> Result<ChannelStatus, ChannelRegistryError>;
+
+    /// The whole roster: one minimal descriptor per entry, sorted by name.
+    /// Touches no actor (same constraint as `channel_status`).
+    ///
+    /// # Errors
+    /// Returns [`ChannelRegistryError::RosterUnavailable`] only.
+    pub fn registered_channels(&self)
+        -> Result<Vec<ChannelDescriptor>, ChannelRegistryError>;
+}
+
+/// One roster entry, minimally. Deliberately NOT the full status: an
+/// enumeration is a census instrument, and a census needs names, origins, and
+/// states — not schemas.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelDescriptor {
+    pub name: String,
+    pub origin: ChannelOrigin,
+    pub state: ChannelState,
+}
+
+/// The state machine's two states, as a value (§II.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelState {
+    Active,
+    Quiesced { reason: String },
 }
 ```
+
+**RULED — the enumerator is IN v1** (L8, overruling this design's original
+omission). The grounds are the estate's census law, and they are decisive: a
+by-name probe can confirm that every *expected* name is present, but it can
+**never** detect an unexpected extra. Seam-5 ruled that layer 3 verifies against
+a MOVING roster; verification with no enumerator is a sweep with no population
+denominator, which is an instrument shape the estate forbids outright. It is also
+cheap — one read lock under §II.4, `n` `Arc` derefs, no actor contact — so the
+only thing the original omission bought was a smaller diff.
 
 **`channel_status` must not use the library's existing observability.**
 `ChannelHandle::subscriber_count` (`types.rs:529-531`) and
@@ -348,6 +401,14 @@ Semantics of `Quiesced(reason)`:
 - **The channel actor keeps running.** Quiesce is a roster-level admission
   decision, not an actor command. `ChannelHandle::close` (`types.rs:538-540`) is
   never called.
+- **Re-quiesce is idempotent only if the reason is IDENTICAL** (L3 ruled). Same
+  reason → `Ok(())`, mirroring §II.6's idempotent-if-identical registration.
+  Different reason → `ChannelRegistryError::AlreadyQuiesced { name, reason }`
+  carrying the reason already on record. A reason is written once (the
+  `OnceLock` below); silently keeping the first while reporting success on the
+  second would tell the caller its reason took effect when it did not, and
+  silently replacing it would lose a recorded cause. Refusing is the only option
+  that neither loses nor lies.
 
 ### The race, decided
 
@@ -486,7 +547,10 @@ failures (`:1219`), and a poisoned responder lock (`:542`). It is a catch-all
 ### (a) Lane-local error enums
 
 Two, in a new module `server::connection::channel_registry`. They are split
-because they have disjoint call sites and only one of them reaches the wire.
+because they have disjoint call sites and only one of them reaches the wire:
+`ChannelRegistryError` answers the host holding the handle, and
+`ChannelAccessError` answers a frame. The second is re-exported alongside the
+trait, because §II.5(d) puts it in `ConnectionServices`' own signature.
 
 ```rust
 /// Failures of the REGISTRATION APIs (§II.2). Never reaches the wire.
@@ -515,6 +579,22 @@ pub enum ChannelRegistryError {
     /// (services.rs:360-365).
     #[error("durable channel '{name}' could not be initialized: {message}")]
     DurableInitFailed { name: String, message: String },
+
+    /// Runtime registration was attempted with no `limits.max_channels`
+    /// declared. Refused rather than admitted: unbounded-by-default is not a
+    /// bound (§II.8). Carries the config key so the operator is told what to
+    /// declare, not merely that something is missing.
+    #[error(
+        "runtime channel registration refused: no {cap} is configured; \
+         a deployment that registers channels at runtime must declare its bound"
+    )]
+    CapNotConfigured { cap: &'static str },
+
+    /// The declared `limits.max_channels` is already reached. Shaped on
+    /// `ServerError::ConnectionCapReached` (error.rs:189-197): the key name and
+    /// the configured value, both carried.
+    #[error("channel registration refused: the {cap} limit of {limit} is reached")]
+    CapReached { cap: &'static str, limit: usize },
 
     /// The roster lock is poisoned.
     #[error("channel roster unavailable: {message}")]
@@ -555,47 +635,71 @@ typing without it.
 uses — the `ProtocolError` precedent at
 `crates/liminal/src/protocol/error.rs:56-72` (stable associated `u16` consts) and
 `:76-88` (a `const fn reason_code` matching each variant to its const),
-consumed at `apply.rs:364` and `:375`:
+consumed at `apply.rs:364` and `:375`.
+
+**RULED — the consts live in `liminal-protocol`** (L1 granted). Two values,
+additive public consts on that crate; no new enum variant anywhere, so nothing
+breaks:
 
 ```rust
-impl ChannelAccessError {
-    /// The named channel is not on the roster.
-    pub const CHANNEL_NOT_REGISTERED_CODE: u16 = 0x0101;
-    /// The named channel is quiesced.            [LEAN — see below]
-    pub const CHANNEL_QUIESCED_CODE: u16 = 0x0102;
+// liminal-protocol
+/// The named channel is not on the server's roster.
+pub const CHANNEL_NOT_REGISTERED_CODE: u16 = 0x0101;
+/// The named channel is quiesced; its reason travels in the frame's message.
+pub const CHANNEL_QUIESCED_CODE: u16 = 0x0102;
+```
 
+```rust
+// liminal-server
+impl ChannelAccessError {
     #[must_use]
-    pub const fn reason_code(&self) -> u16 { … }
+    pub const fn reason_code(&self) -> u16 {
+        match self {
+            Self::NotRegistered { .. } => CHANNEL_NOT_REGISTERED_CODE,
+            Self::Quiesced { .. }      => CHANNEL_QUIESCED_CODE,
+            Self::RosterUnavailable { .. } => SERVER_ERROR_CODE,
+        }
+    }
 }
 ```
 
 `RosterUnavailable` keeps `SERVER_ERROR_CODE` (`apply.rs:26`): it is an internal
-fault, not a statement about the channel.
+fault, not a statement about the channel. `CHANNEL_QUIESCED_CODE` stands (L2
+granted) — without it a quiesced publish falls back to the undifferentiated
+`0xFFFF` and the grep problem simply reopens for the second state.
 
-**Band.** `0x0000–0x00FF` is the protocol layer's (`0x0001`–`0x0009` in use,
-`protocol/error.rs:56-72`). `0xFFFF` is the server's undifferentiated
-"something failed" (`apply.rs:26`, used at `:254`, `:432`, `:456`, `:515`,
-`:551`, `:629`, `:710` — the complete census). `0x0100–0x01FF` is reserved here
-for server-layer channel-roster refusals: a name that is not registered is an
-application-layer statement about the roster, not a parse, negotiation, or auth
-failure, so it does not belong in `ProtocolError`'s vocabulary.
+**Why liminal-protocol and not liminal-server.** `liminal-sdk` — the crate a
+wire client actually uses — depends on `liminal-protocol` and NOT on
+`liminal-server` (`crates/liminal-sdk/Cargo.toml`, `[dependencies]`). A code
+minted server-side is a code every SDK client hardcodes as a literal. The stack
+lead added the sharper form of the same observation: the SDK sees the **liminal**
+crate only *optionally* (`liminal = { workspace = true, optional = true }`, same
+manifest), so `ProtocolError`'s home is not a shared surface either — which is
+one more reason the new codes belong in liminal-protocol rather than beside the
+codes they sit next to numerically. Part I's closing paragraph read the wire
+protocol as untouched; that read is right about *frames* and wrong about
+*vocabulary*.
 
-**Where it is minted, and the finding that complicates it.** The consts above
-sit in the new server module. But `liminal-sdk` — the crate a wire client
-actually uses — depends on `liminal-protocol` and NOT on `liminal-server`
-(`crates/liminal-sdk/Cargo.toml`'s `[dependencies]`). A code minted server-side
-is therefore a code every SDK client hardcodes as a literal. Part I's closing
-paragraph read the wire protocol as untouched; that read is right about *frames*
-and wrong about *vocabulary*. **LEAN:** the honest home for the two consts is
-`liminal-protocol`, as additive public consts (no new enum variant, so no break;
-additive on a `0.4.0` crate). The round ruled the code's existence, not its
-crate. Recorded for the cut, because it moves which crates the version question
-touches.
+**CONDITION on L1 — the band map rides the same commit.** Two crates minting
+`u16` reason codes with no shared registry collide someday, and the collision is
+silent: a client reads a number that means one thing to the crate that sent it
+and another to the crate that documented it. The commit that adds the consts
+records, beside them, the complete band map:
 
-**Where it is applied.** `publish_response` (`apply.rs:429-434`) and
-`subscribe_response` (`apply.rs:512-517`) currently hardcode `SERVER_ERROR_CODE`.
-Both learn to ask a `ChannelAccessError` for its code when the failure is one,
-and keep `SERVER_ERROR_CODE` otherwise. This is the only change to `apply.rs`.
+| Band | Owner | Currently minted in |
+| --- | --- | --- |
+| `0x0000–0x00FF` | protocol layer — parse, negotiation, auth | `ProtocolError`'s consts, `crates/liminal/src/protocol/error.rs:56-72` (`0x0001`–`0x0009` in use) |
+| `0x0100–0x01FF` | server layer — channel-roster refusals | `liminal-protocol` (this lane; `0x0101`, `0x0102` in use) |
+| `0xFFFF` | undifferentiated server error | `SERVER_ERROR_CODE`, `apply.rs:26` — the complete site census is `:254`, `:432`, `:456`, `:515`, `:551`, `:629`, `:710` |
+
+The map is the fence. It is not documentation of a decision already safe; it is
+the thing that makes the decision safe, which is why it may not land in a later
+commit.
+
+**Why the roster band is not inside `ProtocolError`'s.** A name that is not
+registered is an application-layer statement about server state, not a parse,
+negotiation, or auth failure. Putting it in the protocol band would make the
+band mean nothing.
 
 ### (c) The probe
 
@@ -604,6 +708,131 @@ and keep `SERVER_ERROR_CODE` otherwise. This is the only change to `apply.rs`.
 contact. The carrier-waits protocol backs off on `NotRegistered`, stops on
 `Quiesced`, and proceeds on `Active`; each is a distinct constructor, so the
 consumer's truth stream reports which one it saw without a string in sight.
+`registered_channels` (§II.2) is its census companion: the probe answers about a
+name the caller already suspects, the enumerator answers about names the caller
+does not.
+
+### (d) Crossing the trait boundary — the admission probe
+
+**Finding F-v1-1 (stack lead, verified at both seats): §II.5(b) cannot be
+applied as this design originally wrote it.** `apply.rs` does not receive a
+`ChannelAccessError`. It receives a `ServerError`, because that is what the
+PUBLIC `ConnectionServices` trait returns — `publish` at `services.rs:169-174`
+and `subscribe` at `services.rs:189-194`, both
+`Result<_, ServerError>` — and the trait is implemented outside this file
+(`worker_front_door.rs:56`, with its own `publish` at `:57-71` and `subscribe`
+at `:73-82`). Three routes were considered and two are barred:
+
+- Adding a `source` or a code field to `ServerError::ListenerAccept`
+  (`error.rs:27-28`) is exactly as breaking as a new variant on an exhaustive
+  public enum. Barred (§II.10, Path B).
+- Recovering the code by inspecting the error's *message* inside a helper is the
+  grep defect wearing a type's coat. Barred by name.
+
+**RULED — the ADMISSION-PROBE-BEFORE form.** One additive, defaulted method on
+the trait:
+
+```rust
+/// Which channel operation is asking. `Copy`, so the hot path allocates
+/// nothing to ask (contrast `ServerError::UnsupportedOperation`'s owned
+/// `operation: String`, error.rs:104-110 — that one is built on a refusal
+/// path, this one is consulted on every frame).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelOperation { Publish, Subscribe }
+
+pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
+    // … existing methods unchanged …
+
+    /// Whether `channel` admits `operation` right now.
+    ///
+    /// Consulted by the connection process BEFORE the operation is delegated,
+    /// so a roster refusal is typed at the moment of the decision and carries
+    /// its own wire reason code. The default admits everything: an adapter
+    /// with no roster has nothing to say here, and its own refusals travel as
+    /// service errors exactly as they do today.
+    ///
+    /// # Errors
+    /// Returns [`ChannelAccessError`] when the roster refuses the operation.
+    fn admit_channel(
+        &self,
+        operation: ChannelOperation,
+        channel: &str,
+    ) -> Result<(), ChannelAccessError> {
+        let _ = (operation, channel);
+        Ok(())
+    }
+}
+```
+
+**No implementor breaks.** The default body returns `Ok(())`, so every existing
+`impl` — in-repo and downstream — compiles untouched. The trait already carries
+two defaulted methods of exactly this kind (`participant_service` →`None` at
+`services.rs:157-159`, `supports_channel_operations` → `true` at `:246-248`), so
+this is the file's own established shape for additive trait surface, not a new
+device.
+
+**Who overrides.** `LiminalConnectionServices` overrides it with the real roster
+read — one §II.4-priced lookup: lock acquire/release, `Arc` clone or state load,
+poison branch. `WorkerFrontDoorServices` inherits the default `Ok(())` and that
+is correct, not an oversight: its refusals are **profile** statements, not
+**roster** statements. It has no roster to consult, and its `publish`/`subscribe`
+already refuse with `UnsupportedOperation` text through the service error path
+(`worker_front_door.rs:57-71`, `:73-82`). Making a profile refusal wear a
+roster reason code would be its own typed lie.
+
+**How `apply.rs` uses it.** `publish_response` (`apply.rs:408-436`) and
+`subscribe_response` (`apply.rs:438-519`) consult `admit_channel` first:
+
+- **Refused** → emit `PublishError`/`SubscribeError` carrying the
+  `ChannelAccessError`'s own `reason_code()` (`0x0101`/`0x0102`) and its own
+  reason text, and **do not call the service at all**. No publish is attempted
+  against a quiesced channel; no subscribe reaches the actor.
+- **Admitted** → proceed exactly as today. If the service then returns `Err`,
+  the frame carries today's EXACT bytes: `SERVER_ERROR_CODE`
+  (`apply.rs:26`, sites `:432` and `:515`) and the preserved message string.
+
+Degraded, never lying. That is the whole shape of it.
+
+**Ground 1 — why not query the roster in the `Err` arm.** Classifying after the
+fact means re-reading the roster AFTER an opaque failure has already happened.
+A publish that failed in the dedup bridge (`services.rs:975-986`), in the actor
+(`:988-992`), or in schema negotiation (`:1053-1058`) — on a channel that was
+CONCURRENTLY quiesced — would come back from that second read as "quiesced" and
+be stamped `0x0102`. The wire would then carry a typed, confident, wrong cause.
+The probe-before form cannot lie by construction: the code is emitted at the
+moment of the admission decision, by the component that made it, from the value
+it decided on. There is no second read to disagree with the first.
+
+**Ground 2 — the price, said aloud: the happy path reads the roster TWICE.**
+Once at admission in `apply.rs`, and once inside the service's own lookup
+(`services.rs:963`, `:1048`), which STAYS. It stays because it is the guard at
+the library boundary: `LiminalConnectionServices::publish` is public and callable
+without going through `apply.rs` at all, and a guard that only exists in the
+caller is not a guard. This is defense in depth, not redundancy to be optimised
+away, and a later reader who deletes the inner check as "already done upstream"
+will have removed the only check that holds for direct callers. The cost is the
+§II.4 read, doubled — two lock acquire/release pairs and two `Arc` touches on a
+path that already performs a haematite dedup claim and an actor round-trip. Same
+framing as §II.4: nanoseconds against actor hops. Small, real, and named.
+
+**Ground 3 — the attribution window, said aloud.** Admission and delegation are
+not atomic; the roster can move between them. A publish that passes admission and
+is then refused by the service — because quiesce landed in between — surfaces as
+`0xFFFF` plus the preserved string, not as `0x0102`. **A reader must not assume
+every roster refusal carries the new codes.** The codes are a reliable *positive*
+signal (a `0x0101` always means the roster said so) and NOT a complete one
+(`0xFFFF` does not prove the roster was fine). This is the same candour §II.3
+owes about the quiesce race, and it has the same root: the design refuses to hold
+a lock across the library boundary, and pays for that refusal in windows it names
+rather than windows it hides.
+
+**Ground 4 — why this does not contradict §II.2.** §II.2 keeps *registration*
+vocabulary off the trait. That objection was about authority-moving APIs on a
+profile that owns no channels. Access refusal is different in kind: it is
+hot-path vocabulary the worker profile already answers, via
+`supports_channel_operations` (`services.rs:246-248`). The stack lead ruled the
+distinction explicitly, and it is recorded here so a later reader does not read
+§II.2 and §II.5(d) as an inconsistency the design failed to notice.
 
 ## II.6 — Identical configuration: the compared field set
 
@@ -648,11 +877,12 @@ ones. Comparing it would refuse every idempotent re-registration.
   all; `ChannelRegistration` carries bytes.
 - **`origin`.** See §II.7.
 
-**LEAN — re-registering a boot-configured channel.** An identical registration
-against a `BootConfigured` entry returns `AlreadyIdentical` and the origin does
-NOT flip to `RuntimeRegistered`. Flipping it would make the entry lie about its
-restart fate (§II.7): it survives restart because the config file still lists
-it, whatever a runtime call said about it. The round did not rule this.
+**RULED — the origin never flips** (L4 granted). An identical registration
+against a `BootConfigured` entry returns `AlreadyIdentical` and the entry stays
+`BootConfigured`. Flipping it would make the entry lie about its restart fate
+(§II.7): it survives restart because the config file still lists it, whatever a
+runtime call said about it. It also matters for the cap: a flip would move an
+entry into the counted population (§II.8) without a channel having been created.
 
 ## II.7 — Boot config as a seed; the restart contract
 
@@ -717,27 +947,73 @@ Pinned by `runtime_registered_channels_are_absent_after_restart` — §II.9, tes
   measurably slow call. It is on the registering host's thread, not on any
   connection's path.
 
-**What bounds the aggregate: nothing, today.** `config.channels` is
-operator-authored and finite; a runtime API removes that bound. **LEAN:** a
-`limits.max_channels` cap on `LimitsConfig`, refusing registration past it with
-a typed variant, following the `ConnectionCapReached` precedent
-(`error.rs:189-197`) and the existing per-connection caps
-(`apply.rs:452-466`). The round ruled that the aggregate must be bounded and did
-not rule *whose* cap it is; until it does, v1's bound is host-side discipline,
-which is not a bound. This is the largest LEAN in the document and the cut
-should not close without an answer.
+**What bounds the aggregate: `limits.max_channels`, declared by the operator.**
+`config.channels` is operator-authored and finite; a runtime API removes that
+bound, so v1 restores it explicitly (L5 ruled — this was the largest gap in
+design v1 and it closes here).
+
+```rust
+pub struct LimitsConfig {
+    // … the existing eight caps, unchanged …
+    /// Runtime-registered channels this deployment admits. NO DEFAULT: a
+    /// deployment that registers channels at runtime declares its own bound.
+    pub max_channels: Option<usize>,
+}
+```
+
+**`Option`, with no default value.** Every other cap on `LimitsConfig` carries a
+`#[serde(default = "…")]` and a documented §5 constant
+(`crates/liminal-server/src/config/types.rs:286-320`, constants at `:324-338`),
+because each of those numbers is derived from a signed §5 bound. There is no such
+bound for channel count, and the estate bars inventing one. Nor may the field be
+`usize` with a large default — unbounded-by-default is not a bound, it is the
+gap wearing a number.
+
+**Absent ⇒ registration refuses, typed.** `register_channel` with no
+`limits.max_channels` configured returns
+`ChannelRegistryError::CapNotConfigured { cap: "limits.max_channels" }`
+(§II.5(a)), carrying the key so the operator is told what to declare rather than
+that something is missing. A host that wants runtime registration declares its
+bound; a deployment that never registers loses nothing and needs no config
+change, so this is not a compatibility break for any existing config file.
+
+**Present ⇒ enforced, in the existing shape.** Past the cap,
+`CapReached { cap, limit }` — modelled on `ServerError::ConnectionCapReached`
+(`error.rs:189-197`), which carries the `limits.*` key name and the configured
+value for exactly this reason, and matching how the per-connection subscription
+cap already refuses (`apply.rs:452-466`). A configured `Some(0)` is a config
+validation error, joining the eight caps already checked non-zero by
+`LimitsConfig::collect_errors` (`config/types.rs:344-375`) under the rule that
+"a zero cap gates nothing — the unlimited-by-silence state §5 outlaws".
+
+**The counting predicate, stated: the cap bounds `RuntimeRegistered` entries
+ONLY.** Boot-configured channels are the operator's own authored bound — they are
+in the file the operator wrote — and counting them would make the same number
+mean two different things depending on how the deployment was configured. A cap
+whose population is ambiguous is a count-domain defect, so the population is
+named here and not left to the implementation: `count(entries where origin ==
+RuntimeRegistered) < max_channels` is the admission predicate, evaluated under
+the write lock that performs the insert (§II.4), so the check and the insert
+cannot race. §II.6's rule that the origin never flips is what keeps this
+population well-defined over time.
 
 Pinned by `registered_idle_channels_spawn_no_actor` — §II.9, test 3.
 
 ## II.9 — The three pinned tests
+
+All three fixtures configure `limits.max_channels` (§II.8). Registration refuses
+`CapNotConfigured` without it, so the cap is a precondition of every test that
+registers anything — stated once here rather than rediscovered three times.
 
 ### Test 1 — the restart contract
 
 `runtime_registered_channels_are_absent_after_restart`
 
 1. Build services over a config listing one boot channel `boot`, with a
-   `persistence_path` in a `tempdir`, via `from_config_with_store`
-   (`services.rs:311`).
+   `persistence_path` in a `tempdir` and `limits.max_channels = Some(4)` (§II.8
+   — without it every `register_channel` in this test refuses
+   `CapNotConfigured`, so the cap is part of the fixture, not scenery), via
+   `from_config_with_store` (`services.rs:311`).
 2. `register_channel` a durable `runtime`. Publish to both; both succeed.
 3. Drop the services (running the durable flush, `services.rs:1150-1164`).
 4. Rebuild from the SAME config and the SAME store path.
@@ -793,14 +1069,32 @@ is the decision; this exercises the decision directly.
 `ChannelHandle` accessor that could answer "is there an actor?" —
 `subscriber_count` (`types.rs:529-531`), `close` (`types.rs:538-540`) — routes
 through `core()` (`types.rs:543-545`), which SPAWNS one. Observing the property
-would destroy it. **LEAN:** add
-`ChannelHandle::is_actor_spawned(&self) -> bool` reading
-`ChannelActorState.core.get().is_some()` (`types.rs:96`) without touching
-`core()`. It cannot be `#[cfg(test)]`: liminal-server's tests cannot see
-liminal's test-gated items. So it is new public surface on liminal (0.5.1),
-additive, minor — and it means **this lane touches the liminal library crate,
-not only liminal-server**. That is a real widening of the cut's blast radius and
-belongs in §II.10's pricing.
+would destroy it.
+
+**RULED — `ChannelHandle::is_actor_spawned(&self) -> bool` on the liminal
+crate** (L6 granted): new public surface on liminal (0.5.1), additive, minor.
+It cannot be `#[cfg(test)]` — liminal-server's tests cannot see liminal's
+test-gated items — so it is a real API, and the ruling attaches three conditions
+that keep it one:
+
+1. **Its doc-comment states that it NEVER spawns, and why it exists.** The point
+   is spawn-state observability: an actor that materialises lazily
+   (`types.rs:127-142`) has an observable spawned/unspawned state, and a library
+   that offers no way to read it forces every consumer to choose between not
+   knowing and destroying the thing it wanted to know. That is a genuine gap in
+   the handle's surface, not test theatre with a public modifier on it.
+2. **It reads `ChannelActorState.core.get().is_some()` (`types.rs:96`) and
+   touches nothing else.** No `core()`, no supervisor call, no `ensure_running`
+   (`supervisor.rs:227`) — that last one matters, because `ensure_running`
+   RESTARTS a dead actor, so a naive implementation would not merely observe
+   the state but repair it.
+3. **Test 3 keeps both arms.** The grow arm (step 3) and the flat arm (step 4)
+   are one instrument; either alone proves nothing. A flat arm with no grow arm
+   cannot distinguish "the idle channels spawned nothing" from "the harness
+   measured nothing at all".
+
+It means **this lane touches the liminal library crate, not only
+liminal-server** — a real widening of the cut's blast radius, priced in §II.10.
 
 **The gap this test does NOT close.** It bounds *spawn by registration*. It does
 not census scheduler occupancy, because no OS-level process census is available:
@@ -836,10 +1130,25 @@ dishonest:
    (`apply.rs:26`), so no correct client can have keyed on it for this case —
    but it is wire-observable and must be named in the release notes, not
    discovered.
-3. **The liminal-side test seam.** §II.9's `is_actor_spawned` is additive public
-   surface on liminal (0.5.1) — minor there, but it makes this a two-crate cut,
-   and three-crate if the reason-code consts move to liminal-protocol (0.4.0,
-   also additive, also minor).
+3. **The `admit_channel` trait method.** Additive with a default body
+   (§II.5(d)), so no implementor breaks and it stays inside "minor". It is the
+   one place where a mistake would not: a method added *without* a default body
+   breaks every downstream implementor of a public trait, silently converting
+   this into Path B's price by a different route.
+
+**RULED — this is a THREE-CRATE cut** (L1), each leg additive and each priced at
+its own cut:
+
+| Crate | Version now | What this lane adds | Honest number |
+| --- | --- | --- | --- |
+| `liminal-server` | 0.5.1 | registration/quiesce/probe/enumerator APIs, two lane-local enums, `admit_channel` (defaulted), `limits.max_channels` | minor — additive |
+| `liminal-protocol` | 0.4.0 | two `pub const u16` reason codes + the band map (§II.5(b)) | minor — additive, no enum variant |
+| `liminal` | 0.5.1 | `ChannelHandle::is_actor_spawned` (§II.9) | minor — additive |
+
+Three additive-minor legs is a wider cut than design v1 assumed, and the width
+is the honest consequence of two findings — the SDK cannot see liminal-server,
+and the spawn state cannot be observed without destroying it — rather than scope
+creep. Each leg is separately releasable; none of them is a break.
 
 **Path B — rejected, priced openly.** A typed `ServerError::ChannelNotRegistered`
 variant. `ServerError` is public and exhaustive: no `#[non_exhaustive]` at
@@ -851,16 +1160,26 @@ already differentiated on the wire. Declined, and declined in the open, because
 "we did not add a `ServerError` variant" is only honest if the alternative was
 weighed rather than avoided.
 
-**LEAN — `#[non_exhaustive]` on the new enums.** Not ruled. The estate has a
-recorded refusal of the attribute for the 268 public enums in
+**RULED — no `#[non_exhaustive]` on the new enums** (L7 granted explicitly).
+The estate's recorded refusal of the attribute covers the 268 public enums in
 `crates/liminal-protocol/src` (`docs/gates/EXHAUSTIVENESS-REFUSAL.md`, Cally Ray,
 2026-08-03), on the ground that causes must travel by type and a forced `_ =>`
-arm un-makes that discipline. That refusal is scoped to liminal-protocol, so it
-does not decide these enums — but its ground applies identically here: a carrier
-that wildcards its way past a future `ChannelAccessError` variant is a silent
-policy change waiting to happen. **Lean: no `#[non_exhaustive]`, consistent with
-the recorded ruling.** The round should say so explicitly rather than let the
-scope gap decide by default.
+arm un-makes that discipline.
+
+Its *scope* is liminal-protocol, so it did not decide these enums by itself. The
+stack lead **judged its grounds to extend here**, and the judgement is recorded
+rather than assumed: the ground — a wildcard arm past a future variant is a
+silent policy change that will compile, will run, and will route an unconsidered
+cause into whichever branch the wildcard happened to land in — applies
+identically to a carrier matching on `ChannelAccessError`. That carrier is
+exactly the consumer whose backoff turns on the discrimination this lane exists
+to provide.
+
+This is the judged-not-blanket shape the refusal document reserves for itself: a
+named person extended named grounds to a named new surface, on the record, at the
+moment the surface was designed. It is not the attribute being refused everywhere
+by default, and a future enum elsewhere in the estate inherits the grounds, not
+the verdict.
 
 ## II.11 — What v1 does not do
 
@@ -882,7 +1201,10 @@ scope gap decide by default.
   reopens with teeth the day a wire surface is proposed.
 - **No per-channel authorisation.** No ACL, no ownership, no quota per
   registrant. Every holder of the handle is fully privileged.
-- **No aggregate cap.** See §II.8's LEAN. This is a gap, not a decision.
+- **No aggregate cap that the SERVER invents.** `limits.max_channels` is ruled
+  (§II.8) but it is `Option` with no default: liminal does not choose a number,
+  it requires the operator to. A deployment that declares nothing cannot
+  register at runtime — which is a refusal, not an unbounded roster.
 - **No schema evolution through registration.** `ChannelHandle` can evolve a
   live schema (`types.rs:391`, `schema.rs:117`), and re-registering with
   different schema bytes REFUSES (§II.6) rather than evolving. Registration
@@ -890,32 +1212,53 @@ scope gap decide by default.
   v1, and the comparison in §II.6 reads the AS-REGISTERED document
   (`handle.config().schema`, unaffected by evolution) so an evolved channel does
   not start refusing its own original config.
-- **No roster listing on the probe.** `channel_status` answers about one name.
-  A `registered_channels() -> Vec<ChannelDescriptor>` enumerator is obvious and
-  cheap under §II.4's read lock, but the round did not ask for it and a
-  projector reconciling by name does not need it. **LEAN: omit from v1.**
 - **No metrics.** No per-channel gauge, no registration counter. The existing
   metrics are process-wide (`metrics.rs:48-73`) and v1 adds none.
+- **`admit_channel` is not an admin surface.** It is a trait method the
+  connection process calls on the way to a publish or a subscribe. No frame
+  reaches it; no client invokes it. The wire-admin refusal above is unaffected
+  by it.
 
-## II.12 — Every LEAN in this document
+*(Design v1 also proposed omitting the roster enumerator. That omission was
+OVERRULED — `registered_channels()` is in v1; see §II.2.)*
 
-Collected so the round can rule them in one pass:
+## II.12 — The ruling record
 
-1. §II.5(b) — the two reason-code consts belong in `liminal-protocol`, not
-   liminal-server, because `liminal-sdk` cannot see liminal-server. Makes this a
-   three-crate cut.
-2. §II.5(b) — `CHANNEL_QUIESCED_CODE` (`0x0102`). The round ruled a distinct
-   not-registered code; a quiesced publish would otherwise fall back to the
-   undifferentiated `0xFFFF`, which re-opens the grep problem for the second
-   state.
-3. §II.5(a) — `AlreadyQuiesced` on a re-quiesce with a DIFFERENT reason;
-   identical reason is idempotent success, mirroring registration.
-4. §II.6 — an identical re-registration of a boot-configured channel does not
-   flip its origin.
-5. §II.8 — `limits.max_channels`. The aggregate is unbounded without it.
-   **The largest gap in this design.**
-6. §II.9 — `ChannelHandle::is_actor_spawned`, new public surface on the liminal
-   crate, without which test 3's step 4 cannot be written at all.
-7. §II.10 — no `#[non_exhaustive]` on the new enums, consistent with the
-   recorded liminal-protocol refusal whose scope does not reach them.
-8. §II.11 — no `registered_channels()` enumerator in v1.
+Design v1 was ACCEPTED at the design round (2026-08-03) with one structural
+finding and all eight LEANs ruled. Nothing in Part II is open. The register below
+is the record; each ruling's substance lives in its own section and is not
+restated here.
+
+### The structural finding
+
+**F-v1-1 — the typed refusal could not cross the trait boundary as written.**
+Raised and verified at both seats. `apply.rs` receives `ServerError` through the
+public `ConnectionServices` trait (`services.rs:169-174`, `:189-194`), so
+§II.5(b)'s wire code had no route to the frame. RESOLVED by the
+admission-probe-before form, ruled by the stack lead as seam owner and written up
+as decided in **§II.5(d)**, together with the four grounds: why not the `Err`-arm
+query, the doubled roster read on the happy path, the attribution window, and why
+§II.2's placement objection does not carry.
+
+### The eight LEANs, ruled
+
+| # | Subject | Ruling | Now in |
+| --- | --- | --- | --- |
+| L1 | Reason-code consts' home | **GRANTED** — `liminal-protocol`; three-crate cut accepted, each leg additive-minor. **CONDITION:** the three-band map rides the SAME commit as the consts | §II.5(b), §II.10 |
+| L2 | `CHANNEL_QUIESCED_CODE` `0x0102` | **GRANTED** — stands | §II.5(b) |
+| L3 | Different-reason re-quiesce | **GRANTED** — refuses `AlreadyQuiesced`; identical reason is idempotent | §II.3, §II.5(a) |
+| L4 | Origin on identical re-registration | **GRANTED** — never flips | §II.6 |
+| L5 | Aggregate cap | **RULED — THE GAP CLOSES.** `limits.max_channels`, `Option`, no default; absent ⇒ `CapNotConfigured`; population = `RuntimeRegistered` entries only | §II.5(a), §II.8 |
+| L6 | `is_actor_spawned` | **GRANTED** — additive minor on liminal, under three conditions | §II.9 |
+| L7 | `#[non_exhaustive]` | **GRANTED EXPLICITLY** — none. The refusal doc's grounds JUDGED to extend here; a judged extension on the record | §II.10 |
+| L8 | Roster enumerator | **OVERRULED** — `registered_channels()` is IN v1: a by-name probe can never detect an unexpected extra | §II.2, §II.11 |
+
+Two of these changed the design rather than confirming it. L5 closed what this
+document called its own largest gap, and did it by refusing to invent a number —
+the cap is required, not defaulted, so a deployment that wants runtime
+registration states its own bound and one that does not is unaffected. L8
+reversed an omission whose only justification had been a smaller diff, on the
+census ground that verification without a population denominator is not
+verification. Both are recorded here as reversals, not as things the design got
+right, because a design document that quietly absorbs its own corrections stops
+being evidence of anything.
