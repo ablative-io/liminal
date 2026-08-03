@@ -18,6 +18,20 @@
 //! `OwnerTransition { .. }`, which is a legal pattern for a unit variant AND
 //! for a tuple variant, so the red-state tree builds and the fix commit does
 //! not get to rewrite the test that judges it.
+//!
+//! ⚠ THAT LAST GUARD WAS DEPARTED FROM, 2026-08-03, AND THE DEPARTURE IS
+//! RECORDED HERE RATHER THAN QUIETLY TAKEN. The §3.3 commit DID change two
+//! poles: `a_precedence_refusal_is_told_apart_from_its_four_siblings` was
+//! RETIRED (its premise died when §3.1's clamp removed the only route to a
+//! `Precedence` refusal on this fixture) and
+//! `a_non_precedence_owner_transition_refusal_keeps_its_own_reason` was REMOVED
+//! as subsumed. The guard above exists to stop a fix from rewriting its own
+//! judge for convenience; what protects that intent here is that BOTH changes
+//! were pre-ruled by an independent design gate (5f389528) BEFORE authorship,
+//! naming the retirement, its supersession, and the self-naming backstop that
+//! replaces it. The author did not choose which tests to change. The
+//! `OwnerTransition { .. }` pattern claim above still holds and negative pole
+//! ONE, which uses it, is untouched.
 
 use alloc::{
     format,
@@ -35,7 +49,7 @@ use crate::{
 use super::binding_fate_tests::{frontier_owner_with_limit, ordinary_token};
 use super::{
     BindingFateMeasurementError, BindingFateTerminal, BindingTerminalAdmission,
-    BindingTerminalCauseClass, LiveFrontierOwner,
+    BindingTerminalCauseClass, LiveFrontierError, LiveFrontierOwner,
 };
 use crate::lifecycle::{
     ActiveBinding, AdmissionOrder, BindingTerminalDisposition, ClaimFrontiers,
@@ -405,36 +419,92 @@ fn a_retained_unacked_marker_pins_the_measured_floor() -> Result<(), String> {
     Ok(())
 }
 
-/// §3.3 RED UNIT, positive pole. A `Precedence` refusal must arrive carrying
-/// `Precedence`.
+/// §3.3 POSITIVE POLE. A `RetainedCharge` refusal must arrive CARRYING
+/// `RetainedCharge`.
 ///
-/// The observable that survives the variant's shape change is
-/// DISCRIMINATION: two different `LiveFrontierError` causes, raised on a
-/// byte-identical frontier, must not compare equal at this boundary. Today
-/// both are the bare `OwnerTransition`, so they DO compare equal and this
-/// fails — which is precisely the tax §2 names, the one that turned a
-/// one-minute diagnosis into a store excavation.
+/// Driven END-TO-END through a real producer, not by poking the constructor:
+/// `refusal_of(false)` runs the whole measurement, and the refusal is raised by
+/// the retained-charge preflight at
+/// `live_frontier/binding_fate_transition.rs:34` — the first guard inside
+/// `prepare_binding_fate_transition`, whose `LiveFrontierError` travels out to
+/// `binding_fate.rs:373` and is now carried instead of discarded.
+///
+/// This replaces the Precedence positive pole, whose premise §3.1 retired; see
+/// the backstop sentinel below. What that pole tested — that two causes on a
+/// byte-identical frontier are TOLD APART at this boundary — is now tested more
+/// strongly, by naming the exact cause rather than by comparing two refusals
+/// for inequality.
 #[test]
-fn a_precedence_refusal_is_told_apart_from_its_four_siblings() -> Result<(), String> {
-    let precedence = refusal_of(true)?;
-    let retained_charge = refusal_of(false)?;
-    if !matches!(
-        precedence,
-        BindingFateMeasurementError::OwnerTransition { .. }
-    ) {
+fn a_retained_charge_refusal_carries_its_own_cause() -> Result<(), String> {
+    let refused = refusal_of(false)?;
+    let BindingFateMeasurementError::OwnerTransition(cause) = refused else {
         return Err(format!(
-            "F8 §3.3: a marker-crossing floor did not refuse through the owner transition at \
-             all: {precedence:?}"
+            "F8 §3.3: a retained-charge mismatch did not refuse through the owner transition \
+             at all: {refused:?}"
         ));
-    }
-    if precedence == retained_charge {
+    };
+    if cause != LiveFrontierError::RetainedCharge {
         return Err(format!(
-            "F8 §3.3: a Precedence refusal and a RetainedCharge refusal are indistinguishable \
-             at the protocol boundary — both arrive as {precedence:?}, so no operator and no \
-             consumer can tell which of the five causes fired"
+            "F8 §3.3: the owner-transition carrier arrived holding {cause:?}, but the refusal \
+             was raised by the retained-charge preflight at \
+             binding_fate_transition.rs:34 — the carrier is transporting the wrong cause"
         ));
     }
     Ok(())
+}
+
+/// §3.3 BACKSTOP SENTINEL — successor to the RETIRED Precedence positive pole.
+///
+/// THE RETIREMENT, AND WHAT SUPERSEDED IT. The pole that stood here,
+/// `a_precedence_refusal_is_told_apart_from_its_four_siblings`, discriminated a
+/// `Precedence` refusal from its four siblings on the §1 incident fixture. Its
+/// premise no longer exists. The SOLE producer of
+/// `LiveFrontierError::Precedence` is `map_frontier_error` at
+/// `live_frontier.rs:1541`, reached only through the floor path that §3.1 now
+/// clamps, so the incident fixture no longer mints a Precedence refusal at all
+/// — it measures successfully. SUPERSEDED BY §3.1's clamp.
+///
+/// BOUNDARY, deliberate: §3.1's own unit
+/// (`a_retained_unacked_marker_pins_the_measured_floor`) owns the clamp
+/// DIRECTION, and this sentinel does not restate it. It asserts nothing about
+/// the measured floor's value or about marker retention. Its whole subject is
+/// the retired CAUSE.
+///
+/// WHY A SENTINEL AND NOT A DELETION: a retired pole that simply vanishes is
+/// indistinguishable from one quietly deleted, and a silent green here would
+/// hide the premise returning. So this stands where the pole stood and, if the
+/// premise ever comes back, ANNOUNCES ITSELF BY NAME as the backstop firing.
+#[test]
+fn the_retired_precedence_pole_backstop_names_itself_if_it_ever_fires() -> Result<(), String> {
+    let fixture = incident_fixture(true)?;
+    match fixture.owner.prepare_binding_fate(
+        fixture.token,
+        BindingFateTerminal::Ordinary(fixture.terminal),
+        fixture.hard_observer_progress,
+    ) {
+        Ok(_) => Ok(()),
+        Err(refused) => {
+            let error = refused.error();
+            if matches!(
+                error,
+                BindingFateMeasurementError::OwnerTransition(LiveFrontierError::Precedence)
+            ) {
+                return Err(format!(
+                    "F8 §3.3 BACKSTOP FIRING, BY NAME: the RETIRED Precedence premise has \
+                     RETURNED. The §1 incident fixture refused with {error:?}, where §3.1's \
+                     clamp should have carried the measurement through. This sentinel \
+                     supersedes a_precedence_refusal_is_told_apart_from_its_four_siblings; if \
+                     you are reading this, that retirement must be reconsidered — do not \
+                     silence this test"
+                ));
+            }
+            Err(format!(
+                "F8 §3.3 BACKSTOP, BY NAME: the §1 incident fixture stopped measuring, but NOT \
+                 through the retired Precedence premise — it refused with {error:?}. The \
+                 retirement still stands; the fixture does not. Report this, do not silence it"
+            ))
+        }
+    }
 }
 
 /// §3.3 RED UNIT, negative pole ONE. A failure that is not an owner-transition
@@ -478,28 +548,23 @@ fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier()
     Ok(())
 }
 
-/// §3.3 RED UNIT, negative pole TWO. A non-`Precedence` owner-transition
-/// refusal keeps its OWN reason. The carrier discriminates by the protocol's
-/// own cause, not by the seat that raised it, so a `Precedence` test at any
-/// consumer must answer NO for the other four.
-#[test]
-fn a_non_precedence_owner_transition_refusal_keeps_its_own_reason() -> Result<(), String> {
-    let retained_charge = refusal_of(false)?;
-    let precedence = refusal_of(true)?;
-    if !matches!(
-        retained_charge,
-        BindingFateMeasurementError::OwnerTransition { .. }
-    ) {
-        return Err(format!(
-            "F8 §3.3 negative pole TWO: a retained-charge mismatch did not refuse through the \
-             owner transition: {retained_charge:?}"
-        ));
-    }
-    if retained_charge == precedence {
-        return Err(format!(
-            "F8 §3.3 negative pole TWO: a RetainedCharge refusal is readable as lane \
-             precedence — both arrive as {retained_charge:?}"
-        ));
-    }
-    Ok(())
-}
+// §3.3 NEGATIVE POLE TWO WAS REMOVED HERE, and the removal is recorded rather
+// than performed silently.
+//
+// It was `a_non_precedence_owner_transition_refusal_keeps_its_own_reason`, and
+// it asserted that a RetainedCharge refusal and a Precedence refusal do not
+// compare equal at this boundary. BOTH of its premises are gone:
+//
+//   1. It required a live Precedence refusal from `refusal_of(true)`, which
+//      §3.1's clamp retired — the same retirement the backstop sentinel above
+//      records.
+//   2. Its actual subject, "causes inside the carrier do not collapse to one",
+//      is now asserted DIRECTLY and more strongly by
+//      `a_retained_charge_refusal_carries_its_own_cause`, which names the exact
+//      cause by value instead of comparing two refusals for inequality.
+//
+// Rewriting it against the surviving cause would have produced a tautology of
+// the positive pole (cause == RetainedCharge already entails cause !=
+// Precedence), and a tautological test is a green that cannot fail. Negative
+// pole ONE below is untouched and still carries the "a carrier that answers yes
+// to everything is not a carrier" property.

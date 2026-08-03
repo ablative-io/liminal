@@ -145,8 +145,14 @@ pub enum BindingFateMeasurementError {
     ObserverProgress,
     /// The measured checked floor is outside the delivery-sequence domain.
     ResultingFloor,
-    /// The coupled frontier, retained charges, or closure baseline refused installation.
-    OwnerTransition,
+    /// The coupled frontier, retained charges, or closure baseline refused
+    /// installation, CARRYING the protocol's own cause.
+    ///
+    /// §3.3: the cause rides this carrier BY TYPE, because the park-versus-fatal
+    /// decision downstream is not allowed to read it back out of a formatted
+    /// message. The payload is free — both this enum and `LiveFrontierError`
+    /// are `Copy` (`live_frontier.rs:1047`), so the derives above survive it.
+    OwnerTransition(LiveFrontierError),
 }
 
 /// Refused measurement preserving every move-only input for serial retry.
@@ -370,7 +376,7 @@ fn validate_binding_fate_measurement(
             floor.resulting_floor,
             terminal == BindingFateTerminal::RecoveredAndReserveFinalizer,
         )
-        .map_err(|_| BindingFateMeasurementError::OwnerTransition)?;
+        .map_err(BindingFateMeasurementError::OwnerTransition)?;
     Ok(ValidatedBindingFateMeasurement {
         participant_id: floor.participant_id,
         binding_epoch: floor.binding_epoch,
