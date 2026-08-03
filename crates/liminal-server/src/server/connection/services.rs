@@ -151,6 +151,21 @@ pub struct PublishOutcome {
     pub delivered: bool,
 }
 
+/// Which channel operation is asking the roster for admission.
+///
+/// `Copy`, so the hot path allocates nothing to ask. The contrast is
+/// [`ServerError::UnsupportedOperation`]'s owned `operation: String`: that one is
+/// built on a refusal path and pays for its allocation once per refusal, while
+/// this one is consulted on every publish and every subscribe frame that reaches
+/// the connection process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelOperation {
+    /// A `Publish` frame is asking.
+    Publish,
+    /// A `Subscribe` frame is asking.
+    Subscribe,
+}
+
 /// Operations that adapt wire frames to liminal library calls.
 pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
     /// Returns the complete participant service installed on this adapter.
@@ -250,6 +265,37 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
     /// not consult this flag.
     fn supports_channel_operations(&self) -> bool {
         true
+    }
+
+    /// Whether `channel` admits `operation` right now.
+    ///
+    /// Consulted by the connection process BEFORE the operation is delegated, so
+    /// a roster refusal is typed at the moment of the decision, by the component
+    /// that made it, from the value it decided on. The alternative — classifying
+    /// an opaque failure afterwards by re-reading the roster in the error arm —
+    /// cannot tell "the roster refused this" from "something else failed while
+    /// the roster happened to change", and would put a confident wrong cause on
+    /// the wire.
+    ///
+    /// It does NOT replace the adapter's own inner check. Admission here is the
+    /// caller's guard; a service method is public and callable without a frame,
+    /// so it keeps its own.
+    ///
+    /// The default ADMITS. An adapter with no roster has nothing to say here and
+    /// its refusals travel as service errors exactly as they do today; only the
+    /// roster-owning adapter overrides this. A default body is also what keeps
+    /// this addition inside "minor": a method added without one breaks every
+    /// downstream implementor of a public trait.
+    ///
+    /// # Errors
+    /// Returns [`ChannelAccessError`] when the roster refuses the operation.
+    fn admit_channel(
+        &self,
+        operation: ChannelOperation,
+        channel: &str,
+    ) -> Result<(), ChannelAccessError> {
+        let _ = (operation, channel);
+        Ok(())
     }
 }
 
@@ -1416,6 +1462,36 @@ impl ConnectionServices for LiminalConnectionServices {
         self.participant_service.clone()
     }
 
+    /// The roster's admission decision, exposed across the trait boundary as the
+    /// permission alone.
+    ///
+    /// Two methods share the name `admit_channel` on this type: this trait
+    /// method, and the private inherent funnel it delegates to. They are the
+    /// same decision at two different boundaries — the funnel returns the ENTRY
+    /// the decision was made on, because its in-crate callers go on to publish
+    /// or subscribe through it, and this one returns `()`, because a caller
+    /// outside the crate is asking whether it MAY, not for the thing itself.
+    /// Handing the entry out here would make [`ConfiguredChannel`] public
+    /// surface and hand a frame-level caller a channel handle it has no business
+    /// holding. Rust resolves an inherent method ahead of a trait method of the
+    /// same name, so the funnel's existing callers — and the call below — reach
+    /// the funnel; the trait form is reached only through a `dyn
+    /// ConnectionServices`, which is exactly the caller it exists for.
+    ///
+    /// `operation` is unused in v1 and the parameter is still right: absence
+    /// refuses both operations, and quiesce refuses new publishes and new
+    /// subscribes alike, so the two answers are equal today and not equal by
+    /// definition. A signature that could not see what it was deciding about
+    /// would have to break the day they part.
+    fn admit_channel(
+        &self,
+        _operation: ChannelOperation,
+        channel: &str,
+    ) -> Result<(), ChannelAccessError> {
+        LiminalConnectionServices::admit_channel(self, channel)?;
+        Ok(())
+    }
+
     fn publish(
         &self,
         channel: &str,
@@ -1783,7 +1859,16 @@ impl SubscriptionResource for LiminalSubscriptionResource {
 ///
 /// `Quiesced` has no predecessor string to preserve; it carries the refusal's own
 /// message, reason included.
-fn access_to_server_error(error: &ChannelAccessError) -> ServerError {
+///
+/// The connection process renders its admission refusals through this SAME
+/// function rather than through [`ChannelAccessError`]'s own `Display`. Two
+/// consequences, both wanted. The bytes on the wire for an absent channel stay
+/// exactly what they have always been, which is the whole of the semver promise
+/// this lane makes. And an operation refused AT admission and one refused after
+/// admission by the service produce the identical message, differing only in the
+/// reason code — so the code really is the only discriminator, instead of the
+/// message quietly becoming a second one.
+pub(super) fn access_to_server_error(error: &ChannelAccessError) -> ServerError {
     let message = match error {
         ChannelAccessError::NotRegistered { name } => {
             format!("channel '{name}' is not configured")
