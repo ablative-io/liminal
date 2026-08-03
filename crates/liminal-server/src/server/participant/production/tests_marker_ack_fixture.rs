@@ -623,35 +623,6 @@ pub(super) struct AttachedDrainAttempt {
     pub(super) drain: Result<MarkerFixture, String>,
 }
 
-/// Outcome of the F8 PRECONDITION MEASUREMENT (ruling a35c1cb7): does the
-/// marker still drain under `marker_fixture_config` AS TUNED once the members
-/// have attached?
-///
-/// This is a measurement, not a rework. `prepare_marker_fixture` above is
-/// untouched; this is an additive sibling that differs from it in exactly one
-/// respect — two `CredentialAttach` dispatches after enrolment — so any
-/// difference in outcome is attributable to the attaches and to nothing else.
-/// The config is used exactly as tuned; no debt arithmetic is retuned here.
-pub(super) struct AttachedDrainAttempt {
-    /// POSITIVE CONTROL that the attaches actually landed. Part A established
-    /// that without a `CredentialAttach` no participant ever holds a
-    /// binding-fate token (`ops_attach.rs:331-337` is the sole mint), so the
-    /// APPEARANCE of these tokens IS the attach observed. `false` here means
-    /// the measurement never got the state it was built to test.
-    pub(super) first_has_binding_fate: bool,
-    pub(super) second_has_binding_fate: bool,
-    /// CONDITION (b): the derived endpoint AND the live index it came from,
-    /// printed in the teed log. The observable that decided the discriminator
-    /// now serves the fixture.
-    pub(super) derived_ack_endpoints: Vec<DerivedAckEndpoint>,
-    /// The DRAIN WITNESS, non-idempotent by construction: `drive_marker_drain`
-    /// only returns `Ok` if `authority.last_marker_projection` surrendered a
-    /// marker projection at the fourth commit — a one-shot value consumed by
-    /// `.take()` that exists ONLY if a drain actually projected. It is an
-    /// event, not a state that could legitimately sit still.
-    pub(super) drain: Result<MarkerFixture, String>,
-}
-
 pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAttempt, Box<dyn Error>>
 {
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
