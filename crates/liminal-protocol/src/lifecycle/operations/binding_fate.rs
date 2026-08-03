@@ -455,8 +455,13 @@ fn validate_binding_fate_floor(
     // crosses a retained marker (`LiveFrontierError::Precedence`). Those were
     // two halves of one invariant with neither clamping, so the computation
     // could produce a floor the transition was obliged to reject: the incident
-    // in §1, where the refusal is collapsed to a bare `OwnerTransition` and the
-    // Died row that carries the intent is already durable.
+    // in §1, where the refusal WAS collapsed to a bare `OwnerTransition` and
+    // the Died row carrying the intent WAS already durable by the time the
+    // measurement ran. Both halves of that clause describe the PRE-FIX path and
+    // nothing else. §3.3 now carries the cause by type (`OwnerTransition` takes
+    // a `LiveFrontierError`), and §3.2 split the live path so the measurement
+    // runs BEFORE the source append -- only the combined boot form still
+    // measures against a source that is already durable.
     //
     // The purpose of a retained marker is precisely that its record stays
     // replayable until acked. Pinning is the marker's meaning; unsatisfiability
