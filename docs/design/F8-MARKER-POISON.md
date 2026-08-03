@@ -166,6 +166,11 @@ ordered that way deliberately. Installing transitioned state before its durable
 row would be the MIRROR of the defect this section exists to remove — memory
 ahead of disk instead of disk ahead of validation — and trading one for the
 other is not a fix. The boot callers keep the combined form unchanged.
+On the measured path this places the completion append ahead of the projection
+and impact work — entailed by the invariant itself, since deferring the install
+until after both appends leaves the authority mid-transition between them, and
+designed for by `reconcile_obligation_debt_observer_progress`, which refuses at
+`production/state.rs:404-407` while a transition is begun.
 
 ⛔ **SUPERSESSION, scoped honestly.** What is superseded is this section's
 MECHANISM only: "reorder `connection_fate.rs`" → "split the measurement from the
