@@ -27,6 +27,41 @@
 //! intent it refuses to discharge is already durable, and
 //! `repair_unclean_server_restart` re-mints the same poisoned Died on every
 //! subsequent boot.
+//!
+//! ============================================================================
+//! FALLBACK (b) DECLARATION — §3.2's RED OF RECORD IS THE STORE, NOT THESE UNITS
+//! ============================================================================
+//!
+//! The pre-registered fallback fired on the attempt-2 terminal observation
+//! (tree `85ccca0`, log `15b-attempt2-terminal-cured.log`). Both texts are kept,
+//! because they say different things and the difference is the point.
+//!
+//! WHAT WAS REGISTERED, verbatim, kept as the record of what was ANTICIPATED:
+//!
+//!   "units declared BORN GREEN, NEVER WITNESSED THE DEFECT"
+//!
+//! WHAT IS, verbatim from Cally's declaration (ruling af528395):
+//!
+//!   "These units have never witnessed §3.2's defect — and at declaration time
+//!   they are not silently green but LOUDLY RED on a named unmet arming
+//!   precondition: tests_f8_marker_poison.rs:528 sends Generation::ONE where
+//!   the post-attach live generation is Generation(2), so the peer's ack
+//!   through 13 refuses StaleAuthority, observer progress never lifts over the
+//!   marker, and the arming guard refuses to let the units claim. The defect is
+//!   carried by the store-level RED OF RECORD (spine 86ae3a8f…55c1, intent82
+//!   f7effebf…4101); these markers expire the day the units first witness it at
+//!   their own assertions. A loud refusal to claim is recorded as a STRICTLY
+//!   BETTER state than the silent green the original registration anticipated —
+//!   the guard doing at declaration time exactly what it was built to do."
+//!
+//! THE UNITS ARE NOT SILENCED. They stay red-refusing exactly as they are. This
+//! declaration renames WHY they are red; it does not quiet them, and it must
+//! never be read as licence to make them pass.
+//!
+//! EXPIRY: the day these units first witness §3.2's defect at their own
+//! assertions. Until then, §3.2's red of record is the store-level pair above,
+//! cited by hash, and no green here may be claimed as §3.2's.
+//! ============================================================================
 
 use std::error::Error;
 use std::sync::Arc;
@@ -584,6 +619,15 @@ fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
 /// at all OR a completely discharged fate — never a durable Died row carrying
 /// an intent that cannot be discharged. Today it takes the third road, which
 /// is the one that poisons the store.
+///
+/// ⚠️ FALLBACK (b) DECLARED (Cally af528395; see the module header for both
+/// texts verbatim). This unit has NEVER witnessed §3.2's defect. It is not
+/// silently green — it is LOUDLY RED on a named unmet arming precondition
+/// (`:528` sends `Generation::ONE` against a live `Generation(2)`), and the
+/// arming guard refuses to let it claim. §3.2's red of record is the
+/// store-level pair (spine `86ae3a8f…55c1`, intent82 `f7effebf…4101`). This
+/// marker expires the day this unit witnesses the defect at its own
+/// assertions.
 #[test]
 fn a_refused_connection_fate_leaves_no_durable_residue() -> Result<(), Box<dyn Error>> {
     let departed = peer_departed()?;
@@ -662,6 +706,13 @@ fn a_refused_connection_fate_leaves_no_durable_residue() -> Result<(), Box<dyn E
 ///
 /// It can only go red through §3.1's and §3.2's mechanism, so if it is green
 /// before the fix, that is a vacuity finding to report, not a pass.
+///
+/// ⚠️ FALLBACK (b) DECLARED (Cally af528395; see the module header for both
+/// texts verbatim). This unit has NEVER witnessed the property it names. It is
+/// not silently green — it is LOUDLY RED on the same unmet arming precondition
+/// as its sibling, and the guard refuses to let it claim. The defect is
+/// carried by the store-level red of record. This marker expires the day this
+/// unit witnesses it at its own assertions.
 #[test]
 fn the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server()
 -> Result<(), Box<dyn Error>> {
