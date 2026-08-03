@@ -365,11 +365,6 @@ fn refusal_of(charged: bool) -> Result<BindingFateMeasurementError, String> {
 /// `OwnerTransition`. Pinning is the marker's meaning; unsatisfiability was
 /// the bug.
 #[test]
-#[ignore = "TEMPORARY target-boundary observation scaffolding, expiry RE-PINNED (ruling \
-            413f8725): removed in the commit immediately after attempt 2's terminal \
-            observation -- the did-it-happen green or the fallback declaration. cargo is \
-            fail-fast ACROSS test targets, so this red and the server lib binary RUNNING are \
-            mutually exclusive at one tree"]
 fn a_retained_unacked_marker_pins_the_measured_floor() -> Result<(), String> {
     let fixture = incident_fixture(true)?;
     let marker_seq = fixture.marker_seq;
@@ -420,11 +415,6 @@ fn a_retained_unacked_marker_pins_the_measured_floor() -> Result<(), String> {
 /// fails — which is precisely the tax §2 names, the one that turned a
 /// one-minute diagnosis into a store excavation.
 #[test]
-#[ignore = "TEMPORARY target-boundary observation scaffolding, expiry RE-PINNED (ruling \
-            413f8725): removed in the commit immediately after attempt 2's terminal \
-            observation -- the did-it-happen green or the fallback declaration. cargo is \
-            fail-fast ACROSS test targets, so this red and the server lib binary RUNNING are \
-            mutually exclusive at one tree"]
 fn a_precedence_refusal_is_told_apart_from_its_four_siblings() -> Result<(), String> {
     let precedence = refusal_of(true)?;
     let retained_charge = refusal_of(false)?;
@@ -493,11 +483,6 @@ fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier()
 /// own cause, not by the seat that raised it, so a `Precedence` test at any
 /// consumer must answer NO for the other four.
 #[test]
-#[ignore = "TEMPORARY target-boundary observation scaffolding, expiry RE-PINNED (ruling \
-            413f8725): removed in the commit immediately after attempt 2's terminal \
-            observation -- the did-it-happen green or the fallback declaration. cargo is \
-            fail-fast ACROSS test targets, so this red and the server lib binary RUNNING are \
-            mutually exclusive at one tree"]
 fn a_non_precedence_owner_transition_refusal_keeps_its_own_reason() -> Result<(), String> {
     let retained_charge = refusal_of(false)?;
     let precedence = refusal_of(true)?;
