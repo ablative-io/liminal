@@ -24,8 +24,13 @@ change it:
 - No interior mutability; every other touch of the map is a read. (Derived
   independently at two seats: mine, then re-derived and extended by Cally Ray
   before the gate.)
-- `:559`, `:967`, `:1051` — the three refusal sites: subscribe and publish
-  against an unknown name refuse with `channel '<name>' is not configured`.
+- `:967` (publish) and `:1051` (subscribe) — the two PRODUCTION refusal
+  sites: an unknown name refuses with `channel '<name>' is not configured`.
+  A third occurrence of the string at `:559` sits inside `#[cfg(test)]
+  subscribe_handle_for_test` and is not production surface — the earlier
+  three-site count (this brief's v0, and the gate derivation alike) counted
+  the STRING, not the production construct. Corrected at the design round
+  (Cally Ray, F1, 2026-08-03), verified at both seats.
 
 So "the roster is boot-frozen" is not a policy today — it is a structural
 property of one field. This lane changes that property on purpose, and the
