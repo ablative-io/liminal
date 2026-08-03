@@ -180,6 +180,41 @@ do-not-mint-a-second-idiom instruction — not the payload itself. Three of four
 stated absences were measured; the fourth was inferred from a section title and
 is corrected here rather than carried.
 
+**THE STATE A STEP-4 REFUSAL LEAVES BEHIND — MEASURED, AND LOUD.** Step 4
+returns `Err` having installed nothing, so it leaves the conversation authority
+**frontier-less with its transition already begun**: the acquisition lifts the
+coupled owner out of its slot and arms the pending transition in the same
+motion. That state is not a quiet one. Every subsequent attempt to acquire that
+frontier fails at the two guards the acquisition opens with.
+
+- DEFINITION —
+  `crates/liminal-server/src/server/participant/production/state.rs:483-496`,
+  `take_frontier`. Its **first** guard (`:484-487`) refuses with the invariant
+  *"obligation-debt transition authority is already active"* when a transition
+  is already begun. Its **second** (`:489-493`) returns the typed
+  `StateError::FrontierUnavailable` when the slot itself is empty. The order is
+  load-bearing: the first guard is the function's opening statement, so it is
+  the one a post-refusal state trips.
+- CALL SITE — `connection_fate.rs:416`, `let owner = authority.take_frontier()?;`
+- RESTORE ARMS — `connection_fate.rs:427` (prepare refused), `:443` (charge
+  failed on the prepared owner), `:470` (admission refused). Each hands the
+  owner back through `install_frontier` before returning its error.
+
+So the design ground under step 4 is those guards and nothing weaker. A refusal
+that installs nothing cannot decay into silent state, because the next
+acquisition cannot proceed without announcing itself.
+
+The fatal-latch layers — `ensure_service_live` at `handler.rs:202`, and the
+supervisor's outer `ensure_participant_service_live` at
+`crates/liminal-server/src/server/connection/supervisor.rs:2225` — sit above
+this as **defense in depth only**. They are cited as a second layer, not as the
+reason the first one holds: this note makes **no unobservability claim** for a
+step-4 refusal, and needs none.
+
+↪ The condition-(i) gate-coverage map and the condition-(ii) lock-window fact
+are recorded in this amendment commit's message, pinned to the tree they
+measured.
+
 ### 3.3 Carry the cause — RIDE THE LANDED CARRIER, DO NOT MINT A SECOND IDIOM
 
 `OwnerTransition` → `OwnerTransition(LiveFrontierError)`. **This is a named
