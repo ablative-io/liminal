@@ -13,4 +13,5 @@ pub mod algebra;
 pub mod client;
 pub mod lifecycle;
 pub mod outcome;
+pub mod reason_code;
 pub mod wire;
