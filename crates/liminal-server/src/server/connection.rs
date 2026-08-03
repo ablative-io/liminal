@@ -1,5 +1,7 @@
 #[path = "connection/apply.rs"]
 mod apply;
+#[path = "connection/channel_registry.rs"]
+pub mod channel_registry;
 #[path = "connection/conversation.rs"]
 mod conversation;
 #[path = "connection/delivery.rs"]
@@ -42,6 +44,10 @@ mod websocket;
 #[path = "connection/worker_front_door.rs"]
 mod worker_front_door;
 
+pub use channel_registry::{
+    ChannelAccessError, ChannelConfigField, ChannelDescriptor, ChannelOrigin, ChannelRegistration,
+    ChannelRegistryError, ChannelState, ChannelStatus, MAX_CHANNELS_KEY, Registered,
+};
 pub use conversation::{ConnectionConversation, ConversationResource};
 pub use notifier::ConnectionNotifier;
 #[cfg(test)]

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, mpsc};
 use std::time::Instant;
 
 use haematite::{Database, DatabaseConfig, EventStore};
@@ -16,9 +16,14 @@ use liminal::durability::{
 };
 use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSchemaId};
 
+use super::channel_registry::{
+    ChannelAccessError, ChannelBuildError, ChannelConfigField, ChannelDescriptor, ChannelOrigin,
+    ChannelRegistration, ChannelRegistryError, ChannelState, ChannelStatus, MAX_CHANNELS_KEY,
+    Registered, STATE_ACTIVE, STATE_QUIESCED, UNRECORDED_QUIESCE_REASON,
+};
 use super::conversation::{ConnectionConversation, LiminalConversationResource};
 use super::services_cluster::build_channel_cluster;
-use super::services_schema::{ChannelSchema, resolve_channel_schema};
+use super::services_schema::{ChannelSchema, resolve_channel_schema, resolve_schema_bytes};
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{ClusterConfig, ServerConfig, ServiceProfile};
@@ -258,6 +263,15 @@ pub struct LiminalConnectionServices {
     /// read is ever held across a library call, and an entry handed out can
     /// outlive a concurrent mutation of the map itself.
     channels: RwLock<HashMap<String, Arc<ConfiguredChannel>>>,
+    /// The operator-declared bound on RUNTIME-registered channels
+    /// (`limits.max_channels`), carried verbatim from config.
+    ///
+    /// `None` is "the operator declared no bound", which refuses every runtime
+    /// registration rather than admitting an unbounded one — the roster's
+    /// aggregate size is otherwise unbounded the moment a registration API
+    /// exists. Boot-configured channels are never counted against it: they are
+    /// the bound the operator already wrote, in the file they wrote it in.
+    max_channels: Option<usize>,
     cluster: ChannelCluster,
     durable_store: Arc<dyn DurableStore>,
     /// Complete participant service, installed only when semantic lifecycle
@@ -352,9 +366,13 @@ impl LiminalConnectionServices {
                 &channel.name,
                 resolved,
                 channel.durable,
+                ChannelOrigin::BootConfigured,
                 &durable_store,
                 cluster.supervisor(),
-            )?;
+            )
+            .map_err(|error| ServerError::ConfigValidation {
+                message: error.boot_message(&channel.name),
+            })?;
             channels.insert(channel.name.clone(), Arc::new(configured));
         }
         let conversation_supervisor = subsystems.conversation_supervisor()?;
@@ -390,6 +408,7 @@ impl LiminalConnectionServices {
             .transpose()?;
         Ok(Self {
             channels: RwLock::new(channels),
+            max_channels: config.limits.max_channels,
             cluster,
             durable_store,
             participant_service,
@@ -411,6 +430,11 @@ impl LiminalConnectionServices {
         let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
         Ok(Self {
             channels: RwLock::new(HashMap::new()),
+            // No config, so no declared bound: this builder serves tests and
+            // callers with no channels at all, and a registration against it
+            // refuses `CapNotConfigured` exactly as an undeclared deployment's
+            // would.
+            max_channels: None,
             cluster: build_channel_cluster(None)?,
             durable_store,
             participant_service: None,
@@ -616,6 +640,365 @@ impl LiminalConnectionServices {
     }
 }
 
+/// The runtime channel-registration surface.
+///
+/// Inherent methods, not trait methods, and deliberately so: this is
+/// authority-moving vocabulary that belongs to the ONE adapter owning a channel
+/// roster. Putting `register`/`quiesce` on the public [`ConnectionServices`]
+/// trait would break every external implementor and would hand
+/// register/quiesce words to a profile that serves no channels at all.
+///
+/// The same seam as the existing runtime-mutation API on this type
+/// (`register_responder`/`unregister_responder`): `&self`, interior mutability,
+/// typed `Result`.
+impl LiminalConnectionServices {
+    /// Registers `spec` on the live roster.
+    ///
+    /// Idempotent when an entry of that name already has an IDENTICAL
+    /// configuration — mode, protocol schema id, and schema document, all three
+    /// — and refuses typed, naming the first differing field, otherwise. An
+    /// identical registration against a boot-configured entry answers
+    /// [`Registered::AlreadyIdentical`] and leaves its origin alone: flipping it
+    /// would make the entry lie about its restart fate and would move it into
+    /// the counted population without a channel having been created.
+    ///
+    /// The runtime channel cap is consulted first: with no `limits.max_channels`
+    /// declared, registration refuses rather than admitting an unbounded roster.
+    ///
+    /// # Errors
+    /// Returns [`ChannelRegistryError`] when no cap is configured, the cap is
+    /// reached, the name exists with a different configuration, the schema bytes
+    /// do not parse or compile, durable initialization over the shared store
+    /// fails, or the roster lock is poisoned.
+    pub fn register_channel(
+        &self,
+        spec: &ChannelRegistration,
+    ) -> Result<Registered, ChannelRegistryError> {
+        // The cap is consulted before the roster is touched: an undeclared bound
+        // refuses every runtime registration, identical or not, because the
+        // deployment has not said what it admits.
+        let Some(limit) = self.max_channels else {
+            return Err(ChannelRegistryError::CapNotConfigured {
+                cap: MAX_CHANNELS_KEY,
+            });
+        };
+        // Schema resolution is pure (a JSON parse and a digest), so it runs with
+        // no lock held and its result serves BOTH the identity comparison and
+        // the construction below.
+        let resolved =
+            resolve_schema_bytes(spec.schema_bytes.as_deref()).map_err(|error| {
+                ChannelRegistryError::SchemaRejected {
+                    name: spec.name.clone(),
+                    message: error.to_string(),
+                }
+            })?;
+
+        // Fast paths, under a READ lock: an already-identical registration
+        // builds nothing, and a full roster refuses before paying for a
+        // construction it would discard. Neither is the authority — the write
+        // lock below re-decides both, because the roster can move in between.
+        {
+            let channels = self.read_roster()?;
+            if let Some(existing) = channels.get(&spec.name) {
+                return compare_registration(existing, spec, &resolved);
+            }
+            if runtime_registered_count(&channels) >= limit {
+                return Err(ChannelRegistryError::CapReached {
+                    cap: MAX_CHANNELS_KEY,
+                    limit,
+                });
+            }
+        }
+
+        // Construction runs with NO lock held. A durable channel recovers its
+        // per-partition sequence counters from the store here, which is O(stream
+        // length) in store reads; holding the roster lock across it would put a
+        // slow store walk on every connection's publish and subscribe path.
+        let configured = build_configured_channel(
+            &spec.name,
+            resolved,
+            spec.durable,
+            ChannelOrigin::RuntimeRegistered,
+            &self.durable_store,
+            self.cluster.supervisor(),
+        )
+        .map_err(|error| error.into_registry_error(&spec.name))?;
+
+        // The authoritative decision: identity, cap, and insert under ONE write
+        // lock, so the count that admitted the entry and the insert that added
+        // it cannot be separated by a concurrent registration.
+        let mut channels = self.write_roster()?;
+        if let Some(existing) = channels.get(&spec.name) {
+            // A racer registered this name while the channel above was being
+            // built. The built entry is dropped unused: it owns no actor (the
+            // actor is spawned lazily on first use) and its durable
+            // construction only READ the store, so discarding it changes
+            // nothing an observer could see.
+            return compare_registration(existing, spec, &schema_of(&configured));
+        }
+        if runtime_registered_count(&channels) >= limit {
+            return Err(ChannelRegistryError::CapReached {
+                cap: MAX_CHANNELS_KEY,
+                limit,
+            });
+        }
+        channels.insert(spec.name.clone(), Arc::new(configured));
+        Ok(Registered::Created)
+    }
+
+    /// Moves `name` from active to quiesced with a named `reason`. ONE-WAY.
+    ///
+    /// New publishes and new subscribes are refused afterwards, carrying the
+    /// reason. Existing subscriptions are UNTOUCHED: nothing revokes a
+    /// subscription handle, the actor's subscriber list is not walked, no EXIT
+    /// is sent, and the channel actor keeps running. Quiesce is a roster-level
+    /// admission decision, not an actor command.
+    ///
+    /// Re-quiescing under the IDENTICAL reason is `Ok(())`; a DIFFERENT reason
+    /// refuses, carrying the reason already on record.
+    ///
+    /// The return does NOT mean "no new subscriber can appear". A subscribe that
+    /// has already passed admission completes and gets its stream — the
+    /// linearisation point is the admission read, not the subscribe's
+    /// completion. A consumer that needs "nobody is attached" must observe
+    /// attachment directly.
+    ///
+    /// # Errors
+    /// Returns [`ChannelRegistryError`] when the name is not registered, is
+    /// already quiesced under a different reason, or the roster lock is
+    /// poisoned.
+    pub fn quiesce_channel(
+        &self,
+        name: &str,
+        reason: impl Into<String>,
+    ) -> Result<(), ChannelRegistryError> {
+        let reason = reason.into();
+        // A READ lock: the state machine lives on the ENTRY, not in the map, so
+        // the operation the design most wants to be safe never blocks a reader.
+        let configured = {
+            let channels = self.read_roster()?;
+            channels.get(name).map(Arc::clone).ok_or_else(|| {
+                ChannelRegistryError::NotRegistered {
+                    name: name.to_owned(),
+                }
+            })?
+        };
+        configured.quiesce(name, &reason)
+    }
+
+    /// Cheap typed probe: one roster read plus one atomic load.
+    ///
+    /// Touches no actor and therefore CANNOT spawn one. Every handle accessor
+    /// that could answer a question about a channel's activity routes through
+    /// the lazy-spawn path, so a probe built on one would materialise the actor
+    /// of the idle channel it was asked about — turning a read into a side
+    /// effect. This reads the roster entry's own recorded fields and nothing
+    /// else.
+    ///
+    /// # Errors
+    /// Returns [`ChannelRegistryError::RosterUnavailable`] only.
+    pub fn channel_status(&self, name: &str) -> Result<ChannelStatus, ChannelRegistryError> {
+        let configured = {
+            let channels = self.read_roster()?;
+            channels.get(name).map(Arc::clone)
+        };
+        let Some(configured) = configured else {
+            return Ok(ChannelStatus::NotRegistered);
+        };
+        let mode = configured.handle.config().mode;
+        Ok(match configured.state() {
+            ChannelState::Active => ChannelStatus::Active {
+                origin: configured.origin,
+                mode,
+                schema: configured.protocol_schema,
+            },
+            ChannelState::Quiesced { reason } => ChannelStatus::Quiesced {
+                reason,
+                origin: configured.origin,
+                mode,
+            },
+        })
+    }
+
+    /// The whole roster: one minimal descriptor per entry, sorted by name.
+    ///
+    /// The census companion to [`Self::channel_status`]. A by-name probe answers
+    /// about a name the caller already suspects; only an enumeration can reveal
+    /// a name the caller does not know to ask about, and a verification sweep
+    /// with no population denominator is an instrument shape this estate
+    /// forbids. Touches no actor, under the same constraint as the probe.
+    ///
+    /// # Errors
+    /// Returns [`ChannelRegistryError::RosterUnavailable`] only.
+    pub fn registered_channels(&self) -> Result<Vec<ChannelDescriptor>, ChannelRegistryError> {
+        let entries: Vec<(String, Arc<ConfiguredChannel>)> = {
+            let channels = self.read_roster()?;
+            channels
+                .iter()
+                .map(|(name, configured)| (name.clone(), Arc::clone(configured)))
+                .collect()
+        };
+        let mut descriptors: Vec<ChannelDescriptor> = entries
+            .into_iter()
+            .map(|(name, configured)| ChannelDescriptor {
+                name,
+                origin: configured.origin,
+                state: configured.state(),
+            })
+            .collect();
+        descriptors.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(descriptors)
+    }
+
+    /// The roster admission funnel: the ONE place a channel operation's
+    /// permission is decided.
+    ///
+    /// Returns the admitted entry, so the caller works from the value the
+    /// decision was made on rather than reading the roster a second time and
+    /// risking a different answer. This read is the LINEARISATION POINT for the
+    /// quiesce race: everything the caller does with the returned entry happens
+    /// outside the lock and is not re-checked, which is exactly why a quiesce
+    /// that commits after this returns does not stop the operation it admitted.
+    ///
+    /// # Errors
+    /// Returns [`ChannelAccessError`] when the channel is absent, quiesced, or
+    /// the roster lock is poisoned.
+    fn admit_channel(&self, channel: &str) -> Result<Arc<ConfiguredChannel>, ChannelAccessError> {
+        let configured = {
+            let channels =
+                self.channels
+                    .read()
+                    .map_err(|_poisoned| ChannelAccessError::RosterUnavailable {
+                        message: ROSTER_POISONED.to_owned(),
+                    })?;
+            channels.get(channel).map(Arc::clone)
+        };
+        let configured = configured.ok_or_else(|| ChannelAccessError::NotRegistered {
+            name: channel.to_owned(),
+        })?;
+        if configured.state.load(Ordering::Acquire) == STATE_QUIESCED {
+            return Err(ChannelAccessError::Quiesced {
+                name: channel.to_owned(),
+                reason: configured.recorded_quiesce_reason(),
+            });
+        }
+        Ok(configured)
+    }
+
+    /// Takes the roster's READ guard for the registration surface, mapping a
+    /// poisoned lock to a typed [`ChannelRegistryError`].
+    ///
+    /// Separate from [`Self::read_channels`] because the two surfaces answer
+    /// different callers with different error types; recovering one from the
+    /// other would mean inspecting a message.
+    fn read_roster(
+        &self,
+    ) -> Result<
+        std::sync::RwLockReadGuard<'_, HashMap<String, Arc<ConfiguredChannel>>>,
+        ChannelRegistryError,
+    > {
+        self.channels
+            .read()
+            .map_err(|_poisoned| ChannelRegistryError::RosterUnavailable {
+                message: ROSTER_POISONED.to_owned(),
+            })
+    }
+
+    /// Takes the roster's WRITE guard — held only for the check-and-insert that
+    /// must be atomic, never across a call into the liminal library.
+    fn write_roster(
+        &self,
+    ) -> Result<
+        std::sync::RwLockWriteGuard<'_, HashMap<String, Arc<ConfiguredChannel>>>,
+        ChannelRegistryError,
+    > {
+        self.channels
+            .write()
+            .map_err(|_poisoned| ChannelRegistryError::RosterUnavailable {
+                message: ROSTER_POISONED.to_owned(),
+            })
+    }
+}
+
+/// The diagnostic carried when the roster lock is poisoned. One string, shared
+/// by every surface that reports it, so the wording cannot drift between them.
+const ROSTER_POISONED: &str = "channel roster lock poisoned";
+
+/// How many roster entries the registration cap counts.
+///
+/// Runtime-registered entries ONLY. Boot-configured channels are the operator's
+/// own authored bound — they are in the file the operator wrote — and counting
+/// them would make one number mean two different things depending on how the
+/// deployment was configured. The origin never flips, so this population is
+/// well defined over time.
+fn runtime_registered_count(channels: &HashMap<String, Arc<ConfiguredChannel>>) -> usize {
+    channels
+        .values()
+        .filter(|configured| configured.origin == ChannelOrigin::RuntimeRegistered)
+        .count()
+}
+
+/// The three-field identity comparison behind idempotent-if-identical
+/// registration.
+///
+/// All three must match; the FIRST mismatch is reported by name. The name itself
+/// is not compared — it is the roster key, a precondition of the comparison
+/// rather than a member of it — and neither are the supervisor or the durable
+/// store, which are one server-wide instance each and cannot differ between two
+/// registrations in one process.
+///
+/// The schema is compared as BOTH its protocol id and its parsed document, on
+/// purpose. The id is a 64-bit non-cryptographic digest, so the document guards
+/// against a collision accepting a different schema as identical; and the two
+/// fail in opposite directions, because two byte sequences that parse to the
+/// same document but differ in whitespace produce different ids — which must
+/// refuse, since the id is what every future subscriber negotiates.
+///
+/// The channel's own `Schema` is not compared: it is not `PartialEq`, and its
+/// identifier is a fresh value per construction, so comparing it would refuse
+/// every idempotent re-registration.
+fn compare_registration(
+    existing: &ConfiguredChannel,
+    spec: &ChannelRegistration,
+    resolved: &ChannelSchema,
+) -> Result<Registered, ChannelRegistryError> {
+    let requested_mode = if spec.durable {
+        ChannelMode::Durable
+    } else {
+        ChannelMode::Ephemeral
+    };
+    let config = existing.handle.config();
+    let mismatch = if config.mode == requested_mode {
+        if existing.protocol_schema == resolved.protocol_id {
+            if *config.schema.definition() == resolved.document {
+                None
+            } else {
+                Some(ChannelConfigField::SchemaDocument)
+            }
+        } else {
+            Some(ChannelConfigField::SchemaId)
+        }
+    } else {
+        Some(ChannelConfigField::Mode)
+    };
+    mismatch.map_or(Ok(Registered::AlreadyIdentical), |field| {
+        Err(ChannelRegistryError::AlreadyRegistered {
+            name: spec.name.clone(),
+            field,
+        })
+    })
+}
+
+/// Recovers the resolved schema of an already-built entry, so the write-lock
+/// re-check compares the SAME three fields against the same values the fast path
+/// would have.
+fn schema_of(configured: &ConfiguredChannel) -> ChannelSchema {
+    ChannelSchema {
+        document: configured.handle.config().schema.definition().clone(),
+        protocol_id: configured.protocol_schema,
+    }
+}
+
 /// Builds one roster entry: the channel's validation engine, its library handle
 /// (durable or ephemeral), and the protocol schema id advertised at subscribe
 /// time.
@@ -629,15 +1012,26 @@ impl LiminalConnectionServices {
 ///
 /// `resolved` is consumed because its JSON Schema document is moved into the
 /// channel's [`Schema`]; the protocol id is carried onto the entry unchanged.
+/// `origin` is stamped here and never written again.
+///
+/// The failure is typed ([`ChannelBuildError`]) rather than a [`ServerError`] so
+/// BOTH callers can render it without inspecting a message: the boot loop maps
+/// it back to the exact `ConfigValidation` strings it has always produced, and
+/// `register_channel` maps it to the registry's own typed variants.
+///
+/// # Errors
+/// Returns [`ChannelBuildError`] when the JSON Schema document does not compile
+/// or durable initialization over the shared store fails.
 fn build_configured_channel(
     name: &str,
     resolved: ChannelSchema,
     durable: bool,
+    origin: ChannelOrigin,
     durable_store: &Arc<dyn DurableStore>,
     supervisor: &ChannelSupervisor,
-) -> Result<ConfiguredChannel, ServerError> {
-    let schema = Schema::new(resolved.document).map_err(|error| ServerError::ConfigValidation {
-        message: format!("failed to initialize channel '{name}': {error}"),
+) -> Result<ConfiguredChannel, ChannelBuildError> {
+    let schema = Schema::new(resolved.document).map_err(|error| ChannelBuildError::SchemaRejected {
+        message: error.to_string(),
     })?;
     let channel_config = if durable {
         ChannelConfig::new(name.to_owned(), schema, ChannelMode::Durable)
@@ -650,8 +1044,8 @@ fn build_configured_channel(
             Arc::clone(durable_store),
             supervisor.clone(),
         )
-        .map_err(|error| ServerError::ConfigValidation {
-            message: format!("failed to initialize durable channel '{name}': {error}"),
+        .map_err(|error| ChannelBuildError::DurableInitFailed {
+            message: error.to_string(),
         })?
     } else {
         ChannelHandle::with_supervisor(channel_config, supervisor.clone())
@@ -659,6 +1053,9 @@ fn build_configured_channel(
     Ok(ConfiguredChannel {
         handle,
         protocol_schema: resolved.protocol_id,
+        origin,
+        state: AtomicU8::new(STATE_ACTIVE),
+        quiesce_reason: OnceLock::new(),
     })
 }
 
@@ -1013,15 +1410,12 @@ impl ConnectionServices for LiminalConnectionServices {
         // The roster read holds its guard only long enough to clone the entry's
         // `Arc` out; everything below — the dedup bridge and the publish into the
         // channel actor — runs with no roster lock held.
-        let channels = self.read_channels()?;
-        let configured =
-            channels
-                .get(channel)
-                .map(Arc::clone)
-                .ok_or_else(|| ServerError::ListenerAccept {
-                    message: format!("channel '{channel}' is not configured"),
-                })?;
-        drop(channels);
+        //
+        // This inner admission STAYS even once the connection process consults
+        // the roster ahead of delegating: this method is public and callable
+        // without going through a frame at all, and a guard that only exists in
+        // the caller is not a guard.
+        let configured = self.admit_channel(channel).map_err(access_to_server_error)?;
 
         // Dedup-on-delivery: a publish carrying an idempotency key is delivered to
         // subscribers AT MOST ONCE across re-publishes of the same key. Only a
@@ -1100,17 +1494,12 @@ impl ConnectionServices for LiminalConnectionServices {
         accepted_schemas: &[ProtocolSchemaId],
         install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError> {
-        // As in `publish`: clone the entry's `Arc` out under the read guard and
-        // drop the guard before schema negotiation or the actor round-trip below.
-        let channels = self.read_channels()?;
-        let configured =
-            channels
-                .get(channel)
-                .map(Arc::clone)
-                .ok_or_else(|| ServerError::ListenerAccept {
-                    message: format!("channel '{channel}' is not configured"),
-                })?;
-        drop(channels);
+        // As in `publish`: the admission funnel clones the entry's `Arc` out
+        // under the read guard and the guard is released before schema
+        // negotiation or the actor round-trip below. That release is what makes
+        // this the linearisation point — a quiesce landing after it does not
+        // stop the subscription this call is already building.
+        let configured = self.admit_channel(channel).map_err(access_to_server_error)?;
         let selected_schema = if accepted_schemas.is_empty() {
             configured.protocol_schema
         } else {
@@ -1235,10 +1624,87 @@ impl ConnectionServices for LiminalConnectionServices {
     }
 }
 
+/// One roster entry: a channel's library handle, the protocol schema id
+/// advertised for it, where it came from, and its admission state.
 #[derive(Debug)]
-struct ConfiguredChannel {
+pub(super) struct ConfiguredChannel {
     handle: ChannelHandle,
     protocol_schema: ProtocolSchemaId,
+    /// Boot-configured or runtime-registered. Written once at construction and
+    /// NEVER flipped: it is the only field that predicts what a restart does to
+    /// this entry, and it defines the population the registration cap counts.
+    origin: ChannelOrigin,
+    /// [`STATE_ACTIVE`] or [`STATE_QUIESCED`]. Written at most once, by one
+    /// `compare_exchange`, so the transition is one-way and exactly one caller
+    /// can perform it.
+    state: AtomicU8,
+    /// The quiesce cause, set STRICTLY BEFORE `state` flips so any reader that
+    /// observes [`STATE_QUIESCED`] can read it. Written once (the `OnceLock`
+    /// enforces that structurally), which is why a re-quiesce under a different
+    /// reason must refuse rather than silently keep or replace one of them.
+    quiesce_reason: OnceLock<String>,
+}
+
+impl ConfiguredChannel {
+    /// The entry's admission state as a value.
+    ///
+    /// One `Acquire` load and, when quiesced, one read of the already-written
+    /// reason. Touches no actor: the whole point of recording state on the entry
+    /// is that observing it cannot spawn the thing being observed.
+    fn state(&self) -> ChannelState {
+        if self.state.load(Ordering::Acquire) == STATE_QUIESCED {
+            ChannelState::Quiesced {
+                reason: self.recorded_quiesce_reason(),
+            }
+        } else {
+            ChannelState::Active
+        }
+    }
+
+    /// The recorded quiesce reason, for a caller that has already observed
+    /// [`STATE_QUIESCED`] with an `Acquire` load.
+    fn recorded_quiesce_reason(&self) -> String {
+        self.quiesce_reason
+            .get()
+            .map_or_else(|| UNRECORDED_QUIESCE_REASON.to_owned(), Clone::clone)
+    }
+
+    /// Moves this entry from active to quiesced, recording `reason` first.
+    ///
+    /// The reason is written to the `OnceLock` BEFORE the `Release`
+    /// `compare_exchange` that flips the state, so no reader can observe
+    /// `QUIESCED` without being able to read why. Re-quiescing under the
+    /// IDENTICAL reason is `Ok(())` — the caller's intent already holds — and a
+    /// DIFFERENT reason refuses, because the recorded one cannot be replaced
+    /// without losing a cause and cannot be kept without lying to the caller.
+    fn quiesce(&self, name: &str, reason: &str) -> Result<(), ChannelRegistryError> {
+        // Whoever wins the `OnceLock` writes the cause on record; every other
+        // caller — a re-quiesce or a concurrent racer — is judged against THAT
+        // reason, never against whether it happened to perform the flip itself.
+        // Reporting success for having won the CAS would tell a racer whose
+        // reason lost that its reason took effect.
+        let recorded = match self.quiesce_reason.set(reason.to_owned()) {
+            Ok(()) => reason.to_owned(),
+            Err(_rejected) => self.recorded_quiesce_reason(),
+        };
+        // The reason is now readable, so the flip may become visible. The CAS
+        // result is deliberately unused: the state is `QUIESCED` afterwards
+        // whether this call or a racer performed the transition, and the answer
+        // to the caller is governed by the recorded reason above.
+        let _flipped_here = self.state.compare_exchange(
+            STATE_ACTIVE,
+            STATE_QUIESCED,
+            Ordering::Release,
+            Ordering::Acquire,
+        );
+        if recorded == reason {
+            return Ok(());
+        }
+        Err(ChannelRegistryError::AlreadyQuiesced {
+            name: name.to_owned(),
+            reason: recorded,
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -1286,11 +1752,40 @@ impl SubscriptionResource for LiminalSubscriptionResource {
     }
 }
 
+/// Renders an admission refusal as the service error the trait's callers expect.
+///
+/// The two refusals that already existed keep their EXACT bytes: an absent
+/// channel is still `channel '<name>' is not configured` and a poisoned roster
+/// is still `channel roster lock poisoned`, so nothing that reads these messages
+/// today sees a change. Discrimination lives in the reason code
+/// ([`ChannelAccessError::reason_code`]), which the connection process carries to
+/// the wire — this rendering is the degraded path for a caller that reaches the
+/// service directly and has no code to carry.
+///
+/// `Quiesced` has no predecessor string to preserve; it carries the refusal's own
+/// message, reason included.
+fn access_to_server_error(error: ChannelAccessError) -> ServerError {
+    let message = match &error {
+        ChannelAccessError::NotRegistered { name } => {
+            format!("channel '{name}' is not configured")
+        }
+        ChannelAccessError::Quiesced { .. } => error.to_string(),
+        ChannelAccessError::RosterUnavailable { message } => message.clone(),
+    };
+    ServerError::ListenerAccept { message }
+}
+
 pub(super) fn server_error_from_protocol(error: &ProtocolError) -> ServerError {
     ServerError::ListenerAccept {
         message: format!("protocol operation failed: {error}"),
     }
 }
+
+/// The three pinned registration tests. A CHILD module of `services` because
+/// test 2 must hold the exact entry the admission funnel handed out.
+#[cfg(test)]
+#[path = "services_registry_tests.rs"]
+mod services_registry_tests;
 
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]

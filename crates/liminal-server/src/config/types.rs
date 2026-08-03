@@ -317,6 +317,32 @@ pub struct LimitsConfig {
     /// load-bearing for the signed bound.
     #[serde(default = "default_max_subscription_inbox_depth")]
     pub max_subscription_inbox_depth: usize,
+    /// Runtime-registered channels this deployment admits.
+    ///
+    /// # Why this cap departs the uniform pattern
+    ///
+    /// Every other field here carries `#[serde(default = "…")]` naming a §5
+    /// constant, because each of those numbers is a signed §5 bound. **There is
+    /// no signed §5 bound for channel count**, and inventing one is barred: a
+    /// number nobody certified, presented in the same shape as eight numbers
+    /// somebody did, is a forged citation. So the type is `Option<usize>` and
+    /// the serde default is the ABSENCE itself (`None`), never a value —
+    /// `#[serde(default)]` here resolves a missing key to "no bound declared",
+    /// which is a different statement from any number.
+    ///
+    /// Nor may this be a `usize` with a large default: unbounded-by-default is
+    /// not a bound, it is the gap wearing a number.
+    ///
+    /// `None` refuses every runtime channel registration with a typed error
+    /// naming this key, so a deployment that wants runtime registration declares
+    /// its own bound and a deployment that never registers needs no config
+    /// change at all. The cap bounds RUNTIME-registered channels only:
+    /// `[[channels]]` entries are the bound the operator already wrote.
+    ///
+    /// `Some(0)` is a validation error like every other zero cap here — see
+    /// [`LimitsConfig::collect_errors`].
+    #[serde(default)]
+    pub max_channels: Option<usize>,
 }
 
 impl LimitsConfig {
@@ -375,13 +401,35 @@ impl LimitsConfig {
         ];
         for (field, value) in checks {
             if value == 0 {
-                errors.push(format!(
-                    "limits.{field}: must be greater than zero (a zero cap would be \
-                     unlimited-by-silence, which §5 forbids)"
-                ));
+                errors.push(zero_cap_error(field));
             }
         }
+        // `max_channels` is checked BESIDE the array rather than inside it,
+        // because it is the one optional cap and the array's element type has no
+        // way to say "absent". Forcing it in would need a stand-in value for
+        // `None` — a number standing where a declaration is not — and any
+        // stand-in would either invent a bound or make an undeclared cap look
+        // declared. So the shape stays honest and the RULE stays uniform: a
+        // declared zero is refused with the same message as the other eight.
+        //
+        // The parenthetical about unlimited-by-silence is the other eight caps'
+        // ground; for this one a zero would refuse every registration rather
+        // than admit every registration. The message is kept identical anyway:
+        // an operator reading nine cap errors should learn one rule — zero is
+        // not a legal cap value anywhere in this section — not two.
+        if self.max_channels == Some(0) {
+            errors.push(zero_cap_error("max_channels"));
+        }
     }
+}
+
+/// The typed refusal for a zero-valued cap, shared by every field in `[limits]`
+/// so the wording cannot drift between them.
+fn zero_cap_error(field: &str) -> String {
+    format!(
+        "limits.{field}: must be greater than zero (a zero cap would be \
+         unlimited-by-silence, which §5 forbids)"
+    )
 }
 
 impl Default for LimitsConfig {
@@ -396,6 +444,9 @@ impl Default for LimitsConfig {
             max_pending_replies_per_conversation: default_max_pending_replies_per_conversation(),
             max_connection_inbox_bytes: default_max_connection_inbox_bytes(),
             max_subscription_inbox_depth: default_max_subscription_inbox_depth(),
+            // No signed bound exists for this cap, so the default is the
+            // absence of a declaration — never a number.
+            max_channels: None,
         }
     }
 }
