@@ -5,7 +5,7 @@ use liminal_protocol::lifecycle::{
     MeasuredBindingFate, OrdinaryBindingFate, RecoveredBindingFate, SealedBindingFateIntent,
     decide_ordinary_binding_fate_operation, decide_recovered_binding_fate_operation,
 };
-use liminal_protocol::wire::{DiedCause, ParticipantId};
+use liminal_protocol::wire::{DeliverySeq, DiedCause, ParticipantId};
 
 use super::barrier::{CommitMode, commit_through_barrier};
 use super::log::{
@@ -69,6 +69,60 @@ fn validated_completion_terminal(
         ));
     }
     completion_terminal(intent, terminal)
+}
+
+/// Measures one sealed fate token on a frontier owner held as a VALUE, before
+/// the enclosing Died source row is durable.
+///
+/// This is §3.2's measure half. It installs nothing and appends nothing in
+/// either direction; every disposition belongs to the caller, which is what
+/// lets a refusal leave NO DURABLE RESIDUE.
+///
+/// `hard_observer_progress` is an EXPLICIT INPUT, not ambient state, per
+/// amendment 4. BOOT IS CANON: boot's reconstruction measures at the completion
+/// row's sequence, by which point replay has already folded the Died row's OWN
+/// projection into observer progress, so the live measurement must be handed
+/// that same joined value or the two disagree and `ReplayFateAppender` refuses.
+/// The caller computes the join under the exact conditional mirror of
+/// `replay_died_source` (`connection_fate_replay.rs:173-185`); receiving it as a
+/// parameter is what keeps it a computed input rather than an ambient mutation,
+/// so the mirror-defect family stays untouched.
+///
+/// A free function rather than a method BECAUSE that input is explicit: with
+/// progress passed in, nothing on the authority is read here, and
+/// `clippy::unused_self` is denied workspace-wide.
+pub(super) fn measure_specific_fate_on_owner(
+    owner: LiveFrontierOwner,
+    hard_observer_progress: DeliverySeq,
+    died_source_sequence: u64,
+    intent: StoredSpecificFateIntent,
+    terminal: Option<PendingSpecificFateTerminal>,
+    pending: PendingBindingFate,
+) -> Result<MeasuredSpecificFate, StateError> {
+    let terminal_input = validated_completion_terminal(intent, terminal, &pending)?;
+    match owner.prepare_binding_fate(pending.token, terminal_input, hard_observer_progress) {
+        Ok(prepared) => {
+            let (owner, fate, _) = prepared.into_parts();
+            Ok(MeasuredSpecificFate {
+                owner,
+                fate,
+                died_source_sequence,
+                intent,
+                terminal,
+            })
+        }
+        // §3.2 STEP 4, AS RULED: refused => Err with NOTHING appended and
+        // NOTHING installed. The owner is deliberately NOT restored and the
+        // intent is deliberately NOT re-inserted. That leaves the authority
+        // frontier-less with its transition begun, and every subsequent
+        // acquisition reports it loudly at take_frontier's two guards
+        // (production/state.rs:483-496) — which is the design's measured
+        // ground, not an oversight. Do not "repair" this arm.
+        Err(refused) => Err(StateError::invariant(format!(
+            "binding-fate measurement refused: {:?}",
+            refused.error()
+        ))),
+    }
 }
 
 impl ConversationAuthority {
@@ -148,48 +202,6 @@ impl ConversationAuthority {
             terminal,
             appender,
         )
-    }
-
-    /// Measures one sealed fate token on a frontier owner held as a VALUE,
-    /// before the enclosing Died source row is durable.
-    ///
-    /// This is §3.2's measure half. The measurement reads only in-memory
-    /// authority — the owner passed in, the token, and `observer_progress` —
-    /// so it can run ahead of the append, which is precisely what lets a
-    /// refusal leave NO DURABLE RESIDUE. It installs nothing and appends
-    /// nothing in either direction; every disposition belongs to the caller.
-    pub(super) fn measure_specific_fate_on_owner(
-        &self,
-        owner: LiveFrontierOwner,
-        died_source_sequence: u64,
-        intent: StoredSpecificFateIntent,
-        terminal: Option<PendingSpecificFateTerminal>,
-        pending: PendingBindingFate,
-    ) -> Result<MeasuredSpecificFate, StateError> {
-        let terminal_input = validated_completion_terminal(intent, terminal, &pending)?;
-        match owner.prepare_binding_fate(pending.token, terminal_input, self.observer_progress) {
-            Ok(prepared) => {
-                let (owner, fate, _) = prepared.into_parts();
-                Ok(MeasuredSpecificFate {
-                    owner,
-                    fate,
-                    died_source_sequence,
-                    intent,
-                    terminal,
-                })
-            }
-            // §3.2 STEP 4, AS RULED: refused => Err with NOTHING appended and
-            // NOTHING installed. The owner is deliberately NOT restored and the
-            // intent is deliberately NOT re-inserted. That leaves the authority
-            // frontier-less with its transition begun, and every subsequent
-            // acquisition reports it loudly at take_frontier's two guards
-            // (production/state.rs:483-496) — which is the design's measured
-            // ground, not an oversight. Do not "repair" this arm.
-            Err(refused) => Err(StateError::invariant(format!(
-                "binding-fate measurement refused: {:?}",
-                refused.error()
-            ))),
-        }
     }
 
     /// Appends one measured fate's exact specific row and only then installs

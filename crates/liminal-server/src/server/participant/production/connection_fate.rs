@@ -14,7 +14,7 @@ use liminal_protocol::wire::{BindingEpoch, ParticipantId};
 use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 
-use super::binding_fate_completion::MeasuredSpecificFate;
+use super::binding_fate_completion::{MeasuredSpecificFate, measure_specific_fate_on_owner};
 use super::connection_fate_allocation::checked_fate_allocations;
 use super::connection_fate_rows::source_operation;
 use super::frontier;
@@ -306,8 +306,32 @@ fn complete_target(
                             died_source_sequence: source_sequence,
                         },
                     });
-            AdmittedOwnerFate::Measured(authority.measure_specific_fate_on_owner(
+            // AMENDMENT 4 — BOOT IS CANON, so the measurement is handed an
+            // EXPLICIT progress input rather than reading ambient state.
+            //
+            // Boot's reconstruction measures at the completion row's sequence,
+            // by which point replay has already folded THIS row's own
+            // projection into observer progress — replay_died_source at
+            // connection_fate_replay.rs:173-185, the fold at :184. So the live
+            // measurement must see the same joined value or the two disagree
+            // and ReplayFateAppender refuses. The conditional below is the
+            // EXACT mirror of that site: a Committed disposition AND a Some
+            // projection, both required.
+            //
+            // COMPUTED INPUT ONLY. Ambient observer_progress is not mutated
+            // here; the join is passed as an argument and the ambient advance
+            // still happens later, at its own site, after the append. That is
+            // what keeps the mirror-defect family untouched.
+            let measured_observer_progress =
+                match (&completed.observer_projection, stored_disposition) {
+                    (Some(projection), StoredTerminalDisposition::Committed { .. }) => authority
+                        .observer_progress
+                        .max(projection.new_observer_progress()),
+                    _ => authority.observer_progress,
+                };
+            AdmittedOwnerFate::Measured(measure_specific_fate_on_owner(
                 admitted_owner,
+                measured_observer_progress,
                 source_sequence,
                 intent,
                 terminal,
