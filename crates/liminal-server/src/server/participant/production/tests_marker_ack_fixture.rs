@@ -611,14 +611,6 @@ pub(super) struct AttachedDrainAttempt {
     /// the measurement never got the state it was built to test.
     pub(super) first_has_binding_fate: bool,
     pub(super) second_has_binding_fate: bool,
-    /// A/B EVIDENCE for the AckGap's cause. My previous report attributed it to
-    /// "attach resets the persisted cursor to zero", inferred from the doc
-    /// comment at `wire/response.rs:653`. That was an inference, not a
-    /// measurement. These are the members' cursors after enrolment-only and
-    /// after enrol+attach, taken at the same point in the same sequence, so the
-    /// reset is either shown or refuted instead of assumed.
-    pub(super) cursors_enrolled_only: (u64, u64),
-    pub(super) cursors_after_attach: (u64, u64),
     /// CONDITION (b): the derived endpoint AND the live index it came from,
     /// printed in the teed log. The observable that decided the discriminator
     /// now serves the fixture.
@@ -631,170 +623,33 @@ pub(super) struct AttachedDrainAttempt {
     pub(super) drain: Result<MarkerFixture, String>,
 }
 
-/// One arm of the AckGap discriminator (Cally 84dc0265 / 083f4a01). Every field
-/// is read from the SERVER side using the same calls production makes, so the
-/// two arms are compared on identical observables.
-pub(super) struct AckGapArm {
-    pub(super) arm: &'static str,
-    /// OUTCOME (iv), the routing discriminator. This is the PRODUCTION
-    /// PREDICATE COPIED VERBATIM from `ops_acks.rs:51-56`, not a paraphrase of
-    /// it: `obligation_debt_dispatch().is_some_and(|s| s.episode().is_some())`.
-    /// True routes to the nonzero arm (selector sites 2/3); false routes to the
-    /// zero-debt arm (selector site 1). The two selectors implement DIFFERENT
-    /// RULES, so a routing difference between arms is itself an answer.
-    pub(super) routing_nonzero: bool,
-    /// Site 1's deciding input side: `through_seq > contiguously_available_through`
-    /// (`participant_ack.rs:221`). Both operands reported.
-    pub(super) acknowledged_through: u64,
-    pub(super) contiguously_available_through: Result<u64, String>,
-    /// Site 2's evidence. `contains_endpoint` is `pub(in crate::lifecycle)` and
-    /// therefore NOT callable from this crate, so the index itself is reported
-    /// and membership is read from it rather than recomputed. Declared, not
-    /// silently substituted.
-    pub(super) obligations_debug: String,
-    /// What the ack actually did, so the accepting arm proves it accepts.
-    pub(super) ack_outcome: String,
-    /// CONDITION (b): the DERIVED endpoint and the index it came from.
-    pub(super) derived_endpoint: u64,
-    pub(super) derived_index: String,
-}
-
-pub(super) fn ackgap_arm_probe(attach: bool) -> Result<AckGapArm, Box<dyn Error>> {
-    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
-    let config = marker_fixture_config();
-    let conversation_id = 0xA7;
-    let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
-    let members = enroll_members(&handler, conversation_id)?;
-
-    let mut generation = Generation::ONE;
-    if attach {
-        let attached = dispatch(
-            &handler,
-            members.first_connection,
-            ClientRequest::CredentialAttach(CredentialAttachRequest {
-                conversation_id,
-                participant_id: members.first.participant_id(),
-                capability_generation: Generation::ONE,
-                attach_secret: members.first.attach_secret(),
-                attach_attempt_token: AttachAttemptToken::new([0xB2; 16]),
-                accept_marker_delivery_seq: None,
-            }),
-        )?;
-        let ServerValue::AttachBound(bound) = attached else {
-            return Err(format!("ackgap probe: first member did not attach: {attached:?}").into());
-        };
-        generation = bound.origin_binding_epoch().capability_generation;
-    }
-
-    // THE THIRD ENROLMENT. `ack_marker_prefix` enrols a third participant
-    // (:215-224) BEFORE its through-3 ack (:227), and availability is derived
-    // from `all_obligations` -- delivered rows -- not from an empty outbox. A
-    // probe that acks through 3 after only TWO enrolments cannot reproduce the
-    // asymmetry it exists to explain: both arms would refuse at site 1, the
-    // control would correctly declare itself not citable, and the one priced
-    // discriminator run would buy nothing. So the probe now mirrors the real
-    // failing sequence exactly: enrol x2 -> [attach] -> enrol third -> ack 3.
-    // Both arms are identical through this point and differ ONLY in the attach.
-    let third_connection = ConnectionIncarnation::new(0xA7, 3);
-    let third = dispatch(
-        &handler,
-        third_connection,
-        ClientRequest::Enrollment(EnrollmentRequest {
-            conversation_id,
-            enrollment_token: EnrollmentToken::new([0xA0; 16]),
-        }),
-    )?;
-    if !matches!(third, ServerValue::EnrollBound(_)) {
-        return Err(format!("ackgap probe: third enrolment failed: {third:?}").into());
-    }
-
-    let participant_id = members.first.participant_id();
-    let (routing_nonzero, acknowledged_through, contiguously_available_through, obligations_debug) = {
-        let cell = handler.cell(conversation_id)?;
-        let guard = cell
-            .lock()
-            .map_err(|_| "ackgap probe owner lock was poisoned")?;
-        let authority = guard
-            .as_ref()
-            .ok_or("ackgap probe conversation owner was absent")?;
-        // PRODUCTION PREDICATE, copied verbatim from ops_acks.rs:51-56.
-        let routing = authority
-            .obligation_debt_dispatch()
-            .is_some_and(|state| state.episode().is_some());
-        let acked = authority
-            .slots
-            .get(&participant_id)
-            .map_or(u64::MAX, |slot| slot.member.cursor());
-        let (available, obligations) = match authority.outbox.as_ref() {
-            Some(outbox) => match outbox.recipient_ack_obligations(participant_id, acked) {
-                Ok((obligations, available)) => {
-                    (Ok(available), format!("{obligations:?}"))
-                }
-                Err(error) => (Err(format!("{error:?}")), "<unavailable>".to_owned()),
-            },
-            None => (
-                Err("outbox absent".to_owned()),
-                "<no outbox>".to_owned(),
-            ),
-        };
-        let tuple = (routing, acked, available, obligations);
-        drop(guard);
-        tuple
-    };
-
-    // DERIVE, DO NOT GUESS -- the same rule the fixture now follows.
-    let derived = live_ack_endpoint(&handler, conversation_id, participant_id)?;
-    let through_seq = derived.endpoint;
-    let ack_outcome = match dispatch(
-        &handler,
-        members.first_connection,
-        ClientRequest::ParticipantAck(ParticipantAck {
-            conversation_id,
-            participant_id,
-            capability_generation: generation,
-            through_seq,
-        }),
-    ) {
-        Ok(value) => format!("{value:?}"),
-        Err(error) => format!("dispatch error: {error}"),
-    };
-
-    Ok(AckGapArm {
-        arm: if attach { "POST-ATTACH (refusing)" } else { "PRE-ATTACH (accepting, control)" },
-        routing_nonzero,
-        acknowledged_through,
-        contiguously_available_through,
-        obligations_debug,
-        ack_outcome,
-        derived_endpoint: through_seq,
-        derived_index: derived.index_debug,
-    })
-}
-
-fn member_cursors(
-    handler: &ProductionParticipantHandler,
-    conversation_id: u64,
-    members: &FixtureMembers,
-) -> Result<(u64, u64), Box<dyn Error>> {
-    let cell = handler.cell(conversation_id)?;
-    let guard = cell
-        .lock()
-        .map_err(|_| "cursor probe owner lock was poisoned")?;
-    let authority = guard
-        .as_ref()
-        .ok_or("cursor probe conversation owner was absent")?;
-    let read = |participant_id: ParticipantId| {
-        authority
-            .slots
-            .get(&participant_id)
-            .map_or(u64::MAX, |slot| slot.member.cursor())
-    };
-    let pair = (
-        read(members.first.participant_id()),
-        read(members.second.participant_id()),
-    );
-    drop(guard);
-    Ok(pair)
+/// Outcome of the F8 PRECONDITION MEASUREMENT (ruling a35c1cb7): does the
+/// marker still drain under `marker_fixture_config` AS TUNED once the members
+/// have attached?
+///
+/// This is a measurement, not a rework. `prepare_marker_fixture` above is
+/// untouched; this is an additive sibling that differs from it in exactly one
+/// respect — two `CredentialAttach` dispatches after enrolment — so any
+/// difference in outcome is attributable to the attaches and to nothing else.
+/// The config is used exactly as tuned; no debt arithmetic is retuned here.
+pub(super) struct AttachedDrainAttempt {
+    /// POSITIVE CONTROL that the attaches actually landed. Part A established
+    /// that without a `CredentialAttach` no participant ever holds a
+    /// binding-fate token (`ops_attach.rs:331-337` is the sole mint), so the
+    /// APPEARANCE of these tokens IS the attach observed. `false` here means
+    /// the measurement never got the state it was built to test.
+    pub(super) first_has_binding_fate: bool,
+    pub(super) second_has_binding_fate: bool,
+    /// CONDITION (b): the derived endpoint AND the live index it came from,
+    /// printed in the teed log. The observable that decided the discriminator
+    /// now serves the fixture.
+    pub(super) derived_ack_endpoints: Vec<DerivedAckEndpoint>,
+    /// The DRAIN WITNESS, non-idempotent by construction: `drive_marker_drain`
+    /// only returns `Ok` if `authority.last_marker_projection` surrendered a
+    /// marker projection at the fourth commit — a one-shot value consumed by
+    /// `.take()` that exists ONLY if a drain actually projected. It is an
+    /// event, not a state that could legitimately sit still.
+    pub(super) drain: Result<MarkerFixture, String>,
 }
 
 pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAttempt, Box<dyn Error>>
@@ -804,17 +659,6 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
     let conversation_id = 0xA7;
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
     let members = enroll_members(&handler, conversation_id)?;
-
-    // A/B CONTROL ARM: an identically-built server taken to the SAME point with
-    // enrolment only and no attach, so the two cursor readings differ in exactly
-    // one respect.
-    let cursors_enrolled_only = {
-        let control_store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
-        let control_handler =
-            ProductionParticipantHandler::new(Arc::clone(&control_store), marker_fixture_config())?;
-        let control_members = enroll_members(&control_handler, conversation_id)?;
-        member_cursors(&control_handler, conversation_id, &control_members)?
-    };
 
     // THE ONLY DIFFERENCE FROM `prepare_marker_fixture`: two CredentialAttach
     // dispatches, and the POST-ATTACH generation each one mints is captured so
@@ -856,7 +700,6 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
         second: *second_generation,
     };
 
-    let cursors_after_attach = member_cursors(&handler, conversation_id, &members)?;
     let (first_has_binding_fate, second_has_binding_fate) = {
         let cell = handler.cell(conversation_id)?;
         let guard = cell
@@ -918,11 +761,32 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
     Ok(AttachedDrainAttempt {
         first_has_binding_fate,
         second_has_binding_fate,
-        cursors_enrolled_only,
-        cursors_after_attach,
         derived_ack_endpoints,
         drain,
     })
+}
+
+/// THE ARMED FIXTURE (attempt 2, Cally b23e4cc1). `prepare_marker_fixture`
+/// mints no binding-fate token, so every Died row it produces is intent-free
+/// and §1's incident cannot occur in it -- Part A's finding, and the honest
+/// refusal's cited cause. This entry point drives the CredentialAttach that
+/// mints the intent, and the drain verdict at tree 9440a06 proved the marker
+/// still mints and retains under it (EXIT (1), projection at delivery_seq 12).
+pub(super) fn attached_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> {
+    let attempt = attempt_marker_fixture_with_attaches()?;
+    if !(attempt.first_has_binding_fate && attempt.second_has_binding_fate) {
+        return Err(format!(
+            "armed fixture: the attaches did not mint binding-fate tokens (first={} second={}), \
+             so the incident geometry is NOT built and no unit may claim to witness it",
+            attempt.first_has_binding_fate, attempt.second_has_binding_fate
+        )
+        .into());
+    }
+    attempt
+        .drain
+        .map_err(|error| -> Box<dyn Error> {
+            format!("armed fixture: the marker did not drain with attaches present: {error}").into()
+        })
 }
 
 pub(super) fn marker_protocol_snapshot(

@@ -4,7 +4,9 @@
 //!
 //! These two units replay §1's incident on a live store rather than asserting
 //! about it. A compaction marker for P1 is minted and drained by
-//! `prepare_marker_fixture`, and P1 never MarkerAcks — no offer is recorded and
+//! `attached_marker_fixture` (which drives the CredentialAttach that mints the
+//! binding-fate token, so the Died row carries an open Ordinary intent as §1
+//! requires), and P1 never MarkerAcks — no offer is recorded and
 //! no ack is dispatched, so the retained marker record stays replayable and
 //! P1's cursor stays below it. The peer acks past the marker, which lifts hard
 //! observer progress over it, and then departs, which sets ITS cursor to the
@@ -45,9 +47,7 @@ use super::ProductionParticipantHandler;
 use super::log::{DecodedStoredOperation, OperationLog, StoredOperation};
 use super::tests::dispatch_tracked;
 use super::tests_marker_ack_fixture::{
-    AckGapArm, ackgap_arm_probe,
-    MarkerFixture, attempt_marker_fixture_with_attaches, marker_fixture_config,
-    prepare_marker_fixture,
+    MarkerFixture, attached_marker_fixture, marker_fixture_config,
 };
 
 /// The durable `Open` the departing peer's fate completes under.
@@ -486,510 +486,73 @@ fn sample_authority(
     Ok(sample)
 }
 
-/// Counts durable Died rows naming one participant. A Died row is the footprint
-/// of `complete_target` having actually reached its append at
-/// `connection_fate.rs:256` for that target — which is what separates "the fate
-/// ran" from "the work item matched nothing and returned Ok".
-fn died_rows_for(
-    store: &Arc<dyn DurableStore>,
-    conversation_id: u64,
-    participant_id: u64,
-) -> Result<usize, Box<dyn Error>> {
-    Ok(operation_rows(store, conversation_id)?
-        .iter()
-        .filter(|operation| match operation {
-            StoredOperation::Died { row } => row.participant_id == participant_id,
-            _ => false,
-        })
-        .count())
+
+/// Evidence that the §1-intent arming assertions ACTUALLY RAN (condition 3).
+/// An unexecuted branch is not a passing branch, so these values are carried
+/// out and PRINTED by whichever unit reports, rather than being swallowed by a
+/// silent `?`.
+#[derive(Clone, Copy, Debug)]
+struct ArmingEvidence {
+    target_holds_binding_fate_before: bool,
+    target_pending_fate_after: bool,
+    target_died_rows_after: usize,
 }
 
-/// INSTRUMENT LANE (joint gate 0c32310e + 96c62924). This is NOT a verdict on
-/// the leg and NOT a fix — it is a measurement that always reports, so that its
-/// reading lands in the teed log where it can be cited.
+/// §1-INTENT ARMING ASSERTION, BEFORE the departure (Cally b23e4cc1).
 ///
-/// WHY IT EXISTS. The step-0b check sampled the cursor and the watermark AFTER
-/// the departure returned, and reported cursor 9 against watermark 10. Two
-/// readings fit that: §1's premise is conditional, or the departure's own
-/// durable Died row advanced the watermark 9→10 between the fate computing
-/// `resulting_cursor` and my sample. The old instrument cannot separate them,
-/// so it cannot be cited for either.
-///
-/// WHAT THIS ONE DOES DIFFERENTLY. It brackets the departure: the watermark is
-/// captured BEFORE the call and again AFTER, so the 9→10 advance is MEASURED
-/// rather than inferred from sampling order. The discriminator is then exact —
-/// if the post-departure cursor equals the PRE-departure watermark, the fate
-/// did set the cursor to the watermark it could see, and the premise holds.
-///
-/// POSITIVE CONTROL, and the reading is void without it: the instrument must
-/// demonstrably SEE the advance it is being asked to rule on. If the watermark
-/// does not move across the departure, this instrument has not proven it can
-/// observe the very event whose timing is in question, and it says so instead
-/// of returning a verdict it has not earned.
-#[test]
-fn f8_instrument_lane_brackets_the_departure_fate() -> Result<(), Box<dyn Error>> {
-    let fixture = prepare_marker_fixture()?;
-    let roles = incident_roles(&fixture)?;
-    assert_unacked_marker_prestate(&fixture.handler, &roles)?;
-
-    let acked = dispatch_tracked(
-        &fixture.handler,
-        roles.peer_connection,
-        &mut ParticipantConnectionConversations::default(),
-        ClientRequest::ParticipantAck(ParticipantAck {
-            conversation_id: roles.conversation_id,
-            participant_id: roles.peer_participant,
-            capability_generation: Generation::ONE,
-            through_seq: roles.peer_ack_through_seq,
-        }),
-    )?;
-    if !matches!(acked, ServerValue::AckCommitted(_)) {
-        return Err(format!("instrument lane: the peer ack did not commit: {acked:?}").into());
-    }
-
-    let before = sample_authority(&fixture.handler, &roles)?;
-    let consumer: &dyn ParticipantSemanticHandler = &fixture.handler;
-    let departure = consumer.handle_connection_fate(connection_lost(
-        PEER_OPEN_SEQUENCE,
-        roles.peer_connection,
-        roles.conversation_id,
-    ));
-    let after = sample_authority(&fixture.handler, &roles)?;
-
-    // LEAD 2, measured INDEPENDENTLY rather than behind a first-Err: its
-    // silence must be a reading, not an absence.
-    let owner_bound_for_departure = match after.owner_binding {
-        Some(BindingState::Bound(active)) => {
-            if active.binding_epoch.connection_incarnation == roles.owner_connection {
-                "YES — Bound to the exact incarnation its departure names".to_string()
-            } else {
-                format!(
-                    "NO — Bound to {:?}, but its departure names {:?} (owner-side no-op)",
-                    active.binding_epoch.connection_incarnation, roles.owner_connection
-                )
-            }
-        }
-        other => format!("NO — owner slot is {other:?}, not Bound (owner-side no-op)"),
-    };
-
-    let (Some(w_before), Some(w_after)) = (before.high_watermark, after.high_watermark) else {
+/// §1 requires "P1's Died row carrying an open Ordinary intent", and
+/// `connection_fate.rs:234-242` opens that intent ONLY IF the target slot holds
+/// `slot.binding_fate`. This is the amended assertion that superseded the
+/// retained_floor==marker form: it is the server-side condition §1 actually
+/// demands.
+fn assert_intent_geometry_is_built(
+    handler: &ProductionParticipantHandler,
+    roles: &IncidentRoles,
+) -> Result<bool, Box<dyn Error>> {
+    let cell = handler.cell(roles.conversation_id)?;
+    let guard = cell
+        .lock()
+        .map_err(|_| "F8 arming assertion owner lock was poisoned")?;
+    let authority = guard
+        .as_ref()
+        .ok_or("F8 arming assertion conversation owner was absent")?;
+    let holds = authority
+        .slots
+        .get(&roles.owner_participant)
+        .is_some_and(|slot| slot.binding_fate.is_some());
+    drop(guard);
+    if !holds {
         return Err(format!(
-            "INSTRUMENT VOID: no frontier to read a watermark from. before={before:?} after={after:?}"
+            "F8 §1-INTENT ARMING FAILED: marker owner {} holds NO binding-fate token before its \
+             departure, so `connection_fate.rs:234-242` will set specific_fate_intent = None, its \
+             Died row will be INTENT-FREE, and the units below would witness nothing. The fixture \
+             is not armed and no result from it may be claimed.",
+            roles.owner_participant
         )
         .into());
-    };
-    let control = if w_after > w_before {
-        format!("PASS — the watermark advanced {w_before} -> {w_after} across the departure, so this instrument demonstrably observes the event whose timing is in question")
-    } else {
-        format!("FAIL — the watermark did NOT advance ({w_before} -> {w_after}). This instrument has not shown it can see the advance it is being asked to rule on, so its verdict below is NOT CITABLE")
-    };
-    let verdict = match after.peer_cursor {
-        Some(cursor) if cursor == w_before => format!(
-            "(ii) PREMISE HOLDS INSIDE THE FATE — post-departure cursor {cursor} EQUALS the \
-             PRE-departure watermark {w_before}. The fate did set the cursor to the watermark it \
-             could see; the 9->10 style gap is the departure's own Died row landing afterwards. \
-             The step-0b instrument was MIS-TIMED, not the design conditional."
-        ),
-        Some(cursor) if cursor == w_after => format!(
-            "AMBIGUOUS — post-departure cursor {cursor} equals the POST-departure watermark \
-             {w_after} and the watermark moved, so bracketing cannot separate the two instants \
-             here. Not citable for either exit."
-        ),
-        Some(cursor) => format!(
-            "(i) GAP PERSISTS INSIDE THE FATE — post-departure cursor {cursor} matches NEITHER \
-             the pre-departure watermark {w_before} NOR the post-departure watermark {w_after}. \
-             §1's premise does not hold even accounting for the Died row's advance."
-        ),
-        None => "INSTRUMENT VOID — the peer has no slot after departure".to_string(),
-    };
-
-    Err(format!(
-        "=== F8 INSTRUMENT LANE READING (not a test failure; this test reports by returning Err \
-         so its reading reaches the teed log under the fixed tier-1 string) ===\n\
-         departure call returned: {departure:?}\n\
-         POSITIVE CONTROL: {control}\n\
-         VERDICT: {verdict}\n\
-         LEAD 2 (owner Bound for its own departure, measured independently): {owner_bound_for_departure}\n\
-         marker_delivery_seq={} peer={} owner={} peer_ack_through_seq={}\n\
-         BEFORE departure: {before:?}\n\
-         AFTER  departure: {after:?}\n\
-         === END INSTRUMENT READING ===",
-        roles.marker_delivery_seq,
-        roles.peer_participant,
-        roles.owner_participant,
-        roles.peer_ack_through_seq,
-    )
-    .into())
-}
-
-/// INSTRUMENT LANE #2 (joint gate f063b3e9). What did the OWNER's fate actually
-/// do? Read-only; no fix, no classification of the leg.
-///
-/// THE ANSWER IS FIVE-WAY, NOT BOOLEAN. `validate_binding_fate_floor`
-/// (liminal-protocol `binding_fate.rs`) has THREE Err exits BEFORE it computes
-/// anything — `Binding` at :407, `Terminal` at :421, `ObserverProgress` at :426
-/// — and only then reaches the computation at :428-450. A reached/not-reached
-/// boolean would collapse four distinct outcomes into one and would be the
-/// loud/silent trap wearing instrument clothes.
-///
-/// HOW EACH OF THE FIVE IS OBSERVED, without touching production code:
-///   * the three early refusals, BY NAME — a refusal reaches the server as
-///     `StateError::invariant("binding-fate measurement refused: {error:?}")`
-///     (`binding_fate_completion.rs:108-110`), so the variant's own name
-///     travels in the returned error text;
-///   * COMPUTATION REACHED, with its measured floor — `retained_floor` is set
-///     to the computed `resulting_floor` by
-///     `install_binding_fate_transition`, so a move in `retained_floor` is the
-///     computation's own footprint and its new value IS the measured floor;
-///   * NEVER INVOKED — no Died row for the owner appears, meaning
-///     `complete_target` never reached its append at `connection_fate.rs:256`
-///     for that target; or a Died row exists but the intent is still sitting in
-///     `pending_specific_fates`, which is the deferral exit at
-///     `binding_fate_completion.rs:66-77` returning Ok without measuring.
-///
-/// POSITIVE CONTROL, condition of citation: the PEER's fate is known to reach
-/// the computation and decline correctly. This instrument must demonstrably SEE
-/// that — `retained_floor` must move across the peer's departure — before its
-/// word about the owner counts for anything.
-#[test]
-fn f8_instrument_lane_2_what_did_the_owners_fate_do() -> Result<(), Box<dyn Error>> {
-    let fixture = prepare_marker_fixture()?;
-    let roles = incident_roles(&fixture)?;
-    assert_unacked_marker_prestate(&fixture.handler, &roles)?;
-    let store = Arc::clone(&fixture.store);
-
-    let acked = dispatch_tracked(
-        &fixture.handler,
-        roles.peer_connection,
-        &mut ParticipantConnectionConversations::default(),
-        ClientRequest::ParticipantAck(ParticipantAck {
-            conversation_id: roles.conversation_id,
-            participant_id: roles.peer_participant,
-            capability_generation: Generation::ONE,
-            through_seq: roles.peer_ack_through_seq,
-        }),
-    )?;
-    if !matches!(acked, ServerValue::AckCommitted(_)) {
-        return Err(format!("instrument 2: the peer ack did not commit: {acked:?}").into());
     }
-
-    // ---- POSITIVE CONTROL: watch the PEER's fate reach the computation ----
-    let before_peer = sample_authority(&fixture.handler, &roles)?;
-    let consumer: &dyn ParticipantSemanticHandler = &fixture.handler;
-    let peer_departure = consumer.handle_connection_fate(connection_lost(
-        PEER_OPEN_SEQUENCE,
-        roles.peer_connection,
-        roles.conversation_id,
-    ));
-    let after_peer = sample_authority(&fixture.handler, &roles)?;
-    let peer_died_rows = died_rows_for(&store, roles.conversation_id, roles.peer_participant)?;
-    let control = match (before_peer.retained_floor, after_peer.retained_floor) {
-        (Some(before), Some(after)) if after != before => format!(
-            "PASS — the peer's fate moved retained_floor {before} -> {after}, and left \
-             {peer_died_rows} Died row(s). This instrument demonstrably sees a floor computation \
-             happen, so its reading on the owner below is CITABLE. (peer departure returned \
-             {peer_departure:?})"
-        ),
-        (before, after) => format!(
-            "FAIL — retained_floor did not move across the peer's departure ({before:?} -> \
-             {after:?}), so this instrument has NOT shown it can observe a floor computation. \
-             Everything below is NOT CITABLE. (peer departure returned {peer_departure:?})"
-        ),
-    };
-
-    // ---- THE MEASUREMENT: the OWNER's fate ----
-    let before_owner = sample_authority(&fixture.handler, &roles)?;
-    let owner_died_rows_before =
-        died_rows_for(&store, roles.conversation_id, roles.owner_participant)?;
-    let owner_departure = consumer.handle_connection_fate(connection_lost(
-        OWNER_OPEN_SEQUENCE,
-        roles.owner_connection,
-        roles.conversation_id,
-    ));
-    let after_owner = sample_authority(&fixture.handler, &roles)?;
-    let owner_died_rows_after =
-        died_rows_for(&store, roles.conversation_id, roles.owner_participant)?;
-    let owner_row_delta = owner_died_rows_after.saturating_sub(owner_died_rows_before);
-
-    let five_way = match &owner_departure {
-        Err(error) => {
-            let text = error.to_string();
-            let named = ["Binding", "Terminal", "ObserverProgress", "OwnerTransition"]
-                .into_iter()
-                .find(|name| text.contains(name))
-                .unwrap_or("<no known variant name found in the error text>");
-            format!(
-                "EARLY Err EXIT / REFUSAL, BY NAME: {named}\n  full error text: {text}"
-            )
-        }
-        Ok(()) => {
-            if after_owner.owner_pending_fate {
-                format!(
-                    "NEVER MEASURED — DEFERRED: the owner's intent is STILL in \
-                     pending_specific_fates after a departure that returned Ok. That is the \
-                     `binding_fate_completion.rs:66-77` exit: an Ordinary intent with no \
-                     committed terminal is re-inserted and returns Ok WITHOUT measuring. Died \
-                     rows for the owner: {owner_died_rows_before} -> {owner_died_rows_after}."
-                )
-            } else if owner_row_delta == 0 {
-                format!(
-                    "NEVER INVOKED: the departure returned Ok and appended NO Died row for the \
-                     owner ({owner_died_rows_before} -> {owner_died_rows_after}), so \
-                     `complete_target` never reached its append at connection_fate.rs:256 for \
-                     this target — the work item matched an empty target set."
-                )
-            } else {
-                match (before_owner.retained_floor, after_owner.retained_floor) {
-                    (Some(before), Some(after)) if after != before => format!(
-                        "COMPUTATION REACHED AND SUCCEEDED — MEASURED FLOOR = {after} \
-                         (retained_floor {before} -> {after}); marker sits at {}. Died rows for \
-                         the owner: {owner_died_rows_before} -> {owner_died_rows_after}.",
-                        roles.marker_delivery_seq
-                    ),
-                    (before, after) => format!(
-                        "COMPUTATION REACHED, FLOOR UNCHANGED: retained_floor {before:?} -> \
-                         {after:?} while a Died row WAS appended \
-                         ({owner_died_rows_before} -> {owner_died_rows_after}). The fate ran and \
-                         installed no new floor; marker sits at {}.",
-                        roles.marker_delivery_seq
-                    ),
-                }
-            }
-        }
-    };
-
-    Err(format!(
-        "=== F8 INSTRUMENT LANE #2 READING (not a test failure; reports by returning Err so the \
-         reading reaches the teed log under the fixed tier-1 string) ===\n\
-         POSITIVE CONTROL (peer's fate reaches the computation): {control}\n\
-         FIVE-WAY ANSWER FOR THE OWNER'S FATE: {five_way}\n\
-         marker_delivery_seq={} peer={} owner={} peer_ack_through_seq={}\n\
-         BEFORE peer departure : {before_peer:?}\n\
-         AFTER  peer departure : {after_peer:?}\n\
-         BEFORE owner departure: {before_owner:?}\n\
-         AFTER  owner departure: {after_owner:?}\n\
-         === END INSTRUMENT #2 READING ===",
-        roles.marker_delivery_seq,
-        roles.peer_participant,
-        roles.owner_participant,
-        roles.peer_ack_through_seq,
-    )
-    .into())
+    Ok(holds)
 }
 
-/// F8 PRECONDITION MEASUREMENT (ruling a35c1cb7). Does the marker still drain
-/// under `marker_fixture_config` AS TUNED once the members have attached?
-///
-/// This gates whether attempt 2 may open at all. It is a measurement, not a
-/// rework: `prepare_marker_fixture` is untouched, no unit is reworked, no debt
-/// arithmetic is retuned, and attempt 2 is not opened.
-///
-/// WITNESS CHOICES, stated here because on this leg the witness is declared
-/// before the instrument is built:
-///
-///   * "THE MARKER DRAINED" is witnessed by `authority.last_marker_projection`
-///     surrendering a projection at the fourth commit — `state.rs:197`, taken
-///     with `.take()` inside `drive_marker_drain`. It is NON-IDEMPOTENT by
-///     construction: a one-shot value that exists only if a drain actually
-///     projected, consumed when read. It is an event, not a state that could
-///     legitimately sit still — which is the law banked after instrument #2
-///     disqualified itself for choosing `retained_floor` movement, a state
-///     that can correctly not move.
-///   * "THE ATTACHES LANDED" is witnessed by `slot.binding_fate.is_some()`.
-///     Part A proved that without a `CredentialAttach` no participant EVER
-///     holds one (`ops_attach.rs:331-337` is the sole mint; the other four
-///     sites are take-then-reinsert guards). So the appearance of these tokens
-///     IS the attach observed, and it is the same observable that attempt 2's
-///     mandatory arming assertion will use. If it is absent, this measurement
-///     never reached the state it exists to test and says so.
-#[test]
-fn f8_precondition_does_the_marker_still_drain_with_attaches_present()
--> Result<(), Box<dyn Error>> {
-    let attempt = attempt_marker_fixture_with_attaches()?;
-
-    let control = if attempt.first_has_binding_fate && attempt.second_has_binding_fate {
-        "PASS — both members hold a binding-fate token after CredentialAttach, which Part A proved \
-         is impossible without one. The attaches landed and the measurement is testing the state \
-         it means to test."
-            .to_string()
-    } else {
-        format!(
-            "FAIL — binding-fate tokens after attach: first={} second={}. The attaches did not \
-             produce the state whose effect on the drain is being measured, so the drain result \
-             below is NOT CITABLE.",
-            attempt.first_has_binding_fate, attempt.second_has_binding_fate
-        )
-    };
-
-    let (verdict, detail) = match &attempt.drain {
-        Ok(fixture) => (
-            "EXIT (1) — THE MARKER STILL DRAINS WITH ATTACHES PRESENT",
-            format!(
-                "the drain surrendered its marker projection at delivery_seq {} in conversation \
-                 {}; target participant {}, catchup boundary {}. The config was used exactly as \
-                 tuned and nothing was retuned.",
-                fixture.marker_delivery.delivery_seq,
-                fixture.marker_delivery.conversation_id,
-                fixture.target_participant,
-                fixture.catchup_through_seq
-            ),
-        ),
-        Err(error) => (
-            "EXIT (2) — THE MARKER DOES NOT DRAIN WITH ATTACHES PRESENT",
-            format!(
-                "drive_marker_drain refused: {error}. Per the ruling this returns to the design \
-                 gate BEFORE any config retuning — retuning the debt arithmetic may not preserve \
-                 incident fidelity and may route to fallback (b) instead."
-            ),
-        ),
-    };
-
-    let enrolled_only = attempt.cursors_enrolled_only;
-    let after_attach = attempt.cursors_after_attach;
-    let derived = attempt
-        .derived_ack_endpoints
-        .iter()
-        .map(|d| {
-            format!(
-                "\n    participant {} acked_through={} -> DERIVED endpoint {} from index {}",
-                d.participant_id, d.acknowledged_through, d.endpoint, d.index_debug
-            )
-        })
-        .collect::<String>();
-    Err(format!(
-        "=== F8 PRECONDITION MEASUREMENT (not a test failure; reports by returning Err so its \
-         reading reaches the teed log under the fixed tier-1 string) ===\n\
-         POSITIVE CONTROL (attaches landed): {control}\n\
-         A/B CURSOR EVIDENCE (tests the reset I previously INFERRED): enrolled-only \
-         DERIVED ACK ENDPOINTS (condition b -- endpoint AND the live index it came from):{derived}\n\
-         {enrolled_only:?} vs after-attach {after_attach:?}\n\
-         VERDICT: {verdict}\n\
-         DETAIL: {detail}\n\
-         === END PRECONDITION MEASUREMENT ==="
-    )
-    .into())
-}
-
-/// THE HONEST REFUSAL (ruling 94169870 item 3). These units are red, and this
-/// is the TRUE reason — replacing a refuted one rather than removing it and
-/// letting them drift back to a meaningless green.
-///
-/// WHY THE FIXTURE CANNOT YET EXPRESS THE INCIDENT. Part A established at the
-/// bytes that the sole mint of a binding-fate token is `CredentialAttach`
-/// (`ops_attach.rs:331-337`; the other four `slot.binding_fate = Some(..)`
-/// sites are take-then-reinsert guards that mint nothing), and that
-/// `tests_marker_ack_fixture.rs` performs ZERO `CredentialAttach`. Without a
-/// token, `connection_fate.rs:234-242` sets `specific_fate_intent = None`,
-/// `open_specific_fate` (`:296`) is never called, and the measurement (`:368`)
-/// never runs. §1's incident requires "P1's Died row carrying an open Ordinary
-/// intent". This fixture's Died rows carry no intent at all, so there is
-/// nothing here for these units to witness — they would pass for the same
-/// reason an empty room is quiet.
-///
-/// EXPIRY, named so this cannot age into drift: superseded by the amended
-/// §1-intent assertions — `slot.binding_fate.is_some()` for the target BEFORE
-/// the departure, and `pending_specific_fates` gaining that participant AFTER
-/// — when attempt 2 lands. If attempt 2 has landed and this is still here,
-/// this text is the defect.
-fn refuse_until_the_geometry_exists(roles: &IncidentRoles) -> Box<dyn Error> {
-    format!(
-        "F8 HONEST REFUSAL — THE FIXTURE CANNOT YET EXPRESS THE INCIDENT GEOMETRY. No \
-         binding-fate token is ever minted in this fixture (Part A: CredentialAttach at \
-         ops_attach.rs:331-337 is the sole mint, and tests_marker_ack_fixture.rs performs none), \
-         so every Died row it produces is INTENT-FREE, open_specific_fate is never called, and \
-         the binding-fate measurement never runs. §1 requires a Died carrying an OPEN ORDINARY \
-         INTENT; there is none here, so this unit has nothing to witness and a green would mean \
-         nothing. marker={} peer={} owner={}. Superseded by the §1-intent arming assertions when \
-         attempt 2 lands.",
-        roles.marker_delivery_seq, roles.peer_participant, roles.owner_participant
-    )
-    .into()
-}
-
-/// THE ACKGAP DISCRIMINATOR (Cally 84dc0265, answer space confirmed 083f4a01).
-/// The LAST fixture-incompatibility layer this lane chases; the tripwire behind
-/// it fires fallback (b) automatically if the remedy's re-run hits a new layer.
-///
-/// THE QUESTION: what post-attach state refuses an ack that the pre-attach
-/// state accepts from the same cursor 0.
-///
-/// THE PRE-AGREED WITNESS: which selector produced the refusal, and the
-/// deciding input's value, IN BOTH ARMS. The three AckGap producers, verified
-/// at e756069:
-///   SITE 1 `participant_ack.rs:221` -- `through_seq > contiguously_available_through`
-///   SITE 2 `participant_ack.rs:310` -- `!endpoint_is_obligation`
-///   SITE 3 `cursor_facts.rs:873`    -- `through_seq > candidate_high_watermark
-///                                       || !endpoint_available` (compound)
-/// and `endpoint_is_available`'s `?` Err exit reports BY ITS OWN NAME, since it
-/// is not an AckGap.
-///
-/// THE CONTROL, verbatim from the ruling: "if the instrument cannot observe the
-/// selector in the arm that ACCEPTS, it claims nothing." So the pre-attach arm
-/// reports the same observables and must show itself accepting.
-///
-/// DECLARED OBSERVABILITY LIMIT, not a silent substitution: site 2's
-/// `contains_endpoint` is `pub(in crate::lifecycle)` and cannot be called from
-/// this crate, so the obligation INDEX is reported and membership read from it
-/// rather than recomputed. Sites 1 and 4 (routing) are fully observable from
-/// the server side using production's own calls.
-#[test]
-fn f8_ackgap_discriminator_which_selector_refuses() -> Result<(), Box<dyn Error>> {
-    let pre = ackgap_arm_probe(false)?;
-    let post = ackgap_arm_probe(true)?;
-
-    let control = if pre.ack_outcome.contains("AckCommitted") {
-        "PASS — the pre-attach arm ACCEPTS and its selector inputs were observed. The instrument          can see the accepting arm, so its word on the refusing arm counts."
-    } else {
-        "FAIL — the pre-attach arm did not accept, so this instrument has NOT reproduced the          asymmetry it exists to explain. Everything below is NOT CITABLE."
-    };
-
-    let routing_verdict = if pre.routing_nonzero == post.routing_nonzero {
-        format!(
-            "NOT a routing difference — both arms take the same selector              (routing_nonzero={}). The discriminator is an INPUT to that selector, not the              choice of selector.",
-            pre.routing_nonzero
-        )
-    } else {
-        format!(
-            "(iv) SELECTOR-ROUTING DIFFERENCE — pre-attach routing_nonzero={}, post-attach              routing_nonzero={}. The arms run DIFFERENT SELECTORS implementing DIFFERENT RULES,              which is itself the discriminator: production branches at ops_acks.rs:51-56 on              `obligation_debt_dispatch().is_some_and(|s| s.episode().is_some())`.",
-            pre.routing_nonzero, post.routing_nonzero
-        )
-    };
-
-    let render = |a: &AckGapArm| {
-        format!(
-            "  {}
-    routing_nonzero (ops_acks.rs:51-56 predicate) = {}
-                 acknowledged_through = {}
-    contiguously_available_through = {:?}
-                 DERIVED endpoint = {} from live index {} -> site-1 test `endpoint > available` = {}
-                 obligations index = {}
-    ack outcome = {}",
-            a.arm,
-            a.routing_nonzero,
-            a.acknowledged_through,
-            a.contiguously_available_through,
-            a.derived_endpoint,
-            a.derived_index,
-            a.contiguously_available_through
-                .as_ref()
-                .map_or("<unknown>".to_owned(), |v| (a.derived_endpoint > *v).to_string()),
-            a.obligations_debug,
-            a.ack_outcome
-        )
-    };
-
-    Err(format!(
-        "=== F8 ACKGAP DISCRIMINATOR (not a test failure; reports by returning Err so its reading          reaches the teed log under the fixed tier-1 string) ===
-         POSITIVE CONTROL (accepting arm observed): {control}
-         ROUTING (outcome iv): {routing_verdict}
-         ARMS:
-{}
-{}
-         === END ACKGAP DISCRIMINATOR ===",
-        render(&pre),
-        render(&post)
-    )
-    .into())
+/// §1-INTENT ARMING ASSERTION, AFTER the departure: `pending_specific_fates`
+/// gains the participant. That is the durable open intent §1 says the Died row
+/// carries -- the thing that gets stranded when the measurement refuses.
+fn observe_intent_after_departure(
+    handler: &ProductionParticipantHandler,
+    roles: &IncidentRoles,
+) -> Result<bool, Box<dyn Error>> {
+    let cell = handler.cell(roles.conversation_id)?;
+    let guard = cell
+        .lock()
+        .map_err(|_| "F8 post-departure arming observation owner lock was poisoned")?;
+    let authority = guard
+        .as_ref()
+        .ok_or("F8 post-departure arming observation owner was absent")?;
+    let pending = authority
+        .pending_specific_fates
+        .contains_key(&roles.owner_participant);
+    drop(guard);
+    Ok(pending)
 }
 
 fn connection_lost(
@@ -1009,6 +572,9 @@ struct DepartedPeer {
     fixture: MarkerFixture,
     roles: IncidentRoles,
     rows_before_owner_drop: Vec<StoredOperation>,
+    /// Condition 3: carried out so the units PRINT it. An assertion whose value
+    /// is never shown is an assertion nobody watched run.
+    target_holds_binding_fate_before: bool,
 }
 
 /// Replays §1 up to the instant before P1 drops: marker drained and unacked,
@@ -1033,13 +599,11 @@ struct DepartedPeer {
 /// (`state.rs:393`). It is deliberately NOT gated by the slowest member, which
 /// is precisely why one peer ack can lift it over a marker its own owner has
 /// never acked.
-// The tail below is unreachable while the honest refusal stands. It is kept
-// intact rather than deleted because it is exactly what attempt 2 re-enables
-// when the geometry exists: deleting it would make the refusal's expiry a
-// rewrite instead of a removal.
-#[allow(unreachable_code)]
 fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
-    let fixture = prepare_marker_fixture()?;
+    // THE ARMED FIXTURE. `prepare_marker_fixture` mints no binding-fate token,
+    // so its Died rows are intent-free and §1's incident cannot occur in it.
+    // This one drives the CredentialAttach that mints the intent.
+    let fixture = attached_marker_fixture()?;
     let roles = incident_roles(&fixture)?;
     assert_unacked_marker_prestate(&fixture.handler, &roles)?;
 
@@ -1084,16 +648,20 @@ fn peer_departed() -> Result<DepartedPeer, Box<dyn Error>> {
     assert_peer_actually_departed(&fixture.handler, &roles)?;
     assert_owner_is_bound_for_its_departure(&fixture.handler, &roles)?;
 
-    // Ruling 94169870 item 3: the units stay red, for the RIGHT reason. Every
-    // guard above has already run, so if the fixture ALSO breaks in some other
-    // way that failure is reported first and this refusal never masks it.
-    return Err(refuse_until_the_geometry_exists(&roles));
+    // --- PAIRED RETIREMENT, half 2 (Cally b23e4cc1 condition 2) ---
+    // `refuse_until_the_geometry_exists` retires HERE, in the same commit that
+    // adds the §1-intent arming assertion that replaces it. The refusal said
+    // the fixture could not express the incident because no intent is minted.
+    // The armed fixture mints one, so the refusal's own stated cause is gone
+    // and this assertion now proves the geometry positively instead.
+    let arming = assert_intent_geometry_is_built(&fixture.handler, &roles)?;
 
     let rows_before_owner_drop = operation_rows(&fixture.store, roles.conversation_id)?;
     Ok(DepartedPeer {
         fixture,
         roles,
         rows_before_owner_drop,
+        target_holds_binding_fate_before: arming,
     })
 }
 
@@ -1118,6 +686,13 @@ fn a_refused_connection_fate_leaves_no_durable_residue() -> Result<(), Box<dyn E
         roles.conversation_id,
     ));
     let rows_after = operation_rows(&store, roles.conversation_id)?;
+    // §1-INTENT ARMING ASSERTION, AFTER. Observed unconditionally so its value
+    // is reportable on every exit (condition 3).
+    let pending_after = observe_intent_after_departure(&departed.fixture.handler, &roles)?;
+    let arming = format!(
+        "ARMING EVIDENCE (both §1-intent assertions RAN):          slot.binding_fate.is_some() BEFORE departure = {}; pending_specific_fates gained          participant {} AFTER departure = {}",
+        departed.target_holds_binding_fate_before, roles.owner_participant, pending_after
+    );
 
     let Err(error) = outcome else {
         // The measurement was satisfiable. Then the fate must be DISCHARGED:
@@ -1136,7 +711,7 @@ fn a_refused_connection_fate_leaves_no_durable_residue() -> Result<(), Box<dyn E
         if stranded {
             return Err(format!(
                 "the connection fate reported success while leaving participant {} holding an \
-                 open specific-fate intent",
+                 open specific-fate intent. {arming}",
                 roles.owner_participant
             )
             .into());
@@ -1149,7 +724,7 @@ fn a_refused_connection_fate_leaves_no_durable_residue() -> Result<(), Box<dyn E
             "F8 §3.2: the binding-fate measurement refused ({error}) but the connection fate \
              had already appended {} durable row(s) to conversation {} — {} rows before, {} \
              after. The last row is {:?}. That row's intent is now undischargeable, and \
-             `repair_unclean_server_restart` re-mints it on every boot.",
+             `repair_unclean_server_restart` re-mints it on every boot. {arming}",
             rows_after
                 .len()
                 .saturating_sub(departed.rows_before_owner_drop.len()),
@@ -1189,6 +764,15 @@ fn the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server()
         roles.owner_connection,
         roles.conversation_id,
     ));
+    // §1-INTENT ARMING ASSERTION, AFTER -- observed BEFORE `departed` is
+    // dropped, so its value is reportable on every exit (condition 3).
+    let pending_after = observe_intent_after_departure(&departed.fixture.handler, &roles)?;
+    let arming = format!(
+        "ARMING EVIDENCE (both §1-intent assertions RAN): \
+         slot.binding_fate.is_some() BEFORE departure = {}; pending_specific_fates gained \
+         participant {} AFTER departure = {}",
+        departed.target_holds_binding_fate_before, roles.owner_participant, pending_after
+    );
     let live_refusal = fate.err();
     drop(departed);
 
@@ -1197,7 +781,8 @@ fn the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server()
         .map_err(|error| {
             format!(
                 "F8 no-new-poison: the server did not reach listening after the incident \
-                 sequence — boot failed with `{error}`. The live fate had answered {live_refusal:?}."
+                 sequence — boot failed with `{error}`. The live fate had answered \
+                 {live_refusal:?}. {arming}"
             )
         })?;
 
@@ -1228,7 +813,7 @@ fn the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server()
     if stranded {
         return Err(format!(
             "F8 no-new-poison: the rebooted server still holds an open specific-fate intent for \
-             participant {} — the fate was never discharged",
+             participant {} — the fate was never discharged. {arming}",
             roles.owner_participant
         )
         .into());
@@ -1237,7 +822,8 @@ fn the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server()
     // marker its owner has still not acked.
     if !marker_still_retained {
         return Err(format!(
-            "F8 no-new-poison: the marker at {} was released although its owner never acked it",
+            "F8 no-new-poison: the marker at {} was released although its owner never acked it. \
+             {arming}",
             roles.marker_delivery_seq
         )
         .into());
