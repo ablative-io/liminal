@@ -484,7 +484,9 @@ and per `subscribe` (`services.rs:1048`) frame:
 
 1. one uncontended `RwLock` read acquire + release (two atomic RMWs on one
    shared word),
-2. one `Arc` clone (one relaxed atomic increment) and its later decrement,
+2. one `Arc` clone (one relaxed atomic increment) and its later decrement —
+   paid by `subscribe` and the test-only roster read; `publish` does NOT pay
+   it (see the correction below),
 3. one `Acquire` load of the entry's `state` byte,
 4. one fallible branch for lock poisoning.
 
@@ -497,6 +499,20 @@ round-trip (`:1063-1067`). The added cost is nanoseconds on a path already
 measured in actor hops and store writes. It is not free, and the honest
 statement is that the roster read goes from *zero* to *bounded and small*, not
 that nothing changed.
+
+**Correction (found at build step 3, folded at lane close 2026-08-04 on the
+stack lead's binding word — a named correction, not silent absorption):** item
+2 was written as if the `Arc` clone were a new cost on every converted site.
+At the bytes, the pre-refactor `publish` already cloned a `ChannelHandle` out
+of the map (`.map(|configured| configured.handle.clone())`, the old
+`services.rs:963-969` — confirmed independently at the design gate's own
+F2-round read), so for `publish` the conversion SUBSTITUTES an
+`Arc<ConfiguredChannel>` clone for a `ChannelHandle` clone and the genuinely
+new cost is the lock discipline alone (items 1, 3, 4). `subscribe` and the
+test-only roster read each pay one genuinely new `Arc` clone. The
+flip-measurement trigger below is unchanged: it was stated against the shared
+lock word, which every converted path touches regardless of who pays the
+clone.
 
 **The one real hazard, named:** every connection process publishing on *any*
 channel now touches the same `RwLock` word. Reader-reader never blocks, but the
