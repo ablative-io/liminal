@@ -480,6 +480,29 @@ fn open_specific_fate(
             "durable Died opened a second participant-specific fate intent",
         ));
     }
+    // NO-RECONNECT MARK (Sol landing review, carried item 3). THIS BRANCH IS
+    // UNREACHABLE FROM LIVE COMPLETION EVERYWHERE, and that is a property of the
+    // caller rather than of this line.
+    //
+    // `open_specific_fate` has ONE live call site, `:413`, and it sits in the
+    // ELSE of `measured_fate_taken`. The Measured arm at `:278-341` already
+    // claims every case where `committed_died_terminal.is_some()` or the intent
+    // is `Recovered`, and this function is handed those SAME two values
+    // (`committed_terminal` is `completed.committed_died_terminal`, passed at
+    // `:419`). So arriving here at all means that guard measured FALSE, and the
+    // condition below is the same test over the same inputs: after the §3.2
+    // split it cannot be true.
+    //
+    // The combined insert-then-complete form is NOT dead and must not be
+    // deleted. It stays BOOT CANON through its DIRECT callers in
+    // binding_fate_completion.rs (`:419-430` and `:497-501`), which invoke
+    // `complete_pending_specific_fate` themselves — they reach the callee
+    // without ever passing through this branch.
+    //
+    // Reconnecting this arm to live completion would append the completion row
+    // from inside the post-source path and so violate measure-before-source
+    // ordering (§3.2). DELETION IS BARRED, and so is re-wiring: the branch is
+    // load-bearing for boot and inert for live, which is the shape intended.
     let completes_without_terminal = matches!(intent, StoredSpecificFateIntent::Recovered { .. });
     if committed_terminal.is_some() || completes_without_terminal {
         authority.complete_pending_specific_fate(participant_id, appender)?;
