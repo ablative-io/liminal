@@ -14,6 +14,7 @@ use liminal_protocol::wire::{BindingEpoch, ParticipantId};
 use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 use crate::server::participant::{ConnectionFateClass, ConnectionFateWorkItem};
 
+use super::binding_fate_completion::{MeasuredSpecificFate, measure_specific_fate_on_owner};
 use super::connection_fate_allocation::checked_fate_allocations;
 use super::connection_fate_rows::source_operation;
 use super::frontier;
@@ -209,6 +210,18 @@ impl PreparedConnectionFate {
     }
 }
 
+/// The admitted owner's exact §3.2 disposition between admission and install.
+///
+/// The two arms are mutually exclusive by construction, which is the point:
+/// an owner either carries a measured fate — and is installed by the completion
+/// append, after that append — or carries none and is installed directly once
+/// the source row is durable. No path installs it twice, and no path installs
+/// it before a durable row.
+enum AdmittedOwnerFate {
+    Measured(MeasuredSpecificFate),
+    Plain(LiveFrontierOwner),
+}
+
 fn complete_target(
     source: ConnectionFateSource,
     target: ConnectionFateTarget,
@@ -242,31 +255,128 @@ fn complete_target(
     };
     let allocations = checked_fate_allocations(authority)?;
     let source_sequence = allocations.source_sequence;
-    let admitted = admit_terminal(authority, active, source_row_class(source))?;
+    let AdmittedTerminal {
+        owner: admitted_owner,
+        disposition,
+        stored_disposition,
+        committed,
+    } = admit_terminal(authority, active, source_row_class(source))?;
 
     let completed = source_operation(
         source,
         active,
-        admitted.disposition,
-        admitted.stored_disposition,
+        disposition,
+        stored_disposition,
         specific_fate_intent,
     );
+
+    // §3.2 STEP 3: MEASURE BEFORE THE SOURCE APPEND. The measurement is pure,
+    // so it runs here on the admitted owner held as a VALUE — ahead of the
+    // durable Died row and ahead of any install. A refusal returns Err from
+    // inside this match with nothing appended and nothing installed (step 4),
+    // which is what makes the drop re-processable instead of poisonous.
+    let owner_fate = match specific_fate_intent {
+        Some(intent)
+            if completed.committed_died_terminal.is_some()
+                || matches!(intent, StoredSpecificFateIntent::Recovered { .. }) =>
+        {
+            if authority
+                .pending_specific_fates
+                .contains_key(&target.participant_id)
+            {
+                return Err(StateError::invariant(
+                    "durable Died opened a second participant-specific fate intent",
+                ));
+            }
+            let binding_fate = authority
+                .slots
+                .get_mut(&target.participant_id)
+                .and_then(|slot| slot.binding_fate.take())
+                .ok_or_else(|| {
+                    StateError::invariant(
+                        "durable Died intent lost its sealed binding-fate authority",
+                    )
+                })?;
+            let terminal =
+                completed
+                    .committed_died_terminal
+                    .map(|terminal| PendingSpecificFateTerminal {
+                        terminal,
+                        source: StoredOrdinaryTerminalSource::DiedCommitted {
+                            died_source_sequence: source_sequence,
+                        },
+                    });
+            // AMENDMENT 4 — BOOT IS CANON, so the measurement is handed an
+            // EXPLICIT progress input rather than reading ambient state.
+            //
+            // Boot's reconstruction measures at the completion row's sequence,
+            // by which point replay has already folded THIS row's own
+            // projection into observer progress — replay_died_source at
+            // connection_fate_replay.rs:173-185, the fold at :184. So the live
+            // measurement must see the same joined value or the two disagree
+            // and ReplayFateAppender refuses. The conditional below is the
+            // EXACT mirror of that site: a Committed disposition AND a Some
+            // projection, both required.
+            //
+            // COMPUTED INPUT ONLY. Ambient observer_progress is not mutated
+            // here; the join is passed as an argument and the ambient advance
+            // still happens later, at its own site, after the append. That is
+            // what keeps the mirror-defect family untouched.
+            let measured_observer_progress =
+                match (&completed.observer_projection, stored_disposition) {
+                    (Some(projection), StoredTerminalDisposition::Committed { .. }) => authority
+                        .observer_progress
+                        .max(projection.new_observer_progress()),
+                    _ => authority.observer_progress,
+                };
+            AdmittedOwnerFate::Measured(measure_specific_fate_on_owner(
+                admitted_owner,
+                measured_observer_progress,
+                source_sequence,
+                intent,
+                terminal,
+                binding_fate,
+            )?)
+        }
+        _ => AdmittedOwnerFate::Plain(admitted_owner),
+    };
+
     let projection_facts = capture_projection_prestate(authority, &completed.operation);
     authority.route_fate_occurrence(&completed.operation, source_sequence)?;
     appender.append(&completed.operation, authority.next_log_sequence)?;
-    authority.install_frontier(admitted.owner)?;
+    let measured = match owner_fate {
+        AdmittedOwnerFate::Measured(measured) => Some(measured),
+        AdmittedOwnerFate::Plain(owner) => {
+            authority.install_frontier(owner)?;
+            None
+        }
+    };
     authority.next_order = allocations.next_order;
-    if admitted.committed {
+    if committed {
         authority.next_seq = allocations.next_sequence;
     }
     authority.next_log_sequence = allocations.next_log_sequence;
+    // §3.2 STEP 5: the Died row is now durable, so the completion row may be
+    // appended; `append_measured_specific_fate` installs the transitioned owner
+    // only after its own append lands. The install must precede the observer-
+    // progress work below, which refuses loudly while a transition is still
+    // begun (production/state.rs:403-407).
+    let measured_fate_taken = if let Some(measured) = measured {
+        authority.append_measured_specific_fate(measured, appender)?;
+        true
+    } else {
+        false
+    };
     let Some(slot) = authority.slots.get_mut(&target.participant_id) else {
         return Err(StateError::invariant(
             "connection-fate target disappeared after durable source append",
         ));
     };
     slot.binding = completed.binding_state;
-    let binding_fate = if specific_fate_intent.is_some() {
+    let binding_fate = if measured_fate_taken {
+        // Taken before the measurement, above.
+        None
+    } else if specific_fate_intent.is_some() {
         Some(slot.binding_fate.take().ok_or_else(|| {
             StateError::invariant("durable Died intent lost its sealed binding-fate authority")
         })?)
@@ -289,7 +399,14 @@ fn complete_target(
             impact,
         )?;
     }
-    if let Some(intent) = specific_fate_intent {
+    if measured_fate_taken {
+        // The measure half already appended this fate's completion row above,
+        // so open_specific_fate's insert-then-complete round trip has nothing
+        // left to discharge. Its episode effect still belongs here.
+        if let Some(impact) = impact {
+            authority.record_episode_changed(impact);
+        }
+    } else if let Some(intent) = specific_fate_intent {
         let binding_fate = binding_fate.ok_or_else(|| {
             StateError::invariant("durable Died intent has no binding-fate authority")
         })?;
@@ -363,6 +480,29 @@ fn open_specific_fate(
             "durable Died opened a second participant-specific fate intent",
         ));
     }
+    // NO-RECONNECT MARK (Sol landing review, carried item 3). THIS BRANCH IS
+    // UNREACHABLE FROM LIVE COMPLETION EVERYWHERE, and that is a property of the
+    // caller rather than of this line.
+    //
+    // `open_specific_fate` has ONE live call site, `:413`, and it sits in the
+    // ELSE of `measured_fate_taken`. The Measured arm at `:278-341` already
+    // claims every case where `committed_died_terminal.is_some()` or the intent
+    // is `Recovered`, and this function is handed those SAME two values
+    // (`committed_terminal` is `completed.committed_died_terminal`, passed at
+    // `:419`). So arriving here at all means that guard measured FALSE, and the
+    // condition below is the same test over the same inputs: after the §3.2
+    // split it cannot be true.
+    //
+    // The combined insert-then-complete form is NOT dead and must not be
+    // deleted. It stays BOOT CANON through its DIRECT callers in
+    // binding_fate_completion.rs (`:419-430` and `:497-501`), which invoke
+    // `complete_pending_specific_fate` themselves — they reach the callee
+    // without ever passing through this branch.
+    //
+    // Reconnecting this arm to live completion would append the completion row
+    // from inside the post-source path and so violate measure-before-source
+    // ordering (§3.2). DELETION IS BARRED, and so is re-wiring: the branch is
+    // load-bearing for boot and inert for live, which is the shape intended.
     let completes_without_terminal = matches!(intent, StoredSpecificFateIntent::Recovered { .. });
     if committed_terminal.is_some() || completes_without_terminal {
         authority.complete_pending_specific_fate(participant_id, appender)?;

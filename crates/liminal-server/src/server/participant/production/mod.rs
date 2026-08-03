@@ -101,6 +101,8 @@ mod tests_config_d2;
 #[cfg(test)]
 mod tests_delivery_acceptance;
 #[cfg(test)]
+mod tests_f8_marker_poison;
+#[cfg(test)]
 mod tests_f8b_boot_drain;
 #[cfg(test)]
 mod tests_f8b_seal;

@@ -416,8 +416,6 @@ fn participant_service_fatal_blocks_obligation_dispatch() -> Result<(), Box<dyn 
     Ok(())
 }
 
-#[test]
-fn process_killed_has_no_production_participant_binding_emitter() {
-    let cases = trybuild::TestCases::new();
-    cases.compile_fail("tests/trybuild/production_connection_fate_cannot_select_process_killed.rs");
-}
+// `process_killed_has_no_production_participant_binding_emitter` moved verbatim
+// to the crate's dedicated trybuild target, `tests/trybuild_gate.rs`. Its one
+// case is unchanged.

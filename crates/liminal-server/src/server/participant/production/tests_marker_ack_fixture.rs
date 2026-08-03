@@ -5,10 +5,10 @@ use liminal::durability::bridge::block_on;
 use liminal::durability::{DurableStore, open_ephemeral};
 use liminal_protocol::lifecycle::{CapacityCounter, ConnectionConversationTracking};
 use liminal_protocol::wire::{
-    ClientRequest, ConnectionIncarnation, EnrollBound, EnrollmentRequest, EnrollmentToken,
-    Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck, ParticipantDelivery,
-    ParticipantId, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
-    RecordCommitted, ServerValue,
+    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
+    EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck,
+    ParticipantDelivery, ParticipantId, ParticipantRecord, RecordAdmission,
+    RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
 };
 
 use super::ProductionParticipantHandler;
@@ -44,6 +44,27 @@ pub(super) struct MarkerFixture {
     pub(super) catchup_participant: ParticipantId,
     pub(super) catchup_through_seq: u64,
     pub(super) marker_delivery: ParticipantDelivery,
+}
+
+/// The capability generation each member is currently addressable at.
+///
+/// Threaded as a PARAMETER rather than hardcoded, mirroring
+/// `tests_w1b_pending_died_restart.rs:151/:167`. Pre-attach callers pass
+/// `FixtureGenerations::PRE_ATTACH` EXPLICITLY, so they hand these helpers the
+/// exact value the helpers used to hardcode -- behaviour-identity by
+/// construction rather than by comparison.
+#[derive(Clone, Copy)]
+pub(super) struct FixtureGenerations {
+    pub(super) first: Generation,
+    pub(super) second: Generation,
+}
+
+impl FixtureGenerations {
+    /// The value every caller hardcoded before this parameter existed.
+    pub(super) const PRE_ATTACH: Self = Self {
+        first: Generation::ONE,
+        second: Generation::ONE,
+    };
 }
 
 struct FixtureMembers {
@@ -145,36 +166,120 @@ fn enroll_members(
     })
 }
 
+/// One participant's ack endpoint, DERIVED from the live obligations index
+/// rather than hardcoded (Cally c1a876e0).
+///
+/// The discriminator proved the fixture's hardcoded `through_seq: 3` was the
+/// whole defect: pre-attach the index is `[2, 3]` so 3 IS an endpoint and the
+/// ack commits; post-attach the attach's own deliveries consume sequence
+/// numbers, the index becomes `[2, 5]`, 3 is NOT an endpoint, and
+/// `participant_ack.rs:310-311` refuses with AckGap. The sequence number was
+/// never the thing that mattered -- being an ENDPOINT was.
+///
+/// So the fixture stops guessing. `contiguously_available_through`, the second
+/// return of `recipient_ack_obligations`, is the final endpoint of that index
+/// -- measured Ok(3) against `[2, 3]` and Ok(5) against `[2, 5]` -- and it is
+/// the same observable that decided the discriminator.
+#[derive(Clone, Debug)]
+pub(super) struct DerivedAckEndpoint {
+    pub(super) participant_id: ParticipantId,
+    pub(super) acknowledged_through: u64,
+    pub(super) endpoint: u64,
+    pub(super) index_debug: String,
+}
+
+/// Mirrors production's own derivation at `ops_acks.rs:65-70` exactly, so the
+/// fixture asks the question the server asks.
+fn live_ack_endpoint(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    participant_id: ParticipantId,
+) -> Result<DerivedAckEndpoint, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let guard = cell
+        .lock()
+        .map_err(|_| "live ack endpoint owner lock was poisoned")?;
+    let authority = guard
+        .as_ref()
+        .ok_or("live ack endpoint conversation owner was absent")?;
+    let outbox = authority
+        .outbox
+        .as_ref()
+        .ok_or("live ack endpoint outbox is absent")?;
+    let acknowledged_through = authority
+        .slots
+        .get(&participant_id)
+        .map_or_else(|| outbox.durable_ack_through(participant_id), |slot| {
+            slot.member.cursor()
+        });
+    let (obligations, endpoint) = outbox
+        .recipient_ack_obligations(participant_id, acknowledged_through)
+        .map_err(|error| format!("live ack endpoint obligations refused: {error:?}"))?;
+    let derived = DerivedAckEndpoint {
+        participant_id,
+        acknowledged_through,
+        endpoint,
+        index_debug: format!("{obligations:?}"),
+    };
+    drop(guard);
+    Ok(derived)
+}
+
 fn ack_members_through(
     handler: &ProductionParticipantHandler,
     conversation_id: u64,
     members: &FixtureMembers,
-    through_seq: u64,
-) -> Result<(), Box<dyn Error>> {
-    for (connection, participant_id) in [
-        (members.first_connection, members.first.participant_id()),
-        (members.second_connection, members.second.participant_id()),
+    generations: FixtureGenerations,
+) -> Result<Vec<DerivedAckEndpoint>, Box<dyn Error>> {
+    let mut derived_all = Vec::new();
+    for (connection, participant_id, capability_generation) in [
+        (
+            members.first_connection,
+            members.first.participant_id(),
+            generations.first,
+        ),
+        (
+            members.second_connection,
+            members.second.participant_id(),
+            generations.second,
+        ),
     ] {
+        // DERIVE, DO NOT GUESS.
+        let derived = live_ack_endpoint(handler, conversation_id, participant_id)?;
+        let through_seq = derived.endpoint;
+        derived_all.push(derived);
+        if through_seq == 0 {
+            // Nothing outstanding: acking zero is a no-op the server would
+            // refuse as a regression, so skip rather than manufacture a request.
+            continue;
+        }
         let outcome = dispatch(
             handler,
             connection,
             ClientRequest::ParticipantAck(ParticipantAck {
                 conversation_id,
                 participant_id,
-                capability_generation: Generation::ONE,
+                capability_generation,
                 through_seq,
             }),
         )?;
-        assert!(matches!(outcome, ServerValue::AckCommitted(_)));
+        if !matches!(outcome, ServerValue::AckCommitted(_)) {
+            return Err(format!(
+                "marker fixture prefix ack did not commit for participant {participant_id} at \
+                 generation {capability_generation:?} through_seq {through_seq}: {outcome:?}"
+            )
+            .into());
+        }
     }
-    Ok(())
+    Ok(derived_all)
 }
 
 fn ack_marker_prefix(
     handler: &ProductionParticipantHandler,
     conversation_id: u64,
     members: &FixtureMembers,
-) -> Result<(), Box<dyn Error>> {
+    generations: FixtureGenerations,
+) -> Result<Vec<DerivedAckEndpoint>, Box<dyn Error>> {
     let third_connection = ConnectionIncarnation::new(0xA7, 3);
     let third = dispatch(
         handler,
@@ -187,7 +292,7 @@ fn ack_marker_prefix(
     let ServerValue::EnrollBound(third) = third else {
         return Err(format!("third marker fixture enrollment failed: {third:?}").into());
     };
-    ack_members_through(handler, conversation_id, members, 3)?;
+    let mut derived_all = ack_members_through(handler, conversation_id, members, generations)?;
 
     let left = dispatch(
         handler,
@@ -200,8 +305,16 @@ fn ack_marker_prefix(
             leave_attempt_token: LeaveAttemptToken::new([0xA6; 16]),
         }),
     )?;
-    assert!(matches!(left, ServerValue::LeaveCommitted(_)));
-    ack_members_through(handler, conversation_id, members, 4)
+    if !matches!(left, ServerValue::LeaveCommitted(_)) {
+        return Err(format!("marker fixture transient peer did not leave: {left:?}").into());
+    }
+    derived_all.extend(ack_members_through(
+        handler,
+        conversation_id,
+        members,
+        generations,
+    )?);
+    Ok(derived_all)
 }
 
 fn commit_fixture_record(
@@ -222,11 +335,15 @@ fn commit_fixture_record(
     let ServerValue::RecordCommitted(record) = outcome.value else {
         return Err(format!("marker fixture record did not commit: {:?}", outcome.value).into());
     };
-    assert_eq!(
-        authority.next_log_sequence,
-        source_sequence + expected_rows,
-        "record at source {source_sequence} appended an unexpected row count"
-    );
+    if authority.next_log_sequence != source_sequence + expected_rows {
+        return Err(format!(
+            "record at source {source_sequence} appended an unexpected row count: expected {}, \
+             got {}",
+            source_sequence + expected_rows,
+            authority.next_log_sequence
+        )
+        .into());
+    }
     Ok((source_sequence, record))
 }
 
@@ -266,13 +383,14 @@ fn commit_fixture_ack(
     config: &ParticipantConfig,
     conversation_id: u64,
     members: &FixtureMembers,
+    generations: FixtureGenerations,
     through_seq: u64,
 ) -> Result<(), Box<dyn Error>> {
     let source_log_sequence = authority.next_log_sequence;
     let request = ParticipantAck {
         conversation_id,
         participant_id: members.second.participant_id(),
-        capability_generation: Generation::ONE,
+        capability_generation: generations.second,
         through_seq,
     };
     let outcome = authority.apply_ack(
@@ -298,11 +416,16 @@ fn commit_fixture_ack(
     )
 }
 
-fn record_request(conversation_id: u64, participant_id: u64, token: u8) -> RecordAdmission {
+fn record_request(
+    conversation_id: u64,
+    participant_id: u64,
+    capability_generation: Generation,
+    token: u8,
+) -> RecordAdmission {
     RecordAdmission {
         conversation_id,
         participant_id,
-        capability_generation: Generation::ONE,
+        capability_generation,
         record_admission_attempt_token: RecordAdmissionAttemptToken::new([token; 16]),
         payload: vec![token],
     }
@@ -314,6 +437,7 @@ fn drive_marker_drain(
     config: &ParticipantConfig,
     conversation_id: u64,
     members: &FixtureMembers,
+    generations: FixtureGenerations,
 ) -> Result<
     (
         ConnectionIncarnation,
@@ -334,7 +458,12 @@ fn drive_marker_drain(
         .ok_or("marker fixture conversation owner was absent")?;
 
     for token in [0xA3, 0xA4, 0xA5] {
-        let request = record_request(conversation_id, members.first.participant_id(), token);
+        let request = record_request(
+            conversation_id,
+            members.first.participant_id(),
+            generations.first,
+            token,
+        );
         let (source, record) = commit_fixture_record(
             authority,
             &operation_log,
@@ -343,7 +472,13 @@ fn drive_marker_drain(
             &request,
             1,
         )?;
-        assert!(authority.last_marker_projection.take().is_none());
+        if let Some(early) = authority.last_marker_projection.take() {
+            return Err(format!(
+                "a marker projected EARLY, at debt-building record {token:#x} rather than at the \
+                 draining commit: {early:?}"
+            )
+            .into());
+        }
         project_fixture_ordinary(authority, &outbox_log, source, &record, &request, members)?;
         commit_fixture_ack(
             authority,
@@ -352,11 +487,17 @@ fn drive_marker_drain(
             config,
             conversation_id,
             members,
+            generations,
             record.delivery_seq(),
         )?;
     }
 
-    let request = record_request(conversation_id, members.first.participant_id(), 0xA8);
+    let request = record_request(
+        conversation_id,
+        members.first.participant_id(),
+        generations.first,
+        0xA8,
+    );
     let (marker_source, record) = commit_fixture_record(
         authority,
         &operation_log,
@@ -421,7 +562,15 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
     let conversation_id = 0xA7;
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
     let members = enroll_members(&handler, conversation_id)?;
-    ack_marker_prefix(&handler, conversation_id, &members)?;
+    // Unattached path: the derivation must reproduce the values this call site
+    // used to hardcode (3 then 4). It is discarded here and PRINTED on the
+    // attached path, where the whole question lives.
+    let _derived = ack_marker_prefix(
+        &handler,
+        conversation_id,
+        &members,
+        FixtureGenerations::PRE_ATTACH,
+    )?;
     let (target_connection, target_participant, marker_delivery, catchup_through_seq) =
         drive_marker_drain(
             &handler,
@@ -429,6 +578,7 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
             &config,
             conversation_id,
             &members,
+            FixtureGenerations::PRE_ATTACH,
         )?;
     Ok(MarkerFixture {
         handler,
@@ -442,6 +592,172 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
         catchup_through_seq,
         marker_delivery,
     })
+}
+
+/// Outcome of the F8 PRECONDITION MEASUREMENT (ruling a35c1cb7): does the
+/// marker still drain under `marker_fixture_config` AS TUNED once the members
+/// have attached?
+///
+/// This is a measurement, not a rework. `prepare_marker_fixture` above is
+/// untouched; this is an additive sibling that differs from it in exactly one
+/// respect — two `CredentialAttach` dispatches after enrolment — so any
+/// difference in outcome is attributable to the attaches and to nothing else.
+/// The config is used exactly as tuned; no debt arithmetic is retuned here.
+pub(super) struct AttachedDrainAttempt {
+    /// POSITIVE CONTROL that the attaches actually landed. Part A established
+    /// that without a `CredentialAttach` no participant ever holds a
+    /// binding-fate token (`ops_attach.rs:331-337` is the sole mint), so the
+    /// APPEARANCE of these tokens IS the attach observed. `false` here means
+    /// the measurement never got the state it was built to test.
+    pub(super) first_has_binding_fate: bool,
+    pub(super) second_has_binding_fate: bool,
+    /// CONDITION (b): the derived endpoint AND the live index it came from,
+    /// printed in the teed log. The observable that decided the discriminator
+    /// now serves the fixture.
+    pub(super) derived_ack_endpoints: Vec<DerivedAckEndpoint>,
+    /// The DRAIN WITNESS, non-idempotent by construction: `drive_marker_drain`
+    /// only returns `Ok` if `authority.last_marker_projection` surrendered a
+    /// marker projection at the fourth commit — a one-shot value consumed by
+    /// `.take()` that exists ONLY if a drain actually projected. It is an
+    /// event, not a state that could legitimately sit still.
+    pub(super) drain: Result<MarkerFixture, String>,
+}
+
+pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAttempt, Box<dyn Error>>
+{
+    let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
+    let config = marker_fixture_config();
+    let conversation_id = 0xA7;
+    let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
+    let members = enroll_members(&handler, conversation_id)?;
+
+    // THE ONLY DIFFERENCE FROM `prepare_marker_fixture`: two CredentialAttach
+    // dispatches, and the POST-ATTACH generation each one mints is captured so
+    // every later request is addressed to the generation that now exists rather
+    // than to the pre-attach ONE.
+    let mut attached_generations = Vec::new();
+    for (connection, receipt) in [
+        (members.first_connection, &members.first),
+        (members.second_connection, &members.second),
+    ] {
+        let attached = dispatch(
+            &handler,
+            connection,
+            ClientRequest::CredentialAttach(CredentialAttachRequest {
+                conversation_id,
+                participant_id: receipt.participant_id(),
+                // PRE-ATTACH by definition: this is the request that ends the
+                // pre-attach era, so it is addressed at the enrolled generation.
+                capability_generation: Generation::ONE,
+                attach_secret: receipt.attach_secret(),
+                attach_attempt_token: AttachAttemptToken::new([0xB1; 16]),
+                accept_marker_delivery_seq: None,
+            }),
+        )?;
+        let ServerValue::AttachBound(bound) = attached else {
+            return Err(format!(
+                "precondition measurement: participant {} did not attach: {attached:?}",
+                receipt.participant_id()
+            )
+            .into());
+        };
+        attached_generations.push(bound.origin_binding_epoch().capability_generation);
+    }
+    let [first_generation, second_generation] = attached_generations.as_slice() else {
+        return Err("precondition measurement: expected exactly two attach generations".into());
+    };
+    let generations = FixtureGenerations {
+        first: *first_generation,
+        second: *second_generation,
+    };
+
+    let (first_has_binding_fate, second_has_binding_fate) = {
+        let cell = handler.cell(conversation_id)?;
+        let guard = cell
+            .lock()
+            .map_err(|_| "precondition measurement owner lock was poisoned")?;
+        let authority = guard
+            .as_ref()
+            .ok_or("precondition measurement conversation owner was absent")?;
+        let has = |participant_id: ParticipantId| {
+            authority
+                .slots
+                .get(&participant_id)
+                .is_some_and(|slot| slot.binding_fate.is_some())
+        };
+        let pair = (
+            has(members.first.participant_id()),
+            has(members.second.participant_id()),
+        );
+        drop(guard);
+        pair
+    };
+
+    // CONDITION 4: every failure exit of everything this measurement DRIVES --
+    // the helpers' former assert!s included, now returned errors -- lands in the
+    // reportable field. Nothing escapes as a panic, so the positive control
+    // above always reaches the report.
+    let mut derived_ack_endpoints = Vec::new();
+    let driven = ack_marker_prefix(&handler, conversation_id, &members, generations).and_then(
+        |derived| {
+            derived_ack_endpoints = derived;
+            drive_marker_drain(
+                &handler,
+                Arc::clone(&store),
+                &config,
+                conversation_id,
+                &members,
+                generations,
+            )
+        },
+    );
+    let drain = match driven {
+        Ok((target_connection, target_participant, marker_delivery, catchup_through_seq)) => {
+            Ok(MarkerFixture {
+                handler,
+                store,
+                target_connection,
+                target_participant,
+                record_connection: members.first_connection,
+                record_participant: members.first.participant_id(),
+                catchup_connection: members.second_connection,
+                catchup_participant: members.second.participant_id(),
+                catchup_through_seq,
+                marker_delivery,
+            })
+        }
+        Err(error) => Err(error.to_string()),
+    };
+
+    Ok(AttachedDrainAttempt {
+        first_has_binding_fate,
+        second_has_binding_fate,
+        derived_ack_endpoints,
+        drain,
+    })
+}
+
+/// THE ARMED FIXTURE (attempt 2, Cally b23e4cc1). `prepare_marker_fixture`
+/// mints no binding-fate token, so every Died row it produces is intent-free
+/// and §1's incident cannot occur in it -- Part A's finding, and the honest
+/// refusal's cited cause. This entry point drives the CredentialAttach that
+/// mints the intent, and the drain verdict at tree 9440a06 proved the marker
+/// still mints and retains under it (EXIT (1), projection at delivery_seq 12).
+pub(super) fn attached_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> {
+    let attempt = attempt_marker_fixture_with_attaches()?;
+    if !(attempt.first_has_binding_fate && attempt.second_has_binding_fate) {
+        return Err(format!(
+            "armed fixture: the attaches did not mint binding-fate tokens (first={} second={}), \
+             so the incident geometry is NOT built and no unit may claim to witness it",
+            attempt.first_has_binding_fate, attempt.second_has_binding_fate
+        )
+        .into());
+    }
+    attempt
+        .drain
+        .map_err(|error| -> Box<dyn Error> {
+            format!("armed fixture: the marker did not drain with attaches present: {error}").into()
+        })
 }
 
 pub(super) fn marker_protocol_snapshot(

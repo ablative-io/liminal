@@ -446,21 +446,10 @@ fn v3_reader_accepts_v2_prefix_and_refuses_v2_after_v3() -> Result<(), Box<dyn E
     Ok(())
 }
 
-#[test]
-fn fenced_attach_linearity_ui_contract() {
-    let cases = trybuild::TestCases::new();
-    cases.pass("tests/trybuild/fenced_descriptions_remain_copy.rs");
-    cases.compile_fail("tests/trybuild/fenced_raw_mint_is_private.rs");
-    cases.compile_fail("tests/trybuild/fenced_owner_cannot_mint_twice.rs");
-    cases.compile_fail("tests/trybuild/fenced_proof_cannot_clone.rs");
-    cases.compile_fail("tests/trybuild/fenced_proof_cannot_copy.rs");
-    cases.compile_fail("tests/trybuild/fenced_proof_cannot_reuse_after_verify.rs");
-    cases.compile_fail("tests/trybuild/fenced_proof_fate_method_is_private.rs");
-    cases.compile_fail("tests/trybuild/fenced_attach_commit_cannot_split_twice.rs");
-    cases.compile_fail("tests/trybuild/validated_marker_record_cannot_clone.rs");
-    cases.compile_fail("tests/trybuild/validated_marker_record_cannot_copy.rs");
-    cases.compile_fail("tests/trybuild/validated_marker_record_cannot_feed_two_recoveries.rs");
-}
+// `fenced_attach_linearity_ui_contract` moved verbatim to the crate's dedicated
+// trybuild target, `tests/trybuild_gate.rs`. Its eleven cases are unchanged; it
+// lived here only by accident of authorship and dragged 11 nested cargo builds
+// into every scoped run of this crate's lib test binary.
 
 #[test]
 fn v2_after_v3_across_operation_page_boundary_refuses_before_apply() -> Result<(), Box<dyn Error>> {

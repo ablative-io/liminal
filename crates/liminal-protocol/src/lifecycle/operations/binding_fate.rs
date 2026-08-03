@@ -145,8 +145,14 @@ pub enum BindingFateMeasurementError {
     ObserverProgress,
     /// The measured checked floor is outside the delivery-sequence domain.
     ResultingFloor,
-    /// The coupled frontier, retained charges, or closure baseline refused installation.
-    OwnerTransition,
+    /// The coupled frontier, retained charges, or closure baseline refused
+    /// installation, CARRYING the protocol's own cause.
+    ///
+    /// §3.3: the cause rides this carrier BY TYPE, because the park-versus-fatal
+    /// decision downstream is not allowed to read it back out of a formatted
+    /// message. The payload is free — both this enum and `LiveFrontierError`
+    /// are `Copy` (`live_frontier.rs:1047`), so the derives above survive it.
+    OwnerTransition(LiveFrontierError),
 }
 
 /// Refused measurement preserving every move-only input for serial retry.
@@ -370,7 +376,7 @@ fn validate_binding_fate_measurement(
             floor.resulting_floor,
             terminal == BindingFateTerminal::RecoveredAndReserveFinalizer,
         )
-        .map_err(|_| BindingFateMeasurementError::OwnerTransition)?;
+        .map_err(BindingFateMeasurementError::OwnerTransition)?;
     Ok(ValidatedBindingFateMeasurement {
         participant_id: floor.participant_id,
         binding_epoch: floor.binding_epoch,
@@ -440,7 +446,42 @@ fn validate_binding_fate_floor(
         hard_observer_progress,
         owner.frontiers().retained_floor(),
     );
-    let Ok(resulting_floor) = DeliverySeq::try_from(measured.resulting_floor) else {
+    // §3.1 MARKERS PIN THE FLOOR (docs/design/F8-MARKER-POISON.md §3.1).
+    //
+    // `floor_transition` above takes no marker input of any kind -- its five
+    // arguments are the retained floor, the minimum remaining cursor, the
+    // candidate high watermark, hard observer progress, and the retained floor
+    // again. Downstream, the live-frontier transition REFUSES a floor that
+    // crosses a retained marker (`LiveFrontierError::Precedence`). Those were
+    // two halves of one invariant with neither clamping, so the computation
+    // could produce a floor the transition was obliged to reject: the incident
+    // in §1, where the refusal WAS collapsed to a bare `OwnerTransition` and
+    // the Died row carrying the intent WAS already durable by the time the
+    // measurement ran. Both halves of that clause describe the PRE-FIX path and
+    // nothing else. §3.3 now carries the cause by type (`OwnerTransition` takes
+    // a `LiveFrontierError`), and §3.2 split the live path so the measurement
+    // runs BEFORE the source append -- only the combined boot form still
+    // measures against a source that is already durable.
+    //
+    // The purpose of a retained marker is precisely that its record stays
+    // replayable until acked. Pinning is the marker's meaning; unsatisfiability
+    // was the bug. So the measured floor is capped at the minimum retained
+    // marker-record sequence and can no longer cross one.
+    //
+    // The `Precedence` refusal STAYS as a backstop invariant. After this clamp
+    // it should be unreachable from this path, and a reachable backstop firing
+    // is a bug report rather than control flow.
+    let marker_floor_cap = owner
+        .frontiers()
+        .retained_marker_records()
+        .iter()
+        .map(|record| record.delivery_seq)
+        .min();
+    let capped_floor = match marker_floor_cap {
+        Some(cap) => measured.resulting_floor.min(u128::from(cap)),
+        None => measured.resulting_floor,
+    };
+    let Ok(resulting_floor) = DeliverySeq::try_from(capped_floor) else {
         return Err(BindingFateMeasurementError::ResultingFloor);
     };
     Ok(ValidatedBindingFateFloor {
