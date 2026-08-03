@@ -846,11 +846,22 @@ fn f8_precondition_does_the_marker_still_drain_with_attaches_present()
 
     let enrolled_only = attempt.cursors_enrolled_only;
     let after_attach = attempt.cursors_after_attach;
+    let derived = attempt
+        .derived_ack_endpoints
+        .iter()
+        .map(|d| {
+            format!(
+                "\n    participant {} acked_through={} -> DERIVED endpoint {} from index {}",
+                d.participant_id, d.acknowledged_through, d.endpoint, d.index_debug
+            )
+        })
+        .collect::<String>();
     Err(format!(
         "=== F8 PRECONDITION MEASUREMENT (not a test failure; reports by returning Err so its \
          reading reaches the teed log under the fixed tier-1 string) ===\n\
          POSITIVE CONTROL (attaches landed): {control}\n\
          A/B CURSOR EVIDENCE (tests the reset I previously INFERRED): enrolled-only \
+         DERIVED ACK ENDPOINTS (condition b -- endpoint AND the live index it came from):{derived}\n\
          {enrolled_only:?} vs after-attach {after_attach:?}\n\
          VERDICT: {verdict}\n\
          DETAIL: {detail}\n\
@@ -923,9 +934,8 @@ fn refuse_until_the_geometry_exists(roles: &IncidentRoles) -> Box<dyn Error> {
 /// the server side using production's own calls.
 #[test]
 fn f8_ackgap_discriminator_which_selector_refuses() -> Result<(), Box<dyn Error>> {
-    const THROUGH_SEQ: u64 = 3;
-    let pre = ackgap_arm_probe(false, THROUGH_SEQ)?;
-    let post = ackgap_arm_probe(true, THROUGH_SEQ)?;
+    let pre = ackgap_arm_probe(false)?;
+    let post = ackgap_arm_probe(true)?;
 
     let control = if pre.ack_outcome.contains("AckCommitted") {
         "PASS — the pre-attach arm ACCEPTS and its selector inputs were observed. The instrument          can see the accepting arm, so its word on the refusing arm counts."
@@ -951,16 +961,18 @@ fn f8_ackgap_discriminator_which_selector_refuses() -> Result<(), Box<dyn Error>
     routing_nonzero (ops_acks.rs:51-56 predicate) = {}
                  acknowledged_through = {}
     contiguously_available_through = {:?}
-                 through_seq = {THROUGH_SEQ}  -> site-1 test `through_seq > available` = {}
+                 DERIVED endpoint = {} from live index {} -> site-1 test `endpoint > available` = {}
                  obligations index = {}
     ack outcome = {}",
             a.arm,
             a.routing_nonzero,
             a.acknowledged_through,
             a.contiguously_available_through,
+            a.derived_endpoint,
+            a.derived_index,
             a.contiguously_available_through
                 .as_ref()
-                .map_or("<unknown>".to_owned(), |v| (THROUGH_SEQ > *v).to_string()),
+                .map_or("<unknown>".to_owned(), |v| (a.derived_endpoint > *v).to_string()),
             a.obligations_debug,
             a.ack_outcome
         )

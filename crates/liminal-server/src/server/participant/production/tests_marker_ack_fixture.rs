@@ -166,13 +166,72 @@ fn enroll_members(
     })
 }
 
+/// One participant's ack endpoint, DERIVED from the live obligations index
+/// rather than hardcoded (Cally c1a876e0).
+///
+/// The discriminator proved the fixture's hardcoded `through_seq: 3` was the
+/// whole defect: pre-attach the index is `[2, 3]` so 3 IS an endpoint and the
+/// ack commits; post-attach the attach's own deliveries consume sequence
+/// numbers, the index becomes `[2, 5]`, 3 is NOT an endpoint, and
+/// `participant_ack.rs:310-311` refuses with AckGap. The sequence number was
+/// never the thing that mattered -- being an ENDPOINT was.
+///
+/// So the fixture stops guessing. `contiguously_available_through`, the second
+/// return of `recipient_ack_obligations`, is the final endpoint of that index
+/// -- measured Ok(3) against `[2, 3]` and Ok(5) against `[2, 5]` -- and it is
+/// the same observable that decided the discriminator.
+#[derive(Clone, Debug)]
+pub(super) struct DerivedAckEndpoint {
+    pub(super) participant_id: ParticipantId,
+    pub(super) acknowledged_through: u64,
+    pub(super) endpoint: u64,
+    pub(super) index_debug: String,
+}
+
+/// Mirrors production's own derivation at `ops_acks.rs:65-70` exactly, so the
+/// fixture asks the question the server asks.
+fn live_ack_endpoint(
+    handler: &ProductionParticipantHandler,
+    conversation_id: u64,
+    participant_id: ParticipantId,
+) -> Result<DerivedAckEndpoint, Box<dyn Error>> {
+    let cell = handler.cell(conversation_id)?;
+    let guard = cell
+        .lock()
+        .map_err(|_| "live ack endpoint owner lock was poisoned")?;
+    let authority = guard
+        .as_ref()
+        .ok_or("live ack endpoint conversation owner was absent")?;
+    let outbox = authority
+        .outbox
+        .as_ref()
+        .ok_or("live ack endpoint outbox is absent")?;
+    let acknowledged_through = authority
+        .slots
+        .get(&participant_id)
+        .map_or_else(|| outbox.durable_ack_through(participant_id), |slot| {
+            slot.member.cursor()
+        });
+    let (obligations, endpoint) = outbox
+        .recipient_ack_obligations(participant_id, acknowledged_through)
+        .map_err(|error| format!("live ack endpoint obligations refused: {error:?}"))?;
+    let derived = DerivedAckEndpoint {
+        participant_id,
+        acknowledged_through,
+        endpoint,
+        index_debug: format!("{obligations:?}"),
+    };
+    drop(guard);
+    Ok(derived)
+}
+
 fn ack_members_through(
     handler: &ProductionParticipantHandler,
     conversation_id: u64,
     members: &FixtureMembers,
     generations: FixtureGenerations,
-    through_seq: u64,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<DerivedAckEndpoint>, Box<dyn Error>> {
+    let mut derived_all = Vec::new();
     for (connection, participant_id, capability_generation) in [
         (
             members.first_connection,
@@ -185,6 +244,15 @@ fn ack_members_through(
             generations.second,
         ),
     ] {
+        // DERIVE, DO NOT GUESS.
+        let derived = live_ack_endpoint(handler, conversation_id, participant_id)?;
+        let through_seq = derived.endpoint;
+        derived_all.push(derived);
+        if through_seq == 0 {
+            // Nothing outstanding: acking zero is a no-op the server would
+            // refuse as a regression, so skip rather than manufacture a request.
+            continue;
+        }
         let outcome = dispatch(
             handler,
             connection,
@@ -203,7 +271,7 @@ fn ack_members_through(
             .into());
         }
     }
-    Ok(())
+    Ok(derived_all)
 }
 
 fn ack_marker_prefix(
@@ -211,7 +279,7 @@ fn ack_marker_prefix(
     conversation_id: u64,
     members: &FixtureMembers,
     generations: FixtureGenerations,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<Vec<DerivedAckEndpoint>, Box<dyn Error>> {
     let third_connection = ConnectionIncarnation::new(0xA7, 3);
     let third = dispatch(
         handler,
@@ -224,7 +292,7 @@ fn ack_marker_prefix(
     let ServerValue::EnrollBound(third) = third else {
         return Err(format!("third marker fixture enrollment failed: {third:?}").into());
     };
-    ack_members_through(handler, conversation_id, members, generations, 3)?;
+    let mut derived_all = ack_members_through(handler, conversation_id, members, generations)?;
 
     let left = dispatch(
         handler,
@@ -240,7 +308,13 @@ fn ack_marker_prefix(
     if !matches!(left, ServerValue::LeaveCommitted(_)) {
         return Err(format!("marker fixture transient peer did not leave: {left:?}").into());
     }
-    ack_members_through(handler, conversation_id, members, generations, 4)
+    derived_all.extend(ack_members_through(
+        handler,
+        conversation_id,
+        members,
+        generations,
+    )?);
+    Ok(derived_all)
 }
 
 fn commit_fixture_record(
@@ -488,7 +562,10 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
     let conversation_id = 0xA7;
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), config)?;
     let members = enroll_members(&handler, conversation_id)?;
-    ack_marker_prefix(
+    // Unattached path: the derivation must reproduce the values this call site
+    // used to hardcode (3 then 4). It is discarded here and PRINTED on the
+    // attached path, where the whole question lives.
+    let _derived = ack_marker_prefix(
         &handler,
         conversation_id,
         &members,
@@ -542,6 +619,10 @@ pub(super) struct AttachedDrainAttempt {
     /// reset is either shown or refuted instead of assumed.
     pub(super) cursors_enrolled_only: (u64, u64),
     pub(super) cursors_after_attach: (u64, u64),
+    /// CONDITION (b): the derived endpoint AND the live index it came from,
+    /// printed in the teed log. The observable that decided the discriminator
+    /// now serves the fixture.
+    pub(super) derived_ack_endpoints: Vec<DerivedAckEndpoint>,
     /// The DRAIN WITNESS, non-idempotent by construction: `drive_marker_drain`
     /// only returns `Ok` if `authority.last_marker_projection` surrendered a
     /// marker projection at the fourth commit — a one-shot value consumed by
@@ -573,12 +654,12 @@ pub(super) struct AckGapArm {
     pub(super) obligations_debug: String,
     /// What the ack actually did, so the accepting arm proves it accepts.
     pub(super) ack_outcome: String,
+    /// CONDITION (b): the DERIVED endpoint and the index it came from.
+    pub(super) derived_endpoint: u64,
+    pub(super) derived_index: String,
 }
 
-pub(super) fn ackgap_arm_probe(
-    attach: bool,
-    through_seq: u64,
-) -> Result<AckGapArm, Box<dyn Error>> {
+pub(super) fn ackgap_arm_probe(attach: bool) -> Result<AckGapArm, Box<dyn Error>> {
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
     let config = marker_fixture_config();
     let conversation_id = 0xA7;
@@ -661,6 +742,9 @@ pub(super) fn ackgap_arm_probe(
         tuple
     };
 
+    // DERIVE, DO NOT GUESS -- the same rule the fixture now follows.
+    let derived = live_ack_endpoint(&handler, conversation_id, participant_id)?;
+    let through_seq = derived.endpoint;
     let ack_outcome = match dispatch(
         &handler,
         members.first_connection,
@@ -682,6 +766,8 @@ pub(super) fn ackgap_arm_probe(
         contiguously_available_through,
         obligations_debug,
         ack_outcome,
+        derived_endpoint: through_seq,
+        derived_index: derived.index_debug,
     })
 }
 
@@ -797,8 +883,10 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
     // the helpers' former assert!s included, now returned errors -- lands in the
     // reportable field. Nothing escapes as a panic, so the positive control
     // above always reaches the report.
+    let mut derived_ack_endpoints = Vec::new();
     let driven = ack_marker_prefix(&handler, conversation_id, &members, generations).and_then(
-        |()| {
+        |derived| {
+            derived_ack_endpoints = derived;
             drive_marker_drain(
                 &handler,
                 Arc::clone(&store),
@@ -832,6 +920,7 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
         second_has_binding_fate,
         cursors_enrolled_only,
         cursors_after_attach,
+        derived_ack_endpoints,
         drain,
     })
 }
