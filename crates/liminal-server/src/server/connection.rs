@@ -71,8 +71,8 @@ pub(crate) const fn assert_held_heads_are_move_only() {
     assert_not_impl!(participant_delivery::HeldObserverHead: Copy);
 }
 pub use services::{
-    ChannelCluster, ConnectionServices, ConnectionSubscription, LiminalConnectionServices,
-    PublishOutcome, build_connection_services,
+    ChannelCluster, ChannelOperation, ConnectionServices, ConnectionSubscription,
+    LiminalConnectionServices, PublishOutcome, build_connection_services,
 };
 pub use supervisor::{ConnectionHandle, ConnectionSupervisor, PushReplyAwaiter};
 pub(crate) use wake::ReadyWaker;
