@@ -539,6 +539,46 @@ impl ChannelHandle {
         self.core()?.close()
     }
 
+    /// Whether this channel's actor has been spawned — **without spawning it**.
+    ///
+    /// This is the one accessor on the handle that observes the lazy-spawn
+    /// state instead of consuming it. Every other accessor
+    /// ([`subscriber_count`](Self::subscriber_count),
+    /// [`close`](Self::close)) routes through the private `core()`, which
+    /// spawns the actor on demand, so reading "is there an actor?" through any
+    /// of them destroys the very property being read. A handle that spawns
+    /// lazily has a genuine, observable idle/live state, and a consumer that
+    /// needs to know it — a registry reporting which of its channels are inert,
+    /// a cost accountant bounding what mere configuration costs — otherwise has
+    /// to choose between not knowing and changing the answer by asking.
+    ///
+    /// It reads the memoised spawn slot and nothing else: no supervisor call,
+    /// no schema clone, no `ensure_running`. That last exclusion is the point
+    /// of the restriction — `ensure_running` RESTARTS a dead actor, so an
+    /// implementation routed through it would repair the state rather than
+    /// report it.
+    ///
+    /// # What `false` and `true` mean
+    ///
+    /// The slot holds `Result<Arc<ChannelActorCore>, String>`: a spawn that
+    /// failed is memoised as `Err` and, because the slot is one-shot, is never
+    /// retried — every later operation on this handle fails with that stored
+    /// message. So a failed spawn ATTEMPT leaves no actor and can never acquire
+    /// one, and this method answers `false` for it, exactly as it does for a
+    /// channel nobody has touched. `false` therefore means "no actor core
+    /// exists" and deliberately does not distinguish "never attempted" from
+    /// "attempted and permanently failed" — neither has an actor.
+    ///
+    /// `true` means the actor core exists, not that its process is currently
+    /// alive: an actor whose pid has died stays `true` until the next real
+    /// operation restarts it through the supervisor. Liveness is a stronger
+    /// question than this method asks, and answering it would require running
+    /// the repair path this method exists to avoid.
+    #[must_use]
+    pub fn is_actor_spawned(&self) -> bool {
+        self.actor.core.get().is_some_and(Result::is_ok)
+    }
+
     fn core(&self) -> Result<Arc<ChannelActorCore>, LiminalError> {
         self.actor.core(&self.config.schema)
     }
