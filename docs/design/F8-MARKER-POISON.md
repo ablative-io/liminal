@@ -116,6 +116,70 @@ design is that a refusal must actively discharge or annul the intent it
 strands, but that is a different, worse design and it is not to be built
 silently.
 
+**⚡ AMENDMENT (2026-08-03, Cally 62b5ceb2 / b5644caa) — THE MECHANISM IS A
+SPLIT, NOT A REORDER. The requirement above is UNCHANGED; only how it is built
+moves.** Struck text stays readable: the "reorder" instruction above is
+superseded, not erased, and the builder note above is RESOLVED rather than
+deleted, because its resolution is a measurement.
+
+**THE BUILDER NOTE'S STOP CONDITION WAS TESTED AND DID NOT FIRE.** It asked
+whether the code shows a hard reason the source append must precede
+measurement. Measured at `binding_fate_completion.rs:86-89`:
+`prepare_binding_fate` takes exactly three inputs — the owner from
+`take_frontier()`, `pending.token`, and `self.observer_progress`. All three are
+in memory; it reads **no durable state**, so the measurement cannot depend on a
+row it never consults. Corroborating, the refusal path at `:92-111` already
+restores the frontier and re-inserts the pending fate: recoverable by
+construction, which is only coherent if measurement is pure. The stop-and-report
+instruction was followed and the answer is recorded here rather than removed.
+
+**WHAT THE STOP DID SURFACE — a second constraint the original text did not
+anticipate.** `binding_fate_completion.rs:52-53` states the invariant in the
+code's own words: the specific row "appends its exact specific row **after the
+owning Died source is durable**." That binds the COMPLETION APPEND, not the
+measurement. The two are welded into one function, `complete_pending_specific_fate`,
+which has THREE callers:
+
+| caller | path | Died row at call time |
+| --- | --- | --- |
+| `connection_fate.rs:368` | LIVE — §3.2's target | NOT yet durable, once reordered |
+| `binding_fate_completion.rs:318` | boot, `repair_pending_specific_fates` | already durable |
+| `binding_fate_completion.rs:390` | boot | already durable |
+
+The live path needs measure-then-append; both boot paths need the combined form
+over an already-durable row, where it is **correct and stays**. A pure reorder
+cannot serve both. Hence: SPLIT.
+
+**THE PRESCRIPTION.** `admit_terminal` already returns `admitted.owner` as a
+VALUE, so the measurement runs on that value before any install and before any
+append:
+
+1. compute allocations
+2. `admit_terminal` → `admitted`
+3. MEASURE on `admitted.owner` — pure, durable-free
+4. **REFUSED** ⇒ return `Err` with **NOTHING appended and NOTHING installed**
+5. **PREPARED** ⇒ append the Died row, append the completion row, **THEN**
+   install the prepared owner
+
+**THE SHAPE'S OWN INVARIANT: APPENDS PRECEDE INSTALLS, THROUGHOUT.** Step 5 is
+ordered that way deliberately. Installing transitioned state before its durable
+row would be the MIRROR of the defect this section exists to remove — memory
+ahead of disk instead of disk ahead of validation — and trading one for the
+other is not a fix. The boot callers keep the combined form unchanged.
+
+⛔ **SUPERSESSION, scoped honestly.** What is superseded is this section's
+MECHANISM only: "reorder `connection_fate.rs`" → "split the measurement from the
+completion append." §3.2's requirement sentence — *a refused measurement must
+leave no durable residue* — is untouched, and so is every other section. In
+particular this amendment makes **no claim about §3.3's carrier idiom**, which
+is NOT new to the re-anchor: `OwnerTransition → OwnerTransition(LiveFrontierError)`
+is present in the pre-re-anchor text of this document with its `Copy`/derives
+measurement and its `live_frontier.rs:1541` citation. What the re-anchor added
+to §3.3 was the RULING form — the landed-carrier table and the
+do-not-mint-a-second-idiom instruction — not the payload itself. Three of four
+stated absences were measured; the fourth was inferred from a section title and
+is corrected here rather than carried.
+
 ### 3.3 Carry the cause — RIDE THE LANDED CARRIER, DO NOT MINT A SECOND IDIOM
 
 `OwnerTransition` → `OwnerTransition(LiveFrontierError)`. **This is a named
