@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::time::Instant;
 
 use haematite::{Database, DatabaseConfig, EventStore};
-use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, Schema};
+use liminal::channel::{ChannelConfig, ChannelHandle, ChannelMode, ChannelSupervisor, Schema};
 use liminal::conversation::{
     ConversationSupervisor, CrashPolicy, EchoBehaviour, ParticipantBehaviour,
 };
@@ -18,7 +18,7 @@ use liminal::protocol::{MessageEnvelope, ProtocolError, SchemaId as ProtocolSche
 
 use super::conversation::{ConnectionConversation, LiminalConversationResource};
 use super::services_cluster::build_channel_cluster;
-use super::services_schema::resolve_channel_schema;
+use super::services_schema::{ChannelSchema, resolve_channel_schema};
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{ClusterConfig, ServerConfig, ServiceProfile};
@@ -251,7 +251,13 @@ pub trait ConnectionServices: std::fmt::Debug + Send + Sync {
 /// Default adapter from server wire frames to liminal channel/conversation APIs.
 #[derive(Debug)]
 pub struct LiminalConnectionServices {
-    channels: HashMap<String, ConfiguredChannel>,
+    /// The channel roster, keyed by channel name.
+    ///
+    /// Behind an [`RwLock`] over `Arc` values so a reader clones one pointer out
+    /// under the guard and works with it after the guard is released: no roster
+    /// read is ever held across a library call, and an entry handed out can
+    /// outlive a concurrent mutation of the map itself.
+    channels: RwLock<HashMap<String, Arc<ConfiguredChannel>>>,
     cluster: ChannelCluster,
     durable_store: Arc<dyn DurableStore>,
     /// Complete participant service, installed only when semantic lifecycle
@@ -342,37 +348,14 @@ impl LiminalConnectionServices {
             // subscribe time is derived from the SAME schema bytes so an SDK
             // deriving ids from schema bytes converges on it.
             let resolved = resolve_channel_schema(channel);
-            let schema =
-                Schema::new(resolved.document).map_err(|error| ServerError::ConfigValidation {
-                    message: format!("failed to initialize channel '{}': {error}", channel.name),
-                })?;
-            let channel_config = if channel.durable {
-                ChannelConfig::new(channel.name.clone(), schema, ChannelMode::Durable)
-            } else {
-                ChannelConfig::new(channel.name.clone(), schema, ChannelMode::Ephemeral)
-            };
-            let handle = if channel.durable {
-                ChannelHandle::new_durable_with_supervisor(
-                    channel_config,
-                    Arc::clone(&durable_store),
-                    cluster.supervisor().clone(),
-                )
-                .map_err(|error| ServerError::ConfigValidation {
-                    message: format!(
-                        "failed to initialize durable channel '{}': {error}",
-                        channel.name
-                    ),
-                })?
-            } else {
-                ChannelHandle::with_supervisor(channel_config, cluster.supervisor().clone())
-            };
-            channels.insert(
-                channel.name.clone(),
-                ConfiguredChannel {
-                    handle,
-                    protocol_schema: resolved.protocol_id,
-                },
-            );
+            let configured = build_configured_channel(
+                &channel.name,
+                resolved,
+                channel.durable,
+                &durable_store,
+                cluster.supervisor(),
+            )?;
+            channels.insert(channel.name.clone(), Arc::new(configured));
         }
         let conversation_supervisor = subsystems.conversation_supervisor()?;
         let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
@@ -406,7 +389,7 @@ impl LiminalConnectionServices {
             })
             .transpose()?;
         Ok(Self {
-            channels,
+            channels: RwLock::new(channels),
             cluster,
             durable_store,
             participant_service,
@@ -427,7 +410,7 @@ impl LiminalConnectionServices {
         let durable_store = build_durable_store(None)?;
         let dedup = DedupCache::new(Arc::clone(&durable_store), DELIVERY_DEDUP_NAMESPACE);
         Ok(Self {
-            channels: HashMap::new(),
+            channels: RwLock::new(HashMap::new()),
             cluster: build_channel_cluster(None)?,
             durable_store,
             participant_service: None,
@@ -544,6 +527,25 @@ impl LiminalConnectionServices {
             })
     }
 
+    /// Takes the channel roster's read guard, mapping a poisoned lock to a
+    /// [`ServerError`] rather than panicking (the workspace denies
+    /// `unwrap`/`expect`/`panic`), exactly as [`Self::lock_responders`] does for
+    /// the responder registry.
+    ///
+    /// Every caller clones the `Arc` it needs out of the returned guard and drops
+    /// the guard before doing anything else: the roster lock is never held across
+    /// a call into the liminal library.
+    fn read_channels(
+        &self,
+    ) -> Result<std::sync::RwLockReadGuard<'_, HashMap<String, Arc<ConfiguredChannel>>>, ServerError>
+    {
+        self.channels
+            .read()
+            .map_err(|_poisoned| ServerError::ListenerAccept {
+                message: "channel roster lock poisoned".to_owned(),
+            })
+    }
+
     /// Subscribes to a configured channel and returns the raw library
     /// subscription handle so a test can drain the subscriber inbox directly and
     /// observe exactly which messages reached a subscriber.
@@ -552,12 +554,15 @@ impl LiminalConnectionServices {
         &self,
         channel: &str,
     ) -> Result<liminal::channel::SubscriptionHandle, ServerError> {
-        let configured = self
-            .channels
-            .get(channel)
-            .ok_or_else(|| ServerError::ListenerAccept {
-                message: format!("channel '{channel}' is not configured"),
-            })?;
+        let channels = self.read_channels()?;
+        let configured =
+            channels
+                .get(channel)
+                .map(Arc::clone)
+                .ok_or_else(|| ServerError::ListenerAccept {
+                    message: format!("channel '{channel}' is not configured"),
+                })?;
+        drop(channels);
         configured
             .handle
             .subscribe()
@@ -609,6 +614,52 @@ impl LiminalConnectionServices {
             }
         }
     }
+}
+
+/// Builds one roster entry: the channel's validation engine, its library handle
+/// (durable or ephemeral), and the protocol schema id advertised at subscribe
+/// time.
+///
+/// This is the SOLE place a [`ConfiguredChannel`] is constructed. Keeping
+/// construction in one function is what makes "every channel on this server is
+/// the same kind of object" structural rather than a promise: there is no second
+/// body a channel could be built by, so no channel can drift into a different
+/// shape. The boot loop in [`LiminalConnectionServices::from_config_with_store_via`]
+/// is its caller.
+///
+/// `resolved` is consumed because its JSON Schema document is moved into the
+/// channel's [`Schema`]; the protocol id is carried onto the entry unchanged.
+fn build_configured_channel(
+    name: &str,
+    resolved: ChannelSchema,
+    durable: bool,
+    durable_store: &Arc<dyn DurableStore>,
+    supervisor: &ChannelSupervisor,
+) -> Result<ConfiguredChannel, ServerError> {
+    let schema = Schema::new(resolved.document).map_err(|error| ServerError::ConfigValidation {
+        message: format!("failed to initialize channel '{name}': {error}"),
+    })?;
+    let channel_config = if durable {
+        ChannelConfig::new(name.to_owned(), schema, ChannelMode::Durable)
+    } else {
+        ChannelConfig::new(name.to_owned(), schema, ChannelMode::Ephemeral)
+    };
+    let handle = if durable {
+        ChannelHandle::new_durable_with_supervisor(
+            channel_config,
+            Arc::clone(durable_store),
+            supervisor.clone(),
+        )
+        .map_err(|error| ServerError::ConfigValidation {
+            message: format!("failed to initialize durable channel '{name}': {error}"),
+        })?
+    } else {
+        ChannelHandle::with_supervisor(channel_config, supervisor.clone())
+    };
+    Ok(ConfiguredChannel {
+        handle,
+        protocol_schema: resolved.protocol_id,
+    })
 }
 
 /// Returns the current epoch-millis timestamp used as the dedup entry anchor.
@@ -959,13 +1010,18 @@ impl ConnectionServices for LiminalConnectionServices {
         envelope: &MessageEnvelope,
         idempotency_key: Option<&str>,
     ) -> Result<PublishOutcome, ServerError> {
-        let handle = self
-            .channels
-            .get(channel)
-            .map(|configured| configured.handle.clone())
-            .ok_or_else(|| ServerError::ListenerAccept {
-                message: format!("channel '{channel}' is not configured"),
-            })?;
+        // The roster read holds its guard only long enough to clone the entry's
+        // `Arc` out; everything below — the dedup bridge and the publish into the
+        // channel actor — runs with no roster lock held.
+        let channels = self.read_channels()?;
+        let configured =
+            channels
+                .get(channel)
+                .map(Arc::clone)
+                .ok_or_else(|| ServerError::ListenerAccept {
+                    message: format!("channel '{channel}' is not configured"),
+                })?;
+        drop(channels);
 
         // Dedup-on-delivery: a publish carrying an idempotency key is delivered to
         // subscribers AT MOST ONCE across re-publishes of the same key. Only a
@@ -985,7 +1041,7 @@ impl ConnectionServices for LiminalConnectionServices {
             }
         }
 
-        let delivery = handle.publish_with_delivery(
+        let delivery = configured.handle.publish_with_delivery(
             &envelope.payload,
             liminal::envelope::PublisherId::default(),
             None,
@@ -1044,12 +1100,17 @@ impl ConnectionServices for LiminalConnectionServices {
         accepted_schemas: &[ProtocolSchemaId],
         install: Option<liminal::channel::InboxInstall>,
     ) -> Result<ConnectionSubscription, ServerError> {
-        let configured = self
-            .channels
-            .get(channel)
-            .ok_or_else(|| ServerError::ListenerAccept {
-                message: format!("channel '{channel}' is not configured"),
-            })?;
+        // As in `publish`: clone the entry's `Arc` out under the read guard and
+        // drop the guard before schema negotiation or the actor round-trip below.
+        let channels = self.read_channels()?;
+        let configured =
+            channels
+                .get(channel)
+                .map(Arc::clone)
+                .ok_or_else(|| ServerError::ListenerAccept {
+                    message: format!("channel '{channel}' is not configured"),
+                })?;
+        drop(channels);
         let selected_schema = if accepted_schemas.is_empty() {
             configured.protocol_schema
         } else {
@@ -1148,7 +1209,17 @@ impl ConnectionServices for LiminalConnectionServices {
     }
 
     fn flush_durable_state(&self) -> Result<(), ServerError> {
-        for (channel_name, configured) in &self.channels {
+        // Clone the roster out under the read guard and drop the guard before
+        // flushing: a shutdown flush is a durable write per entry, and it must
+        // never run with the roster lock held.
+        let entries: Vec<(String, Arc<ConfiguredChannel>)> = {
+            let channels = self.read_channels()?;
+            channels
+                .iter()
+                .map(|(channel_name, configured)| (channel_name.clone(), Arc::clone(configured)))
+                .collect()
+        };
+        for (channel_name, configured) in entries {
             if configured.handle.config().mode == ChannelMode::Durable {
                 configured
                     .handle
