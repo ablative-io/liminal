@@ -35,6 +35,42 @@ struct RecoveredCompletion {
     presentation: StoredRecoveredPresentation,
 }
 
+/// One measured binding fate held as a VALUE between its measurement and the
+/// durable append that completes it.
+///
+/// §3.2's split exists so this can be carried across the Died source append:
+/// the measurement that produces it is pure, so it may run before any durable
+/// row exists, and the append that consumes it runs only once that row is.
+pub(super) struct MeasuredSpecificFate {
+    owner: LiveFrontierOwner,
+    fate: MeasuredBindingFate,
+    died_source_sequence: u64,
+    intent: StoredSpecificFateIntent,
+    terminal: Option<PendingSpecificFateTerminal>,
+}
+
+/// Validates one durable Died intent against its sealed token and resolves the
+/// exact terminal input.
+///
+/// Pure: acquires no frontier, appends nothing, and mutates no pending state,
+/// so a refusal here disturbs neither half of §3.2's split. Both halves call it
+/// before any owner is acquired, which is what keeps a validation refusal from
+/// ever leaving an owner taken.
+fn validated_completion_terminal(
+    intent: StoredSpecificFateIntent,
+    terminal: Option<PendingSpecificFateTerminal>,
+    pending: &PendingBindingFate,
+) -> Result<BindingFateTerminal, StateError> {
+    if pending.attached_source_sequence != intent.attached_source_sequence()
+        || !intent_matches_token(intent, pending)
+    {
+        return Err(StateError::invariant(
+            "durable Died intent disagrees with sealed binding-fate authority",
+        ));
+    }
+    completion_terminal(intent, terminal)
+}
+
 impl ConversationAuthority {
     /// Completes one open durable Died intent from its owner-held move-only token.
     pub(super) fn complete_pending_specific_fate(
@@ -76,14 +112,7 @@ impl ConversationAuthority {
             return Ok(());
         }
         let attached_source_sequence = pending.attached_source_sequence;
-        if attached_source_sequence != intent.attached_source_sequence()
-            || !intent_matches_token(intent, &pending)
-        {
-            return Err(StateError::invariant(
-                "durable Died intent disagrees with sealed binding-fate authority",
-            ));
-        }
-        let terminal_input = completion_terminal(intent, terminal)?;
+        let terminal_input = validated_completion_terminal(intent, terminal, &pending)?;
         let owner = self.take_frontier()?;
         let prepared =
             match owner.prepare_binding_fate(pending.token, terminal_input, self.observer_progress)
@@ -111,6 +140,76 @@ impl ConversationAuthority {
                 }
             };
         let (owner, fate, _) = prepared.into_parts();
+        self.append_measured_binding_fate(
+            owner,
+            fate,
+            died_source_sequence,
+            intent,
+            terminal,
+            appender,
+        )
+    }
+
+    /// Measures one sealed fate token on a frontier owner held as a VALUE,
+    /// before the enclosing Died source row is durable.
+    ///
+    /// This is §3.2's measure half. The measurement reads only in-memory
+    /// authority — the owner passed in, the token, and `observer_progress` —
+    /// so it can run ahead of the append, which is precisely what lets a
+    /// refusal leave NO DURABLE RESIDUE. It installs nothing and appends
+    /// nothing in either direction; every disposition belongs to the caller.
+    pub(super) fn measure_specific_fate_on_owner(
+        &self,
+        owner: LiveFrontierOwner,
+        died_source_sequence: u64,
+        intent: StoredSpecificFateIntent,
+        terminal: Option<PendingSpecificFateTerminal>,
+        pending: PendingBindingFate,
+    ) -> Result<MeasuredSpecificFate, StateError> {
+        let terminal_input = validated_completion_terminal(intent, terminal, &pending)?;
+        match owner.prepare_binding_fate(pending.token, terminal_input, self.observer_progress) {
+            Ok(prepared) => {
+                let (owner, fate, _) = prepared.into_parts();
+                Ok(MeasuredSpecificFate {
+                    owner,
+                    fate,
+                    died_source_sequence,
+                    intent,
+                    terminal,
+                })
+            }
+            // §3.2 STEP 4, AS RULED: refused => Err with NOTHING appended and
+            // NOTHING installed. The owner is deliberately NOT restored and the
+            // intent is deliberately NOT re-inserted. That leaves the authority
+            // frontier-less with its transition begun, and every subsequent
+            // acquisition reports it loudly at take_frontier's two guards
+            // (production/state.rs:483-496) — which is the design's measured
+            // ground, not an oversight. Do not "repair" this arm.
+            Err(refused) => Err(StateError::invariant(format!(
+                "binding-fate measurement refused: {:?}",
+                refused.error()
+            ))),
+        }
+    }
+
+    /// Appends one measured fate's exact specific row and only then installs
+    /// the transitioned owner.
+    ///
+    /// This is §3.2's append half, and it is called only once the enclosing
+    /// Died source row is durable. The install trails the append throughout,
+    /// per the shape's own invariant.
+    pub(super) fn append_measured_specific_fate(
+        &mut self,
+        measured: MeasuredSpecificFate,
+        appender: &dyn DurableAppend,
+    ) -> Result<(), StateError> {
+        let MeasuredSpecificFate {
+            owner,
+            fate,
+            died_source_sequence,
+            intent,
+            terminal,
+        } = measured;
         self.append_measured_binding_fate(
             owner,
             fate,
