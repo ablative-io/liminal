@@ -79,6 +79,29 @@ pub fn deliveries_recorded(count: u64) {
     }
 }
 
+/// The current value of the accepted-publish counter, for a test that needs an
+/// UNRELATED counter to prove its harness measured anything at all.
+///
+/// `None` means the family is not readable — either [`init`] has not run in this
+/// process or the registry holds no such counter — which a caller must treat as
+/// "no measurement", never as zero. The name is read from the same constant the
+/// registration uses, so the two cannot drift.
+#[cfg(test)]
+pub(crate) fn publishes_total_value() -> Option<u64> {
+    use liminal::metrics::MetricValue;
+
+    let registry = global_registry()?;
+    registry
+        .snapshot()
+        .metrics()
+        .iter()
+        .find(|metric| metric.name == PUBLISHES_TOTAL)
+        .and_then(|metric| match metric.value {
+            MetricValue::Counter(value) => Some(value),
+            MetricValue::Gauge(_) | MetricValue::Histogram(_) => None,
+        })
+}
+
 impl ServerMetrics {
     fn register(registry: &MetricsRegistry) -> Option<Self> {
         let connections_active = registry

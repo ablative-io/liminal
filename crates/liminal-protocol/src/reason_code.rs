@@ -13,7 +13,7 @@
 //! | --- | --- | --- |
 //! | `0x0000`–`0x00FF` | protocol layer — parse, negotiation, auth | `ProtocolError`'s associated consts in the `liminal` crate, `crates/liminal/src/protocol/error.rs:56-72` (`0x0001`–`0x0009` in use) |
 //! | `0x0100`–`0x01FF` | server layer — channel-roster refusals | this module ([`CHANNEL_NOT_REGISTERED_CODE`], [`CHANNEL_QUIESCED_CODE`]; the rest of the band is reserved for further roster refusals) |
-//! | `0xFFFF` | the server's undifferentiated error | `SERVER_ERROR_CODE` in `liminal-server`, minted privately in three modules: `src/server/connection/apply.rs:26`, `src/server/connection/pending_reply.rs:51`, `src/server/connection/delivery.rs:45` |
+//! | `0xFFFF` | the server's undifferentiated error | `SERVER_ERROR_CODE` in `liminal-server`, minted privately in four modules: `src/server/connection/apply.rs:26`, `src/server/connection/pending_reply.rs:51`, `src/server/connection/delivery.rs:45`, `src/server/connection/channel_registry.rs` |
 //!
 //! The map is the fence. Two crates minting `u16` reason codes with no shared
 //! registry collide eventually, and the collision is silent: a client reads a
