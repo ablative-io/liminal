@@ -220,6 +220,55 @@ step-4 refusal, and needs none.
 are recorded in this amendment commit's message, pinned to the tree they
 measured.
 
+**⚡ AMENDMENT 4 (2026-08-03) — THE BOOT-IDENTITY LAW, AND WHAT STEP 3 MEASURES
+AGAINST.** The ruled shape moved the measurement ahead of the source append and,
+without anyone intending it, changed the VALUE the measurement produces. A run
+falsified it rather than an argument: the two `tests_w1b_fate_completion` units
+refused with `reconstructed fate operation drifted from durable sequence 4`. The
+ordering stands; the input is corrected.
+
+⚠ **THE LAW, stated once and general beyond F8: IDENTITY OF BOOT CODE IS NOT
+IDENTITY OF THE LOG IT CONSUMES.** §3.2's boot callers were left byte-unchanged
+and that was verified — but behaviour identity was claimed from it, and the
+claim was too strong. The live path writes the bytes that boot later replays, so
+changing what live WRITES breaks boot while every line of boot's own code stays
+untouched. A by-construction identity argument must therefore range over the
+durable bytes, not only over the code.
+
+**BOOT IS CANON.** The measurement must see exactly what boot's recompute sees
+at the completion row's sequence: the log prefix INCLUDING the operation's own
+source row. Boot has always measured that way and cannot be changed to measure
+otherwise — its reconstruction reads ambient progress at a point where the Died
+row's own projection has already been folded in, because replay folds that
+projection while applying the row. The old live path conformed to this by
+accident of ordering. The ruled shape broke the conformance while moving the
+measurement, and this clause restores it.
+
+**THE STEP-3 INPUT CLAUSE.** Step 3 STAYS WHERE IT IS. What changes is that its
+observer-progress argument becomes EXPLICIT rather than ambient: it is the JOIN
+of ambient progress with the measured operation's OWN projection, taken under
+the exact conditional mirror of `replay_died_source`
+(`connection_fate_replay.rs:173-185` — a `Committed` disposition AND a `Some`
+projection, both required, the fold itself at `:184`). The join is a COMPUTED
+INPUT to the measurement, never a mutation of ambient state before the append —
+so the mirror-defect family this section exists to remove stays untouched, and
+the appends-precede-installs invariant is undisturbed. The projection is derived
+at application time on both sides, not carried as a separate durable row, which
+is why the two sides can be made to agree by computing rather than by recording.
+
+⛔ **TWO ALTERNATIVES REFUSED, struck rather than left unsaid.**
+
+- ~~Pin the measured input into the durable row.~~ REFUSED: it would turn
+  `ReplayFateAppender`'s recompute-and-compare into an echo of its own recorded
+  input, retiring the very check that caught this. The drift check stays
+  INDEPENDENT, and no row format changes.
+- ~~Run the projection fold before the measurement.~~ REFUSED: that is memory
+  ahead of disk, the exact defect family §3.2 removes — and the guard at
+  `production/state.rs:404-407` refuses mid-transition regardless.
+
+↪ The falsifying run, its log coordinates, and the confirmed mechanism chain are
+recorded in this amendment commit's message.
+
 ### 3.3 Carry the cause — RIDE THE LANDED CARRIER, DO NOT MINT A SECOND IDIOM
 
 `OwnerTransition` → `OwnerTransition(LiveFrontierError)`. **This is a named
