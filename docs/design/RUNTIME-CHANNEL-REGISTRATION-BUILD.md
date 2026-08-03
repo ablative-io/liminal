@@ -36,18 +36,34 @@ consume:
 2. **`is_actor_spawned`** (`liminal`). Additive, self-contained, and test 3's
    instrument — built before the code it will observe, so the idle-cost test
    can land WITH step 4 rather than after it.
-3. **The roster refactor** (`liminal-server`, no new public API yet): the field
-   becomes `RwLock<HashMap<String, Arc<ConfiguredChannel>>>`, `ConfiguredChannel`
-   gains `origin`/`state`/`quiesce_reason`, the boot loop's body is extracted to
-   `build_configured_channel`, `flush_durable_state` adopts the
-   clone-then-drop-guard iteration (§II.4). Behaviour-identical by intent:
-   the existing suite is the check that it is. This is the step where drift
-   would hide, so it lands alone, not folded into step 4.
-4. **The APIs + the cap** (`liminal-server`): `channel_registry` module,
+3. **The roster refactor** (`liminal-server`, no new public API, no new
+   state): the field becomes `RwLock<HashMap<String, Arc<ConfiguredChannel>>>`,
+   the boot loop's body is extracted to `build_configured_channel`, and
+   `flush_durable_state` adopts the clone-then-drop-guard iteration (§II.4).
+   Pure structure — behaviour-identical by intent, and the existing suite is
+   the check that it is. This is the step where drift would hide, so it lands
+   alone, not folded into step 4.
+   **Re-scoped at registration (stack lead, 2026-08-03, binding):**
+   `ConfiguredChannel`'s new fields do NOT land here — a field with no reader
+   is dead-state debt in exactly the step designed to carry zero noise. The
+   registered premise ("`-D warnings` fails the build") was corrected at the
+   bytes — no warnings-deny exists in this workspace, and the tree already
+   carries two *tracked* dead-code warnings that build green — but the cure
+   stands on the truer ground: the estate's no-silent-tradeoffs rule bars
+   deliberately minting new warning-debt, tracked or not, and a
+   behaviour-identical step must be byte-quiet to mean what it claims.
+4. **The APIs + the cap** (`liminal-server`): `ConfiguredChannel` gains
+   `origin`/`state`/`quiesce_reason` in the same commit as their readers
+   (the step-3 re-scope, binding), plus the `channel_registry` module,
    `register_channel` / `quiesce_channel` / `channel_status` /
    `registered_channels`, `limits.max_channels` with `Some(0)` in
    `collect_errors`' non-zero rule, and the three pinned tests (§II.9) landing
-   in the same commit as the surface they pin.
+   in the same commit as the surface they pin. Test 1's reason-code assertion
+   is satisfiable HERE, without the wire leg: `ChannelAccessError` and its
+   `reason_code()` land in this step and the consts landed in step 1, so the
+   test asserts the funnel's typed refusal directly — the WIRE carrying the
+   code is step 5's claim, not test 1's (confirmed on the record at
+   registration).
 5. **The wire leg**: `ChannelOperation` + defaulted `admit_channel` on the
    trait, the `LiminalConnectionServices` override, `apply.rs` consultation in
    `publish_response`/`subscribe_response` (§II.5(d)). Last because it consumes
