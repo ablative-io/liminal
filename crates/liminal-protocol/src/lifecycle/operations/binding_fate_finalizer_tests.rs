@@ -45,15 +45,15 @@ use crate::{
 
 use super::LiveFrontierOwner;
 use super::binding_fate_f8_tests::{DEPARTED_PEER, committed_died_terminal};
+use super::binding_fate_fixture::{
+    TwoExitClaims, two_identity_ledgers, two_identity_order_restore, two_identity_sequence_restore,
+};
 use super::binding_fate_tests::ordinary_token;
 use crate::lifecycle::{
     AdmissionOrder, ClaimFrontiers, ClaimFrontiersRestore, ClosureAccounting, ClosureState,
-    CommittedDiedTerminal, ExitProductRangeRestore, FrontierBinding, FrontierParticipant,
-    MarkerProvenance, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore,
-    OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, PendingDiedOrdinaryFinalizer,
-    RecoverySequenceReserve, RetainedCausalRecord, RetainedCausalRecordKind, RetainedRecordCharge,
-    SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner, SequenceLedger,
-    SequenceProductRangesRestore,
+    CommittedDiedTerminal, FrontierBinding, FrontierParticipant, MarkerProvenance,
+    PendingDiedOrdinaryFinalizer, RetainedCausalRecord, RetainedCausalRecordKind,
+    RetainedRecordCharge,
 };
 
 /// Which single row occupies the one-row retained suffix of a fixture frontier.
@@ -134,33 +134,11 @@ fn suffix_frontier(
         .checked_add(1)
         .ok_or_else(|| "finalizer fixture identity slot limit overflow".to_string())?;
 
-    // Frozen canonical claim order (E, T, M, RS, RT, L*T, L*RT, L_other*E) for
-    // L=2, T=0, M=0: two exits and two exit products. Both identities are
-    // Detached, so no binding-terminal claim is owed.
-    let own_exit = high_watermark
-        .checked_add(1)
-        .ok_or_else(|| "finalizer fixture own exit claim overflow".to_string())?;
-    let peer_exit = own_exit
-        .checked_add(1)
-        .ok_or_else(|| "finalizer fixture peer exit claim overflow".to_string())?;
-    let own_exit_product = peer_exit
-        .checked_add(1)
-        .ok_or_else(|| "finalizer fixture own exit product overflow".to_string())?;
-    let peer_exit_product = own_exit_product
-        .checked_add(1)
-        .ok_or_else(|| "finalizer fixture peer exit product overflow".to_string())?;
-
-    let sequence = SequenceLedger::try_new(
-        high_watermark,
-        SequenceClaims::new(2, 0, 0, RecoverySequenceReserve::None),
-    )
-    .map_err(|error| format!("finalizer fixture sequence ledger refused: {error:?}"))?;
-    let order = OrderLedger::try_new(
-        OrderHigh::Empty,
-        OrderClaims::new(0, 2, false, false)
-            .map_err(|error| format!("finalizer fixture order claims refused: {error:?}"))?,
-    )
-    .map_err(|error| format!("finalizer fixture order ledger refused: {error:?}"))?;
+    // The frozen canonical claim order for two Detached identities: two exits
+    // and two exit products, no binding-terminal claim owed. Shared with the F8
+    // incident fixture at `binding_fate_fixture` so the two cannot drift.
+    let claims = TwoExitClaims::above(high_watermark)?;
+    let (sequence, order) = two_identity_ledgers(high_watermark)?;
 
     let (phase, kind) = match row {
         SuffixRow::Marker => (
@@ -210,58 +188,8 @@ fn suffix_frontier(
             active_marker_anchors,
             historical_marker_deliveries: vec![],
             historical_causal_facts: vec![],
-            sequence: SequenceClaimFrontierRestore {
-                movable_claims: vec![
-                    MovableSequenceClaim {
-                        delivery_seq: own_exit,
-                        owner: SequenceDirectOwner::MembershipExit {
-                            participant_index: participant_id,
-                        },
-                    },
-                    MovableSequenceClaim {
-                        delivery_seq: peer_exit,
-                        owner: SequenceDirectOwner::MembershipExit {
-                            participant_index: DEPARTED_PEER,
-                        },
-                    },
-                ],
-                immutable_candidates: vec![],
-                products: SequenceProductRangesRestore {
-                    live_times_terminal: vec![],
-                    live_times_replacement_terminal: None,
-                    other_live_times_exit: vec![
-                        ExitProductRangeRestore {
-                            start: own_exit_product,
-                            length: 1,
-                            exit_participant: participant_id,
-                        },
-                        ExitProductRangeRestore {
-                            start: peer_exit_product,
-                            length: 1,
-                            exit_participant: DEPARTED_PEER,
-                        },
-                    ],
-                },
-                recovery: None,
-            },
-            order: OrderClaimFrontierRestore {
-                movable_claims: vec![
-                    MovableOrderClaim {
-                        transaction_order: 0,
-                        owner: OrderDirectOwner::MembershipExit {
-                            participant_index: participant_id,
-                        },
-                    },
-                    MovableOrderClaim {
-                        transaction_order: 1,
-                        owner: OrderDirectOwner::MembershipExit {
-                            participant_index: DEPARTED_PEER,
-                        },
-                    },
-                ],
-                immutable_candidates: vec![],
-                recovery: None,
-            },
+            sequence: two_identity_sequence_restore(claims, participant_id, DEPARTED_PEER),
+            order: two_identity_order_restore(participant_id, DEPARTED_PEER),
             recovery_marker_delivery_seq: None,
         },
         sequence,

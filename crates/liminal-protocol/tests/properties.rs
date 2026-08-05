@@ -1,6 +1,9 @@
 #![allow(clippy::expect_used)]
 
-use liminal_protocol::algebra::{WideResourceVector, floor_transition};
+use liminal_protocol::algebra::{
+    AdmissibleFloor, WideResourceVector, admissible_installed_floor, floor_transition,
+    marker_clamped_floor,
+};
 use liminal_protocol::lifecycle::{
     BoundParticipantCursor, ClosureDebt, CumulativeAckOutcome, NonzeroDebtCursorEpisode,
     ObserverProjection, PhysicalCompaction,
@@ -216,5 +219,70 @@ proptest! {
             first_floor.preferred_floor,
             u128::from(member_cursor.min(observer_progress)) + 1,
         );
+    }
+
+    /// PRECEDENCE-CLAMP M7. The marker clamp and the installed-floor interval,
+    /// over the whole domain including both degenerate cases: no markers at
+    /// all, and a marker sitting exactly on the floor.
+    ///
+    /// The clamp's whole job is to be the OPPOSITE of `cap_floor`, so the
+    /// direction is asserted here rather than left to the two call sites.
+    #[test]
+    fn the_marker_clamp_lowers_and_the_installed_floor_stays_inside_its_interval(
+        computed_floor in 0_u128..=260,
+        marker in proptest::option::of(0_u64..=255),
+        retained_floor in 0_u128..=260,
+        high_watermark in 0_u64..=255,
+    ) {
+        let clamped = marker_clamped_floor(computed_floor, marker);
+
+        // Direction: the clamp only ever LOWERS. `cap_floor` only ever raises,
+        // and the two must never converge.
+        prop_assert!(clamped <= computed_floor);
+        let raised = floor_transition(computed_floor, None, high_watermark, high_watermark, computed_floor)
+            .resulting_floor;
+        prop_assert!(raised >= computed_floor);
+
+        if let Some(marker) = marker {
+            // A marker pins: the clamped floor never crosses it, and it lands
+            // ON it rather than below it whenever the computed floor reaches it.
+            prop_assert!(clamped <= u128::from(marker));
+            if computed_floor >= u128::from(marker) {
+                prop_assert_eq!(clamped, u128::from(marker));
+            }
+        } else {
+            // The empty marker set is the majority case: byte-identical
+            // pass-through, never a guess about the minimum of an empty set.
+            prop_assert_eq!(clamped, computed_floor);
+        }
+
+        let retained_end = u128::from(high_watermark) + 1;
+        match admissible_installed_floor(computed_floor, retained_floor, marker, high_watermark) {
+            AdmissibleFloor::Install(installed) => {
+                // Inside the interval BOTH ends, which is the whole point: a
+                // floor clamped only downward can land below the retained floor
+                // and be refused there instead.
+                prop_assert!(installed >= retained_floor);
+                prop_assert!(installed <= retained_end);
+                // Never raised to reach the interval.
+                prop_assert!(installed <= computed_floor);
+                // Never across a marker.
+                if let Some(marker) = marker {
+                    prop_assert!(installed <= u128::from(marker));
+                }
+                // An uncontested floor installs byte-identically (F5).
+                if computed_floor <= retained_end
+                    && marker.is_none_or(|marker| computed_floor <= u128::from(marker))
+                {
+                    prop_assert_eq!(installed, computed_floor);
+                }
+            }
+            // Subsumed exactly when no admissible value reaches the retained
+            // floor. Never a refusal, and never an install running backwards.
+            AdmissibleFloor::Subsumed => {
+                let upper = marker_clamped_floor(retained_end, marker);
+                prop_assert!(computed_floor.min(upper) < retained_floor);
+            }
+        }
     }
 }
