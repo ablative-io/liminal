@@ -1,4 +1,4 @@
-# The Precedence clamp — a floor that cannot cross a marker, r2
+# The Precedence clamp — a floor that cannot cross a marker, r3
 
 **Status: dispatch-ready. Tom ruled "get this fixed" (2026-08-05) after the
 third estate brick in six days. Hermes ruled the shape and reviews the build;
@@ -77,6 +77,39 @@ the rule; it is that nothing prevents an unsatisfiable floor from being proposed
   success: the measurement path is fixed, G2 passes both paths in a quiet test,
   and the finalizer path stays live in production under concurrency — a fourth
   occurrence with a fix already in the tree.
+- **M1a — the re-mint's admissible interval, or (a) swaps one brick for
+  another.** `install_finalized_binding_fate_floor` refuses on **two** conditions,
+  and clamping downward against markers only bounds one of them. Verbatim:
+
+  ```rust
+  let retained_end = u128::from(self.sequence.ledger().high_watermark()) + 1;
+  if resulting_floor < self.retained_floor || resulting_floor > retained_end {
+      return Err(LiveFrontierTransitionError::ResultingFrontier);
+  }
+  ```
+
+  A re-mint that clamps only downward can land **below** the current
+  `retained_floor` — which has moved by ordinary means since measurement — and
+  is refused as `ResultingFrontier`: the same permanent brick under a different
+  variant name, produced by a builder implementing (a) exactly as written.
+  So the re-minted floor must land in
+  **[current `retained_floor`, min(lowest_retained_marker_seq, high_watermark + 1)]**,
+  with **both ends read at finalization time, not at mint time** — the upper end
+  moves too, since `retained_end` derives from the current high watermark.
+  **The subsumed case is a decision, not an accident:** if the current
+  `retained_floor` has already advanced past the measured floor, the fate's floor
+  is subsumed and installing the older value is meaningless. Handle it as an
+  explicit success / no-op. It must not be allowed to fall into the `<` branch
+  and refuse.
+- **M1b — a required question, answered from the code, not from G3.** Is the
+  subsumed-floor refusal an **independent, marker-free brick path**? It needs no
+  marker at all — only that the floor advanced by ordinary projection while a
+  finalizer sat pending across the durable boundary. Neither Hermes nor Waffles
+  claims it is reachable; the interval's concurrency is untraced. The build must
+  answer it from the code and say so in the report. If it is reachable, it is a
+  second way to produce a permanent refusal on the same durable-Died-row
+  mechanism, and our three specimens may not all be the marker story — which
+  would be the difference between fixing this class and fixing most of it.
 - **M2 — a true clamp, not `cap_floor`.** The minted floor is
   `min(computed_floor, lowest_retained_marker_seq)`. It must NOT be routed
   through `cap_floor`, for the reason stated above; if a new algebra helper is
@@ -195,6 +228,14 @@ the rule; it is that nothing prevents an unsatisfiable floor from being proposed
   differs — which also makes a clean boot self-evidencing rather than merely
   hoped for. A run that cannot show the difference reports "inconclusive", never
   a verdict.
+  **Report the refusal variant verbatim, per specimen.** M4's error preservation
+  makes `Precedence` and `ResultingFrontier` distinguishable for the first time,
+  so a latching specimen must say WHICH it is. That costs nothing and it is how
+  M1b's question gets a second, independent answer from live evidence: if any
+  specimen latches on `ResultingFrontier` rather than `Precedence`, the
+  marker-free path is not hypothetical and the three specimens are not one
+  story. (M4 was argued on diagnosis time; it has become load-bearing for the
+  specimen gate.)
 - **G4 (no regressions)** — full workspace battery fresh on the final tree:
   `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, the
   complete test suite. No `#[allow]`, no `#[ignore]`, no skips.
