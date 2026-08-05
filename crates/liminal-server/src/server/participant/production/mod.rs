@@ -119,6 +119,8 @@ mod tests_log_v2;
 #[cfg(test)]
 mod tests_marker_ack;
 #[cfg(test)]
+mod tests_marker_fate_repro;
+#[cfg(test)]
 mod tests_marker_ack_fixture;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
