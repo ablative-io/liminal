@@ -229,6 +229,27 @@ pub enum ParticipantSemanticError {
         /// Conversation whose closure refused the request.
         conversation_id: ConversationId,
     },
+    /// CONTAINMENT: this one conversation's durable state cannot be loaded, so
+    /// this one conversation is refused. The node starts, every other
+    /// conversation is served, and the refusal NAMES its subject.
+    ///
+    /// Attribution is not decoration here, it is half the property. A node
+    /// that contains an unloadable conversation without naming it boots clean
+    /// and silently serves nothing on that conversation forever, which is
+    /// worse than the crash it replaced, because the crash was the only thing
+    /// telling anyone. The underlying failure travels as `reason` rather than
+    /// as a wrapped error because it is already a rendered diagnostic by the
+    /// time replay refuses it.
+    #[error(
+        "participant conversation {conversation_id} is unloadable and is refused on its own: \
+         {reason}"
+    )]
+    ConversationUnloadable {
+        /// Conversation whose durable state could not be loaded.
+        conversation_id: ConversationId,
+        /// The load failure's own text, as the operator needs to see it.
+        reason: String,
+    },
 }
 
 /// One semantic result paired with every dispatch effect durably installed by
