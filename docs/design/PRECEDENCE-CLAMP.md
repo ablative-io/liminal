@@ -1,4 +1,4 @@
-# The Precedence clamp — a floor that cannot cross a marker, r1
+# The Precedence clamp — a floor that cannot cross a marker, r2
 
 **Status: dispatch-ready. Tom ruled "get this fixed" (2026-08-05) after the
 third estate brick in six days. Hermes ruled the shape and reviews the build;
@@ -53,11 +53,30 @@ the rule; it is that nothing prevents an unsatisfiable floor from being proposed
 
 ## Requirements
 
-- **M1 — one marker-aware minting point.** The resulting floor is minted in
-  exactly one place that knows about `marker_records`, and **both** enforcement
-  sites (`prepare_binding_fate_transition`, `install_finalized_binding_fate_floor`)
-  draw from it. Correctness lives in the structure, not in two functions each
-  remembering a rule.
+- **M1 — one marker-aware minting point, AND a floor that is still legal when
+  it is enforced.** The resulting floor is minted in exactly one place that
+  knows about `marker_records`. That is necessary and **not sufficient**, for a
+  reason read at Hermes's bytes and confirmed at Waffles's:
+  `PendingDiedOrdinaryFinalizer` (`binding_fate.rs:81-84`) carries a **frozen**
+  `resulting_floor: DeliverySeq`, fixed at measurement time (`:288`, `:340`).
+  `complete_pending_died_ordinary_finalizer` (`:120-127`) destructures that
+  stored value and replays it into `install_finalized_binding_fate_floor`, which
+  re-checks it against the **current** marker set. The server holds that
+  finalizer across a durable boundary
+  (`liminal-server/src/server/participant/production/state.rs:117`) — the very
+  window M5 exists to close. So a floor correctly clamped at mint time can be
+  crossed by a marker admitted afterwards, and the second enforcer refuses a
+  floor that was legal when it was computed.
+  The build must therefore deliver **one** of:
+  **(a)** re-clamp at finalization against the current marker set — re-mint
+  rather than replay; or
+  **(b)** a demonstrated argument, in the code and in the report, that no marker
+  can be admitted in that interval.
+  (a) is the structural answer and is preferred. (b) is acceptable only if
+  actually proven; asserted is not proven. Getting this wrong looks exactly like
+  success: the measurement path is fixed, G2 passes both paths in a quiet test,
+  and the finalizer path stays live in production under concurrency — a fourth
+  occurrence with a fix already in the tree.
 - **M2 — a true clamp, not `cap_floor`.** The minted floor is
   `min(computed_floor, lowest_retained_marker_seq)`. It must NOT be routed
   through `cap_floor`, for the reason stated above; if a new algebra helper is
@@ -68,6 +87,17 @@ the rule; it is that nothing prevents an unsatisfiable floor from being proposed
   `install_binding_fate_transition` retains only markers `>= resulting_floor`,
   so the lowest retained marker is never below `retained_floor`, and the clamp
   can therefore never drive a floor backwards.
+  **The clamp target is the marker itself, not `marker - 1`.** The enforcer
+  refuses on `record.delivery_seq < resulting_floor` — strictly below — so
+  `resulting_floor == lowest_marker_seq` is admissible, and it is consistent
+  downstream because `install_binding_fate_transition` retains markers
+  `>= resulting_floor`, so a marker sitting exactly at the floor survives.
+  "Clamp to just below the marker, to be safe" is the natural defensive reflex
+  and it silently destroys legal floor advances: a green build in which the
+  floor quietly stops moving.
+  **The empty marker set is the majority case and must be stated, not inferred:**
+  no retained markers ⇒ no clamp ⇒ the computed floor passes through
+  byte-identical. A `min` over an empty set is otherwise resolved by a guess.
 - **M3 — answer the reuse question out loud.**
   `ordinary_record_projection.rs:728-750` already does this properly for its own
   invariant: compute a base floor, run it through
@@ -103,11 +133,25 @@ the rule; it is that nothing prevents an unsatisfiable floor from being proposed
 - **F2 — the poisoned stores are evidence, not scratch.** ⛔ The three poisoned
   estates are the only specimens of this class in existence. Every gate runs
   against **copies**. No binary, fixed or otherwise, is ever booted against an
-  original. Preserved at
+  original. ⛔ The `.manifold-backup-*` originals stay untouched — that is the
+  one thing here that cannot be undone. Preserved at
   `apps/manifold/.manifold-backup-20260805-intent329`,
   `.manifold-backup-20260801-intent82`,
   `.manifold-backup-20260731-spine-poison`, plus
   `.manifold-poisoned-parts-20260801`.
+- **F2a — copy wholesale, never look inside.** These store trees hold real
+  payloads: private conversations belonging to real people. Copy them as opaque
+  directories. Do **not** `cat`, `grep`, `strings`, or otherwise inspect their
+  contents, and do not include store contents in any report. The only things
+  that may be reported from a specimen are the **boot outcome** and the
+  **verbatim refusal line**.
+- **F2b — a narrow, named exception to a standing fence.** Executors are barred
+  from `/Users/tom/Developer/ablative/apps/manifold/` as standing estate policy.
+  This brief lifts that fence for exactly one act: copying the four paths named
+  in F2 to the builder's own scratch directory, and building the manifold binary
+  for G3. Nothing else under that path may be read, written, moved or deleted —
+  and the live `.manifold/` estate is not in the exception at all. Stated here,
+  by the author, so no builder discovers a block and improvises around it.
 - **F3 — nothing publishes.** No version bump, no tag, no crates.io release.
   Consuming this from manifold is a separate act behind Tom's own word. G3's
   local `[patch.crates-io]` override is gate machinery and is not landed.
@@ -139,6 +183,18 @@ the rule; it is that nothing prevents an unsatisfiable floor from being proposed
   boot, we state hand-recovery-is-unnecessary as a property; if they latch,
   Part C is real and Hermes rules the abandon semantics with the client-side
   atom as template.
+  **G3 requires a positive control, and is invalid without it.** If the
+  `[patch.crates-io]` override silently fails to apply, the specimen boots the
+  OLD liminal and latches exactly as it always did — and we would read that as
+  "the copies latch ⇒ Part C is real" and build an abandonment path nobody
+  needs. That is a false green wearing a red coat, and it is the tool-absence
+  class from the measurement catalogue: **the control must exercise the same
+  predicate as the run.** Before believing either outcome, prove the booted
+  binary actually contains the clamp. The cheapest honest form is to boot a copy
+  under **both** the unpatched and the patched build and show the behaviour
+  differs — which also makes a clean boot self-evidencing rather than merely
+  hoped for. A run that cannot show the difference reports "inconclusive", never
+  a verdict.
 - **G4 (no regressions)** — full workspace battery fresh on the final tree:
   `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, the
   complete test suite. No `#[allow]`, no `#[ignore]`, no skips.
