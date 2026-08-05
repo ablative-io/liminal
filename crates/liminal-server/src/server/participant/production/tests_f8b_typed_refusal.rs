@@ -78,9 +78,10 @@ fn partly_applied_fate() -> Result<PartlyAppliedFate, Box<dyn Error>> {
             }),
         )?;
         if !matches!(enrolled, ServerValue::EnrollBound(_)) {
-            return Err(
-                format!("prefix conversation {conversation_id} did not bind: {enrolled:?}").into(),
-            );
+            return Err(format!(
+                "prefix conversation {conversation_id} did not bind: {enrolled:?}"
+            )
+            .into());
         }
     }
     let mut tracked_conversations: Vec<u64> = PREFIX_CONVERSATIONS

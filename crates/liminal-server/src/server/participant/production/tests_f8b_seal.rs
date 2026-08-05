@@ -220,7 +220,10 @@ fn boot_draining_the_last_identity_seals_the_conversation() -> Result<(), Box<dy
     if authority.frontier().is_some() {
         return Err("the sealed conversation retained an executable frontier".into());
     }
-    if authority.slots.contains_key(&minted.survivor_participant_id) {
+    if authority
+        .slots
+        .contains_key(&minted.survivor_participant_id)
+    {
         return Err("the sealed conversation retained the drained identity's slot".into());
     }
     drop(owner);
@@ -267,13 +270,16 @@ fn the_boot_drain_verdict_names_the_seal() -> Result<(), Box<dyn Error>> {
         .minter
         .replay_aggregate_reference(minted.conversation_id, &log)?;
 
-    let verdict = minted
-        .minter
-        .drain_restored_candidate_lane(minted.conversation_id, &mut replayed, &log);
-    if verdict != (BootDrainVerdict::Drained {
-        drains: 1,
-        sealed: true,
-    }) {
+    let verdict =
+        minted
+            .minter
+            .drain_restored_candidate_lane(minted.conversation_id, &mut replayed, &log);
+    if verdict
+        != (BootDrainVerdict::Drained {
+            drains: 1,
+            sealed: true,
+        })
+    {
         return Err(format!(
             "the last-identity drain's verdict did not name the seal: {verdict:?}"
         )
@@ -344,7 +350,9 @@ fn a_sealed_conversation_does_not_refuse_its_neighbours() -> Result<(), Box<dyn 
         }),
     )?;
     if !matches!(bound, ServerValue::EnrollBound(_)) {
-        return Err(format!("a sealed neighbour refused an unrelated enrollment: {bound:?}").into());
+        return Err(
+            format!("a sealed neighbour refused an unrelated enrollment: {bound:?}").into(),
+        );
     }
     Ok(())
 }

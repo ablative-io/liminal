@@ -66,8 +66,8 @@
 use std::error::Error;
 use std::sync::Arc;
 
-use liminal::durability::bridge::block_on;
 use liminal::durability::DurableStore;
+use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::BindingState;
 use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, Generation, ParticipantAck, ServerValue,

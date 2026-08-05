@@ -12,12 +12,11 @@ use std::collections::BTreeMap;
 
 use liminal_protocol::lifecycle::{
     BindingState, BindingTerminalAdmitError, ClosureState, CommittedDiedTerminal,
-    ConversationDecision, ConversationGenesis,
-    ConversationRefusalReason, CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt,
-    LiveFrontierOwner, LiveMember, NonzeroParticipantAckCommit, ObligationDebtDispatchState,
-    ObligationDebtDispatchTransition, ObligationDebtOwnerError, ObserverProgressProjection,
-    OrdinaryBindingFate, ParticipantConversation, PendingDiedOrdinaryFinalizer, RetiredIdentity,
-    SealedBindingFateToken,
+    ConversationDecision, ConversationGenesis, ConversationRefusalReason,
+    CredentialAttachLiveReceipt, DetachCell, EnrollmentLiveReceipt, LiveFrontierOwner, LiveMember,
+    NonzeroParticipantAckCommit, ObligationDebtDispatchState, ObligationDebtDispatchTransition,
+    ObligationDebtOwnerError, ObserverProgressProjection, OrdinaryBindingFate,
+    ParticipantConversation, PendingDiedOrdinaryFinalizer, RetiredIdentity, SealedBindingFateToken,
 };
 #[cfg(test)]
 use liminal_protocol::wire::ParticipantDelivery;

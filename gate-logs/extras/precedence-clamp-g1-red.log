@@ -1,0 +1,25 @@
+   Compiling liminal-protocol v0.4.0 (/private/tmp/claude-501/-Users-tom-Developer-projects-deno-rust-meridian/896955e1-86dd-4d6a-9c25-f3f978b189a9/scratchpad/wt-precedence-clamp/crates/liminal-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.55s
+     Running unittests src/lib.rs (target/debug/deps/liminal_protocol-8d13fbe853e0ca1f)
+
+running 3 tests
+test lifecycle::operations::binding_fate_finalizer_tests::a_marker_retained_while_the_finalizer_waited_pins_the_installed_floor ... FAILED
+test lifecycle::operations::binding_fate_finalizer_tests::an_uncontested_finalizer_floor_installs_unchanged ... ok
+test lifecycle::operations::binding_fate_finalizer_tests::a_floor_subsumed_while_the_finalizer_waited_installs_as_a_no_op ... FAILED
+
+failures:
+
+---- lifecycle::operations::binding_fate_finalizer_tests::a_marker_retained_while_the_finalizer_waited_pins_the_installed_floor stdout ----
+Error: "PRECEDENCE-CLAMP M1: a frozen floor of 7 crossed a marker retained at 6 while the finalizer waited, and the second enforcer refused Precedence. The enclosing source row is durable, so this refusal repeats on every boot, forever"
+
+---- lifecycle::operations::binding_fate_finalizer_tests::a_floor_subsumed_while_the_finalizer_waited_installs_as_a_no_op stdout ----
+Error: "PRECEDENCE-CLAMP M1a: a fate floor of 6 was subsumed by a retained floor that had already advanced to 7, and the finalizer refused Frontier instead of treating it as the no-op it is. The enclosing source row is durable, so this refusal repeats on every boot, forever"
+
+
+failures:
+    lifecycle::operations::binding_fate_finalizer_tests::a_floor_subsumed_while_the_finalizer_waited_installs_as_a_no_op
+    lifecycle::operations::binding_fate_finalizer_tests::a_marker_retained_while_the_finalizer_waited_pins_the_installed_floor
+
+test result: FAILED. 1 passed; 2 failed; 0 ignored; 0 measured; 431 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p liminal-protocol --lib`

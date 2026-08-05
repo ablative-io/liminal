@@ -57,14 +57,14 @@ use crate::lifecycle::{
     DiedBindingTransition, ExitProductRangeRestore, FrontierBinding, FrontierParticipant,
     MarkerProvenance, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore,
     OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, RecoverySequenceReserve,
-    RetainedCausalRecord, RetainedCausalRecordKind, RetainedRecordCharge,
-    SealedBindingFateToken, SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner,
-    SequenceLedger, SequenceProductRangesRestore,
+    RetainedCausalRecord, RetainedCausalRecordKind, RetainedRecordCharge, SealedBindingFateToken,
+    SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner, SequenceLedger,
+    SequenceProductRangesRestore,
 };
 
 /// The departed peer's permanent index. Distinct from the ordinary token's
 /// participant (3) so the two identities never collide in the frontier.
-const DEPARTED_PEER: u64 = 5;
+pub(super) const DEPARTED_PEER: u64 = 5;
 
 fn generation(value: u64) -> Result<Generation, String> {
     Generation::new(value).ok_or_else(|| "F8 fixture generation must be nonzero".to_string())
@@ -97,7 +97,7 @@ fn clear_accounting() -> Result<ClosureAccounting, String> {
 /// throwaway owner. Only the terminal travels; its owner is dropped, so the
 /// terminal's provenance never constrains the marker-pinned frontier below.
 /// Same construction as `binding_fate_tests::committed_died_owner`.
-fn committed_died_terminal(
+pub(super) fn committed_died_terminal(
     active: ActiveBinding,
     cursor: DeliverySeq,
 ) -> Result<CommittedDiedTerminal, String> {
@@ -123,7 +123,12 @@ fn committed_died_terminal(
             candidate_sequence,
             high_watermark,
         )
-        .map_err(|refused| format!("F8 committed terminal prepare refused: {:?}", refused.error()))?;
+        .map_err(|refused| {
+            format!(
+                "F8 committed terminal prepare refused: {:?}",
+                refused.error()
+            )
+        })?;
     let key = prepared.candidate_key();
     let BindingTerminalAdmission::Commit(committed) =
         prepared.admit(key.bind_v3_charge(ResourceVector::new(1, 73)))
@@ -168,7 +173,9 @@ fn marker_pinned_owner(
     charged: bool,
 ) -> Result<LiveFrontierOwner, String> {
     if cursor >= marker_seq {
-        return Err("F8 fixture needs an UNACKED marker: P1's cursor must sit below it".to_string());
+        return Err(
+            "F8 fixture needs an UNACKED marker: P1's cursor must sit below it".to_string(),
+        );
     }
     let high_watermark = marker_seq;
     let identity_slot_limit = participant_id
@@ -512,8 +519,8 @@ fn the_retired_precedence_pole_backstop_names_itself_if_it_ever_fires() -> Resul
 /// everything is not a carrier, and the positive pole alone cannot detect
 /// that.
 #[test]
-fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier()
--> Result<(), String> {
+fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier() -> Result<(), String>
+{
     let fixture = incident_fixture(true)?;
     // A Recovered terminal against an Ordinary token fails the terminal-class
     // check at `binding_fate.rs:409-422`, well before any owner transition.
@@ -536,10 +543,7 @@ fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier()
             "F8 §3.3 negative pole ONE: the terminal-class failure changed class: {refused:?}"
         ));
     }
-    if matches!(
-        refused,
-        BindingFateMeasurementError::OwnerTransition { .. }
-    ) {
+    if matches!(refused, BindingFateMeasurementError::OwnerTransition { .. }) {
         return Err(format!(
             "F8 §3.3 negative pole ONE: a non-owner-transition failure wore the owner-transition \
              carrier: {refused:?}"
