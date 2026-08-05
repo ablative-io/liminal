@@ -1,0 +1,52 @@
+   Compiling liminal-server v0.5.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a97adb1c4a09a7a4b/crates/liminal-server)
+warning: fields `participant_id`, `acknowledged_through`, and `index_debug` are never read
+   --> crates/liminal-server/src/server/participant/production/tests_marker_ack_fixture.rs:185:16
+    |
+184 | pub(super) struct DerivedAckEndpoint {
+    |                   ------------------ fields in this struct
+185 |     pub(super) participant_id: ParticipantId,
+    |                ^^^^^^^^^^^^^^
+186 |     pub(super) acknowledged_through: u64,
+    |                ^^^^^^^^^^^^^^^^^^^^
+187 |     pub(super) endpoint: u64,
+188 |     pub(super) index_debug: String,
+    |                ^^^^^^^^^^^
+    |
+    = note: `DerivedAckEndpoint` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `derived_ack_endpoints` is never read
+   --> crates/liminal-server/src/server/participant/production/tests_marker_ack_fixture.rs:617:16
+    |
+606 | pub(super) struct AttachedDrainAttempt {
+    |                   -------------------- field in this struct
+...
+617 |     pub(super) derived_ack_endpoints: Vec<DerivedAckEndpoint>,
+    |                ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `liminal-server` (lib test) generated 2 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.82s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-c0c363b8f399ccc8)
+
+running 3 tests
+test server::participant::production::tests_r4_silent_close::live_path_stale_generation_is_answered_by_lookup_with_the_current_generation ... ok
+test server::participant::production::tests_r4_silent_close::attach_against_pending_finalization_must_not_answer_with_silence ... FAILED
+test server::participant::production::tests_r4_silent_close::stale_generation_attach_is_already_refused_with_a_frame ... ok
+
+failures:
+
+---- server::participant::production::tests_r4_silent_close::attach_against_pending_finalization_must_not_answer_with_silence stdout ----
+
+thread 'server::participant::production::tests_r4_silent_close::attach_against_pending_finalization_must_not_answer_with_silence' (4652129) panicked at crates/liminal-server/src/server/participant/production/tests_r4_silent_close.rs:109:5:
+a credential attach that cannot be admitted must still TELL the client so, on the Respond path that guarantees delivery and leaves the connection open. Instead the client got: NO FRAME AT ALL — silent close. Server-only text: participant semantic service failed: participant production operation failed: participant production invariant violated: pending finalization observed in a binding that commits detaches immediately
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    server::participant::production::tests_r4_silent_close::attach_against_pending_finalization_must_not_answer_with_silence
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 596 filtered out; finished in 1.49s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+TRUE_EXIT_CODE=101 (cargo test, red as intended)
+Captured at commit ca66543 + the R4 red test, branch silent-close-attach-refusal.
