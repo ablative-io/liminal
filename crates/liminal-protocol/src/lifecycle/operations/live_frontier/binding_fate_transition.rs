@@ -102,6 +102,44 @@ impl LiveFrontierOwner {
     /// `admissible_installed_floor` returns `min(measured, upper)`, so the
     /// installed floor is `<= measured` always.
     ///
+    /// # What was traced, and what was NOT proven (PRECEDENCE-CLAMP M1b)
+    ///
+    /// The re-mint is structural insurance, and it is deliberately not resting
+    /// on either of the reachability findings below.
+    ///
+    /// THE MARKER CONDITION CANNOT FIRE FROM A MARKER ADMITTED IN THE INTERVAL,
+    /// and that is mechanical rather than argued. `marker_records` gains rows in
+    /// exactly one place outside restore — `drain_next_marker_core`
+    /// (`claim_frontier.rs`, the sole `marker_records.push`) — which refuses
+    /// with `SequenceNotNext` unless the drained marker sits at exactly
+    /// `high_watermark + 1`. The sequence high watermark is monotone
+    /// non-decreasing, and a measured floor is at most `high_watermark + 1` at
+    /// measurement time (the preferred floor is `min(member_cursor,
+    /// observer_progress) + 1` with both inputs bounded by the watermark, and
+    /// the retained floor it is maxed against is itself bounded by
+    /// `high_watermark + 1`). So a marker retained after the measurement sits at
+    /// or above the measured floor, and the enforcer refuses only on STRICTLY
+    /// below. The condition can therefore only be met by a marker that was
+    /// already below the floor when it was measured, which is exactly what the
+    /// measurement-site clamp now prevents.
+    ///
+    /// THE SUBSUMED CONDITION IS MARKER-FREE AND INDEPENDENT. It reads no marker
+    /// state at all: it needs only that `retained_floor` advanced past the
+    /// measured floor while the finalizer waited.  `retained_floor` is written
+    /// in exactly three places — the ordinary-record projection and the two
+    /// binding-fate installs — and none of them appears between a
+    /// `prepare_pending_died_*` and its matching completion in any server call
+    /// chain that exists today (`ops_leave`, `ops_attach`, `ops_terminal_drain`
+    /// are straight-line `&mut self` sequences, and boot repair drains prepared
+    /// finalizers before anything else). NO REACHABLE SERVER PATH WAS FOUND.
+    /// That is a negative result from tracing and NOT a proof: the concurrency
+    /// of the conversation-authority seam was not exhaustively traced, and a
+    /// future caller that holds a finalizer across an ordinary admission reaches
+    /// it immediately. The unit
+    /// `a_floor_subsumed_while_the_finalizer_waited_installs_as_a_no_op` shows
+    /// the condition firing with an empty marker set, so the path is real at
+    /// this crate's public boundary whatever the server does with it.
+    ///
     /// # Errors
     ///
     /// Returns [`LiveFrontierError`] if the retained charges disagree with the

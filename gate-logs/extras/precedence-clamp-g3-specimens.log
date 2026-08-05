@@ -1,0 +1,37 @@
+PRECEDENCE-CLAMP G3 — THE SPECIMEN GATE
+Run 2026-08-05. Every run is against a fresh COPY; no original was ever booted.
+Predicate: `manifold --data-dir <copy> serve` (the verb that boots the embedded
+liminal broker). `status` is NOT the predicate: it reads the record without
+recovering conversations and exits 0 on a poisoned estate under every build.
+
+THREE ARMS (the positive control is the middle one AND the first one):
+  unpatched : manifold as it ships   -> liminal-protocol 0.3.2 from crates.io
+  baseline  : [patch.crates-io] -> liminal at landed main ca66543 (F8 chain only)
+  patched   : [patch.crates-io] -> liminal at precedence-clamp (F8 + M1 re-mint)
+
+PATCH-APPLIED PROOF (structural):
+  unpatched  cargo tree: liminal-protocol@0.4.0 did not match any packages
+  patched    cargo tree: liminal-protocol v0.4.0 (path .../wt-precedence-clamp/...)
+             reached by manifold-node, liminal-sdk(path), liminal-server(path)
+  binary strings containing the worktree protocol path: patched 32, unpatched 0
+
+RESULTS (F2a: boot outcome and the verbatim refusal line only)
+-------------------------------------------------------------------------
+SPECIMEN .manifold-backup-20260805-intent329
+  unpatched: LATCHED
+    VERBATIM: participant incarnation connection-fate handler recovery failed: Open 329 failed before Complete: participant semantic service failed: connection-fate intent 329 is incomplete at conversation 7: participant semantic service failed: participant production operation failed: participant production invariant violated: binding-terminal admission refused: Precedence
+  baseline: BOOTED CLEAN and stayed up for the full 45s gate window
+  patched: BOOTED CLEAN and stayed up for the full 45s gate window
+-------------------------------------------------------------------------
+SPECIMEN .manifold-backup-20260801-intent82
+  unpatched: LATCHED
+    VERBATIM: participant incarnation connection-fate handler recovery failed: Open 82 failed before Complete: participant semantic service failed: connection-fate intent 82 is incomplete at conversation 3: participant semantic service failed: participant production operation failed: participant production invariant violated: binding-terminal admission refused: Precedence
+  baseline: BOOTED CLEAN and stayed up for the full 45s gate window
+  patched: BOOTED CLEAN and stayed up for the full 45s gate window
+-------------------------------------------------------------------------
+SPECIMEN .manifold-backup-20260731-spine-poison
+  unpatched: LATCHED
+    VERBATIM: participant startup restore failed: participant semantic service failed: participant production operation failed: participant production invariant violated: binding-fate measurement refused: OwnerTransition
+  baseline: BOOTED CLEAN and stayed up for the full 45s gate window
+  patched: BOOTED CLEAN and stayed up for the full 45s gate window
+-------------------------------------------------------------------------
