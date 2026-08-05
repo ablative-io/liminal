@@ -178,13 +178,32 @@ fn mixed_stream_fails_startup_without_publishing_an_authority() -> Result<(), Bo
     }
 
     let store = open_disk_store_for_tests(&data_dir)?;
-    let result = ProductionParticipantHandler::new(store, test_participant_config());
-    let Err(error) = result else {
-        return Err("mixed v2/v1 stream unexpectedly published an authority".into());
-    };
+    // CONTAINMENT: the node starts. The two properties this test has always
+    // protected are unchanged and are now asserted DIRECTLY rather than
+    // inferred from a dead constructor: the mixed stream publishes no
+    // authority, and the migration cause survives by name.
+    let handler =
+        ProductionParticipantHandler::new(store, test_participant_config()).map_err(|error| {
+            format!("CONTAINMENT: one unloadable conversation took the whole node down: {error}")
+        })?;
+
+    let cell = handler.cell(conversation_id)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "conversation owner lock is poisoned")?;
     assert!(
-        error.to_string().contains("schema version 1"),
-        "startup reported the wrong migration failure: {error}"
+        owner.is_none(),
+        "the mixed v2/v1 stream published an authority anyway"
+    );
+    drop(owner);
+
+    let unloadable = handler.unloadable_conversations();
+    let reason = unloadable
+        .get(&conversation_id)
+        .ok_or("the mixed v2/v1 conversation was not recorded as unloadable")?;
+    assert!(
+        reason.contains("schema version 1"),
+        "the migration failure was contained but its cause was lost: {reason}"
     );
     Ok(())
 }

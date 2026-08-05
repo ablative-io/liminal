@@ -172,16 +172,13 @@ fn malformed_unknown_and_mixed_extension_refuses_before_publication() -> Result<
     let assigned = block_on(store.append(&key, vec![2], 1))??;
     assert_eq!(assigned, 1);
     block_on(store.flush())??;
-    let result = ProductionParticipantHandler::new(store, test_participant_config());
-    let Err(error) = result else {
-        return Err("mixed extension stream unexpectedly published authority".into());
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("mixed Unit 2 extension schema versions")
-    );
-    Ok(())
+    // CONTAINMENT: the node starts, and both properties this test protects are
+    // asserted directly — no authority published, and the cause kept by name.
+    let handler =
+        ProductionParticipantHandler::new(store, test_participant_config()).map_err(|error| {
+            format!("CONTAINMENT: one unloadable conversation took the whole node down: {error}")
+        })?;
+    assert_no_authority_and_named_cause(&handler, "mixed Unit 2 extension schema versions")
 }
 
 #[test]
@@ -204,11 +201,41 @@ fn impossible_extension_boundary_refuses_before_publication() -> Result<(), Box<
         },
         1,
     ))??;
-    let result = ProductionParticipantHandler::new(store, test_participant_config());
-    let Err(error) = result else {
-        return Err("impossible extension boundary unexpectedly published authority".into());
-    };
-    assert!(error.to_string().contains("impossible future boundary"));
+    let handler =
+        ProductionParticipantHandler::new(store, test_participant_config()).map_err(|error| {
+            format!("CONTAINMENT: one unloadable conversation took the whole node down: {error}")
+        })?;
+    assert_no_authority_and_named_cause(&handler, "impossible future boundary")
+}
+
+/// The successor to `let Err(..) = ProductionParticipantHandler::new(..)`.
+///
+/// Containment moved WHERE an unloadable conversation is refused, not WHETHER
+/// it is. Both halves of the original property are checked here: the
+/// conversation publishes no authority, and its refusal still carries the
+/// specific cause instead of being flattened into "something went wrong".
+fn assert_no_authority_and_named_cause(
+    handler: &ProductionParticipantHandler,
+    expected_cause: &str,
+) -> Result<(), Box<dyn Error>> {
+    let cell = handler.cell(CONVERSATION)?;
+    let owner = cell
+        .lock()
+        .map_err(|_| "conversation owner lock is poisoned")?;
+    assert!(
+        owner.is_none(),
+        "an unloadable conversation published an authority anyway"
+    );
+    drop(owner);
+
+    let unloadable = handler.unloadable_conversations();
+    let reason = unloadable
+        .get(&CONVERSATION)
+        .ok_or("the conversation was not recorded as unloadable")?;
+    assert!(
+        reason.contains(expected_cause),
+        "the failure was contained but its cause was lost: expected {expected_cause:?} in {reason}"
+    );
     Ok(())
 }
 

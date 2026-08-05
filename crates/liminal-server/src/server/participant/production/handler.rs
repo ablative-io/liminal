@@ -80,6 +80,15 @@ pub struct ProductionParticipantHandler {
     /// each conversation's genesis append, read at startup to enumerate
     /// every durable conversation for the capacity restore.
     pub(super) registry: ConversationRegistry,
+    /// CONTAINMENT: conversations whose durable state could not be loaded,
+    /// each against the load failure's own text.
+    ///
+    /// A conversation lands here instead of taking the node down with it. The
+    /// map is the node's answer to "which one is broken?", which is the half
+    /// of the property that a boot-succeeds assertion cannot see: containment
+    /// without attribution is a node that serves nothing on one conversation
+    /// forever and never says so.
+    unloadable: Mutex<BTreeMap<ConversationId, String>>,
     /// Exact W2 work observation points, isolated per handler and test-only.
     #[cfg(test)]
     pub(super) obligation_dispatch_work: ObligationDispatchWorkCounters,
@@ -129,6 +138,7 @@ impl ProductionParticipantHandler {
             observer: Mutex::new(None),
             capacity: ServerCapacity::default(),
             registry,
+            unloadable: Mutex::new(BTreeMap::new()),
             #[cfg(test)]
             obligation_dispatch_work: ObligationDispatchWorkCounters::default(),
             #[cfg(test)]
@@ -235,8 +245,36 @@ impl ProductionParticipantHandler {
     /// crash window between the two ordered appends) replays empty and is
     /// evicted exactly like a refused probe.
     fn restore_all_conversations(&self) -> Result<(), ParticipantSemanticError> {
+        // THE REGISTRY READ STAYS FATAL, and that is the property stated
+        // precisely rather than an exception carved out of it. Containment
+        // here is PER-CONVERSATION containment: without the registry read
+        // there is no per-conversation subject to attribute a failure to, so a
+        // failure with no conversation to name is the one thing that still
+        // should stop the node.
         let conversation_ids = self.registry.restore().map_err(|error| log_error(&error))?;
         for conversation_id in conversation_ids {
+            // ONE FALLIBLE UNIT, not a guard per `?`. A guard per `?` is the
+            // same defect with a longer fuse: the next `?` added to the
+            // restore body is fatal again and nothing complains.
+            if let Err(error) = self.restore_one_conversation(conversation_id) {
+                self.record_unloadable(conversation_id, &error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Restores exactly one conversation, and fails as exactly one
+    /// conversation.
+    ///
+    /// Every propagation point in here belongs to a single conversation, so
+    /// its `Err` is that conversation's answer and nobody else's. The caller
+    /// is what makes that true — this function is deliberately allowed to be
+    /// fallible, and deliberately not allowed to be fatal.
+    fn restore_one_conversation(
+        &self,
+        conversation_id: ConversationId,
+    ) -> Result<(), ParticipantSemanticError> {
+        {
             let cell = self.cell(conversation_id)?;
             let mut owner = cell
                 .lock()
@@ -252,7 +290,7 @@ impl ProductionParticipantHandler {
                 if durably_empty {
                     drop(owner);
                     self.evict_uncommitted(conversation_id, &cell)?;
-                    continue;
+                    return Ok(());
                 }
                 // R-BOOT-DRAIN (F8B §6.2): empty this conversation's
                 // immutable-candidate lane before any retained connection-fate
@@ -279,6 +317,67 @@ impl ProductionParticipantHandler {
             drop(owner);
         }
         Ok(())
+    }
+
+    /// Records one conversation as unloadable and renders the NAMED refusal
+    /// every later request on it is answered with.
+    ///
+    /// This is the attribution half of containment, and it is deliberately the
+    /// same call on both sides: the boot loop records and continues, the
+    /// request path records and refuses, and both produce a refusal carrying
+    /// the conversation id. An operator therefore never has to correlate a
+    /// bare decode failure against a log to learn which conversation stopped.
+    fn record_unloadable(
+        &self,
+        conversation_id: ConversationId,
+        error: &ParticipantSemanticError,
+    ) -> ParticipantSemanticError {
+        let reason = error.to_string();
+        tracing::error!(
+            conversation_id,
+            reason = %reason,
+            "CONTAINMENT: participant conversation is unloadable and is refused on its own; every \
+             other conversation keeps being served"
+        );
+        if let Ok(mut unloadable) = self.unloadable.lock() {
+            unloadable.insert(conversation_id, reason.clone());
+        } else {
+            // Never a silent drop: a refusal that is reported but not retained
+            // is a different, weaker state than one that was retained, and an
+            // operator reading `unloadable_conversations` must not be told a
+            // shorter story than the log tells.
+            tracing::error!(
+                conversation_id,
+                "the unloadable-conversation record is poisoned; this refusal is reported but not \
+                 retained"
+            );
+        }
+        ParticipantSemanticError::ConversationUnloadable {
+            conversation_id,
+            reason,
+        }
+    }
+
+    /// Retires an unloadable record once the conversation has actually loaded,
+    /// so the map never keeps reporting a conversation that recovered.
+    fn clear_unloadable(&self, conversation_id: ConversationId) {
+        if let Ok(mut unloadable) = self.unloadable.lock() {
+            unloadable.remove(&conversation_id);
+        } else {
+            tracing::error!(
+                conversation_id,
+                "the unloadable-conversation record is poisoned; a conversation that recovered may \
+                 still be reported as unloadable"
+            );
+        }
+    }
+
+    /// Every conversation this node has refused as unloadable, against the
+    /// load failure's own text.
+    pub(super) fn unloadable_conversations(&self) -> BTreeMap<ConversationId, String> {
+        self.unloadable
+            .lock()
+            .map_or_else(|_| BTreeMap::new(), |unloadable| unloadable.clone())
     }
 
     pub(super) fn registered_conversation_ids(
@@ -367,7 +466,13 @@ impl ProductionParticipantHandler {
                 })?;
         let log = OperationLog::new(Arc::clone(&self.store), conversation_id);
         if owner.is_none() {
-            let replayed = self.replay_and_repair(conversation_id, &log)?;
+            // The request-side half of containment. A conversation the node
+            // cannot load refuses HERE, by name, instead of surfacing a bare
+            // decode failure that names no subject at all.
+            let replayed = self
+                .replay_and_repair(conversation_id, &log)
+                .map_err(|error| self.record_unloadable(conversation_id, &error))?;
+            self.clear_unloadable(conversation_id);
             *owner = Some(replayed);
         }
         let Some(authority) = owner.as_mut() else {
