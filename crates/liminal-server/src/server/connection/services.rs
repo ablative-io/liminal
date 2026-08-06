@@ -738,13 +738,12 @@ impl LiminalConnectionServices {
         // Schema resolution is pure (a JSON parse and a digest), so it runs with
         // no lock held and its result serves BOTH the identity comparison and
         // the construction below.
-        let resolved =
-            resolve_schema_bytes(spec.schema_bytes.as_deref()).map_err(|error| {
-                ChannelRegistryError::SchemaRejected {
-                    name: spec.name.clone(),
-                    message: error.to_string(),
-                }
-            })?;
+        let resolved = resolve_schema_bytes(spec.schema_bytes.as_deref()).map_err(|error| {
+            ChannelRegistryError::SchemaRejected {
+                name: spec.name.clone(),
+                message: error.to_string(),
+            }
+        })?;
 
         // Fast paths, under a READ lock: an already-identical registration
         // builds nothing, and a full roster refuses before paying for a
@@ -926,12 +925,11 @@ impl LiminalConnectionServices {
     /// the roster lock is poisoned.
     fn admit_channel(&self, channel: &str) -> Result<Arc<ConfiguredChannel>, ChannelAccessError> {
         let configured = {
-            let channels =
-                self.channels
-                    .read()
-                    .map_err(|_poisoned| ChannelAccessError::RosterUnavailable {
-                        message: ROSTER_POISONED.to_owned(),
-                    })?;
+            let channels = self.channels.read().map_err(|_poisoned| {
+                ChannelAccessError::RosterUnavailable {
+                    message: ROSTER_POISONED.to_owned(),
+                }
+            })?;
             channels.get(channel).map(Arc::clone)
         };
         let configured = configured.ok_or_else(|| ChannelAccessError::NotRegistered {
@@ -1091,9 +1089,10 @@ fn build_configured_channel(
     durable_store: &Arc<dyn DurableStore>,
     supervisor: &ChannelSupervisor,
 ) -> Result<ConfiguredChannel, ChannelBuildError> {
-    let schema = Schema::new(resolved.document).map_err(|error| ChannelBuildError::SchemaRejected {
-        message: error.to_string(),
-    })?;
+    let schema =
+        Schema::new(resolved.document).map_err(|error| ChannelBuildError::SchemaRejected {
+            message: error.to_string(),
+        })?;
     let channel_config = if durable {
         ChannelConfig::new(name.to_owned(), schema, ChannelMode::Durable)
     } else {

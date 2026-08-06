@@ -138,8 +138,10 @@ fn runtime_registered_channels_are_absent_after_restart() -> Result<(), Box<dyn 
 #[test]
 fn quiesce_admits_a_subscribe_that_read_active() -> Result<(), Box<dyn Error>> {
     let (store, _dir) = disk_store()?;
-    let services =
-        LiminalConnectionServices::from_config_with_store(&config_with(Vec::new(), Some(4)), store)?;
+    let services = LiminalConnectionServices::from_config_with_store(
+        &config_with(Vec::new(), Some(4)),
+        store,
+    )?;
     assert_eq!(
         services.register_channel(&registration("orders", false))?,
         Registered::Created
@@ -367,11 +369,12 @@ fn registered_idle_channels_spawn_no_actor() -> Result<(), Box<dyn Error>> {
 /// Registration is idempotent when all three compared fields match, and refuses
 /// naming the FIRST field that differs.
 #[test]
-fn registration_is_idempotent_only_for_an_identical_configuration()
--> Result<(), Box<dyn Error>> {
+fn registration_is_idempotent_only_for_an_identical_configuration() -> Result<(), Box<dyn Error>> {
     let (store, _dir) = disk_store()?;
-    let services =
-        LiminalConnectionServices::from_config_with_store(&config_with(Vec::new(), Some(4)), store)?;
+    let services = LiminalConnectionServices::from_config_with_store(
+        &config_with(Vec::new(), Some(4)),
+        store,
+    )?;
 
     let spec = ChannelRegistration {
         name: "orders".to_owned(),
@@ -469,8 +472,10 @@ fn the_channel_cap_refuses_undeclared_and_reached() -> Result<(), Box<dyn Error>
     // Nothing was built: the refusal happens before the roster is touched.
     assert!(undeclared.registered_channels()?.is_empty());
 
-    let bounded =
-        LiminalConnectionServices::from_config_with_store(&config_with(Vec::new(), Some(1)), store)?;
+    let bounded = LiminalConnectionServices::from_config_with_store(
+        &config_with(Vec::new(), Some(1)),
+        store,
+    )?;
     assert_eq!(
         bounded.register_channel(&registration("first", false))?,
         Registered::Created
@@ -507,8 +512,10 @@ fn the_channel_cap_refuses_undeclared_and_reached() -> Result<(), Box<dyn Error>
 #[test]
 fn quiesce_refuses_an_unregistered_name_and_the_probe_reports_it() -> Result<(), Box<dyn Error>> {
     let (store, _dir) = disk_store()?;
-    let services =
-        LiminalConnectionServices::from_config_with_store(&config_with(Vec::new(), Some(2)), store)?;
+    let services = LiminalConnectionServices::from_config_with_store(
+        &config_with(Vec::new(), Some(2)),
+        store,
+    )?;
 
     assert_eq!(
         services.channel_status("absent")?,
@@ -530,8 +537,10 @@ fn quiesce_refuses_an_unregistered_name_and_the_probe_reports_it() -> Result<(),
 #[test]
 fn a_rejected_schema_registers_nothing() -> Result<(), Box<dyn Error>> {
     let (store, _dir) = disk_store()?;
-    let services =
-        LiminalConnectionServices::from_config_with_store(&config_with(Vec::new(), Some(4)), store)?;
+    let services = LiminalConnectionServices::from_config_with_store(
+        &config_with(Vec::new(), Some(4)),
+        store,
+    )?;
 
     let unparseable = ChannelRegistration {
         name: "orders".to_owned(),
@@ -559,8 +568,10 @@ fn a_rejected_schema_registers_nothing() -> Result<(), Box<dyn Error>> {
 #[test]
 fn probing_and_enumerating_never_spawn_an_actor() -> Result<(), Box<dyn Error>> {
     let (store, _dir) = disk_store()?;
-    let services =
-        LiminalConnectionServices::from_config_with_store(&config_with(Vec::new(), Some(2)), store)?;
+    let services = LiminalConnectionServices::from_config_with_store(
+        &config_with(Vec::new(), Some(2)),
+        store,
+    )?;
     let scheduler = services.channel_cluster().supervisor().scheduler();
     let baseline = scheduler.process_table().len();
 
@@ -672,7 +683,10 @@ fn disk_store() -> Result<(Arc<dyn DurableStore>, TempDir), Box<dyn Error>> {
     Ok((store, dir))
 }
 
-fn read_payloads(store: &dyn DurableStore, stream_key: &str) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
+fn read_payloads(
+    store: &dyn DurableStore,
+    stream_key: &str,
+) -> Result<Vec<Vec<u8>>, Box<dyn Error>> {
     let entries: Vec<StoredEntry> = block_on(store.read_from(stream_key, 0, 1024))??;
     let mut payloads = Vec::with_capacity(entries.len());
     for entry in entries {
