@@ -12,7 +12,7 @@ use liminal::protocol::{
 };
 use liminal_protocol::wire::PARTICIPANT_FRAME_TYPE;
 
-use super::services::ConnectionServices;
+use super::services::{ChannelOperation, ConnectionServices, access_to_server_error};
 use super::state::{ConnectionProcessState, FrameAction};
 use super::supervisor::ConnectionRuntime;
 use crate::ServerError;
@@ -412,6 +412,19 @@ fn publish_response(
     envelope: &MessageEnvelope,
     idempotency_key: Option<&str>,
 ) -> FrameAction {
+    // Admission BEFORE delegation. A roster refusal is decided here, by the
+    // component holding the roster, and stamped with its own reason code at the
+    // moment of the decision — so the code cannot disagree with the read that
+    // produced it. Nothing is published against a refused channel: the service is
+    // not called at all.
+    if let Err(refusal) = services.admit_channel(ChannelOperation::Publish, channel) {
+        return FrameAction::Respond(Frame::PublishError {
+            flags: 0,
+            stream_id,
+            reason_code: refusal.reason_code(),
+            message: Some(access_to_server_error(&refusal).to_string()),
+        });
+    }
     match services.publish(channel, envelope, idempotency_key) {
         Ok(outcome) => FrameAction::Respond(Frame::PublishAck {
             // Set the genuine-delivery flag only when the publish was accepted by
@@ -426,6 +439,13 @@ fn publish_response(
             stream_id,
             message_id: outcome.message_id,
         }),
+        // Admitted, then refused by the service. This keeps the undifferentiated
+        // code and today's exact bytes even when the cause WAS the roster — a
+        // quiesce that landed in the window between the admission above and this
+        // call surfaces here, not as `0x0102`. Degraded, never lying: a roster
+        // code is a reliable positive signal and never a complete one, and
+        // recovering the "real" cause by a second roster read is the exact lie
+        // the probe-before form exists to make impossible.
         Err(error) => FrameAction::Respond(Frame::PublishError {
             flags: 0,
             stream_id,
@@ -464,6 +484,26 @@ fn subscribe_response(
             ),
         });
     }
+    // Admission BEFORE delegation, on the same grounds as `publish_response`.
+    //
+    // It sits AFTER the §5 per-connection subscription cap and BEFORE the inbox
+    // budget is built. After the cap, because the cap is a statement about THIS
+    // connection and the roster is a statement about the server: a connection
+    // already at its cap is refused for that reason today, and moving the roster
+    // ahead of it would change which of two true refusals an over-cap subscribe
+    // to an absent channel receives. Before the budget, because
+    // `get_or_insert_with` below MINTS the connection's shared inbox pool on
+    // first use, and a refused frame must leave connection state exactly as it
+    // found it.
+    let services = runtime.services();
+    if let Err(refusal) = services.admit_channel(ChannelOperation::Subscribe, channel) {
+        return FrameAction::Respond(Frame::SubscribeError {
+            flags: 0,
+            stream_id,
+            reason_code: refusal.reason_code(),
+            message: Some(access_to_server_error(&refusal).to_string()),
+        });
+    }
     // R3 + §5: build the install spec CARRIED INTO subscribe, so the shared
     // connection byte budget, per-inbox fairness cap, and wake notifier are
     // installed on the inbox at construction — strictly BEFORE the registration
@@ -492,7 +532,6 @@ fn subscribe_response(
         depth_cap: limits.max_subscription_inbox_depth,
         notifier,
     };
-    let services = runtime.services();
     match services.subscribe(channel, accepted_schemas, Some(install)) {
         Ok(mut subscription) => {
             // Record the client-chosen delivery stream so the pump can address
@@ -509,6 +548,8 @@ fn subscribe_response(
                 selected_schema,
             })
         }
+        // Admitted, then refused by the service — the same degraded arm as
+        // `publish_response`'s, on the same grounds.
         Err(error) => FrameAction::Respond(Frame::SubscribeError {
             flags: 0,
             stream_id,
@@ -750,3 +791,12 @@ fn conversation_close(
 #[cfg(test)]
 #[path = "process_tests.rs"]
 mod tests;
+
+/// The wire leg's own instruments. A separate module from `tests` above because
+/// those exercise the frame surface against a recording stand-in, and these have
+/// to run against a REAL roster: the claim is that the typed code survives the
+/// trip from the roster to the response frame, and a stand-in that answers the
+/// admission question itself would be asserting on its own fixture.
+#[cfg(test)]
+#[path = "apply_admission_tests.rs"]
+mod admission_tests;
