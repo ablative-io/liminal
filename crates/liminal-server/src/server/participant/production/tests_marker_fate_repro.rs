@@ -60,9 +60,11 @@ use super::ProductionParticipantHandler;
 use super::log::OperationLog;
 use super::outbox_log::{OutboxLog, OutboxRow, StoredMarkerAckCommitted};
 
-use crate::server::participant::{ParticipantOfferedProgress, ParticipantSemanticHandler};
+use crate::server::participant::{
+    ParticipantConnectionConversations, ParticipantOfferedProgress, ParticipantSemanticHandler,
+};
 
-use super::tests::dispatch;
+use super::tests::{dispatch, dispatch_tracked};
 use super::tests_marker_ack_fixture::{
     FixtureAppender, MarkerFixture, attached_marker_fixture, marker_fixture_config,
     marker_fixture_facts,
@@ -474,6 +476,289 @@ fn a_cold_replayed_marker_ack_must_leave_the_sealed_token_in_step() -> Result<()
                 "the ordinary ack after a cold-replayed marker-ack was refused, but NOT by the \
                  sealed binding-fate check this unit exists to catch, so it needs its own \
                  diagnosis before anything is concluded: {rendered}"
+            )
+            .into())
+        }
+    }
+}
+
+/// SITE ONE'S PIN — the CACHED-AUTHORITY window, which neither unit above can see.
+///
+/// # Why this unit had to exist, stated against my own claim
+///
+/// I asserted the two sites were independent: kill `ops_acks.rs:426` and only
+/// the live unit reddens. THE INDEPENDENCE MATRIX FALSIFIED THAT. Measured
+/// three times — my run, and Waffles's arms A/B/C in a separate tree — killing
+/// `:426` ALONE reddens NOTHING, while killing `:524` alone reddens BOTH. Both
+/// units above were riding the REPLAY call. Site one was pinned by nothing, and
+/// the commit message said otherwise.
+///
+/// # The mechanism, which is why a THIRD unit and not a tweak to the first
+///
+/// The handler CACHES the authority across requests
+/// (`handler.rs:69`, `Mutex<HashMap<_, Arc<Mutex<Option<ConversationAuthority>>>>>`).
+/// After an operation succeeds, `with_conversation_reconciliation` REPLACES that
+/// cached owner with a fresh replay — but ONLY if the operation appended to the
+/// operation log (`handler.rs:492`, `next_log_sequence > starting_log_sequence`,
+/// re-replay at `:498`, install at `:504`). Otherwise `:513` RETAINS the mutated
+/// in-memory authority.
+///
+/// ⚡ AND A MARKER-ACK STRUCTURALLY CANNOT APPEND TO THE OPERATION LOG. Its arm
+/// at `handler_semantic.rs:136` binds the appender as `_appender` — UNUSED —
+/// where the ordinary ack at `:127` uses it; `commit_marker_ack` writes only the
+/// OUTBOX log (`ops_acks.rs:414`) and merely READS `next_log_sequence` at `:402`
+/// as `base_log_head`. ⇒ A marker-ack never trips `:492`, so the owner it
+/// mutated survives into the next request WITH NO REPLAY BEHIND IT. That window
+/// is the one and only place site one is the sole protection.
+///
+/// # ⛔ CELL 3'S RED IS A PROPERTY OF THE CODE, NOT A DEFECT HERE. DO NOT "FIX" IT.
+///
+/// The natural isolation bar for this unit is "site 1 present + site 2 absent =>
+/// GREEN", proving it pins site 1 alone rather than the union. **THAT CELL
+/// CANNOT BE MADE GREEN BY ANY *APPENDING* OBSERVATION THAT JUDGES ON THE
+/// REQUEST'S OUTCOME.**
+///
+/// ⚠ THAT IS THE NARROW CLAIM AND IT IS DELIBERATELY NARROW. A NON-APPENDING
+/// observation never enters the reconcile arm at all, and an observation that
+/// judges on DURABLE ROWS rather than the request's outcome is not covered
+/// either. ⛔ DO NOT UPGRADE THIS TO "UNSATISFIABLE BY CONSTRUCTION" — an
+/// overstated impossibility is exactly what stops a future reader finding a real
+/// gap, and the wide version of this sentence was corrected out of this comment
+/// once already. Measured ordering, probes at the entry of
+/// `commit_marker_ack` / `replay_marker_ack_extension` / `ack_commit` /
+/// `replay_and_repair`, with NO loader-calling probes in the test itself —
+/// byte-identical in the both-present and site-2-absent cells:
+///
+/// ```text
+/// SITE 1                <- the marker-ack commit
+/// operation_facts       <- the ordinary ack's dispatch begins
+/// ORDINARY ack_commit   <- THE ACK RUNS FIRST, on the cached un-replayed authority
+/// replay_and_repair     <- POST-op reconcile (handler.rs:498), the ack having appended
+///   ack_commit x7 -> SITE 2 -> ack_commit x1
+/// ```
+///
+/// ⇒ No replay precedes the ack's commit, so site 1's window is real. But the
+/// ack APPENDS, so the post-op reconcile fires and traverses site 2 — and it
+/// returns THAT failure as the REQUEST's failure even though the operation
+/// succeeded. The arm is in `ProductionParticipantHandler::
+/// with_conversation_reconciliation`, gated on
+/// `reconcile_appended_source && next_log_sequence > starting_log_sequence`,
+/// and on reconcile `Err` it does `*owner = None; (Err(error), false)`,
+/// DISCARDING the operation's own `Ok(value)`.
+///
+/// ⚠ CITED BY ENCLOSING FUNCTION ON PURPOSE: this file and `main` sit on
+/// different revs, where the same arm is `handler.rs:492/:498-510` (this tree)
+/// and `handler.rs:365-385` (main). A bare `file:line` is ambiguous between
+/// them by construction; the function name is not.
+///
+/// ⇒ **THE GATE IS WHY THE CLAIM IS NARROW: an operation that does not append
+/// never reaches this arm.**
+///
+/// ⛔ **AND THE ACK COMMITS ANYWAY IN THAT CELL:** the reconcile's replay
+/// re-executes an `ack_commit` AFTER `SITE 2`, and outbox ordering places the
+/// ack's own row after the marker row — that re-execution is present in BOTH
+/// cells, so the row was written. A COMMIT-THEN-RECONCILE-FAILURE IS
+/// TEXT-IDENTICAL TO A REFUSAL; only durable rows tell them apart.
+///
+/// ⛔ THE FIRST UNIT MISSES IT BY ONE STEP: it admits an ordinary record BETWEEN
+/// the two acks (`:192`), and a record admission DOES append, so `:492` fires
+/// and the cached owner is thrown away and rebuilt by site two. The unit then
+/// measures site two while appearing to measure site one. HERE EVERY APPENDING
+/// STEP HAPPENS BEFORE THE MARKER-ACK, so nothing whatever runs between the two
+/// acks.
+#[test]
+fn a_marker_ack_must_not_wedge_the_cached_authority_for_the_next_ordinary_ack()
+-> Result<(), Box<dyn Error>> {
+    let fixture = attached_marker_fixture()?;
+    let conversation_id = fixture.marker_delivery.conversation_id;
+    let marker_seq = fixture.marker_delivery.delivery_seq;
+
+    // 1. EVERY APPENDING STEP HAPPENS FIRST — and "first" here means before the
+    //    marker is even OFFERED, not merely before it is acked.
+    //
+    //    ⚠ MEASURED, NOT ASSUMED: admitting the record after the marker offer
+    //    retires the marker expectation, and the marker-ack then answers
+    //    `NoMarkerExpected`. That is how the first two drafts of this unit died,
+    //    both times at this unit's own arming guard rather than as a false pass.
+    //
+    //    The generation comes from a PROBE publication that is deliberately NOT
+    //    recorded — reading `binding_epoch` arms nothing, and it keeps the
+    //    hardcoded-`Generation::ONE` mistake that blinds the F8 units out of
+    //    this file.
+    let probe = fixture
+        .handler
+        .next_publication(fixture.target_connection, conversation_id, None)?
+        .ok_or("NOT ARMED: the fixture offered no publications at all")?;
+    let live_generation = probe.binding_epoch.capability_generation;
+    if live_generation == Generation::ONE {
+        return Err(format!(
+            "NOT ARMED: the live generation is {live_generation:?}, so this fixture never drove \
+             the CredentialAttach that mints the sealed binding-fate token. There is nothing for \
+             a marker-ack to strand and this unit witnesses NOTHING."
+        )
+        .into());
+    }
+
+    let admitted = dispatch(
+        &fixture.handler,
+        fixture.catchup_connection,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id: fixture.catchup_participant,
+            capability_generation: live_generation,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xF3; 16]),
+            payload: vec![0xF3],
+        }),
+    )
+    .map_err(|error| {
+        format!(
+            "NOT ARMED: no ordinary record could be admitted, so there is nothing past the \
+             marker for an ordinary ack to reach: {error}"
+        )
+    })?;
+
+    // 2. ONLY NOW is the marker offered, so its expectation is the freshest
+    //    thing in the conversation and nothing below retires it.
+    let epoch = offer_marker_and_read_live_epoch(&fixture)?;
+    assert_armed_post_attach(epoch)?;
+
+    // 3. The durable operation-log head, read WITHOUT touching the cached owner:
+    //    `replay_aggregate_reference` builds a throwaway authority from rows and
+    //    never locks the cell, so measuring here cannot perturb the thing being
+    //    measured.
+    //
+    //    ⚠ THE PUBLICATION WALK CANNOT BE HOISTED ABOVE THE MARKER-ACK. Recording
+    //    offers PAST the marker retires the marker expectation, and the marker-ack
+    //    then answers `NoMarkerExpected` — measured, not assumed: that is exactly
+    //    how the first draft of this unit failed, at this unit's own arming guard.
+    //    So the walk stays BELOW the marker-ack and the head check below is
+    //    widened to span it.
+    // ⛔ THE UPSTREAM-FREEZE GUARD. If a marker-ack extension row ALREADY exists
+    //    before this window opens, then any rebuild before the window can strand
+    //    the token for a reason that has nothing to do with this unit's subject,
+    //    and a red here would be misattributed.
+    //
+    //    I verified BY HAND that today's fixture writes no such row (outbox at
+    //    fixture-build: 18 rows, ZERO MarkerAckCommitted). ⚠ THAT VERIFICATION
+    //    DOES NOT TRAVEL — a fixture change reintroduces the possibility
+    //    silently — so the hand-check becomes a STANDING one here.
+    //
+    //    ⛔ IT READS ROWS ONLY. It must never call `replay_aggregate_reference`
+    //    or any other loader: see the cell-3 note above — AN ARMING PROBE THAT
+    //    EXECUTES THE PATH UNDER TEST IS A CONTAMINANT, NOT A CONTROL, and an
+    //    earlier draft of this very guard was exactly that.
+    let preexisting_marker_rows = {
+        let outbox = OutboxLog::new(Arc::clone(&fixture.store), conversation_id);
+        let rows = block_on(outbox.read_all())
+            .map_err(|error| format!("outbox bridge failed: {error:?}"))?
+            .map_err(|error| format!("outbox read failed: {error:?}"))?;
+        rows.iter()
+            .filter(|(_, row)| matches!(row, OutboxRow::MarkerAckCommitted(_)))
+            .count()
+    };
+    if preexisting_marker_rows != 0 {
+        return Err(format!(
+            "NOT ARMED: {preexisting_marker_rows} marker-ack extension row(s) already existed              before this unit's marker-ack. A rebuild before the window can then strand the token              upstream of everything this unit tests, so a red below would be MISATTRIBUTED.              APPARATUS fault, not a verdict."
+        )
+        .into());
+    }
+
+    // 4. ONE connection map held across BOTH requests, so this is one
+    //    connection's occupancy rather than a fresh one per call as plain
+    //    `dispatch` would give.
+    let mut conversations = ParticipantConnectionConversations::default();
+
+    let marker_acked = dispatch_tracked(
+        &fixture.handler,
+        fixture.target_connection,
+        &mut conversations,
+        ClientRequest::MarkerAck(MarkerAck {
+            conversation_id,
+            participant_id: fixture.target_participant,
+            capability_generation: epoch.capability_generation,
+            marker_delivery_seq: marker_seq,
+        }),
+    )
+    .map_err(|error| {
+        format!("NOT ARMED: the marker-ack itself was refused, so nothing was stranded: {error}")
+    })?;
+    // A marker-ack that answered something OTHER than committed (a capacity
+    // refusal, say) strands no token at all, and a pass below would be vacuous.
+    if !matches!(marker_acked, ServerValue::MarkerAckCommitted(_)) {
+        return Err(format!(
+            "NOT ARMED: the marker-ack did not commit; it answered {marker_acked:?}. Nothing was \
+             stranded and this unit witnesses NOTHING."
+        )
+        .into());
+    }
+
+    // 5. The publication walk, which gives the ordinary ack something past the
+    //    marker to reach. It uses `next_publication`/`record_publication_offer`
+    //    directly rather than the dispatch seam, so it does not run an
+    //    operation — and step 6 PROVES it appended nothing rather than assuming
+    //    it.
+    let deliverable = offer_everything_available(
+        &fixture,
+        ParticipantOfferedProgress {
+            binding_epoch: epoch,
+            through_seq: marker_seq,
+        },
+    )?;
+    if deliverable <= marker_seq {
+        return Err(format!(
+            "NOT ARMED: nothing beyond the marker at {marker_seq} was offered to the target \
+             (highest offered {deliverable}), so the ordinary ack below cannot reach past it and \
+             this unit witnesses NOTHING. Admission answered {admitted:?}."
+        )
+        .into());
+    }
+
+    // 7. THE ASSERTION. Nothing appending has run since the marker-ack, so the authority
+    //    answering this request is the very one the marker-ack mutated in
+    //    memory. Whether it commits is decided by site one alone.
+    let ordinary = dispatch_tracked(
+        &fixture.handler,
+        fixture.target_connection,
+        &mut conversations,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id,
+            participant_id: fixture.target_participant,
+            capability_generation: epoch.capability_generation,
+            through_seq: deliverable,
+        }),
+    );
+
+    match ordinary {
+        Ok(ServerValue::AckCommitted(_)) => Ok(()),
+        Ok(ServerValue::AckGap(gap)) => Err(format!(
+            "NOT ARMED: the ordinary ack fell in a delivery gap ({gap:?}), so the sealed token was \
+             never asked to progress and this unit witnessed NOTHING."
+        )
+        .into()),
+        Ok(other) => Err(format!(
+            "the ordinary ack on the CACHED authority neither committed nor refused; it answered \
+             {other:?}."
+        )
+        .into()),
+        Err(error) => {
+            let rendered = error.to_string();
+            assert!(
+                !rendered.contains("sealed binding-fate authority"),
+                "#26 REPRODUCED: the sealed binding-fate token DID NOT PROGRESS across the \
+                 marker-ack, so the next ordinary ack could not be carried through. ⛔ THIS UNIT \
+                 NAMES NO SITE AND CANNOT: it is a UNION DETECTOR. Either the marker-ack path \
+                 failed to progress the token (ops_acks.rs:426), or the replay path did \
+                 (ops_acks.rs:524), or both — every one of those presents here identically. ⛔ AND \
+                 THE TEXT CANNOT EVEN TELL YOU WHETHER THE ACK COMMITTED: a post-commit \
+                 reconcile failure (handler.rs:498-510 returns the reconcile's error as the \
+                 REQUEST's error) is string-identical to a refusal. ONLY THE DURABLE ROWS \
+                 DISCRIMINATE. Do not attribute this red to a site without reading them. \
+                 Refusal: {rendered}"
+            );
+            Err(format!(
+                "the ordinary ack on the cached authority was refused, but NOT by the sealed \
+                 binding-fate check this unit exists to catch, so it needs its own diagnosis \
+                 before anything is concluded: {rendered}"
             )
             .into())
         }
