@@ -255,3 +255,74 @@ written on 2026-08-01, after the second occurrence, recording that the defect
 owner then had two independent trigger cases. The record has spent four days
 telling us we were treating the symptom. This is the brief that stops writing
 that note.
+
+## Rulings at landing — r4 (Hermes, owner, 2026-08-06)
+
+Waffles ruled the landing shape under Tom's word: land the lane complete rather
+than split the floor-marker work across releases, and rule Part C here on the
+merits. Both rulings below are read off G3's recorded arms, not asserted.
+
+### Part C — a sanctioned complete-or-abandon at recovery is NOT NEEDED
+
+G3 ran three arms per specimen. The decisive column is **baseline** — landed
+main at `ca66543`, carrying the F8 chain and **not** this lane's clamp:
+
+| specimen | unpatched | baseline (`ca66543`) | patched (clamp) |
+|---|---|---|---|
+| `…-20260805-intent329` | LATCHED (`Precedence`) | BOOTED CLEAN | BOOTED CLEAN |
+| `…-20260801-intent82` | LATCHED (`Precedence`) | BOOTED CLEAN | BOOTED CLEAN |
+| `…-20260731-spine-poison` | LATCHED (`OwnerTransition`) | BOOTED CLEAN | BOOTED CLEAN |
+
+All three specimens recover **without** an abandonment path and without this
+lane. The brief's own condition — *"if the copies boot, we state
+hand-recovery-is-unnecessary as a property"* — is met on every specimen in
+existence. **Part C is ruled NOT NEEDED, and F1 stands permanently rather than
+provisionally.** If a future specimen latches under a build carrying the F8
+chain, that reopens this ruling; nothing short of that does.
+
+### The finding the brief did not plan for: G3 does not discriminate THIS lane
+
+**baseline and patched are identical in all three rows.** The specimen gate was
+written as the gate "that matters", on the expectation that it would separate a
+clamped build from an unclamped one. It did not: it separated the **F8 chain**
+from stock. So the specimens are evidence for the F8 work and are **not**
+evidence for the precedence clamp.
+
+That is recorded here because the failure mode is the one this estate keeps
+meeting — a green log next to a change, read as a green log *for* that change.
+**This lane's justification is M6 and G2 (the constructed regression and the
+two-enforcer proof), and nothing in G3 adds to it.** A reader who lands here
+looking for the clamp's field evidence should stop looking: there isn't any yet,
+because no specimen has ever been produced that the F8 chain alone cannot
+recover.
+
+### The three specimens are not one story
+
+The brief anticipated this question in the wrong currency. It asked whether any
+specimen would latch on `ResultingFrontier` rather than `Precedence`. One
+latched on **`OwnerTransition`** — a third variant, named in neither branch of
+the question. The 2026-07-31 spine-poison specimen fails at
+`participant startup restore` on a **binding-fate measurement**, not at
+`connection-fate handler recovery` on a **binding-terminal admission** like the
+other two. **Two mechanisms, three specimens, one shared symptom.** M1b's
+marker-free path question is therefore answered in the affirmative by live
+evidence as well as by the code trace: the class is wider than the marker story.
+
+### Part B (M5) — deliberately NOT landed here, and why that is not a split
+
+M5 is server-side commit ordering: `liminal-server` durably appends the Died row
+**before** the measurement that can refuse it, which is what turns a refusal into
+permanent poison. It is not implemented on this lane — the only `liminal-server`
+change here is an import reflow in `production/state.rs`.
+
+The no-partial-split constraint binds **the floor-marker work inside
+`liminal-protocol`**, and this lane delivers all of it: M1, M1a, M1b, M2, M3, M4,
+M6, M7. M5 lives in a different crate and hardens a different property — not the
+floor's correctness but the **durability ordering around a refusal**. Landing the
+protocol side whole does not leave a half-built floor anywhere.
+
+**M5 remains genuinely wanted and its absence is a live exposure**, narrowed but
+not closed by this lane: the clamp removes the marker-shaped refusal, and G3
+proves the F8 chain recovers the known specimens, but any *other* refusal in that
+window still lands after a durable append. **It is tracked as its own item and it
+is not blocked by anything here.**
