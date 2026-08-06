@@ -169,6 +169,28 @@ fn assert_marker_replay(
 
     let replay_snapshot =
         marker_protocol_snapshot(&replay.handler, conversation_id, replay.target_participant)?;
+    // ⛔ WHAT THIS EQUALITY CANNOT EVIDENCE, STATED HERE BECAUSE OF WHERE IT SITS.
+    //
+    // This asserts that cold replay AGREES WITH live. It does NOT assert that
+    // either one is HEALTHY. When `#26` was open, the live and replay paths both
+    // failed to progress the sealed binding-fate token, so BOTH SIDES FROZE
+    // IDENTICALLY and this assertion was GREEN WITH THE DEFECT — exactly as green
+    // as it is now that the defect is fixed. ⇒ AGREEMENT IS NOT HEALTH: two paths
+    // sharing a bug agree perfectly.
+    //
+    // ⚠ AND THIS UNIT COULD NOT BE STRENGTHENED IN PLACE TO CLOSE THAT, WHICH IS
+    // WHY IT CARRIES A NOTE RATHER THAN A BETTER ASSERTION. `prepare_marker_fixture`
+    // (line above) drives NO CredentialAttach, so it mints NO sealed binding-fate
+    // token — there is nothing here for a marker-ack to strand, and no state
+    // assertion about fate is even expressible against this fixture. Rewriting it
+    // onto `attached_marker_fixture` would not sharpen this test; it would replace
+    // it with a different one.
+    //
+    // The health question is answered by `tests_marker_fate_repro`, which arms on
+    // the ATTACHED fixture and discriminates on STATE (does the next ordinary ack
+    // COMMIT) rather than on agreement. ⛔ DO NOT CITE THIS UNIT AS EVIDENCE THAT
+    // COLD REPLAY IS CORRECT. It pins live/cold parity, which is worth pinning, and
+    // that is the whole of what it can say.
     assert_eq!(replay_snapshot, live_snapshot);
     Ok(())
 }

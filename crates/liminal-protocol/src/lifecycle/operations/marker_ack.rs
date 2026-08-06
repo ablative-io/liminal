@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use crate::wire::{
     BindingEpoch, ConversationId, DeliverySeq, Generation, MarkerAck, MarkerAckCommitted,
     MarkerAckEnvelope, MarkerAckResponse, ParticipantId,
@@ -6,7 +8,8 @@ use crate::wire::{
 use super::{
     super::{
         BindingRequiredLookupResult, BindingState, LiveMember, ObserverProgressProjection,
-        ParticipantBindingRequest, PresentedIdentity, lookup_binding_required,
+        ParticipantBindingRequest, PresentedIdentity, SealedBindingFateToken,
+        lookup_binding_required,
         membership::{LiveMemberCursorUpdate, LiveMemberCursorUpdateError},
     },
     marker_proof::{
@@ -88,6 +91,35 @@ impl MarkerAckCommit {
     #[must_use]
     pub const fn proof(&self) -> &MarkerProofPermit {
         &self.proof
+    }
+
+    /// Replays this exact selected marker transition into one sealed fate token.
+    ///
+    /// The ordinary-ack path has always progressed the token in step with the
+    /// member cursor (`ParticipantAckCommit::progress_binding_fate_token`); the
+    /// marker path never did, so a marker-ack advanced the member and stranded
+    /// the token behind it, and the NEXT ordinary ack — live or rebuilt from
+    /// durable rows on boot — was refused against a frozen prestate.
+    ///
+    /// # Errors
+    ///
+    /// Returns the unchanged token when its conversation, participant, binding
+    /// epoch, or cursor prestate differs from this committed marker-ack.
+    /// Replaying a marker-ack the token has already consumed is NOT an error:
+    /// it returns the token untouched, matching [`Self::apply_to`]'s own
+    /// idempotence.
+    pub fn progress_binding_fate_token(
+        &self,
+        token: SealedBindingFateToken,
+    ) -> Result<SealedBindingFateToken, Box<SealedBindingFateToken>> {
+        let request = self.outcome.request();
+        token.marker_ack_progressed(
+            request.conversation_id,
+            request.participant_id,
+            self.receiving_binding_epoch(),
+            self.from_cursor(),
+            self.resulting_cursor(),
+        )
     }
 
     /// Applies this commit to either its exact old cursor or its already-written

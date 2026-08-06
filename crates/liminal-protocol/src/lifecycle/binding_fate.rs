@@ -105,6 +105,55 @@ impl SealedBindingFateToken {
         Ok(self)
     }
 
+    /// Replays one protocol-selected MARKER acknowledgement into this token.
+    ///
+    /// A marker-ack advances the member's cursor exactly as an ordinary ack
+    /// does, so the sealed token must follow it or the two disagree forever.
+    /// The validation is therefore delegated, unchanged, to
+    /// [`Self::participant_ack_progressed`]: the token tracks CURSOR
+    /// PROGRESSION, and the operation that caused the progression does not
+    /// change what has to hold.
+    ///
+    /// # ⛔ THE IDEMPOTENT ARM IS LOAD-BEARING AND ITS ABSENCE IS INVISIBLE BY MESSAGE
+    ///
+    /// `MarkerAckCommit::apply_to` is idempotent by documented contract:
+    /// re-applying it to its own resulting cursor is a no-op returning the same
+    /// outcome. The token is progressed alongside it, so the token must tolerate
+    /// that same second application. Without the arm below, replaying an
+    /// already-applied marker-ack fails `previous_cursor != self.cursor` and
+    /// raises `ack cursor commit disagrees with sealed binding-fate authority`
+    /// — **THE EXACT STRING THE MISSING-PROGRESSION DEFECT RAISES.**
+    ///
+    /// A fix whose failure mode is message-identical to the bug it repairs
+    /// cannot be distinguished from that bug by any test asserting on the
+    /// message: such a test passes in both worlds. That is why the units
+    /// guarding this discriminate on STATE — whether the next ordinary ack
+    /// COMMITS — and never on the refusal text.
+    pub(in crate::lifecycle) fn marker_ack_progressed(
+        self,
+        conversation_id: ConversationId,
+        participant_id: ParticipantId,
+        binding_epoch: BindingEpoch,
+        previous_cursor: DeliverySeq,
+        through_seq: DeliverySeq,
+    ) -> Result<Self, Box<Self>> {
+        // ALREADY APPLIED: the token already sits at this commit's resulting
+        // cursor, so the durable row is being replayed onto state that has
+        // consumed it. `previous_cursor < through_seq` keeps a degenerate
+        // no-progress commit out of this arm — that case falls through and is
+        // refused below exactly as it always was.
+        if self.cursor == through_seq && previous_cursor < through_seq {
+            return Ok(self);
+        }
+        self.participant_ack_progressed(
+            conversation_id,
+            participant_id,
+            binding_epoch,
+            previous_cursor,
+            through_seq,
+        )
+    }
+
     /// Returns the exact protocol-owned identity whose floor must be measured.
     pub(in crate::lifecycle) const fn measurement_context(
         &self,
