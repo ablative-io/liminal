@@ -445,6 +445,54 @@ fn separate_channels_are_independent_processes() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn is_actor_spawned_reports_an_idle_channel_without_spawning_it() -> Result<(), Box<dyn Error>> {
+    let supervisor = ChannelSupervisor::new()?;
+    let handle = order_channel(&supervisor)?;
+    let scheduler = supervisor.scheduler();
+    let idle_processes = scheduler.process_table().len();
+
+    // Asking repeatedly must keep answering `false`: the probe reports the
+    // lazy-spawn state without consuming it, unlike every accessor that routes
+    // through `core()`.
+    for probe in 0..3 {
+        assert!(
+            !handle.is_actor_spawned(),
+            "probe {probe} must find a configured-but-untouched channel unspawned"
+        );
+    }
+
+    // Independent witness for the same claim: the supervisor's own scheduler
+    // gained no process across the probes, so `false` is not the answer of a
+    // method that quietly spawned one behind it.
+    assert_eq!(
+        scheduler.process_table().len(),
+        idle_processes,
+        "probing spawn-state must add no process to the scheduler"
+    );
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[test]
+fn is_actor_spawned_is_true_once_an_operation_forces_the_actor() -> Result<(), Box<dyn Error>> {
+    // The other direction: without this arm, a method that always answered
+    // `false` would pass the idle test above.
+    let supervisor = ChannelSupervisor::new()?;
+    let handle = order_channel(&supervisor)?;
+    assert!(!handle.is_actor_spawned());
+
+    let subscription = handle.subscribe()?;
+
+    assert!(
+        handle.is_actor_spawned(),
+        "an operation that drove the actor must leave the spawn observable"
+    );
+    drop(subscription);
+    supervisor.shutdown();
+    Ok(())
+}
+
+#[test]
 fn restart_policy_never_is_configurable() -> Result<(), Box<dyn Error>> {
     // Supervision is configurable (R4): a `never` policy is accepted and exposed.
     let supervisor = ChannelSupervisor::with_policy(ChannelRestartPolicy::never())?;
