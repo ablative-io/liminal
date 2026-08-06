@@ -546,10 +546,19 @@ fn a_cold_replayed_marker_ack_must_leave_the_sealed_token_in_step() -> Result<()
 /// and on reconcile `Err` it does `*owner = None; (Err(error), false)`,
 /// DISCARDING the operation's own `Ok(value)`.
 ///
-/// ⚠ CITED BY ENCLOSING FUNCTION ON PURPOSE: this file and `main` sit on
-/// different revs, where the same arm is `handler.rs:492/:498-510` (this tree)
-/// and `handler.rs:365-385` (main). A bare `file:line` is ambiguous between
-/// them by construction; the function name is not.
+/// ⚠ CITED BY ENCLOSING FUNCTION ON PURPOSE — AND FOR THE RIGHT REASON: a
+/// `file:line` carries an IMPLICIT REV and is meaningless without one. It is NOT
+/// because trees legitimately differ here; they do not. `handler.rs` is
+/// BYTE-IDENTICAL across `5bdf5df`, `6673d8d` and `70f5a19` (blob
+/// `0ca75423decbde6f333d40789ef409f1ac34495c` at all three), and the arm is at
+/// `:491-511` with the `Err`/`has_staged` sibling at `:519-543`, AT THOSE REVS.
+///
+/// ⛔ AN EARLIER DRAFT OF THIS COMMENT RECORDED TWO TREE-TAGGED READINGS AS IF
+/// BOTH WERE VALID. They were not — one was simply wrong. ACCOMMODATING A
+/// DISCREPANCY DESTROYS IT AS EVIDENCE: two readings that disagree are a working
+/// detector, and "both are correct, tagged by tree" switches it off without
+/// resolving anything, then preserves the wrong one where later readers will
+/// take it as authoritative. ⇒ RECONCILE DISAGREEING READINGS TO ONE.
 ///
 /// ⇒ **THE GATE IS WHY THE CLAIM IS NARROW: an operation that does not append
 /// never reaches this arm.**
