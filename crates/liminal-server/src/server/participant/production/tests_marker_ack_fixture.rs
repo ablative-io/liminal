@@ -19,8 +19,8 @@ use super::state::{ConversationAuthority, DurableAppend};
 use super::tests::{dispatch, test_participant_config};
 use crate::config::types::ParticipantConfig;
 
-struct FixtureAppender<'a> {
-    log: &'a OperationLog,
+pub(super) struct FixtureAppender<'a> {
+    pub(super) log: &'a OperationLog,
 }
 
 impl DurableAppend for FixtureAppender<'_> {
@@ -85,7 +85,7 @@ pub(super) fn marker_fixture_config() -> ParticipantConfig {
     config
 }
 
-fn marker_fixture_facts(
+pub(super) fn marker_fixture_facts(
     connection: ConnectionIncarnation,
     config: &ParticipantConfig,
 ) -> Result<OperationFacts, Box<dyn Error>> {

@@ -419,6 +419,11 @@ impl ConversationAuthority {
         let slot = self.slots.get_mut(&request.participant_id).ok_or_else(|| {
             StateError::invariant("committed marker ack lost its participant slot")
         })?;
+        // SITE ONE of `#26`. The sealed token MUST move with the member cursor,
+        // and it must move BEFORE `apply_to` consumes the commit. Omitting this
+        // is what left the token frozen behind an advanced member and had the
+        // next ordinary ack refused at the invariant below.
+        progress_pending_marker_binding_fate(slot, &commit)?;
         let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
             StateError::invariant(format!("marker ack cursor commit rejected: {error:?}"))
         })?;
@@ -512,6 +517,11 @@ impl ConversationAuthority {
             .slots
             .get_mut(&row.request.participant_id)
             .ok_or_else(|| StateError::invariant("stored MarkerAck participant is absent"))?;
+        // SITE TWO of `#26`, and the one that made the fault survive restarts.
+        // This is the load path — `ops_session_replay` -> `recipient_ack_obligations`
+        // -> `outbox_replay` -> here — so without this call a boot did not clear
+        // the frozen token, it REBUILT it from durable rows every time.
+        progress_pending_marker_binding_fate(slot, &commit)?;
         let outcome = commit.apply_to(&mut slot.member).map_err(|error| {
             StateError::invariant(format!("stored MarkerAck cursor commit failed: {error:?}"))
         })?;
@@ -559,6 +569,56 @@ const fn marker_ack_envelope(request: &MarkerAck) -> MarkerAckEnvelope {
         participant_id: request.participant_id,
         capability_generation: request.capability_generation,
         marker_delivery_seq: request.marker_delivery_seq,
+    }
+}
+
+/// Moves the sealed binding-fate token in step with a MARKER acknowledgement.
+///
+/// The sibling of `progress_pending_binding_fate`, for the path that never had
+/// one. A member with no pending fate token is the ordinary case and returns
+/// `Ok` untouched — the token only exists after a CredentialAttach mints it.
+///
+/// # ⚠ WHY THIS REFUSAL IS WORDED DIFFERENTLY FROM ITS SIBLING
+///
+/// The sibling raises `ack cursor commit disagrees with sealed binding-fate
+/// authority` — the string the `#26` defect surfaces, because under the defect
+/// it is the ORDINARY ack that gets refused against a token this path failed to
+/// move. If this function reused that wording, a future refusal from the marker
+/// path would be indistinguishable from the original bug in every log and every
+/// assertion, and "the fix regressed" would read exactly like "the fix was never
+/// applied". The distinct prefix keeps the two separable at a glance.
+///
+/// ⛔ It does NOT make the string safe as a gate signal. A refusal is a refusal
+/// in both a healthy and a broken tree; only STATE — whether the next ordinary
+/// ack COMMITS — discriminates, and the guarding units are built on that.
+fn progress_pending_marker_binding_fate(
+    slot: &mut Slot,
+    commit: &MarkerAckCommit,
+) -> Result<(), StateError> {
+    let Some(pending) = slot.binding_fate.take() else {
+        return Ok(());
+    };
+    let PendingBindingFate {
+        attached_source_sequence,
+        token,
+    } = pending;
+    match commit.progress_binding_fate_token(token) {
+        Ok(token) => {
+            slot.binding_fate = Some(PendingBindingFate {
+                attached_source_sequence,
+                token,
+            });
+            Ok(())
+        }
+        Err(token) => {
+            slot.binding_fate = Some(PendingBindingFate {
+                attached_source_sequence,
+                token: *token,
+            });
+            Err(StateError::invariant(
+                "marker ack cursor commit disagrees with sealed binding-fate authority",
+            ))
+        }
     }
 }
 
