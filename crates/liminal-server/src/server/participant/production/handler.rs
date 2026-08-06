@@ -374,6 +374,19 @@ impl ProductionParticipantHandler {
 
     /// Every conversation this node has refused as unloadable, against the
     /// load failure's own text.
+    ///
+    /// ⚠ NOTHING READS THIS. The node maintains the unloadable record and then
+    /// offers no way to see it, which is an observability gap rather than dead
+    /// weight: this is precisely the surface an operator wants when deciding
+    /// whether a node may be restarted. Kept and flagged rather than deleted --
+    /// removing it would take away the only accessor to a record that is still
+    /// being written.
+    #[allow(
+        dead_code,
+        reason = "an unread diagnostic surface, deliberately retained; see the \
+                  note above -- deleting it would discard the only reader of a \
+                  record the node still maintains."
+    )]
     pub(super) fn unloadable_conversations(&self) -> BTreeMap<ConversationId, String> {
         self.unloadable
             .lock()

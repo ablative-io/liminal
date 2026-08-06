@@ -29,7 +29,7 @@
 //!
 //! # WHY IT ARMS WITH THE LIVE GENERATION
 //!
-//! `attached_marker_fixture` drives the CredentialAttach that MINTS the fate
+//! `attached_marker_fixture` drives the `CredentialAttach` that MINTS the fate
 //! token — `prepare_marker_fixture` mints none, so the incident cannot exist
 //! in it at all (`tests_marker_ack_fixture.rs:549-552`). But an attach also
 //! advances the capability generation to its successor
@@ -419,7 +419,7 @@ fn a_cold_replayed_marker_ack_must_leave_the_sealed_token_in_step() -> Result<()
     // in-memory state crosses this line; everything the cold node knows, it
     // rebuilt from rows — including the marker-ack extension.
     let config = marker_fixture_config();
-    let cold = ProductionParticipantHandler::new(Arc::clone(&live.store), config.clone())?;
+    let cold = ProductionParticipantHandler::new(Arc::clone(&live.store), config)?;
     let cold_log = OperationLog::new(Arc::clone(&live.store), conversation_id);
     let mut replayed = cold.replay_aggregate_reference(conversation_id, &cold_log)?;
 
@@ -583,6 +583,12 @@ fn a_cold_replayed_marker_ack_must_leave_the_sealed_token_in_step() -> Result<()
 /// STEP HAPPENS BEFORE THE MARKER-ACK, so nothing whatever runs between the two
 /// acks.
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the unit's whole claim is that NOTHING runs between the two acks, \
+              so the sequence has to stay in one body -- extracting helpers \
+              would insert exactly the indirection the test exists to rule out."
+)]
 fn a_marker_ack_must_not_wedge_the_cached_authority_for_the_next_ordinary_ack()
 -> Result<(), Box<dyn Error>> {
     let fixture = attached_marker_fixture()?;

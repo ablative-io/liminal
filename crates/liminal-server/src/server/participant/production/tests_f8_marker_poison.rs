@@ -4,9 +4,9 @@
 //!
 //! These two units replay §1's incident on a live store rather than asserting
 //! about it. A compaction marker for P1 is minted and drained by
-//! `attached_marker_fixture` (which drives the CredentialAttach that mints the
+//! `attached_marker_fixture` (which drives the `CredentialAttach` that mints the
 //! binding-fate token, so the Died row carries an open Ordinary intent as §1
-//! requires), and P1 never MarkerAcks — no offer is recorded and
+//! requires), and P1 never `MarkerAcks` — no offer is recorded and
 //! no ack is dispatched, so the retained marker record stays replayable and
 //! P1's cursor stays below it. The peer acks past the marker, which lifts hard
 //! observer progress over it, and then departs, which sets ITS cursor to the
@@ -44,9 +44,9 @@
 //!
 //!   "These units have never witnessed §3.2's defect — and at declaration time
 //!   they are not silently green but LOUDLY RED on a named unmet arming
-//!   precondition: tests_f8_marker_poison.rs:528 sends Generation::ONE where
+//!   precondition: `tests_f8_marker_poison.rs:528` sends `Generation::ONE` where
 //!   the post-attach live generation is Generation(2), so the peer's ack
-//!   through 13 refuses StaleAuthority, observer progress never lifts over the
+//!   through 13 refuses `StaleAuthority`, observer progress never lifts over the
 //!   marker, and the arming guard refuses to let the units claim. The defect is
 //!   carried by the store-level RED OF RECORD (spine 86ae3a8f…55c1, intent82
 //!   f7effebf…4101); these markers expire the day the units first witness it at
@@ -449,7 +449,7 @@ fn assert_owner_is_bound_for_its_departure(
 /// §1 requires "P1's Died row carrying an open Ordinary intent", and
 /// `connection_fate.rs:234-242` opens that intent ONLY IF the target slot holds
 /// `slot.binding_fate`. This is the amended assertion that superseded the
-/// retained_floor==marker form: it is the server-side condition §1 actually
+/// `retained_floor==marker` form: it is the server-side condition §1 actually
 /// demands.
 fn assert_intent_geometry_is_built(
     handler: &ProductionParticipantHandler,
@@ -760,16 +760,13 @@ fn the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server()
     let stranded = authority
         .pending_specific_fates
         .contains_key(&roles.owner_participant);
-    let marker_still_retained = authority
-        .frontier()
-        .map(|frontier| {
-            frontier
-                .frontiers()
-                .retained_marker_records()
-                .iter()
-                .any(|record| record.delivery_seq == roles.marker_delivery_seq)
-        })
-        .unwrap_or(false);
+    let marker_still_retained = authority.frontier().is_some_and(|frontier| {
+        frontier
+            .frontiers()
+            .retained_marker_records()
+            .iter()
+            .any(|record| record.delivery_seq == roles.marker_delivery_seq)
+    });
     drop(owner);
 
     if stranded {

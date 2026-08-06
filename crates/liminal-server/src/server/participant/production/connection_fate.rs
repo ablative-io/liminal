@@ -217,11 +217,27 @@ impl PreparedConnectionFate {
 /// append, after that append — or carries none and is installed directly once
 /// the source row is durable. No path installs it twice, and no path installs
 /// it before a durable row.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "boxing `Measured` would put an allocation on the connection-fate \
+              completion path -- the exact path the three poisoned-estate \
+              incidents ran through. The enum is short-lived and never stored, \
+              so the size difference costs a stack copy and nothing durable. \
+              Boxing it is a real change to that path and wants its own gate, \
+              not a lint sweep."
+)]
 enum AdmittedOwnerFate {
     Measured(MeasuredSpecificFate),
     Plain(LiveFrontierOwner),
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "the ordering here is load-bearing and documented inline: measure, \
+              append durably, then install. M5 is the open item that revisits \
+              this function's commit ordering, and splitting it now would move \
+              those steps apart before that ruling exists."
+)]
 fn complete_target(
     source: ConnectionFateSource,
     target: ConnectionFateTarget,

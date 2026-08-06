@@ -1,13 +1,13 @@
 use crate::config::types::ParticipantConfig;
 
-use liminal::durability::{DurableStore, open_ephemeral};
 use liminal::durability::bridge::block_on;
+use liminal::durability::{DurableStore, open_ephemeral};
 
 use liminal_protocol::lifecycle::{CapacityCounter, ConnectionConversationTracking};
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
-    EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest, ParticipantAck,
-    ParticipantDelivery, ParticipantId, ParticipantRecord, RecordAdmission,
+    EnrollmentRequest, EnrollmentToken, Generation, LeaveAttemptToken, LeaveRequest,
+    ParticipantAck, ParticipantDelivery, ParticipantId, ParticipantRecord, RecordAdmission,
     RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
 };
 
@@ -175,7 +175,7 @@ fn enroll_members(
 /// whole defect: pre-attach the index is `[2, 3]` so 3 IS an endpoint and the
 /// ack commits; post-attach the attach's own deliveries consume sequence
 /// numbers, the index becomes `[2, 5]`, 3 is NOT an endpoint, and
-/// `participant_ack.rs:310-311` refuses with AckGap. The sequence number was
+/// `participant_ack.rs:310-311` refuses with `AckGap`. The sequence number was
 /// never the thing that mattered -- being an ENDPOINT was.
 ///
 /// So the fixture stops guessing. `contiguously_available_through`, the second
@@ -183,6 +183,12 @@ fn enroll_members(
 /// -- measured Ok(3) against `[2, 3]` and Ok(5) against `[2, 5]` -- and it is
 /// the same observable that decided the discriminator.
 #[derive(Clone, Debug)]
+#[allow(
+    dead_code,
+    reason = "these fields are read through Debug when a fixture fails -- that \
+              is their whole job. Deleting them would shrink the failure output \
+              of the units that exist to explain this observable."
+)]
 pub(super) struct DerivedAckEndpoint {
     pub(super) participant_id: ParticipantId,
     pub(super) acknowledged_through: u64,
@@ -376,6 +382,13 @@ fn project_fixture_ordinary(
     )
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "a test fixture helper: each argument is one piece of the durable \
+              state an ack commit reads, and bundling them into a struct would \
+              hide which pieces a given call actually exercises -- the thing \
+              these fixtures exist to make visible."
+)]
 fn commit_fixture_ack(
     authority: &mut ConversationAuthority,
     operation_log: &OperationLog,
@@ -431,6 +444,13 @@ fn record_request(
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "a fixture that drives one continuous durable sequence; the steps \
+              are ordered and each depends on the last, so splitting it would \
+              scatter a single scenario across helpers and make the ordering \
+              harder to check than it is to read."
+)]
 fn drive_marker_drain(
     handler: &ProductionParticipantHandler,
     store: Arc<dyn DurableStore>,
@@ -603,6 +623,13 @@ pub(super) fn prepare_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> 
 /// respect — two `CredentialAttach` dispatches after enrolment — so any
 /// difference in outcome is attributable to the attaches and to nothing else.
 /// The config is used exactly as tuned; no debt arithmetic is retuned here.
+#[allow(
+    dead_code,
+    reason = "`derived_ack_endpoints` is carried so a failing drain can print \
+              the endpoint index it derived. It is evidence for the reader of a \
+              failure, not an input to the assertion -- which is exactly the \
+              shape dead_code cannot distinguish."
+)]
 pub(super) struct AttachedDrainAttempt {
     /// POSITIVE CONTROL that the attaches actually landed. Part A established
     /// that without a `CredentialAttach` no participant ever holds a
@@ -739,9 +766,9 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
 /// THE ARMED FIXTURE (attempt 2, Cally b23e4cc1). `prepare_marker_fixture`
 /// mints no binding-fate token, so every Died row it produces is intent-free
 /// and §1's incident cannot occur in it -- Part A's finding, and the honest
-/// refusal's cited cause. This entry point drives the CredentialAttach that
+/// refusal's cited cause. This entry point drives the `CredentialAttach` that
 /// mints the intent, and the drain verdict at tree 9440a06 proved the marker
-/// still mints and retains under it (EXIT (1), projection at delivery_seq 12).
+/// still mints and retains under it (EXIT (1), projection at `delivery_seq` 12).
 pub(super) fn attached_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>> {
     let attempt = attempt_marker_fixture_with_attaches()?;
     if !(attempt.first_has_binding_fate && attempt.second_has_binding_fate) {

@@ -576,7 +576,7 @@ const fn marker_ack_envelope(request: &MarkerAck) -> MarkerAckEnvelope {
 ///
 /// The sibling of `progress_pending_binding_fate`, for the path that never had
 /// one. A member with no pending fate token is the ordinary case and returns
-/// `Ok` untouched — the token only exists after a CredentialAttach mints it.
+/// `Ok` untouched — the token only exists after a `CredentialAttach` mints it.
 ///
 /// # ⚠ WHY THIS REFUSAL IS WORDED DIFFERENTLY FROM ITS SIBLING
 ///
