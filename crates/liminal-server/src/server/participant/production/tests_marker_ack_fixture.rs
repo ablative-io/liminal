@@ -1,8 +1,8 @@
-use std::error::Error;
-use std::sync::Arc;
+use crate::config::types::ParticipantConfig;
 
-use liminal::durability::bridge::block_on;
 use liminal::durability::{DurableStore, open_ephemeral};
+use liminal::durability::bridge::block_on;
+
 use liminal_protocol::lifecycle::{CapacityCounter, ConnectionConversationTracking};
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
@@ -11,13 +11,15 @@ use liminal_protocol::wire::{
     RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
 };
 
+use std::error::Error;
+use std::sync::Arc;
+
 use super::ProductionParticipantHandler;
 use super::barrier::{OperationFacts, ReceiptCapacityLimits};
 use super::log::{OperationLog, OperationLogError, StoredOperation};
 use super::outbox_log::{OutboxLog, OutboxRow, ProducedBatch, ProducedSourceKind, ProjectedRecord};
 use super::state::{ConversationAuthority, DurableAppend};
 use super::tests::{dispatch, test_participant_config};
-use crate::config::types::ParticipantConfig;
 
 pub(super) struct FixtureAppender<'a> {
     pub(super) log: &'a OperationLog,
@@ -206,12 +208,10 @@ fn live_ack_endpoint(
         .outbox
         .as_ref()
         .ok_or("live ack endpoint outbox is absent")?;
-    let acknowledged_through = authority
-        .slots
-        .get(&participant_id)
-        .map_or_else(|| outbox.durable_ack_through(participant_id), |slot| {
-            slot.member.cursor()
-        });
+    let acknowledged_through = authority.slots.get(&participant_id).map_or_else(
+        || outbox.durable_ack_through(participant_id),
+        |slot| slot.member.cursor(),
+    );
     let (obligations, endpoint) = outbox
         .recipient_ack_obligations(participant_id, acknowledged_through)
         .map_err(|error| format!("live ack endpoint obligations refused: {error:?}"))?;
@@ -698,8 +698,8 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
     // reportable field. Nothing escapes as a panic, so the positive control
     // above always reaches the report.
     let mut derived_ack_endpoints = Vec::new();
-    let driven = ack_marker_prefix(&handler, conversation_id, &members, generations).and_then(
-        |derived| {
+    let driven =
+        ack_marker_prefix(&handler, conversation_id, &members, generations).and_then(|derived| {
             derived_ack_endpoints = derived;
             drive_marker_drain(
                 &handler,
@@ -709,8 +709,7 @@ pub(super) fn attempt_marker_fixture_with_attaches() -> Result<AttachedDrainAtte
                 &members,
                 generations,
             )
-        },
-    );
+        });
     let drain = match driven {
         Ok((target_connection, target_participant, marker_delivery, catchup_through_seq)) => {
             Ok(MarkerFixture {
@@ -753,11 +752,9 @@ pub(super) fn attached_marker_fixture() -> Result<MarkerFixture, Box<dyn Error>>
         )
         .into());
     }
-    attempt
-        .drain
-        .map_err(|error| -> Box<dyn Error> {
-            format!("armed fixture: the marker did not drain with attaches present: {error}").into()
-        })
+    attempt.drain.map_err(|error| -> Box<dyn Error> {
+        format!("armed fixture: the marker did not drain with attaches present: {error}").into()
+    })
 }
 
 pub(super) fn marker_protocol_snapshot(

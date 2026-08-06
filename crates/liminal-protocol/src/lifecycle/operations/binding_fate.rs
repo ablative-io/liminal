@@ -1,6 +1,9 @@
 use alloc::boxed::Box;
 
-use crate::{algebra::floor_transition, wire::DeliverySeq};
+use crate::{
+    algebra::{floor_transition, marker_clamped_floor},
+    wire::DeliverySeq,
+};
 
 use super::{LiveFrontierError, LiveFrontierOwner, live_frontier::BindingFateOwnerPlan};
 use crate::lifecycle::{
@@ -465,23 +468,48 @@ fn validate_binding_fate_floor(
     //
     // The purpose of a retained marker is precisely that its record stays
     // replayable until acked. Pinning is the marker's meaning; unsatisfiability
-    // was the bug. So the measured floor is capped at the minimum retained
+    // was the bug. So the measured floor is LOWERED to the minimum retained
     // marker-record sequence and can no longer cross one.
+    //
+    // NOT `cap_floor` (PRECEDENCE-CLAMP M2). `floor_transition`'s fifth argument
+    // is named `cap_floor` and is `max(base_result, cap_floor)` — a floor
+    // RAISER. This clamp LOWERS. Routing the lowest marker through `cap_floor`
+    // yields `max(base, marker)`, which still sits above the marker in exactly
+    // the poisoning case and would raise floors in cases that work today. The
+    // clamp therefore has its own named primitive, `marker_clamped_floor`, and
+    // never travels through `cap_floor`.
     //
     // The `Precedence` refusal STAYS as a backstop invariant. After this clamp
     // it should be unreachable from this path, and a reachable backstop firing
     // is a bug report rather than control flow.
-    let marker_floor_cap = owner
+    //
+    // WHY A CLAMP BESIDE `search_capacity_floor` AND NOT A REUSE OF IT
+    // (PRECEDENCE-CLAMP M3, decided rather than guessed).
+    // `ordinary_record_projection.rs`'s `search_capacity_floor` does the
+    // structurally similar thing for its own invariant, and it is the wrong
+    // tool here for three independent reasons, any one of which is fatal:
+    //   1. DIRECTION. It SEARCHES UPWARD, walking the floor to successively
+    //      higher retained sequences until a capacity/credit baseline admits,
+    //      and it feeds its answer back through `floor_transition`'s `cap_floor`
+    //      — a raiser. Precedence needs the floor LOWERED.
+    //   2. INVARIANT. Its subject is capacity: whether the resulting retained
+    //      charge fits the configured cap. Precedence's subject is replayability:
+    //      an unacked marker must stay retained. It treats a marker anchor below
+    //      its chosen floor as an ERROR (`MarkerAnchorCapacity`) rather than as a
+    //      bound, which is the opposite of pinning.
+    //   3. INPUTS. It is a function of `OrdinaryProjectionFacts` — an order
+    //      ledger, a sequence ledger, an admission request, encoded charges —
+    //      none of which exist at a binding-fate measurement.
+    // The two are NOT interchangeable, so the marker rule gets its own named
+    // primitive, `marker_clamped_floor`, and the two live side by side.
+    let lowest_retained_marker_seq = owner
         .frontiers()
         .retained_marker_records()
         .iter()
         .map(|record| record.delivery_seq)
         .min();
-    let capped_floor = match marker_floor_cap {
-        Some(cap) => measured.resulting_floor.min(u128::from(cap)),
-        None => measured.resulting_floor,
-    };
-    let Ok(resulting_floor) = DeliverySeq::try_from(capped_floor) else {
+    let clamped_floor = marker_clamped_floor(measured.resulting_floor, lowest_retained_marker_seq);
+    let Ok(resulting_floor) = DeliverySeq::try_from(clamped_floor) else {
         return Err(BindingFateMeasurementError::ResultingFloor);
     };
     Ok(ValidatedBindingFateFloor {

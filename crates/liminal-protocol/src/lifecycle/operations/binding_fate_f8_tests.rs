@@ -46,6 +46,9 @@ use crate::{
     wire::{BindingEpoch, ConnectionIncarnation, DeliverySeq, Generation},
 };
 
+use super::binding_fate_fixture::{
+    TwoExitClaims, two_identity_ledgers, two_identity_order_restore, two_identity_sequence_restore,
+};
 use super::binding_fate_tests::{frontier_owner_with_limit, ordinary_token};
 use super::{
     BindingFateMeasurementError, BindingFateTerminal, BindingTerminalAdmission,
@@ -54,17 +57,13 @@ use super::{
 use crate::lifecycle::{
     ActiveBinding, AdmissionOrder, BindingTerminalDisposition, ClaimFrontiers,
     ClaimFrontiersRestore, ClosureAccounting, ClosureState, CommittedDiedTerminal,
-    DiedBindingTransition, ExitProductRangeRestore, FrontierBinding, FrontierParticipant,
-    MarkerProvenance, MovableOrderClaim, MovableSequenceClaim, OrderClaimFrontierRestore,
-    OrderClaims, OrderDirectOwner, OrderHigh, OrderLedger, RecoverySequenceReserve,
-    RetainedCausalRecord, RetainedCausalRecordKind, RetainedRecordCharge,
-    SealedBindingFateToken, SequenceClaimFrontierRestore, SequenceClaims, SequenceDirectOwner,
-    SequenceLedger, SequenceProductRangesRestore,
+    DiedBindingTransition, FrontierBinding, FrontierParticipant, MarkerProvenance,
+    RetainedCausalRecord, RetainedCausalRecordKind, RetainedRecordCharge, SealedBindingFateToken,
 };
 
 /// The departed peer's permanent index. Distinct from the ordinary token's
 /// participant (3) so the two identities never collide in the frontier.
-const DEPARTED_PEER: u64 = 5;
+pub(super) const DEPARTED_PEER: u64 = 5;
 
 fn generation(value: u64) -> Result<Generation, String> {
     Generation::new(value).ok_or_else(|| "F8 fixture generation must be nonzero".to_string())
@@ -97,7 +96,7 @@ fn clear_accounting() -> Result<ClosureAccounting, String> {
 /// throwaway owner. Only the terminal travels; its owner is dropped, so the
 /// terminal's provenance never constrains the marker-pinned frontier below.
 /// Same construction as `binding_fate_tests::committed_died_owner`.
-fn committed_died_terminal(
+pub(super) fn committed_died_terminal(
     active: ActiveBinding,
     cursor: DeliverySeq,
 ) -> Result<CommittedDiedTerminal, String> {
@@ -123,7 +122,12 @@ fn committed_died_terminal(
             candidate_sequence,
             high_watermark,
         )
-        .map_err(|refused| format!("F8 committed terminal prepare refused: {:?}", refused.error()))?;
+        .map_err(|refused| {
+            format!(
+                "F8 committed terminal prepare refused: {:?}",
+                refused.error()
+            )
+        })?;
     let key = prepared.candidate_key();
     let BindingTerminalAdmission::Commit(committed) =
         prepared.admit(key.bind_v3_charge(ResourceVector::new(1, 73)))
@@ -143,7 +147,7 @@ fn committed_died_terminal(
 /// The incident's frontier, §1, built at the moment P1's fate is measured.
 ///
 /// A compaction marker for P1 is minted and drained, so its retained record
-/// sits at `marker_seq` and stays replayable until P1 MarkerAcks. P1 never
+/// sits at `marker_seq` and stays replayable until P1 `MarkerAck`s. P1 never
 /// acks (killed), so P1's cursor stays BELOW `marker_seq`. The peer has
 /// already departed, and a departing participant's cursor is set to the high
 /// watermark — which is now at or past the marker. The floor computation sees
@@ -168,7 +172,9 @@ fn marker_pinned_owner(
     charged: bool,
 ) -> Result<LiveFrontierOwner, String> {
     if cursor >= marker_seq {
-        return Err("F8 fixture needs an UNACKED marker: P1's cursor must sit below it".to_string());
+        return Err(
+            "F8 fixture needs an UNACKED marker: P1's cursor must sit below it".to_string(),
+        );
     }
     let high_watermark = marker_seq;
     let identity_slot_limit = participant_id
@@ -178,31 +184,11 @@ fn marker_pinned_owner(
 
     // Reserve, in the frozen canonical term order (E, T, M, RS, RT, L*T,
     // L*RT, L_other*E) for L=2, T=0, M=0: 2 + 0 + 0 + 0 + 0 + 0 + 0 + 2 = 4.
-    // Both identities are Detached, so no binding-terminal claim is owed.
-    let own_exit = high_watermark
-        .checked_add(1)
-        .ok_or_else(|| "F8 fixture own exit claim overflow".to_string())?;
-    let peer_exit = own_exit
-        .checked_add(1)
-        .ok_or_else(|| "F8 fixture peer exit claim overflow".to_string())?;
-    let own_exit_product = peer_exit
-        .checked_add(1)
-        .ok_or_else(|| "F8 fixture own exit product overflow".to_string())?;
-    let peer_exit_product = own_exit_product
-        .checked_add(1)
-        .ok_or_else(|| "F8 fixture peer exit product overflow".to_string())?;
-
-    let sequence = SequenceLedger::try_new(
-        high_watermark,
-        SequenceClaims::new(2, 0, 0, RecoverySequenceReserve::None),
-    )
-    .map_err(|error| format!("F8 fixture sequence ledger refused: {error:?}"))?;
-    let order = OrderLedger::try_new(
-        OrderHigh::Empty,
-        OrderClaims::new(0, 2, false, false)
-            .map_err(|error| format!("F8 fixture order claims refused: {error:?}"))?,
-    )
-    .map_err(|error| format!("F8 fixture order ledger refused: {error:?}"))?;
+    // Both identities are Detached, so no binding-terminal claim is owed. That
+    // geometry is shared with the PRECEDENCE-CLAMP finalizer units and lives in
+    // `binding_fate_fixture`, byte-identical to what stood inline here.
+    let claims = TwoExitClaims::above(high_watermark)?;
+    let (sequence, order) = two_identity_ledgers(high_watermark)?;
 
     let marker_order = AdmissionOrder::new(0, CandidatePhase::CompactionMarker, participant_id);
     let marker_record = RetainedCausalRecord {
@@ -236,58 +222,8 @@ fn marker_pinned_owner(
             active_marker_anchors: vec![marker_seq],
             historical_marker_deliveries: vec![],
             historical_causal_facts: vec![],
-            sequence: SequenceClaimFrontierRestore {
-                movable_claims: vec![
-                    MovableSequenceClaim {
-                        delivery_seq: own_exit,
-                        owner: SequenceDirectOwner::MembershipExit {
-                            participant_index: participant_id,
-                        },
-                    },
-                    MovableSequenceClaim {
-                        delivery_seq: peer_exit,
-                        owner: SequenceDirectOwner::MembershipExit {
-                            participant_index: DEPARTED_PEER,
-                        },
-                    },
-                ],
-                immutable_candidates: vec![],
-                products: SequenceProductRangesRestore {
-                    live_times_terminal: vec![],
-                    live_times_replacement_terminal: None,
-                    other_live_times_exit: vec![
-                        ExitProductRangeRestore {
-                            start: own_exit_product,
-                            length: 1,
-                            exit_participant: participant_id,
-                        },
-                        ExitProductRangeRestore {
-                            start: peer_exit_product,
-                            length: 1,
-                            exit_participant: DEPARTED_PEER,
-                        },
-                    ],
-                },
-                recovery: None,
-            },
-            order: OrderClaimFrontierRestore {
-                movable_claims: vec![
-                    MovableOrderClaim {
-                        transaction_order: 0,
-                        owner: OrderDirectOwner::MembershipExit {
-                            participant_index: participant_id,
-                        },
-                    },
-                    MovableOrderClaim {
-                        transaction_order: 1,
-                        owner: OrderDirectOwner::MembershipExit {
-                            participant_index: DEPARTED_PEER,
-                        },
-                    },
-                ],
-                immutable_candidates: vec![],
-                recovery: None,
-            },
+            sequence: two_identity_sequence_restore(claims, participant_id, DEPARTED_PEER),
+            order: two_identity_order_restore(participant_id, DEPARTED_PEER),
             recovery_marker_delivery_seq: None,
         },
         sequence,
@@ -512,8 +448,8 @@ fn the_retired_precedence_pole_backstop_names_itself_if_it_ever_fires() -> Resul
 /// everything is not a carrier, and the positive pole alone cannot detect
 /// that.
 #[test]
-fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier()
--> Result<(), String> {
+fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier() -> Result<(), String>
+{
     let fixture = incident_fixture(true)?;
     // A Recovered terminal against an Ordinary token fails the terminal-class
     // check at `binding_fate.rs:409-422`, well before any owner transition.
@@ -536,10 +472,7 @@ fn a_non_owner_transition_failure_stays_outside_the_owner_transition_carrier()
             "F8 §3.3 negative pole ONE: the terminal-class failure changed class: {refused:?}"
         ));
     }
-    if matches!(
-        refused,
-        BindingFateMeasurementError::OwnerTransition { .. }
-    ) {
+    if matches!(refused, BindingFateMeasurementError::OwnerTransition { .. }) {
         return Err(format!(
             "F8 §3.3 negative pole ONE: a non-owner-transition failure wore the owner-transition \
              carrier: {refused:?}"

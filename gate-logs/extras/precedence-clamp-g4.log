@@ -1,0 +1,105 @@
+PRECEDENCE-CLAMP G4 — battery on the final tree, 2026-08-05T01:22:38Z
+toolchain: rustc 1.97.1 (8bab26f4f 2026-07-14)
+
+$ cargo fmt --all --check
+rc=0
+
+$ cargo clippy -p liminal-protocol --all-targets -- -D warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+rc=
+
+$ cargo clippy --workspace --all-targets -- -D warnings
+   1 error: called `map(<f>).unwrap_or(false)` on an `Option` value
+   1 error: could not compile `liminal-server` (lib test) due to 16 previous errors
+   1 error: could not compile `liminal-server` (lib) due to 2 previous errors
+   1 error: field `derived_ack_endpoints` is never read
+   1 error: fields `participant_id`, `acknowledged_through`, and `index_debug` are never read
+   9 error: item in documentation is missing backticks
+   1 error: large size difference between variants
+   1 error: this function has too many arguments (8/7)
+   1 error: this function has too many lines (104/100)
+   1 error: this function has too many lines (162/100)
+
+PRE-EXISTING ON LANDED MAIN ca66543 (measured on a clean archive of that commit,
+same toolchain). liminal-protocol's three are FIXED by this branch; every remaining
+one is in liminal-server, is untouched here, and is deliberately left untouched so
+the G3 specimen gate measures the protocol change and not a server refactor:
+
+   1 error: could not compile `liminal-protocol` (lib test) due to 2 previous errors; 1 warning emitted
+   1 error: item in documentation is missing backticks
+   1 error: this function has too many lines (135/100)
+
+$ cargo clippy --workspace --all-targets -- -D warnings  [FINAL TREE]
+   1 error: called `map(<f>).unwrap_or(false)` on an `Option` value
+   1 error: could not compile `liminal-server` (lib test) due to 16 previous errors
+   1 error: could not compile `liminal-server` (lib) due to 2 previous errors
+   1 error: field `derived_ack_endpoints` is never read
+   1 error: fields `participant_id`, `acknowledged_through`, and `index_debug` are never read
+   9 error: item in documentation is missing backticks
+   1 error: large size difference between variants
+   1 error: this function has too many arguments (8/7)
+   1 error: this function has too many lines (104/100)
+   1 error: this function has too many lines (162/100)
+
+SAME LINTS ON LANDED MAIN ca66543 (clean archive, same toolchain) — the whole
+list below is PRE-EXISTING. liminal-protocol's three are FIXED on this branch;
+liminal-server's are untouched, deliberately, so G3 measures the protocol change
+and not a server refactor:
+   1 error: called `map(<f>).unwrap_or(false)` on an `Option` value
+   1 error: could not compile `liminal-protocol` (lib test) due to 2 previous errors; 1 warning emitted
+   1 error: could not compile `liminal-server` (lib test) due to 14 previous errors; 2 warnings emitted
+   1 error: could not compile `liminal-server` (lib) due to 2 previous errors
+  10 error: item in documentation is missing backticks
+   1 error: large size difference between variants
+   1 error: this function has too many arguments (8/7)
+   1 error: this function has too many lines (104/100)
+   1 error: this function has too many lines (135/100)
+   1 error: this function has too many lines (162/100)
+
+$ cargo test --workspace  [FINAL TREE]
+test result: ok. 441 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 338 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.28s
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 63 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.02s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.01s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.01s
+failures:
+---- server::participant::production::tests_f8_marker_poison::a_refused_connection_fate_leaves_no_durable_residue stdout ----
+---- server::participant::production::tests_f8_marker_poison::the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server stdout ----
+failures:
+test result: FAILED. 594 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 101.62s
+error: test failed, to rerun pass `-p liminal-server --lib`
+
+THE TWO TEST FAILURES ARE PRE-EXISTING ON LANDED MAIN ca66543, verified against
+a clean archive of that commit with the same toolchain. Both are the F8 server
+units, and both fail in their own FIXTURE ARMING with byte-identical text:
+
+  tests_f8_marker_poison::a_refused_connection_fate_leaves_no_durable_residue
+  tests_f8_marker_poison::the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server
+
+  "the peer's ack through 13 did not commit, so hard observer progress was never
+   lifted over the marker at 12 and the incident is not armed: StaleAuthority(
+   Live { ... capability_generation: Generation(1) ... current_generation:
+   Generation(2) })"
+
+This branch adds ZERO failures. It also does not repair those two, because they
+are a liminal-server fixture defect outside this brief's scope and repairing them
+would change the very server code the G3 specimen gate holds constant.

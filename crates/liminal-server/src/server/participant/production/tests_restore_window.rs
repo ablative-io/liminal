@@ -95,9 +95,11 @@ fn assert_boot_drained_and_released(
 ) -> Result<(), Box<dyn Error>> {
     let booted = installed_owner_facts(handler, conversation_id)?;
     if !booted.lane.is_empty() {
-        return Err(
-            format!("boot left the restored candidate lane occupied: {:?}", booted.lane).into(),
-        );
+        return Err(format!(
+            "boot left the restored candidate lane occupied: {:?}",
+            booted.lane
+        )
+        .into());
     }
     if booted.slots.contains(&drained_participant) {
         return Err("boot drained the terminal without releasing the victim's slot".into());
@@ -579,7 +581,11 @@ fn residence_frontier_census_sole_terminal_candidate_closure_clear() -> Result<(
     let restarted = restarted_handler(&fixture)?;
     let booted = installed_owner_facts(&restarted, fixture.conversation_id)?;
     if !booted.lane.is_empty() {
-        return Err(format!("boot left the censused candidate in the lane: {:?}", booted.lane).into());
+        return Err(format!(
+            "boot left the censused candidate in the lane: {:?}",
+            booted.lane
+        )
+        .into());
     }
     if booted.slots.contains(&sole_owner) {
         return Err("boot drained the censused candidate without releasing its slot".into());

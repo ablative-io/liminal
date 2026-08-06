@@ -89,9 +89,11 @@ fn assert_boot_drained_and_preserved(
 ) -> Result<(), Box<dyn Error>> {
     let booted = installed_owner_facts(handler, conversation_id)?;
     if !booted.lane.is_empty() {
-        return Err(
-            format!("boot left the restored candidate lane occupied: {:?}", booted.lane).into(),
-        );
+        return Err(format!(
+            "boot left the restored candidate lane occupied: {:?}",
+            booted.lane
+        )
+        .into());
     }
     if !booted.slots.contains(&drained_participant) {
         return Err("the boot Detached drain erased the victim's binding slot".into());
@@ -755,9 +757,11 @@ fn detached_residence_census_sole_terminal_candidate_closure_clear() -> Result<(
     let restarted = restarted_handler(&fixture)?;
     let booted = installed_owner_facts(&restarted, fixture.conversation_id)?;
     if !booted.lane.is_empty() {
-        return Err(
-            format!("boot left the censused candidate in the lane: {:?}", booted.lane).into(),
-        );
+        return Err(format!(
+            "boot left the censused candidate in the lane: {:?}",
+            booted.lane
+        )
+        .into());
     }
     if !booted.slots.contains(&sole_owner) || !booted.token_holders.contains(&sole_owner) {
         return Err("the boot Detached drain did not preserve the censused owner".into());
