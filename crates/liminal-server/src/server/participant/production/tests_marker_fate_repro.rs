@@ -547,9 +547,16 @@ fn a_cold_replayed_marker_ack_must_leave_the_sealed_token_in_step() -> Result<()
 /// DISCARDING the operation's own `Ok(value)`.
 ///
 /// ⚠ CITED BY ENCLOSING FUNCTION ON PURPOSE — AND FOR THE RIGHT REASON: a
-/// `file:line` carries an IMPLICIT REV and is meaningless without one. It is NOT
-/// because trees legitimately differ here; they do not. `handler.rs` is
-/// BYTE-IDENTICAL across `5bdf5df`, `6673d8d` and `70f5a19` (blob
+/// `file:line` carries an IMPLICIT REV and is meaningless without one — AND that
+/// rev must be shown to be IN THE SET UNDER REVIEW. Naming a rev makes a citation
+/// CHECKABLE; proving it an ancestor of the thing under review makes it RELEVANT.
+/// The disagreement that produced this comment was neither drift inside the
+/// review set nor identical trees: it was ONE READER STANDING OUTSIDE THE SET,
+/// citing `1646ed2` — a perfectly nameable rev, not an ancestor of `70f5a19`,
+/// whose `handler.rs` is 667 lines (blob `3d1af92e`) against 814 here. The files
+/// differed by 147 lines and the BLOCK merely happened to match. Within the
+/// review set proper, `handler.rs` IS BYTE-IDENTICAL across `5bdf5df`,
+/// `6673d8d` and `70f5a19` (blob
 /// `0ca75423decbde6f333d40789ef409f1ac34495c` at all three), and the arm is at
 /// `:491-511` with the `Err`/`has_staged` sibling at `:519-543`, AT THOSE REVS.
 ///
