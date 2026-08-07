@@ -10,10 +10,19 @@ of truth and cannot drift from its consumer.
 
 Three field roles, taken from the census and enforced here:
 
-  COMPARE   counts; drift in either direction is RED
+  COMPARE   counts AND the expected-failure set; drift in either direction
+            is RED
   REQUIRE   preconditions; a mismatch makes the comparison VOID -- neither a
             pass nor a failure, because the question was never validly asked
   RECORD    provenance; printed, never compared
+
+The expected-failure set is compared BY NAME, not by cardinality. A count of
+failures cannot tell two declared instrument reds from one fixed instrument
+plus one fresh regression: "2 failed, same as always" is the most reassuring
+output a suite can produce, which is exactly why it must not be trusted as a
+count (finding: Cally Ray, 2026-08-08). The runner asserts the failing set
+EQUALS the pinned set -- a new failure REDs, and a pinned failure that
+passes ALSO REDs, because the pin is then a stale declaration.
 
 Exit codes: 0 PASS, 1 RED, 2 instrument/usage error, 3 VOID.
 
@@ -34,6 +43,7 @@ from pathlib import Path
 PASS, RED, ERROR, VOID = 0, 1, 2, 3
 
 COMPARE_FIELDS = ("tests_started", "tests_ok", "tests_failed", "tests_ignored", "suites")
+COMPARE_SET_FIELD = "expected_failures"
 REQUIRE_FIELDS = ("baseline_tree", "toolchain", "cargo", "command")
 PIN_LINE = re.compile(r"^(?P<key>[a-z_]+)\s*=\s*(?P<value>.+?)\s*$")
 
@@ -72,11 +82,37 @@ def read_pin(census: Path) -> dict[str, str]:
     missing = [f for f in COMPARE_FIELDS if f not in pin]
     if missing:
         raise InstrumentError(f"census pin is missing COMPARE fields: {', '.join(missing)}")
+    if COMPARE_SET_FIELD not in pin:
+        raise InstrumentError(
+            f"census pin is missing {COMPARE_SET_FIELD}: a failure COUNT with no "
+            "named set is exactly the field this runner exists to refuse"
+        )
     return pin
 
 
-def count_stream(stream_path: Path) -> Counts:
-    """Count test-level events, refusing to guess past anything unparseable.
+def expected_failure_set(pin: dict[str, str]) -> frozenset[str]:
+    """Parse and coherence-check the pinned expected-failure set.
+
+    ``expected_failures = <none>`` declares an empty set. The set's size must
+    equal the pinned ``tests_failed`` count -- a pin that disagrees with
+    itself is an instrument error, never a comparison result.
+    """
+    raw = pin[COMPARE_SET_FIELD].strip()
+    names = frozenset() if raw == "<none>" else frozenset(
+        name.strip() for name in raw.split(",") if name.strip()
+    )
+    declared_count = int(pin["tests_failed"])
+    if len(names) != declared_count:
+        raise InstrumentError(
+            f"census pin is incoherent: tests_failed = {declared_count} but "
+            f"{COMPARE_SET_FIELD} names {len(names)} test(s); refusing to pick a side"
+        )
+    return names
+
+
+def count_stream(stream_path: Path) -> tuple[Counts, frozenset[str]]:
+    """Count test-level events and collect failing names, refusing to guess
+    past anything unparseable.
 
     The raw event stream is two populations summed: ``libtest-json-plus`` emits
     ``started`` for suites as well as tests, so an unfiltered count yields
@@ -86,6 +122,7 @@ def count_stream(stream_path: Path) -> Counts:
     if not stream_path.is_file():
         raise InstrumentError(f"nextest json stream not found: {stream_path}")
     tally: Counter[tuple[str, str]] = Counter()
+    failed_names: set[str] = set()
     unparseable = 0
     first_bad = 0
     for number, raw in enumerate(stream_path.read_text(encoding="utf-8").splitlines(), 1):
@@ -102,6 +139,14 @@ def count_stream(stream_path: Path) -> Counts:
         kind, name = event.get("type"), event.get("event")
         if isinstance(kind, str) and isinstance(name, str):
             tally[(kind, name)] += 1
+            if (kind, name) == ("test", "failed"):
+                test_id = event.get("name")
+                if not isinstance(test_id, str) or not test_id:
+                    raise InstrumentError(
+                        f"test-failed event without a usable name at line {number}; "
+                        "a failure that cannot be named cannot be set-compared"
+                    )
+                failed_names.add(test_id)
     if unparseable:
         raise InstrumentError(
             f"{unparseable} unparseable line(s) in {stream_path}, first at line {first_bad}; "
@@ -119,7 +164,12 @@ def count_stream(stream_path: Path) -> Counts:
             "zero test-started events: a dead producer and an empty world are the same "
             "number, so this is refused rather than compared"
         )
-    return counts
+    if len(failed_names) != counts.tests_failed:
+        raise InstrumentError(
+            f"the stream disagrees with itself: {counts.tests_failed} test-failed "
+            f"event(s) but {len(failed_names)} distinct failing name(s)"
+        )
+    return counts, frozenset(failed_names)
 
 
 def reconcile(counts: Counts) -> list[str]:
@@ -169,7 +219,8 @@ def main() -> int:
 
     try:
         pin = read_pin(args.census)
-        counts = count_stream(args.stream)
+        expected_failing = expected_failure_set(pin)
+        counts, observed_failing = count_stream(args.stream)
     except InstrumentError as failure:
         print(f"ERROR  {failure}", file=sys.stderr)
         return ERROR
@@ -203,7 +254,7 @@ def main() -> int:
     expected_started = args.expect_total if args.expect_total is not None else int(pin["tests_started"])
     expected = {
         "tests_started": expected_started,
-        "tests_ok": expected_started,
+        "tests_ok": expected_started - int(pin["tests_failed"]) - int(pin["tests_ignored"]),
         "tests_failed": int(pin["tests_failed"]),
         "tests_ignored": int(pin["tests_ignored"]),
         "suites": int(pin["suites"]),
@@ -221,13 +272,25 @@ def main() -> int:
         if want != got:
             drift.append(f"{field}: expected {want}, got {got} ({got - want:+d})")
 
+    unexpected = sorted(observed_failing - expected_failing)
+    stale = sorted(expected_failing - observed_failing)
+    set_flag = "ok " if not unexpected and not stale else "RED"
+    print(f"  {set_flag} {COMPARE_SET_FIELD:14s} pin names {len(expected_failing)}   run names {len(observed_failing)} (compared as a SET, not a count)")
+    for name in unexpected:
+        drift.append(f"UNEXPECTED failure, not in the pinned set: {name}")
+    for name in stale:
+        drift.append(
+            f"STALE declaration, pinned as failing but did not fail: {name} "
+            "(if it was fixed, the pin must say so before this can pass)"
+        )
+
     if drift:
-        print("\nRED  count drift; every difference must be reasoned, not waved through:")
+        print("\nRED  drift; every difference must be reasoned, not waved through:")
         for line in drift:
             print(f"  {line}")
         return RED
 
-    print("\nPASS  counts identical to the pin.")
+    print("\nPASS  counts identical to the pin and the failing set equals the pinned set by name.")
     return PASS
 
 
