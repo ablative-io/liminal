@@ -786,3 +786,146 @@ fn a_marker_ack_must_not_wedge_the_cached_authority_for_the_next_ordinary_ack()
         }
     }
 }
+
+/// `#42`, EXECUTED — the 2026-08-07 manifold outage's primal cause, pinned.
+///
+/// A delivered compaction marker mints one active marker anchor in the
+/// conversation's closure accounting. The marker-ack path retires it
+/// (`apply_marker_ack_frontier` moves cursor and anchor count atomically). The
+/// ORDINARY cumulative-ack path retires nothing: it advances the member's
+/// cursor with the closure accounting untouched, and consults no marker at
+/// all. An ordinary ack whose `through_seq` crosses the marker therefore
+/// splits the two ledgers the next admission's projection cross-checks —
+/// `derived` counts unaccepted anchors by CURSOR POSITION
+/// (`claim_frontier.rs ordinary_unaccepted_marker_anchors`), `stored` counts
+/// them by ACCOUNTING — and every admission from then on faults with
+/// `MarkerAnchorAccounting { derived: 0, stored: 1 }`, which the funnel
+/// converts to a silent connection close. The conversation is wedged for
+/// every member, forever; only history compaction rebuilds the accounting.
+///
+/// Two lawful fix shapes, and this unit accepts either:
+///  (a) the crossing ack retires the anchor exactly as a marker-ack would, or
+///  (b) the crossing ack is REFUSED with a wire-visible response.
+/// What must never survive: the crossing is ACCEPTED and the very next
+/// admission faults. That is the wedge, and it is what this unit reds on
+/// today.
+#[test]
+fn an_ordinary_ack_crossing_a_marker_must_not_wedge_the_conversation() -> Result<(), Box<dyn Error>>
+{
+    let fixture = attached_marker_fixture()?;
+    let epoch = offer_marker_and_read_live_epoch(&fixture)?;
+    assert_armed_post_attach(epoch)?;
+
+    let conversation_id = fixture.marker_delivery.conversation_id;
+    let marker_seq = fixture.marker_delivery.delivery_seq;
+
+    // 1. Ordinary traffic PAST the marker, so a crossing ack has a real
+    //    delivery to land on. Without it the ack below is an `AckGap` about a
+    //    delivery that does not exist and the crossing never happens.
+    let admitted = dispatch(
+        &fixture.handler,
+        fixture.catchup_connection,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id: fixture.catchup_participant,
+            capability_generation: epoch.capability_generation,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xF3; 16]),
+            payload: vec![0xF3],
+        }),
+    )
+    .map_err(|error| {
+        format!(
+            "NOT ARMED: no ordinary record could be admitted after the marker delivery, so no \
+             ack can cross the marker and this unit witnesses NOTHING: {error}"
+        )
+    })?;
+    let _ = &admitted;
+
+    // 2. Offer everything to the target so the crossing `through_seq` names a
+    //    delivery the target was actually offered.
+    let deliverable = offer_everything_available(
+        &fixture,
+        ParticipantOfferedProgress {
+            binding_epoch: epoch,
+            through_seq: marker_seq,
+        },
+    )?;
+    if deliverable <= marker_seq {
+        return Err(format!(
+            "NOT ARMED: nothing beyond the marker at {marker_seq} was offered to the target \
+             (highest offered {deliverable}), so no ordinary ack can cross it and this unit \
+             witnesses NOTHING. Admission answered {admitted:?}."
+        )
+        .into());
+    }
+
+    // 3. THE CROSSING. An ordinary cumulative ack straight through the marker.
+    //    No marker-ack is ever sent in this unit — that is the point: the
+    //    field client (a bridge SDK) never sent one either.
+    let crossing = dispatch(
+        &fixture.handler,
+        fixture.target_connection,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id,
+            participant_id: fixture.target_participant,
+            capability_generation: epoch.capability_generation,
+            through_seq: deliverable,
+        }),
+    );
+    match crossing {
+        // Fix shape (b): a wire-visible refusal of the crossing is lawful —
+        // fall through and prove the conversation is still admittable.
+        Ok(ServerValue::AckCommitted(_)) | Ok(_) => {}
+        Err(error) => {
+            return Err(format!(
+                "the CROSSING ACK ITSELF failed closed rather than committing or refusing on \
+                 the wire — a silent close one step earlier than the one this unit pins, and \
+                 it needs its own diagnosis: {error}"
+            )
+            .into());
+        }
+    }
+
+    // 4. THE ASSERTION. Whatever the crossing answered, the conversation must
+    //    still admit records. Under the defect it cannot: the projection
+    //    cross-check faults with `MarkerAnchorAccounting` and the funnel
+    //    closes the connection with no wire frame.
+    let follow_up = dispatch(
+        &fixture.handler,
+        fixture.catchup_connection,
+        ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id: fixture.catchup_participant,
+            capability_generation: epoch.capability_generation,
+            record_admission_attempt_token: RecordAdmissionAttemptToken::new([0xF4; 16]),
+            payload: vec![0xF4],
+        }),
+    );
+    match follow_up {
+        Ok(ServerValue::RecordCommitted(_)) => Ok(()),
+        Ok(other) => Err(format!(
+            "the admission after the crossing ack neither committed nor failed closed; it \
+             answered {other:?}, which needs its own diagnosis before anything is concluded."
+        )
+        .into()),
+        Err(error) => {
+            let rendered = error.to_string();
+            assert!(
+                !rendered.contains("MarkerAnchorAccounting"),
+                "#42 REPRODUCED: the ordinary ack crossed the delivered marker, advanced the \
+                 member's cursor, and retired NO anchor from the closure accounting — the two \
+                 ledgers the admission projection cross-checks now disagree by exactly one and \
+                 every admission to this conversation fails closed. This is the manifold \
+                 2026-08-07 wedge (spine capture: `record admission protocol fault: \
+                 Projection(MarkerAnchorAccounting {{ derived: 0, stored: 1 }})`), executed \
+                 rather than argued. Refusal: {rendered}"
+            );
+            Err(format!(
+                "the admission after the crossing ack failed, but NOT with the split-ledger \
+                 fault this unit exists to catch; it needs its own diagnosis before anything \
+                 is concluded: {rendered}"
+            )
+            .into())
+        }
+    }
+}
