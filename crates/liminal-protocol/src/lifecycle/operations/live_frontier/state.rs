@@ -61,13 +61,28 @@ pub(super) fn accounting_after_floor(
 pub(super) fn accounting_after_marker_ack(
     accounting: ClosureAccounting,
 ) -> Option<ClosureAccounting> {
+    accounting_after_marker_crossings(accounting, 1)
+}
+
+/// Retires `crossed` marker anchors accepted by a cumulative cursor advance.
+///
+/// The sibling of [`accounting_after_marker_ack`] for the ORDINARY ack path:
+/// an ordinary acknowledgement whose `through_seq` crosses a delivered
+/// compaction marker accepts it cumulatively, exactly as a marker-ack would
+/// have, and the anchor accounting must move with the cursor or the two
+/// ledgers the next admission cross-checks diverge
+/// (`MarkerAnchorAccounting { derived, stored }`) and the conversation wedges.
+pub(super) fn accounting_after_marker_crossings(
+    accounting: ClosureAccounting,
+    crossed: u64,
+) -> Option<ClosureAccounting> {
     accounting_after_rows_with_state(
         accounting,
         &[],
         accounting.state(),
         MarkerAccounting {
             credits: accounting.marker_capacity_credits(),
-            anchors: accounting.marker_anchors().checked_sub(1)?,
+            anchors: accounting.marker_anchors().checked_sub(crossed)?,
         },
         accounting.edge_sequence_claims(),
         accounting.edge_order_position_claims(),

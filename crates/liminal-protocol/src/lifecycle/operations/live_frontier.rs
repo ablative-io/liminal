@@ -35,7 +35,7 @@ use ledger::{
 };
 use state::{
     accounting_after_fenced_attach, accounting_after_leave, accounting_after_marker_ack,
-    accounting_after_rows, retained_attached, retained_terminal,
+    accounting_after_marker_crossings, accounting_after_rows, retained_attached, retained_terminal,
 };
 
 /// Complete executable frontier, closure-accounting, and keyed-retention owner.
@@ -1266,7 +1266,45 @@ pub fn apply_detach_frontier<EF, V>(
     )
 }
 
+/// Counts this participant's active marker anchors that a cumulative cursor
+/// advance from `previous_cursor` to `through_seq` crosses.
+///
+/// A crossed anchor is one that was unaccepted before the advance
+/// (`previous_cursor < marker seq`) and is accepted after it
+/// (`marker seq <= through_seq`) — the exact transition the admission
+/// projection's derived side (`ordinary_unaccepted_marker_anchors`) observes
+/// from the cursor, which is why the stored accounting must move by the same
+/// count in the same commit.
+fn crossed_marker_anchors(
+    owner: &LiveFrontierOwner,
+    participant_id: crate::wire::ParticipantId,
+    previous_cursor: crate::wire::DeliverySeq,
+    through_seq: crate::wire::DeliverySeq,
+) -> u64 {
+    owner
+        .frontiers
+        .retained_marker_records()
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.kind,
+                RetainedCausalRecordKind::CompactionMarker { participant_index, .. }
+                    if participant_index == participant_id
+            ) && previous_cursor < record.delivery_seq
+                && record.delivery_seq <= through_seq
+        })
+        .fold(0_u64, |count, _| count.saturating_add(1))
+}
+
 /// Applies a zero-debt participant acknowledgement cursor transition.
+///
+/// A cumulative ack whose `through_seq` crosses this participant's delivered
+/// compaction marker accepts it, so the marker's anchor is retired from the
+/// closure accounting in the same commit — the ordinary-path sibling of
+/// [`apply_marker_ack_frontier`]. Left unretired, the stored anchor count and
+/// the cursor-derived one diverge and every later admission faults
+/// (`MarkerAnchorAccounting`), which the dispatch funnel presents as a silent
+/// connection close (the 2026-08-07 manifold wedge).
 ///
 /// # Errors
 ///
@@ -1286,6 +1324,22 @@ pub fn apply_participant_ack_frontier(
     else {
         return failure(owner, operation, LiveFrontierError::Authority);
     };
+    let crossed = crossed_marker_anchors(
+        &owner,
+        request.participant_id,
+        current.cursor(),
+        request.through_seq,
+    );
+    let accounting = if crossed == 0 {
+        None
+    } else {
+        match accounting_after_marker_crossings(owner.closure_accounting, crossed) {
+            Some(accounting) => Some(accounting),
+            None => {
+                return failure(owner, operation, LiveFrontierError::ClosureAccounting);
+            }
+        }
+    };
     let participant = FrontierParticipant::new(
         request.participant_id,
         request.through_seq,
@@ -1299,6 +1353,9 @@ pub fn apply_participant_ack_frontier(
             return failure(owner, operation, map_frontier_error(error));
         }
     };
+    if let Some(accounting) = accounting {
+        owner.closure_accounting = accounting;
+    }
     Ok(LiveFrontierCommit { operation, owner })
 }
 
@@ -1326,6 +1383,24 @@ pub fn apply_nonzero_participant_ack_frontier(
     else {
         return failure(owner, operation, LiveFrontierError::Authority);
     };
+    // A nonzero-debt cumulative ack crosses markers exactly as the zero-debt
+    // one does; the anchor accounting moves with the cursor here too.
+    let crossed = crossed_marker_anchors(
+        &owner,
+        request.participant_id,
+        current.cursor(),
+        request.through_seq,
+    );
+    let accounting = if crossed == 0 {
+        None
+    } else {
+        match accounting_after_marker_crossings(owner.closure_accounting, crossed) {
+            Some(accounting) => Some(accounting),
+            None => {
+                return failure(owner, operation, LiveFrontierError::ClosureAccounting);
+            }
+        }
+    };
     let participant = FrontierParticipant::new(
         request.participant_id,
         request.through_seq,
@@ -1339,6 +1414,9 @@ pub fn apply_nonzero_participant_ack_frontier(
             return failure(owner, operation, map_frontier_error(error));
         }
     };
+    if let Some(accounting) = accounting {
+        owner.closure_accounting = accounting;
+    }
     Ok(LiveFrontierCommit { operation, owner })
 }
 
