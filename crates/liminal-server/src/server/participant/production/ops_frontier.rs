@@ -15,21 +15,21 @@ use liminal_protocol::lifecycle::{
     classify_record_admission_binding, drain_next_marker,
 };
 use liminal_protocol::wire::{
-    BindingEpoch, ParticipantDelivery, RecordAdmission, RecordAdmissionResponse,
+    BindingEpoch, ParticipantDelivery, RecordAdmission, RecordAdmissionResponse, RecordCommitted,
 };
 
 use crate::config::types::ParticipantConfig;
 use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
 
 use super::barrier::{ArmOutcome, OperationFacts};
-use super::facts::Digest;
+use super::facts::{Digest, ordinary_payload_fingerprint};
 use super::frontier::{ordinary_projection_limits, ordinary_record_charge};
 use super::log::{
     StoredBindingEpoch, StoredMarkerDrain, StoredOperation, StoredRecordAdmission,
     StoredRecordAdmissionRequest, StoredResourceVector, StoredRetainedCharge,
 };
 use super::outbox_projection::ReplayedProjectionFacts;
-use super::state::{ConversationAuthority, DurableAppend, StateError};
+use super::state::{CommittedAdmission, ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
     #[cfg(test)]
@@ -96,6 +96,44 @@ impl ConversationAuthority {
                 )
                 .into_server_value(),
             ));
+        }
+
+        // Contract amendment A2 (§0.13) defensive idempotence: a committed
+        // attempt token re-presented with byte-identical payload by the same
+        // participant answers the FIRST commit's exact result and commits
+        // nothing. Ordered deliberately AFTER the binding-authority
+        // classification above (moving this cheap lookup earlier would hand
+        // an unauthorized presenter a token oracle) and BEFORE any frontier
+        // or order allocation (a dedup hit consumes no transaction_order
+        // major and no delivery sequence).
+        if let Some(committed) = self
+            .committed_admissions
+            .get(&request.record_admission_attempt_token.into_bytes())
+        {
+            if committed.participant_id == request.participant_id
+                && committed.payload_fingerprint == ordinary_payload_fingerprint(&request.payload)
+            {
+                return Ok(ArmOutcome::respond(
+                    RecordAdmissionResponse::record_committed(RecordCommitted::new(
+                        record_envelope(request),
+                        committed.delivery_seq,
+                    ))
+                    .into_server_value(),
+                ));
+            }
+            // The token is the dedup KEY and the fingerprint only a GUARD: a
+            // mismatch is never answered with the first commit (that would
+            // silently discard an edited body) and never refused (no admitted
+            // refusal shape exists for it inside A2; the conflict arm is a
+            // separate register decision). It falls through to a normal
+            // admission, loudly.
+            tracing::warn!(
+                conversation_id = self.conversation_id,
+                participant_id = request.participant_id,
+                first_delivery_seq = committed.delivery_seq,
+                "ordinary admission attempt token reused with a different payload or \
+                 participant -- dedup bypassed, committing as a new record"
+            );
         }
 
         let owner = self.take_frontier()?;
@@ -269,11 +307,24 @@ impl ConversationAuthority {
         let response = persistence.outcome.clone();
         let order = persistence.order.major();
         let sequence = persistence.record.delivery_seq();
+        let dedup_token = persistence
+            .record
+            .request()
+            .record_admission_attempt_token
+            .into_bytes();
+        let dedup_entry = CommittedAdmission {
+            participant_id: persistence.record.request().participant_id,
+            delivery_seq: sequence,
+            payload_fingerprint: ordinary_payload_fingerprint(
+                &persistence.record.request().payload,
+            ),
+        };
         let owner = LiveFrontierOwner::from_record_admission_persistence(
             persistence,
             retained_record_limit,
         );
         self.install_frontier(owner)?;
+        self.committed_admissions.insert(dedup_token, dedup_entry);
         self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()?;
         self.record_produced_source(
@@ -362,6 +413,12 @@ impl ConversationAuthority {
         config: &ParticipantConfig,
     ) -> Result<(), StateError> {
         let request = row.request.clone().into_request()?;
+        let dedup_token = request.record_admission_attempt_token.into_bytes();
+        let dedup_entry = CommittedAdmission {
+            participant_id: request.participant_id,
+            delivery_seq: row.delivery_seq,
+            payload_fingerprint: ordinary_payload_fingerprint(&request.payload),
+        };
         let receiving_epoch = row.receiving_epoch.to_epoch()?;
         let tracking = if row.newly_tracked {
             ConnectionConversationTracking::Untracked
@@ -530,6 +587,7 @@ impl ConversationAuthority {
             retained_record_limit,
         );
         self.install_frontier(owner)?;
+        self.committed_admissions.insert(dedup_token, dedup_entry);
         self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()
     }

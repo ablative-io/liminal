@@ -151,6 +151,8 @@ mod tests_receipts_enrollment;
 #[cfg(test)]
 mod tests_record_admission;
 #[cfg(test)]
+mod tests_record_admission_dedup;
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_residue;
 #[cfg(test)]

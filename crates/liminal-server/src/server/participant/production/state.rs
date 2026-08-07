@@ -117,6 +117,18 @@ pub(super) struct PreparedOrdinaryFinalizer {
     pub(super) finalizer: PendingDiedOrdinaryFinalizer,
 }
 
+/// One committed ordinary admission's identity for contract amendment A2
+/// (§0.13 defensive idempotence): the attempt token (the map key) resolves to
+/// the first commit's assigned delivery sequence, its verified participant,
+/// and the payload fingerprint guarding the token against reuse across
+/// different bytes.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct CommittedAdmission {
+    pub(super) participant_id: ParticipantId,
+    pub(super) delivery_seq: DeliverySeq,
+    pub(super) payload_fingerprint: Digest,
+}
+
 /// One enrolled participant's live authority and replay facts.
 #[derive(Debug)]
 pub(super) struct Slot {
@@ -207,6 +219,13 @@ pub(super) struct ConversationAuthority {
     pub(super) retired: BTreeMap<ParticipantId, RetiredIdentity<Digest, Digest, Digest>>,
     /// Permanent enrollment-token index.
     pub(super) tokens: BTreeMap<[u8; 16], ParticipantId>,
+    /// Committed ordinary-admission attempt tokens (contract amendment A2,
+    /// §0.13 defensive idempotence). Rebuilt from durable rows on replay and
+    /// extended by every live commit, so its size mirrors the op log's
+    /// committed-admission rows and shrinks exactly when compaction retires
+    /// them: a re-present whose witness row has been compacted commits a
+    /// second copy — the NAMED dedup window, not a silent one.
+    pub(super) committed_admissions: BTreeMap<[u8; 16], CommittedAdmission>,
     /// F8B R-SEAL closed marker (§6.6). Set by the Died-flavor drain apply that
     /// erases this conversation's FINAL enrollment token, on the live apply and
     /// on every replay alike, and never appended as a row of its own — closure
@@ -361,6 +380,7 @@ impl ConversationAuthority {
             fate_occurrences: FateOccurrenceRouter::new(),
             retired: BTreeMap::new(),
             tokens: BTreeMap::new(),
+            committed_admissions: BTreeMap::new(),
             closed: false,
             next_order: 0,
             next_seq: 1,
