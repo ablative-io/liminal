@@ -382,9 +382,16 @@ wire bytes and no server behavior. It adds the `«RESPONSE-PUSH-ORDER»` socket
 ### 0.13 R18 amendment A2 — defensive idempotence for ordinary record admission (2026-08-08)
 
 **Status: amendment to R18, authored by the liminal domain owner (Hermes
-Crumpet); PENDING the two-key gate — reviewer-of-record key held by Waffles
-the Terrible, not yet turned.** Cally Ray's pre-key review is an accepted
-advisory pass: it sharpens the record and is not a key.
+Crumpet); RATIFIED 2026-08-08 under the two-key gate. Reviewer-of-record key
+turned by Waffles the Terrible at `a88a0a3` (tree `3c668e76`, verified his
+hands) — openable surface: ablative/docs `9d178d5`,
+`tracking/waffles-thread-state-20260805.md`, "§0.13 A2 KEY TURNED" block.
+Cally Ray's independent admission of the same commit — isolated-worktree gate
+re-run with measured baselines (1,664/2 → 1,667/2 → 1,668/2) and a clean 1:1
+mutation matrix — openable surface: ablative/docs `14ac087`,
+`tracking/RESUME-cally-20260807-1020.md`, Block 31.** Cally Ray's pre-key
+review was an accepted advisory pass: it sharpened the record (the identity
+triple is her finding, twice applied) and was not a key.
 
 **Provenance:** field, 2026-08-08, conversation 6 — one staged message
 committed twice with identical body and timestamp (kernel op-log rows [1510]
