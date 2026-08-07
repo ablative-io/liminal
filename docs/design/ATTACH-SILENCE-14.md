@@ -159,6 +159,63 @@ is answered by reachability analysis per site, not by mapping them all to frames
 - **`ops_attach_capacity.rs` (1), `ops_attach_finalizer.rs` (3).** Not yet
   classified. Named here so the census says which refs it saw.
 
+## Reachability sweep — first tranche (`ops_attach_lookup.rs`, 4 of 10 settled)
+
+Method: constructor census over the COMPLETE producer set, then the server's own
+call site. Each result is a measurement, not a reading of the prose.
+
+**PROVEN CLASS A — the premise is true, silence is contract-compliant:**
+
+1. *"leave conflict row observed in the credential-attach lookup"*. The complete
+   producer set is `lookup_credential_attach` (`lookup.rs:339-420`) plus its one
+   delegate `lookup_live_attach_receipt` (`:422-468`). Across both, the ONLY
+   `AttemptTokenBodyConflict` construction is `::CredentialAttach`. A Leave row
+   cannot arrive. Unreachable.
+2. *"enrollment provenance row observed in the credential-attach lookup"*. Same
+   producer set; the ONLY `ReceiptExpired` construction is `::CredentialAttach`.
+   Unreachable.
+3. *"retired identity observed in a binding that mints no tombstones"*. I
+   suspected this one — it is a claim about SERVER STATE, structurally identical
+   to the claim already proven false at `ops_attach.rs:215`. **It survived.**
+   Both identity inputs to the lookup are hardcoded on the attach path:
+   `ops_attach.rs:82` passes `PresentedIdentity::Live(&slot.member)`, and
+   `ops_attach_lookup.rs:45` binds `ResolvedIdentity::Live(&self.member)`. The
+   server mints a `Retired` identity in exactly one place, `ops_leave.rs:164`,
+   which is the leave path and not this one. Unreachable; premise TRUE.
+4. *"authorized attach routed through the refusal mapper"*. Caller-discipline
+   guard: reachable only if `ops_attach.rs:87`'s `AuthorizedFresh` check and the
+   mapper disagree, which is one function calling another six lines away. Class A.
+
+**STILL OPEN in this file (6):** two × *"attach receipt replay without a stored
+receipt"*, and the four inside `marker_bearing_attach_refusal`.
+
+⚠ **An instrument note, because it nearly produced a clean wrong answer.** Two of
+my own measurements of the same population disagreed — one predicate returned
+zero `Retired` constructions, another found one at `ops_leave.rs:164`. The count
+was wrong: `PresentedIdentity::Retired` does not match the turbofish form
+`PresentedIdentity::<Digest, Digest, Digest>::Retired` that the code actually
+uses. **When two machine readings disagree, measure; do not pick.** A zero from
+the narrower predicate would have been reported as "the server never mints
+tombstones at all", which is false.
+
+## A conformance gap found in passing — NOT a #14 silence, its own row
+
+`CredentialAttachResponse::retired()` exists as a register-admitted outcome
+(rows 5648/5659/5667) and has **ZERO production callers** — the only reference is
+`wire/authority_tests.rs:257`. Positive control through the same predicate:
+`stale_authority` has a real caller at `ops_attach_lookup.rs:208`.
+
+Because both identity inputs are hardcoded `Live`, the server cannot produce the
+`Retired` outcome the register admits for credential attach. An attach naming a
+participant that has left appears to fall to `ops_attach.rs:74`'s
+`participant_unknown` arm instead — collapsing "never existed" and "existed and
+is retired", which the register deliberately distinguishes.
+
+⚠ Stated as a CANDIDATE, not a finding: I have not established what leave does to
+the slot (whether it is removed or retained with a retired identity state), and
+that determines which arm actually runs. It is **not** a #14 item either way —
+the client gets a frame, just possibly the wrong one. Separate row.
+
 ## Honest limits of this pass
 
 - Class A status is asserted from the *shape* of each guard, not yet from a
