@@ -10,6 +10,33 @@ difference in how the counting was done. A pin no runner mechanically
 compares is an instruction, not a control — the block below is written to be
 consumed, not admired.
 
+## ⚠️ RE-PINNED 2026-08-08 — the first pin went stale unobserved, and the
+## count alone could not have caught what stale hides
+
+The original pin (tree `c921827`, measured 2026-07-29, `tests_failed = 0`)
+predated the F8 declared marker-poison instruments (landed 2026-08-01,
+`524b3f1`): two units that are red BY DESIGN, permanently, declared in their
+own module header (`tests_f8_marker_poison.rs`). From that landing on, this
+census could only RED an honest run — and no gate noticed, because no gate
+ran it: the gates of that window counted `cargo test` result lines instead
+(different runner, different denominator, incommensurable with this pin).
+**A gate nobody runs degrades silently, and its last green stays quotable
+forever** (finding: Cally Ray, 2026-08-08).
+
+Her second finding cuts deeper and reshaped the pin itself: the comparator
+compared failure COUNTS, while the declared-red set lived in prose that
+fires at nobody. Fix one F8 unit and break something unrelated, and the
+count stays 2 — green, silently. "2 failed, same as always" is the most
+reassuring output a suite can produce, which is exactly why it must not be
+consumed as a count. This file's own opening law — a pin no runner
+mechanically compares is an instruction — had been applied to every field
+except the one guarding the reds. **The pin now names the expected failing
+set in `expected_failures`, and `scripts/baseline-compare.py` asserts set
+EQUALITY by name: a third failure REDs, a substitution at equal count REDs,
+and a pinned red that passes REDs as a stale declaration.** The superseded
+pin remains readable at this file's git history (`git log -- docs/gates/
+BASELINE-CENSUS.md`); its numbers are historical citations, not live claims.
+
 ## The pin (machine-consumable)
 
 **Each field has exactly one role. A consumer that compares a RECORD field
@@ -18,34 +45,52 @@ a wall-clock duration. The partition is part of the pin, not commentary on it:
 
 | Role | Fields | Meaning |
 |------|--------|---------|
-| **COMPARE** | `tests_started`, `tests_ok`, `tests_failed`, `tests_ignored`, `suites` | The predicate. Drift in either direction is RED. |
+| **COMPARE** | `tests_started`, `tests_ok`, `tests_failed`, `tests_ignored`, `suites`, `expected_failures` | The predicate. Drift in either direction is RED. `expected_failures` is compared **as a set of names, never as a count**: a run whose failing set differs from the pinned set in EITHER direction is RED — a new failure, and equally a pinned failure that passes (the pin is then a stale declaration). The runner also refuses (ERROR, not RED) a pin whose `tests_failed` disagrees with the size of its own named set. |
 | **REQUIRE** | `baseline_tree`, `toolchain`, `cargo`, `command` | Preconditions. A mismatch does not fail the gate — it makes the comparison **void**, which must be reported as such and never as a pass. |
-| **RECORD** | `summary_line`, `machine`, `operator`, `measured_at`, `runner`, `evidence_branch`, `sibling_run` | Provenance. Print, never compare. |
+| **RECORD** | `summary_line`, `machine`, `operator`, `measured_at`, `runner`, `evidence` | Provenance. Print, never compare. |
 
 ```
-baseline_tree      = c9218279a5c187c977161ea3d1d9eb2e07d6379b
-baseline_tree_short = c921827
-summary_line       = Summary [ 130.895s] 1764 tests run: 1764 passed (3 slow, 1 leaky), 0 skipped
-tests_started      = 1764
-tests_ok           = 1764
-tests_failed       = 0
+baseline_tree      = f3155557934ec8b28b4214355f8d020a83da9b26
+baseline_tree_short = f315555
+summary_line       = Summary [ 284.658s] 1841 tests run: 1839 passed (3 slow), 2 failed, 0 skipped
+tests_started      = 1841
+tests_ok           = 1839
+tests_failed       = 2
 tests_ignored      = 0
-suites             = 36
+suites             = 37
+expected_failures  = liminal-server::liminal_server$server::participant::production::tests_f8_marker_poison::a_refused_connection_fate_leaves_no_durable_residue, liminal-server::liminal_server$server::participant::production::tests_f8_marker_poison::the_incident_sequence_reboots_into_a_discharged_fate_and_a_live_server
 toolchain          = rustc 1.97.1 (8bab26f4f 2026-07-14)
 cargo              = cargo 1.97.1 (c980f4866 2026-06-30)
 toolchain_pin      = rust-toolchain.toml (tree-pinned)
-machine            = Annabel's box (Annabels-MacBook-Pro, aarch64-apple-darwin)
-operator           = Mercury Toast (5b70322e-e7a9-451c-91ca-a3dfa7b05bda)
-measured_at        = 2026-07-29T21:21:29Z..21:25:08Z (claim window, pid 58281)
+machine            = Tom's box (Toms-MacBook-Pro, aarch64-apple-darwin)
+operator           = Hermes Crumpet (5b70322e-e7a9-451c-91ca-a3dfa7b05bd9)
+measured_at        = 2026-08-08, duration 284.658s, ended 06:59:57 local (log mtime)
 command            = NEXTEST_EXPERIMENTAL_LIBTEST_JSON=1 cargo nextest run --workspace --cargo-quiet --message-format libtest-json-plus --no-fail-fast
-runner             = canon r3 + five disclosed deltas, as-run sha256 82ea8eac3f9e0bf576d784bc20fa1c410fd48a94ebfc765aeb6d816abcbc49f9
-evidence_branch    = evidence/main-baseline-battery @ 67810be (off c921827)
-sibling_run        = evidence/release-0.5.1-battery @ fbf444c (off 62d9b80, identical counts)
+runner             = cargo-nextest 0.9.133; process exit 100 (nextest's tests-failed exit) is EXPECTED for as long as expected_failures is non-empty
+evidence           = gate-logs/extras/2026-08-08-census-repin.json.log + .summary.log (in-tree, committed with this pin)
 ```
 
-Reconciliation held at the source run, four ways: test-level started (1764)
-equals ok (1764) + failed (0) + ignored (0); the 36 suite-level sums agree;
-nextest Summary totals agree; JSON `ignored` equals Summary `skipped` (0).
+The two `expected_failures` are the F8 declared marker-poison instruments
+(`tests_f8_marker_poison.rs`, landed `524b3f1`): red BY DESIGN, permanently,
+per their own module header and the fallback-(b) declaration (`f024a08`).
+Fixing either one without amending this pin is a RED — correctly, because
+the declaration is then stale and must be updated in the same act.
+
+The battery ran at a working tree whose `.rs` content is byte-identical to
+`f315555` — this lane's edits touch only `docs/` and `scripts/`, verified
+with `git status --porcelain -- '*.rs'` returning empty at measurement time.
+
+Reconciliation held at the source run, four ways: test-level started (1841)
+equals ok (1839) + failed (2) + ignored (0); suite-level started (37) equals
+suite ok (36) + suite failed (1 — the binary carrying the F8 reds); nextest
+Summary totals agree (1841 run / 1839 passed / 2 failed / 0 skipped); total
+stream lines close with no remainder (3756 = 3682 test events + 74 suite
+events). The superseded pin's suite count was 36; the 37th is a test binary
+added between `c921827` and `f315555`. The superseded pin's evidence
+branches (`evidence/main-baseline-battery @ 67810be`,
+`evidence/release-0.5.1-battery @ fbf444c`) remain historical citations at
+their own revs; the "Known limits" entries below that cite them describe
+THAT run, not this one. This run carried no LEAK observation.
 
 ## ⚠️ How to extract the numbers — the raw stream is TWO POPULATIONS SUMMED
 
@@ -87,10 +132,24 @@ itself — a dead producer and an empty world are the same number, so a zero is
 never compared. `--expect-total` is the stated-in-advance denominator for a
 tree whose `.rs` files moved, and it is echoed in the verdict.
 
-Proven both ways against committed evidence before first use: the baseline and
-release-tip streams PASS; a toolchain mismatch VOIDs; `--expect-total 1772`
-against the 1764 run REDs naming `-8`; empty, corrupt, and five-tests-missing
-streams are each refused with the correct diagnosis.
+Proven both ways against committed evidence before first use (the original
+2026-07-29 proofs, at that pin): the baseline and release-tip streams PASS; a
+toolchain mismatch VOIDs; `--expect-total 1772` against the 1764 run REDs
+naming `-8`; empty, corrupt, and five-tests-missing streams are each refused
+with the correct diagnosis.
+
+The set comparison was proven both ways at the 2026-08-08 re-pin, six arms
+against the re-pin's own evidence stream (`gate-logs/extras/
+2026-08-08-census-proof.log`, the as-run transcript): the real stream PASSES
+under the full REQUIRE predicate; a fabricated third failure REDs named as
+UNEXPECTED; **a substitution at EQUAL failure count REDs on the set line
+alone while every count column reads `ok` — the discriminator no count can
+express, and the arm that justifies the field**; a pinned red that passes
+REDs named as a STALE declaration; **a doctored CENSUS (three names against
+`tests_failed = 2`) fed the REAL stream ERRORs — exit 2, not RED, not PASS
+(pin-side arm: Cally Ray's observation that a check which only ever sees
+valid configuration has never been tested, and that the coherence refusal
+guards this file's own future edits)**; a toolchain mismatch still VOIDs.
 
 Run the pinned command at the tree under gate, under the pinned toolchain,
 and compare `tests run` / `passed` / `skipped` against the block. If the diff

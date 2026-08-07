@@ -1,0 +1,95 @@
+=== ARM 0: real stream, full REQUIRE predicate -> expect PASS exit 0 ===
+RECORD (printed, never compared)
+  pin summary_line   = Summary [ 284.658s] 1841 tests run: 1839 passed (3 slow), 2 failed, 0 skipped
+  pin machine        = Tom's box (Toms-MacBook-Pro, aarch64-apple-darwin)
+  pin operator       = Hermes Crumpet (5b70322e-e7a9-451c-91ca-a3dfa7b05bd9)
+  pin measured_at    = 2026-08-08, duration 284.658s, ended 06:59:57 local (log mtime)
+  pin runner         = cargo-nextest 0.9.133; process exit 100 (nextest's tests-failed exit) is EXPECTED for as long as expected_failures is non-empty
+
+COMPARE against the pin at f315555
+  ok  tests_started  pin   1841   run   1841
+  ok  tests_ok       pin   1839   run   1839
+  ok  tests_failed   pin      2   run      2
+  ok  tests_ignored  pin      0   run      0
+  ok  suites         pin     37   run     37
+  ok  expected_failures pin names 2   run names 2 (compared as a SET, not a count)
+
+PASS  counts identical to the pin and the failing set equals the pinned set by name.
+exit=0
+=== ARM 1: fabricated third failure -> expect RED exit 1 ===
+RECORD (printed, never compared)
+  pin summary_line   = Summary [ 284.658s] 1841 tests run: 1839 passed (3 slow), 2 failed, 0 skipped
+  pin machine        = Tom's box (Toms-MacBook-Pro, aarch64-apple-darwin)
+  pin operator       = Hermes Crumpet (5b70322e-e7a9-451c-91ca-a3dfa7b05bd9)
+  pin measured_at    = 2026-08-08, duration 284.658s, ended 06:59:57 local (log mtime)
+  pin runner         = cargo-nextest 0.9.133; process exit 100 (nextest's tests-failed exit) is EXPECTED for as long as expected_failures is non-empty
+
+COMPARE against the pin at f315555
+  RED tests_started  pin   1841   run   1842
+  ok  tests_ok       pin   1839   run   1839
+  RED tests_failed   pin      2   run      3
+  ok  tests_ignored  pin      0   run      0
+  ok  suites         pin     37   run     37
+  RED expected_failures pin names 2   run names 3 (compared as a SET, not a count)
+
+RED  drift; every difference must be reasoned, not waved through:
+  tests_started: expected 1841, got 1842 (+1)
+  tests_failed: expected 2, got 3 (+1)
+  UNEXPECTED failure, not in the pinned set: liminal-server::liminal_server$server::participant::production::doctored::fabricated_third_failure
+exit=1
+=== ARM 2: substitution at EQUAL count -> expect RED exit 1 ===
+RECORD (printed, never compared)
+  pin summary_line   = Summary [ 284.658s] 1841 tests run: 1839 passed (3 slow), 2 failed, 0 skipped
+  pin machine        = Tom's box (Toms-MacBook-Pro, aarch64-apple-darwin)
+  pin operator       = Hermes Crumpet (5b70322e-e7a9-451c-91ca-a3dfa7b05bd9)
+  pin measured_at    = 2026-08-08, duration 284.658s, ended 06:59:57 local (log mtime)
+  pin runner         = cargo-nextest 0.9.133; process exit 100 (nextest's tests-failed exit) is EXPECTED for as long as expected_failures is non-empty
+
+COMPARE against the pin at f315555
+  ok  tests_started  pin   1841   run   1841
+  ok  tests_ok       pin   1839   run   1839
+  ok  tests_failed   pin      2   run      2
+  ok  tests_ignored  pin      0   run      0
+  ok  suites         pin     37   run     37
+  RED expected_failures pin names 2   run names 2 (compared as a SET, not a count)
+
+RED  drift; every difference must be reasoned, not waved through:
+  UNEXPECTED failure, not in the pinned set: liminal-server::liminal_server$server::participant::production::doctored::fabricated_third_failure
+  STALE declaration, pinned as failing but did not fail: liminal-server::liminal_server$server::participant::production::tests_f8_marker_poison::a_refused_connection_fate_leaves_no_durable_residue (if it was fixed, the pin must say so before this can pass)
+exit=1
+=== ARM 3: pinned red passes (stale declaration) -> expect RED exit 1 ===
+RECORD (printed, never compared)
+  pin summary_line   = Summary [ 284.658s] 1841 tests run: 1839 passed (3 slow), 2 failed, 0 skipped
+  pin machine        = Tom's box (Toms-MacBook-Pro, aarch64-apple-darwin)
+  pin operator       = Hermes Crumpet (5b70322e-e7a9-451c-91ca-a3dfa7b05bd9)
+  pin measured_at    = 2026-08-08, duration 284.658s, ended 06:59:57 local (log mtime)
+  pin runner         = cargo-nextest 0.9.133; process exit 100 (nextest's tests-failed exit) is EXPECTED for as long as expected_failures is non-empty
+
+COMPARE against the pin at f315555
+  ok  tests_started  pin   1841   run   1841
+  RED tests_ok       pin   1839   run   1840
+  RED tests_failed   pin      2   run      1
+  ok  tests_ignored  pin      0   run      0
+  ok  suites         pin     37   run     37
+  RED expected_failures pin names 2   run names 1 (compared as a SET, not a count)
+
+RED  drift; every difference must be reasoned, not waved through:
+  tests_ok: expected 1839, got 1840 (+1)
+  tests_failed: expected 2, got 1 (-1)
+  STALE declaration, pinned as failing but did not fail: liminal-server::liminal_server$server::participant::production::tests_f8_marker_poison::a_refused_connection_fate_leaves_no_durable_residue (if it was fixed, the pin must say so before this can pass)
+exit=1
+=== ARM 4 (pin-side, Cally): doctored CENSUS + REAL stream -> expect ERROR exit 2 ===
+ERROR  census pin is incoherent: tests_failed = 2 but expected_failures names 3 test(s); refusing to pick a side
+exit=2
+=== ARM 5: toolchain mismatch -> expect VOID exit 3 ===
+RECORD (printed, never compared)
+  pin summary_line   = Summary [ 284.658s] 1841 tests run: 1839 passed (3 slow), 2 failed, 0 skipped
+  pin machine        = Tom's box (Toms-MacBook-Pro, aarch64-apple-darwin)
+  pin operator       = Hermes Crumpet (5b70322e-e7a9-451c-91ca-a3dfa7b05bd9)
+  pin measured_at    = 2026-08-08, duration 284.658s, ended 06:59:57 local (log mtime)
+  pin runner         = cargo-nextest 0.9.133; process exit 100 (nextest's tests-failed exit) is EXPECTED for as long as expected_failures is non-empty
+
+VOID  precondition mismatch -- the comparison was never validly asked:
+  toolchain: pin 'rustc 1.97.1 (8bab26f4f 2026-07-14)' != run 'rustc 9.9.9 (dead)'
+  This is neither a pass nor a failure. Re-run under the pinned conditions.
+exit=3
