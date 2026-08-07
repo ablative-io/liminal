@@ -2215,6 +2215,30 @@ impl ClaimFrontiers {
         &self.marker_records
     }
 
+    /// Counts the marker anchors the ordinary-ack projection derives as
+    /// unaccepted — the same census the admission cross-check compares against
+    /// stored closure accounting. Exposed so load-time reconciliation can
+    /// measure the derived side of that ledger without re-running a projection.
+    #[must_use]
+    pub(in crate::lifecycle) fn unaccepted_marker_anchor_count(&self) -> u64 {
+        ordinary_unaccepted_marker_anchors(self).len() as u64
+    }
+
+    /// Counts planned compaction markers still pending as immutable sequence
+    /// candidates. A planned marker already holds its stored anchor while its
+    /// retained record exists only after the drain, so the record census alone
+    /// under-derives exactly while a drain is pending — the DrainFirst
+    /// discipline keeps the admission projection out of that window, and
+    /// load-time reconciliation must stay out of it the same way.
+    #[must_use]
+    pub(in crate::lifecycle) fn pending_marker_candidate_count(&self) -> u64 {
+        self.sequence
+            .immutable_candidates
+            .iter()
+            .filter(|candidate| matches!(candidate, ImmutableSequenceCandidate::Marker(_)))
+            .count() as u64
+    }
+
     /// Projects exact offered-marker cursor progress from one validated retained
     /// marker and its current bound identity.
     ///

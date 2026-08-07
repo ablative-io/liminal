@@ -929,3 +929,117 @@ fn an_ordinary_ack_crossing_a_marker_must_not_wedge_the_conversation() -> Result
         }
     }
 }
+
+/// `#12`, EXECUTED — the redundant marker-ack after a crossing ordinary ack.
+///
+/// The crossing fix (`67d780e`) made an ordinary ack through the marker retire
+/// its anchor — cumulative acceptance means what it says. But a client whose
+/// resume state predates the crossing still OWES the marker-ack and re-presents
+/// it against a cursor already sitting AT the marker. The frozen selector's
+/// AckNoOp arm (`marker_proof.rs:241-245`, `requested == cursor &&
+/// accepted_marker_at_cursor && is_marker_ack`) exists for exactly this
+/// acknowledgement, and it is dead only because the server hardcodes the flag
+/// `false`.
+///
+/// MEASURED at the pre-fix bytes, the dead arm presents as
+/// `MarkerMismatch { NoMarkerExpected }` — the exact response the kernel died
+/// on at 2026-08-07's second boot — WITHOUT any restart in this unit: the
+/// selector's expected-marker input exists only while the in-memory offer
+/// entry survives, and it does not survive to the re-present. Were the entry
+/// still present, the same missing flag would instead fall through to the
+/// commit path and double-retire the anchor (`checked_sub` on 0, frontier
+/// transition refused). Both are the one defect; this unit reds on either.
+///
+/// Green = the marker-ack answers `AckNoOp` (or lawfully commits, if a future
+/// accounting shape makes the re-commit sound). The fix computes the flag from
+/// the retained marker-record census, which is durable — so it answers the
+/// restart presentation too, not just the live one.
+#[test]
+fn a_redundant_marker_ack_at_the_cursor_must_answer_ack_noop() -> Result<(), Box<dyn Error>> {
+    let fixture = attached_marker_fixture()?;
+    let epoch = offer_marker_and_read_live_epoch(&fixture)?;
+    assert_armed_post_attach(epoch)?;
+
+    let conversation_id = fixture.marker_delivery.conversation_id;
+    let marker_seq = fixture.marker_delivery.delivery_seq;
+
+    // 1. Ordinary cumulative ack EXACTLY through the marker. Crossing includes
+    //    equality: the anchor is retired and the cursor lands AT the marker —
+    //    the precise state a resuming client that still owes its marker-ack
+    //    finds itself against.
+    let crossing = dispatch(
+        &fixture.handler,
+        fixture.target_connection,
+        ClientRequest::ParticipantAck(ParticipantAck {
+            conversation_id,
+            participant_id: fixture.target_participant,
+            capability_generation: epoch.capability_generation,
+            through_seq: marker_seq,
+        }),
+    )
+    .map_err(|error| {
+        format!(
+            "NOT ARMED: the ordinary ack through the marker was refused, so the cursor never \
+             reached the marker and there is nothing for a redundant marker-ack to be \
+             redundant ABOUT: {error}"
+        )
+    })?;
+    if !matches!(crossing, ServerValue::AckCommitted(_)) {
+        return Err(format!(
+            "NOT ARMED: the ordinary ack through the marker did not commit; it answered \
+             {crossing:?}, so the cursor never reached the marker and this unit witnesses \
+             NOTHING."
+        )
+        .into());
+    }
+
+    // 2. THE REDUNDANT MARKER-ACK. Same marker, same epoch, cursor already at
+    //    the marker's sequence. Merely redundant — not a fault.
+    let redundant = dispatch(
+        &fixture.handler,
+        fixture.target_connection,
+        ClientRequest::MarkerAck(MarkerAck {
+            conversation_id,
+            participant_id: fixture.target_participant,
+            capability_generation: epoch.capability_generation,
+            marker_delivery_seq: marker_seq,
+        }),
+    );
+    match redundant {
+        Ok(ServerValue::AckNoOp(_)) | Ok(ServerValue::MarkerAckCommitted(_)) => Ok(()),
+        Ok(ServerValue::MarkerMismatch(mismatch)) => Err(format!(
+            "#12 REPRODUCED: the redundant marker-ack for an already-accepted marker was \
+             answered with a MISMATCH — the frozen selector's AckNoOp arm is dead because \
+             the server hardcodes `accepted_marker_at_cursor = false`, so an acknowledgement \
+             that is merely redundant presents as a genuine fault. This is the response the \
+             kernel lawfully died on at 2026-08-07's second boot (`MarkerMismatch {{ \
+             NoMarkerExpected }}`), executed rather than argued. Answered: {mismatch:?}"
+        )
+        .into()),
+        Ok(other) => Err(format!(
+            "the redundant marker-ack neither no-opped nor committed; it answered {other:?}, \
+             which needs its own diagnosis before anything is concluded."
+        )
+        .into()),
+        Err(error) => {
+            let rendered = error.to_string();
+            assert!(
+                !rendered.contains("marker ack frontier transition failed"),
+                "#12 REPRODUCED: the redundant marker-ack fell through the dead AckNoOp arm \
+                 (server hardcodes `accepted_marker_at_cursor = false`) into the commit path \
+                 and DOUBLE-RETIRED the anchor the crossing ordinary ack already retired — \
+                 the frontier transition's `checked_sub` refused and the acknowledgement of \
+                 an already-accepted marker killed the request. This is the same missing \
+                 server half that presented in the field as `MarkerMismatch {{ \
+                 NoMarkerExpected }}` and took the kernel down on 2026-08-07's second boot. \
+                 Refusal: {rendered}"
+            );
+            Err(format!(
+                "the redundant marker-ack failed, but NOT by the double-retire this unit \
+                 exists to catch; it needs its own diagnosis before anything is concluded: \
+                 {rendered}"
+            )
+            .into())
+        }
+    }
+}
