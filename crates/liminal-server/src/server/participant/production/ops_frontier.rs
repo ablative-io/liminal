@@ -9,10 +9,10 @@
 use liminal_protocol::algebra::ResourceVector;
 use liminal_protocol::lifecycle::{
     BindingState, CapacityCounter, ConnectionConversationTracking, ImmutableSequenceCandidate,
-    LiveFrontierOwner, MarkerDeliveryProjection, PresentedIdentity, RecordAdmissionDecision,
-    RecordAdmissionPrestate, RetainedRecordCharge, SemanticConnectionCapacityDecision,
-    apply_record_admission as select_record_admission, classify_record_admission_binding,
-    drain_next_marker,
+    LiveFrontierOwner, MarkerDeliveryProjection, OrdinaryProjectionError, PresentedIdentity,
+    RecordAdmissionDecision, RecordAdmissionFault, RecordAdmissionPrestate, RetainedRecordCharge,
+    SemanticConnectionCapacityDecision, apply_record_admission as select_record_admission,
+    classify_record_admission_binding, drain_next_marker,
 };
 use liminal_protocol::wire::{
     BindingEpoch, ParticipantDelivery, RecordAdmission, RecordAdmissionResponse,
@@ -416,12 +416,93 @@ impl ConversationAuthority {
             self.observer_progress,
             ordinary_projection_limits(config),
         );
-        let RecordAdmissionDecision::Commit(commit) =
-            select_record_admission(prestate, encoded_record_charge)
-        else {
-            return Err(StateError::invariant(
-                "durable committed record did not replay as Commit",
-            ));
+        let commit = match select_record_admission(prestate, encoded_record_charge) {
+            RecordAdmissionDecision::Commit(commit) => commit,
+            RecordAdmissionDecision::Fault(failure)
+                if matches!(
+                    failure.fault(),
+                    RecordAdmissionFault::Projection(
+                        OrdinaryProjectionError::MarkerAnchorAccounting { derived, stored }
+                    ) if derived < stored
+                ) =>
+            {
+                // A committed row is a WITNESS that the live state it committed
+                // on held consistent marker ledgers. The load that served that
+                // commit had reconciled its orphaned anchors at load end — a
+                // memory-only repair — while THIS replay rebuilt the accounting
+                // from rows alone, without it. Any row committed after that
+                // live reconcile therefore re-derives the orphan split here and
+                // refuses, making the conversation unloadable (the 2026-08-08
+                // conversation-6 second signature). Re-perform the reconcile at
+                // exactly the first row that proves it happened live, and retry
+                // the selection once. A row that still refuses after an actual
+                // retirement falls to the original invariant unchanged.
+                let (_, unchanged) = failure.into_parts();
+                let (mut owner, request, encoded_record_charge) =
+                    LiveFrontierOwner::from_unchanged_record_admission(
+                        unchanged,
+                        retained_record_limit,
+                    );
+                let orphaned = owner.reconcile_orphaned_marker_anchors();
+                if orphaned == 0 {
+                    return Err(StateError::invariant(
+                        "durable committed record did not replay as Commit",
+                    ));
+                }
+                tracing::warn!(
+                    conversation_id = self.conversation_id,
+                    orphaned,
+                    delivery_seq = row.delivery_seq,
+                    "reconciled orphaned marker anchors during replay -- a committed row \
+                     witnessed the live load-end reconcile"
+                );
+                let (frontiers, closure_accounting, retained_charges, _) = owner.into_parts();
+                let slot = self.slots.get(&request.participant_id).ok_or_else(|| {
+                    StateError::invariant("durable record participant is absent")
+                })?;
+                let tracking = if row.newly_tracked {
+                    ConnectionConversationTracking::Untracked
+                } else {
+                    ConnectionConversationTracking::AlreadyTracked
+                };
+                let capacity = CapacityCounter::try_new(
+                    config.max_semantic_conversations_per_connection,
+                    occupied,
+                )
+                .map_err(|error| {
+                    StateError::invariant(format!("durable record capacity is invalid: {error:?}"))
+                })?;
+                let prestate = RecordAdmissionPrestate::new(
+                    request,
+                    PresentedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
+                    &slot.binding,
+                    receiving_epoch,
+                    tracking,
+                    capacity,
+                    closure_accounting,
+                    ResourceVector::new(
+                        config.max_ordinary_record_entries,
+                        config.max_ordinary_record_bytes,
+                    ),
+                    frontiers,
+                    retained_charges,
+                    self.observer_progress,
+                    ordinary_projection_limits(config),
+                );
+                let RecordAdmissionDecision::Commit(commit) =
+                    select_record_admission(prestate, encoded_record_charge)
+                else {
+                    return Err(StateError::invariant(
+                        "durable committed record did not replay as Commit",
+                    ));
+                };
+                commit
+            }
+            _ => {
+                return Err(StateError::invariant(
+                    "durable committed record did not replay as Commit",
+                ));
+            }
         };
         let persistence = commit.into_persistence_parts();
         let order = persistence.record.admission_order().transaction_order();
