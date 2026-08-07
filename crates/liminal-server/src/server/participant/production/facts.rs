@@ -102,6 +102,19 @@ pub fn detach_request_verifier(request: &DetachRequest) -> Digest {
     digest
 }
 
+/// Stable domain-separated fingerprint of an ordinary admission payload:
+/// the dedup GUARD of contract amendment A2 (§0.13). The attempt token is
+/// the dedup KEY (it names intent); this fingerprint only catches a token
+/// outliving the bytes it was minted for, which must never be answered with
+/// the first commit.
+#[must_use]
+pub fn ordinary_payload_fingerprint(payload: &[u8]) -> Digest {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"liminal/record-admission/payload-fingerprint/v1");
+    hasher.update(payload);
+    *hasher.finalize().as_bytes()
+}
+
 /// Stable non-reversible verifier for the presented Leave attach secret.
 ///
 /// The token and public request body deliberately do not enter this proof:
