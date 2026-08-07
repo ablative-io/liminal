@@ -186,8 +186,59 @@ call site. Each result is a measurement, not a reading of the prose.
    guard: reachable only if `ops_attach.rs:87`'s `AuthorizedFresh` check and the
    mapper disagree, which is one function calling another six lines away. Class A.
 
-**STILL OPEN in this file (6):** two × *"attach receipt replay without a stored
-receipt"*, and the four inside `marker_bearing_attach_refusal`.
+## Reachability sweep — tranche 2: `ops_attach_lookup.rs` is CLOSED, 10 of 10 Class A
+
+The remaining six settled, all by construction rather than by inspection.
+
+**The four in `marker_bearing_attach_refusal`.** This function IS live and its
+trigger is client-controlled — `ops_attach.rs:117` enters it whenever
+`request.accept_marker_delivery_seq.is_some()`, a field the client supplies. So
+these are not husk guards. They are still all unreachable:
+
+5. *"marker-bearing attach classification without a presented marker"*.
+   `MarkerProofInput::credential_attach` (`marker_proof.rs:29`) returns `None`
+   **exactly when** `accept_marker_delivery_seq` is `None`, and the caller only
+   enters when it `is_some()`. **The caller's guard and the constructor's `None`
+   condition are the same predicate on the same field.**
+6. *"attach marker proof classified as a marker-ack no-op"*. `AckNoOp` is
+   reachable only at `marker_proof.rs:241-245`, which requires
+   `input.is_marker_ack()`. The input here is `MarkerProofInput::CredentialAttach`.
+7. *"attach marker proof classified under a foreign operation envelope"*. Every
+   `MarkerMismatch`/`MarkerNotDelivered` in the selector is built with
+   `input.into_wire_request()` — it echoes the input it was given, and the input
+   is `CredentialAttach`. (Premise is testable and tested:
+   `marker_proof_tests.rs:103` pins that the envelope is preserved.)
+8. *"marker proof permitted although no marker was ever delivered"*. The server
+   constructs `MarkerProofState::new(cursor, false, None, proof_epoch, None)`,
+   so `expected_marker_delivery_seq` is `None`, and `marker_proof.rs:248` returns
+   `MarkerMismatch::NoMarkerExpected` **before any path to `Permit` exists**.
+
+**The two receipt-replay guards.** `CredentialAttachTokenPhase::LiveReceipt` is
+constructed only inside the `Some(attach)` arm of `attach_token_phase`
+(`ops_attach_lookup.rs:47-54`), `Bound`/`UnboundReceipt` are produced only from
+the LiveReceipt phase, and the mapper then reads `slot.attach` on the same
+borrow within the same request. `slot.attach` is `Some` by construction wherever
+those arms run.
+
+⇒ **`ops_attach_lookup.rs`: 10 of 10 Class A. The file is closed.** Ten guards,
+zero silences that a client was entitled to hear about.
+
+### Two things this tranche found that are not #14
+
+**It narrows board #12.** `#12` tracks `accepted_marker_at_cursor` hardcoded
+`false` at three sites, one of them this file's `MarkerProofState::new`. **At
+this site the hardcoded `false` is INERT**: the only branch that reads it
+(`marker_proof.rs:241`) also requires `input.is_marker_ack()`, which is false by
+construction on the attach path. Whatever #12 is elsewhere, it cannot change an
+outcome here. One site down, on evidence.
+
+**A functional limitation, honestly stated.** Because
+`expected_marker_delivery_seq` is hardcoded `None`, a client that presents
+`accept_marker_delivery_seq` **always** receives a `MarkerMismatch` and can never
+attach — only two of the selector's five outcomes are reachable at all. That is
+the "no participant-record delivery pump yet" boundary the call site documents.
+⚠ It is NOT a #14 item: the client gets a real frame on the reliable path. It is
+a capability gap, and it belongs to whoever owns the delivery pump.
 
 ⚠ **An instrument note, because it nearly produced a clean wrong answer.** Two of
 my own measurements of the same population disagreed — one predicate returned
