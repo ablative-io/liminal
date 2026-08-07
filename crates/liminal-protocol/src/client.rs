@@ -92,7 +92,7 @@
 //! | Expected detach + replay `Parked` | commit, live fate, testimony resolution, restore only when exact and unissued | 0 | recovery or replay start issues exactly one effect |
 //! | Expected detach + replay `InFlight` | release/start, restore only when exact and issued | 1 live, or serialized testimony after restore | correlated outcome/fate consumes the live correlation; restore mints the take-once testimony whose [`resolve_lost_operation_authority`] resolution parks exact-token replay |
 //! | Expected detach + replay `Empty`, `Superseded`, `LeaveSuperseded`, or terminal | never accepted, unreachable by construction | 0 | refused at restore by `ClientResumeRestoreError::ExpectedDetachActiveReplayMismatch` and in live code by [`ClientOperationRecordRefusalReason::DetachReplayIncompatible`], which closes the only door that could re-couple an expected detach to an inactive replay |
-//! | Active replay without exact expected detach | never accepted | 0 | typed `ActiveReplayExpectedDetachMismatch` restore refusal |
+//! | Active replay without exact expected detach | never accepted | 0 | typed `ActiveReplayExpectedDetachMismatch` restore refusal; the write side refuses to encode the same decoupling with `ClientResumeRecordEncodeError::DecoupledDetachReplay` (field 2026-08-07: a generation-skipping attach once stranded a replay in exactly this shape) |
 //! | Replay `Empty` | new, abort, restore without expected detach | 0 | admitted detach records `Parked` atomically |
 //! | Replay `Superseded` | authority-consuming matching attach, restore | 0 | old generation terminal; exact newer generation may replace; same-envelope re-record refused by construction (`DetachReplayIncompatible`) |
 //! | Replay `LeaveSuperseded` | authority-consuming matching durable Leave, restore | 0 | proves only that matching Leave/retirement superseded replay; public [`apply_leave_durable`] does **not** change binding to `Left`; same-envelope re-record refused by construction (`DetachReplayIncompatible`) |
@@ -540,6 +540,8 @@ pub use resume::{
 mod authority_property_tests;
 #[cfg(test)]
 mod d1_flip_tests;
+#[cfg(test)]
+mod gen_skip_supersession_tests;
 #[cfg(test)]
 mod r2_tests;
 #[cfg(test)]
