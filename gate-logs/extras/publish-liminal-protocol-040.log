@@ -1,0 +1,12 @@
+    Updating crates.io index
+   Packaging liminal-protocol v0.4.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+    Updating crates.io index
+    Packaged 162 files, 3.1MiB (544.2KiB compressed)
+   Verifying liminal-protocol v0.4.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+   Compiling liminal-protocol v0.4.0 (/Users/tom/Developer/ablative/stack/liminal/target/package/liminal-protocol-0.4.0)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 8.53s
+   Uploading liminal-protocol v0.4.0 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+    Uploaded liminal-protocol v0.4.0 to registry `crates-io`
+note: waiting for liminal-protocol v0.4.0 to be available at registry `crates-io`
+help: you may press ctrl-c to skip waiting; the crate should be available shortly
+   Published liminal-protocol v0.4.0 at registry `crates-io`
