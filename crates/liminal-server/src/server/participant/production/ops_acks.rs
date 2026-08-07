@@ -10,12 +10,13 @@ use liminal::durability::bridge::block_on;
 use liminal_protocol::lifecycle::{
     BindingState, MarkerAckCommit, MarkerAckDecision, MarkerProofState, ParticipantAckCommit,
     ParticipantAckDecision, PresentedIdentity, RecipientAckObligations,
-    SemanticConnectionCapacityDecision, apply_marker_ack, apply_marker_ack_frontier,
-    apply_participant_ack_frontier, apply_participant_ack_with_obligations,
+    RetainedCausalRecordKind, SemanticConnectionCapacityDecision, apply_marker_ack,
+    apply_marker_ack_frontier, apply_participant_ack_frontier,
+    apply_participant_ack_with_obligations,
 };
 use liminal_protocol::wire::{
-    BindingEpoch, MarkerAck, MarkerAckEnvelope, MarkerAckResponse, ParticipantAck,
-    ParticipantAckEnvelope, ParticipantAckResponse, ServerDiscriminant, ServerValue,
+    BindingEpoch, DeliverySeq, MarkerAck, MarkerAckEnvelope, MarkerAckResponse, ParticipantAck,
+    ParticipantAckEnvelope, ParticipantAckResponse, ParticipantId, ServerDiscriminant, ServerValue,
 };
 
 use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
@@ -311,9 +312,21 @@ impl ConversationAuthority {
             ),
             None => (None, receiving_epoch, None),
         };
+        // The server's half of the frozen selector's AckNoOp arm: a retained
+        // compaction marker of THIS participant sitting exactly AT the cursor
+        // was accepted — the cursor can only reach its own marker's sequence
+        // by a marker-ack or by an ordinary ack crossing it (which retires the
+        // anchor). A client that still owes the marker-ack (its resume state
+        // predates the crossing) re-presents it here, and without this flag
+        // the selector answers MarkerMismatch for an acknowledgement that is
+        // merely redundant — the 2026-08-07 kernel death.
+        let accepted_marker_at_cursor = self.marker_record_accepted_at_cursor(
+            request.participant_id,
+            cursor,
+        );
         let marker_state = MarkerProofState::new(
             cursor,
-            false,
+            accepted_marker_at_cursor,
             expected_marker,
             delivered_binding_epoch,
             progress,
@@ -356,6 +369,32 @@ impl ConversationAuthority {
                 Ok(outcome)
             }
         }
+    }
+
+    /// Answers whether a retained compaction marker owned by this participant
+    /// sits exactly at the given cursor — the durable fact behind the frozen
+    /// selector's `accepted_marker_at_cursor` flag. The retained-record census
+    /// survives restarts, so a marker accepted before a boot is still visible
+    /// here when its offer entry is not.
+    fn marker_record_accepted_at_cursor(
+        &self,
+        participant_id: ParticipantId,
+        cursor: DeliverySeq,
+    ) -> bool {
+        self.frontier().is_some_and(|owner| {
+            owner
+                .frontiers()
+                .retained_marker_records()
+                .iter()
+                .any(|record| {
+                    record.delivery_seq == cursor
+                        && matches!(
+                            record.kind,
+                            RetainedCausalRecordKind::CompactionMarker { participant_index, .. }
+                                if participant_index == participant_id
+                        )
+                })
+        })
     }
 
     fn commit_marker_ack(
@@ -467,6 +506,19 @@ impl ConversationAuthority {
             .slots
             .get(&row.request.participant_id)
             .map_or(0, |slot| slot.member.cursor());
+        // A log written before ordinary acks retired crossed marker anchors
+        // can hold an ordinary-ack row that crosses this marker FOLLOWED by
+        // this marker-ack row — both committed under the old accounting.
+        // Replaying the ordinary row through the fixed applies already
+        // advanced the cursor to (or past) the marker and retired its anchor;
+        // re-committing this row would retire the anchor a second time and
+        // kill the load. The acceptance this row witnesses is already durably
+        // reflected in the replayed state, so it is a no-op here. The sealed
+        // binding-fate token is safe to skip with it: the crossing row
+        // progressed it, and token replay is idempotent.
+        if cursor >= row.offered_marker_delivery_seq {
+            return Ok(());
+        }
         let marker_state = MarkerProofState::new(
             cursor,
             false,

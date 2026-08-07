@@ -129,6 +129,24 @@ impl ConversationAuthority {
             )));
         }
         merge.finish(&mut authority, sequence)?;
+        // Load-end anchor reconcile: participant erasure or record retirement
+        // can strand a stored marker anchor with NO log row left that could
+        // retire it — replay alone rebuilds the wedge (the conversation-6
+        // residue of the 2026-08-07 outage). Retire the orphaned excess here,
+        // loudly; the derived-ahead direction stays untouched for the
+        // admission projection to fault on.
+        if authority.frontier().is_some() {
+            let mut frontier = authority.take_frontier()?;
+            let orphaned = frontier.reconcile_orphaned_marker_anchors();
+            authority.install_frontier(frontier)?;
+            if orphaned > 0 {
+                tracing::warn!(
+                    conversation_id,
+                    orphaned,
+                    "reconciled orphaned marker anchors at load"
+                );
+            }
+        }
         Ok(authority)
     }
 

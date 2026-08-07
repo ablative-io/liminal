@@ -23,6 +23,8 @@ mod binding_terminal_tests;
 #[cfg(test)]
 mod enrollment_operation_tests;
 #[cfg(test)]
+mod live_frontier_reconcile_tests;
+#[cfg(test)]
 mod marker_ack_tests;
 #[cfg(test)]
 mod marker_drain_tests;

@@ -181,6 +181,48 @@ impl LiveFrontierOwner {
         self.retained_record_limit
     }
 
+    /// Retires marker anchors the stored closure accounting still holds but
+    /// the frontier census can no longer derive, returning how many were
+    /// retired.
+    ///
+    /// An anchor is derived only while its marker record survives retention
+    /// AND its owning participant is still active with a cursor short of the
+    /// marker; participant erasure or record retirement zeroes the derived
+    /// side with no acknowledgement row ever retiring the stored side. The
+    /// stranded anchor then wedges every later admission on the
+    /// `MarkerAnchorAccounting` cross-check with nothing left in the log that
+    /// could clear it. Reconciling retires exactly the orphaned excess; a
+    /// derived count at or above the stored one is left for the admission
+    /// projection to fault on, and a retirement the accounting arithmetic
+    /// refuses is left unchanged the same way.
+    ///
+    /// A PLANNED marker still pending as an immutable sequence candidate holds
+    /// its stored anchor before any retained record exists — the DrainFirst
+    /// discipline keeps admissions (and their cross-check) out of that window.
+    /// Those anchors are accounted, not orphaned, and are excluded here the
+    /// same way.
+    #[must_use]
+    pub fn reconcile_orphaned_marker_anchors(&mut self) -> u64 {
+        let derived = self
+            .frontiers
+            .unaccepted_marker_anchor_count()
+            .saturating_add(self.frontiers.pending_marker_candidate_count());
+        let stored = self.closure_accounting.marker_anchors();
+        let Some(orphaned) = stored.checked_sub(derived) else {
+            return 0;
+        };
+        if orphaned == 0 {
+            return 0;
+        }
+        match accounting_after_marker_crossings(self.closure_accounting, orphaned) {
+            Some(accounting) => {
+                self.closure_accounting = accounting;
+                orphaned
+            }
+            None => 0,
+        }
+    }
+
     /// Consumes the complete owner for `RecordAdmission`, Leave, or persistence.
     #[must_use]
     pub fn into_parts(
