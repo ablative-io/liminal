@@ -1168,7 +1168,7 @@ dependencies = [
 
 [[package]]
 name = "liminal-rs"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "async-trait",
  "beamr",
@@ -1202,7 +1202,7 @@ dependencies = [
 
 [[package]]
 name = "liminal-server"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
