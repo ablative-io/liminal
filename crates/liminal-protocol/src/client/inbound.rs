@@ -233,6 +233,12 @@ fn decide_inbound_inner(
         return inbound_refusal(aggregate, value, reason);
     }
 
+    // This clear stays coupled to the detach replay slot because every
+    // matching arm of `apply_correlated_value` supersedes or terminalizes the
+    // replay (attach supersession is generation-skip-aware), and any residual
+    // decoupling is refused at the next persist by
+    // `ClientResumeRecordEncodeError::DecoupledDetachReplay` instead of
+    // becoming a record no restore accepts.
     aggregate.expected = None;
     apply_correlated_value(&mut aggregate, &value);
     ClientInboundDecision::Applied(ClientInboundApplied { aggregate, value })

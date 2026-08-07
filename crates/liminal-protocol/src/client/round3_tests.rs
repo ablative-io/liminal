@@ -51,9 +51,14 @@ fn active_replay_without_matching_expected_detach_refuses_restore() -> TestResul
         },
         status: DetachReplayStatus::Parked,
     };
-    let record = aggregate
-        .resume_record()
-        .map_err(|_| "uncoupled fixture must encode inertly")?;
+    assert_eq!(
+        aggregate.resume_record(),
+        Err(ClientResumeRecordEncodeError::DecoupledDetachReplay)
+    );
+    let bytes = super::resume_encode::encode_aggregate(&aggregate)
+        .map_err(|_| "uncoupled fixture must encode inertly at the codec layer")?;
+    let record = ClientResumeRecord::decode_canonical(&bytes)
+        .map_err(|_| "canonical uncoupled fixture must decode")?;
     assert_eq!(
         record.restore(),
         Err(ClientResumeRestoreError::ActiveReplayExpectedDetachMismatch)

@@ -86,9 +86,14 @@ fn expected_detach_requires_active_matching_replay_full_matrix() -> TestResult {
             },
         };
         assert_eq!(
-            aggregate
-                .resume_record()
-                .map_err(|_| "converse fixture must encode")?
+            aggregate.resume_record(),
+            Err(ClientResumeRecordEncodeError::DecoupledDetachReplay)
+        );
+        let bytes = super::resume_encode::encode_aggregate(&aggregate)
+            .map_err(|_| "converse fixture must encode at the codec layer")?;
+        assert_eq!(
+            ClientResumeRecord::decode_canonical(&bytes)
+                .map_err(|_| "canonical converse fixture must decode")?
                 .restore(),
             Err(ClientResumeRestoreError::ExpectedDetachActiveReplayMismatch)
         );
@@ -128,9 +133,14 @@ fn active_replay_requires_exact_expected_detach_full_matrix() -> TestResult {
                 status: status.clone(),
             };
             assert_eq!(
-                aggregate
-                    .resume_record()
-                    .map_err(|_| "coupling fixture must encode")?
+                aggregate.resume_record(),
+                Err(ClientResumeRecordEncodeError::DecoupledDetachReplay)
+            );
+            let bytes = super::resume_encode::encode_aggregate(&aggregate)
+                .map_err(|_| "coupling fixture must encode at the codec layer")?;
+            assert_eq!(
+                ClientResumeRecord::decode_canonical(&bytes)
+                    .map_err(|_| "canonical coupling fixture must decode")?
                     .restore(),
                 Err(ClientResumeRestoreError::ActiveReplayExpectedDetachMismatch)
             );

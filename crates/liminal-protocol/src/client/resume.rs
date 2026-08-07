@@ -40,6 +40,11 @@ pub enum ClientResumeRecordEncodeError {
     },
     /// The own-codec payload cannot fit its u64 length field.
     LengthOverflow,
+    /// The live detach replay and expected slot have decoupled: an active
+    /// replay without its exact expected detach, or an expected detach without
+    /// its active replay. Encoding this state would mint a record every
+    /// restore refuses, so the write side refuses first.
+    DecoupledDetachReplay,
 }
 
 /// Typed canonical client-record decode failure.
@@ -239,9 +244,53 @@ impl ClientParticipantAggregate {
     /// Returns a typed nested-codec or length error if a live typed value cannot
     /// be represented canonically.
     pub fn resume_record(&self) -> Result<ClientResumeRecord, ClientResumeRecordEncodeError> {
+        validate_live_replay_coupling(self.expected.as_ref(), &self.detach_replay.state)?;
         Ok(ClientResumeRecord {
             canonical: encode_aggregate(self)?,
         })
+    }
+}
+
+/// Write-side twin of the restore coupling refusals
+/// (`ActiveReplayExpectedDetachMismatch` / `ExpectedDetachActiveReplayMismatch`):
+/// a decoupled aggregate is refused at encode instead of becoming a durable
+/// record no restore will accept. Deliberately looser than restore in one
+/// dimension: the issued/status pairing is not checked, so a lawful persist
+/// between issuing and the `Parked` to `InFlight` flip is never refused.
+fn validate_live_replay_coupling(
+    expected: Option<&ExpectedOperationState>,
+    replay: &DetachReplayState,
+) -> Result<(), ClientResumeRecordEncodeError> {
+    let active_replay = match replay {
+        DetachReplayState::Recorded { request, status }
+            if matches!(
+                status,
+                DetachReplayStatus::Parked | DetachReplayStatus::InFlight
+            ) =>
+        {
+            Some(request)
+        }
+        DetachReplayState::Empty | DetachReplayState::Recorded { .. } => None,
+    };
+    let expected_detach = expected.and_then(|expected| {
+        let ClientRequest::Detach(value) = &expected.request else {
+            return None;
+        };
+        Some(value)
+    });
+    match (active_replay, expected_detach) {
+        (Some(request), Some(value))
+            if value.conversation_id == request.conversation_id
+                && value.participant_id == request.participant_id
+                && value.capability_generation == request.capability_generation
+                && value.detach_attempt_token == request.detach_attempt_token =>
+        {
+            Ok(())
+        }
+        (None, None) => Ok(()),
+        (Some(_), _) | (None, Some(_)) => {
+            Err(ClientResumeRecordEncodeError::DecoupledDetachReplay)
+        }
     }
 }
 
@@ -256,6 +305,10 @@ impl super::ClientOperationCommit {
     ///
     /// Returns a typed nested-codec or length error before authority release.
     pub fn resume_record(&self) -> Result<ClientResumeRecord, ClientResumeRecordEncodeError> {
+        validate_live_replay_coupling(
+            self.aggregate.expected.as_ref(),
+            &self.aggregate.detach_replay.state,
+        )?;
         Ok(ClientResumeRecord {
             canonical: encode_aggregate(&self.aggregate)?,
         })

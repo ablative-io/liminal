@@ -100,9 +100,13 @@ impl SdkDetachReplayAggregate {
         let DetachReplayState::Recorded { request, status } = &mut self.state else {
             return false;
         };
+        // Generations are monotonic per participant, so any granted generation
+        // above the replayed detach's proves that capability is retired forever
+        // -- including a generation-SKIPPING attach whose request_generation
+        // never equaled the replay's (field 2026-08-07: a req-4-granted-5
+        // attach over a gen-3 replay must supersede, not strand it InFlight).
         if attach.conversation_id() == request.conversation_id
             && attach.participant_id() == request.participant_id
-            && attach.request_generation() == request.capability_generation
             && attach.capability_generation() > request.capability_generation
         {
             *status = DetachReplayStatus::Superseded;
