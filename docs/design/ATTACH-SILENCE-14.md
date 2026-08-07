@@ -267,6 +267,49 @@ the slot (whether it is removed or retained with a retired identity state), and
 that determines which arm actually runs. It is **not** a #14 item either way —
 the client gets a frame, just possibly the wrong one. Separate row.
 
+## Reachability sweep — tranche 3: capacity and finalizer, and a COUPLING that constrains the fix
+
+**`ops_attach_capacity.rs:184` — Class A, type-system gap.** `let [lrs, lrp, ps,
+pc, pp]: [CapacityCounter; 5] = counters.try_into()`. `ordered` is a fixed
+five-element array literal (the frozen five-scope order), the loop pushes exactly
+one counter per scope, and every non-`Valid` branch returns early. `counters.len()`
+is 5 by construction at that line; Rust simply cannot prove it statically.
+Unreachable.
+
+**`ops_attach_finalizer.rs:68/:88/:115` — Class A on production data, but
+CONDITIONALLY, and the condition is the Class B site itself.** All three sit
+behind `let BindingState::PendingFinalization(pending) = binding else { return
+Ok(None) }`, so all three need a binding in `PendingFinalization`.
+
+⇒ ⛔ **THE COUPLING. `allocate_attach_mode` — the `:215` gate — has exactly ONE
+caller, `ops_attach.rs:153`, and it is on the LIVE path only. `replay_attached`
+(`:222`) goes straight to `commit_attach_entry` with `CommitMode::Replay` and
+BYPASSES THAT GATE ENTIRELY.**
+
+So today these three are unreachable on production data only because the live
+path refuses at `:215` to ever *create* the stored state that would reach them.
+That refusal is the Class B defect — the one site #14 exists to fix.
+
+⇒ **This constrains #14's remedy, and it is the most useful thing in this
+tranche.** A fix at `:215` that merely *admits* a `PendingFinalization` attach
+would let that attach be COMMITTED AND STORED; on the next cold replay it arrives
+at `select_fenced_finalizer` through a path `:215` does not guard, and meets
+three bare-close `StateError::invariant` sinks. **A repair at `:215` that admits
+the state energises three downstream silences on a path its own gate never
+covers.** This is the same "the repair ENERGISES" shape already flagged for the
+fenced verifier, now with a second instance and a named mechanism.
+
+⚠ It is also a live instance of the banked correction that cold replay
+re-executes attaches, **so the live and replay paths are not disjoint** — a live
+guard is not a replay guard.
+
+**⇒ ACCEPTANCE CONSTRAINT for whoever fixes `:215`:** answering the client with a
+frame is necessary and NOT sufficient. The fix must either (a) keep refusing to
+commit the state, changing only how the refusal is *delivered*, or (b) if it
+admits the state, carry the replay path with it and account for all three
+finalizer guards. **Option (a) is the smaller, safer change and is what the red
+test at `557eed7` actually asks for** — it asserts `Respond`, not admission.
+
 ## Honest limits of this pass
 
 - Class A status is asserted from the *shape* of each guard, not yet from a
