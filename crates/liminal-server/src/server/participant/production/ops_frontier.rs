@@ -15,7 +15,8 @@ use liminal_protocol::lifecycle::{
     classify_record_admission_binding, drain_next_marker,
 };
 use liminal_protocol::wire::{
-    BindingEpoch, ParticipantDelivery, RecordAdmission, RecordAdmissionResponse, RecordCommitted,
+    BindingEpoch, ParticipantDelivery, ParticipantId, RecordAdmission, RecordAdmissionResponse,
+    RecordCommitted,
 };
 
 use crate::config::types::ParticipantConfig;
@@ -29,7 +30,7 @@ use super::log::{
     StoredRecordAdmissionRequest, StoredResourceVector, StoredRetainedCharge,
 };
 use super::outbox_projection::ReplayedProjectionFacts;
-use super::state::{CommittedAdmission, ConversationAuthority, DurableAppend, StateError};
+use super::state::{ConversationAuthority, DurableAppend, StateError};
 
 impl ConversationAuthority {
     #[cfg(test)]
@@ -99,40 +100,61 @@ impl ConversationAuthority {
         }
 
         // Contract amendment A2 (§0.13) defensive idempotence: a committed
-        // attempt token re-presented with byte-identical payload by the same
-        // participant answers the FIRST commit's exact result and commits
-        // nothing. Ordered deliberately AFTER the binding-authority
+        // identity — the FULL (attempt token, payload fingerprint, verified
+        // participant) triple — re-presented answers ITS commit's exact
+        // result and commits nothing. The triple key is the review-corrected
+        // shape (Cally Ray 2026-08-08, twice): any component demoted from
+        // the key to a checked field leaves one slot per remaining key, so a
+        // bypass commit evicts the demoted identity's answer and an honest
+        // answer-lost re-present of it duplicates — the field bug re-opened
+        // through the eviction. With the whole predicate in the key nothing
+        // can evict, a foreign presenter structurally cannot hit an entry
+        // not keyed to it (no disclosure check needed — the miss IS the
+        // guard), and every committed identity stays independently
+        // re-presentable. Ordered deliberately AFTER the binding-authority
         // classification above (moving this cheap lookup earlier would hand
         // an unauthorized presenter a token oracle) and BEFORE any frontier
         // or order allocation (a dedup hit consumes no transaction_order
         // major and no delivery sequence).
-        if let Some(committed) = self
+        let dedup_token = request.record_admission_attempt_token.into_bytes();
+        let dedup_key = (
+            dedup_token,
+            ordinary_payload_fingerprint(&request.payload),
+            request.participant_id,
+        );
+        if let Some(committed_delivery_seq) = self.committed_admissions.get(&dedup_key) {
+            return Ok(ArmOutcome::respond(
+                RecordAdmissionResponse::record_committed(RecordCommitted::new(
+                    record_envelope(request),
+                    *committed_delivery_seq,
+                ))
+                .into_server_value(),
+            ));
+        }
+        if self
             .committed_admissions
-            .get(&request.record_admission_attempt_token.into_bytes())
+            .range(
+                (dedup_token, [0_u8; 32], ParticipantId::MIN)
+                    ..=(dedup_token, [0xFF_u8; 32], ParticipantId::MAX),
+            )
+            .next()
+            .is_some()
         {
-            if committed.participant_id == request.participant_id
-                && committed.payload_fingerprint == ordinary_payload_fingerprint(&request.payload)
-            {
-                return Ok(ArmOutcome::respond(
-                    RecordAdmissionResponse::record_committed(RecordCommitted::new(
-                        record_envelope(request),
-                        committed.delivery_seq,
-                    ))
-                    .into_server_value(),
-                ));
-            }
-            // The token is the dedup KEY and the fingerprint only a GUARD: a
-            // mismatch is never answered with the first commit (that would
-            // silently discard an edited body) and never refused (no admitted
-            // refusal shape exists for it inside A2; the conflict arm is a
-            // separate register decision). It falls through to a normal
-            // admission, loudly.
+            // The token is already committed under a different payload or
+            // participant. Never answered with any prior commit (a changed
+            // body must not be silently discarded; a foreign participant
+            // must learn nothing) and never refused (no admitted refusal
+            // shape exists inside A2; the conflict arm is a separate
+            // register decision). Falls through to a normal admission,
+            // loudly. No sibling delivery sequence is logged: range order is
+            // fingerprint order, so any single sibling would be an
+            // arbitrary one wearing a confident label.
             tracing::warn!(
                 conversation_id = self.conversation_id,
                 participant_id = request.participant_id,
-                first_delivery_seq = committed.delivery_seq,
-                "ordinary admission attempt token reused with a different payload or \
-                 participant -- dedup bypassed, committing as a new record"
+                "ordinary admission attempt token already committed under a \
+                 different payload or participant -- dedup bypassed, \
+                 committing as a new record"
             );
         }
 
@@ -307,24 +329,21 @@ impl ConversationAuthority {
         let response = persistence.outcome.clone();
         let order = persistence.order.major();
         let sequence = persistence.record.delivery_seq();
-        let dedup_token = persistence
-            .record
-            .request()
-            .record_admission_attempt_token
-            .into_bytes();
-        let dedup_entry = CommittedAdmission {
-            participant_id: persistence.record.request().participant_id,
-            delivery_seq: sequence,
-            payload_fingerprint: ordinary_payload_fingerprint(
-                &persistence.record.request().payload,
-            ),
-        };
+        let dedup_key = (
+            persistence
+                .record
+                .request()
+                .record_admission_attempt_token
+                .into_bytes(),
+            ordinary_payload_fingerprint(&persistence.record.request().payload),
+            persistence.record.request().participant_id,
+        );
         let owner = LiveFrontierOwner::from_record_admission_persistence(
             persistence,
             retained_record_limit,
         );
         self.install_frontier(owner)?;
-        self.committed_admissions.insert(dedup_token, dedup_entry);
+        self.committed_admissions.insert(dedup_key, sequence);
         self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()?;
         self.record_produced_source(
@@ -413,12 +432,12 @@ impl ConversationAuthority {
         config: &ParticipantConfig,
     ) -> Result<(), StateError> {
         let request = row.request.clone().into_request()?;
-        let dedup_token = request.record_admission_attempt_token.into_bytes();
-        let dedup_entry = CommittedAdmission {
-            participant_id: request.participant_id,
-            delivery_seq: row.delivery_seq,
-            payload_fingerprint: ordinary_payload_fingerprint(&request.payload),
-        };
+        let dedup_key = (
+            request.record_admission_attempt_token.into_bytes(),
+            ordinary_payload_fingerprint(&request.payload),
+            request.participant_id,
+        );
+        let dedup_seq = row.delivery_seq;
         let receiving_epoch = row.receiving_epoch.to_epoch()?;
         let tracking = if row.newly_tracked {
             ConnectionConversationTracking::Untracked
@@ -587,7 +606,7 @@ impl ConversationAuthority {
             retained_record_limit,
         );
         self.install_frontier(owner)?;
-        self.committed_admissions.insert(dedup_token, dedup_entry);
+        self.committed_admissions.insert(dedup_key, dedup_seq);
         self.observe_replayed_position(order, sequence)?;
         self.advance_log_head()
     }

@@ -436,18 +436,29 @@ stands, and stops being catastrophic when violated.**
   `record_admission_attempt_token` field the `0x0007` wire body already
   carries; the row's omission predates this amendment and no wire byte
   changes.
-- That row gains re-answer semantics: an ordinary admission whose
-  (`conversation_id`, `participant_id`, `record_admission_attempt_token`)
-  matches a COMMITTED admission within the retained op-log window, presented
-  with byte-identical payload, answers the FIRST commit's exact
-  `RecordCommitted` (original `delivery_seq` and `sender_participant_id`)
-  and commits nothing.
-- The token is the dedup KEY; the payload fingerprint is a GUARD, not part
-  of the key. Same token with DIFFERENT payload bytes bypasses dedup: the
-  presentation commits as a NEW record exactly as today, plus a loud
-  server-side warning naming the token reuse — never the first commit's
-  answer, which would silently discard an edit. No new wire refusal exists
-  in this amendment.
+- That row gains re-answer semantics: a committed ordinary admission's
+  dedup IDENTITY is the (`record_admission_attempt_token`, payload bytes,
+  verified `participant_id`) TRIPLE. An admission whose identity matches a
+  COMMITTED admission within the retained op-log window answers that
+  identity's commit — its exact `RecordCommitted` (original `delivery_seq`
+  and `sender_participant_id`) — and commits nothing. Within the window
+  one identity has exactly one commit, so the re-answer is unambiguous.
+- The identity is the WHOLE predicate, with no component demoted to a
+  checked guard (pre-key review findings, Cally Ray, twice: first the
+  payload fingerprint, then the participant one field over — any component
+  left outside the identity leaves one answer slot per remaining identity,
+  so a reuse commit evicts the demoted identity's answer and some honest
+  answer-lost re-present duplicates, the field bug re-opened through the
+  eviction). A presentation differing in ANY component — same token with
+  different payload bytes, or the same (token, bytes) from a different
+  verified participant — is a DISTINCT identity: it bypasses dedup,
+  commits as a NEW record exactly as today, and draws a loud server-side
+  warning naming the token reuse; it is never answered with any prior
+  commit, which would silently discard an edit or disclose another
+  participant's commit facts (the foreign-participant miss is structural:
+  an entry not keyed to the presenter cannot be hit). Every committed
+  identity remains independently re-presentable. No new wire refusal
+  exists in this amendment.
 - Ordering: the dedup lookup runs AFTER authority verification (a token
   must never disclose commit facts to an unauthorized presenter) and BEFORE
   order allocation (a dedup hit consumes no `transaction_order` major).
@@ -5846,7 +5857,7 @@ together are exhaustive; no generic “proof/admission refusal” exists.
 | `MarkerAck { conversation_id, participant_id, capability_generation, marker_delivery_seq }` | `MarkerAckCommitted` / `AckNoOp` | common request envelope plus `current_cursor`; committed returns the resulting marker cursor and no-op returns it unchanged | Success only after tuple+binding match; record abandonment or idempotent confirmation. |
 | `MarkerAck` | `MarkerNotDelivered` / `MarkerMismatch` | exactly R-C3's flattened schema: `conversation_id,participant_id,capability_generation,requested_marker_delivery_seq` plus the selected reason's required `current_cursor` or `expected_marker_delivery_seq`; no common-envelope duplication | Terminal for this ack after authority succeeds; cursor holds. Invalid authority uses the generic `StaleAuthority` row and discloses no current marker/cursor state. |
 | `MarkerAck` | `Retired` | exact common request envelope plus `retired_generation` | Tombstone lookup uses the presented id; no secret, binding, or live/current cursor is present. |
-| `RecordAdmission { conversation_id, participant_id, capability_generation, record_admission_attempt_token, payload }` | `RecordCommitted` | exact common request envelope plus `sender_participant_id` and assigned `delivery_seq` | Success only after tuple+binding match; `sender_participant_id` equals the verified request participant. After response loss enter SDK `RecordAdmissionUnknown` and never resend automatically. A2 defensive idempotence: after authority verification and before order allocation, a token matching a committed admission within the retained op-log window with byte-identical payload re-answers that commit's exact `RecordCommitted` and commits nothing; a token match with different payload bytes commits a new record with a server-side warning and is never answered with the first commit. |
+| `RecordAdmission { conversation_id, participant_id, capability_generation, record_admission_attempt_token, payload }` | `RecordCommitted` | exact common request envelope plus `sender_participant_id` and assigned `delivery_seq` | Success only after tuple+binding match; `sender_participant_id` equals the verified request participant. After response loss enter SDK `RecordAdmissionUnknown` and never resend automatically. A2 defensive idempotence: after authority verification and before order allocation, an admission whose (attempt token, payload bytes, verified participant) identity matches a committed admission within the retained op-log window re-answers that identity's exact `RecordCommitted` and commits nothing; a presentation differing in any identity component commits a new record with a server-side warning and is never answered with any prior commit. |
 | Ordinary record admission | `RecordTooLarge` / `ConversationSequenceExhausted` / `MarkerClosureCapacityExceeded` | `RecordTooLarge` carries `dimension: Entries\|Bytes`, exact `encoded_record_charge`, and exact componentwise `max_ordinary_record_charge`; exhaustion carries exactly one nested canonical ten-field `sequence_budget`; closure carries the complete generic `MarkerClosureCapacityExceeded` row above | Terminal for this record; refusal consumes no sequence and preserves floor, identity, every exit/terminal/marker claim, credit, and debt edge. |
 | Ordinary record admission | `ObserverBackpressure` | exact common request envelope plus `backpressure_epoch,observer_progress` | A received refusal may park for one progress-cycle retry; a lost response is ambiguous and terminal. |
 | Reconnect recovery handshake | `ObserverRecoveryAccepted` | after R-D2's structural status count, exactly one request-ordered `statuses` list whose entries are `ObserverProgressStatus { conversation_id,refused_epoch,current_observer_progress,armed,progressed }` | Single whole-batch success. Older epochs are progressed/unarmed; equal epochs atomically arm then snapshot. Empty input returns an empty list. Matching progress retries every bounded local row at that epoch. |

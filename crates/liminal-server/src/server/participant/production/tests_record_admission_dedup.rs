@@ -232,19 +232,21 @@ fn distinct_tokens_identical_bodies_commit_twice() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// PIN 4 — the guard: same token + DIFFERENT payload bytes bypasses dedup
-/// and commits a NEW record; it is specifically never answered with the
-/// first commit, which would silently discard the changed body. The
-/// server-side warning is a diagnostic, not the mechanism, and is not
-/// asserted here (no capture harness in this suite); the two-commits outcome
-/// is the mechanism and is.
+/// PIN 4 — the guard, re-derived against the PAIR-KEYED map (review
+/// finding, Cally Ray 2026-08-08): same token + DIFFERENT payload bytes
+/// bypasses dedup and commits a NEW record; it is specifically never
+/// answered with any prior commit, which would silently discard the changed
+/// body. The server-side warning is a diagnostic, not the mechanism, and is
+/// not asserted here (no capture harness in this suite); the two-commits
+/// outcome is the mechanism and is.
 ///
-/// The pin also fixes the post-bypass map semantics: the token map mirrors
-/// the MOST RECENT commit under a token (last-writer-wins). That choice is
-/// load-bearing for the answer-lost class: after an edit slipped through
-/// under a reused token, a lost answer and re-present of the EDITED bytes
-/// must dedup against the edited commit — first-writer-wins would re-open
-/// the field bug for exactly that record.
+/// Because a record's identity is (token, bytes) and each identity owns its
+/// own map entry, there is no one-slot policy left to defend: after a
+/// bypass commit under a reused token, an answer-lost re-present of the
+/// EDITED bytes dedups against the edited commit AND an answer-lost
+/// re-present of the ORIGINAL bytes dedups against the original commit.
+/// Under the rejected token-only key the second half duplicated — the field
+/// bug re-opened for the original record; this pin holds both halves.
 #[test]
 fn same_token_different_body_commits_new_record_and_never_answers_first()
 -> Result<(), Box<dyn Error>> {
@@ -291,8 +293,8 @@ fn same_token_different_body_commits_new_record_and_never_answers_first()
         "a mismatched body must commit anew, never receive the first answer"
     );
 
-    // Last-writer-wins: the edited commit now owns the token's dedup answer,
-    // so an answer-lost re-present of the edited bytes dedups against it...
+    // Each committed identity owns its own answer: an answer-lost re-present
+    // of the edited bytes dedups against the edited commit...
     let edited_replay = require_committed(dispatch(
         &handler,
         connection,
@@ -305,9 +307,9 @@ fn same_token_different_body_commits_new_record_and_never_answers_first()
         ),
     )?)?;
     assert_eq!(edited_replay.delivery_seq(), edited.delivery_seq());
-    // ...while the ORIGINAL bytes under the same token are again a mismatch
-    // and again commit anew — never a silent answer carrying either seq.
-    let original_again = require_committed(dispatch(
+    // ...AND an answer-lost re-present of the ORIGINAL bytes dedups against
+    // the original commit — the half that duplicated under a token-only key.
+    let original_replay = require_committed(dispatch(
         &handler,
         connection,
         admission(
@@ -318,6 +320,108 @@ fn same_token_different_body_commits_new_record_and_never_answers_first()
             original_body,
         ),
     )?)?;
-    assert!(original_again.delivery_seq() > edited.delivery_seq());
+    assert_eq!(original_replay.delivery_seq(), first.delivery_seq());
+    Ok(())
+}
+
+/// PIN 5 — the participant leg of the identity triple (review finding,
+/// Cally Ray 2026-08-08, second pass): a DIFFERENT verified participant
+/// presenting an already-committed (token, bytes) pair commits its OWN new
+/// record — it can never be answered with the first participant's commit,
+/// structurally, because it cannot hit a map entry not keyed to it — and
+/// its commit EVICTS NOTHING: both participants' identities remain
+/// independently re-presentable afterwards. Under the rejected pair key
+/// (participant demoted to a checked field) the foreign commit overwrote
+/// the original participant's answer and the original's honest answer-lost
+/// re-present committed a second copy — the field bug re-opened across
+/// participants.
+#[test]
+fn different_participant_same_token_and_bytes_commits_anew_and_evicts_nothing()
+-> Result<(), Box<dyn Error>> {
+    let home = tempfile::tempdir()?;
+    let data_dir = home.path().join("durability");
+    let conversation_id = 950;
+    let first_connection = ConnectionIncarnation::new(94, 5);
+    let second_connection = ConnectionIncarnation::new(94, 6);
+    let handler = open_handler(&data_dir)?;
+    let first_member = require_enrolled(dispatch(
+        &handler,
+        first_connection,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([0x5A; 16]),
+        }),
+    )?)?;
+    let second_member = require_enrolled(dispatch(
+        &handler,
+        second_connection,
+        ClientRequest::Enrollment(EnrollmentRequest {
+            conversation_id,
+            enrollment_token: EnrollmentToken::new([0x5B; 16]),
+        }),
+    )?)?;
+    let token = RecordAdmissionAttemptToken::new([0x5C; 16]);
+    let body = vec![0x42, 0x43, 0x44];
+    let first = require_committed(dispatch(
+        &handler,
+        first_connection,
+        admission(
+            conversation_id,
+            &first_member,
+            Generation::ONE,
+            token,
+            body.clone(),
+        ),
+    )?)?;
+
+    // The second participant's presentation of the identical (token, bytes)
+    // is a DISTINCT identity: a new commit with its own sender, never the
+    // first participant's answer.
+    let foreign = require_committed(dispatch(
+        &handler,
+        second_connection,
+        admission(
+            conversation_id,
+            &second_member,
+            Generation::ONE,
+            token,
+            body.clone(),
+        ),
+    )?)?;
+    assert!(foreign.delivery_seq() > first.delivery_seq());
+    assert_eq!(
+        foreign.sender_participant_id(),
+        second_member.participant_id()
+    );
+
+    // Nothing was evicted: BOTH identities still answer their own commits.
+    let first_replay = require_committed(dispatch(
+        &handler,
+        first_connection,
+        admission(
+            conversation_id,
+            &first_member,
+            Generation::ONE,
+            token,
+            body.clone(),
+        ),
+    )?)?;
+    assert_eq!(first_replay.delivery_seq(), first.delivery_seq());
+    assert_eq!(
+        first_replay.sender_participant_id(),
+        first_member.participant_id()
+    );
+    let second_replay = require_committed(dispatch(
+        &handler,
+        second_connection,
+        admission(
+            conversation_id,
+            &second_member,
+            Generation::ONE,
+            token,
+            body,
+        ),
+    )?)?;
+    assert_eq!(second_replay.delivery_seq(), foreign.delivery_seq());
     Ok(())
 }
