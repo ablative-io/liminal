@@ -143,6 +143,8 @@ mod tests_outbox_owner;
 #[cfg(test)]
 mod tests_outbox_replay;
 #[cfg(test)]
+mod tests_pending_died_live_reachability;
+#[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_receipts;
 #[cfg(test)]
