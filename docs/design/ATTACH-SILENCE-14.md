@@ -435,3 +435,62 @@ on the tranches above. `ops_session.rs:241` is the detach twin of the
 misclassified site and was never inside the 28 — the original census covered
 the attach path only, so the detach arm has had no sweep at all and its
 `StateError::invariant` sites are unclassified.
+
+## The detach arm's first two classifications, measured at `902f514`
+
+The detach arm carries **eight** `StateError::invariant` sites
+(`ops_session.rs` `:96 :101 :190 :205 :214 :223 :241 :256`). Two of them sit at
+the LOOKUP stage, ahead of `allocate_position` (`:117`) and `detach_commit`
+(`:125`), where every sibling arm already returns
+`Ok(ArmOutcome::respond(..))` — so unlike `:241` they satisfy the carrier's
+consumed-no-authority precondition and are the arm's only cheap candidates.
+Both are classified here rather than left to the phrase "unclassified".
+
+**`:96` — `Retired` — CLASS A, and now measured rather than assumed.** Its
+message asserts "retired identity observed in a binding that mints no
+tombstones". That is the same *form* of claim as the one the funnel proved
+false at `allocate_attach_mode`, so it was checked at the bytes rather than
+read: `ConversationAuthority::retired` is constructed empty
+(`state.rs:398`) and **has no insertion site anywhere in `liminal-server`** —
+the only `retired.insert` in the crate belongs to `outbox.rs`'s unrelated
+`BTreeSet`. The map is therefore permanently empty, no lookup can resolve a
+tombstone, and the message is accurate. ⚠ The same single measurement settles
+the identically-worded `ops_attach_lookup.rs:312` and `ops_enroll.rs:554`, so
+tranche 1's Class A call at `:312` is confirmed by measurement rather than by
+its own construction argument.
+
+**`:101` — `PendingReplayRequired` — CLASS B, an exact register row exists, and
+it is still NOT built here.** This is the detach arm's true twin of the sink
+the funnel answered, and every part of the case is positive:
+
+- **It is reachable, by this lane's own fixture.** The register mints
+  `PendingFinalization` and `detach_replay::Pending` in ONE transition (the
+  "first accepted while append is blocked" row), so the pending detach cell is
+  born with the binding state whose reachability `tests_14_attach_presentation`
+  already proves. The message "pending detach cell observed in a binding that
+  commits detaches immediately" is false for the same reason its attach twin's
+  was.
+- **The row is exact, not borrowed.** The register's
+  "`DetachRequest` exact-token replay while cell is Pending" row is
+  `ObserverBackpressure`, and `DetachLookupResult`'s own doc names this variant
+  "an exact pending token requires the equality/drain/rewrite transition".
+- **The protocol already implements the whole transition.**
+  `PendingReplayRequest::apply` (`detach.rs:690+`) covers all three arms.
+
+**Why it is nonetheless out of scope for the funnel, stated as a boundary and
+not a deferral.** Only the EQUALITY arm
+(`observer_progress == cell.refused_epoch()`, `PendingDrainDecision::NotAttempted`)
+is pure presentation — it returns the cell unchanged. The other two arms are
+record mutations: `StillBlocked` rewrites `refused_epoch` to the newer
+progress, and `Committed` completes the detach and appends. #14's constraint is
+that a refusal which commits nothing must still commit nothing, and this lane
+changes no record mutations; driving a drain decision so the server can choose
+between those arms is a server capability that does not exist yet, not a
+delivery change. Building only the equality arm and leaving the others as bare
+closes would answer the common retry and still strand the client precisely when
+progress HAS moved — the fix that closes a different failure.
+
+**⇒ The detach arm's standing count.** Of eight sites: one Class A by
+measurement (`:96`), one Class B with an exact row and a named blocker
+(`:101`), one misclassified `LiveFrontierError` twin (`:241`), and **five
+unclassified** (`:190 :205 :214 :223 :256`).
