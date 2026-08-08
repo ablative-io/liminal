@@ -291,6 +291,17 @@ impl SubscriptionInbox {
                 return InboxAdmission::Closed;
             }
             if state.queue.len() >= state.depth_cap {
+                // WORKTREE PROBE (ws-parked-delivery measurement lane): the
+                // PERMANENT starvation edge. This sets the sticky overflow flag
+                // the delivery pump sheds on, so this line is where a
+                // subscription stops being a subscription.
+                if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                    eprintln!(
+                        "PROBE[overflow] cause=depth_cap queued={} depth_cap={}",
+                        state.queue.len(),
+                        state.depth_cap
+                    );
+                }
                 self.overflowed.store(true, Ordering::Release);
                 let notifier = state.notifier.clone();
                 drop(state);
@@ -302,6 +313,14 @@ impl SubscriptionInbox {
             let charged = match state.budget.as_ref() {
                 Some(budget) => {
                     if !budget.try_charge(bytes) {
+                        // WORKTREE PROBE: the other permanent starvation edge —
+                        // the connection-scoped shared byte budget.
+                        if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                            eprintln!(
+                                "PROBE[overflow] cause=byte_budget queued={} bytes={bytes}",
+                                state.queue.len()
+                            );
+                        }
                         self.overflowed.store(true, Ordering::Release);
                         let notifier = state.notifier.clone();
                         drop(state);

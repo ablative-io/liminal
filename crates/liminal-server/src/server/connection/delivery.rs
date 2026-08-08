@@ -160,6 +160,13 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
                 continue;
             }
             outbound.enqueue_frame(&frame)?;
+            // WORKTREE PROBE (ws-parked-delivery measurement lane): the shed
+            // itself. The caller removes this subscription from the connection
+            // AND releases it at the channel actor, so this is the last moment
+            // it exists.
+            if probing {
+                eprintln!("PROBE[shed] subscription_id={subscription_id} stream_id={stream_id}");
+            }
             shed.push(*subscription_id);
             continue;
         }
