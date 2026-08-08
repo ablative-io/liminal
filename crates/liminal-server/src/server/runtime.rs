@@ -57,6 +57,18 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
     let (connection_supervisor, cluster_handle) = match config.services.profile()? {
         ServiceProfile::Full => {
             let services = Arc::new(LiminalConnectionServices::from_config(&config)?);
+            // Publish the participant's refused-load record onto the health
+            // endpoint. It happens HERE and not at `start_health_server`
+            // because the endpoint binds before the participant exists —
+            // liveness has to be answerable while the rest of the server is
+            // still being built. Boot has already recorded every conversation
+            // it refused by the time `from_config` returns, so the first scrape
+            // after this line sees the complete boot answer. The worker-front-
+            // door profile configures no participant and installs nothing, and
+            // the route reports that rather than an empty refusal set.
+            if let Some(record) = services.unloadable_conversation_record() {
+                health_server.install_unloadable_record(record);
+            }
             let channel_cluster = services.channel_cluster().clone();
             let connection_supervisor = ConnectionSupervisor::with_fatal_shutdown(
                 services,

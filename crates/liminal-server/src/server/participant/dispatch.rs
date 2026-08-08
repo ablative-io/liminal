@@ -273,6 +273,29 @@ pub enum ParticipantSemanticError {
     },
 }
 
+impl ParticipantSemanticError {
+    /// Stable operator-facing class for this refusal.
+    ///
+    /// The rendered message is a diagnostic: it carries the subject and the
+    /// detail, and it is allowed to move. This is the discriminant an operator
+    /// surface and a log field can be read against without matching on a
+    /// substring — which is what the containment record's consumers need, since
+    /// the failure text a refused load carries ("expected value at line 1
+    /// column 1") names no class at all on its own.
+    #[must_use]
+    pub const fn class(&self) -> &'static str {
+        match self {
+            Self::Unavailable => "unavailable",
+            Self::Internal { .. } => "internal",
+            Self::ServiceFatal(_) => "service_fatal",
+            Self::BindingTerminalAdmissionRefused { .. } => "binding_terminal_admission_refused",
+            Self::BootDrainRefused { .. } => "boot_drain_refused",
+            Self::ConversationSealed { .. } => "conversation_sealed",
+            Self::ConversationUnloadable { .. } => "conversation_unloadable",
+        }
+    }
+}
+
 /// One semantic result paired with every dispatch effect durably installed by
 /// the request before it returned.
 ///

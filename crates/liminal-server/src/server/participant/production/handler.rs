@@ -22,6 +22,7 @@ use liminal_protocol::lifecycle::{CapacityCounter, ObserverRecoveryAggregate};
 use liminal_protocol::wire::ConversationId;
 
 use crate::config::types::ParticipantConfig;
+use crate::health::unloadable::{UnloadableConversation, UnloadableConversationRecord};
 use crate::server::participant::{
     ObserverPublicationTarget, ParticipantConnectionContext, ParticipantConnectionConversations,
     ParticipantSemanticError, ParticipantServiceFatal, dispatch_impact::DispatchImpactAccumulator,
@@ -81,14 +82,20 @@ pub struct ProductionParticipantHandler {
     /// every durable conversation for the capacity restore.
     pub(super) registry: ConversationRegistry,
     /// CONTAINMENT: conversations whose durable state could not be loaded,
-    /// each against the load failure's own text.
+    /// each against the load failure's own class and text.
     ///
     /// A conversation lands here instead of taking the node down with it. The
-    /// map is the node's answer to "which one is broken?", which is the half
+    /// record is the node's answer to "which one is broken?", which is the half
     /// of the property that a boot-succeeds assertion cannot see: containment
     /// without attribution is a node that serves nothing on one conversation
     /// forever and never says so.
-    unloadable: Mutex<BTreeMap<ConversationId, String>>,
+    ///
+    /// The record is SHARED, not private: a clone of it is published onto the
+    /// health endpoint's `GET /unloadable-conversations` at server startup
+    /// ([`Self::unloadable_record`]), so the answer this handler writes is the
+    /// same answer an operator reads. Nothing pushes — the endpoint snapshots
+    /// this record only when it is scraped.
+    unloadable: UnloadableConversationRecord,
     /// Exact W2 work observation points, isolated per handler and test-only.
     #[cfg(test)]
     pub(super) obligation_dispatch_work: ObligationDispatchWorkCounters,
@@ -138,7 +145,7 @@ impl ProductionParticipantHandler {
             observer: Mutex::new(None),
             capacity: ServerCapacity::default(),
             registry,
-            unloadable: Mutex::new(BTreeMap::new()),
+            unloadable: UnloadableConversationRecord::default(),
             #[cfg(test)]
             obligation_dispatch_work: ObligationDispatchWorkCounters::default(),
             #[cfg(test)]
@@ -333,19 +340,27 @@ impl ProductionParticipantHandler {
         error: &ParticipantSemanticError,
     ) -> ParticipantSemanticError {
         let reason = error.to_string();
+        let class = error.class();
+        // The operator's first tell, and it carries the class as its own field:
+        // the refusal text of a failed load ("expected value at line 1 column
+        // 1") names no class at all, so a reader with only the message has to
+        // discriminate on a substring or not at all.
         tracing::error!(
             conversation_id,
+            class,
             reason = %reason,
             "CONTAINMENT: participant conversation is unloadable and is refused on its own; every \
              other conversation keeps being served"
         );
-        if let Ok(mut unloadable) = self.unloadable.lock() {
-            unloadable.insert(conversation_id, reason.clone());
-        } else {
+        if !self.unloadable.record(UnloadableConversation {
+            conversation_id,
+            class,
+            reason: reason.clone(),
+        }) {
             // Never a silent drop: a refusal that is reported but not retained
             // is a different, weaker state than one that was retained, and an
-            // operator reading `unloadable_conversations` must not be told a
-            // shorter story than the log tells.
+            // operator reading `GET /unloadable-conversations` must not be told
+            // a shorter story than the log tells.
             tracing::error!(
                 conversation_id,
                 "the unloadable-conversation record is poisoned; this refusal is reported but not \
@@ -361,9 +376,7 @@ impl ProductionParticipantHandler {
     /// Retires an unloadable record once the conversation has actually loaded,
     /// so the map never keeps reporting a conversation that recovered.
     fn clear_unloadable(&self, conversation_id: ConversationId) {
-        if let Ok(mut unloadable) = self.unloadable.lock() {
-            unloadable.remove(&conversation_id);
-        } else {
+        if !self.unloadable.retire(conversation_id) {
             tracing::error!(
                 conversation_id,
                 "the unloadable-conversation record is poisoned; a conversation that recovered may \
@@ -372,25 +385,33 @@ impl ProductionParticipantHandler {
         }
     }
 
+    /// The shared refused-load record, for publication onto the operator read
+    /// surface.
+    ///
+    /// The clone shares the record rather than copying it, so a refusal
+    /// recorded after publication is still the answer the surface gives. This
+    /// is the only way out of the handler for the containment record, and the
+    /// server's startup path (`server/runtime.rs`) is its one production
+    /// caller.
+    pub(crate) fn unloadable_record(&self) -> UnloadableConversationRecord {
+        self.unloadable.clone()
+    }
+
     /// Every conversation this node has refused as unloadable, against the
     /// load failure's own text.
     ///
-    /// ⚠ NOTHING READS THIS. The node maintains the unloadable record and then
-    /// offers no way to see it, which is an observability gap rather than dead
-    /// weight: this is precisely the surface an operator wants when deciding
-    /// whether a node may be restarted. Kept and flagged rather than deleted --
-    /// removing it would take away the only accessor to a record that is still
-    /// being written.
-    #[allow(
-        dead_code,
-        reason = "an unread diagnostic surface, deliberately retained; see the \
-                  note above -- deleting it would discard the only reader of a \
-                  record the node still maintains."
-    )]
+    /// In-process view for the tests that assert on containment attribution.
+    /// The operator's view of the same record is
+    /// `GET /unloadable-conversations`, served from the clone published by
+    /// [`Self::unloadable_record`]; this accessor exists so a test can read the
+    /// record without standing up an HTTP endpoint.
+    #[cfg(test)]
     pub(super) fn unloadable_conversations(&self) -> BTreeMap<ConversationId, String> {
         self.unloadable
-            .lock()
-            .map_or_else(|_| BTreeMap::new(), |unloadable| unloadable.clone())
+            .snapshot()
+            .into_iter()
+            .map(|entry| (entry.conversation_id, entry.reason))
+            .collect()
     }
 
     pub(super) fn registered_conversation_ids(

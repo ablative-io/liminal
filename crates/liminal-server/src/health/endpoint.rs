@@ -9,12 +9,14 @@ use crate::ServerError;
 use crate::server::listener::{loopback_interrupt_target, shed_on_fd_exhaustion};
 
 use super::checks::{SharedReadinessState, health_check, readiness_check};
+use super::unloadable::{SharedUnloadableConversations, UnloadableConversationRecord};
 
 use super::metrics_route;
 
 const HEALTH_PATH: &str = "/health";
 const READY_PATH: &str = "/ready";
 const METRICS_PATH: &str = "/metrics";
+const UNLOADABLE_PATH: &str = "/unloadable-conversations";
 const APPLICATION_JSON: &str = "application/json";
 const READ_BUFFER_BYTES: usize = 2048;
 
@@ -42,6 +44,12 @@ pub struct HealthServerHandle {
     /// deadline. At most one stream exists at a time (the worker is serial), so
     /// one slot suffices.
     active_stream: Arc<Mutex<Option<TcpStream>>>,
+    /// The operator read surface for refused conversation loads, shared with
+    /// the worker. The health server binds before any participant handler
+    /// exists, so this starts empty and the participant's record is published
+    /// into it by [`Self::install_unloadable_record`] once built. Pull-only:
+    /// nothing reads it until a request arrives, so it cannot wake the worker.
+    unloadable: SharedUnloadableConversations,
     worker: Option<JoinHandle<Result<(), ServerError>>>,
     /// Count of `accept` calls issued by the worker (test observability for the
     /// zero-idle-wakes oracle: on a silent listener this stays at the single
@@ -66,6 +74,22 @@ impl HealthServerHandle {
     #[must_use]
     pub const fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// Publishes a participant's unloadable-conversation record onto
+    /// `GET /unloadable-conversations`.
+    ///
+    /// Server startup binds the health endpoint FIRST — liveness has to be
+    /// answerable while the rest of the server is still being built — so the
+    /// record cannot be a constructor argument. Until this is called the route
+    /// answers `participant_installed: false`, which is a different answer from
+    /// "nothing is refused" and is reported as such.
+    ///
+    /// Installing shares the handler's live record rather than copying it: a
+    /// refusal recorded after this call is reported by the next scrape. No
+    /// thread, timer, or notification is created here.
+    pub fn install_unloadable_record(&self, record: UnloadableConversationRecord) {
+        self.unloadable.install(record);
     }
 
     /// Stops the health endpoint server and waits for its worker thread to exit.
@@ -172,6 +196,7 @@ pub fn start_health_server(
     let interrupt_target = loopback_interrupt_target(local_addr);
     let shutdown = Arc::new(AtomicBool::new(false));
     let active_stream = Arc::new(Mutex::new(None));
+    let unloadable = SharedUnloadableConversations::default();
     let accept_attempts = Arc::new(AtomicU64::new(0));
     let shed_count = Arc::new(AtomicU64::new(0));
     let requests_entered = Arc::new(AtomicU64::new(0));
@@ -180,10 +205,14 @@ pub fn start_health_server(
     let worker_attempts = Arc::clone(&accept_attempts);
     let worker_shed = Arc::clone(&shed_count);
     let worker_entered = Arc::clone(&requests_entered);
+    let served = ServedState {
+        readiness,
+        unloadable: unloadable.clone(),
+    };
     let worker = thread::spawn(move || {
         serve(
             &listener,
-            &readiness,
+            &served,
             &worker_shutdown,
             &worker_stream,
             &worker_attempts,
@@ -197,6 +226,7 @@ pub fn start_health_server(
         interrupt_target,
         shutdown,
         active_stream,
+        unloadable,
         worker: Some(worker),
         #[cfg(test)]
         accept_attempts,
@@ -207,9 +237,17 @@ pub fn start_health_server(
     })
 }
 
+/// Everything a request is answered from, carried as one value so the worker's
+/// parameter list does not grow a slot per operator surface.
+#[derive(Debug, Clone)]
+struct ServedState {
+    readiness: SharedReadinessState,
+    unloadable: SharedUnloadableConversations,
+}
+
 fn serve(
     listener: &TcpListener,
-    readiness: &SharedReadinessState,
+    served: &ServedState,
     shutdown: &AtomicBool,
     active_stream: &Mutex<Option<TcpStream>>,
     accept_attempts: &AtomicU64,
@@ -250,7 +288,7 @@ fn serve(
                 // a single port probe kills the health server for the process lifetime and
                 // subsequent liveness/readiness probes get connection-refused. Only fatal
                 // listener-level accept errors (below) terminate serving.
-                let result = handle_connection(stream, readiness);
+                let result = handle_connection(stream, served);
                 // The request is done: clear the slot so a later shutdown finds
                 // nothing to interrupt (and never shuts down an unrelated stream).
                 // A no-op if `stop_worker` already took the clone.
@@ -280,10 +318,7 @@ fn is_transient_accept_error(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(code) if code == 24 || code == 23)
 }
 
-fn handle_connection(
-    mut stream: TcpStream,
-    readiness: &SharedReadinessState,
-) -> Result<(), ServerError> {
+fn handle_connection(mut stream: TcpStream, served: &ServedState) -> Result<(), ServerError> {
     stream
         .set_nonblocking(false)
         .map_err(|error| ServerError::HealthEndpoint {
@@ -306,7 +341,7 @@ fn handle_connection(
         return Ok(());
     }
 
-    let response = response_for_request(&buffer[..bytes_read], readiness)?;
+    let response = response_for_request(&buffer[..bytes_read], served)?;
     stream
         .write_all(&response)
         .map_err(|error| ServerError::HealthEndpoint {
@@ -317,10 +352,7 @@ fn handle_connection(
     })
 }
 
-fn response_for_request(
-    request: &[u8],
-    readiness: &SharedReadinessState,
-) -> Result<Vec<u8>, ServerError> {
+fn response_for_request(request: &[u8], served: &ServedState) -> Result<Vec<u8>, ServerError> {
     let Ok(request) = std::str::from_utf8(request) else {
         return Ok(empty_response(StatusCode::BadRequest));
     };
@@ -331,7 +363,7 @@ fn response_for_request(
     match (method, path) {
         ("GET", HEALTH_PATH) => json_response(StatusCode::Ok, &health_check()),
         ("GET", READY_PATH) => {
-            let status = readiness_check(&readiness.snapshot());
+            let status = readiness_check(&served.readiness.snapshot());
             let status_code = if status.ready {
                 StatusCode::Ok
             } else {
@@ -344,7 +376,11 @@ fn response_for_request(
             Some(metrics_route::CONTENT_TYPE),
             metrics_route::render_body().as_bytes(),
         )),
-        (_, HEALTH_PATH | READY_PATH | METRICS_PATH) => {
+        // The refused-load surface. Reading it is a snapshot of a record
+        // another part of the server already maintains — this route computes
+        // nothing, schedules nothing, and touches no conversation.
+        ("GET", UNLOADABLE_PATH) => json_response(StatusCode::Ok, &served.unloadable.status()),
+        (_, HEALTH_PATH | READY_PATH | METRICS_PATH | UNLOADABLE_PATH) => {
             Ok(empty_response(StatusCode::MethodNotAllowed))
         }
         _ => Ok(empty_response(StatusCode::NotFound)),
@@ -429,13 +465,23 @@ mod tests {
 
     use serde_json::Value;
 
-    use super::{response_for_request, start_health_server};
+    use super::{ServedState, response_for_request, start_health_server};
     use crate::health::checks::{
         ClusterReadiness, ReadinessCondition, ReadinessState, SharedReadinessState,
     };
 
     fn loopback_ephemeral() -> Result<SocketAddr, Box<dyn std::error::Error>> {
         Ok("127.0.0.1:0".parse()?)
+    }
+
+    /// The request-level tests answer from readiness alone; the refused-load
+    /// surface stays uninstalled, which is the state a server is in before its
+    /// participant handler exists.
+    fn served(readiness: SharedReadinessState) -> ServedState {
+        ServedState {
+            readiness,
+            unloadable: crate::health::unloadable::SharedUnloadableConversations::default(),
+        }
     }
 
     fn get(address: SocketAddr, path: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -596,7 +642,7 @@ mod tests {
                 membership_established: false,
             },
         ));
-        let response = response_for_request(b"GET /ready HTTP/1.1\r\n\r\n", &readiness)?;
+        let response = response_for_request(b"GET /ready HTTP/1.1\r\n\r\n", &served(readiness))?;
         let response = String::from_utf8(response)?;
 
         assert_status(&response, 503);
@@ -669,7 +715,7 @@ mod tests {
     #[test]
     fn unsupported_paths_are_not_served() -> Result<(), Box<dyn std::error::Error>> {
         let readiness = SharedReadinessState::default();
-        let response = response_for_request(b"GET /unknown HTTP/1.1\r\n\r\n", &readiness)?;
+        let response = response_for_request(b"GET /unknown HTTP/1.1\r\n\r\n", &served(readiness))?;
         let response = String::from_utf8(response)?;
 
         assert_status(&response, 404);
@@ -681,7 +727,7 @@ mod tests {
     fn unsupported_methods_on_health_paths_are_rejected() -> Result<(), Box<dyn std::error::Error>>
     {
         let readiness = SharedReadinessState::default();
-        let response = response_for_request(b"POST /health HTTP/1.1\r\n\r\n", &readiness)?;
+        let response = response_for_request(b"POST /health HTTP/1.1\r\n\r\n", &served(readiness))?;
         let response = String::from_utf8(response)?;
 
         assert_status(&response, 405);
