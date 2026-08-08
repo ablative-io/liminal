@@ -609,6 +609,63 @@ mod tests {
         Ok(())
     }
 
+    /// THE UNLOADABLE-CONVERSATIONS READ SURFACE, RED UNTIL THE ROUTE EXISTS.
+    ///
+    /// The node already records every conversation it refused to load
+    /// (`server/participant/production/handler.rs`, `record_unloadable`) and
+    /// then offers an operator no way to read it back: the accessor has no
+    /// caller. Containment without a read surface is a node that serves nothing
+    /// on one conversation forever and answers no question about it.
+    ///
+    /// This pin fixes the shape of the answer and nothing else — that the route
+    /// EXISTS, answers JSON 200, and carries the three fields an operator reads:
+    /// how many conversations are refused, which ones, and whether a participant
+    /// record is even attached (so a `count` of zero is never confused with a
+    /// node that has no participant installed at all).
+    ///
+    /// The unknown-path arm in the same test is the discriminator: without it a
+    /// 200 here would also be satisfied by a server that answers 200 to
+    /// everything.
+    #[test]
+    fn unloadable_conversations_route_answers_the_operator_a_json_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let readiness = SharedReadinessState::new(ReadinessState::default());
+        let server = start_health_server(loopback_ephemeral()?, readiness)?;
+
+        let response = get(server.local_addr(), "/unloadable-conversations")?;
+        let unknown = get(server.local_addr(), "/unloadable-conversations-typo")?;
+        server.shutdown()?;
+
+        // The discriminator first: a neighbouring path is still not served, so
+        // the 200 below is this route's own answer.
+        assert_status(&unknown, 404);
+
+        assert_status(&response, 200);
+        assert!(
+            response.contains("Content-Type: application/json\r\n"),
+            "the unloadable-conversations route must answer JSON: {response}"
+        );
+        let body = json_body(&response)?;
+        assert_eq!(
+            body["count"], 0,
+            "a server with no participant record attached refuses nothing: {body}"
+        );
+        assert_eq!(
+            body["participant_installed"], false,
+            "no participant record is attached to this server, and the surface must say so \
+             rather than let a zero count read as a clean node: {body}"
+        );
+        let Some(conversations) = body["conversations"].as_array() else {
+            return Err("conversations should be an array".into());
+        };
+        assert!(
+            conversations.is_empty(),
+            "no conversation was refused: {conversations:?}"
+        );
+
+        Ok(())
+    }
+
     #[test]
     fn unsupported_paths_are_not_served() -> Result<(), Box<dyn std::error::Error>> {
         let readiness = SharedReadinessState::default();
