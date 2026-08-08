@@ -382,3 +382,18 @@ fn ws_apply_binary_refuses_truncated_body_as_typed_error() -> Result<(), String>
     );
     Ok(())
 }
+
+/// Design §10: the WebSocket acceptor is the third door, and it stamps its own
+/// kind. Pinned here so the mount fact cannot silently collapse to the socket
+/// default on the transport that already exists — the failure mode a defaulted
+/// field invites.
+#[test]
+fn the_websocket_door_stamps_its_own_mount_on_the_connection_state() -> Result<(), String> {
+    let (process, _client) = scheduler_free_process()?;
+    assert_eq!(
+        process.state.mount,
+        crate::server::mount::MountKind::WebSocket,
+        "a WebSocket-admitted connection reports WebSocket, not the socket default"
+    );
+    Ok(())
+}

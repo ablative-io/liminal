@@ -25,19 +25,27 @@
 //! incarnation authority, and the registry unreachable from outside, and the
 //! loopback lives within the wall rather than widening it.
 //!
-//! Build order (§8) stages this module. Step 2 — this commit — is the byte
-//! duplex alone: two bounded rings, wake-on-write, close semantics, and its
-//! unit pins. The connection process, the supervisor spawn path, the mount
-//! fact, and the SDK-side transport are steps 3 and 4 and are not here.
+//! Build order (§8) stages this module. Step 2 was the byte duplex alone: two
+//! bounded rings, wake-on-write, close semantics, and its unit pins. Step 3 —
+//! this commit — adds the server side: the transport, the connection process it
+//! makes, and the mount fact the admitting door stamps. The SDK-side transport
+//! and `EmbeddedServer` are step 4 and are not here.
 
 #[path = "loopback/duplex.rs"]
 mod duplex;
+
+#[path = "loopback/process.rs"]
+mod process;
 
 #[cfg(test)]
 #[path = "loopback/duplex_tests.rs"]
 mod duplex_tests;
 
-// `LoopbackServerEnd` is not re-exported: it is named through
-// [`LoopbackDuplex::bounded`]'s return type by the step-3 sites, which live in
-// this module's own subtree, and it needs no path of its own.
+// `LoopbackServerEnd` is not re-exported to the crate: the supervisor's spawn
+// seam names it through [`LoopbackDuplex::bounded`]'s return type, and the
+// connection process that owns it lives in this module's own subtree. Keeping
+// it unexported is the structural half of no-side-door — nothing outside can
+// hold a server end without going through admission.
+pub(super) use duplex::LoopbackServerEnd;
 pub use duplex::{LoopbackClientEnd, LoopbackDuplex};
+pub(super) use process::LoopbackConnectionProcess;

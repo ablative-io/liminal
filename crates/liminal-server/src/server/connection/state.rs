@@ -12,6 +12,7 @@ use liminal_protocol::wire::ConnectionIncarnation;
 use super::conversation::ConnectionConversation;
 use super::participant_delivery::{HeldObserverHead, HeldParticipantHead};
 use super::services::ConnectionSubscription;
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, ParticipantConnectionConversations, ParticipantOfferedProgress,
     ParticipantPublicationError, ParticipantPublicationInbox, ParticipantSession,
@@ -152,6 +153,14 @@ pub(super) struct ConnectionProcessState {
     /// Durable incarnation allocated and flushed before this process was spawned.
     /// `None` means the supervisor had no complete participant service installed.
     pub(super) connection_incarnation: Option<ConnectionIncarnation>,
+    /// Which door admitted this connection (design §10). Stamped by the spawn
+    /// path that built this process, from the server's own knowledge of which
+    /// path it is — never negotiated, never carried in a frame, never derived
+    /// from an inbound byte. [`super::apply::apply_frame`] reads it from here
+    /// into the participant handler context, which is the one surface the
+    /// consumer's door reads the mount attestation from. Liminal's own durable
+    /// rows carry no mount field.
+    pub(super) mount: MountKind,
     /// Strongly owned bounded/coalescing participant-ready inbox. The server-wide
     /// registry holds only a weak handle to this exact value.
     pub(super) participant_publication: Option<ParticipantPublicationInbox>,

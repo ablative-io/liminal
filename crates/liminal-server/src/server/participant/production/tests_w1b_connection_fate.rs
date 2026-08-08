@@ -9,6 +9,7 @@ use liminal_protocol::wire::{
 };
 
 use crate::server::connection::ReadyWaker;
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticHandler,
@@ -382,7 +383,7 @@ fn participant_service_fatal_blocks_obligation_dispatch() -> Result<(), Box<dyn 
             if fatal == selected
     ));
     let request = service.handle(
-        ParticipantConnectionContext::new(incarnation),
+        ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: CONVERSATION_ID,

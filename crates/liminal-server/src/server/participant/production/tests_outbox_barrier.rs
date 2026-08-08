@@ -11,6 +11,7 @@ use liminal_protocol::wire::{
 };
 
 use crate::server::connection::ReadyWaker;
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
     ParticipantSemanticHandler, encode_server_push,
@@ -31,7 +32,7 @@ fn apply(
 ) -> Result<ServerValue, Box<dyn Error>> {
     service
         .handle(
-            ParticipantConnectionContext::new(incarnation),
+            ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
             &mut ParticipantConnectionConversations::default(),
             request,
         )

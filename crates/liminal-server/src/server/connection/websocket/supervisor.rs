@@ -349,10 +349,12 @@ impl HandshakeShared {
                 ))
             })
         };
-        match self
-            .supervisor
-            .spawn_transport_connection(peer_addr, fd_guard, &build)
-        {
+        match self.supervisor.spawn_transport_connection(
+            peer_addr,
+            Some(fd_guard),
+            crate::server::mount::MountKind::WebSocket,
+            &build,
+        ) {
             Ok(handle) => {
                 tracing::debug!(
                     ?peer_addr,

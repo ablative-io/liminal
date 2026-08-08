@@ -23,6 +23,7 @@ use super::{
     },
     transport::{ParticipantSession, normalize_configured_frame_limit},
 };
+use crate::server::mount::MountKind;
 
 #[derive(Debug)]
 struct RecordingHandler {
@@ -111,7 +112,7 @@ fn negotiated_session() -> Result<ParticipantSession, String> {
 }
 
 fn context() -> ParticipantConnectionContext {
-    ParticipantConnectionContext::new(ConnectionIncarnation::new(4, 9))
+    ParticipantConnectionContext::new(ConnectionIncarnation::new(4, 9), MountKind::Tcp)
 }
 
 #[test]

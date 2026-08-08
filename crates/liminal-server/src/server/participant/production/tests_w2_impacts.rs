@@ -13,6 +13,7 @@ use liminal_protocol::wire::{
 };
 
 use crate::server::connection::ReadyWaker;
+use crate::server::mount::MountKind;
 use crate::server::participant::dispatch_impact::{DispatchEffect, DispatchImpact, DispatchTarget};
 use crate::server::participant::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
@@ -43,7 +44,7 @@ fn apply(
 ) -> Result<ServerValue, Box<dyn Error>> {
     service
         .handle(
-            ParticipantConnectionContext::new(incarnation),
+            ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
             conversations,
             request,
         )
@@ -185,7 +186,7 @@ fn two_enrollment_impact()
     let second_incarnation = ConnectionIncarnation::new(0xF2, 5);
     let mut first_conversations = ParticipantConnectionConversations::default();
     let first = handler.handle_with_impact(
-        ParticipantConnectionContext::new(first_incarnation),
+        ParticipantConnectionContext::new(first_incarnation, MountKind::Tcp),
         &mut first_conversations,
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: CONVERSATION,
@@ -198,7 +199,7 @@ fn two_enrollment_impact()
     };
     let mut second_conversations = ParticipantConnectionConversations::default();
     let second = handler.handle_with_impact(
-        ParticipantConnectionContext::new(second_incarnation),
+        ParticipantConnectionContext::new(second_incarnation, MountKind::Tcp),
         &mut second_conversations,
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: CONVERSATION,

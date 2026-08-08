@@ -25,6 +25,7 @@ use liminal::protocol::WorkerRegistration;
 use liminal_protocol::wire::ConnectionIncarnation;
 
 use super::incarnation::ConnectionIncarnationAuthority;
+use super::loopback::{LoopbackConnectionProcess, LoopbackServerEnd};
 use super::notifier::ConnectionNotifier;
 use super::process::ConnectionProcess;
 use super::services::{
@@ -33,6 +34,7 @@ use super::services::{
 };
 use crate::ServerError;
 use crate::config::types::{LimitsConfig, ServerConfig};
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, InstalledParticipantService, ParticipantSemanticHandler,
     ParticipantServiceFatal,
@@ -503,7 +505,12 @@ impl ConnectionSupervisor {
     ///
     /// `fd_guard` is a host-held duplicate of the connection's underlying
     /// socket, exactly like the TCP path's: it keeps the fd alive until the
-    /// single record-removal path has synchronously deregistered readiness.
+    /// single record-removal path has synchronously deregistered readiness. It
+    /// is `None` for a transport that owns no descriptor.
+    ///
+    /// `mount` is the admitting door's own name for itself (design §10), which
+    /// is why this seam takes it rather than deriving it: the caller IS the
+    /// door, and no other party — least of all the client — has any input.
     ///
     /// This method exists because Rust module privacy makes the runtime,
     /// admission counter, incarnation authority, and registry unreachable from
@@ -517,14 +524,71 @@ impl ConnectionSupervisor {
     pub(super) fn spawn_transport_connection(
         &self,
         peer_addr: Option<SocketAddr>,
-        fd_guard: TcpStream,
+        fd_guard: Option<TcpStream>,
+        mount: MountKind,
         build_factory: &dyn Fn(
             Arc<ConnectionRuntime>,
             Option<ConnectionIncarnation>,
         ) -> NativeHandlerFactory,
     ) -> Result<ConnectionHandle, ServerError> {
         self.inner
-            .spawn_transport_connection(peer_addr, fd_guard, build_factory)
+            .spawn_transport_connection(peer_addr, fd_guard, mount, build_factory)
+    }
+
+    /// Admits one in-process connection over `server_end` (design §8 step 3).
+    ///
+    /// This replaces exactly the listener's `accept()` + `spawn_connection`
+    /// pair, and NOTHING else about admission. It runs the same
+    /// `try_reserve_admission` against the same §5 slot pool — an in-process
+    /// connect at capacity is refused with the same typed
+    /// [`ServerError::ConnectionLimitReached`] a socket connect is — allocates a
+    /// real durable [`ConnectionIncarnation`] from the same authority, so
+    /// participant binding, resume, and fate records work identically, and
+    /// registers the same record. Only two fields differ, and both are honest
+    /// descriptions rather than semantics: no fd guard (there is no descriptor
+    /// to keep alive) and `peer_addr: None` (there is no socket to have an
+    /// address). Nothing on this path reads a socket fact.
+    ///
+    /// The connection's wake is installed by the process itself on its first
+    /// serviced slice, which is the earliest point at which its pid and host
+    /// record — the two things the wake names — both exist.
+    ///
+    /// `pub(crate)` rather than `pub`: the embedding handle that grants
+    /// loopback connections lives in this crate, and widening the surface
+    /// further would hand an outside caller a way to reach the runtime that
+    /// module privacy currently denies it.
+    ///
+    /// # Errors
+    /// Returns [`ServerError`] when admission is refused
+    /// ([`ServerError::ConnectionLimitReached`]), incarnation allocation fails,
+    /// or beamr spawn/registration fails.
+    #[allow(
+        dead_code,
+        reason = "the loopback admission door is built and pinned at design step 3; \
+                  its production caller is the EmbeddedServer handle at step 4"
+    )]
+    pub(crate) fn spawn_loopback_connection(
+        &self,
+        server_end: LoopbackServerEnd,
+    ) -> Result<ConnectionHandle, ServerError> {
+        // The same interior-mutability handoff the socket path uses: the native
+        // handler factory is `Fn + Send + Sync`, so the duplex end cannot be
+        // moved into it and the FIRST handler build takes it out exactly once.
+        let holder = Arc::new(Mutex::new(Some(server_end)));
+        let build = move |runtime: Arc<ConnectionRuntime>,
+                          incarnation: Option<ConnectionIncarnation>|
+              -> NativeHandlerFactory {
+            let holder = Arc::clone(&holder);
+            Box::new(move || {
+                Box::new(LoopbackConnectionProcess::from_loopback_holder(
+                    Arc::clone(&runtime),
+                    &holder,
+                    incarnation,
+                ))
+            })
+        };
+        self.inner
+            .spawn_transport_connection(None, None, MountKind::Loopback, &build)
     }
 
     /// Stops the beamr scheduler used by connection processes.
@@ -542,6 +606,21 @@ impl ConnectionSupervisor {
     #[cfg(test)]
     pub(crate) fn slice_count(&self, pid: u64) -> u64 {
         self.inner.runtime.slice_count(pid)
+    }
+
+    /// The mount the admitting door stamped on `pid`'s registry record, or
+    /// `None` when no record is tracked (design §10).
+    #[cfg(test)]
+    pub(crate) fn connection_mount(&self, pid: u64) -> Option<MountKind> {
+        self.inner.runtime.connection_mount(pid)
+    }
+
+    /// Whether `pid`'s registry record holds an fd guard, or `None` when no
+    /// record is tracked. A loopback record must answer `Some(false)`: there is
+    /// no descriptor for the guard to keep alive.
+    #[cfg(test)]
+    pub(crate) fn connection_has_fd_guard(&self, pid: u64) -> Option<bool> {
+        self.inner.runtime.connection_has_fd_guard(pid)
     }
 
     /// Installs a one-use readiness marker for the next serviced slice of `pid`.
@@ -1133,10 +1212,13 @@ impl SupervisorInner {
                 .map_err(|error| ServerError::ListenerAccept {
                     message: format!("failed to spawn connection process: {error}"),
                 })?;
-        if let Err(error) =
-            self.runtime
-                .register_with_fd(pid, peer_addr, connection_incarnation, fd_guard)
-        {
+        if let Err(error) = self.runtime.register_connection(
+            pid,
+            peer_addr,
+            connection_incarnation,
+            MountKind::Tcp,
+            Some(fd_guard),
+        ) {
             // Registration failure leaves no host record to reap. Terminate the
             // just-spawned process explicitly so neither its stream nor admission
             // reservation can escape this failed spawn.
@@ -1164,7 +1246,8 @@ impl SupervisorInner {
     fn spawn_transport_connection(
         self: &Arc<Self>,
         peer_addr: Option<SocketAddr>,
-        fd_guard: TcpStream,
+        fd_guard: Option<TcpStream>,
+        mount: MountKind,
         build_factory: &dyn Fn(
             Arc<ConnectionRuntime>,
             Option<ConnectionIncarnation>,
@@ -1183,10 +1266,13 @@ impl SupervisorInner {
                 .map_err(|error| ServerError::ListenerAccept {
                     message: format!("failed to spawn connection process: {error}"),
                 })?;
-        if let Err(error) =
-            self.runtime
-                .register_with_fd(pid, peer_addr, connection_incarnation, fd_guard)
-        {
+        if let Err(error) = self.runtime.register_connection(
+            pid,
+            peer_addr,
+            connection_incarnation,
+            mount,
+            fd_guard,
+        ) {
             self.scheduler.terminate_process(pid, ExitReason::Error);
             return Err(error);
         }
@@ -2598,14 +2684,20 @@ impl ConnectionRuntime {
     /// `reap_crashed` scan that used to self-heal that orphan continuously;
     /// instead [`Self::reconcile_register_orphan`] closes the race with a SINGLE
     /// point check on the registration event itself — never a loop.
-    fn register_with_fd(
+    /// `fd_guard` is `None` for a transport that owns no descriptor. The guard
+    /// exists to keep an fd alive until readiness deregistration has been
+    /// acknowledged; a loopback connection registers no readiness and holds no
+    /// descriptor, so there is nothing to guard and the slot is honestly empty
+    /// rather than filled with a placeholder.
+    fn register_connection(
         &self,
         pid: u64,
         peer_addr: Option<SocketAddr>,
         connection_incarnation: Option<ConnectionIncarnation>,
-        fd_guard: TcpStream,
+        mount: MountKind,
+        fd_guard: Option<TcpStream>,
     ) -> Result<(), ServerError> {
-        self.register_record(pid, peer_addr, connection_incarnation, Some(fd_guard))?;
+        self.register_record(pid, peer_addr, connection_incarnation, mount, fd_guard)?;
         self.reconcile_register_orphan(pid);
         Ok(())
     }
@@ -2653,6 +2745,7 @@ impl ConnectionRuntime {
         tracing::warn!(
             connection_pid = pid,
             peer_addr = ?record.peer_addr,
+            mount = ?record.mount,
             reason = ?reason,
             "connection process exited without a final slice; host record reclaimed by delivery"
         );
@@ -2690,7 +2783,7 @@ impl ConnectionRuntime {
 
     #[cfg(test)]
     fn register(&self, pid: u64, peer_addr: Option<SocketAddr>) -> Result<(), ServerError> {
-        self.register_record(pid, peer_addr, None, None)
+        self.register_record(pid, peer_addr, None, MountKind::Tcp, None)
     }
 
     fn register_record(
@@ -2698,6 +2791,7 @@ impl ConnectionRuntime {
         pid: u64,
         peer_addr: Option<SocketAddr>,
         connection_incarnation: Option<ConnectionIncarnation>,
+        mount: MountKind,
         fd_guard: Option<TcpStream>,
     ) -> Result<(), ServerError> {
         match lock(&self.records, "connection registry")?.entry(pid) {
@@ -2716,6 +2810,7 @@ impl ConnectionRuntime {
             Entry::Vacant(entry) => {
                 entry.insert(ConnectionRecord {
                     peer_addr,
+                    mount,
                     connection_incarnation,
                     registration: None,
                     readiness: None,
@@ -2742,9 +2837,14 @@ impl ConnectionRuntime {
             .as_ref()
             .and_then(|record| record.peer_addr)
             .or(peer_addr);
+        // The mount names the door this connection came through — the one fact
+        // that tells a reader whether a crashed connection was a socket peer or
+        // a co-resident caller, which `peer_addr: None` alone cannot.
+        let mount = removed.as_ref().map(|record| record.mount);
         tracing::warn!(
             connection_pid = pid,
             peer_addr = ?removed_peer_addr,
+            mount = ?mount,
             reason = ?reason,
             "connection process crashed"
         );
@@ -2969,6 +3069,26 @@ impl ConnectionRuntime {
         self.records.lock().map_or(0, |records| records.len())
     }
 
+    /// Test read of the record's stamped mount (design §10).
+    #[cfg(test)]
+    fn connection_mount(&self, pid: u64) -> Option<MountKind> {
+        self.records
+            .lock()
+            .ok()?
+            .get(&pid)
+            .map(|record| record.mount)
+    }
+
+    /// Test read of whether the record holds an fd guard.
+    #[cfg(test)]
+    fn connection_has_fd_guard(&self, pid: u64) -> Option<bool> {
+        self.records
+            .lock()
+            .ok()?
+            .get(&pid)
+            .map(|record| record.fd_guard.is_some())
+    }
+
     /// Removes the connection record for `pid` and, in the same close step, drops
     /// every push reply slot that connection still owns so each waiting
     /// [`PushReplyAwaiter`] wakes immediately with a disconnected error. This runs
@@ -3142,6 +3262,10 @@ enum PushSlotDisposition {
 #[derive(Debug)]
 struct ConnectionRecord {
     peer_addr: Option<SocketAddr>,
+    /// Which door admitted this connection (design §10). Written once, by the
+    /// spawn path, from the server's own knowledge of which path it is; never
+    /// read from, or influenced by, anything the client sends.
+    mount: MountKind,
     /// Durable pair allocated and flushed before the process was spawned.
     connection_incarnation: Option<ConnectionIncarnation>,
     /// Worker registration declared on this connection, set by `set_registration`

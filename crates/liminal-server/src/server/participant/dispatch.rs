@@ -15,6 +15,8 @@ use liminal_protocol::wire::{
     ObserverRecoveryHandshake, ParticipantId, ServerValue, ValidatedFrameLimit,
 };
 
+use crate::server::mount::MountKind;
+
 use super::dispatch_impact::DispatchImpact;
 use super::transport::{
     ParticipantIngress, ParticipantSession, encode_server_value, gate_generic_frame,
@@ -79,14 +81,23 @@ impl ParticipantConnectionConversations {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParticipantConnectionContext {
     connection_incarnation: ConnectionIncarnation,
+    mount: MountKind,
 }
 
 impl ParticipantConnectionContext {
-    /// Captures the durably allocated incarnation of the receiving connection.
+    /// Captures the durably allocated incarnation of the receiving connection
+    /// and the mount its admitting door stamped.
+    ///
+    /// Both arguments are server facts. `mount` in particular is supplied by
+    /// the spawn path from its own knowledge of which door it is (design §10);
+    /// it is a required argument rather than a defaulted field precisely so a
+    /// new transport cannot acquire a mount attestation by forgetting to say
+    /// which one it is.
     #[must_use]
-    pub const fn new(connection_incarnation: ConnectionIncarnation) -> Self {
+    pub const fn new(connection_incarnation: ConnectionIncarnation, mount: MountKind) -> Self {
         Self {
             connection_incarnation,
+            mount,
         }
     }
 
@@ -94,6 +105,16 @@ impl ParticipantConnectionContext {
     #[must_use]
     pub const fn connection_incarnation(self) -> ConnectionIncarnation {
         self.connection_incarnation
+    }
+
+    /// Returns the mount the admitting door stamped on this connection.
+    ///
+    /// This is the mount attestation the consumer's door reads before stamping
+    /// its own append. Nothing a client sends can move it: the value was fixed
+    /// by the spawn path before the connection's first inbound byte was read.
+    #[must_use]
+    pub const fn mount(self) -> MountKind {
+        self.mount
     }
 }
 

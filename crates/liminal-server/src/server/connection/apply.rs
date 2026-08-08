@@ -196,7 +196,11 @@ fn participant_frame_response(
                 frame,
                 state.authenticated,
                 state.participant_session,
-                ParticipantConnectionContext::new(connection_incarnation),
+                // The mount fact is the CONNECTION's, stamped by its spawn path
+                // before any inbound byte was read (design §10). It is read off
+                // the connection state here — never derived from `frame`, whose
+                // contents are exactly the thing a client controls.
+                ParticipantConnectionContext::new(connection_incarnation, state.mount),
                 &mut state.participant_conversations,
                 service,
             ) {

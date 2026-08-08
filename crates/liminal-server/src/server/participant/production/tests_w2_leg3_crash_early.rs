@@ -12,6 +12,7 @@ use super::ProductionParticipantHandler;
 use super::tests::test_participant_config;
 use super::tests_outbox_barrier_fixture::{OutboxBarrierKind, OutboxBarrierStore};
 use crate::server::connection::ReadyWaker;
+use crate::server::mount::MountKind;
 use crate::server::participant::dispatch_impact::DispatchImpact;
 use crate::server::participant::{
     InstalledParticipantService, ParticipantConnectionContext, ParticipantConnectionConversations,
@@ -34,7 +35,7 @@ pub(super) fn apply_without_tell(
     request: ClientRequest,
 ) -> Result<(ServerValue, DispatchImpact), Box<dyn Error>> {
     let outcome = handler.handle_with_impact(
-        ParticipantConnectionContext::new(incarnation),
+        ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         request,
     );
@@ -124,7 +125,7 @@ fn crash_before_debt_flush_restores_prior_dispatch_state() -> Result<(), Box<dyn
     )?;
     barriers.fail_next(OutboxBarrierKind::OperationAppend)?;
     let failed = service.handle(
-        ParticipantConnectionContext::new(sender_incarnation),
+        ParticipantConnectionContext::new(sender_incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::ParticipantAck(ParticipantAck {
             conversation_id: CONVERSATION,
@@ -195,7 +196,7 @@ fn crash_after_debt_flush_before_tell_rebind_replays_ready_work() -> Result<(), 
     assert!(!inbox.has_pending()?);
 
     let rebound = service.handle(
-        ParticipantConnectionContext::new(rebound_incarnation),
+        ParticipantConnectionContext::new(rebound_incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::CredentialAttach(CredentialAttachRequest {
             conversation_id: CONVERSATION,

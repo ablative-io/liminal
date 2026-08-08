@@ -13,6 +13,7 @@ use super::log_v3::StoredOperationV3;
 use super::tests_outbox_barrier_fixture::{OutboxBarrierKind, OutboxBarrierStore};
 use super::tests_w2_leg3_crash_early::{CONVERSATION, enroll_without_tell, handler, installed};
 use crate::server::connection::ReadyWaker;
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantOfferedProgress,
@@ -26,7 +27,7 @@ fn apply(
 ) -> Result<ServerValue, Box<dyn Error>> {
     service
         .handle(
-            ParticipantConnectionContext::new(incarnation),
+            ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
             &mut ParticipantConnectionConversations::default(),
             request,
         )
@@ -318,7 +319,7 @@ fn run_nonzero_barrier_cut(
     let service = installed(&live, Arc::clone(&gated))?;
     barriers.fail_next(cut)?;
     let result = service.handle(
-        ParticipantConnectionContext::new(recipient_incarnation),
+        ParticipantConnectionContext::new(recipient_incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::ParticipantAck(ParticipantAck {
             conversation_id: CONVERSATION,
