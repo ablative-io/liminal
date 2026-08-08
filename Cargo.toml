@@ -26,6 +26,11 @@ authors = [
 liminal = { package = "liminal-rs", version = "0.5.2", path = "crates/liminal" }
 liminal-protocol = { version = "0.4.0", path = "crates/liminal-protocol" }
 liminal-sdk = { version = "0.5.1", path = "crates/liminal-sdk" }
+# Consumed by `liminal-sdk`'s optional `embedded` feature (the in-process
+# transport needs the server it connects to) and dev-consumed the other way, so
+# the pair is a cycle THROUGH A DEV-DEPENDENCY, which Cargo permits and the
+# build graph never contains.
+liminal-server = { version = "0.5.2", path = "crates/liminal-server" }
 
 anyhow = "1"
 async-trait = "0.1"

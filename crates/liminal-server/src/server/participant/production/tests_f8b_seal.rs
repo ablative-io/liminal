@@ -36,6 +36,7 @@ use liminal_protocol::wire::{
     ClientRequest, ConnectionIncarnation, EnrollmentRequest, EnrollmentToken, ServerValue,
 };
 
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, ConnectionFateWorkItem, ParticipantConnectionContext,
     ParticipantConnectionConversations, ParticipantSemanticError, ParticipantSemanticHandler,
@@ -303,7 +304,7 @@ fn enrollment_into_a_sealed_conversation_is_refused_by_type() -> Result<(), Box<
     let booted = ProductionParticipantHandler::new(Arc::clone(&minted.store), seal_config())?;
 
     let refused = booted.handle(
-        ParticipantConnectionContext::new(ConnectionIncarnation::new(0xF5, 1)),
+        ParticipantConnectionContext::new(ConnectionIncarnation::new(0xF5, 1), MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: minted.conversation_id,
@@ -342,7 +343,7 @@ fn a_sealed_conversation_does_not_refuse_its_neighbours() -> Result<(), Box<dyn 
         .checked_add(1)
         .ok_or("neighbour conversation id overflowed")?;
     let bound = booted.handle(
-        ParticipantConnectionContext::new(ConnectionIncarnation::new(0xF7, 1)),
+        ParticipantConnectionContext::new(ConnectionIncarnation::new(0xF7, 1), MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: neighbour,
@@ -416,7 +417,7 @@ fn a_genesis_only_conversation_still_enrolls_as_ordinary_flow() -> Result<(), Bo
     drop(owner);
 
     let bound = booted.handle(
-        ParticipantConnectionContext::new(ConnectionIncarnation::new(0xF9, 1)),
+        ParticipantConnectionContext::new(ConnectionIncarnation::new(0xF9, 1), MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id: GENESIS_ONLY,

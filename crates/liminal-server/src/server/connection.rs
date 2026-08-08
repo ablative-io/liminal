@@ -11,6 +11,8 @@ mod incarnation;
 #[cfg(test)]
 #[path = "connection/incarnation_tests.rs"]
 mod incarnation_tests;
+#[path = "connection/loopback.rs"]
+mod loopback;
 #[path = "connection/notifier.rs"]
 pub mod notifier;
 #[path = "connection/outbound.rs"]
@@ -49,6 +51,13 @@ pub use channel_registry::{
     ChannelRegistryError, ChannelState, ChannelStatus, MAX_CHANNELS_KEY, Registered,
 };
 pub use conversation::{ConnectionConversation, ConversationResource};
+// The in-process transport's public surface is exactly two names: the type an
+// embedded caller holds and the constructor that mints it. `LoopbackServerEnd`
+// is deliberately NOT re-exported — it is the half that touches the connection
+// machinery, so the private `loopback` module is its visibility ceiling and the
+// step-3 sites that need it (all of them inside `connection`) reach it as
+// `loopback::LoopbackServerEnd`.
+pub use loopback::{LoopbackClientEnd, LoopbackDuplex};
 pub use notifier::ConnectionNotifier;
 #[cfg(test)]
 pub(crate) const fn assert_held_heads_are_move_only() {

@@ -12,7 +12,7 @@ use liminal_protocol::wire::{
 
 use crate::SdkError;
 
-pub(super) fn request_frame(request: &ClientRequest) -> Result<Frame, SdkError> {
+pub(in crate::remote) fn request_frame(request: &ClientRequest) -> Result<Frame, SdkError> {
     let frame = ParticipantFrame::ClientRequest(request.clone());
     let needed = encoded_len(&frame).map_err(codec_error)?;
     let mut complete = vec![0_u8; needed];
@@ -31,7 +31,7 @@ pub(super) fn request_frame(request: &ClientRequest) -> Result<Frame, SdkError> 
     })
 }
 
-pub(super) fn response_frame(frame: Frame) -> Result<ParticipantFrame, SdkError> {
+pub(in crate::remote) fn response_frame(frame: Frame) -> Result<ParticipantFrame, SdkError> {
     let Frame::Unknown {
         type_id,
         flags,

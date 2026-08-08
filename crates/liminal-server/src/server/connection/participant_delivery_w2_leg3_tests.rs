@@ -9,6 +9,7 @@ use liminal_protocol::wire::{
 
 use super::{RecordingSink, service_participant_publications};
 use crate::server::connection::state::ConnectionProcessState;
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ConnectionFateClass, ConnectionFateWorkItem, InstalledParticipantService,
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantSemanticHandler,
@@ -44,7 +45,7 @@ fn enroll_bound(
     token: u8,
 ) -> Result<liminal_protocol::wire::EnrollBound, Box<dyn Error>> {
     let value = service.handle(
-        ParticipantConnectionContext::new(incarnation),
+        ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::Enrollment(EnrollmentRequest {
             conversation_id,
@@ -108,7 +109,7 @@ fn held_obligation_revalidates_binding_and_debt_before_offer() -> Result<(), Box
     assert!(state.participant_offered.is_empty());
 
     let ack = service.handle(
-        ParticipantConnectionContext::new(held_incarnation),
+        ParticipantConnectionContext::new(held_incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::ParticipantAck(ParticipantAck {
             conversation_id,
@@ -173,7 +174,7 @@ fn connection_fate_drops_stale_head_and_replays_after_reconciled_cursor()
     assert!(sink.frames.is_empty());
 
     let attached = service.handle(
-        ParticipantConnectionContext::new(new_incarnation),
+        ParticipantConnectionContext::new(new_incarnation, MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         ClientRequest::CredentialAttach(CredentialAttachRequest {
             conversation_id,

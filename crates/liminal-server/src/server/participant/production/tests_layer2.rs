@@ -16,6 +16,7 @@ use liminal_protocol::wire::{
     encoded_len,
 };
 
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
     ParticipantSemanticError, ParticipantSemanticHandler, ParticipantSession,
@@ -302,7 +303,7 @@ fn dispatch_matrix_response(value: ServerValue) -> Result<ServerValue, Box<dyn E
         &matrix_generic_request()?,
         true,
         session,
-        ParticipantConnectionContext::new(ConnectionIncarnation::new(91, 1)),
+        ParticipantConnectionContext::new(ConnectionIncarnation::new(91, 1), MountKind::Tcp),
         &mut ParticipantConnectionConversations::default(),
         &handler,
     );

@@ -160,6 +160,10 @@ impl WebSocketConnectionProcess {
             connection_incarnation,
             participant_publication,
             pending_replies,
+            // Design §10: the door that admitted this connection was the
+            // WebSocket acceptor, and it says so here — from its own knowledge,
+            // before the first inbound message is read.
+            mount: crate::server::mount::MountKind::WebSocket,
             ..ConnectionProcessState::default()
         };
         Self {

@@ -7,6 +7,7 @@
 //! between the state-building half and the assertion half.
 
 use crate::config::types::ParticipantConfig;
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     ParticipantConnectionContext, ParticipantConnectionConversations, ParticipantDispatch,
     ParticipantSemanticError, ParticipantSemanticHandler, ParticipantServiceFatal,
@@ -130,7 +131,7 @@ pub(super) fn dispatch_tracked(
         &generic,
         true,
         negotiated_session()?,
-        ParticipantConnectionContext::new(incarnation),
+        ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
         conversations,
         handler,
     );
@@ -584,7 +585,7 @@ fn connection_fate_intent_incomplete_latches_first_fatal_before_semantic_or_publ
         observer_refusals: Vec::new(),
     });
     let semantic_result = handler.handle(
-        ParticipantConnectionContext::new(ConnectionIncarnation::new(1, 0)),
+        ParticipantConnectionContext::new(ConnectionIncarnation::new(1, 0), MountKind::Tcp),
         &mut conversations,
         request,
     );

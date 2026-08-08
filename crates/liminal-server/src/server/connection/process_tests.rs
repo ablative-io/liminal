@@ -25,6 +25,7 @@ use crate::server::connection::services::{
     ConnectionSubscription, PublishOutcome, SubscriptionResource,
 };
 use crate::server::connection::worker_front_door::WorkerFrontDoorServices;
+use crate::server::mount::MountKind;
 use crate::server::participant::{
     InstalledParticipantService, PARTICIPANT_CAPABILITY_BIT, ParticipantConnectionContext,
     ParticipantConnectionConversations, ParticipantSemanticError, ParticipantSemanticHandler,
@@ -1254,7 +1255,10 @@ fn installed_participant_service_advertises_and_dispatches_with_exact_incarnatio
         .map_err(|_| "participant process test recorder poisoned")?;
     assert_eq!(
         seen.as_slice(),
-        &[(ParticipantConnectionContext::new(incarnation), request)]
+        &[(
+            ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
+            request
+        )]
     );
     drop(seen);
     Ok(())
@@ -2226,5 +2230,97 @@ fn open_refusals_preserve_the_request_stream_id() -> Result<(), ServerError> {
         "the adapter open error rides the request's stream"
     );
     assert!(message.contains("open failed under test"));
+    Ok(())
+}
+
+/// Design §10: the mount the connection's door stamped is what reaches the
+/// participant handler context — and NOTHING a client sends can move it.
+///
+/// The discrimination is what makes this a pin rather than a tautology. The
+/// same connection state is driven with two participant requests whose frames
+/// differ in every byte a client controls (conversation, participant, payload),
+/// and the recorded contexts must agree on the mount while disagreeing on the
+/// request. A handler that read the mount from anywhere in the frame — or a
+/// context that defaulted it — would either vary here or fail the `Loopback`
+/// half against the socket-stamped control below.
+#[test]
+fn the_stamped_mount_reaches_the_handler_context_and_no_frame_can_move_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    fn admission_frame(
+        conversation_id: u64,
+        participant_id: u64,
+        payload: Vec<u8>,
+    ) -> Result<Frame, Box<dyn std::error::Error>> {
+        let request = ClientRequest::RecordAdmission(RecordAdmission {
+            conversation_id,
+            participant_id,
+            capability_generation: Generation::new(3)
+                .ok_or_else(|| "mount pin generation was zero".to_owned())?,
+            record_admission_attempt_token:
+                liminal_protocol::wire::RecordAdmissionAttemptToken::new([0xC3; 16]),
+            payload,
+        });
+        let participant = ParticipantFrame::ClientRequest(request);
+        let mut bytes =
+            vec![0; participant_encoded_len(&participant).map_err(|error| format!("{error:?}"))?];
+        let written =
+            encode_participant(&participant, &mut bytes).map_err(|error| format!("{error:?}"))?;
+        bytes.truncate(written);
+        let (generic, _consumed) = liminal::protocol::decode(&bytes)?;
+        Ok(generic)
+    }
+
+    fn mounts_seen(
+        mount: MountKind,
+    ) -> Result<Vec<(MountKind, ClientRequest)>, Box<dyn std::error::Error>> {
+        let handler = Arc::new(ProcessParticipantHandler::default());
+        let runtime = participant_runtime(Arc::clone(&handler))?;
+        let mut state = ConnectionProcessState {
+            connection_incarnation: Some(ConnectionIncarnation::new(11, 2)),
+            mount,
+            ..ConnectionProcessState::default()
+        };
+        let _connect = apply_frame(TEST_PID, &runtime, &mut state, connect_frame(&[]));
+        for frame in [
+            admission_frame(70, 2, vec![1, 2, 3])?,
+            admission_frame(4242, 9, vec![0xFF; 64])?,
+        ] {
+            let _action = apply_frame(TEST_PID, &runtime, &mut state, frame);
+        }
+        let seen = handler
+            .seen
+            .lock()
+            .map_err(|_| "mount pin recorder poisoned")?;
+        Ok(seen
+            .iter()
+            .map(|(context, request)| (context.mount(), request.clone()))
+            .collect())
+    }
+
+    let loopback = mounts_seen(MountKind::Loopback)?;
+    assert_eq!(loopback.len(), 2, "both requests reached the handler");
+    for (mount, _request) in &loopback {
+        assert_eq!(
+            *mount,
+            MountKind::Loopback,
+            "a loopback-stamped connection reports Loopback for every frame it carries"
+        );
+    }
+    assert_ne!(
+        loopback.first().map(|(_, request)| request),
+        loopback.get(1).map(|(_, request)| request),
+        "the two frames really did differ in what the client controls, so the \
+         invariant mount above is not an artefact of sending the same frame twice"
+    );
+
+    let socket = mounts_seen(MountKind::Tcp)?;
+    for (mount, _request) in &socket {
+        assert_eq!(
+            *mount,
+            MountKind::Tcp,
+            "a socket-stamped connection reports Tcp through the identical frames — \
+             so the mount tracks the door, not the traffic"
+        );
+    }
     Ok(())
 }

@@ -1,4 +1,4 @@
-use std::io::Read;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::AsRawFd;
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ use super::services::server_error_from_protocol;
 use super::state::{ConnectionProcessState, FrameAction, ProcessStatus};
 use super::supervisor::{ConnectionControl, ConnectionRuntime};
 use crate::ServerError;
+use crate::server::mount::MountKind;
 use crate::server::participant::ConnectionFateClass;
 
 #[cfg(test)]
@@ -36,16 +37,31 @@ mod terminal_tests;
 #[path = "process_wake_tests.rs"]
 mod wake_tests;
 
-const READ_BUFFER_BYTES: usize = 8192;
+/// Per-slice inbound read size, and the per-slice outbound drain budget.
+///
+/// Shared with the sibling transports so one connection cannot monopolize a
+/// scheduler thread on one door and not another.
+pub(super) const READ_BUFFER_BYTES: usize = 8192;
 /// Application stream id used for server-initiated push frames. Push is an
 /// application-stream frame (non-zero stream id), like publish and conversation.
 const PUSH_STREAM_ID: u32 = 1;
 
+/// One supervised connection, generic over the transport half it owns.
+///
+/// EVERYTHING above the read/write halves is here exactly once: the slice
+/// ordering, the `apply_frame` seam, the pending-reply table, the delivery and
+/// participant-publication pumps, the control vocabulary, the close/fate paths,
+/// and the teardown backstop. A sibling transport supplies a
+/// [`ConnectionTransport`] and inherits all of it — no second slice loop, no
+/// second probe, no second close path to keep in step. That is the design's
+/// "third sibling, not a new seam" answer, and it is why the loopback needs no
+/// parallel process type.
 #[derive(Debug)]
-pub(super) struct ConnectionProcess {
+pub(super) struct TransportConnectionProcess<T: ConnectionTransport> {
     runtime: Arc<ConnectionRuntime>,
     peer_addr: Option<SocketAddr>,
-    stream: Option<TcpStream>,
+    /// The read/write halves and their transport-specific readiness discipline.
+    transport: T,
     buffer: Vec<u8>,
     state: ConnectionProcessState,
     /// Per-connection outbound byte buffer. EVERY server-originated frame (acks,
@@ -54,16 +70,195 @@ pub(super) struct ConnectionProcess {
     /// frame larger than the socket send buffer streams out across slices instead
     /// of failing a `write_all` on the non-blocking socket (ledger G4).
     outbound: OutboundWriter,
-    /// One registration for this connection's lifetime. The same token is copied
-    /// into the host record so external death can deregister it.
-    readiness_token: Option<ReadinessToken>,
+    /// Set once the transport's wake has been installed, so the install runs on
+    /// the first serviced slice and never again.
+    wake_installed: bool,
 }
+
+/// The supervised TCP connection process: the original, and the transport every
+/// sibling is measured against.
+pub(super) type ConnectionProcess = TransportConnectionProcess<TcpTransport>;
 
 /// Whether a connection slice's socket/inbound servicing leaves the connection
 /// running or has already resolved its lifecycle.
 enum SliceStep {
     Continue,
     Stop(ExitReason),
+}
+
+/// A connection's read and write halves, plus the transport-specific parts of
+/// parking: how readiness is armed, how the reader is told, and what a drop of
+/// the transport owes the runtime.
+///
+/// Implementors supply ONLY what genuinely differs between doors. Every
+/// transport-neutral decision — when to park, when to requeue, what a close
+/// costs, which fate a hangup folds — stays in
+/// [`TransportConnectionProcess`], so a new mount cannot accidentally acquire
+/// different lifecycle semantics by copying a slice loop slightly wrong.
+pub(super) trait ConnectionTransport: Send + 'static {
+    /// The door this transport IS (design §10).
+    ///
+    /// An associated const rather than a constructor argument: the mount fact
+    /// is then a property of the transport type itself, so no spawn path can
+    /// stamp a mount that disagrees with the halves it actually handed over,
+    /// and no runtime value — least of all an inbound byte — can move it.
+    const MOUNT: MountKind;
+
+    /// Whether the transport still holds its halves. A transport that has been
+    /// released (or never received them) can neither read nor write.
+    fn is_connected(&self) -> bool;
+
+    /// Reads whatever is available into `buffer` without blocking.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ListenerAccept`] on an unrecoverable read
+    /// failure; `WouldBlock`/`Interrupted` are reported as
+    /// [`ReadStatus::WouldBlock`], not errors.
+    fn read_available(&mut self, buffer: &mut Vec<u8>) -> Result<ReadStatus, ServerError>;
+
+    /// The outbound sink, or `None` when the transport has no write half left.
+    fn sink(&mut self) -> Option<&mut dyn Write>;
+
+    /// Whether inbound bytes are already waiting, without consuming them.
+    ///
+    /// A transport with no read half answers `true`: quiescence was never
+    /// established, so parking on it would be a claim the probe cannot make.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ListenerAccept`] when the probe itself fails.
+    fn probe_inbound(&self) -> Result<bool, ServerError>;
+
+    /// Arms this transport's readiness interest before the connection parks.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ListenerAccept`] when the readiness contract
+    /// cannot be satisfied.
+    fn arm_readiness(
+        &mut self,
+        pid: u64,
+        ctx: &NativeContext<'_>,
+        interest: Interest,
+        runtime: &ConnectionRuntime,
+    ) -> Result<(), ServerError>;
+
+    /// Installs this transport's wake on the connection's first serviced slice,
+    /// once the host record exists (so the connection's `READY` waker can be
+    /// built). Transports woken by the readiness facility need nothing here.
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ListenerAccept`] when the wake cannot be
+    /// installed — for a transport that has no other way to be told, a failed
+    /// install is fatal rather than a silently deaf connection.
+    fn install_wake(&mut self, pid: u64, runtime: &ConnectionRuntime) -> Result<(), ServerError>;
+
+    /// Drops the transport's halves at an orderly server-forced close, after the
+    /// host record has been removed.
+    fn release(&mut self);
+
+    /// Observes the transport's halves actually dropping, for the descriptor
+    /// allocator boundary tests. Production keeps the ordinary field-drop path.
+    #[cfg(test)]
+    fn note_process_drop(&mut self, runtime: &ConnectionRuntime);
+}
+
+/// The TCP transport: a non-blocking socket armed through beamr's `RawFd`
+/// readiness facility.
+#[derive(Debug)]
+pub(super) struct TcpTransport {
+    stream: Option<TcpStream>,
+    /// One registration for this connection's lifetime. The same token is copied
+    /// into the host record so external death can deregister it.
+    readiness_token: Option<ReadinessToken>,
+}
+
+impl ConnectionTransport for TcpTransport {
+    const MOUNT: MountKind = MountKind::Tcp;
+
+    fn is_connected(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    fn read_available(&mut self, buffer: &mut Vec<u8>) -> Result<ReadStatus, ServerError> {
+        let Some(stream) = self.stream.as_mut() else {
+            // Unreachable: the caller checks `is_connected` first. Kept total so
+            // the read half binds without an unwrap.
+            return Ok(ReadStatus::Closed);
+        };
+        read_available(stream, buffer)
+    }
+
+    fn sink(&mut self) -> Option<&mut dyn Write> {
+        self.stream
+            .as_mut()
+            .map(|stream| stream as &mut dyn std::io::Write)
+    }
+
+    fn probe_inbound(&self) -> Result<bool, ServerError> {
+        self.stream
+            .as_ref()
+            .map_or(Ok(true), InboundPending::inbound_pending)
+    }
+
+    fn arm_readiness(
+        &mut self,
+        pid: u64,
+        ctx: &NativeContext<'_>,
+        interest: Interest,
+        runtime: &ConnectionRuntime,
+    ) -> Result<(), ServerError> {
+        let facility = ctx
+            .readiness_facility()
+            .ok_or_else(|| ServerError::ListenerAccept {
+                message: "connection scheduler started without its required readiness service"
+                    .to_owned(),
+            })?;
+        if let Some(token) = self.readiness_token {
+            return facility
+                .rearm(&token, interest)
+                .map_err(|error| ServerError::ListenerAccept {
+                    message: format!("failed to rearm connection readiness: {error}"),
+                });
+        }
+        let stream = self
+            .stream
+            .as_ref()
+            .ok_or_else(|| ServerError::ListenerAccept {
+                message: "cannot register readiness for a missing connection stream".to_owned(),
+            })?;
+        let token = facility
+            .register(stream.as_raw_fd(), interest, pid, runtime.ready_atom())
+            .map_err(|error| ServerError::ListenerAccept {
+                message: format!("failed to register connection readiness: {error}"),
+            })?;
+        if let Err(error) = runtime.set_readiness_token_once(pid, token, stream.as_raw_fd()) {
+            runtime.deregister_unpublished_readiness(token);
+            return Err(error);
+        }
+        self.readiness_token = Some(token);
+        Ok(())
+    }
+
+    /// Nothing: a socket is told by the readiness facility, armed each slice.
+    fn install_wake(&mut self, _pid: u64, _runtime: &ConnectionRuntime) -> Result<(), ServerError> {
+        Ok(())
+    }
+
+    fn release(&mut self) {
+        self.stream.take();
+    }
+
+    #[cfg(test)]
+    fn note_process_drop(&mut self, runtime: &ConnectionRuntime) {
+        // External scheduler termination can remove the process-table entry while
+        // the native handler is still executing. Tests that need the descriptor
+        // allocator boundary must observe the stream's actual drop, not table
+        // absence. Production keeps the ordinary field-drop path byte-for-byte.
+        if let Some(stream) = self.stream.take() {
+            let fd = stream.as_raw_fd();
+            drop(stream);
+            runtime.record_process_stream_drop(fd);
+        }
+    }
 }
 
 impl ConnectionProcess {
@@ -96,6 +291,32 @@ impl ConnectionProcess {
                 None
             }
         };
+        Self::over_transport(
+            runtime,
+            peer_addr,
+            TcpTransport {
+                stream,
+                readiness_token: None,
+            },
+            connection_incarnation,
+        )
+    }
+}
+
+impl<T: ConnectionTransport> TransportConnectionProcess<T> {
+    /// Builds a connection process over `transport`.
+    ///
+    /// The ONE construction: pending-reply table sized from the runtime's
+    /// configured §5 caps, publication inbox iff a durable incarnation and a
+    /// participant service both exist, and the mount stamped from the
+    /// transport's own [`ConnectionTransport::MOUNT`]. Every sibling transport
+    /// enters here, so none of those decisions can drift per door.
+    pub(super) fn over_transport(
+        runtime: Arc<ConnectionRuntime>,
+        peer_addr: Option<SocketAddr>,
+        transport: T,
+        connection_incarnation: Option<ConnectionIncarnation>,
+    ) -> Self {
         // Build the pending-reply table from the runtime's configured §5 caps
         // (R1(vi), §1.2(3b)). The default table carries the signed defaults; this
         // uses the connection's actual limits.
@@ -114,6 +335,9 @@ impl ConnectionProcess {
             connection_incarnation,
             participant_publication,
             pending_replies,
+            // Design §10: stamped from the transport TYPE, so the door that
+            // handed over the halves is the door on the record.
+            mount: T::MOUNT,
             ..ConnectionProcessState::default()
         };
         #[cfg(test)]
@@ -125,12 +349,22 @@ impl ConnectionProcess {
         Self {
             runtime,
             peer_addr,
-            stream,
+            transport,
             buffer: Vec::new(),
             state,
             outbound,
-            readiness_token: None,
+            wake_installed: false,
         }
+    }
+
+    /// The mount this process's transport stamped onto its connection state.
+    ///
+    /// The test-side read of the design §10 fact: it proves the door's stamp
+    /// arrived on the state `apply_frame` builds the handler context from,
+    /// rather than trusting that the constructor passed it along.
+    #[cfg(test)]
+    pub(super) const fn mount(&self) -> MountKind {
+        self.state.mount
     }
 
     /// Runs one connection scheduler slice: service inbound socket/control work,
@@ -152,6 +386,9 @@ impl ConnectionProcess {
         // and register after the record exists.
         if !self.runtime.is_registered(pid) {
             return NativeOutcome::Continue;
+        }
+        if let Err(error) = self.ensure_transport_wake_installed(pid) {
+            return self.fail_slice(pid, &error);
         }
         if let Err(error) = self.ensure_participant_publication_registered(pid) {
             return self.fail_slice(pid, &error);
@@ -259,6 +496,26 @@ impl ConnectionProcess {
         }
     }
 
+    /// Installs the transport's wake exactly once, on the first slice that finds
+    /// the host record in place.
+    ///
+    /// The ordering is what closes the lost-wake window for a transport with no
+    /// descriptor. The install happens at the TOP of the slice, so it strictly
+    /// precedes this slice's [`Self::final_probe`] — and the probe is the only
+    /// way to `Wait`. A write that lands before the probe is seen BY the probe
+    /// (which requeues); a write that lands after it fires the now-installed
+    /// wake. There is no third case, so a parked connection is never a deaf one.
+    /// It cannot run earlier than this: the wake names the connection's pid and
+    /// its record, and neither exists until the spawn thread has registered.
+    fn ensure_transport_wake_installed(&mut self, pid: u64) -> Result<(), ServerError> {
+        if self.wake_installed {
+            return Ok(());
+        }
+        self.transport.install_wake(pid, &self.runtime)?;
+        self.wake_installed = true;
+        Ok(())
+    }
+
     fn service_participant_pushes(&mut self, pid: u64) -> Option<NativeOutcome> {
         let service = self.runtime.participant_service()?;
         #[cfg(test)]
@@ -303,18 +560,13 @@ impl ConnectionProcess {
     /// Services the inbound half of a slice: reads available bytes and applies any
     /// complete frames, enqueuing responses into the outbound buffer.
     fn service_socket(&mut self, pid: u64) -> SliceStep {
-        if self.stream.is_none() {
+        if !self.transport.is_connected() {
             self.release_conversations();
             self.runtime
                 .mark_crashed(pid, ExitReason::Error, self.peer_addr);
             return SliceStep::Stop(ExitReason::Error);
         }
-        let Some(stream) = self.stream.as_mut() else {
-            // Unreachable: the `is_none` guard above already handled a missing
-            // stream. Kept as a total match so `stream` binds without an unwrap.
-            return SliceStep::Stop(ExitReason::Error);
-        };
-        match read_available(stream, &mut self.buffer) {
+        match self.transport.read_available(&mut self.buffer) {
             Ok(ReadStatus::Closed) => {
                 // Best-effort flush of anything still queued (e.g. WouldBlock residue
                 // from earlier slices to a half-closed peer) before we let the stream
@@ -566,10 +818,10 @@ impl ConnectionProcess {
     fn drain_outbound(
         &mut self,
     ) -> Result<super::outbound::DrainOutcome, super::outbound::OutboundError> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(sink) = self.transport.sink() else {
             return Ok(super::outbound::DrainOutcome::Drained);
         };
-        self.outbound.drain(stream, Some(READ_BUFFER_BYTES))
+        self.outbound.drain(sink, Some(READ_BUFFER_BYTES))
     }
 
     /// Makes one unbudgeted, nonblocking attempt to flush terminal output.
@@ -581,10 +833,10 @@ impl ConnectionProcess {
     fn drain_outbound_for_close(
         &mut self,
     ) -> Result<super::outbound::DrainOutcome, super::outbound::OutboundError> {
-        let Some(stream) = self.stream.as_mut() else {
+        let Some(sink) = self.transport.sink() else {
             return Ok(super::outbound::DrainOutcome::Drained);
         };
-        self.outbound.drain(stream, None)
+        self.outbound.drain(sink, None)
     }
 
     fn arm_readiness(
@@ -593,39 +845,8 @@ impl ConnectionProcess {
         ctx: &NativeContext<'_>,
         interest: Interest,
     ) -> Result<(), ServerError> {
-        let facility = ctx
-            .readiness_facility()
-            .ok_or_else(|| ServerError::ListenerAccept {
-                message: "connection scheduler started without its required readiness service"
-                    .to_owned(),
-            })?;
-        if let Some(token) = self.readiness_token {
-            return facility
-                .rearm(&token, interest)
-                .map_err(|error| ServerError::ListenerAccept {
-                    message: format!("failed to rearm connection readiness: {error}"),
-                });
-        }
-        let stream = self
-            .stream
-            .as_ref()
-            .ok_or_else(|| ServerError::ListenerAccept {
-                message: "cannot register readiness for a missing connection stream".to_owned(),
-            })?;
-        let token = facility
-            .register(stream.as_raw_fd(), interest, pid, self.runtime.ready_atom())
-            .map_err(|error| ServerError::ListenerAccept {
-                message: format!("failed to register connection readiness: {error}"),
-            })?;
-        if let Err(error) = self
-            .runtime
-            .set_readiness_token_once(pid, token, stream.as_raw_fd())
-        {
-            self.runtime.deregister_unpublished_readiness(token);
-            return Err(error);
-        }
-        self.readiness_token = Some(token);
-        Ok(())
+        self.transport
+            .arm_readiness(pid, ctx, interest, &self.runtime)
     }
 
     fn sync_deadline_timers(
@@ -658,21 +879,7 @@ impl ConnectionProcess {
     /// including the native mailbox so READY enqueued by this slice cannot be
     /// mistaken for quiescence after its inbox work was already consumed.
     fn final_probe(&self, pid: u64, ctx: &NativeContext<'_>) -> Result<bool, ServerError> {
-        let socket_ready = if let Some(stream) = self.stream.as_ref() {
-            let mut byte = [0_u8; 1];
-            match stream.peek(&mut byte) {
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => true,
-                Err(error) => {
-                    return Err(ServerError::ListenerAccept {
-                        message: format!("connection readiness probe failed: {error}"),
-                    });
-                }
-            }
-        } else {
-            true
-        };
+        let socket_ready = self.transport.probe_inbound()?;
         let subscription_ready = !self.state.held_deliveries.is_empty()
             || self
                 .state
@@ -732,7 +939,7 @@ impl ConnectionProcess {
                 // Host removal ACKs readiness deregistration while both the
                 // process stream and record fd guard are still live.
                 self.runtime.finish(pid);
-                self.stream.take();
+                self.transport.release();
                 Some(NativeOutcome::Stop(ExitReason::Normal))
             }
             ConnectionControl::Push {
@@ -753,7 +960,7 @@ impl ConnectionProcess {
     /// the awaiter does not block forever on a reply that can never arrive; the
     /// connection itself is left to its normal lifecycle.
     fn write_push(&mut self, pid: u64, correlation_id: u64, payload: Vec<u8>) {
-        if self.stream.is_none() {
+        if !self.transport.is_connected() {
             tracing::warn!(
                 connection_pid = pid,
                 correlation_id,
@@ -795,7 +1002,7 @@ impl ConnectionProcess {
         }
 
         self.state.shutdown_notification_attempted = true;
-        if self.stream.is_none() {
+        if !self.transport.is_connected() {
             tracing::warn!(
                 connection_pid = pid,
                 peer_addr = ?self.peer_addr,
@@ -854,7 +1061,7 @@ impl ConnectionProcess {
     }
 }
 
-impl NativeHandler for ConnectionProcess {
+impl<T: ConnectionTransport> NativeHandler for TransportConnectionProcess<T> {
     fn handle(&mut self, ctx: &mut NativeContext<'_>) -> NativeOutcome {
         let pid = ctx.self_pid();
         // FIX A-ii: the moment this connection is scheduled it is executing, so it
@@ -879,7 +1086,7 @@ impl NativeHandler for ConnectionProcess {
     }
 }
 
-impl Drop for ConnectionProcess {
+impl<T: ConnectionTransport> Drop for TransportConnectionProcess<T> {
     fn drop(&mut self) {
         // Backstop for termination paths that never run another handler slice:
         // external termination (killed via the scheduler) and scheduler shutdown
@@ -892,15 +1099,10 @@ impl Drop for ConnectionProcess {
         self.release_conversations();
         let timers = self.state.pending_replies.take_retired_timers();
         self.runtime.cancel_deadline_timers(timers);
-        // External scheduler termination can remove the process-table entry while
-        // this native handler is still executing. Tests that need the descriptor
-        // allocator boundary must observe the stream's actual drop, not table
-        // absence. Production keeps the ordinary field-drop path byte-for-byte.
         #[cfg(test)]
-        if let Some(stream) = self.stream.take() {
-            let fd = stream.as_raw_fd();
-            drop(stream);
-            self.runtime.record_process_stream_drop(fd);
+        {
+            let runtime = Arc::clone(&self.runtime);
+            self.transport.note_process_drop(&runtime);
         }
     }
 }
@@ -998,10 +1200,54 @@ fn participant_publication_error(
     }
 }
 
+/// A connection's read half, asked whether inbound bytes are already waiting.
+///
+/// [`ConnectionProcess::final_probe`] answers "is there inbound work pending"
+/// before the connection parks, and that one term of the probe is a transport
+/// fact rather than a connection fact: a socket answers with a non-consuming
+/// `peek`, a transport with no socket answers from its own queued bytes. The
+/// remaining terms (subscriptions, participant publications, reply deadlines,
+/// control, mailbox) are shared across transports unchanged, so a sibling
+/// process type replaces only this answer.
+pub(super) trait InboundPending {
+    /// Whether readable bytes are already waiting, without consuming them.
+    ///
+    /// `Interrupted` reports pending (the probe never ran, so quiescence is not
+    /// established); `WouldBlock` is the honest "nothing waiting".
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ListenerAccept`] when the read half fails the
+    /// probe with anything other than `WouldBlock` or `Interrupted`.
+    fn inbound_pending(&self) -> Result<bool, ServerError>;
+}
+
+impl InboundPending for TcpStream {
+    fn inbound_pending(&self) -> Result<bool, ServerError> {
+        let mut byte = [0_u8; 1];
+        match self.peek(&mut byte) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(true),
+            Err(error) => Err(ServerError::ListenerAccept {
+                message: format!("connection readiness probe failed: {error}"),
+            }),
+        }
+    }
+}
+
+/// What one non-blocking inbound read found.
+///
+/// Shared across transports so every door's hangup, idle, and progress answers
+/// select the SAME lifecycle branch in [`TransportConnectionProcess::
+/// service_socket`] — a sibling cannot map its own end of file onto a different
+/// fate by classifying it differently.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReadStatus {
+pub(super) enum ReadStatus {
+    /// Bytes were appended to the buffer.
     Read,
+    /// Nothing is available right now; the peer is still there.
     WouldBlock,
+    /// End of file: the peer hung up and the read half is drained.
     Closed,
 }
 

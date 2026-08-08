@@ -1191,6 +1191,7 @@ dependencies = [
  "js-sys",
  "liminal-protocol",
  "liminal-rs",
+ "liminal-server",
  "serde",
  "serde_json",
  "spin",

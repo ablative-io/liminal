@@ -25,7 +25,8 @@ use crate::config::types::{
     LimitsConfig, ParticipantConfig, ServerConfig, ServicesConfig, WebSocketConfig,
 };
 use crate::server::connection::{
-    ConnectionHandle, ConnectionServices, ConnectionSupervisor, WebSocketListener,
+    ConnectionHandle, ConnectionServices, ConnectionSupervisor, LoopbackClientEnd, LoopbackDuplex,
+    WebSocketListener,
 };
 use crate::server::listener::ServerListener;
 use crate::server::participant::{
@@ -392,6 +393,26 @@ impl SocketFixture {
             &mut self.pushes,
             request,
         )
+    }
+
+    /// Admits one IN-PROCESS connection against this fixture's supervisor,
+    /// returning the caller's end of its duplex and the connection handle.
+    ///
+    /// The same `spawn_loopback_connection` an [`EmbeddedServer`] calls, so a
+    /// connection minted here consumes the same admission slot, gets the same
+    /// durable incarnation, and reaches the same production participant handler
+    /// this fixture installed. The returned end has NOT handshaken: the caller
+    /// still sends `Connect` and still reads `ConnectAck`, exactly as over a
+    /// socket.
+    ///
+    /// [`EmbeddedServer`]: crate::server::embedded::EmbeddedServer
+    pub(in crate::server::participant::production) fn spawn_loopback(
+        &self,
+        ring_capacity_bytes: usize,
+    ) -> Result<(LoopbackClientEnd, ConnectionHandle), Box<dyn Error>> {
+        let (client, server) = LoopbackDuplex::bounded(ring_capacity_bytes);
+        let connection = self.supervisor.spawn_loopback_connection(server)?;
+        Ok((client, connection))
     }
 
     pub(in crate::server::participant::production) fn spawn_peer(

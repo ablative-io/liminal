@@ -36,7 +36,12 @@ futures-core = { workspace = true, features = ["std"] }
 # carries them.
 liminal = { workspace = true, features = ["test-support"] }
 liminal-protocol = { workspace = true, features = ["test-support"] }
-liminal-sdk = { workspace = true }
+# `embedded` is what puts the in-process transport's pins into the default
+# workspace battery: they live in THIS crate's test tree (they need both the
+# SDK client and the server's participant fixtures), so `cargo test --workspace`
+# compiles and runs them with no extra flag. The feature stays off in the SDK's
+# own default set.
+liminal-sdk = { workspace = true, features = ["embedded"] }
 # Test-only: shrink the client socket's SO_RCVBUF so a never-reading subscriber
 # caps the in-flight TCP window far below an oversize frame, making the server's
 # outbound WouldBlock-with-residue certain by construction (G4 regression).
