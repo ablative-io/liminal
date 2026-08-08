@@ -485,6 +485,45 @@ stands, and stops being catastrophic when violated.**
 DOES change server behavior — the door that previously double-committed a
 violated prohibition now re-answers idempotently.
 
+### 0.14 R18 amendment A3 — re-offer scheduling on a healthy connection (2026-08-08)
+
+**Status: amendment to R18, authored by the liminal domain owner (Hermes
+Crumpet); PROPOSED — awaiting the reviewer-of-record key under the two-key
+gate.**
+
+**Provenance.** The #50 in-process-transport parity gate
+(`crates/liminal-server/tests/loopback_parity_e2e.rs` at liminal `29a2bce`,
+`assert_push_parity` and exempt field 3) drove one participant scenario through
+the TCP door and the in-process door and measured, over repeated runs on BOTH
+mounts, the same unsolicited `ServerPush(ParticipantDelivery)` arriving at two
+different interleave positions and arriving TWICE on some runs — on one healthy
+connection, with no transport loss and no reconnect. The repeats were
+byte-identical to their first arrival on every run. The fact was recorded in
+that test's exempt-field list, which is where a test author looks and not where
+a protocol consumer reads; this amendment moves it into the contract.
+
+**The gap.** R-C3 already states at-least-once delivery with exactly-once
+marking, but its re-offer sentence named only "transport loss or reconnect" as
+causes of a repeated offer. A consumer reading that sentence could conclude a
+healthy connection sees each `(conversation_id, delivery_seq)` exactly once and
+build on offer count or arrival position — both of which are decided by the
+server's publication scan schedule and are therefore meaningless to a client.
+
+**The change — prose only.** R-C3's re-offer sentence now names the server's
+own publication scheduling as a lawful cause of repetition, and R-C3 gains one
+titled paragraph ("Re-offer scheduling") stating: repetition needs no loss of
+any kind; offer count and interleave position are publication-scan-decided and
+mount-independent; every offer of one pair is byte-identical, so a re-offer can
+never present a different record under an already-seen key; consumers
+deduplicate on the pair and read no meaning into count or position. The
+`«PUSH-REOFFER-SCHEDULE»` socket is added to §7. Consumer-facing rustdoc on
+`ParticipantDelivery` and the SDK participant `receive()` states the same fact
+where an SDK consumer reads.
+
+**Honesty line (A1's form):** this amendment changes NO wire bytes and NO
+server behavior — it records measured, mount-independent behavior the contract
+already permitted but described too narrowly.
+
 ## 1. The verified gap
 
 The evidence base was re-verified rather than copied:
@@ -2410,11 +2449,27 @@ excluded from v1 under `«TARGETED-DELIVERY»`, not left as a semantics hole.
 marking.** The server stores one durable cumulative cursor per authorized
 `(conversation_id, participant_id)`. While `cursor + 1 >= physical_floor`, it
 offers every entitled retained `(conversation_id, delivery_seq)` at least once
-until cumulatively acknowledged; transport loss or reconnect may offer the same
-pair again. If `cursor + 1 < physical_floor`, continuous history is impossible:
-the server offers R-C4's explicit abandonment marker instead of promising the
-retained suffix. This is the deliberate R4 narrowing of R3's unconditional
-retained-record offer.
+until cumulatively acknowledged; transport loss, reconnect, or the server's own
+publication scheduling may offer the same pair again (re-offer scheduling,
+amendment A3 below). If `cursor + 1 < physical_floor`, continuous history is
+impossible: the server offers R-C4's explicit abandonment marker instead of
+promising the retained suffix. This is the deliberate R4 narrowing of R3's
+unconditional retained-record offer.
+
+**Re-offer scheduling (amendment A3).** Re-offer is not confined to transport
+loss or reconnect: on one healthy connection with no loss of any kind, the
+server's publication scan lawfully offers an unacknowledged pair again. How
+many times a pair is offered before acknowledgment, and where each offer lands
+in the interleave relative to request responses, are decided by when that scan
+runs — not by the client's behavior, not by the transport, and not by the
+admitting mount (measured identical across the TCP and in-process doors by the
+#50 parity gate). What IS promised about repeats: every offer of one
+`(conversation_id, delivery_seq)` carries byte-identical content, so a re-offer
+can never present a different record under an already-seen key. A correct
+consumer therefore treats offer count and arrival position as carrying no
+meaning — it deduplicates on the pair exactly as the SDK watermark rule below
+describes, and it never infers ordering from a push's position
+(`«RESPONSE-PUSH-ORDER»` already bars that inference for responses).
 
 Both ack shapes carry their authority explicitly:
 
@@ -6372,6 +6427,7 @@ to choose incompatible semantics silently.
 | `«RETENTION-UNITS»` | **decided-by-draft** | Caps start at `2Q+I×marker`: debt borrows only Q; K=Q is componentwise transferable recovery occupancy. Recovery charge moves from K_remaining into B; fit uses exact post-transfer K_remaining. One quartet and the fixed occurrence/selection array back the complete successor plan; anchored DCR forbids ordinary attach. | Empty equality with one-record enrollment; exact S/B/K_remaining transfers; marker ack/compaction; fenced DCR/Leave; equality refusal and farther-max quartet; crash-atomic successor tests. |
 | `«MULTI-CONVERSATION-MUX»` | **decided-by-draft** | Yes. One connection carries many conversations, demuxed by `conversation_id`; participant `stream_id = 0` and has no semantic role. | Cross-conversation interleaving and independent-cursor tests. |
 | `«RESPONSE-PUSH-ORDER»` | **decided-by-amendment (A1, 2026-07-23) — RATIFIED 2026-07-28, reviewer-of-record key turned (Vesper Lynd, at the bytes; verdict record in §0.12)** | No ordering is promised between a request's `ServerValue` response and unsolicited `ServerPush` frames on one connection; per-conversation push order is preserved; correct clients demux by frame variant with single-outstanding-request discipline; v1 has no request-correlation field (R-D3 defers it). | Amplified interleave reproduction (52/60 under 8-way contention, byte captures) plus harness demux fix as fail-first pair; SDK `receive()` variant-demux as reference; cross-conversation interleaving tests of `«MULTI-CONVERSATION-MUX»` unaffected. |
+| `«PUSH-REOFFER-SCHEDULE»` | **decided-by-amendment (A3, 2026-08-08) — PROPOSED, awaiting reviewer-of-record key (record in §0.14)** | Re-offer of an unacknowledged `(conversation_id, delivery_seq)` is lawful on one healthy connection with no transport loss: the publication scan decides offer count and interleave position, both mount-independent and meaningless to a client; every offer of one pair is byte-identical, so a re-offer can never present a different record; consumers deduplicate on the pair per R-C3's watermark rule. | #50 parity gate `assert_push_parity` (dedup-by-bytes across repeated runs, repeats byte-identical, both mounts) at liminal `29a2bce`; R-C3 idempotency-key and crash-window redelivery acceptance cases; `«RESPONSE-PUSH-ORDER»` covers the ordering half. |
 | `«MULTI-BINDING-PER-CONVERSATION»` | **decided-by-draft (excluded in v1)** | At most one participant binds each `(connection_incarnation, conversation_id)`. A different-id enrollment/attach gets R-C1's exact request-echo variant, which adds only `presented_participant_id:None\|Some(request participant)` and never an occupying identity field; same-id rotation is allowed. | Empty-slot race, enrollment with no presented id, Q-after-P refusal without P disclosure, same-P rotation, and conversation-only delivery codec. |
 | `«LIFECYCLE-VERDICT-RECIPIENTS»` | **decided-by-draft** | Every member is entitled to every lifecycle/compaction record in total order, including while detached, unless it explicitly accepts a named abandonment after compaction broke continuity. | Three-party lifecycle/compaction races, offline replay, and explicit-abandonment tests. |
 | `«LIFECYCLE-OBSERVER-DELIVERY»` | **decided-by-draft** | The log is sole completed lifecycle history and observer progress hard. Signed per-conversation and SDK-wide conversation/row/full-byte caps plus request/row maxima bound parking; durable first-row interest slots make all Awaiting conversations armable. `Reserved` restart, checked u64 order, cohort marking, authority loss, epoch monotonicity, and all-dimension renegotiation are explicit. Acks never park. | Independent row/byte/global cap hits, interest-slot recovery, Reserved crash, per-row downward incompatibility, near-max order, epoch races, credential loss, and no orphan/ack/poll. |

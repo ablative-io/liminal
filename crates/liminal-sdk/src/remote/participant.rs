@@ -400,6 +400,11 @@ impl<S: ParticipantResumeStore> RemoteParticipantHandle<S> {
 
     /// Receives one real participant frame and delegates every `ServerValue` to the crate.
     ///
+    /// Pushed deliveries are at-least-once: the same
+    /// `(conversation_id, delivery_seq)` may arrive more than once on one
+    /// healthy connection, byte-identical each time — deduplicate on the pair
+    /// (participant contract R-C3, amendment A3).
+    ///
     /// # Errors
     ///
     /// Returns transport, direction, LPCR encoding, or storage failures.
