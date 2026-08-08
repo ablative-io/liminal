@@ -252,6 +252,13 @@ impl WebSocketConnectionProcess {
                 return self.stop_crashed(pid);
             }
         };
+        // WORKTREE PROBE (ws-parked-delivery measurement lane): death-site 4 —
+        // "drained but the socket write/flush is lost". Pairs with
+        // `PROBE[pump-enqueue]`: frames enqueued this slice must show up here as
+        // a drain that made progress or completed.
+        if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+            eprintln!("PROBE[ws-drain] pid={pid} outcome={drain:?}");
+        }
         if let Err(error) = self.sync_deadline_timers(pid, ctx) {
             return self.fail_slice(pid, &error);
         }
@@ -286,6 +293,15 @@ impl WebSocketConnectionProcess {
             Ok(false) => {
                 #[cfg(test)]
                 self.runtime.record_park(pid);
+                // WORKTREE PROBE (ws-parked-delivery measurement lane): the park
+                // itself. Everything after this point on this connection must be
+                // driven by a wake — a READY marker, socket readiness, or a timer.
+                if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                    eprintln!(
+                        "PROBE[ws-park] pid={pid} subscriptions={}",
+                        self.state.subscriptions.len()
+                    );
+                }
                 NativeOutcome::Wait
             }
             Err(error) => self.fail_slice(pid, &error),

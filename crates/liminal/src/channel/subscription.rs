@@ -316,6 +316,17 @@ impl SubscriptionInbox {
             };
             let was_empty = state.queue.is_empty();
             state.queue.push_back((envelope, charged));
+            // WORKTREE PROBE (ws-parked-delivery measurement lane): the
+            // empty→non-empty wake edge. `notifier_present=false` here is the
+            // silent-None fate; `was_empty=false` means the wake is deliberately
+            // coalesced onto an earlier one.
+            if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                eprintln!(
+                    "PROBE[admit] queued={} was_empty={was_empty} notifier_present={}",
+                    state.queue.len(),
+                    state.notifier.is_some()
+                );
+            }
             // Fire only on the empty→non-empty edge: a parked connection needs one
             // wake to drain the whole burst, and coalescing is harmless (R6).
             if was_empty {

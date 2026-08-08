@@ -100,6 +100,22 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
         held_deliveries,
         ..
     } = state;
+    // WORKTREE PROBE (ws-parked-delivery measurement lane): death-site 3 —
+    // "woken but the pump does not drain". This runs on EVERY slice of both
+    // transports, so a pending inbox that is never drained shows up here as a
+    // `pending=true` entry with no matching `PROBE[pump-enqueue]`.
+    let probing = std::env::var_os("LIMINAL_WS_PROBE").is_some();
+    if probing && !subscriptions.is_empty() {
+        eprintln!(
+            "PROBE[pump] subscriptions={} pending={:?} held={}",
+            subscriptions.len(),
+            subscriptions
+                .iter()
+                .map(|(id, subscription)| (*id, subscription.has_pending()))
+                .collect::<Vec<_>>(),
+            held_deliveries.len()
+        );
+    }
     let mut remaining = budget;
     // §5 shed: subscriptions whose inbox overflowed the connection byte budget or
     // the fairness trip. Each is sent a typed `SubscribeError` here and removed by
@@ -175,6 +191,9 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
                 return Ok(shed);
             }
             outbound.enqueue_frame(&frame)?;
+            if probing {
+                eprintln!("PROBE[pump-enqueue] subscription_id={subscription_id} stream_id={stream_id}");
+            }
             remaining -= 1;
         }
     }

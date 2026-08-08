@@ -337,12 +337,33 @@ impl ChannelActorCore {
             Envelope::new(normalized, causal_context, schema.id(), publisher_id)
         };
         let subscribers = lock(&self.subscribers)?;
+        // WORKTREE PROBE (ws-parked-delivery measurement lane): death-site 1 —
+        // "never enqueued at the channel actor". This is the ONE fan-out list;
+        // a subscription missing from it can never receive anything.
+        let probing = std::env::var_os("LIMINAL_WS_PROBE").is_some();
+        if probing {
+            eprintln!(
+                "PROBE[fanout] subscriber_registrations={} pids={:?}",
+                subscribers.len(),
+                subscribers
+                    .iter()
+                    .map(super::subscription::SubscriberRegistration::pid)
+                    .collect::<Vec<_>>()
+            );
+        }
         let mut delivered_count = 0;
         for subscriber in subscribers.iter() {
             // `deliver` is infallible now (R3: an inbox overflow marks the
             // subscription for shedding and returns `false` rather than erroring),
             // so a non-delivered envelope simply is not counted.
-            if subscriber.deliver(&envelope) {
+            let delivered = subscriber.deliver(&envelope);
+            if probing {
+                eprintln!(
+                    "PROBE[deliver] subscriber_pid={} admitted={delivered}",
+                    subscriber.pid()
+                );
+            }
+            if delivered {
                 delivered_count += 1;
             }
         }

@@ -104,9 +104,21 @@ impl ReadyWaker {
             return true;
         }
         let Some(scheduler) = self.scheduler.upgrade() else {
+            // WORKTREE PROBE (ws-parked-delivery measurement lane).
+            if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                eprintln!(
+                    "PROBE[fire] pid={} delivered=false reason=scheduler_gone",
+                    self.pid
+                );
+            }
             return false;
         };
         self.ready_pending.store(true, Ordering::Release);
-        scheduler.enqueue_atom_message(self.pid, self.ready_atom)
+        let delivered = scheduler.enqueue_atom_message(self.pid, self.ready_atom);
+        // WORKTREE PROBE: death-site 2 — did the wake actually reach the pid?
+        if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+            eprintln!("PROBE[fire] pid={} delivered={delivered}", self.pid);
+        }
+        delivered
     }
 }

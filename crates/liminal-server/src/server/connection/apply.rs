@@ -531,6 +531,18 @@ fn subscribe_response(
             waker.fire();
         }) as liminal::channel::InboxNotifier
     });
+    // WORKTREE PROBE (ws-parked-delivery measurement lane): death-site 2 —
+    // "enqueued but the connection is never woken" starts here. A `None`
+    // notifier is a once-per-establishment fate: that subscription then has NO
+    // wake source for its entire life.
+    if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+        eprintln!(
+            "PROBE[install] pid={pid} mount={:?} channel={channel} notifier_installed={} \
+             stream_id={stream_id}",
+            state.mount,
+            notifier.is_some()
+        );
+    }
     let install = liminal::channel::InboxInstall {
         budget,
         depth_cap: limits.max_subscription_inbox_depth,
@@ -543,6 +555,13 @@ fn subscribe_response(
             // on.
             subscription.set_stream_id(stream_id);
             let subscription_id = subscription.id();
+            if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                eprintln!(
+                    "PROBE[subscribed] pid={pid} mount={:?} channel={channel} \
+                     subscription_id={subscription_id} stream_id={stream_id}",
+                    state.mount
+                );
+            }
             let selected_schema = subscription.selected_schema();
             state.subscriptions.insert(subscription_id, subscription);
             FrameAction::Respond(Frame::SubscribeAck {
