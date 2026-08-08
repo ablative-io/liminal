@@ -23,7 +23,6 @@
 
 use std::collections::VecDeque;
 use std::io::Write;
-use std::net::TcpStream;
 
 use liminal::protocol::{Frame, ProtocolError, encode, encoded_len};
 
@@ -171,7 +170,13 @@ impl OutboundWriter {
             .is_some_and(|projected| projected <= self.capacity)
     }
 
-    /// Drains queued bytes to `stream`, reporting the [`DrainOutcome`] tri-state.
+    /// Drains queued bytes to `sink`, reporting the [`DrainOutcome`] tri-state.
+    ///
+    /// The sink is any [`std::io::Write`]: the live path passes the connection's
+    /// non-blocking `TcpStream`, and a transport with no socket passes its own
+    /// write half. Nothing below reads a socket fact — the byte budget, the
+    /// partial-write tracking and the error classification are transport-neutral —
+    /// so one writer serves every transport instead of being copied per sink.
     ///
     /// Writes proceed from the front of the queue with a `write()` loop that
     /// tracks partial progress; a `WouldBlock` (the non-blocking socket's send
@@ -193,14 +198,14 @@ impl OutboundWriter {
     /// Returns [`OutboundError::Write`] on an unrecoverable socket write error.
     pub(super) fn drain(
         &mut self,
-        stream: &mut TcpStream,
+        sink: &mut dyn Write,
         budget: Option<usize>,
     ) -> Result<DrainOutcome, OutboundError> {
         let mut written_total: usize = 0;
         while !self.buffer.is_empty() {
             // Stop on the byte budget BEFORE the next write: the budget bounds
             // bytes written this drain, and residue remaining means the caller
-            // (park-flip) re-services next slice — the socket last accepted a
+            // (park-flip) re-services next slice — the sink last accepted a
             // write, so it is presumed writable (`Progress`, not a WouldBlock).
             let remaining_budget = match budget {
                 Some(limit) if written_total >= limit => return Ok(DrainOutcome::Progress),
@@ -216,7 +221,7 @@ impl OutboundWriter {
             let front = remaining_budget.map_or(front, |limit| {
                 front.get(..limit.min(front.len())).unwrap_or(front)
             });
-            match stream.write(front) {
+            match sink.write(front) {
                 Ok(0) => {
                     return Err(OutboundError::Write(std::io::Error::new(
                         std::io::ErrorKind::WriteZero,

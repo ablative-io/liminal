@@ -658,20 +658,9 @@ impl ConnectionProcess {
     /// including the native mailbox so READY enqueued by this slice cannot be
     /// mistaken for quiescence after its inbox work was already consumed.
     fn final_probe(&self, pid: u64, ctx: &NativeContext<'_>) -> Result<bool, ServerError> {
-        let socket_ready = if let Some(stream) = self.stream.as_ref() {
-            let mut byte = [0_u8; 1];
-            match stream.peek(&mut byte) {
-                Ok(_) => true,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => true,
-                Err(error) => {
-                    return Err(ServerError::ListenerAccept {
-                        message: format!("connection readiness probe failed: {error}"),
-                    });
-                }
-            }
-        } else {
-            true
+        let socket_ready = match self.stream.as_ref() {
+            Some(stream) => stream.inbound_pending()?,
+            None => true,
         };
         let subscription_ready = !self.state.held_deliveries.is_empty()
             || self
@@ -995,6 +984,41 @@ fn participant_publication_error(
 ) -> ServerError {
     ServerError::ListenerAccept {
         message: format!("participant publication registry failed: {error}"),
+    }
+}
+
+/// A connection's read half, asked whether inbound bytes are already waiting.
+///
+/// [`ConnectionProcess::final_probe`] answers "is there inbound work pending"
+/// before the connection parks, and that one term of the probe is a transport
+/// fact rather than a connection fact: a socket answers with a non-consuming
+/// `peek`, a transport with no socket answers from its own queued bytes. The
+/// remaining terms (subscriptions, participant publications, reply deadlines,
+/// control, mailbox) are shared across transports unchanged, so a sibling
+/// process type replaces only this answer.
+pub(super) trait InboundPending {
+    /// Whether readable bytes are already waiting, without consuming them.
+    ///
+    /// `Interrupted` reports pending (the probe never ran, so quiescence is not
+    /// established); `WouldBlock` is the honest "nothing waiting".
+    ///
+    /// # Errors
+    /// Returns [`ServerError::ListenerAccept`] when the read half fails the
+    /// probe with anything other than `WouldBlock` or `Interrupted`.
+    fn inbound_pending(&self) -> Result<bool, ServerError>;
+}
+
+impl InboundPending for TcpStream {
+    fn inbound_pending(&self) -> Result<bool, ServerError> {
+        let mut byte = [0_u8; 1];
+        match self.peek(&mut byte) {
+            Ok(_) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(false),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Ok(true),
+            Err(error) => Err(ServerError::ListenerAccept {
+                message: format!("connection readiness probe failed: {error}"),
+            }),
+        }
     }
 }
 
