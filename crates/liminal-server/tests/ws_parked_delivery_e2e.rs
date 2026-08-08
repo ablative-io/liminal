@@ -101,6 +101,16 @@ struct RunningServer {
 
 impl RunningServer {
     fn start() -> Result<Self, Box<dyn Error>> {
+        Self::start_with(&[CHANNEL], false, Vec::new())
+    }
+
+    /// Fidelity knobs the field estate differs on: durable channels, more than
+    /// one channel per connection, and a non-empty `allowed_origins` list.
+    fn start_with(
+        channels: &[&str],
+        durable: bool,
+        allowed_origins: Vec<String>,
+    ) -> Result<Self, Box<dyn Error>> {
         let health = std::net::TcpListener::bind("127.0.0.1:0")?;
         let health_listen_address = health.local_addr()?;
         drop(health);
@@ -108,12 +118,15 @@ impl RunningServer {
             listen_address: "127.0.0.1:0".parse()?,
             health_listen_address,
             drain_timeout_ms: 30_000,
-            channels: vec![ChannelDef {
-                name: CHANNEL.to_owned(),
-                schema_ref: None,
-                durable: false,
-                loaded_schema: None,
-            }],
+            channels: channels
+                .iter()
+                .map(|name| ChannelDef {
+                    name: (*name).to_owned(),
+                    schema_ref: None,
+                    durable,
+                    loaded_schema: None,
+                })
+                .collect(),
             routing_rules: Vec::new(),
             persistence_path: None,
             cluster: None,
@@ -128,7 +141,7 @@ impl RunningServer {
         let ws_config = WebSocketConfig {
             listen_address: "127.0.0.1:0".parse()?,
             path: PATH.to_owned(),
-            allowed_origins: Vec::new(),
+            allowed_origins,
             // The field estate runs with NO keepalive timer, so the connection
             // has no periodic self-wake: pinned here so the harness cannot
             // accidentally supply the wake the field lacks.
@@ -241,6 +254,58 @@ fn publish_over_tcp(server: &RunningServer, id: u64) -> Result<(), Box<dyn Error
     Ok(())
 }
 
+/// Publishes `payload` to `channel` over a fresh raw TCP connection, so a
+/// non-default channel needs no SDK config plumbing.
+fn publish_raw_tcp(
+    server: &RunningServer,
+    channel: &str,
+    payload: &[u8],
+) -> Result<(), Box<dyn Error>> {
+    use std::io::{Read, Write};
+
+    let mut stream = TcpStream::connect(server.tcp_addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let write_frame = |stream: &mut TcpStream, frame: &Frame| -> Result<(), Box<dyn Error>> {
+        let mut bytes = vec![0_u8; encoded_len(frame)?];
+        let written = encode(frame, &mut bytes)?;
+        bytes.truncate(written);
+        stream.write_all(&bytes)?;
+        Ok(())
+    };
+    write_frame(
+        &mut stream,
+        &Frame::Connect {
+            flags: 0,
+            min_version: ProtocolVersion::new(1, 0),
+            max_version: ProtocolVersion::new(1, 0),
+            auth_token: Vec::new(),
+        },
+    )?;
+    let mut buffer = vec![0_u8; 4096];
+    let read = stream.read(&mut buffer)?;
+    decode(&buffer[..read])?;
+    write_frame(
+        &mut stream,
+        &Frame::Publish {
+            flags: 0,
+            stream_id: RAW_PUBLISH_STREAM,
+            channel: channel.to_owned(),
+            envelope: MessageEnvelope::new(
+                SchemaId::new([7_u8; SchemaId::WIRE_LEN]),
+                CausalContext::independent(),
+                payload.to_vec(),
+            ),
+            idempotency_key: None,
+        },
+    )?;
+    let read = stream.read(&mut buffer)?;
+    let (frame, _consumed) = decode(&buffer[..read])?;
+    match frame {
+        Frame::PublishAck { .. } => Ok(()),
+        other => Err(format!("raw tcp publish refused: {other:?}").into()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Raw WebSocket client (arm C): one connection that subscribes AND publishes,
 // which is the browser's shape and which no SDK type offers.
@@ -254,10 +319,20 @@ struct RawWsClient {
 impl RawWsClient {
     /// Performs the RFC 6455 upgrade, the liminal `Connect`, and a `Subscribe`.
     fn open(server: &RunningServer) -> Result<Self, Box<dyn Error>> {
+        Self::open_on(server, &[CHANNEL], None)
+    }
+
+    /// The same open with the field's fidelity knobs: one subscribe per channel
+    /// on the SAME connection, and an optional browser `Origin` header.
+    fn open_on(
+        server: &RunningServer,
+        channels: &[&str],
+        origin: Option<&str>,
+    ) -> Result<Self, Box<dyn Error>> {
         let deadline = Instant::now() + CONNECT_TIMEOUT;
         let mut last: Option<String> = None;
         while Instant::now() < deadline {
-            match Self::try_open(server) {
+            match Self::try_open(server, channels, origin) {
                 Ok(client) => return Ok(client),
                 Err(error) => {
                     last = Some(error.to_string());
@@ -268,10 +343,24 @@ impl RawWsClient {
         Err(format!("raw websocket client never opened: {last:?}").into())
     }
 
-    fn try_open(server: &RunningServer) -> Result<Self, Box<dyn Error>> {
+    fn try_open(
+        server: &RunningServer,
+        channels: &[&str],
+        origin: Option<&str>,
+    ) -> Result<Self, Box<dyn Error>> {
         let stream = TcpStream::connect(server.ws_addr)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-        let (mut socket, _response) = tungstenite::client::client(server.ws_url(), stream)?;
+        let (mut socket, _response) = match origin {
+            None => tungstenite::client::client(server.ws_url(), stream)?,
+            Some(origin) => {
+                use tungstenite::client::IntoClientRequest;
+                let mut request = server.ws_url().into_client_request()?;
+                request
+                    .headers_mut()
+                    .insert("Origin", origin.parse().map_err(|_| "bad origin header")?);
+                tungstenite::client::client(request, stream)?
+            }
+        };
 
         send_frame(
             &mut socket,
@@ -287,22 +376,26 @@ impl RawWsClient {
             other => return Err(format!("expected ConnectAck, got {other:?}").into()),
         }
 
-        send_frame(
-            &mut socket,
-            &Frame::Subscribe {
-                flags: 0,
-                stream_id: RAW_SUBSCRIBE_STREAM,
-                channel: CHANNEL.to_owned(),
-                accepted_schemas: Vec::new(),
-                max_in_flight: 16,
-            },
-        )?;
-        let subscription_id = match read_frame(&mut socket, Duration::from_secs(5))? {
-            Some(Frame::SubscribeAck {
-                subscription_id, ..
-            }) => subscription_id,
-            other => return Err(format!("expected SubscribeAck, got {other:?}").into()),
-        };
+        let mut subscription_id = 0;
+        for (index, channel) in channels.iter().enumerate() {
+            let stream_id = RAW_SUBSCRIBE_STREAM + u32::try_from(index)?;
+            send_frame(
+                &mut socket,
+                &Frame::Subscribe {
+                    flags: 0,
+                    stream_id,
+                    channel: (*channel).to_owned(),
+                    accepted_schemas: Vec::new(),
+                    max_in_flight: 16,
+                },
+            )?;
+            subscription_id = match read_frame(&mut socket, Duration::from_secs(5))? {
+                Some(Frame::SubscribeAck {
+                    subscription_id, ..
+                }) => subscription_id,
+                other => return Err(format!("expected SubscribeAck, got {other:?}").into()),
+            };
+        }
         Ok(Self {
             socket,
             subscription_id,
@@ -310,12 +403,16 @@ impl RawWsClient {
     }
 
     fn publish(&mut self, payload: &[u8]) -> Result<(), Box<dyn Error>> {
+        self.publish_to(CHANNEL, payload)
+    }
+
+    fn publish_to(&mut self, channel: &str, payload: &[u8]) -> Result<(), Box<dyn Error>> {
         send_frame(
             &mut self.socket,
             &Frame::Publish {
                 flags: 0,
                 stream_id: RAW_PUBLISH_STREAM,
-                channel: CHANNEL.to_owned(),
+                channel: channel.to_owned(),
                 envelope: MessageEnvelope::new(
                     SchemaId::new([7_u8; SchemaId::WIRE_LEN]),
                     CausalContext::independent(),
@@ -523,6 +620,135 @@ fn arm_c_ask_shape_ws_connection_receives_later_publishes() -> Result<(), Box<dy
     assert!(
         failures.is_empty(),
         "ARM C (ask shape) failed {}/{iterations} iterations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Fidelity arms: the field estate differs from arms A-C on knobs that could
+// each carry the defect. Each is arm B's park shape with ONE knob moved.
+// ---------------------------------------------------------------------------
+
+/// Arm D — DURABLE channel. The estate's channels persist; a durable publish
+/// takes a different path to the actor than an ephemeral one.
+fn arm_d_once() -> Result<(bool, String), Box<dyn Error>> {
+    let server = RunningServer::start_with(&[CHANNEL], true, Vec::new())?;
+    let mut client = RawWsClient::open(&server)?;
+    std::thread::sleep(PARK_WINDOW);
+    publish_raw_tcp(&server, CHANNEL, br#"{"id":501}"#)?;
+    let (payloads, others) = client.collect_until(Instant::now() + RECV_TIMEOUT);
+    let seen: Vec<String> = payloads
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+        .collect();
+    let received = seen.iter().any(|payload| payload == r#"{"id":501}"#);
+    Ok((received, format!("seen={seen:?} other_frames={others:?}")))
+}
+
+#[test]
+fn arm_d_durable_channel_ws_receives_after_park() -> Result<(), Box<dyn Error>> {
+    let iterations = iterations(3);
+    let mut failures = Vec::new();
+    for index in 0..iterations {
+        let (received, detail) = arm_d_once()?;
+        eprintln!("ARM D iteration {index}: received={received} :: {detail}");
+        if !received {
+            failures.push(format!("iteration {index}: {detail}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ARM D (durable channel, publish after park) failed {}/{iterations} iterations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+/// Arm E — MANY subscriptions on ONE websocket connection, the estate's shape
+/// (a page subscribes to several channels over its single socket). Every
+/// subscription shares one connection inbox budget and one delivery pump.
+fn arm_e_once() -> Result<(bool, String), Box<dyn Error>> {
+    let channels = ["events", "presence", "addresses"];
+    let server = RunningServer::start_with(&channels, false, Vec::new())?;
+    let mut client = RawWsClient::open_on(&server, &channels, None)?;
+    std::thread::sleep(PARK_WINDOW);
+    for (index, channel) in channels.iter().enumerate() {
+        publish_raw_tcp(
+            &server,
+            channel,
+            format!("{{\"id\":{}}}", 600 + index).as_bytes(),
+        )?;
+    }
+    let (payloads, others) = client.collect_until(Instant::now() + RECV_TIMEOUT);
+    let seen: Vec<String> = payloads
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+        .collect();
+    let missing: Vec<String> = (0..channels.len())
+        .map(|index| format!("{{\"id\":{}}}", 600 + index))
+        .filter(|wanted| !seen.contains(wanted))
+        .collect();
+    Ok((
+        missing.is_empty(),
+        format!("missing={missing:?} seen={seen:?} other_frames={others:?}"),
+    ))
+}
+
+#[test]
+fn arm_e_multi_channel_ws_connection_receives_after_park() -> Result<(), Box<dyn Error>> {
+    let iterations = iterations(3);
+    let mut failures = Vec::new();
+    for index in 0..iterations {
+        let (received, detail) = arm_e_once()?;
+        eprintln!("ARM E iteration {index}: all_received={received} :: {detail}");
+        if !received {
+            failures.push(format!("iteration {index}: {detail}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ARM E (multi-channel ws connection after park) failed {}/{iterations} iterations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+/// Arm F — ORIGIN-GATED acceptor with a matching browser `Origin` header, the
+/// estate's `allowed_origins` shape. Proves the origin check is a handshake
+/// decision only and changes nothing about delivery.
+fn arm_f_once() -> Result<(bool, String), Box<dyn Error>> {
+    let origin = "https://face.example";
+    let server = RunningServer::start_with(&[CHANNEL], false, vec![origin.to_owned()])?;
+    let mut client = RawWsClient::open_on(&server, &[CHANNEL], Some(origin))?;
+    std::thread::sleep(PARK_WINDOW);
+    publish_raw_tcp(&server, CHANNEL, br#"{"id":701}"#)?;
+    let (payloads, others) = client.collect_until(Instant::now() + RECV_TIMEOUT);
+    let seen: Vec<String> = payloads
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+        .collect();
+    let received = seen.iter().any(|payload| payload == r#"{"id":701}"#);
+    Ok((received, format!("seen={seen:?} other_frames={others:?}")))
+}
+
+#[test]
+fn arm_f_origin_gated_ws_receives_after_park() -> Result<(), Box<dyn Error>> {
+    let iterations = iterations(3);
+    let mut failures = Vec::new();
+    for index in 0..iterations {
+        let (received, detail) = arm_f_once()?;
+        eprintln!("ARM F iteration {index}: received={received} :: {detail}");
+        if !received {
+            failures.push(format!("iteration {index}: {detail}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ARM F (origin-gated acceptor, publish after park) failed {}/{iterations} iterations:\n{}",
         failures.len(),
         failures.join("\n")
     );
