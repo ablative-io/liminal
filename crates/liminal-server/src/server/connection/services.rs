@@ -27,6 +27,7 @@ use super::services_schema::{ChannelSchema, resolve_channel_schema, resolve_sche
 use super::worker_front_door::WorkerFrontDoorServices;
 use crate::ServerError;
 use crate::config::types::{ClusterConfig, ServerConfig, ServiceProfile};
+use crate::health::unloadable::UnloadableConversationRecord;
 use crate::server::participant::{InstalledParticipantService, ProductionParticipantHandler};
 
 pub use super::services_cluster::ChannelCluster;
@@ -323,6 +324,16 @@ pub struct LiminalConnectionServices {
     /// Complete participant service, installed only when semantic lifecycle
     /// handling and its durable aggregate store are both ready.
     participant_service: Option<InstalledParticipantService>,
+    /// The production handler's refused-load record, captured at construction.
+    ///
+    /// [`InstalledParticipantService`] holds its handler behind
+    /// `dyn ParticipantSemanticHandler`, so the concrete production handler is
+    /// no longer reachable once it is installed; the record is taken here, in
+    /// the one place the concrete handler exists, and carried out to the
+    /// startup path that publishes it onto the health endpoint. `None` is "no
+    /// participant is configured", which the operator surface reports as such
+    /// rather than as an empty refusal set.
+    unloadable_conversations: Option<UnloadableConversationRecord>,
     /// In-memory (haematite-backed) dedup cache for dedup-on-delivery. Keyed by
     /// the per-message idempotency key carried on the publish frame; a duplicate
     /// key is suppressed before fan-out so a subscriber receives it at most once.
@@ -429,7 +440,7 @@ impl LiminalConnectionServices {
         // conversation logs live in, under the configured wire-frame limit.
         // No section, no service — the capability bit stays off and the
         // connection path is byte-identical to the pre-activation build.
-        let participant_service = config
+        let installed_participant = config
             .participant
             .as_ref()
             .map(|participant| {
@@ -438,7 +449,12 @@ impl LiminalConnectionServices {
                         .map_err(|error| ServerError::ParticipantStartupRestore {
                             message: error.to_string(),
                         })?;
-                InstalledParticipantService::new(
+                // Taken BEFORE the handler is erased behind
+                // `dyn ParticipantSemanticHandler`: boot has already recorded
+                // every conversation it refused by the time `new` returns, so
+                // the record captured here is complete from the first scrape.
+                let unloadable_conversations = handler.unloadable_record();
+                let service = InstalledParticipantService::new(
                     Arc::new(handler),
                     Arc::clone(&durable_store),
                     participant.wire_frame_limit,
@@ -449,15 +465,18 @@ impl LiminalConnectionServices {
                          complete participant frame ({error:?})",
                         participant.wire_frame_limit
                     ),
-                })
+                })?;
+                Ok::<_, ServerError>((service, unloadable_conversations))
             })
             .transpose()?;
+        let (participant_service, unloadable_conversations) = installed_participant.unzip();
         Ok(Self {
             channels: RwLock::new(channels),
             max_channels: config.limits.max_channels,
             cluster,
             durable_store,
             participant_service,
+            unloadable_conversations,
             dedup,
             conversation_supervisor,
             responders: Mutex::new(HashMap::new()),
@@ -484,6 +503,7 @@ impl LiminalConnectionServices {
             cluster: build_channel_cluster(None)?,
             durable_store,
             participant_service: None,
+            unloadable_conversations: None,
             dedup,
             conversation_supervisor,
             responders: Mutex::new(HashMap::new()),
@@ -505,6 +525,18 @@ impl LiminalConnectionServices {
     #[must_use]
     pub fn durable_store(&self) -> Arc<dyn DurableStore> {
         Arc::clone(&self.durable_store)
+    }
+
+    /// The production participant handler's refused-load record, when a
+    /// participant is configured.
+    ///
+    /// The server's startup path publishes this onto the health endpoint so
+    /// `GET /unloadable-conversations` answers from the same record the
+    /// handler writes. `None` means no participant is configured at all, which
+    /// the surface reports as a distinct state from "nothing was refused".
+    #[must_use]
+    pub fn unloadable_conversation_record(&self) -> Option<UnloadableConversationRecord> {
+        self.unloadable_conversations.clone()
     }
 
     /// Installs a complete participant bundle in full-service supervisor tests.

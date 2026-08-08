@@ -163,6 +163,9 @@ mod tests_restore_window;
 mod tests_restore_window_detached;
 #[cfg(test)]
 mod tests_unit2_layer1;
+
+#[cfg(test)]
+mod tests_unloadable_surface;
 #[cfg(test)]
 mod tests_w1a;
 #[cfg(test)]

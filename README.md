@@ -49,7 +49,7 @@ bounded by `drain_timeout_ms`.
 
 ### Health and metrics
 
-The health listener speaks plain HTTP on `health_listen_address` and serves three
+The health listener speaks plain HTTP on `health_listen_address` and serves four
 `GET` routes. Any other path answers `404`; any other method on these paths
 answers `405`.
 
@@ -58,6 +58,7 @@ answers `405`.
 | `GET /health` | Liveness. Always `200` with `{"status":"healthy","message":null}` — if the process can answer, it is alive. |
 | `GET /ready` | Readiness. `200` with `{"ready":true,"unmet_conditions":[]}` once configuration has loaded, the wire listener is bound, and — when `[cluster]` is configured — membership is established. Otherwise `503`, naming the unmet conditions. |
 | `GET /metrics` | Prometheus text exposition (`text/plain; version=0.0.4`) of the process metrics registry. Always `200`; the body is empty when no registry is installed, so a scraper still observes a live target. |
+| `GET /unloadable-conversations` | Which conversations this node refused to load. Always `200` with `{"participant_installed":bool,"count":n,"conversations":[{"conversation_id":n,"class":"…","reason":"…"}]}`. Containment refuses one unloadable conversation on its own and keeps serving the rest; this is how an operator asks which one. `participant_installed` is `false` when no participant record is attached at all, so a `count` of `0` is never read as a clean node when it means the surface is looking at nothing. `class` is the stable refusal discriminant — match on it, not on `reason`, whose text is a diagnostic and may move. |
 
 ### Environment overrides
 
