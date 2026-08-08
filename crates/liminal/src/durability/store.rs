@@ -261,8 +261,18 @@ impl DurableStore for HaematiteStore {
 /// on unwind it DISARMS the directory guard — the directory is deliberately
 /// leaked, because visible residue is diagnosable while removal under live
 /// workers is filesystem corruption — logs the leaked path, and re-raises the
-/// panic. On the clean path the directory is removed after the store, by the
-/// ordinary field drop that follows this `Drop`.
+/// panic. On the clean path the directory is removed after the store, HERE,
+/// by an explicit [`TempDir::close`] whose error is logged.
+///
+/// The explicitness is the point. Letting the `TempDir` field drop instead
+/// would remove the directory via `tempfile`'s own `Drop`, which is
+/// `let _ = remove_dir_all(..)` — the `io::Result` is discarded, so a removal
+/// that FAILED would be indistinguishable from one that succeeded and this
+/// doc's "the directory is removed" would be a claim no code could check.
+/// `close()` returns that error; the clean path reports it and leaves the
+/// residue where the log says it is. It never panics (a `Drop` that unwinds
+/// during another unwind aborts the process) and never masks: a failure to
+/// remove is a durability fact, not something to swallow.
 ///
 /// Both fields are `Option` only so `drop` can move them out; they are `Some`
 /// for the shell's entire life outside `drop`.
@@ -290,6 +300,20 @@ impl<S> Drop for EphemeralGuard<S> {
             }
             std::panic::resume_unwind(panic);
         }
+        // Clean path: the store is closed, its workers are joined and the
+        // writer lock is released, so removing the directory now is safe — and
+        // removing it EXPLICITLY is what makes a failure sayable.
+        if let Some(dir) = self.dir.take() {
+            let path = dir.path().to_path_buf();
+            if let Err(error) = dir.close() {
+                tracing::error!(
+                    path = %path.display(),
+                    %error,
+                    "ephemeral store directory removal failed; residue remains at the \
+                     logged path"
+                );
+            }
+        }
     }
 }
 
@@ -305,8 +329,9 @@ impl<S> Drop for EphemeralGuard<S> {
 /// `Arc<dyn DurableStore>` over the whole wrapper. When the last such clone
 /// drops, the [`EphemeralGuard`] drops the store FIRST — the database closes,
 /// its shard actors join and the data-dir writer lock releases on fd close —
-/// and only then removes the directory; if closing the database panics, the
-/// directory is deliberately leaked instead (see [`EphemeralGuard`]).
+/// and only then removes the directory, logging the error if that removal
+/// fails; if closing the database panics, the directory is deliberately leaked
+/// instead (see [`EphemeralGuard`]).
 #[derive(Debug)]
 pub struct EphemeralHaematiteStore {
     guard: EphemeralGuard<HaematiteStore>,
@@ -503,8 +528,8 @@ mod ephemeral_lifecycle_tests {
     //! rule-1 assertions that the ephemeral store's directory has an enforced
     //! owner across every teardown path.
 
-    use std::path::PathBuf;
-    use std::sync::Arc;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     use super::super::bridge::block_on;
     use super::{
@@ -512,6 +537,73 @@ mod ephemeral_lifecycle_tests {
     };
 
     const TEST_SHARD_COUNT: usize = 2;
+
+    /// In-memory `tracing` sink, so a test can assert on what the teardown path
+    /// LOGGED rather than on what it merely did.
+    ///
+    /// Every teardown assertion below runs against this one instrument, and
+    /// [`panic_path_leak_is_logged_with_its_path`] is its positive control: it
+    /// exercises the SAME predicate (`captured` contains the path and `ERROR`)
+    /// against a log line that is emitted today. Without that control an empty
+    /// capture would only measure the harness.
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        /// Everything written to the sink so far, as text.
+        fn text(&self) -> String {
+            let bytes = self
+                .0
+                .lock()
+                .expect("capture buffer is not poisoned")
+                .clone();
+            String::from_utf8(bytes).expect("tracing's fmt writer emits utf-8")
+        }
+
+        /// Runs `body` with this sink installed as the thread's subscriber.
+        fn capturing<R>(&self, body: impl FnOnce() -> R) -> R {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(self.clone())
+                .with_ansi(false)
+                .finish();
+            tracing::subscriber::with_default(subscriber, body)
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| std::io::Error::other("capture buffer poisoned"))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLog {
+        type Writer = Self;
+
+        fn make_writer(&'writer self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Sets `path`'s mode, used to make a parent directory unwritable so that
+    /// removing a directory INSIDE it fails at the final `rmdir`.
+    ///
+    /// That is the observed production failure shape: the contents go, the
+    /// directory itself stays, and the removal error is the only witness.
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("test can set permissions on a directory it created");
+    }
 
     /// Store stand-in whose `Drop` pins the guard's internal ordering: the
     /// directory must still exist at store-drop time, so this drop FAILS the
@@ -722,5 +814,163 @@ mod ephemeral_lifecycle_tests {
         drop(store);
 
         assert!(!dir.exists(), "the rooted directory is removed on drop");
+    }
+
+    /// Clean-teardown gate (keepalive-honest shape): the guard directory is
+    /// present for the store's WHOLE life — re-checked between unrelated
+    /// operations that each succeed — and gone once the store drops cleanly.
+    ///
+    /// The "unrelated ops proceed" leg is what makes the final absence mean
+    /// something: a directory that vanished early would take the appends,
+    /// reads and CAS down with it, so this cannot pass by removing the
+    /// directory too soon and cannot pass by never having created it.
+    #[test]
+    fn ephemeral_dir_persists_across_unrelated_work_then_goes_on_clean_drop() {
+        let store = open_ephemeral(TEST_SHARD_COUNT).expect("ephemeral open succeeds");
+        let dir = store
+            .ephemeral_dir_path()
+            .expect("ephemeral store carries a guard dir")
+            .to_path_buf();
+        assert!(
+            dir.exists(),
+            "the directory exists as soon as the store does"
+        );
+
+        for round in 0..3_u64 {
+            block_on(store.append("clean-teardown/probe", b"payload".to_vec(), round))
+                .expect("bridge completes synchronously")
+                .expect("append to a live ephemeral store succeeds");
+            assert!(
+                dir.exists(),
+                "the directory is still there after append round {round}"
+            );
+        }
+        block_on(store.cas("clean-teardown/counter", 0, 7))
+            .expect("bridge completes synchronously")
+            .expect("cas on a live ephemeral store succeeds");
+        let entries = block_on(store.read_from("clean-teardown/probe", 0, 10))
+            .expect("bridge completes synchronously")
+            .expect("read from a live ephemeral store succeeds");
+        assert_eq!(entries.len(), 3, "every appended entry is readable back");
+        assert!(
+            dir.exists(),
+            "the directory is still there after unrelated cas and read work"
+        );
+
+        block_on(store.flush())
+            .expect("bridge completes synchronously")
+            .expect("flush of a live ephemeral store succeeds");
+        drop(store);
+
+        assert!(
+            !dir.exists(),
+            "the clean drop removes the directory it kept alive throughout"
+        );
+    }
+
+    /// Clean-teardown gate: when removal FAILS on the clean path the guard
+    /// LOGS the failure and its path, and does not panic.
+    ///
+    /// Injected the way it fails in production: the parent is made unwritable,
+    /// so `remove_dir_all` clears the contents and then cannot unlink the
+    /// directory itself. `tempfile`'s own `Drop` discards that error
+    /// (`let _ = remove_dir_all(..)`), which is why this pin is red until the
+    /// clean path calls `close()` and reports what it returns.
+    #[cfg(unix)]
+    #[test]
+    fn clean_drop_removal_failure_is_logged_and_never_panics() {
+        let parent = tempfile::tempdir().expect("test can create a temp parent");
+        let dir = tempfile::Builder::new()
+            .prefix("liminal-durability-")
+            .tempdir_in(parent.path())
+            .expect("test can create a guard dir under the parent");
+        let path = dir.path().to_path_buf();
+        let guard = EphemeralGuard {
+            store: Some(()),
+            dir: Some(dir),
+        };
+
+        set_mode(parent.path(), 0o500);
+        let captured = CapturedLog::default();
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            captured.capturing(|| drop(guard));
+        }));
+        // Restored before the assertions so a failing assertion still leaves a
+        // parent the outer `TempDir` can clean up.
+        set_mode(parent.path(), 0o700);
+
+        assert!(
+            outcome.is_ok(),
+            "a removal failure is reported, never raised as a panic"
+        );
+        let logged = captured.text();
+        assert!(
+            logged.contains("ERROR"),
+            "the removal failure is logged at error level; captured: {logged:?}"
+        );
+        assert!(
+            logged.contains(&path.display().to_string()),
+            "the log names the directory that survived; captured: {logged:?}"
+        );
+        assert!(
+            path.exists(),
+            "the residue is left where the log says it is, not silently claimed removed"
+        );
+    }
+
+    /// Clean-teardown gate (negative control for the capture instrument): a
+    /// removal that SUCCEEDS logs nothing, so the assertion above discriminates
+    /// failure from success rather than matching any teardown at all.
+    #[test]
+    fn clean_drop_that_succeeds_logs_nothing() {
+        let dir = tempfile::tempdir().expect("test can create a temp dir");
+        let path = dir.path().to_path_buf();
+        let guard = EphemeralGuard {
+            store: Some(()),
+            dir: Some(dir),
+        };
+
+        let captured = CapturedLog::default();
+        captured.capturing(|| drop(guard));
+
+        assert!(!path.exists(), "the successful clean drop removed the dir");
+        assert!(
+            captured.text().is_empty(),
+            "a successful removal is silent; captured: {:?}",
+            captured.text()
+        );
+    }
+
+    /// Positive control for the capture instrument: the panic path's sanctioned
+    /// leak line IS captured, path and all, by the same predicate the
+    /// removal-failure gate uses.
+    ///
+    /// Without this, an empty capture would be a measurement of the harness
+    /// rather than of the code under test.
+    #[test]
+    fn panic_path_leak_is_logged_with_its_path() {
+        let dir = tempfile::tempdir().expect("test can create a temp dir");
+        let path = dir.path().to_path_buf();
+        let guard = EphemeralGuard {
+            store: Some(PanickingProbeStore),
+            dir: Some(dir),
+        };
+
+        let captured = CapturedLog::default();
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            captured.capturing(|| drop(guard));
+        }));
+
+        assert!(unwound.is_err(), "the injected store-drop panic propagates");
+        let logged = captured.text();
+        assert!(
+            logged.contains("ERROR"),
+            "the sanctioned leak is logged at error level; captured: {logged:?}"
+        );
+        assert!(
+            logged.contains(&path.display().to_string()),
+            "the leak log names the leaked directory; captured: {logged:?}"
+        );
+        std::fs::remove_dir_all(&path).expect("test cleans up the deliberately leaked directory");
     }
 }

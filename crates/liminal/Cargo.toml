@@ -33,5 +33,10 @@ thiserror = { workspace = true, features = ["std"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
+[dev-dependencies]
+# Teardown gates assert on what the drop path LOGGED, not only on what it did;
+# the fmt subscriber writes into an in-test buffer for that.
+tracing-subscriber = { workspace = true }
+
 [lints]
 workspace = true
