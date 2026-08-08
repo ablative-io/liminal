@@ -171,3 +171,27 @@ AGPL-3.0-only:
 Commercial licensing for the server components is available from Ablative —
 contact <tom@ablative.com.au>. The full rule, and the reasoning behind it, is in
 [`LICENSING.md`](LICENSING.md).
+
+## Development
+
+The git hooks live in [`.githooks/`](.githooks), and **a clone does not arm
+them**. Git has no versioned way to point at a hooks directory, so a fresh
+clone — and every linked worktree — starts with no `commit-msg` validation and
+announces nothing while it does. Arm this checkout once:
+
+```sh
+tools/arm-hooks.sh            # point git at .githooks, then prove the hook is live
+tools/arm-hooks.sh --verify   # re-check at any time; writes nothing
+```
+
+Arming is verified by outcome rather than assumed from the write: the script
+asks git to resolve the path, requires the hook to be executable, and runs it on
+one message it must refuse and one it must accept — a hook that passes
+everything and a hook that refuses everything are both broken.
+
+The configured path is deliberately **relative**. An absolute one is true for a
+single filesystem, breaks in silence on any move or re-clone, and aims every
+linked worktree at a single checkout's copy of the hook. `tools/arm-hooks.sh
+--help` carries the measurements behind each of those claims, and
+`tools/arm-hooks-selftest.sh` proves the checker can tell armed from unarmed.
+
