@@ -376,7 +376,12 @@ impl ConversationAuthority {
     /// selector's `accepted_marker_at_cursor` flag. The retained-record census
     /// survives restarts, so a marker accepted before a boot is still visible
     /// here when its offer entry is not.
-    fn marker_record_accepted_at_cursor(
+    ///
+    /// Shared with the credential-attach marker-proof site
+    /// (`ops_attach_lookup::attach_marker_proof_state`) under board #12: two
+    /// sites feed one frozen selector the same field, so they derive it from
+    /// one durable fact rather than each answering for itself.
+    pub(super) fn marker_record_accepted_at_cursor(
         &self,
         participant_id: ParticipantId,
         cursor: DeliverySeq,

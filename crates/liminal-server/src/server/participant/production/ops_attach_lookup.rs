@@ -135,14 +135,33 @@ impl Slot {
 /// Builds the durable marker-proof facts one marker-bearing credential attach
 /// is classified against.
 ///
-/// ⚠ Board #12: `accepted_marker_at_cursor` is a HARDCODED `false` here. It is
-/// a claim about durable state that this site never measured, and the identical
-/// hardcoded `false` at the live marker-ack site killed a kernel on 2026-08-07
-/// before it was computed from the retained marker-record census. Extracted
-/// into its own named function so the claim has a seam a test can address;
-/// `tests_12_attach_marker_census` is red against it.
+/// # Board #12: the last `accepted_marker_at_cursor` site stops lying
 ///
-/// The other two facts are `None` deliberately. This live binding has no
+/// This flag was a hardcoded `false` here. The live marker-ack site had the
+/// identical hardcoded `false` and it was NOT inert there — it presented a
+/// merely redundant acknowledgement as a genuine fault and took a kernel down
+/// on 2026-08-07 — so it now derives the flag from the durable retained
+/// marker-record census. This site calls THE SAME function
+/// (`ConversationAuthority::marker_record_accepted_at_cursor`) rather than
+/// answering for itself, so the two sites feeding one frozen selector the same
+/// field cannot drift apart.
+///
+/// ⚠ **Here the value is inert, and that is precisely why truing it up is
+/// safe.** `select_marker_proof` reads `accepted_marker_at_cursor` at exactly
+/// one branch, and that branch also requires `input.is_marker_ack()`. The
+/// input on this path is `MarkerProofInput::CredentialAttach`, so the branch
+/// cannot be taken and no outcome can change. Not asserted — measured, both
+/// ways, by `tests_12_attach_marker_census`, which compares the selector's
+/// answer over the truthful and the hardcoded state and runs a marker-ack
+/// input through the same comparison as its positive control.
+///
+/// So this is a truthfulness fix, not a behaviour change. What it buys: the
+/// site stops making a claim about durable state it never measured, and the
+/// `AckNoOp` guard in the mapper below stays unreachable for the reason it
+/// gives — a foreign operation envelope — rather than by the accident of a
+/// field nobody computed.
+///
+/// The other two facts stay `None` deliberately. This live binding has no
 /// participant-record delivery pump, so there is no expected marker anchor and
 /// no delivery witness to supply; inventing either would be the hand-built
 /// outcome the module's own doc forbids. That is a capability gap owned by the
@@ -153,11 +172,10 @@ pub(super) fn attach_marker_proof_state(
     slot: &Slot,
     operation_facts: &OperationFacts,
 ) -> MarkerProofState {
-    let _ = authority;
     let cursor = slot.member.cursor();
     MarkerProofState::new(
         cursor,
-        false,
+        authority.marker_record_accepted_at_cursor(request.participant_id, cursor),
         None,
         BindingEpoch::new(
             operation_facts.receiving_incarnation,
