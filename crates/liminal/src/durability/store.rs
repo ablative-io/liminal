@@ -561,7 +561,21 @@ mod ephemeral_lifecycle_tests {
         }
 
         /// Runs `body` with this sink installed as the thread's subscriber.
+        ///
+        /// Capture windows are SERIALIZED. `with_default` registers a
+        /// dispatcher on entry and deregisters it on exit, and tracing
+        /// rebuilds its global per-callsite interest cache on both edges — so
+        /// two windows interleaving on parallel test threads can leave the
+        /// production `error!` callsite cached as not-interested during the
+        /// OTHER window, which reads as an intermittently empty capture
+        /// (measured: 3/40 module runs before this lock, 0/40 after). One
+        /// window at a time removes the race; the poisoned-lock fallback
+        /// keeps a failing sibling from cascading.
         fn capturing<R>(&self, body: impl FnOnce() -> R) -> R {
+            static CAPTURE_WINDOW: Mutex<()> = Mutex::new(());
+            let _window = CAPTURE_WINDOW
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let subscriber = tracing_subscriber::fmt()
                 .with_writer(self.clone())
                 .with_ansi(false)
