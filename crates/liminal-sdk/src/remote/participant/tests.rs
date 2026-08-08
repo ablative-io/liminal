@@ -502,3 +502,102 @@ fn restored_issued_reconnect_permit_resolves_take_once_testimony() -> TestResult
     loopback.finish()?;
     Ok(())
 }
+
+/// The server's assigned record sequence must be readable from the SDK's own
+/// record-admission return path, and it must be the exact number the wire
+/// response carried.
+///
+/// The expected value is read off the `RecordCommitted` the fixture server will
+/// actually send rather than restated as a literal, so the assertion compares
+/// the surfaced sequence against the wire response itself. A literal would pass
+/// just as well against an accessor that returned a number the SDK invented.
+///
+/// The `None` legs are the other half of the discriminator: an applied response
+/// that is not a commit, and a response the crate refused rather than applied,
+/// must both stay empty. A refused `RecordCommitted` in particular carries a
+/// sequence on the wire while committing the client to nothing, so surfacing it
+/// would be a claim the crate declined to make.
+#[test]
+fn committed_delivery_seq_reaches_the_record_admission_return_path() -> TestResult {
+    const SURFACED_SEQ: u64 = 424_242;
+    const EXACT_TOKEN: [u8; 16] = [0xD4; 16];
+    const FOREIGN_TOKEN: [u8; 16] = [0xE5; 16];
+
+    let request = RecordAdmission {
+        conversation_id: CONVERSATION,
+        participant_id: PARTICIPANT,
+        capability_generation: generation(1)?,
+        record_admission_attempt_token: liminal_protocol::wire::RecordAdmissionAttemptToken::new(
+            EXACT_TOKEN,
+        ),
+        payload: vec![11],
+    };
+    let wire_response = record_committed(EXACT_TOKEN, SURFACED_SEQ)?;
+    let ServerValue::RecordCommitted(ref committed) = wire_response else {
+        return Err(io::Error::other("fixture value must be a RecordCommitted").into());
+    };
+    let wire_delivery_seq = committed.delivery_seq();
+
+    let loopback = Loopback::spawn(vec![vec![
+        Action::Respond(vec![enroll_bound(CONVERSATION, [1; 16])?]),
+        // The foreign-token commit is refused by the crate's conservative
+        // ambiguity rule; the exact-token commit is applied.
+        Action::Respond(vec![
+            record_committed(FOREIGN_TOKEN, SURFACED_SEQ + 1)?,
+            wire_response,
+        ]),
+    ]])?;
+    let config = loopback.connected_config()?;
+    let handle = RemoteParticipantHandle::new(&config, MemoryStore::default())?;
+
+    enroll(&handle)?;
+    let enrolled = handle.receive()?;
+    assert!(matches!(
+        enrolled,
+        RemoteParticipantInbound::Applied {
+            value: ServerValue::EnrollBound(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        enrolled.committed_delivery_seq(),
+        None,
+        "an applied response that is not a record commit carries no record sequence"
+    );
+
+    let operation = recorded(handle.record_operation(ClientRequest::RecordAdmission(request))?)?;
+    sent(&handle.send_operation(operation)?)?;
+
+    let refused = handle.receive()?;
+    assert!(matches!(
+        refused,
+        RemoteParticipantInbound::Refused {
+            value: ServerValue::RecordCommitted(_),
+            reason: ClientInboundRefusalReason::AmbiguousResponse,
+            ..
+        }
+    ));
+    assert_eq!(
+        refused.committed_delivery_seq(),
+        None,
+        "a commit the crate refused must not surface a sequence it never applied"
+    );
+
+    let applied = handle.receive()?;
+    assert!(matches!(
+        applied,
+        RemoteParticipantInbound::Applied {
+            value: ServerValue::RecordCommitted(_),
+            ..
+        }
+    ));
+    assert_eq!(
+        applied.committed_delivery_seq(),
+        Some(wire_delivery_seq),
+        "the surfaced record sequence must be the one the wire response carried"
+    );
+    assert_eq!(wire_delivery_seq, SURFACED_SEQ);
+
+    loopback.finish()?;
+    Ok(())
+}
