@@ -1,16 +1,24 @@
-# In-process transport (SDK loopback) — design sketch r1
+# In-process transport (SDK loopback) — design + build brief
 
-Status: SKETCH for the build brief. Ruled at ablative/docs
-`design/face-substrate/DESIGN-DRAFT-r1.md` §12 item 2 (rev `eb1cf33`+): the
-in-process transport is BUILT AT LIMINAL, because the participant contract is
-liminal's — every consumer inherits it, and the no-side-door guarantee is
-enforced at the protocol layer, the only place it can't be bypassed. §5 of the
-same record carries the hard line this sketch is built around:
+Status: BUILD BRIEF (was: sketch r1). Ruled at ablative/docs
+`design/face-substrate/DESIGN-DRAFT-r2.md` §12 item 2 (rev `86a458a`), which
+names this document's sketch revision (`design-50-loopback-sketch @ 28f6d85`)
+as the ruling's artifact. BUILD GO given 2026-08-08 (Waffles, relaying Tom's
+read of the hardened draft), with four brief-time rulings folded into §9
+below.
 
-> in-process is not a side door. Same protocol, same admission, same signing,
-> no direct state access — a participant mounted in-process is
-> indistinguishable on the record from one across the wire. Code unchanged
-> across all three mounts.
+**The guarantee, in the hardened draft's own language (r2 §5, binding on
+every doc comment this build writes):** the loopback secures the **RECORD
+PATH** — it carries the exact framed wire image through the same preflight,
+participant gate, and token compare, so no append reaches the record except
+through the same door. The mount itself is **TRUSTED-CODE**: a co-resident
+extension reaches the host's heap, descriptors, and store handle without ever
+calling the loopback, so the record vouches for a trusted-code mount only as
+far as the host process is trusted. **The word "isolated" is banned from this
+build.** Every append admitted through the loopback carries a mount
+attestation from the admitting door (see §10 for what that means at liminal's
+layer). Code unchanged across all three mounts (in-process / local process /
+remote).
 
 All `file:line` citations below are at liminal `e63b3e9` (main).
 
@@ -209,15 +217,60 @@ Supporting pins, per estate law:
   `spawn_loopback_connection` share admission/incarnation/registry steps by
   construction (shared helper), not by parallel maintenance.
 
-## 8. Build order proposal (for the brief)
+## 8. Build order (binding)
 
 1. Outbound sink abstraction (`dyn Write`) + `final_probe` pluggability —
    pure refactor, gate must hold at baseline.
 2. `LoopbackDuplex` with bounded rings, wake-on-write, close semantics + its
    own unit pins (backpressure, EOF, wake).
-3. Server side: `spawn_loopback_connection` + `LoopbackConnectionProcess`.
+3. Server side: `spawn_loopback_connection` + `LoopbackConnectionProcess` +
+   the `MountKind` fact (§10).
 4. Client side: `LoopbackRemoteTransport` + `EmbeddedServer` +
    `RemoteConfig::connect_loopback`.
-5. The discriminating parity test + the five supporting pins.
-6. Follow-ons named: push/subscription generalization (with task #2's auth
-   fix), `SdkConfig::Embedded` unification question to Tom.
+5. The discriminating parity test + the six supporting pins (§6 five + §10's
+   mount-fact pin).
+6. Follow-ons named, not built: push/subscription generalization (inherits
+   task #2's hardcoded-auth defect explicitly), loopback drain-timeout
+   tightening (§9.1), TS/Gleam SDK trait mirrors (r2 §12.2: Rust first).
+
+## 9. Brief-time rulings (2026-08-08, binding on the build)
+
+1. **Drain-timeout semantics: v1 INHERITS socket semantics unchanged.** The
+   stronger meaning of loopback silence is documented (§7), not exploited —
+   no code path may treat loopback silence differently from socket silence
+   in v1. Tightening is a named follow-on.
+2. **`OutboundWriter` sink abstraction is IN scope. Copy three is refused** —
+   a diff showing a third parallel writer means the build is wrong.
+3. **Scope fence ratified as drawn (§5):** full participant contract IN;
+   `PushClient` / `SubscriptionStream` OUT of v1, their generalization the
+   first follow-on, task #2's auth defect inherited by that follow-on
+   explicitly.
+4. **`SdkConfig::Embedded` shape: this build's call, one constraint —
+   `EmbeddedServer`'s only granting surface stays `connect_loopback`, under
+   whatever config shape is picked.**
+
+## 10. The mount attestation at liminal's layer
+
+r2 §5: "every append admitted through the loopback carries a mount
+attestation from the admitting door." The record being attested is the
+CONSUMER's (manifold's estate record); the admitting door for those appends
+is the consumer's participant machinery riding on liminal. Liminal's
+obligation is therefore to supply the **unforgeable mount fact**, not to
+stamp its own rows:
+
+- The connection registry record and the participant handler context carry a
+  `MountKind` (`Tcp` / `WebSocket` / `Loopback`), set by the server at spawn
+  from its own knowledge of which door admitted the connection. **No client
+  input influences it** — it is not negotiated, not carried in any frame,
+  and not readable from anything the client sends.
+- The consumer's door reads `MountKind` from the handler context and stamps
+  its append. Liminal's own durable op-log rows carry NO mount field — which
+  is what keeps §6's discriminating test exact: liminal record outcomes stay
+  byte-identical across mounts, and the mount fact lives only in the context
+  surface where the consumer's door reads it.
+- **Sixth supporting pin:** the handler context reports `Loopback` for a
+  loopback-admitted connection and `Tcp` for a socket-admitted one, and a
+  client presenting any frame content cannot move it.
+
+If the consume side needs the fact somewhere other than the handler context,
+that is a declaration-time conversation with Waffles, not a silent widening.
