@@ -873,9 +873,11 @@ fn an_ordinary_ack_crossing_a_marker_must_not_wedge_the_conversation() -> Result
         }),
     );
     match crossing {
-        // Fix shape (b): a wire-visible refusal of the crossing is lawful —
-        // fall through and prove the conversation is still admittable.
-        Ok(ServerValue::AckCommitted(_)) | Ok(_) => {}
+        // Fix shape (b): a wire-visible refusal of the crossing is lawful, and
+        // so is an `AckCommitted` — every wire answer falls through and proves
+        // the conversation is still admittable. Only a failed-closed crossing
+        // (the `Err` arm) is diagnosed separately.
+        Ok(_) => {}
         Err(error) => {
             return Err(format!(
                 "the CROSSING ACK ITSELF failed closed rather than committing or refusing on \
@@ -936,7 +938,7 @@ fn an_ordinary_ack_crossing_a_marker_must_not_wedge_the_conversation() -> Result
 /// its anchor — cumulative acceptance means what it says. But a client whose
 /// resume state predates the crossing still OWES the marker-ack and re-presents
 /// it against a cursor already sitting AT the marker. The frozen selector's
-/// AckNoOp arm (`marker_proof.rs:241-245`, `requested == cursor &&
+/// `AckNoOp` arm (`marker_proof.rs:241-245`, `requested == cursor &&
 /// accepted_marker_at_cursor && is_marker_ack`) exists for exactly this
 /// acknowledgement, and it is dead only because the server hardcodes the flag
 /// `false`.
@@ -1006,7 +1008,7 @@ fn a_redundant_marker_ack_at_the_cursor_must_answer_ack_noop() -> Result<(), Box
         }),
     );
     match redundant {
-        Ok(ServerValue::AckNoOp(_)) | Ok(ServerValue::MarkerAckCommitted(_)) => Ok(()),
+        Ok(ServerValue::AckNoOp(_) | ServerValue::MarkerAckCommitted(_)) => Ok(()),
         Ok(ServerValue::MarkerMismatch(mismatch)) => Err(format!(
             "#12 REPRODUCED: the redundant marker-ack for an already-accepted marker was \
              answered with a MISMATCH — the frozen selector's AckNoOp arm is dead because \
