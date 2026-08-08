@@ -27,7 +27,9 @@ use liminal_protocol::client::{
     record_transport_fate,
 };
 use liminal_protocol::outcome::ReconnectDelayResult;
-use liminal_protocol::wire::{ClientRequest, ParticipantFrame, ServerPush, ServerValue};
+use liminal_protocol::wire::{
+    ClientRequest, DeliverySeq, ParticipantFrame, ServerPush, ServerValue,
+};
 use spin::Mutex;
 
 use crate::SdkError;
@@ -229,6 +231,34 @@ pub enum RemoteParticipantInbound {
         /// Connection/attempt that delivered it.
         provenance: ParticipantResponseProvenance,
     },
+}
+
+impl RemoteParticipantInbound {
+    /// The record sequence the server assigned an admitted record, when this
+    /// inbound is an APPLIED [`ServerValue::RecordCommitted`].
+    ///
+    /// This is the answer to a `RecordAdmission`, read off the exact wire value
+    /// the protocol crate applied. It saves every caller destructuring the wire
+    /// enum to reach the one number a record admission is asked for, without
+    /// removing that value: [`Applied`](Self::Applied) still carries the whole
+    /// `ServerValue`, so this is purely additive.
+    ///
+    /// `None` for everything else, and that includes a `RecordCommitted` the
+    /// crate REFUSED. A refused commit carries a sequence on the wire while
+    /// leaving the aggregate and its correlation untouched -- returning it here
+    /// would report a commitment the crate deliberately declined to make. It is
+    /// also `None` for a [`Push`](Self::Push), which is a delivery rather than
+    /// a correlated response.
+    #[must_use]
+    pub const fn committed_delivery_seq(&self) -> Option<DeliverySeq> {
+        match self {
+            Self::Applied {
+                value: ServerValue::RecordCommitted(committed),
+                ..
+            } => Some(committed.delivery_seq()),
+            Self::Applied { .. } | Self::Refused { .. } | Self::Push { .. } => None,
+        }
+    }
 }
 
 pub(super) struct RemoteParticipantState<S> {
