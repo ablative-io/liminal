@@ -197,7 +197,7 @@ impl LiveFrontierOwner {
     /// refuses is left unchanged the same way.
     ///
     /// A PLANNED marker still pending as an immutable sequence candidate holds
-    /// its stored anchor before any retained record exists — the DrainFirst
+    /// its stored anchor before any retained record exists — the `DrainFirst`
     /// discipline keeps admissions (and their cross-check) out of that window.
     /// Those anchors are accounted, not orphaned, and are excluded here the
     /// same way.

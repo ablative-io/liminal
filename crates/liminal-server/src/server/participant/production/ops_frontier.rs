@@ -10,13 +10,14 @@ use liminal_protocol::algebra::ResourceVector;
 use liminal_protocol::lifecycle::{
     BindingState, CapacityCounter, ConnectionConversationTracking, ImmutableSequenceCandidate,
     LiveFrontierOwner, MarkerDeliveryProjection, OrdinaryProjectionError, PresentedIdentity,
-    RecordAdmissionDecision, RecordAdmissionFault, RecordAdmissionPrestate, RetainedRecordCharge,
-    SemanticConnectionCapacityDecision, apply_record_admission as select_record_admission,
-    classify_record_admission_binding, drain_next_marker,
+    RecordAdmissionCommit, RecordAdmissionDecision, RecordAdmissionFailure, RecordAdmissionFault,
+    RecordAdmissionPrestate, RetainedRecordCharge, SemanticConnectionCapacityDecision,
+    apply_record_admission as select_record_admission, classify_record_admission_binding,
+    drain_next_marker,
 };
 use liminal_protocol::wire::{
-    BindingEpoch, ParticipantDelivery, ParticipantId, RecordAdmission, RecordAdmissionResponse,
-    RecordCommitted,
+    BindingEpoch, DeliverySeq, ParticipantDelivery, ParticipantId, RecordAdmission,
+    RecordAdmissionResponse, RecordCommitted,
 };
 
 use crate::config::types::ParticipantConfig;
@@ -51,24 +52,17 @@ impl ConversationAuthority {
         )
     }
 
-    /// Applies one ordinary record admission.
+    /// Answers an ordinary admission the caller is not authorized to make.
     ///
-    /// Binding lookup (stages 2-5), stage-6 connection capacity, and all
-    /// frontier-dependent admission outcomes run through protocol selectors.
-    /// Commit and mandatory marker-drain arms publish state only after their
-    /// complete durable rows have appended and flushed.
-    pub(super) fn apply_record_admission_with_impact(
-        &mut self,
+    /// Binding lookup (stages 2-5) runs through the protocol selector; stage-6
+    /// connection capacity follows it. `None` means the presenter is
+    /// authorized and nothing has been consumed.
+    fn classify_record_admission_authority(
+        &self,
         request: &RecordAdmission,
         operation_facts: &OperationFacts,
-        config: &ParticipantConfig,
-        appender: &dyn DurableAppend,
-        impact: &mut DispatchImpactAccumulator,
-    ) -> Result<ArmOutcome, StateError> {
-        let receiving_epoch = BindingEpoch::new(
-            operation_facts.receiving_incarnation,
-            request.capability_generation,
-        );
+        receiving_epoch: BindingEpoch,
+    ) -> Option<ArmOutcome> {
         let binding_detached = BindingState::Detached;
         let (identity, binding) = self.slots.get(&request.participant_id).map_or(
             (
@@ -85,12 +79,12 @@ impl ConversationAuthority {
         if let Some(response) =
             classify_record_admission_binding(identity, binding, receiving_epoch, request)
         {
-            return Ok(ArmOutcome::respond(response.into_server_value()));
+            return Some(ArmOutcome::respond(response.into_server_value()));
         }
         if let SemanticConnectionCapacityDecision::Respond { limit } =
             operation_facts.semantic_connection_capacity()
         {
-            return Ok(ArmOutcome::respond(
+            return Some(ArmOutcome::respond(
                 RecordAdmissionResponse::connection_conversation_capacity_exceeded(
                     record_envelope(request),
                     limit,
@@ -98,24 +92,25 @@ impl ConversationAuthority {
                 .into_server_value(),
             ));
         }
+        None
+    }
 
-        // Contract amendment A2 (§0.13) defensive idempotence: a committed
-        // identity — the FULL (attempt token, payload fingerprint, verified
-        // participant) triple — re-presented answers ITS commit's exact
-        // result and commits nothing. The triple key is the review-corrected
-        // shape (Cally Ray 2026-08-08, twice): any component demoted from
-        // the key to a checked field leaves one slot per remaining key, so a
-        // bypass commit evicts the demoted identity's answer and an honest
-        // answer-lost re-present of it duplicates — the field bug re-opened
-        // through the eviction. With the whole predicate in the key nothing
-        // can evict, a foreign presenter structurally cannot hit an entry
-        // not keyed to it (no disclosure check needed — the miss IS the
-        // guard), and every committed identity stays independently
-        // re-presentable. Ordered deliberately AFTER the binding-authority
-        // classification above (moving this cheap lookup earlier would hand
-        // an unauthorized presenter a token oracle) and BEFORE any frontier
-        // or order allocation (a dedup hit consumes no transaction_order
-        // major and no delivery sequence).
+    /// Contract amendment A2 (§0.13) defensive idempotence: a committed
+    /// identity — the FULL (attempt token, payload fingerprint, verified
+    /// participant) triple — re-presented answers ITS commit's exact result
+    /// and commits nothing. The triple key is the review-corrected shape
+    /// (Cally Ray 2026-08-08, twice): any component demoted from the key to a
+    /// checked field leaves one slot per remaining key, so a bypass commit
+    /// evicts the demoted identity's answer and an honest answer-lost
+    /// re-present of it duplicates — the field bug re-opened through the
+    /// eviction. With the whole predicate in the key nothing can evict, a
+    /// foreign presenter structurally cannot hit an entry not keyed to it (no
+    /// disclosure check needed — the miss IS the guard), and every committed
+    /// identity stays independently re-presentable.
+    ///
+    /// `None` means no committed identity matched and the caller admits
+    /// normally. Consumes nothing either way.
+    fn answer_committed_record_admission(&self, request: &RecordAdmission) -> Option<ArmOutcome> {
         let dedup_token = request.record_admission_attempt_token.into_bytes();
         let dedup_key = (
             dedup_token,
@@ -123,7 +118,7 @@ impl ConversationAuthority {
             request.participant_id,
         );
         if let Some(committed_delivery_seq) = self.committed_admissions.get(&dedup_key) {
-            return Ok(ArmOutcome::respond(
+            return Some(ArmOutcome::respond(
                 RecordAdmissionResponse::record_committed(RecordCommitted::new(
                     record_envelope(request),
                     *committed_delivery_seq,
@@ -156,6 +151,40 @@ impl ConversationAuthority {
                  different payload or participant -- dedup bypassed, \
                  committing as a new record"
             );
+        }
+        None
+    }
+
+    /// Applies one ordinary record admission.
+    ///
+    /// Binding lookup (stages 2-5), stage-6 connection capacity, and all
+    /// frontier-dependent admission outcomes run through protocol selectors.
+    /// Commit and mandatory marker-drain arms publish state only after their
+    /// complete durable rows have appended and flushed.
+    pub(super) fn apply_record_admission_with_impact(
+        &mut self,
+        request: &RecordAdmission,
+        operation_facts: &OperationFacts,
+        config: &ParticipantConfig,
+        appender: &dyn DurableAppend,
+        impact: &mut DispatchImpactAccumulator,
+    ) -> Result<ArmOutcome, StateError> {
+        let receiving_epoch = BindingEpoch::new(
+            operation_facts.receiving_incarnation,
+            request.capability_generation,
+        );
+        if let Some(outcome) =
+            self.classify_record_admission_authority(request, operation_facts, receiving_epoch)
+        {
+            return Ok(outcome);
+        }
+        // Ordered deliberately AFTER the binding-authority classification
+        // above (moving this cheap lookup earlier would hand an unauthorized
+        // presenter a token oracle) and BEFORE any frontier or order
+        // allocation (a dedup hit consumes no transaction_order major and no
+        // delivery sequence).
+        if let Some(outcome) = self.answer_committed_record_admission(request) {
+            return Ok(outcome);
         }
 
         let owner = self.take_frontier()?;
@@ -424,6 +453,86 @@ impl ConversationAuthority {
         Ok(projection.into_delivery())
     }
 
+    /// Re-performs the live load-end orphan reconcile and retries one replayed
+    /// admission selection once.
+    ///
+    /// A committed row is a WITNESS that the live state it committed on held
+    /// consistent marker ledgers. The load that served that commit had
+    /// reconciled its orphaned anchors at load end — a memory-only repair —
+    /// while the replay rebuilt the accounting from rows alone, without it. Any
+    /// row committed after that live reconcile therefore re-derives the orphan
+    /// split and refuses, making the conversation unloadable (the 2026-08-08
+    /// conversation-6 second signature). Re-perform the reconcile at exactly the
+    /// first row that proves it happened live, and retry the selection once. A
+    /// row that still refuses after an actual retirement falls to the original
+    /// invariant unchanged.
+    fn retry_replay_after_orphan_reconcile<'a>(
+        &'a self,
+        failure: Box<RecordAdmissionFailure<'a, Digest, Digest, Digest>>,
+        row: &StoredRecordAdmission,
+        config: &ParticipantConfig,
+        retained_record_limit: u64,
+        occupied: u64,
+        receiving_epoch: BindingEpoch,
+    ) -> Result<Box<RecordAdmissionCommit>, StateError> {
+        let (_, unchanged) = failure.into_parts();
+        let (mut owner, request, encoded_record_charge) =
+            LiveFrontierOwner::from_unchanged_record_admission(unchanged, retained_record_limit);
+        let orphaned = owner.reconcile_orphaned_marker_anchors();
+        if orphaned == 0 {
+            return Err(StateError::invariant(
+                "durable committed record did not replay as Commit",
+            ));
+        }
+        tracing::warn!(
+            conversation_id = self.conversation_id,
+            orphaned,
+            delivery_seq = row.delivery_seq,
+            "reconciled orphaned marker anchors during replay -- a committed row \
+             witnessed the live load-end reconcile"
+        );
+        let (frontiers, closure_accounting, retained_charges, _) = owner.into_parts();
+        let slot = self
+            .slots
+            .get(&request.participant_id)
+            .ok_or_else(|| StateError::invariant("durable record participant is absent"))?;
+        let tracking = if row.newly_tracked {
+            ConnectionConversationTracking::Untracked
+        } else {
+            ConnectionConversationTracking::AlreadyTracked
+        };
+        let capacity =
+            CapacityCounter::try_new(config.max_semantic_conversations_per_connection, occupied)
+                .map_err(|error| {
+                    StateError::invariant(format!("durable record capacity is invalid: {error:?}"))
+                })?;
+        let prestate = RecordAdmissionPrestate::new(
+            request,
+            PresentedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
+            &slot.binding,
+            receiving_epoch,
+            tracking,
+            capacity,
+            closure_accounting,
+            ResourceVector::new(
+                config.max_ordinary_record_entries,
+                config.max_ordinary_record_bytes,
+            ),
+            frontiers,
+            retained_charges,
+            self.observer_progress,
+            ordinary_projection_limits(config),
+        );
+        let RecordAdmissionDecision::Commit(commit) =
+            select_record_admission(prestate, encoded_record_charge)
+        else {
+            return Err(StateError::invariant(
+                "durable committed record did not replay as Commit",
+            ));
+        };
+        Ok(commit)
+    }
+
     /// Replays one committed v2 `RecordAdmission` through the same total selector
     /// and verifies every persisted allocation/charge audit before publication.
     pub(super) fn replay_record_admission(
@@ -502,77 +611,14 @@ impl ConversationAuthority {
                     ) if derived < stored
                 ) =>
             {
-                // A committed row is a WITNESS that the live state it committed
-                // on held consistent marker ledgers. The load that served that
-                // commit had reconciled its orphaned anchors at load end — a
-                // memory-only repair — while THIS replay rebuilt the accounting
-                // from rows alone, without it. Any row committed after that
-                // live reconcile therefore re-derives the orphan split here and
-                // refuses, making the conversation unloadable (the 2026-08-08
-                // conversation-6 second signature). Re-perform the reconcile at
-                // exactly the first row that proves it happened live, and retry
-                // the selection once. A row that still refuses after an actual
-                // retirement falls to the original invariant unchanged.
-                let (_, unchanged) = failure.into_parts();
-                let (mut owner, request, encoded_record_charge) =
-                    LiveFrontierOwner::from_unchanged_record_admission(
-                        unchanged,
-                        retained_record_limit,
-                    );
-                let orphaned = owner.reconcile_orphaned_marker_anchors();
-                if orphaned == 0 {
-                    return Err(StateError::invariant(
-                        "durable committed record did not replay as Commit",
-                    ));
-                }
-                tracing::warn!(
-                    conversation_id = self.conversation_id,
-                    orphaned,
-                    delivery_seq = row.delivery_seq,
-                    "reconciled orphaned marker anchors during replay -- a committed row \
-                     witnessed the live load-end reconcile"
-                );
-                let (frontiers, closure_accounting, retained_charges, _) = owner.into_parts();
-                let slot = self.slots.get(&request.participant_id).ok_or_else(|| {
-                    StateError::invariant("durable record participant is absent")
-                })?;
-                let tracking = if row.newly_tracked {
-                    ConnectionConversationTracking::Untracked
-                } else {
-                    ConnectionConversationTracking::AlreadyTracked
-                };
-                let capacity = CapacityCounter::try_new(
-                    config.max_semantic_conversations_per_connection,
+                self.retry_replay_after_orphan_reconcile(
+                    failure,
+                    row,
+                    config,
+                    retained_record_limit,
                     occupied,
-                )
-                .map_err(|error| {
-                    StateError::invariant(format!("durable record capacity is invalid: {error:?}"))
-                })?;
-                let prestate = RecordAdmissionPrestate::new(
-                    request,
-                    PresentedIdentity::<Digest, Digest, Digest>::Live(&slot.member),
-                    &slot.binding,
                     receiving_epoch,
-                    tracking,
-                    capacity,
-                    closure_accounting,
-                    ResourceVector::new(
-                        config.max_ordinary_record_entries,
-                        config.max_ordinary_record_bytes,
-                    ),
-                    frontiers,
-                    retained_charges,
-                    self.observer_progress,
-                    ordinary_projection_limits(config),
-                );
-                let RecordAdmissionDecision::Commit(commit) =
-                    select_record_admission(prestate, encoded_record_charge)
-                else {
-                    return Err(StateError::invariant(
-                        "durable committed record did not replay as Commit",
-                    ));
-                };
-                commit
+                )?
             }
             _ => {
                 return Err(StateError::invariant(
@@ -580,6 +626,25 @@ impl ConversationAuthority {
                 ));
             }
         };
+        self.publish_replayed_record_admission(
+            *commit,
+            row,
+            retained_record_limit,
+            dedup_key,
+            dedup_seq,
+        )
+    }
+
+    /// Verifies every persisted allocation/charge audit of a replayed
+    /// admission and only then publishes its state.
+    fn publish_replayed_record_admission(
+        &mut self,
+        commit: RecordAdmissionCommit,
+        row: &StoredRecordAdmission,
+        retained_record_limit: u64,
+        dedup_key: ([u8; 16], Digest, ParticipantId),
+        dedup_seq: DeliverySeq,
+    ) -> Result<(), StateError> {
         let persistence = commit.into_persistence_parts();
         let order = persistence.record.admission_order().transaction_order();
         let sequence = persistence.record.delivery_seq();

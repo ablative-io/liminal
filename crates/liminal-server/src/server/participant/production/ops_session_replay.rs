@@ -104,50 +104,60 @@ impl ConversationAuthority {
                 break;
             }
         }
-        // F8B R-SEAL (§6.6). Closed carries its own clause: Closed => tokens
-        // empty AND frontier None AND marker set. The clause is a
-        // CONJUNCTION check, not a relaxation — a seal that retired the
-        // frontier but kept a token, or set the marker without retiring the
-        // frontier, is refused here. Bare tokens-empty-with-frontier-Some
-        // REMAINS the original refusal for every shape that is not the sealed
-        // one; the corruption tripwire is not widened.
-        if authority.is_closed() {
-            if !authority.tokens.is_empty() || authority.frontier().is_some() {
+        authority.validate_replayed_seal()?;
+        merge.finish(&mut authority, sequence)?;
+        authority.reconcile_load_end_marker_anchors()?;
+        Ok(authority)
+    }
+
+    /// F8B R-SEAL (§6.6). Closed carries its own clause: Closed => tokens
+    /// empty AND frontier None AND marker set. The clause is a CONJUNCTION
+    /// check, not a relaxation — a seal that retired the frontier but kept a
+    /// token, or set the marker without retiring the frontier, is refused
+    /// here. Bare tokens-empty-with-frontier-Some REMAINS the original refusal
+    /// for every shape that is not the sealed one; the corruption tripwire is
+    /// not widened.
+    fn validate_replayed_seal(&self) -> Result<(), RestoreError> {
+        if self.is_closed() {
+            if !self.tokens.is_empty() || self.frontier().is_some() {
                 return Err(RestoreError::Semantic(StateError::invariant(
                     "sealed conversation retained enrollment tokens or an executable frontier",
                 )));
             }
-        } else if authority.tokens.is_empty() {
-            if authority.frontier().is_some() {
+        } else if self.tokens.is_empty() {
+            if self.frontier().is_some() {
                 return Err(RestoreError::Semantic(StateError::invariant(
                     "durably empty conversation rebuilt an executable frontier",
                 )));
             }
-        } else if authority.frontier().is_none() {
+        } else if self.frontier().is_none() {
             return Err(RestoreError::Semantic(StateError::invariant(
                 "enrolled conversation replay completed without executable frontier ownership",
             )));
         }
-        merge.finish(&mut authority, sequence)?;
-        // Load-end anchor reconcile: participant erasure or record retirement
-        // can strand a stored marker anchor with NO log row left that could
-        // retire it — replay alone rebuilds the wedge (the conversation-6
-        // residue of the 2026-08-07 outage). Retire the orphaned excess here,
-        // loudly; the derived-ahead direction stays untouched for the
-        // admission projection to fault on.
-        if authority.frontier().is_some() {
-            let mut frontier = authority.take_frontier()?;
+        Ok(())
+    }
+
+    /// Load-end anchor reconcile: participant erasure or record retirement can
+    /// strand a stored marker anchor with NO log row left that could retire it
+    /// — replay alone rebuilds the wedge (the conversation-6 residue of the
+    /// 2026-08-07 outage). Retires the orphaned excess, loudly; the
+    /// derived-ahead direction stays untouched for the admission projection to
+    /// fault on.
+    fn reconcile_load_end_marker_anchors(&mut self) -> Result<(), StateError> {
+        if self.frontier().is_some() {
+            let mut frontier = self.take_frontier()?;
             let orphaned = frontier.reconcile_orphaned_marker_anchors();
-            authority.install_frontier(frontier)?;
+            self.install_frontier(frontier)?;
             if orphaned > 0 {
                 tracing::warn!(
-                    conversation_id,
+                    conversation_id = self.conversation_id,
                     orphaned,
                     "reconciled orphaned marker anchors at load"
                 );
             }
         }
-        Ok(authority)
+        Ok(())
     }
 
     /// Frozen pre-W3 complete-vector replay used only by equivalence oracles.

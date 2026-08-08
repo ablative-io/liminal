@@ -16,9 +16,9 @@ use std::error::Error;
 use std::path::Path;
 
 use liminal_protocol::wire::{
-    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest,
-    EnrollBound, EnrollmentRequest, EnrollmentToken, Generation, RecordAdmission,
-    RecordAdmissionAttemptToken, RecordCommitted, ServerValue,
+    AttachAttemptToken, ClientRequest, ConnectionIncarnation, CredentialAttachRequest, EnrollBound,
+    EnrollmentRequest, EnrollmentToken, Generation, RecordAdmission, RecordAdmissionAttemptToken,
+    RecordCommitted, ServerValue,
 };
 
 use super::ProductionParticipantHandler;
@@ -157,30 +157,45 @@ fn same_token_same_bytes_across_cold_replay_and_rotation_answers_first_commit()
         first.sender_participant_id()
     );
 
-    // A fresh admission still allocates, and the original token still answers
-    // the first commit after an intervening commit.
-    let fresh = require_committed(dispatch(
+    assert_token_survives_an_intervening_commit(
         &handler,
         cold_connection,
+        &member,
+        attached.capability_generation(),
+        token,
+        payload,
+        &first,
+    )
+}
+
+/// A fresh admission still allocates, and the original token still answers the
+/// first commit after an intervening commit.
+fn assert_token_survives_an_intervening_commit(
+    handler: &ProductionParticipantHandler,
+    connection: ConnectionIncarnation,
+    member: &EnrollBound,
+    generation: Generation,
+    token: RecordAdmissionAttemptToken,
+    payload: Vec<u8>,
+    first: &RecordCommitted,
+) -> Result<(), Box<dyn Error>> {
+    let conversation_id = first.request().conversation_id;
+    let fresh = require_committed(dispatch(
+        handler,
+        connection,
         admission(
             conversation_id,
-            &member,
-            attached.capability_generation(),
+            member,
+            generation,
             RecordAdmissionAttemptToken::new([0x54; 16]),
             vec![0x99],
         ),
     )?)?;
     assert!(fresh.delivery_seq() > first.delivery_seq());
     let again = require_committed(dispatch(
-        &handler,
-        cold_connection,
-        admission(
-            conversation_id,
-            &member,
-            attached.capability_generation(),
-            token,
-            payload,
-        ),
+        handler,
+        connection,
+        admission(conversation_id, member, generation, token, payload),
     )?)?;
     assert_eq!(again.delivery_seq(), first.delivery_seq());
     Ok(())
