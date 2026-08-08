@@ -64,9 +64,15 @@ use liminal_protocol::wire::{CredentialAttachResponse, DetachResponse, ServerVal
 
 /// A refusal the frozen R-D1 register admits on the participant wire, carried
 /// out of a transition that cannot answer for itself.
+///
+/// The value is BOXED, and not for tidiness. `StateError` is the error half of
+/// nearly every `Result` in this module, so its size is paid on every
+/// successful call too; a `ServerValue` stored inline widens it enough that
+/// `clippy::result_large_err` fires at roughly two hundred sites. One
+/// indirection on the rarest path is the right trade.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct PresentedRefusal {
-    value: ServerValue,
+    value: Box<ServerValue>,
 }
 
 impl PresentedRefusal {
@@ -74,7 +80,7 @@ impl PresentedRefusal {
     /// register-bound response authority.
     pub(super) fn credential_attach(response: CredentialAttachResponse) -> Self {
         Self {
-            value: response.into_server_value(),
+            value: Box::new(response.into_server_value()),
         }
     }
 
@@ -88,12 +94,12 @@ impl PresentedRefusal {
     )]
     pub(super) fn detach(response: DetachResponse) -> Self {
         Self {
-            value: response.into_server_value(),
+            value: Box::new(response.into_server_value()),
         }
     }
 
     /// Moves the presented value out for the arm's ordinary response path.
     pub(super) fn into_server_value(self) -> ServerValue {
-        self.value
+        *self.value
     }
 }
