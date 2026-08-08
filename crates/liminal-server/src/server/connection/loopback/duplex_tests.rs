@@ -115,7 +115,9 @@ fn a_write_to_a_dropped_peer_reports_broken_pipe() {
     let (client, mut server) = LoopbackDuplex::bounded(16);
     drop(client);
 
-    let error = server.write(&[1]).expect_err("a dropped reader breaks the pipe");
+    let error = server
+        .write(&[1])
+        .expect_err("a dropped reader breaks the pipe");
     assert_eq!(error.kind(), ErrorKind::BrokenPipe);
 
     let (mut client, server) = LoopbackDuplex::bounded(16);
@@ -132,7 +134,11 @@ fn the_waker_fires_once_per_empty_to_nonempty_transition() {
     let wakes = counting_waker(&server);
 
     assert_eq!(client.write(&[1, 2]).expect("first write fits"), 2);
-    assert_eq!(wakes.load(Ordering::SeqCst), 1, "empty to non-empty is one wake");
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        1,
+        "empty to non-empty is one wake"
+    );
 
     assert_eq!(client.write(&[3, 4]).expect("second write fits"), 2);
     assert_eq!(client.write(&[5, 6]).expect("third write fits"), 2);
@@ -250,7 +256,9 @@ fn the_server_end_serves_as_the_outbound_drain_sink() {
     outbound.enqueue_frame(&frame).expect("the frame fits");
 
     let sink: &mut dyn Write = &mut server;
-    let outcome = outbound.drain(sink, None).expect("the ring accepts the drain");
+    let outcome = outbound
+        .drain(sink, None)
+        .expect("the ring accepts the drain");
 
     assert!(matches!(outcome, DrainOutcome::Drained));
     let mut seen = Vec::new();
@@ -270,7 +278,9 @@ fn a_zero_capacity_request_is_floored_so_the_ring_can_progress() {
     let (mut client, mut server) = LoopbackDuplex::bounded(0);
 
     assert_eq!(
-        client.write(&[5, 6, 7]).expect("the floored ring accepts a byte"),
+        client
+            .write(&[5, 6, 7])
+            .expect("the floored ring accepts a byte"),
         1
     );
     assert_eq!(
@@ -294,7 +304,11 @@ fn either_drop_order_leaves_no_panic_and_no_deadlock() {
     let (client, server) = LoopbackDuplex::bounded(8);
     let wakes = counting_waker(&server);
     drop(server);
-    assert_eq!(wakes.load(Ordering::SeqCst), 0, "a server drop wakes nobody");
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        0,
+        "a server drop wakes nobody"
+    );
     drop(client);
     assert_eq!(
         wakes.load(Ordering::SeqCst),
@@ -335,7 +349,10 @@ fn a_sequence_larger_than_the_ring_round_trips_across_two_threads() {
     }
     drop(server);
 
-    assert_eq!(echo.join().expect("the echo thread finishes"), payload.len());
+    assert_eq!(
+        echo.join().expect("the echo thread finishes"),
+        payload.len()
+    );
     assert_eq!(echoed, payload, "the byte sequence survived the round-trip");
 }
 

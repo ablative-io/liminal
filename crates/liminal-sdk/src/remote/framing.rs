@@ -438,12 +438,12 @@ impl<S: FrameStream> Connection<S> {
             })?;
         let result = self.try_receive_once();
         // Always restore the steady-state timeout, even on error.
-        let restore = self
-            .stream
-            .set_read_deadline(IO_TIMEOUT)
-            .map_err(|source| SdkError::Connection {
-                description: format!("failed to restore read timeout: {source}"),
-            });
+        let restore =
+            self.stream
+                .set_read_deadline(IO_TIMEOUT)
+                .map_err(|source| SdkError::Connection {
+                    description: format!("failed to restore read timeout: {source}"),
+                });
         let frame = result?;
         restore?;
         Ok(frame)

@@ -246,10 +246,8 @@ impl RemoteConfig {
         server: Arc<liminal_server::server::embedded::EmbeddedServer>,
         auth_token: &[u8],
     ) -> Result<Self, SdkError> {
-        let transport = self::loopback::LoopbackRemoteTransport::connect_with_auth(
-            server,
-            auth_token,
-        )?;
+        let transport =
+            self::loopback::LoopbackRemoteTransport::connect_with_auth(server, auth_token)?;
         self.transport = Arc::new(transport);
         self.websocket = None;
         Ok(self)

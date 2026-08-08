@@ -70,7 +70,9 @@ impl fmt::Debug for EmbeddedServer {
     /// name: it would put the runtime's contents, the admission counter, and
     /// the registry into any log line that formatted this handle.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("EmbeddedServer").finish_non_exhaustive()
+        formatter
+            .debug_struct("EmbeddedServer")
+            .finish_non_exhaustive()
     }
 }
 

@@ -37,8 +37,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use liminal_protocol::wire::{
-    ClientRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation, ParticipantDelivery,
-    ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken, ServerPush, ServerValue,
+    ClientRequest, EnrollBound, EnrollmentRequest, EnrollmentToken, Generation,
+    ParticipantDelivery, ParticipantRecord, RecordAdmission, RecordAdmissionAttemptToken,
+    ServerPush, ServerValue,
 };
 use liminal_sdk::{
     ConnectionPoolConfig, ParticipantResumeStore, RemoteConfig, RemoteOperationRecordOutcome,
@@ -337,7 +338,11 @@ fn a_wrong_token_is_refused_on_its_own_loopback_exactly_as_on_a_socket()
 #[test]
 fn a_participant_enrolls_and_commits_a_record_over_the_loopback() -> Result<(), Box<dyn Error>> {
     let home = tempfile::tempdir()?;
-    let server = start_embedded(&home.path().join("participant"), None, LimitsConfig::default())?;
+    let server = start_embedded(
+        &home.path().join("participant"),
+        None,
+        LimitsConfig::default(),
+    )?;
 
     let sender = connect_participant(Arc::clone(&server))?;
     let sender_bound = enroll(&sender, [0x51; 16])?;
@@ -425,8 +430,8 @@ fn an_embedded_server_at_admission_capacity_refuses_a_loopback_connect()
 }
 
 #[test]
-fn dropping_the_loopback_transport_tears_the_server_connection_down()
--> Result<(), Box<dyn Error>> {
+fn dropping_the_loopback_transport_tears_the_server_connection_down() -> Result<(), Box<dyn Error>>
+{
     let home = tempfile::tempdir()?;
     let server = start_embedded(
         &home.path().join("teardown"),
