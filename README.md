@@ -155,6 +155,29 @@ crates/liminal/src/
 - Rust 1.85+ (edition 2024)
 - Depends on beamr 0.16.1 (with the `readiness` feature) and haematite 0.7.0
 
+## Development
+
+The git hooks live in [`.githooks/`](.githooks), and **a clone does not arm
+them**. Git has no versioned way to point at a hooks directory, so a fresh
+clone — and every linked worktree — starts with no `commit-msg` validation and
+announces nothing while it does. Arm this checkout once:
+
+```sh
+tools/arm-hooks.sh            # point git at .githooks, then prove the hook is live
+tools/arm-hooks.sh --verify   # re-check at any time; writes nothing
+```
+
+Arming is verified by outcome rather than assumed from the write: the script
+asks git to resolve the path, requires the hook to be executable, and runs it on
+one message it must refuse and one it must accept — a hook that passes
+everything and a hook that refuses everything are both broken.
+
+The configured path is deliberately **relative**. An absolute one is true for a
+single filesystem, breaks in silence on any move or re-clone, and aims every
+linked worktree at a single checkout's copy of the hook. `tools/arm-hooks.sh
+--help` carries the measurements behind each of those claims, and
+`tools/arm-hooks-selftest.sh` proves the checker can tell armed from unarmed.
+
 ## License
 
 Liminal is **split-licensed** — the client surface is Apache-2.0, the servers are
