@@ -1,0 +1,6 @@
+== liminal-family entries in the joint lock ==
+liminal-protocol 0.4.1
+liminal-rs 0.5.3
+liminal-sdk 0.5.3
+liminal-server 0.5.3
+PASS: 4 family crates, one version each — the published wave co-resolves to a single graph

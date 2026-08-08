@@ -1,0 +1,41 @@
+=== PUBLISH liminal-server 20:29:33Z ===
+    Updating crates.io index
+   Packaging liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Updating crates.io index
+    Packaged 283 files, 3.9MiB (865.8KiB compressed)
+   Verifying liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+ Downloading crates ...
+  Downloaded liminal-rs v0.5.3
+  Downloaded liminal-protocol v0.4.1
+   Compiling beamr v0.16.3
+   Compiling liminal-protocol v0.4.1
+   Compiling haematite v0.8.1
+   Compiling liminal-rs v0.5.3
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/target/package/liminal-server-0.5.3)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 38.41s
+   Uploading liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Uploaded liminal-server v0.5.3 to registry `crates-io`
+note: waiting for liminal-server v0.5.3 to be available at registry `crates-io`
+help: you may press ctrl-c to skip waiting; the crate should be available shortly
+   Published liminal-server v0.5.3 at registry `crates-io`
+=== DONE liminal-server exit=0 ===
+=== PUBLISH liminal-sdk 20:30:16Z ===
+    Updating crates.io index
+   Packaging liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Updating crates.io index
+warning: package `spin v0.9.8` in Cargo.lock is yanked in registry `crates-io`, consider updating to a version that is not yanked
+    Packaged 67 files, 764.4KiB (174.7KiB compressed)
+   Verifying liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+   Compiling beamr v0.16.3
+   Compiling futures-core v0.3.32
+   Compiling tungstenite v0.30.0
+   Compiling haematite v0.8.1
+   Compiling liminal-rs v0.5.3
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/target/package/liminal-sdk-0.5.3)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 23.97s
+   Uploading liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Uploaded liminal-sdk v0.5.3 to registry `crates-io`
+note: waiting for liminal-sdk v0.5.3 to be available at registry `crates-io`
+help: you may press ctrl-c to skip waiting; the crate should be available shortly
+   Published liminal-sdk v0.5.3 at registry `crates-io`
+=== DONE liminal-sdk exit=0 ===

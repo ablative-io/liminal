@@ -1,0 +1,71 @@
+=== PUBLISH liminal-protocol 20:27:33Z ===
+    Updating crates.io index
+   Packaging liminal-protocol v0.4.1 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+    Updating crates.io index
+    Packaged 164 files, 3.1MiB (550.9KiB compressed)
+   Verifying liminal-protocol v0.4.1 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+   Compiling liminal-protocol v0.4.1 (/Users/tom/Developer/ablative/stack/liminal/target/package/liminal-protocol-0.4.1)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.42s
+   Uploading liminal-protocol v0.4.1 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-protocol)
+    Uploaded liminal-protocol v0.4.1 to registry `crates-io`
+note: waiting for liminal-protocol v0.4.1 to be available at registry `crates-io`
+help: you may press ctrl-c to skip waiting; the crate should be available shortly
+   Published liminal-protocol v0.4.1 at registry `crates-io`
+=== DONE liminal-protocol exit=0 ===
+=== PUBLISH liminal 20:27:42Z ===
+    Updating crates.io index
+   Packaging liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal)
+    Updating crates.io index
+    Packaged 114 files, 1.0MiB (231.6KiB compressed)
+   Verifying liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal)
+   Compiling log v0.4.32
+   Compiling tracing-core v0.1.36
+   Compiling regalloc2 v0.15.1
+   Compiling mio v1.2.1
+   Compiling tracing v0.1.44
+   Compiling tokio v1.52.3
+   Compiling cranelift-codegen v0.131.2
+   Compiling cranelift-module v0.131.2
+   Compiling cranelift-native v0.131.2
+   Compiling cranelift-frontend v0.131.2
+   Compiling cranelift-jit v0.131.2
+   Compiling beamr v0.16.3
+   Compiling haematite v0.8.1
+   Compiling liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/target/package/liminal-rs-0.5.3)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 32.92s
+   Uploading liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal)
+    Uploaded liminal-rs v0.5.3 to registry `crates-io`
+note: waiting for liminal-rs v0.5.3 to be available at registry `crates-io`
+help: you may press ctrl-c to skip waiting; the crate should be available shortly
+   Published liminal-rs v0.5.3 at registry `crates-io`
+=== DONE liminal exit=0 ===
+=== PUBLISH liminal-server 20:28:19Z ===
+    Updating crates.io index
+   Packaging liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)
+    Updating crates.io index
+error: failed to prepare local package for uploading
+
+Caused by:
+  failed to select a version for `liminal-sdk`.
+      ... required by package `liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-server)`
+  versions that meet the requirements `^0.5.1` are: 0.5.1
+
+  package `liminal-server` depends on `liminal-sdk` with feature `embedded` but `liminal-sdk` does not have that feature.
+  help: available features: browser, default, std
+
+
+  failed to select a version for `liminal-sdk` which could resolve this conflict
+=== DONE liminal-server exit=101 ===
+=== PUBLISH liminal-sdk 20:28:21Z ===
+    Updating crates.io index
+   Packaging liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)
+    Updating crates.io index
+error: failed to prepare local package for uploading
+
+Caused by:
+  failed to select a version for the requirement `liminal-server = "^0.5.3"`
+  candidate versions found which didn't match: 0.5.2, 0.5.1, 0.5.0, ...
+  location searched: crates.io index
+  required by package `liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/crates/liminal-sdk)`
+=== DONE liminal-sdk exit=101 ===
+WAVE_EXIT=0
