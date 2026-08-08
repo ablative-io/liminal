@@ -1,5 +1,14 @@
 mod config;
+/// The byte-stream framing layer every real transport shares: one handshake,
+/// one partial-frame buffer, one conversation drain. It is generic over
+/// [`framing::FrameStream`] rather than duplicated per transport — the third
+/// parallel copy is what `docs/design/IN-PROCESS-TRANSPORT.md` §9 ruling 2
+/// refuses.
+#[cfg(feature = "std")]
+mod framing;
 mod handles;
+#[cfg(feature = "embedded")]
+mod loopback;
 mod participant;
 mod protocol;
 #[cfg(feature = "std")]
@@ -167,6 +176,80 @@ impl RemoteConfig {
     pub fn connect_tcp_with_auth(mut self, auth_token: &[u8]) -> Result<Self, SdkError> {
         let transport =
             self::tcp::TcpRemoteTransport::connect_with_auth(&self.server_address, auth_token)?;
+        self.transport = Arc::new(transport);
+        self.websocket = None;
+        Ok(self)
+    }
+
+    /// Opens an in-process connection to `server` and installs the loopback
+    /// wire transport, replacing the in-process protocol transport.
+    ///
+    /// Same shape as [`connect_tcp`], same guarantee, different mount. This
+    /// performs the protocol handshake (`Connect` -> `ConnectAck`) eagerly
+    /// against a REAL server — the same admission slot pool, the same durable
+    /// connection incarnation, the same constant-time token compare, the same
+    /// frame preflight and participant gate — so a returned configuration is
+    /// already connected and every later call traverses the identical framed
+    /// wire image a socket would have carried. What it removes is the syscall,
+    /// the kernel copy, the descriptor lifecycle, and the round trip; what it
+    /// does not remove is any part of the record path.
+    ///
+    /// The mount is TRUSTED CODE. A co-resident caller already reaches the host
+    /// process's heap, descriptors and store handle without this transport, so
+    /// what the record vouches for here is that the append came through the
+    /// same door — never that its author was contained.
+    ///
+    /// `self.server_address` is untouched and stays a diagnostic label: nothing
+    /// on this path reads a socket fact, and the server's own record carries
+    /// `peer_addr: None` for the same reason.
+    ///
+    /// The server is taken as an [`Arc`] because the participant contract
+    /// includes reconnect, and a transport that can open a second connection
+    /// later must outlive the call that built it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the server refuses to admit the
+    /// connection — at `max_connections` this is the same refusal a socket
+    /// connect receives — and [`SdkError::Protocol`] when the handshake is
+    /// rejected or its frames cannot be encoded.
+    ///
+    /// [`connect_tcp`]: Self::connect_tcp
+    #[cfg(feature = "embedded")]
+    pub fn connect_loopback(
+        self,
+        server: Arc<liminal_server::server::embedded::EmbeddedServer>,
+    ) -> Result<Self, SdkError> {
+        self.connect_loopback_with_auth(server, &[])
+    }
+
+    /// Opens an in-process connection whose handshake carries `auth_token`, for
+    /// a server gated by an `[auth]` section, and installs the loopback wire
+    /// transport. Additive to [`connect_loopback`]: an empty token behaves
+    /// identically to it.
+    ///
+    /// **Admission is admission.** An embedded caller presenting the wrong
+    /// token is refused on its own loopback by the same `connect_response`
+    /// compare that refuses a socket caller, and the refusal surfaces here as
+    /// the same [`SdkError::Connection`] the socket path produces.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the connection cannot be admitted
+    /// or the token is rejected, and [`SdkError::Protocol`] when the handshake
+    /// frames cannot be encoded or sent.
+    ///
+    /// [`connect_loopback`]: Self::connect_loopback
+    #[cfg(feature = "embedded")]
+    pub fn connect_loopback_with_auth(
+        mut self,
+        server: Arc<liminal_server::server::embedded::EmbeddedServer>,
+        auth_token: &[u8],
+    ) -> Result<Self, SdkError> {
+        let transport = self::loopback::LoopbackRemoteTransport::connect_with_auth(
+            server,
+            auth_token,
+        )?;
         self.transport = Arc::new(transport);
         self.websocket = None;
         Ok(self)

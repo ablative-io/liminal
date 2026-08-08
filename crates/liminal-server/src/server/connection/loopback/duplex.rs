@@ -13,7 +13,13 @@
 //! idle-memory class. A full ring answers `WouldBlock`, a nearly-full ring
 //! accepts a partial write, and [`super::super::outbound::OutboundWriter`]'s
 //! budget and partial-write logic then behaves over a ring exactly as it
-//! behaves over a socket. Neither end's `write` ever blocks.
+//! behaves over a socket. Neither end's [`Write::write`] ever blocks. The
+//! client end additionally offers a BLOCKING
+//! [`write_timeout`](LoopbackClientEnd::write_timeout), the twin of its
+//! blocking read and for the same reason: a socket's `write_all` waits out a
+//! full send buffer under a write deadline, and a client that could only see
+//! an instant `WouldBlock` would have a backpressure semantics no other mount
+//! has.
 //!
 //! **The reader is TOLD, never polls.** The loopback has no descriptor, so the
 //! beamr readiness facility cannot arm it and the retired busy loop is not
@@ -144,6 +150,62 @@ impl Ring {
         Ok((accepted, was_empty))
     }
 
+    /// Writes what fits, parking on the condvar until space appears, the
+    /// reading end goes away, or `timeout` elapses.
+    ///
+    /// `None` parks without a deadline; a `timeout` whose deadline is not
+    /// representable as an `Instant` is treated as `None`, matching
+    /// [`Self::read_until`]. Returns the accepted byte count and whether this
+    /// write took the ring from empty to non-empty — the one edge a waker
+    /// fires on.
+    ///
+    /// # Errors
+    /// `BrokenPipe` when the reading end has been dropped; `TimedOut` when the
+    /// window closes with the ring still full.
+    fn write_until(&self, buf: &[u8], timeout: Option<Duration>) -> io::Result<(usize, bool)> {
+        if buf.is_empty() {
+            return Ok((0, false));
+        }
+        let deadline = timeout.and_then(|window| Instant::now().checked_add(window));
+        let mut state = recover(&self.state);
+        loop {
+            if state.reader_gone {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "loopback peer end was dropped",
+                ));
+            }
+            let free = self.capacity.saturating_sub(state.bytes.len());
+            if free > 0 {
+                let accepted = free.min(buf.len());
+                let was_empty = state.bytes.is_empty();
+                state.bytes.extend(buf.get(..accepted).unwrap_or(buf));
+                drop(state);
+                self.changed.notify_all();
+                return Ok((accepted, was_empty));
+            }
+            let Some(deadline) = deadline else {
+                state = self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner);
+                continue;
+            };
+            // Re-derived every pass so a spurious wake cannot extend the window.
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "loopback write deadline expired",
+                ));
+            };
+            let (next, _) = self
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+        }
+    }
+
     /// Reads what is there, never blocking.
     ///
     /// # Errors
@@ -157,7 +219,15 @@ impl Ring {
             let mut state = recover(&self.state);
             (take_from(&mut state.bytes, buf), state.writer_gone)
         };
-        if taken > 0 || buf.is_empty() || writer_gone {
+        if taken > 0 {
+            // A read is the only event that frees ring space, so it is the only
+            // event that can tell a writer parked in `write_until` to try
+            // again. Without this the sole wake a blocked writer could ever
+            // receive is its reader disappearing.
+            self.changed.notify_all();
+            return Ok(taken);
+        }
+        if buf.is_empty() || writer_gone {
             return Ok(taken);
         }
         Err(io::Error::new(
@@ -184,6 +254,9 @@ impl Ring {
         loop {
             let taken = take_from(&mut state.bytes, buf);
             if taken > 0 {
+                drop(state);
+                // Freed space is a writer's only progress signal; see `read`.
+                self.changed.notify_all();
                 return Ok(taken);
             }
             if state.writer_gone {
@@ -345,6 +418,32 @@ impl LoopbackClientEnd {
     /// happened.
     pub fn read_timeout(&mut self, buf: &mut [u8], timeout: Option<Duration>) -> io::Result<usize> {
         self.from_server.read_until(buf, timeout)
+    }
+
+    /// Writes from `buf`, parking until ring space appears, the server end is
+    /// dropped, or `timeout` elapses. `None` parks without a deadline. Returns
+    /// the accepted byte count, which may be short of `buf.len()`.
+    ///
+    /// This is the write-side twin of [`Self::read_timeout`], and the socket it
+    /// stands in for is why it exists. A blocking `TcpStream` with a write
+    /// timeout BLOCKS while the kernel send buffer is full and fails only when
+    /// the window closes, so `write_all` over a socket makes progress across a
+    /// slow reader. [`Write::write`] on this end never blocks — a full ring
+    /// answers `WouldBlock` at once, which `io::Write::write_all` reads as a
+    /// hard failure — so a client driving the non-blocking half would see a
+    /// backpressure semantics no other mount has. Both halves are kept: the
+    /// non-blocking one is what the server end and the outbound budget want,
+    /// this one is what a client's `write_all` equivalent wants.
+    ///
+    /// # Errors
+    /// `BrokenPipe` when the server end has been dropped; `TimedOut` when the
+    /// window closes with the ring still full.
+    pub fn write_timeout(&mut self, buf: &[u8], timeout: Option<Duration>) -> io::Result<usize> {
+        let (written, opened_the_ring) = self.to_server.write_until(buf, timeout)?;
+        if opened_the_ring {
+            self.server_waker.fire();
+        }
+        Ok(written)
     }
 }
 

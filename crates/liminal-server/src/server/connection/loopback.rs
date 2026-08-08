@@ -26,10 +26,14 @@
 //! loopback lives within the wall rather than widening it.
 //!
 //! Build order (§8) stages this module. Step 2 was the byte duplex alone: two
-//! bounded rings, wake-on-write, close semantics, and its unit pins. Step 3 —
-//! this commit — adds the server side: the transport, the connection process it
-//! makes, and the mount fact the admitting door stamps. The SDK-side transport
-//! and `EmbeddedServer` are step 4 and are not here.
+//! bounded rings, wake-on-write, close semantics, and its unit pins. Step 3
+//! added the server side: the transport, the connection process it makes, and
+//! the mount fact the admitting door stamps. Step 4 built the client half
+//! elsewhere — [`crate::server::embedded::EmbeddedServer`] is the handle that
+//! grants connections, and the SDK's `remote/loopback` is the transport that
+//! drives them — and left this module's shape untouched, adding only the
+//! duplex's blocking client write, which is what a client's `write_all`
+//! equivalent needs from a stream that stands in for a socket.
 
 #[path = "loopback/duplex.rs"]
 mod duplex;

@@ -562,11 +562,6 @@ impl ConnectionSupervisor {
     /// Returns [`ServerError`] when admission is refused
     /// ([`ServerError::ConnectionLimitReached`]), incarnation allocation fails,
     /// or beamr spawn/registration fails.
-    #[allow(
-        dead_code,
-        reason = "the loopback admission door is built and pinned at design step 3; \
-                  its production caller is the EmbeddedServer handle at step 4"
-    )]
     pub(crate) fn spawn_loopback_connection(
         &self,
         server_end: LoopbackServerEnd,

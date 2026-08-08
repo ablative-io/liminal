@@ -1,9 +1,29 @@
-//! Socket ownership and frame I/O for the TCP transport.
+//! Stream ownership and frame I/O, shared by every byte-level SDK transport.
 //!
-//! [`Connection`] wraps one blocking [`TcpStream`], buffers partial reads until a
+//! [`Connection`] wraps one blocking byte stream, buffers partial reads until a
 //! whole frame decodes (mirroring the server's `process_buffer` loop), and tracks
 //! which conversations have been opened so a message never re-opens a conversation
-//! or leaves an undrained error frame on the shared socket.
+//! or leaves an undrained error frame on the shared connection.
+//!
+//! # Why this is generic, and over exactly what
+//!
+//! This layer used to live inside `tcp/` and be nailed to [`TcpStream`]. The
+//! in-process (loopback) transport carries the identical framed wire image over
+//! an in-memory duplex rather than a socket
+//! (`docs/design/IN-PROCESS-TRANSPORT.md` §1), so it needs this exact
+//! handshake, this exact partial-frame buffering, this exact `Deliver` demux,
+//! and this exact conversation-drain logic. A parallel copy of them is the
+//! failure mode that design names and refuses (§7, §9 ruling 2): a second
+//! `fill_buffer` is a second place for a desync to appear and only one of them
+//! would ever get the fix.
+//!
+//! So [`Connection`] became generic over [`FrameStream`] — a trait covering
+//! EXACTLY the four things this file asked a `TcpStream` for and nothing more:
+//! a bounded read, a whole-buffer write, a flush, and a settable read deadline.
+//! It is not an abstraction over sockets; it is the shadow this file already
+//! cast. The socket path is unchanged: each `self.stream.…` site is the same
+//! call it was, reached through a trait method whose `TcpStream` implementation
+//! is the original expression.
 
 use alloc::collections::BTreeSet;
 use alloc::format;
@@ -12,6 +32,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::time::Duration;
 
+use std::io;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 
@@ -20,15 +41,15 @@ use liminal::protocol::{
     ProtocolVersion, decode, encode, encoded_len,
 };
 
-use super::participant;
+use super::tcp::participant;
 use crate::SdkError;
 
 /// Minimum protocol version this client advertises during the handshake.
 const CLIENT_MIN_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
 /// Maximum protocol version this client advertises during the handshake.
 const CLIENT_MAX_VERSION: ProtocolVersion = ProtocolVersion::new(1, 0);
-/// Maximum time spent waiting on a single socket read or write.
-const IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum time spent waiting on a single stream read or write.
+pub(in crate::remote) const IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Brief window used to detect an error reply for an otherwise-silent
 /// conversation send. The server replies synchronously on the connection thread,
 /// so this only needs to cover that one round of processing; on success the
@@ -41,19 +62,82 @@ const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Application stream id used for conversation frames.
 const APPLICATION_STREAM_ID: u32 = 1;
 
-/// Owns the socket and the partial-frame read buffer for one server connection.
-pub(super) struct Connection {
-    stream: TcpStream,
+/// The exact stream surface [`Connection`] uses: four operations, no more.
+///
+/// Deliberately NOT `std::io::Read + Write`. Those traits carry a great deal
+/// this layer never asks for, and — decisively — they carry no way to say
+/// "bound the next read by this window", which is the one socket option
+/// [`Connection::receive_with_timeout`] genuinely needs. Naming the four
+/// operations directly is what makes a second implementation obviously
+/// complete rather than plausibly complete.
+pub(in crate::remote) trait FrameStream {
+    /// Reads into `buf`, bounded by the deadline last set by
+    /// [`set_read_deadline`](Self::set_read_deadline).
+    ///
+    /// `Ok(0)` means end of file. A window that closes with no bytes must
+    /// report `WouldBlock` or `TimedOut`; the two are read identically by
+    /// [`Connection::fill_buffer_nonfatal`], mirroring the socket contract
+    /// where the platform picks between them.
+    ///
+    /// # Errors
+    /// Any transport read failure.
+    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<usize>;
+
+    /// Writes all of `bytes`, waiting out backpressure under this transport's
+    /// write deadline exactly as a blocking socket's `write_all` does.
+    ///
+    /// # Errors
+    /// Any transport write failure, including a deadline that closes with
+    /// bytes still unwritten.
+    fn write_all_bytes(&mut self, bytes: &[u8]) -> io::Result<()>;
+
+    /// Pushes anything this transport buffers behind the write.
+    ///
+    /// # Errors
+    /// Any transport flush failure.
+    fn flush_bytes(&mut self) -> io::Result<()>;
+
+    /// Bounds subsequent [`read_bytes`](Self::read_bytes) calls by `timeout`.
+    ///
+    /// # Errors
+    /// Any failure to install the deadline.
+    fn set_read_deadline(&mut self, timeout: Duration) -> io::Result<()>;
+}
+
+impl FrameStream for TcpStream {
+    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        Read::read(self, buf)
+    }
+
+    fn write_all_bytes(&mut self, bytes: &[u8]) -> io::Result<()> {
+        Write::write_all(self, bytes)
+    }
+
+    fn flush_bytes(&mut self) -> io::Result<()> {
+        Write::flush(self)
+    }
+
+    fn set_read_deadline(&mut self, timeout: Duration) -> io::Result<()> {
+        self.set_read_timeout(Some(timeout))
+    }
+}
+
+/// Owns the stream and the partial-frame read buffer for one server connection.
+pub(in crate::remote) struct Connection<S> {
+    stream: S,
     buffer: Vec<u8>,
     /// Conversation ids already opened on this connection, so a message does not
     /// re-send `ConversationOpen` (which would leave the server with a duplicate).
     open_conversations: BTreeSet<u64>,
 }
 
-impl Connection {
+impl Connection<TcpStream> {
     /// Connects and completes the handshake carrying `auth_token`, for a server
     /// gated by an `[auth]` section. An empty slice selects open access.
-    pub(super) fn connect_with_auth(address: &str, auth_token: &[u8]) -> Result<Self, SdkError> {
+    pub(in crate::remote) fn connect_with_auth(
+        address: &str,
+        auth_token: &[u8],
+    ) -> Result<Self, SdkError> {
         let stream = TcpStream::connect(address).map_err(|source| SdkError::Connection {
             description: format!("failed to connect to {address}: {source}"),
         })?;
@@ -73,6 +157,19 @@ impl Connection {
                 description: format!("failed to set write timeout for {address}: {source}"),
             })?;
 
+        Self::established(stream, auth_token)
+    }
+}
+
+impl<S: FrameStream> Connection<S> {
+    /// Takes an already-open byte stream and drives the protocol handshake
+    /// (`Connect` -> `ConnectAck`) over it.
+    ///
+    /// This is where every mount converges: the stream differs, the handshake
+    /// does not. A returned connection has been accepted by the server's
+    /// `connect_response` — same version negotiation, same constant-time token
+    /// compare — whatever carried the bytes.
+    pub(in crate::remote) fn established(stream: S, auth_token: &[u8]) -> Result<Self, SdkError> {
         let mut connection = Self {
             stream,
             buffer: Vec::new(),
@@ -83,13 +180,13 @@ impl Connection {
     }
 
     /// Sends a request frame and blocks for the matching response frame.
-    pub(super) fn round_trip(&mut self, request: &Frame) -> Result<Frame, SdkError> {
+    pub(in crate::remote) fn round_trip(&mut self, request: &Frame) -> Result<Frame, SdkError> {
         self.send(request)?;
         self.receive()
     }
 
     /// Writes one canonical participant request on this established connection.
-    pub(super) fn send_participant(
+    pub(in crate::remote) fn send_participant(
         &mut self,
         request: &liminal_protocol::wire::ClientRequest,
     ) -> Result<(), SdkError> {
@@ -97,7 +194,7 @@ impl Connection {
     }
 
     /// Reads and direction-decodes one canonical participant response.
-    pub(super) fn receive_participant(
+    pub(in crate::remote) fn receive_participant(
         &mut self,
     ) -> Result<liminal_protocol::wire::ParticipantFrame, SdkError> {
         participant::response_frame(self.receive()?)
@@ -135,13 +232,15 @@ impl Connection {
             description: "wire encoder reported an invalid byte count".to_string(),
         })?;
         self.stream
-            .write_all(encoded)
+            .write_all_bytes(encoded)
             .map_err(|source| SdkError::Connection {
                 description: format!("failed to write frame to server: {source}"),
             })?;
-        self.stream.flush().map_err(|source| SdkError::Connection {
-            description: format!("failed to flush frame to server: {source}"),
-        })
+        self.stream
+            .flush_bytes()
+            .map_err(|source| SdkError::Connection {
+                description: format!("failed to flush frame to server: {source}"),
+            })
     }
 
     fn receive(&mut self) -> Result<Frame, SdkError> {
@@ -182,7 +281,7 @@ impl Connection {
         let mut chunk = [0_u8; READ_CHUNK_BYTES];
         let read = self
             .stream
-            .read(&mut chunk)
+            .read_bytes(&mut chunk)
             .map_err(|source| SdkError::Connection {
                 description: format!("failed to read frame from server: {source}"),
             })?;
@@ -333,7 +432,7 @@ impl Connection {
     /// bytes arrive in the window, leaving the buffer untouched (no stale frame).
     fn receive_with_timeout(&mut self, timeout: Duration) -> Result<Option<Frame>, SdkError> {
         self.stream
-            .set_read_timeout(Some(timeout))
+            .set_read_deadline(timeout)
             .map_err(|source| SdkError::Connection {
                 description: format!("failed to set conversation drain timeout: {source}"),
             })?;
@@ -341,7 +440,7 @@ impl Connection {
         // Always restore the steady-state timeout, even on error.
         let restore = self
             .stream
-            .set_read_timeout(Some(IO_TIMEOUT))
+            .set_read_deadline(IO_TIMEOUT)
             .map_err(|source| SdkError::Connection {
                 description: format!("failed to restore read timeout: {source}"),
             });
@@ -385,7 +484,7 @@ impl Connection {
             });
         }
         let mut chunk = [0_u8; READ_CHUNK_BYTES];
-        match self.stream.read(&mut chunk) {
+        match self.stream.read_bytes(&mut chunk) {
             Ok(0) => Err(SdkError::Connection {
                 description: "server closed the connection before a full frame arrived".to_string(),
             }),
@@ -424,14 +523,14 @@ enum FillOutcome {
 }
 
 /// Maps a low-level wire codec error into the SDK error taxonomy.
-pub(super) fn protocol_error(error: &ProtocolError) -> SdkError {
+pub(in crate::remote) fn protocol_error(error: &ProtocolError) -> SdkError {
     SdkError::Protocol {
         description: format!("wire codec error: {error}"),
     }
 }
 
 /// Builds a protocol error describing an unexpected response frame.
-pub(super) fn unexpected_frame(expected: &str, actual: &Frame) -> SdkError {
+pub(in crate::remote) fn unexpected_frame(expected: &str, actual: &Frame) -> SdkError {
     SdkError::Protocol {
         description: format!(
             "expected {expected} frame, received {:?}",

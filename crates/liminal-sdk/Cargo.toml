@@ -22,10 +22,17 @@ std = ["thiserror/std", "serde/std", "dep:liminal", "dep:tungstenite"]
 # conversion layer (the F5 mirror) has no platform type and is always
 # compiled, so the deterministic driver-trace suites pin it natively.
 browser = ["dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
+# The in-process (loopback) transport (docs/design/IN-PROCESS-TRANSPORT.md).
+# OFF by default and absent from `default`, so an existing consumer's dependency
+# graph, feature set, and compiled surface are byte-for-byte what they were.
+# Implies `std`: the transport reuses the std framing layer and the canonical
+# wire codec, and it carries an `EmbeddedServer`, which is the whole server.
+embedded = ["std", "dep:liminal-server"]
 
 [dependencies]
 futures-core = { workspace = true }
 liminal = { workspace = true, optional = true }
+liminal-server = { workspace = true, optional = true }
 liminal-protocol = { workspace = true }
 serde = { workspace = true, features = ["alloc"] }
 serde_json = { workspace = true, features = ["alloc"] }

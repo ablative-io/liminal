@@ -1,46 +1,56 @@
-//! Real TCP transport for the remote SDK.
+//! The in-process (loopback) transport: the client half of
+//! `docs/design/IN-PROCESS-TRANSPORT.md`.
 //!
-//! Unlike [`ProtocolRemoteTransport`](super::protocol::ProtocolRemoteTransport),
-//! which only exercises the SDK's framing in-process, this transport opens a real
-//! `TcpStream` to a running `liminal-server`, performs the protocol handshake, and
-//! exchanges canonical wire frames over the socket.
+//! **What this transport secures is the RECORD PATH** (hardened
+//! face-substrate draft r2 §5). It carries the exact framed wire image an
+//! ordinary socket client carries — encoded by the same codec, handshaken by
+//! the same `Connect`/`ConnectAck`, admitted through the same slot pool, token
+//! compare, frame preflight and participant gate — so an in-process caller
+//! reaches the record through the same door and no append arrives except
+//! through it.
 //!
-//! # Blocking model
+//! **What this transport does NOT secure is the mount.** A co-resident caller
+//! is TRUSTED CODE: it holds the host process's heap, descriptors and store
+//! handle whether or not it ever calls this transport. The record therefore
+//! vouches for a co-resident mount only as far as the host process itself is
+//! trusted. This is not a sandbox and must never be read as one; every append
+//! admitted here carries the mount fact the admitting server door stamped
+//! (design §10) precisely because a consumer must weigh the mount.
 //!
-//! The SDK API surface is synchronous: [`RemoteTransport`] methods return plain
-//! `Result` values, and the rest of the SDK (connection pool, lifecycle) is
-//! driven by ordinary blocking calls. This transport therefore uses
-//! `std::net::TcpStream` in blocking mode with explicit read/write timeouts; it
-//! does not introduce an async runtime. Each transport call holds a short-lived
-//! connection lock for the duration of one request/response exchange.
+//! **The no-side-door guarantee has a client half, and it is the type system.**
+//! [`RemoteTransport`] and [`ParticipantRemoteTransport`] stay crate-private
+//! and `RemoteConfig::transport` stays a private field, so an embedder cannot
+//! hand-roll a transport that skips the handshake, the gate, or the codec. The
+//! only way in is [`RemoteConfig::connect_loopback`], and the only way it gets
+//! a byte stream is [`EmbeddedServer::connect_loopback`], which is the server's
+//! whole grant.
+//!
+//! **Scope (§5, ratified §9 ruling 3):** the full participant contract — connect,
+//! admission, enrollment, attach/detach, acks, record admission, receive, and
+//! reconnect — plus the generic publish/subscribe/conversation surface the
+//! shared framing layer already carries. `PushClient` and `SubscriptionStream`
+//! open their own sockets today, bypassing the transport trait entirely; they
+//! stay TCP-only in v1 and are the first follow-on.
 
-mod flush;
-/// The canonical participant framing, reached by every byte-level transport
-/// through [`super::framing`] — hence `pub(in crate::remote)` rather than
-/// private to `tcp`.
-pub(in crate::remote) mod participant;
-mod push_client;
-mod subscription;
-
-pub use flush::{FlushMode, FlushOutcome, PublishRejection};
-pub use push_client::{OBSERVABILITY_CHANNEL, PushClient, PushWriter, PushedFrame};
-pub use subscription::{DeliveredMessage, SubscriptionStream};
+#[path = "stream.rs"]
+mod stream;
 
 use alloc::format;
-use alloc::string::{String, ToString};
+use alloc::string::ToString;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
-use std::net::TcpStream;
 
 use liminal::protocol::{
     CausalContext, Frame, MessageEnvelope, PUBLISH_DELIVERED_FLAG, PUBLISH_IDEMPOTENCY_KEY_FLAG,
     SchemaId,
 };
+use liminal_server::server::embedded::EmbeddedServer;
 use spin::Mutex;
 
 use crate::{DeliveryAck, PressureResponse, SdkError};
 
+use self::stream::LoopbackStream;
 use super::ServerAddress;
 use super::framing::{Connection, unexpected_frame};
 use super::participant::ParticipantResponseProvenance;
@@ -56,65 +66,64 @@ const DEFAULT_MAX_IN_FLIGHT: u32 = 1;
 /// Schema id used for payloads whose schema is not carried on the wire.
 const SCHEMALESS_SCHEMA: &[u8] = &[];
 
+/// The established connection plus the response provenance the participant
+/// layer stamps on everything read from it. Mirrors the TCP transport's slot
+/// exactly, because reconnect identity is a protocol fact and not a socket one.
 struct ConnectionSlot {
-    connection: Connection<TcpStream>,
+    connection: Connection<LoopbackStream>,
     provenance: ParticipantResponseProvenance,
     next_attempt_id: u64,
     next_connection_id: u64,
 }
 
-/// Real TCP transport that exchanges canonical wire frames with a liminal server.
-pub struct TcpRemoteTransport {
+/// An in-process transport bound to one [`EmbeddedServer`].
+///
+/// The server handle is held behind an `Arc` for one reason:
+/// [`ParticipantRemoteTransport::reconnect_participant`] must be able to open a
+/// SECOND connection later, and a `RemoteConfig` carries its transport as
+/// `Arc<dyn RemoteTransport>` with no lifetime to borrow against. The `Arc` is
+/// not a second granting surface — the grant is still
+/// [`EmbeddedServer::connect_loopback`] and nothing else — it is what keeps the
+/// server alive for as long as a connection to it exists, which is the same
+/// order a socket server and its accepted sockets already have.
+pub(super) struct LoopbackRemoteTransport {
+    server: Arc<EmbeddedServer>,
     connection: Arc<Mutex<ConnectionSlot>>,
-    address: String,
     auth_token: Vec<u8>,
 }
 
-impl fmt::Debug for TcpRemoteTransport {
+impl fmt::Debug for LoopbackRemoteTransport {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("TcpRemoteTransport")
+            .debug_struct("LoopbackRemoteTransport")
             .finish_non_exhaustive()
     }
 }
 
-impl TcpRemoteTransport {
-    /// Connects to `server_address`, completes the handshake, and returns a ready transport.
+impl LoopbackRemoteTransport {
+    /// Takes one loopback connection from `server` and completes the handshake
+    /// carrying `auth_token`. An empty slice selects open access.
     ///
     /// # Errors
     ///
-    /// Returns [`SdkError::Connection`] when the TCP connection cannot be
-    /// established, and [`SdkError::Protocol`] when the handshake frames cannot be
-    /// encoded, sent, or are rejected by the server.
-    pub fn connect(server_address: &ServerAddress) -> Result<Self, SdkError> {
-        Self::connect_with_auth(server_address, &[])
-    }
-
-    /// Connects and handshakes carrying `auth_token`, for a server gated by an
-    /// `[auth]` section. Additive to [`connect`]; an empty token is equivalent to it.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SdkError::Connection`] when the TCP connection cannot be
-    /// established or the server rejects the token (a `ConnectError` closes the
-    /// socket), and [`SdkError::Protocol`] when the handshake frames cannot be
-    /// encoded or sent.
-    ///
-    /// [`connect`]: Self::connect
-    pub fn connect_with_auth(
-        server_address: &ServerAddress,
+    /// Returns [`SdkError::Connection`] when the server refuses to admit the
+    /// connection (at `max_connections` this is the same refusal a socket
+    /// connect receives) or rejects the token, and [`SdkError::Protocol`] when
+    /// the handshake frames cannot be encoded or the server answers with
+    /// something other than `ConnectAck`.
+    pub(super) fn connect_with_auth(
+        server: Arc<EmbeddedServer>,
         auth_token: &[u8],
     ) -> Result<Self, SdkError> {
-        let address = server_address.as_str().to_string();
-        let connection = Connection::connect_with_auth(&address, auth_token)?;
+        let connection = open_connection(&server, auth_token)?;
         Ok(Self {
+            server,
             connection: Arc::new(Mutex::new(ConnectionSlot {
                 connection,
                 provenance: ParticipantResponseProvenance::new(1, 1),
                 next_attempt_id: 2,
                 next_connection_id: 2,
             })),
-            address,
             auth_token: auth_token.to_vec(),
         })
     }
@@ -124,7 +133,25 @@ impl TcpRemoteTransport {
     }
 }
 
-impl ParticipantRemoteTransport for TcpRemoteTransport {
+/// Asks the server for a connection and handshakes over it.
+///
+/// The admission refusal is mapped into [`SdkError::Connection`] rather than
+/// propagated as a server error, because from the client's side an embedded
+/// server at capacity and a listener at capacity are the same event: the
+/// connect did not happen.
+fn open_connection(
+    server: &EmbeddedServer,
+    auth_token: &[u8],
+) -> Result<Connection<LoopbackStream>, SdkError> {
+    let end = server
+        .connect_loopback()
+        .map_err(|source| SdkError::Connection {
+            description: format!("failed to open an in-process connection: {source}"),
+        })?;
+    Connection::established(LoopbackStream::new(end), auth_token)
+}
+
+impl ParticipantRemoteTransport for LoopbackRemoteTransport {
     fn send_participant(
         &self,
         _server_address: &ServerAddress,
@@ -147,6 +174,13 @@ impl ParticipantRemoteTransport for TcpRemoteTransport {
         })
     }
 
+    /// Opens a fresh loopback connection and advances the transport identity,
+    /// step for step with the socket transport's reconnect.
+    ///
+    /// Replacing `slot.connection` drops the previous connection's client end,
+    /// which is the end-of-file the server reads as a hangup — so the old
+    /// connection is torn down and its admission slot released by the same path
+    /// a dropped socket drives.
     fn reconnect_participant(
         &self,
         _server_address: &ServerAddress,
@@ -159,7 +193,7 @@ impl ParticipantRemoteTransport for TcpRemoteTransport {
                 .ok_or_else(|| SdkError::Connection {
                     description: "participant transport attempt identity exhausted".to_string(),
                 })?;
-        let connection = Connection::connect_with_auth(&self.address, &self.auth_token)?;
+        let connection = open_connection(&self.server, &self.auth_token)?;
         let connection_id = slot.next_connection_id;
         slot.next_connection_id =
             slot.next_connection_id
@@ -174,15 +208,14 @@ impl ParticipantRemoteTransport for TcpRemoteTransport {
     }
 }
 
-impl RemoteTransport for TcpRemoteTransport {
+impl RemoteTransport for LoopbackRemoteTransport {
     fn publish(
         &self,
         _server_address: &ServerAddress,
         request: &WirePublishRequest,
     ) -> Result<PressureResponse, SdkError> {
         let frame = build_publish_frame(request);
-        let response = self.round_trip(&frame)?;
-        publish_response(response)
+        publish_response(self.round_trip(&frame)?)
     }
 
     fn publish_with_delivery(
@@ -191,30 +224,17 @@ impl RemoteTransport for TcpRemoteTransport {
         request: &WirePublishRequest,
     ) -> Result<DeliveryAck, SdkError> {
         let frame = build_publish_frame(request);
-        let response = self.round_trip(&frame)?;
-        publish_delivery_response(response)
+        publish_delivery_response(self.round_trip(&frame)?)
     }
 
     /// Subscribes over the shared request/response connection.
     ///
-    /// # v1 caveat — pooled subscribe registers a delivering subscriber
-    ///
-    /// This registers a *real* server-side subscriber on the shared pool
-    /// connection, which is what lets a subsequent keyed publish observe a genuine
-    /// delivery ack ([`PUBLISH_DELIVERED_FLAG`](liminal::protocol::PUBLISH_DELIVERED_FLAG)).
-    /// The server then pumps a `Deliver` frame for every message on the channel onto
-    /// this connection. Because the connection only reads (and discards) those
-    /// frames during a round trip, an application that subscribes for the ack signal
-    /// and then goes idle on a busy channel lets the server's bounded outbound buffer
-    /// (default 4 MiB) fill; on overflow the server tears the connection down, and
-    /// every later request on this transport then fails through no fault of the
-    /// caller. An actively-used transport is self-limiting (each round trip drains
-    /// the backlog), but a subscribe-then-idle client on a hot channel is at risk.
-    ///
-    /// v1 guidance: consume channel deliveries through a dedicated
-    /// [`SubscriptionStream`] (its own connection with a background reader), and use
-    /// the pooled subscribe only as the delivery-ack signal alongside regular
-    /// traffic. The v2 credit mode removes this by gating and multiplexing delivery.
+    /// The pooled-subscribe caveat the socket transport documents applies here
+    /// unchanged: this registers a real server-side subscriber, so the server
+    /// pumps a `Deliver` for every message on the channel onto this connection
+    /// and a subscribe-then-idle client on a hot channel can overflow the
+    /// server's bounded outbound buffer. The ring is bounded exactly so that
+    /// this behaves the way the socket does rather than buffering without end.
     fn subscribe(
         &self,
         _server_address: &ServerAddress,
@@ -229,8 +249,7 @@ impl RemoteTransport for TcpRemoteTransport {
             accepted_schemas: Vec::new(),
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         };
-        let response = self.round_trip(&frame)?;
-        subscribe_response(response)
+        subscribe_response(self.round_trip(&frame)?)
     }
 
     fn send_conversation(
@@ -262,22 +281,21 @@ impl RemoteTransport for TcpRemoteTransport {
             .conversation_request_reply(conversation_id, conversation_label, envelope)
     }
 
+    /// Refused for the same reason the socket transport refuses it: the wire
+    /// protocol has no resume frame, and this transport does not retain the
+    /// channel/stream mapping needed to re-drive the `Subscribe` that triggers
+    /// server replay. Reporting the refusal keeps the contract honest instead
+    /// of dropping the caller's resume intent under a success.
     fn resume(
         &self,
         _server_address: &ServerAddress,
         request: &WireResumeRequest,
     ) -> Result<(), SdkError> {
-        // The wire protocol has no resume frame: the server replays a subscription
-        // from its durable log only when the SDK re-issues the Subscribe for that
-        // stream on reconnect. This transport does not retain the channel/stream
-        // mapping needed to re-drive that Subscribe here, so it cannot honour the
-        // resume over the socket. Returning a clear error keeps the contract honest
-        // rather than reporting success while dropping the user's resume intent.
         let _ = (request.subscription_id(), request.resume_from_sequence());
         Err(SdkError::Protocol {
             description:
-                "resume is not yet supported over the TCP transport; re-subscribe to trigger \
-                 server replay"
+                "resume is not yet supported over the in-process transport; re-subscribe to \
+                 trigger server replay"
                     .to_string(),
         })
     }
@@ -293,13 +311,13 @@ fn build_envelope(schema_bytes: &[u8], payload: &[u8]) -> MessageEnvelope {
 
 /// Derives a stable 32-byte schema id from arbitrary schema bytes via FNV-1a.
 ///
-/// The server selects the channel's configured schema on subscribe and stores the
-/// published envelope verbatim, so this id only needs to be deterministic, not a
-/// negotiated value.
+/// Byte-for-byte the socket transport's derivation, and it has to be: the
+/// design's discriminating property is that the two mounts put the SAME bytes
+/// on the record, and a differently-derived schema id would be a different
+/// envelope.
 fn schema_id_from_bytes(schema_bytes: &[u8]) -> SchemaId {
     let mut id = [0_u8; SchemaId::WIRE_LEN];
     let mut hash = fnv1a(schema_bytes).to_be_bytes();
-    // Spread the 8-byte digest across the 32-byte id deterministically.
     for (index, slot) in id.iter_mut().enumerate() {
         *slot = hash[index % hash.len()];
         if index % hash.len() == hash.len() - 1 {
@@ -325,9 +343,9 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Builds the wire `Publish` frame, attaching the idempotency key (and its flag)
-/// only when the request carries one so a no-key publish stays byte-identical to
-/// the pre-13-L1 layout.
+/// Builds the wire `Publish` frame, attaching the idempotency key (and its
+/// flag) only when the request carries one so a no-key publish stays
+/// byte-identical to the socket mount's layout.
 fn build_publish_frame(request: &WirePublishRequest) -> Frame {
     let envelope = build_envelope(request.schema().schema.as_ref(), request.payload());
     let flags = match request.idempotency_key() {
@@ -360,14 +378,12 @@ fn publish_response(frame: Frame) -> Result<PressureResponse, SdkError> {
     }
 }
 
-/// Maps a publish ack into a genuine delivery ack: the `PUBLISH_DELIVERED_FLAG`
-/// bit on the ack reports whether a subscriber actually received the message.
 fn publish_delivery_response(frame: Frame) -> Result<DeliveryAck, SdkError> {
     match frame {
-        Frame::PublishAck { flags, .. } => {
-            let accepted = flags & PUBLISH_DELIVERED_FLAG != 0;
-            Ok(DeliveryAck::new(PressureResponse::Accept, accepted))
-        }
+        Frame::PublishAck { flags, .. } => Ok(DeliveryAck::new(
+            PressureResponse::Accept,
+            flags & PUBLISH_DELIVERED_FLAG != 0,
+        )),
         Frame::PublishError {
             reason_code,
             message,
@@ -396,47 +412,5 @@ fn subscribe_response(frame: Frame) -> Result<(), SdkError> {
             ),
         }),
         other => Err(unexpected_frame("SubscribeAck", &other)),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn schema_ids_are_deterministic_and_distinct() {
-        assert_eq!(schema_id_from_bytes(b"a"), schema_id_from_bytes(b"a"));
-        assert_ne!(schema_id_from_bytes(b"a"), schema_id_from_bytes(b"b"));
-    }
-
-    #[test]
-    fn conversation_ids_are_stable() {
-        assert_eq!(conversation_wire_id("chat"), conversation_wire_id("chat"));
-        assert_ne!(conversation_wire_id("chat"), conversation_wire_id("other"));
-    }
-
-    #[test]
-    fn publish_ack_maps_to_accept() -> Result<(), SdkError> {
-        let frame = Frame::PublishAck {
-            flags: 0,
-            stream_id: 1,
-            message_id: 7,
-        };
-        assert_eq!(publish_response(frame)?, PressureResponse::Accept);
-        Ok(())
-    }
-
-    #[test]
-    fn publish_error_maps_to_backpressure() {
-        let frame = Frame::PublishError {
-            flags: 0,
-            stream_id: 1,
-            reason_code: 9,
-            message: Some("nope".to_string()),
-        };
-        assert!(matches!(
-            publish_response(frame),
-            Err(SdkError::Backpressure { .. })
-        ));
     }
 }
