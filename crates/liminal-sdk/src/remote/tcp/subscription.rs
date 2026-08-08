@@ -123,6 +123,40 @@ impl SubscriptionStream {
         channel: &str,
         accepted_schemas: Vec<SchemaId>,
     ) -> Result<Self, SdkError> {
+        Self::open_with_auth(address, channel, accepted_schemas, &[])
+    }
+
+    /// Connects, handshakes carrying `auth_token`, subscribes to `channel`, and
+    /// starts the background reader.
+    ///
+    /// A subscription owns a dedicated connection (the v1 shape), so it presents
+    /// its own credential in its own `Connect` frame; the token a
+    /// request/response transport was built with lives on that transport's
+    /// socket and cannot travel here. Additive to [`open`]: an empty token is
+    /// exactly the open-access handshake `open` performs, so an ungated server
+    /// sees byte-identical bytes either way.
+    ///
+    /// The server compares the token during the handshake and answers a
+    /// mismatch with `ConnectError` before closing, which surfaces here as
+    /// [`SdkError::Connection`].
+    ///
+    /// `accepted_schemas` is the client's schema-compatibility list; pass an
+    /// empty vector to let the server select the channel's configured schema.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the TCP connection or socket
+    /// configuration fails or the token is rejected, and [`SdkError::Protocol`]
+    /// when the subscribe is rejected, or the socket cannot be cloned for the
+    /// reader thread.
+    ///
+    /// [`open`]: Self::open
+    pub fn open_with_auth(
+        address: &str,
+        channel: &str,
+        accepted_schemas: Vec<SchemaId>,
+        auth_token: &[u8],
+    ) -> Result<Self, SdkError> {
         let mut stream = connect_socket(address)?;
         // A single buffer threads through the whole synchronous setup so any bytes
         // the setup reads past the control-frame reply are preserved. The server
@@ -134,7 +168,7 @@ impl SubscriptionStream {
         // from being dropped and, worse, from desyncing a reader that would
         // otherwise start mid-frame on a fresh empty buffer.
         let mut buffer = Vec::new();
-        handshake(&mut stream, &mut buffer)?;
+        handshake(&mut stream, &mut buffer, auth_token)?;
         let subscription_id = subscribe(&mut stream, &mut buffer, channel, accepted_schemas)?;
 
         // The control exchange is over, so its deadline comes off: the reader
@@ -252,16 +286,21 @@ fn connect_socket(address: &str) -> Result<TcpStream, SdkError> {
     Ok(stream)
 }
 
-/// Drives the client handshake (`Connect` -> `ConnectAck`) on a fresh socket.
+/// Drives the client handshake (`Connect` -> `ConnectAck`) on a fresh socket,
+/// presenting `auth_token` (empty for an open, non-auth server).
 ///
 /// `buffer` carries any residue read past the reply forward to the next setup step
 /// (and ultimately the reader thread) rather than discarding it.
-fn handshake(stream: &mut TcpStream, buffer: &mut Vec<u8>) -> Result<(), SdkError> {
+fn handshake(
+    stream: &mut TcpStream,
+    buffer: &mut Vec<u8>,
+    auth_token: &[u8],
+) -> Result<(), SdkError> {
     let connect = Frame::Connect {
         flags: 0,
         min_version: CLIENT_MIN_VERSION,
         max_version: CLIENT_MAX_VERSION,
-        auth_token: Vec::new(),
+        auth_token: auth_token.to_vec(),
     };
     write_frame(stream, &connect)?;
     match read_one_frame(stream, buffer)? {

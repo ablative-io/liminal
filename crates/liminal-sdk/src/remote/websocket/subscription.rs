@@ -115,6 +115,35 @@ impl WebSocketSubscriptionStream {
         channel: &str,
         accepted_schemas: Vec<SchemaId>,
     ) -> Result<Self, SdkError> {
+        Self::open_with_auth(address, channel, accepted_schemas, &[])
+    }
+
+    /// Connects to the `ws://` address, performs the liminal handshake
+    /// carrying `auth_token`, subscribes to `channel`, and starts the
+    /// background reader.
+    ///
+    /// A subscription owns a dedicated connection (the v1 shape), so it
+    /// presents its own credential in its own `Connect` frame; the token a
+    /// request/response transport was built with lives on that transport's
+    /// socket and cannot travel here. Additive to [`open`]: an empty token is
+    /// exactly the open-access handshake `open` performs, so an ungated server
+    /// sees byte-identical bytes either way. TCP parity with
+    /// [`SubscriptionStream::open_with_auth`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SdkError::Connection`] when the client unit refuses the open,
+    /// the socket cannot be opened, or the token is rejected, and
+    /// [`SdkError::Protocol`] when the subscribe is rejected.
+    ///
+    /// [`open`]: Self::open
+    /// [`SubscriptionStream::open_with_auth`]: crate::SubscriptionStream::open_with_auth
+    pub fn open_with_auth(
+        address: &str,
+        channel: &str,
+        accepted_schemas: Vec<SchemaId>,
+        auth_token: &[u8],
+    ) -> Result<Self, SdkError> {
         let message_bound = liminal_ws_message_bound()?;
         let mut binding = WebSocketAuthorityBinding::new();
         match binding.request_open() {
@@ -125,7 +154,13 @@ impl WebSocketSubscriptionStream {
                 )));
             }
         }
-        match Self::open_link(address, channel, accepted_schemas, message_bound) {
+        match Self::open_link(
+            address,
+            channel,
+            accepted_schemas,
+            message_bound,
+            auth_token,
+        ) {
             Ok((socket, driver, subscription_id, pending)) => {
                 match binding.connection_established() {
                     AttemptFateOutcome::Recorded { .. } => {}
@@ -182,12 +217,14 @@ impl WebSocketSubscriptionStream {
         self.binding.lock().reconnect_state()
     }
 
-    /// Performs the socket open, handshake, and subscribe exchange.
+    /// Performs the socket open, handshake carrying `auth_token`, and subscribe
+    /// exchange.
     fn open_link(
         address: &str,
         channel: &str,
         accepted_schemas: Vec<SchemaId>,
         message_bound: usize,
+        auth_token: &[u8],
     ) -> Result<
         (
             WsSocket,
@@ -226,7 +263,7 @@ impl WebSocketSubscriptionStream {
             flags: 0,
             min_version: CLIENT_MIN_VERSION,
             max_version: CLIENT_MAX_VERSION,
-            auth_token: Vec::new(),
+            auth_token: auth_token.to_vec(),
         };
         match setup_exchange(&mut socket, &mut driver, &connect, &mut pending)? {
             Frame::ConnectAck { .. } => {}
