@@ -560,37 +560,69 @@ mod ephemeral_lifecycle_tests {
             String::from_utf8(bytes).expect("tracing's fmt writer emits utf-8")
         }
 
-        /// Runs `body` with this sink installed as the thread's subscriber.
+        /// Runs `body` with this sink receiving everything the CURRENT THREAD
+        /// logs, via one process-global subscriber and a thread-routed writer.
         ///
-        /// Capture windows are SERIALIZED. `with_default` registers a
-        /// dispatcher on entry and deregisters it on exit, and tracing
-        /// rebuilds its global per-callsite interest cache on both edges — so
-        /// two windows interleaving on parallel test threads can leave the
-        /// production `error!` callsite cached as not-interested during the
-        /// OTHER window, which reads as an intermittently empty capture
-        /// (measured: 3/40 module runs before this lock, 0/40 after). One
-        /// window at a time removes the race; the poisoned-lock fallback
-        /// keeps a failing sibling from cascading.
+        /// Why not `tracing::subscriber::with_default`: a scoped subscriber
+        /// registers a dispatcher on entry and deregisters it on exit, and
+        /// tracing maintains global state (the per-callsite interest cache and
+        /// the max-level hint) that is rebuilt on those edges. That produced a
+        /// measured intermittently-EMPTY capture in this module — 3/40
+        /// module-scoped runs raw; serializing the windows on a mutex cured
+        /// the module-scoped loop (0/40) but the full-workspace battery still
+        /// reproduced the empty capture with the mutex in place, so edge
+        /// timing was not the whole mechanism. This design removes the CLASS:
+        /// the global subscriber is installed exactly once and never
+        /// deregistered, so no edge ever exists to re-poison the caches, and
+        /// routing is thread-local so parallel tests cannot cross-capture.
         fn capturing<R>(&self, body: impl FnOnce() -> R) -> R {
-            static CAPTURE_WINDOW: Mutex<()> = Mutex::new(());
-            let _window = CAPTURE_WINDOW
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let subscriber = tracing_subscriber::fmt()
-                .with_writer(self.clone())
-                .with_ansi(false)
-                .finish();
-            tracing::subscriber::with_default(subscriber, body)
+            static INSTALL: std::sync::Once = std::sync::Once::new();
+            /// Clears the thread's capture slot even when `body` unwinds.
+            struct ResetOnDrop;
+            impl Drop for ResetOnDrop {
+                fn drop(&mut self) {
+                    ACTIVE_CAPTURE.with(|slot| *slot.borrow_mut() = None);
+                }
+            }
+            INSTALL.call_once(|| {
+                let subscriber = tracing_subscriber::fmt()
+                    .with_writer(RoutedWriter)
+                    .with_ansi(false)
+                    .finish();
+                tracing::subscriber::set_global_default(subscriber)
+                    .expect("no other global tracing subscriber is installed in this test binary");
+            });
+            ACTIVE_CAPTURE.with(|slot| *slot.borrow_mut() = Some(self.clone()));
+            let _reset = ResetOnDrop;
+            body()
         }
     }
 
-    impl std::io::Write for CapturedLog {
+    thread_local! {
+        /// The capture buffer receiving THIS thread's log output, if a
+        /// [`CapturedLog::capturing`] window is active on it.
+        static ACTIVE_CAPTURE: std::cell::RefCell<Option<CapturedLog>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// The one writer the process-global subscriber owns: appends to the
+    /// emitting thread's active capture buffer, and silently discards output
+    /// from threads with no capture window open.
+    #[derive(Clone, Copy, Default)]
+    struct RoutedWriter;
+
+    impl std::io::Write for RoutedWriter {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0
-                .lock()
-                .map_err(|_| std::io::Error::other("capture buffer poisoned"))?
-                .extend_from_slice(buf);
-            Ok(buf.len())
+            ACTIVE_CAPTURE.with(|slot| {
+                if let Some(capture) = slot.borrow().as_ref() {
+                    capture
+                        .0
+                        .lock()
+                        .map_err(|_| std::io::Error::other("capture buffer poisoned"))?
+                        .extend_from_slice(buf);
+                }
+                Ok(buf.len())
+            })
         }
 
         fn flush(&mut self) -> std::io::Result<()> {
@@ -598,11 +630,11 @@ mod ephemeral_lifecycle_tests {
         }
     }
 
-    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLog {
+    impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for RoutedWriter {
         type Writer = Self;
 
         fn make_writer(&'writer self) -> Self::Writer {
-            self.clone()
+            *self
         }
     }
 
