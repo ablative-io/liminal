@@ -19,7 +19,7 @@ use liminal_protocol::wire::{
 
 use super::barrier::OperationFacts;
 use super::facts::{self, Digest};
-use super::state::{Slot, StateError};
+use super::state::{ConversationAuthority, Slot, StateError};
 
 impl Slot {
     /// Resolves the credential-attach token phase and its phase-scoped
@@ -132,6 +132,41 @@ impl Slot {
     }
 }
 
+/// Builds the durable marker-proof facts one marker-bearing credential attach
+/// is classified against.
+///
+/// ⚠ Board #12: `accepted_marker_at_cursor` is a HARDCODED `false` here. It is
+/// a claim about durable state that this site never measured, and the identical
+/// hardcoded `false` at the live marker-ack site killed a kernel on 2026-08-07
+/// before it was computed from the retained marker-record census. Extracted
+/// into its own named function so the claim has a seam a test can address;
+/// `tests_12_attach_marker_census` is red against it.
+///
+/// The other two facts are `None` deliberately. This live binding has no
+/// participant-record delivery pump, so there is no expected marker anchor and
+/// no delivery witness to supply; inventing either would be the hand-built
+/// outcome the module's own doc forbids. That is a capability gap owned by the
+/// delivery pump, not a #12 item.
+pub(super) fn attach_marker_proof_state(
+    authority: &ConversationAuthority,
+    request: &CredentialAttachRequest,
+    slot: &Slot,
+    operation_facts: &OperationFacts,
+) -> MarkerProofState {
+    let _ = authority;
+    let cursor = slot.member.cursor();
+    MarkerProofState::new(
+        cursor,
+        false,
+        None,
+        BindingEpoch::new(
+            operation_facts.receiving_incarnation,
+            request.capability_generation,
+        ),
+        None,
+    )
+}
+
 /// Classifies a marker-bearing (fenced-recovery) attach through the crate's
 /// total marker-proof selector against the factual delivery state.
 ///
@@ -142,6 +177,7 @@ impl Slot {
 /// observing one is a loud invariant failure — never a silently hand-built
 /// outcome.
 pub(super) fn marker_bearing_attach_refusal(
+    authority: &ConversationAuthority,
     request: &CredentialAttachRequest,
     slot: &Slot,
     operation_facts: &OperationFacts,
@@ -151,11 +187,7 @@ pub(super) fn marker_bearing_attach_refusal(
             "marker-bearing attach classification without a presented marker",
         ));
     };
-    let proof_epoch = BindingEpoch::new(
-        operation_facts.receiving_incarnation,
-        request.capability_generation,
-    );
-    let marker_state = MarkerProofState::new(slot.member.cursor(), false, None, proof_epoch, None);
+    let marker_state = attach_marker_proof_state(authority, request, slot, operation_facts);
     let response = match select_marker_proof(&marker_state, input) {
         MarkerProofDecision::MarkerMismatch(MarkerMismatch {
             request: MarkerProofRequest::CredentialAttach(proof),

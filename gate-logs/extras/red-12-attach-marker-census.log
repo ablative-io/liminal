@@ -1,0 +1,39 @@
+   Compiling liminal-server v0.5.2 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/wf_69be2f3b-b0c-7/crates/liminal-server)
+   Compiling liminal-sdk v0.5.1 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/wf_69be2f3b-b0c-7/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.28s
+     Running unittests src/lib.rs (target/debug/deps/liminal_server-13248f4818f476d4)
+
+running 3 tests
+test server::participant::production::tests_12_attach_marker_census::the_attach_marker_proof_state_reports_the_retained_marker_at_the_cursor ... FAILED
+test server::participant::production::tests_12_attach_marker_census::the_truthful_flag_cannot_change_the_credential_attach_outcome ... FAILED
+test server::participant::production::tests_12_attach_marker_census::a_cold_replay_answers_the_marker_bearing_attach_identically ... FAILED
+
+failures:
+
+---- server::participant::production::tests_12_attach_marker_census::the_attach_marker_proof_state_reports_the_retained_marker_at_the_cursor stdout ----
+
+thread 'server::participant::production::tests_12_attach_marker_census::the_attach_marker_proof_state_reports_the_retained_marker_at_the_cursor' (74132990) panicked at crates/liminal-server/src/server/participant/production/tests_12_attach_marker_census.rs:161:5:
+#12: the credential-attach marker-proof site must read the retained marker-record census rather than asserting a hardcoded `false`. The target's cursor is at delivery sequence 12, which is its own retained compaction marker, and the site reported that no marker had been accepted.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- server::participant::production::tests_12_attach_marker_census::the_truthful_flag_cannot_change_the_credential_attach_outcome stdout ----
+
+thread 'server::participant::production::tests_12_attach_marker_census::the_truthful_flag_cannot_change_the_credential_attach_outcome' (74132991) panicked at crates/liminal-server/src/server/participant/production/tests_12_attach_marker_census.rs:205:5:
+this test only means something while the flag is genuinely TRUE
+
+---- server::participant::production::tests_12_attach_marker_census::a_cold_replay_answers_the_marker_bearing_attach_identically stdout ----
+
+thread 'server::participant::production::tests_12_attach_marker_census::a_cold_replay_answers_the_marker_bearing_attach_identically' (74132989) panicked at crates/liminal-server/src/server/participant/production/tests_12_attach_marker_census.rs:313:5:
+the retained marker-record census must survive the boot, or this test's agreement is two empty measurements agreeing with each other
+
+
+failures:
+    server::participant::production::tests_12_attach_marker_census::a_cold_replay_answers_the_marker_bearing_attach_identically
+    server::participant::production::tests_12_attach_marker_census::the_attach_marker_proof_state_reports_the_retained_marker_at_the_cursor
+    server::participant::production::tests_12_attach_marker_census::the_truthful_flag_cannot_change_the_credential_attach_outcome
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored; 0 measured; 665 filtered out; finished in 4.36s
+
+error: test failed, to rerun pass `-p liminal-server --lib`
+
+TRUE_EXIT_CODE=101

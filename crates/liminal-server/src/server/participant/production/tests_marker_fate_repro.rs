@@ -76,7 +76,7 @@ use super::tests_marker_ack_fixture::{
 ///
 /// The epoch is the point: it carries the generation production currently
 /// considers authoritative, so nothing downstream has to guess one.
-fn offer_marker_and_read_live_epoch(
+pub(super) fn offer_marker_and_read_live_epoch(
     fixture: &MarkerFixture,
 ) -> Result<BindingEpoch, Box<dyn Error>> {
     let mut offered = None;
@@ -109,7 +109,7 @@ fn offer_marker_and_read_live_epoch(
 /// THE ARMING PROOF. If the fixture is not post-attach, there is no sealed
 /// token to strand and this unit would be measuring nothing at all — the exact
 /// failure mode that keeps the F8 units from ever claiming.
-fn assert_armed_post_attach(epoch: BindingEpoch) -> Result<(), Box<dyn Error>> {
+pub(super) fn assert_armed_post_attach(epoch: BindingEpoch) -> Result<(), Box<dyn Error>> {
     if epoch.capability_generation == Generation::ONE {
         return Err(format!(
             "NOT ARMED: the live generation is {:?}, so this fixture never drove the \

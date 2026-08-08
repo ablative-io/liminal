@@ -116,7 +116,7 @@ impl ConversationAuthority {
         // boundary by returning the total selector's typed refusal until the
         // later delivery owner can supply those facts.
         if request.accept_marker_delivery_seq.is_some() {
-            return marker_bearing_attach_refusal(request, slot, operation_facts)
+            return marker_bearing_attach_refusal(self, request, slot, operation_facts)
                 .map(ArmOutcome::respond);
         }
         // Stage 8 (R-D1): credential attach's exact five-scope
