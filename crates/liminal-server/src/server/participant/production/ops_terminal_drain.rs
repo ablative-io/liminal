@@ -1,9 +1,12 @@
 //! Candidate-lane terminal drain (PARTICIPANT-CONTRACT R-A2).
 //!
 //! When record admission's `DrainFirst` selects a pending binding terminal
-//! as the earliest immutable candidate — a crash-restored
-//! `PendingFinalization` residence of either flavor — the server drains that
-//! terminal as one durable candidate transaction instead of faulting:
+//! as the earliest immutable candidate — a `PendingFinalization` residence
+//! of either flavor, the Detached one reached only by crash restore
+//! (`start_blocked_detach`, replayed from `connection_fate_replay`) and the
+//! Died one also minted LIVE by `connection_fate` when terminal admission
+//! pends under retention pressure — the server drains that terminal as one
+//! durable candidate transaction instead of faulting:
 //! terminal-record append, retention transition, candidate deletion, and the
 //! flavor's own slot settlement, with fate completion wired through the same
 //! `record_terminal_impact` path connection-fate finalizers use. The drain
