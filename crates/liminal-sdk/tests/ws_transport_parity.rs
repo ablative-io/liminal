@@ -648,6 +648,140 @@ fn subscription_delivery_parity() -> TestResult {
     Ok(())
 }
 
+/// A token no gated fixture accepts, used to prove the refusal leg is the
+/// server's answer to THIS token and not a blanket refusal.
+const WRONG_TOKEN: &[u8] = b"not-the-parity-secret";
+
+/// Script serving one TOKEN-GATED subscription: the handshake is answered only
+/// when the client's own `Connect` frame carries [`AUTH_TOKEN`], and only then
+/// are the `Subscribe` leg and one delivery served.
+///
+/// [`subscription_script`] gates on `&[]` — the empty token both subscription
+/// streams hardcoded — so it could never tell a client that carries its
+/// caller's token from one that discards it. This one can.
+fn gated_subscription_script(link: &mut dyn ServerLink) -> TestResult<Vec<Vec<u8>>> {
+    script_handshake(link, AUTH_TOKEN)?;
+    let frame = link.read_frame()?;
+    let Frame::Subscribe { stream_id, .. } = frame else {
+        return Err(format!("expected Subscribe, got {frame:?}"));
+    };
+    link.write_frame(&Frame::SubscribeAck {
+        flags: 0,
+        stream_id,
+        subscription_id: 77,
+        selected_schema: liminal::protocol::SchemaId::new([1; 32]),
+    })?;
+    let envelope = liminal::protocol::MessageEnvelope::new(
+        liminal::protocol::SchemaId::new([1; 32]),
+        liminal::protocol::CausalContext::independent(),
+        b"gated".to_vec(),
+    );
+    link.write_frame(&Frame::Deliver {
+        flags: 0,
+        stream_id,
+        delivery_seq: 1,
+        envelope,
+    })
+    .map(|()| Vec::new())
+}
+
+/// A token-gated bus must be reachable through the SDK's subscribe path.
+///
+/// Both subscription streams built their own handshake with a hardcoded EMPTY
+/// `auth_token` (`tcp/subscription.rs` and `websocket/subscription.rs`), so a
+/// server with an `[auth]` section refused every SDK subscription whatever
+/// credential the caller held — the defect recorded in
+/// `docs/design/OWNERSHIP-AUDIT-LIMINAL.md` §2.6. The caller's token must reach
+/// the wire on both transports.
+#[test]
+fn subscription_auth_parity() -> TestResult {
+    for kind in [TransportKind::Tcp, TransportKind::Ws] {
+        let (address, handle) = spawn_script(kind, Box::new(gated_subscription_script))?;
+        let (subscription_id, delivery) = match kind {
+            TransportKind::Tcp => {
+                let stream =
+                    SubscriptionStream::open_with_auth(&address, CHANNEL, Vec::new(), AUTH_TOKEN)
+                        .map_err(|error| format!("tcp gated subscription open failed: {error}"))?;
+                let message = stream
+                    .recv_timeout(RECV_TIMEOUT)
+                    .map_err(|error| format!("tcp gated delivery receive failed: {error}"))?;
+                (
+                    stream.subscription_id(),
+                    (message.delivery_seq(), message.into_payload()),
+                )
+            }
+            TransportKind::Ws => {
+                let stream =
+                    liminal_sdk::remote::websocket::WebSocketSubscriptionStream::open_with_auth(
+                        &address,
+                        CHANNEL,
+                        Vec::new(),
+                        AUTH_TOKEN,
+                    )
+                    .map_err(|error| format!("ws gated subscription open failed: {error}"))?;
+                let message = stream
+                    .recv_timeout(RECV_TIMEOUT)
+                    .map_err(|error| format!("ws gated delivery receive failed: {error}"))?;
+                (
+                    stream.subscription_id(),
+                    (message.delivery_seq(), message.into_payload()),
+                )
+            }
+        };
+        assert_eq!(
+            subscription_id, 77,
+            "{kind:?} gated subscribe must be acknowledged once the caller's token reaches the wire"
+        );
+        assert_eq!(
+            delivery,
+            (1_u64, b"gated".to_vec()),
+            "{kind:?} gated subscription must deliver"
+        );
+        join_script(handle)?;
+    }
+    Ok(())
+}
+
+/// The other direction of the same discriminator: the gated fixture is not
+/// accepting whatever it is handed. A wrong token is refused as a typed
+/// connection error on both transports.
+///
+/// Without this leg the success pin above could be satisfied by a server that
+/// never checked, which would say nothing about what the client sent.
+#[test]
+fn subscription_auth_refusal_parity() -> TestResult {
+    for kind in [TransportKind::Tcp, TransportKind::Ws] {
+        let (address, handle) = spawn_script(
+            kind,
+            Box::new(|link| {
+                script_handshake(link, AUTH_TOKEN)?;
+                Ok(Vec::new())
+            }),
+        )?;
+        let result = match kind {
+            TransportKind::Tcp => {
+                SubscriptionStream::open_with_auth(&address, CHANNEL, Vec::new(), WRONG_TOKEN)
+                    .map(|_| ())
+            }
+            TransportKind::Ws => {
+                liminal_sdk::remote::websocket::WebSocketSubscriptionStream::open_with_auth(
+                    &address,
+                    CHANNEL,
+                    Vec::new(),
+                    WRONG_TOKEN,
+                )
+                .map(|_| ())
+            }
+        };
+        assert!(
+            matches!(result, Err(SdkError::Connection { .. })),
+            "{kind:?} wrong subscription token must be a typed connection refusal, got {result:?}"
+        );
+        join_script(handle)?;
+    }
+    Ok(())
+}
+
 #[test]
 fn resume_parity() -> TestResult {
     // Neither v1 transport supports the resume path over the wire; both must
