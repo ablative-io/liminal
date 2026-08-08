@@ -258,11 +258,14 @@ const ATTACH_INVARIANT: &str =
     "pending finalization observed in a binding that commits detaches immediately";
 
 /// (b) While the binding rests there, a fresh credential attach with the exact
-/// valid secret hits the `PendingFinalization` invariant in
-/// `ops_attach::allocate_attach_mode` (`ops_attach.rs:216` @ edeabeb) — and the
-/// SAME request against the same fixture with the binding still Bound does not.
+/// valid secret hits the `PendingFinalization` refusal in
+/// `ops_attach::allocate_attach_mode` — which the #14 funnel now PRESENTS as a
+/// wire-visible `ObserverBackpressure` response (`StateError::PresentedRefusal`
+/// raised at the arm, converted in `handler_semantic`) instead of a bare fatal
+/// carrying the invariant text. The SAME request against the same fixture with
+/// the binding still Bound takes neither exit.
 #[test]
-fn reattach_against_the_live_pending_died_residence_faults_the_attach_invariant()
+fn reattach_against_the_live_pending_died_residence_is_refused_on_the_wire()
 -> Result<(), Box<dyn Error>> {
     let residence = mint_live_pending_died_residence()?;
     assert!(matches!(
@@ -284,12 +287,17 @@ fn reattach_against_the_live_pending_died_residence_faults_the_attach_invariant(
     eprintln!("BOUND CONTROL re-attach => {control_report}");
 
     assert!(
-        pending_report.contains(ATTACH_INVARIANT),
-        "re-attach against the live pending-Died residence did not raise the allocate_attach_mode invariant; it produced: {pending_report}"
+        pending_report.starts_with("RESPONDED") && pending_report.contains("ObserverBackpressure"),
+        "re-attach against the live pending-Died residence was not refused on the wire as ObserverBackpressure; it produced: {pending_report}"
     );
     assert!(
-        !control_report.contains(ATTACH_INVARIANT),
-        "the Bound control raised the allocate_attach_mode invariant too, so the discriminator is not the pending residence; control produced: {control_report}"
+        !pending_report.contains(ATTACH_INVARIANT),
+        "the invariant text leaked to the client past the funnel: {pending_report}"
+    );
+    assert!(
+        !control_report.contains("ObserverBackpressure")
+            && !control_report.contains(ATTACH_INVARIANT),
+        "the Bound control took the pending residence's exit too, so the discriminator is not the pending residence; control produced: {control_report}"
     );
     Ok(())
 }
@@ -381,7 +389,9 @@ fn peer_record_drains_the_live_residence_and_erases_the_victim_identity()
 /// even a fully-acked control still faults on `RetainedRecordLimit`.
 ///
 /// What IS asserted is the observed inseparability plus the discrimination that
-/// does hold: the pending residence changes WHICH fault fires.
+/// does hold: the pending residence decides the OUTCOME — a wire-visible
+/// `ObserverBackpressure` refusal (the #14 funnel presenting the
+/// `allocate_attach_mode` refusal) versus the retention fault.
 #[test]
 fn attach_invariant_and_retention_wall_are_inseparable_at_this_configuration()
 -> Result<(), Box<dyn Error>> {
@@ -471,14 +481,17 @@ fn attach_invariant_and_retention_wall_are_inseparable_at_this_configuration()
         "the peer ack dissolved the pending residence: {binding_after_ack:?}"
     );
     // And the discrimination that DOES hold: same request, same cap, and the
-    // pending residence decides which of the two faults the client gets.
+    // pending residence decides the outcome the client gets — the funnel's
+    // wire-visible refusal versus the retention fault.
     assert!(
-        attach_after_ack.contains(ATTACH_INVARIANT),
-        "re-attach against the pending residence did not raise the allocate_attach_mode invariant; it produced: {attach_after_ack}"
+        attach_after_ack.starts_with("RESPONDED")
+            && attach_after_ack.contains("ObserverBackpressure"),
+        "re-attach against the pending residence was not refused on the wire as ObserverBackpressure; it produced: {attach_after_ack}"
     );
     assert!(
-        !control_attach_after_ack.contains(ATTACH_INVARIANT),
-        "the Bound control raised the allocate_attach_mode invariant too: {control_attach_after_ack}"
+        !control_attach_after_ack.contains("ObserverBackpressure")
+            && !control_attach_after_ack.contains(ATTACH_INVARIANT),
+        "the Bound control took the pending residence's exit: {control_attach_after_ack}"
     );
     Ok(())
 }
