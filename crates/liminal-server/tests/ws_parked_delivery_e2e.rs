@@ -1014,6 +1014,74 @@ fn arm_i_burst_hits_both_transports_alike() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Arm J — arm I's control. Arm I compares an SDK TCP subscriber against my raw
+/// websocket client, so its asymmetry could be a property of the CLIENT rather
+/// than of the transport. This arm runs the same burst against the two SDK
+/// subscribers — `SubscriptionStream` and `WebSocketSubscriptionStream`, both
+/// with a background reader thread, the exact pair the existing green pin
+/// `sdk_subscription_delivery_parity_over_real_acceptor` uses — so a shed here
+/// is the transport's, not the harness's.
+fn arm_j_once(burst: usize) -> Result<(bool, String), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let tcp_stream = open_tcp_subscription(&server)?;
+    let ws_stream = open_ws_subscription(&server)?;
+
+    let (accepted, publisher_frames) = publish_burst_raw_tcp(&server, CHANNEL, burst)?;
+
+    let mut tcp_received = 0_usize;
+    let mut tcp_error = None;
+    while tcp_received < accepted {
+        match tcp_stream.recv_timeout(Duration::from_secs(2)) {
+            Ok(_) => tcp_received += 1,
+            Err(error) => {
+                tcp_error = Some(format!("{error}"));
+                break;
+            }
+        }
+    }
+    let mut ws_received = 0_usize;
+    let mut ws_error = None;
+    while ws_received < accepted {
+        match ws_stream.recv_timeout(Duration::from_secs(2)) {
+            Ok(_) => ws_received += 1,
+            Err(error) => {
+                ws_error = Some(format!("{error}"));
+                break;
+            }
+        }
+    }
+
+    let detail = format!(
+        "burst={burst} accepted={accepted} tcp_received={tcp_received} tcp_error={tcp_error:?} \
+         ws_received={ws_received} ws_error={ws_error:?} publisher_frames={publisher_frames:?}"
+    );
+    Ok((tcp_received == accepted && ws_received == accepted, detail))
+}
+
+#[test]
+fn arm_j_burst_hits_both_sdk_subscribers_alike() -> Result<(), Box<dyn Error>> {
+    let burst = std::env::var("LIMINAL_WS_BURST")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(400);
+    let iterations = iterations(10);
+    let mut failures = Vec::new();
+    for index in 0..iterations {
+        let (ok, detail) = arm_j_once(burst)?;
+        eprintln!("ARM J iteration {index}: ok={ok} :: {detail}");
+        if !ok {
+            failures.push(format!("iteration {index}: {detail}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ARM J (burst against both SDK subscribers) failed {}/{iterations} iterations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
 /// Arm G — a LONG park, on the field's own cadence. The face page re-asks every
 /// 60-90s, so the estate's ws connections sit parked for a minute-plus between
 /// events; arm B's five seconds only proves the park is entered, not that it
