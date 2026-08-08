@@ -340,10 +340,11 @@ impl ChannelActorCore {
         // WORKTREE PROBE (ws-parked-delivery measurement lane): death-site 1 —
         // "never enqueued at the channel actor". This is the ONE fan-out list;
         // a subscription missing from it can never receive anything.
-        let probing = std::env::var_os("LIMINAL_WS_PROBE").is_some();
+        let probing = crate::probe::envelope_enabled();
         if probing {
             eprintln!(
-                "PROBE[fanout] subscriber_registrations={} pids={:?}",
+                "PROBE[fanout] t={} subscriber_registrations={} pids={:?}",
+                crate::probe::micros(),
                 subscribers.len(),
                 subscribers
                     .iter()
@@ -359,7 +360,8 @@ impl ChannelActorCore {
             let delivered = subscriber.deliver(&envelope);
             if probing {
                 eprintln!(
-                    "PROBE[deliver] subscriber_pid={} admitted={delivered}",
+                    "PROBE[deliver] t={} subscriber_pid={} admitted={delivered}",
+                    crate::probe::micros(),
                     subscriber.pid()
                 );
             }

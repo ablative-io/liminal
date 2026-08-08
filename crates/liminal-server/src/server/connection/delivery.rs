@@ -100,22 +100,23 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
         held_deliveries,
         ..
     } = state;
-    // WORKTREE PROBE (ws-parked-delivery measurement lane): death-site 3 —
-    // "woken but the pump does not drain". This runs on EVERY slice of both
-    // transports, so a pending inbox that is never drained shows up here as a
-    // `pending=true` entry with no matching `PROBE[pump-enqueue]`.
-    let probing = std::env::var_os("LIMINAL_WS_PROBE").is_some();
+    // WORKTREE PROBE (ws-parked-delivery measurement lane): the pump timeline.
+    // Entry depth per subscription is the (a)-vs-(b) discriminator — a cadence
+    // problem shows a big depth climb BETWEEN slices with slices far apart in
+    // time, a cost problem shows slices back-to-back but each one long.
+    let probing = liminal::probe::enabled();
     if probing && !subscriptions.is_empty() {
         eprintln!(
-            "PROBE[pump] subscriptions={} pending={:?} held={}",
-            subscriptions.len(),
+            "PROBE[pump-enter] t={} depths={:?} held={}",
+            liminal::probe::micros(),
             subscriptions
                 .iter()
-                .map(|(id, subscription)| (*id, subscription.has_pending()))
+                .map(|(id, subscription)| (*id, subscription.pending_len()))
                 .collect::<Vec<_>>(),
             held_deliveries.len()
         );
     }
+    let mut drained = 0_usize;
     let mut remaining = budget;
     // §5 shed: subscriptions whose inbox overflowed the connection byte budget or
     // the fairness trip. Each is sent a typed `SubscribeError` here and removed by
@@ -165,7 +166,10 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
             // AND releases it at the channel actor, so this is the last moment
             // it exists.
             if probing {
-                eprintln!("PROBE[shed] subscription_id={subscription_id} stream_id={stream_id}");
+                eprintln!(
+                    "PROBE[shed] t={} subscription_id={subscription_id} stream_id={stream_id}",
+                    liminal::probe::micros()
+                );
             }
             shed.push(*subscription_id);
             continue;
@@ -194,15 +198,42 @@ pub(super) fn service_subscriptions<Sink: DeliverySink>(
             // `enqueue_frame` and its fatal Overflow tears the connection down (the
             // spec-inherent single-frame bound).
             if needed <= outbound.capacity() && !outbound.has_room(needed) {
+                // WORKTREE PROBE: hypothesis (c) OUTBOUND BACKPRESSURE. This is
+                // the pump's only backpressure early-exit; if (c) is the answer
+                // this line fires, and if it never fires (c) is dead.
+                if probing {
+                    eprintln!(
+                        "PROBE[pump-held] t={} subscription_id={subscription_id} drained={drained} \
+                         needed={needed} capacity={}",
+                        liminal::probe::micros(),
+                        outbound.capacity()
+                    );
+                }
                 held_deliveries.insert(*subscription_id, frame);
                 return Ok(shed);
             }
             outbound.enqueue_frame(&frame)?;
-            if probing {
-                eprintln!("PROBE[pump-enqueue] subscription_id={subscription_id} stream_id={stream_id}");
+            if liminal::probe::envelope_enabled() {
+                eprintln!(
+                    "PROBE[pump-enqueue] subscription_id={subscription_id} stream_id={stream_id}"
+                );
             }
+            drained += 1;
             remaining -= 1;
         }
+    }
+    // WORKTREE PROBE: how many frames this slice actually moved, and what the
+    // inboxes look like on the way out. `drained == budget` means the pump left
+    // hungry — the per-slice cap, not the socket, ended the slice.
+    if probing && !subscriptions.is_empty() {
+        eprintln!(
+            "PROBE[pump-exit] t={} drained={drained} budget={budget} depths={:?}",
+            liminal::probe::micros(),
+            subscriptions
+                .iter()
+                .map(|(id, subscription)| (*id, subscription.pending_len()))
+                .collect::<Vec<_>>()
+        );
     }
     Ok(shed)
 }

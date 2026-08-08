@@ -387,6 +387,16 @@ impl<T: ConnectionTransport> TransportConnectionProcess<T> {
         if !self.runtime.is_registered(pid) {
             return NativeOutcome::Continue;
         }
+        // WORKTREE PROBE (ws-parked-delivery measurement lane): the TCP twin of
+        // PROBE[ws-slice-begin]. The whole follow-up question is why one
+        // transport keeps pace and the other does not, so both timelines must be
+        // measured by the SAME instrument at the SAME point in the slice.
+        if liminal::probe::enabled() {
+            eprintln!(
+                "PROBE[tcp-slice-begin] t={} pid={pid}",
+                liminal::probe::micros()
+            );
+        }
         if let Err(error) = self.ensure_transport_wake_installed(pid) {
             return self.fail_slice(pid, &error);
         }
@@ -456,12 +466,30 @@ impl<T: ConnectionTransport> TransportConnectionProcess<T> {
         if let Err(error) = self.sync_deadline_timers(pid, ctx) {
             return self.fail_slice(pid, &error);
         }
+        if liminal::probe::enabled() {
+            eprintln!(
+                "PROBE[tcp-drain] t={} pid={pid} outcome={drain:?}",
+                liminal::probe::micros()
+            );
+        }
         // A successful budget-limited write proves immediately actionable work
         // remains. Do not arm a permanently-writable socket in this state.
         if drain == DrainOutcome::Progress {
+            if liminal::probe::enabled() {
+                eprintln!(
+                    "PROBE[tcp-slice-end] t={} pid={pid} outcome=continue_progress",
+                    liminal::probe::micros()
+                );
+            }
             return NativeOutcome::Continue;
         }
         if drain == DrainOutcome::Drained && has_held_participant_head(&self.state) {
+            if liminal::probe::enabled() {
+                eprintln!(
+                    "PROBE[tcp-slice-end] t={} pid={pid} outcome=continue_participant",
+                    liminal::probe::micros()
+                );
+            }
             return NativeOutcome::Continue;
         }
         let interest = if drain == DrainOutcome::WouldBlockWithResidue {
@@ -480,11 +508,23 @@ impl<T: ConnectionTransport> TransportConnectionProcess<T> {
                 if barrier_staged {
                     self.runtime.record_pre_wait_probe_hit();
                 }
+                if liminal::probe::enabled() {
+                    eprintln!(
+                        "PROBE[tcp-slice-end] t={} pid={pid} outcome=continue_probe",
+                        liminal::probe::micros()
+                    );
+                }
                 NativeOutcome::Continue
             }
             Ok(false) => {
                 #[cfg(test)]
                 self.runtime.record_park(pid);
+                if liminal::probe::enabled() {
+                    eprintln!(
+                        "PROBE[tcp-slice-end] t={} pid={pid} outcome=park",
+                        liminal::probe::micros()
+                    );
+                }
                 // FIX A-ii: parked with every accepted publish flushed to the
                 // socket (final_probe found no pending inbox/held delivery and no
                 // READY edge). Tell the shutdown flush barrier this connection has

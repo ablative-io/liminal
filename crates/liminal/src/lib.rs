@@ -6,6 +6,8 @@ pub mod envelope;
 pub mod error;
 pub mod metrics;
 pub mod pressure;
+// WORKTREE-ONLY (ws-parked-delivery measurement lane): the shared probe clock.
+pub mod probe;
 pub mod protocol;
 pub mod routing;
 pub mod tracing;

@@ -116,8 +116,14 @@ impl ReadyWaker {
         self.ready_pending.store(true, Ordering::Release);
         let delivered = scheduler.enqueue_atom_message(self.pid, self.ready_atom);
         // WORKTREE PROBE: death-site 2 — did the wake actually reach the pid?
-        if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
-            eprintln!("PROBE[fire] pid={} delivered={delivered}", self.pid);
+        // Timestamped for the follow-up lane: under hypothesis (a) the interval
+        // between a fire and the slice it starts is the cadence being measured.
+        if liminal::probe::enabled() {
+            eprintln!(
+                "PROBE[fire] t={} pid={} delivered={delivered}",
+                liminal::probe::micros(),
+                self.pid
+            );
         }
         delivered
     }

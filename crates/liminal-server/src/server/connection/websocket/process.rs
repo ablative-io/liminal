@@ -189,6 +189,16 @@ impl WebSocketConnectionProcess {
         if !self.runtime.is_registered(pid) {
             return NativeOutcome::Continue;
         }
+        // WORKTREE PROBE (ws-parked-delivery measurement lane): slice boundary.
+        // Paired with PROBE[ws-slice-end], this brackets a whole ws slice, so
+        // hypothesis (b) SLICE COST is the width of the bracket and hypothesis
+        // (a) SLICE CADENCE is the gap between one bracket and the next.
+        if liminal::probe::enabled() {
+            eprintln!(
+                "PROBE[ws-slice-begin] t={} pid={pid}",
+                liminal::probe::micros()
+            );
+        }
         if let Err(error) = self.ensure_participant_publication_registered(pid) {
             return self.fail_slice(pid, &error);
         }
@@ -256,16 +266,31 @@ impl WebSocketConnectionProcess {
         // "drained but the socket write/flush is lost". Pairs with
         // `PROBE[pump-enqueue]`: frames enqueued this slice must show up here as
         // a drain that made progress or completed.
-        if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
-            eprintln!("PROBE[ws-drain] pid={pid} outcome={drain:?}");
+        if liminal::probe::enabled() {
+            eprintln!(
+                "PROBE[ws-drain] t={} pid={pid} outcome={drain:?}",
+                liminal::probe::micros()
+            );
         }
         if let Err(error) = self.sync_deadline_timers(pid, ctx) {
             return self.fail_slice(pid, &error);
         }
         if drain == DrainOutcome::Progress {
+            if liminal::probe::enabled() {
+                eprintln!(
+                    "PROBE[ws-slice-end] t={} pid={pid} outcome=continue_progress",
+                    liminal::probe::micros()
+                );
+            }
             return NativeOutcome::Continue;
         }
         if drain == DrainOutcome::Drained && has_held_participant_head(&self.state) {
+            if liminal::probe::enabled() {
+                eprintln!(
+                    "PROBE[ws-slice-end] t={} pid={pid} outcome=continue_participant",
+                    liminal::probe::micros()
+                );
+            }
             return NativeOutcome::Continue;
         }
         let interest = if drain == DrainOutcome::WouldBlockWithResidue {
@@ -288,6 +313,15 @@ impl WebSocketConnectionProcess {
                 if barrier_staged {
                     self.runtime.record_pre_wait_probe_hit();
                 }
+                // WORKTREE PROBE: the final probe saw work and RE-QUEUED. If the
+                // pump's per-slice budget left a non-empty inbox, this is the
+                // outcome that must appear — hypothesis (a) lives or dies here.
+                if liminal::probe::enabled() {
+                    eprintln!(
+                        "PROBE[ws-slice-end] t={} pid={pid} outcome=continue_probe",
+                        liminal::probe::micros()
+                    );
+                }
                 NativeOutcome::Continue
             }
             Ok(false) => {
@@ -296,9 +330,10 @@ impl WebSocketConnectionProcess {
                 // WORKTREE PROBE (ws-parked-delivery measurement lane): the park
                 // itself. Everything after this point on this connection must be
                 // driven by a wake — a READY marker, socket readiness, or a timer.
-                if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                if liminal::probe::enabled() {
                     eprintln!(
-                        "PROBE[ws-park] pid={pid} subscriptions={}",
+                        "PROBE[ws-slice-end] t={} pid={pid} outcome=park subscriptions={}",
+                        liminal::probe::micros(),
                         self.state.subscriptions.len()
                     );
                 }

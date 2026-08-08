@@ -295,9 +295,10 @@ impl SubscriptionInbox {
                 // PERMANENT starvation edge. This sets the sticky overflow flag
                 // the delivery pump sheds on, so this line is where a
                 // subscription stops being a subscription.
-                if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                if crate::probe::enabled() {
                     eprintln!(
-                        "PROBE[overflow] cause=depth_cap queued={} depth_cap={}",
+                        "PROBE[overflow] t={} cause=depth_cap queued={} depth_cap={}",
+                        crate::probe::micros(),
                         state.queue.len(),
                         state.depth_cap
                     );
@@ -315,9 +316,10 @@ impl SubscriptionInbox {
                     if !budget.try_charge(bytes) {
                         // WORKTREE PROBE: the other permanent starvation edge —
                         // the connection-scoped shared byte budget.
-                        if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+                        if crate::probe::enabled() {
                             eprintln!(
-                                "PROBE[overflow] cause=byte_budget queued={} bytes={bytes}",
+                                "PROBE[overflow] t={} cause=byte_budget queued={} bytes={bytes}",
+                                crate::probe::micros(),
                                 state.queue.len()
                             );
                         }
@@ -338,10 +340,12 @@ impl SubscriptionInbox {
             // WORKTREE PROBE (ws-parked-delivery measurement lane): the
             // empty→non-empty wake edge. `notifier_present=false` here is the
             // silent-None fate; `was_empty=false` means the wake is deliberately
-            // coalesced onto an earlier one.
-            if std::env::var_os("LIMINAL_WS_PROBE").is_some() {
+            // coalesced onto an earlier one — which is the (a) SLICE CADENCE
+            // hypothesis, so the timestamp and the depth both matter here.
+            if crate::probe::envelope_enabled() {
                 eprintln!(
-                    "PROBE[admit] queued={} was_empty={was_empty} notifier_present={}",
+                    "PROBE[admit] t={} queued={} was_empty={was_empty} notifier_present={}",
+                    crate::probe::micros(),
                     state.queue.len(),
                     state.notifier.is_some()
                 );
@@ -379,6 +383,14 @@ impl SubscriptionInbox {
     /// Non-consuming race-barrier query used after a connection arms readiness.
     pub(crate) fn has_pending(&self) -> bool {
         self.state.lock().is_ok_and(|state| !state.queue.is_empty())
+    }
+
+    /// WORKTREE-ONLY (ws-parked-delivery measurement lane): queued envelopes.
+    /// `has_pending` answers the race-barrier question; the timeline needs the
+    /// DEPTH, because the whole question is how far the inbox climbs toward the
+    /// cap between one drain and the next.
+    pub(crate) fn pending_len(&self) -> usize {
+        self.state.lock().map_or(0, |state| state.queue.len())
     }
 
     /// Atomically closes the inbox, releasing every queued charge back to the
@@ -639,6 +651,13 @@ impl SubscriptionHandle {
     #[must_use]
     pub fn has_pending(&self) -> bool {
         self.inner.inbox.has_pending()
+    }
+
+    /// WORKTREE-ONLY (ws-parked-delivery measurement lane): queued envelopes on
+    /// this subscription's inbox.
+    #[must_use]
+    pub fn pending_len(&self) -> usize {
+        self.inner.inbox.pending_len()
     }
 
     /// Whether an overflow has marked this subscription for shedding (§5).

@@ -58,6 +58,12 @@ pub trait SubscriptionResource: std::fmt::Debug + Send {
     /// Non-consuming availability query for the post-arm race barrier.
     fn has_pending(&self) -> bool;
 
+    /// WORKTREE-ONLY (ws-parked-delivery measurement lane): queued envelopes.
+    /// Defaulted so only the real liminal-backed resource has to answer.
+    fn pending_len(&self) -> usize {
+        usize::from(self.has_pending())
+    }
+
     /// Whether an overflow has marked this subscription for shedding (§5). The
     /// delivery pump sheds an overflowed subscription with a typed error frame.
     /// Defaulted to `false`: a resource with no bounded inbox never overflows.
@@ -125,6 +131,11 @@ impl ConnectionSubscription {
 
     pub(super) fn has_pending(&self) -> bool {
         self.resource.has_pending()
+    }
+
+    /// WORKTREE-ONLY (ws-parked-delivery measurement lane): queued envelopes.
+    pub(super) fn pending_len(&self) -> usize {
+        self.resource.pending_len()
     }
 
     /// Whether this subscription has been shed by an inbox overflow (§5).
@@ -1853,6 +1864,10 @@ impl SubscriptionResource for LiminalSubscriptionResource {
 
     fn has_pending(&self) -> bool {
         self.subscription.has_pending()
+    }
+
+    fn pending_len(&self) -> usize {
+        self.subscription.pending_len()
     }
 
     fn try_next(&mut self) -> Option<liminal::envelope::Envelope> {
