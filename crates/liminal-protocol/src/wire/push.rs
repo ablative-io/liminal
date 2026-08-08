@@ -136,7 +136,8 @@ impl ParticipantRecord {
 /// Delivery is at-least-once: the server may push the same
 /// `(conversation_id, delivery_seq)` more than once on one healthy connection
 /// with no transport loss — the publication scan decides offer count and
-/// interleave position, and neither carries meaning. Every repeat of one pair
+/// interleave position, and neither carries application meaning. Every repeat
+/// of one pair
 /// is byte-identical to its first offer, so consumers deduplicate on the pair
 /// (participant contract R-C3, amendment A3, `«PUSH-REOFFER-SCHEDULE»`).
 #[derive(Clone, Debug, PartialEq, Eq)]
