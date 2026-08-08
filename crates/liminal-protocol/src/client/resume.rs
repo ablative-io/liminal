@@ -262,14 +262,10 @@ fn validate_live_replay_coupling(
     replay: &DetachReplayState,
 ) -> Result<(), ClientResumeRecordEncodeError> {
     let active_replay = match replay {
-        DetachReplayState::Recorded { request, status }
-            if matches!(
-                status,
-                DetachReplayStatus::Parked | DetachReplayStatus::InFlight
-            ) =>
-        {
-            Some(request)
-        }
+        DetachReplayState::Recorded {
+            request,
+            status: DetachReplayStatus::Parked | DetachReplayStatus::InFlight,
+        } => Some(request),
         DetachReplayState::Empty | DetachReplayState::Recorded { .. } => None,
     };
     let expected_detach = expected.and_then(|expected| {
@@ -288,9 +284,7 @@ fn validate_live_replay_coupling(
             Ok(())
         }
         (None, None) => Ok(()),
-        (Some(_), _) | (None, Some(_)) => {
-            Err(ClientResumeRecordEncodeError::DecoupledDetachReplay)
-        }
+        (Some(_), _) | (None, Some(_)) => Err(ClientResumeRecordEncodeError::DecoupledDetachReplay),
     }
 }
 

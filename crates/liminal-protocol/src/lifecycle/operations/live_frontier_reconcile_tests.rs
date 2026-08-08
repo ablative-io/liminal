@@ -18,7 +18,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
-use alloc::{vec, vec::Vec};
+use alloc::vec;
 
 use crate::algebra::{ResourceVector, WideResourceVector};
 use crate::outcome::CandidatePhase;

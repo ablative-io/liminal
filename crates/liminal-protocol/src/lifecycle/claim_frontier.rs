@@ -2227,7 +2227,7 @@ impl ClaimFrontiers {
     /// Counts planned compaction markers still pending as immutable sequence
     /// candidates. A planned marker already holds its stored anchor while its
     /// retained record exists only after the drain, so the record census alone
-    /// under-derives exactly while a drain is pending — the DrainFirst
+    /// under-derives exactly while a drain is pending — the `DrainFirst`
     /// discipline keeps the admission projection out of that window, and
     /// load-time reconciliation must stay out of it the same way.
     #[must_use]
