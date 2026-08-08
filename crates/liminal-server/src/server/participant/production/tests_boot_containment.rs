@@ -108,8 +108,8 @@ use super::log::STREAM_PREFIX;
 use super::tests::{dispatch_tracked, test_participant_config};
 use super::tests_w1b_pending_died_restart::pending_restart_fixture;
 
-const POISONED_CONVERSATION: u64 = 7_201;
-const HEALTHY_CONVERSATION: u64 = 7_202;
+pub(super) const POISONED_CONVERSATION: u64 = 7_201;
+pub(super) const HEALTHY_CONVERSATION: u64 = 7_202;
 const POISONED_TOKEN: [u8; 16] = [0xC1; 16];
 const HEALTHY_TOKEN: [u8; 16] = [0xC2; 16];
 
@@ -120,7 +120,7 @@ const PENDING_CONVERSATION: u64 = 67;
 
 /// Which single-conversation fault a [`OneConversationFault`] injects.
 #[derive(Debug, Clone, Copy)]
-enum FaultMode {
+pub(super) enum FaultMode {
     /// One record's payload is unloadable from the first read onward, so the
     /// row still reads but no longer decodes. Trips `handler.rs:250`.
     CorruptRecordNow(u64),
@@ -137,7 +137,7 @@ enum FaultMode {
 /// A durable store that breaks exactly one conversation, exactly one way, and
 /// records what it actually did so an arm can prove which route it drove.
 #[derive(Debug)]
-struct OneConversationFault {
+pub(super) struct OneConversationFault {
     inner: Arc<dyn DurableStore>,
     target_key: String,
     mode: FaultMode,
@@ -148,7 +148,7 @@ struct OneConversationFault {
 }
 
 impl OneConversationFault {
-    fn new(inner: Arc<dyn DurableStore>, conversation_id: u64, mode: FaultMode) -> Self {
+    pub(super) fn new(inner: Arc<dyn DurableStore>, conversation_id: u64, mode: FaultMode) -> Self {
         Self {
             inner,
             target_key: format!("{STREAM_PREFIX}{conversation_id}"),
@@ -258,7 +258,7 @@ fn enroll(
 
 /// Seeds two independent conversations through the production request seam and
 /// returns the shared store they were written to.
-fn seed_two_conversations() -> Result<Arc<dyn DurableStore>, Box<dyn Error>> {
+pub(super) fn seed_two_conversations() -> Result<Arc<dyn DurableStore>, Box<dyn Error>> {
     let store: Arc<dyn DurableStore> = Arc::new(open_ephemeral(1)?);
     let handler = ProductionParticipantHandler::new(Arc::clone(&store), test_participant_config())?;
 
