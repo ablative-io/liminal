@@ -261,8 +261,18 @@ impl DurableStore for HaematiteStore {
 /// on unwind it DISARMS the directory guard — the directory is deliberately
 /// leaked, because visible residue is diagnosable while removal under live
 /// workers is filesystem corruption — logs the leaked path, and re-raises the
-/// panic. On the clean path the directory is removed after the store, by the
-/// ordinary field drop that follows this `Drop`.
+/// panic. On the clean path the directory is removed after the store, HERE,
+/// by an explicit [`TempDir::close`] whose error is logged.
+///
+/// The explicitness is the point. Letting the `TempDir` field drop instead
+/// would remove the directory via `tempfile`'s own `Drop`, which is
+/// `let _ = remove_dir_all(..)` — the `io::Result` is discarded, so a removal
+/// that FAILED would be indistinguishable from one that succeeded and this
+/// doc's "the directory is removed" would be a claim no code could check.
+/// `close()` returns that error; the clean path reports it and leaves the
+/// residue where the log says it is. It never panics (a `Drop` that unwinds
+/// during another unwind aborts the process) and never masks: a failure to
+/// remove is a durability fact, not something to swallow.
 ///
 /// Both fields are `Option` only so `drop` can move them out; they are `Some`
 /// for the shell's entire life outside `drop`.
@@ -290,6 +300,20 @@ impl<S> Drop for EphemeralGuard<S> {
             }
             std::panic::resume_unwind(panic);
         }
+        // Clean path: the store is closed, its workers are joined and the
+        // writer lock is released, so removing the directory now is safe — and
+        // removing it EXPLICITLY is what makes a failure sayable.
+        if let Some(dir) = self.dir.take() {
+            let path = dir.path().to_path_buf();
+            if let Err(error) = dir.close() {
+                tracing::error!(
+                    path = %path.display(),
+                    %error,
+                    "ephemeral store directory removal failed; residue remains at the \
+                     logged path"
+                );
+            }
+        }
     }
 }
 
@@ -305,8 +329,9 @@ impl<S> Drop for EphemeralGuard<S> {
 /// `Arc<dyn DurableStore>` over the whole wrapper. When the last such clone
 /// drops, the [`EphemeralGuard`] drops the store FIRST — the database closes,
 /// its shard actors join and the data-dir writer lock releases on fd close —
-/// and only then removes the directory; if closing the database panics, the
-/// directory is deliberately leaked instead (see [`EphemeralGuard`]).
+/// and only then removes the directory, logging the error if that removal
+/// fails; if closing the database panics, the directory is deliberately leaked
+/// instead (see [`EphemeralGuard`]).
 #[derive(Debug)]
 pub struct EphemeralHaematiteStore {
     guard: EphemeralGuard<HaematiteStore>,
