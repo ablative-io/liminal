@@ -69,8 +69,8 @@ use liminal_protocol::lifecycle::ConversationEvent;
 use liminal_protocol::wire::{
     AttachAttemptToken, AttachSecret, ClientRequest, CredentialAttachRequest, DetachAttemptToken,
     DetachRequest, EnrollmentRequest, EnrollmentToken, Generation, ParticipantAck,
-    ParticipantFrame, RecordAdmission, RecordAdmissionAttemptToken, ServerValue, encode,
-    encoded_len,
+    ParticipantFrame, ParticipantId, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
+    encode, encoded_len,
 };
 use liminal_sdk::{
     ConnectionPoolConfig, ParticipantResumeStore, RemoteConfig, RemoteOperationRecordOutcome,
@@ -415,14 +415,43 @@ fn run_scenario(
     deadlines.push(attach_bound.provenance_expires_at());
     let rotated = Generation::new(2).ok_or("generation two is nonzero")?;
 
+    drive_records_ack_and_detach(
+        participant,
+        &mut responses,
+        &mut pushes,
+        participant_id,
+        rotated,
+    )?;
+
+    let rows = read_transition_log(store)?;
+    Ok(DriveOutcome {
+        rows,
+        responses,
+        pushes,
+        secrets,
+        deadlines,
+    })
+}
+
+/// The closing half of [`run_scenario`]: the two ordinary records, the
+/// acknowledgement that discharges the peer's genuine obligation at delivery
+/// sequence 2, and the final detach. Every token and payload stays a fixed
+/// literal so both drives present byte-identical request bodies.
+fn drive_records_ack_and_detach(
+    participant: &SdkParticipant,
+    responses: &mut Vec<Vec<u8>>,
+    pushes: &mut Vec<Vec<u8>>,
+    participant_id: ParticipantId,
+    rotated: Generation,
+) -> Result<(), Box<dyn Error>> {
     for (token, payload) in [
         ([0x5D_u8; 16], vec![0x00_u8, 0xFF, 0x50, 0x05, 0xA5]),
         ([0x5E_u8; 16], vec![0x11_u8, 0x22, 0x33, 0x44, 0x55, 0x66]),
     ] {
         let committed = step(
             participant,
-            &mut responses,
-            &mut pushes,
+            responses,
+            pushes,
             ClientRequest::RecordAdmission(RecordAdmission {
                 conversation_id: PARITY_CONVERSATION,
                 participant_id,
@@ -438,8 +467,8 @@ fn run_scenario(
 
     let acked = step(
         participant,
-        &mut responses,
-        &mut pushes,
+        responses,
+        pushes,
         ClientRequest::ParticipantAck(ParticipantAck {
             conversation_id: PARITY_CONVERSATION,
             participant_id,
@@ -453,8 +482,8 @@ fn run_scenario(
 
     let final_detach = step(
         participant,
-        &mut responses,
-        &mut pushes,
+        responses,
+        pushes,
         ClientRequest::Detach(DetachRequest {
             conversation_id: PARITY_CONVERSATION,
             participant_id,
@@ -465,15 +494,7 @@ fn run_scenario(
     if !matches!(final_detach, ServerValue::DetachCommitted(_)) {
         return Err(format!("the final detach did not commit: {final_detach:?}").into());
     }
-
-    let rows = read_transition_log(store)?;
-    Ok(DriveOutcome {
-        rows,
-        responses,
-        pushes,
-        secrets,
-        deadlines,
-    })
+    Ok(())
 }
 
 /// Reads the whole transition-input log for [`PARITY_CONVERSATION`] as stored
@@ -796,6 +817,125 @@ fn row_operation(row: &[u8]) -> Result<String, Box<dyn Error>> {
         .ok_or_else(|| "a durable row carried no operation tag".into())
 }
 
+/// Censuses the durable op-log rows, then compares them entry by entry at their
+/// own structure and returns the walk's report.
+///
+/// Row bytes are a `serde_json` document whose numbers are decimal text, so two
+/// different random secrets make two different row LENGTHS — which is exactly
+/// why the rule says split at the structure rather than compare a blob. The
+/// exemption machinery must also have been EXERCISED, or the row comparison
+/// proves nothing about it.
+fn compare_durable_rows(
+    loopback: &DriveOutcome,
+    tcp: &DriveOutcome,
+) -> Result<RowComparison, Box<dyn Error>> {
+    assert_eq!(
+        loopback.rows.len(),
+        tcp.rows.len(),
+        "the two mounts wrote different numbers of durable rows"
+    );
+    let census: Vec<String> = loopback
+        .rows
+        .iter()
+        .map(|row| row_operation(row))
+        .collect::<Result<_, _>>()?;
+    assert_eq!(
+        census,
+        vec![
+            "genesis".to_owned(),
+            "enrolled".to_owned(),
+            "enrolled".to_owned(),
+            "detached".to_owned(),
+            "attached".to_owned(),
+            "record_admission".to_owned(),
+            "record_admission".to_owned(),
+            "zero_debt_ack".to_owned(),
+            "detached".to_owned(),
+        ],
+        "the scenario did not write the operations it claims to exercise, so a parity \
+         assertion over these rows would not cover the record path it names"
+    );
+
+    let mut report = RowComparison::default();
+    for (index, (loopback_row, tcp_row)) in loopback.rows.iter().zip(tcp.rows.iter()).enumerate() {
+        assert_eq!(
+            row_operation(loopback_row)?,
+            row_operation(tcp_row)?,
+            "durable row {index} is a different operation on the two mounts"
+        );
+        let loopback_json: serde_json::Value = serde_json::from_slice(loopback_row)?;
+        let tcp_json: serde_json::Value = serde_json::from_slice(tcp_row)?;
+        compare_row_structure(
+            &format!("row[{index}]"),
+            &loopback_json,
+            &tcp_json,
+            &mut report,
+        )?;
+    }
+
+    assert!(
+        report
+            .exempt_paths
+            .iter()
+            .any(|path| path.ends_with("/attach_secret")),
+        "no attach-secret exemption fired, so the exempt path was never taken and the \
+         rows above may not contain the nondeterminism this test claims to handle"
+    );
+    assert!(
+        report
+            .exempt_paths
+            .iter()
+            .any(|path| path.ends_with("/receipt_expires_at")),
+        "no wall-clock exemption fired"
+    );
+    Ok(report)
+}
+
+/// Proves the canonical shell event bytes, pulled out of the rows by the walk,
+/// at the BYTE level.
+///
+/// Stronger than the element-wise compare the walk would have done: the
+/// loopback's own secrets are substituted for the socket's and the images must
+/// then be identical for their whole length, so any byte that is not one of
+/// those named secrets survives and fails.
+fn assert_shell_event_parity(
+    report: &RowComparison,
+    pairs: &[ExemptPair],
+) -> Result<(), Box<dyn Error>> {
+    assert!(
+        report.events.len() >= 4,
+        "only {} canonical shell events were compared; the scenario mints one per \
+         lifecycle operation, so a low count means the walk did not reach them",
+        report.events.len()
+    );
+    for (path, loopback_event, tcp_event) in &report.events {
+        assert_parity_after_substitution(
+            &format!("canonical shell event bytes at {path}"),
+            loopback_event,
+            tcp_event,
+            pairs,
+        );
+        // Decoded as well as raw: the canonical envelope must name the same
+        // conversation and the same ordinal on both mounts, so a hypothetical
+        // encoder that produced equal bytes for unequal events could not pass.
+        let loopback_decoded = ConversationEvent::decode_canonical(loopback_event)
+            .map_err(|error| format!("loopback shell event did not decode: {error:?}"))?;
+        let tcp_decoded = ConversationEvent::decode_canonical(tcp_event)
+            .map_err(|error| format!("socket shell event did not decode: {error:?}"))?;
+        assert_eq!(
+            loopback_decoded.conversation_id(),
+            tcp_decoded.conversation_id(),
+            "the shell event at {path} names a different conversation on the two mounts"
+        );
+        assert_eq!(
+            loopback_decoded.ordinal(),
+            tcp_decoded.ordinal(),
+            "the shell event at {path} carries a different ordinal on the two mounts"
+        );
+    }
+    Ok(())
+}
+
 #[test]
 fn a_loopback_drive_and_a_socket_drive_leave_byte_identical_records() -> Result<(), Box<dyn Error>>
 {
@@ -860,110 +1000,10 @@ fn a_loopback_drive_and_a_socket_drive_leave_byte_identical_records() -> Result<
     );
 
     // ---- the durable op-log rows ----
-    assert_eq!(
-        loopback.rows.len(),
-        tcp.rows.len(),
-        "the two mounts wrote different numbers of durable rows"
-    );
-    let census: Vec<String> = loopback
-        .rows
-        .iter()
-        .map(|row| row_operation(row))
-        .collect::<Result<_, _>>()?;
-    assert_eq!(
-        census,
-        vec![
-            "genesis".to_owned(),
-            "enrolled".to_owned(),
-            "enrolled".to_owned(),
-            "detached".to_owned(),
-            "attached".to_owned(),
-            "record_admission".to_owned(),
-            "record_admission".to_owned(),
-            "zero_debt_ack".to_owned(),
-            "detached".to_owned(),
-        ],
-        "the scenario did not write the operations it claims to exercise, so a parity \
-         assertion over these rows would not cover the record path it names"
-    );
-
-    // Entry by entry, decoded at the row's own structure. Row bytes are a
-    // `serde_json` document whose numbers are decimal text, so two different
-    // random secrets make two different row LENGTHS — which is exactly why the
-    // rule says split at the structure rather than compare a blob.
-    let mut report = RowComparison::default();
-    for (index, (loopback_row, tcp_row)) in loopback.rows.iter().zip(tcp.rows.iter()).enumerate() {
-        assert_eq!(
-            row_operation(loopback_row)?,
-            row_operation(tcp_row)?,
-            "durable row {index} is a different operation on the two mounts"
-        );
-        let loopback_json: serde_json::Value = serde_json::from_slice(loopback_row)?;
-        let tcp_json: serde_json::Value = serde_json::from_slice(tcp_row)?;
-        compare_row_structure(
-            &format!("row[{index}]"),
-            &loopback_json,
-            &tcp_json,
-            &mut report,
-        )?;
-    }
-
-    // The exemption machinery must have been EXERCISED, or the row comparison
-    // above proves nothing about it.
-    assert!(
-        report
-            .exempt_paths
-            .iter()
-            .any(|path| path.ends_with("/attach_secret")),
-        "no attach-secret exemption fired, so the exempt path was never taken and the \
-         rows above may not contain the nondeterminism this test claims to handle"
-    );
-    assert!(
-        report
-            .exempt_paths
-            .iter()
-            .any(|path| path.ends_with("/receipt_expires_at")),
-        "no wall-clock exemption fired"
-    );
+    let report = compare_durable_rows(&loopback, &tcp)?;
 
     // ---- the canonical shell event bytes ----
-    //
-    // Pulled out of the rows by the walk and proven at the BYTE level, which is
-    // stronger than the element-wise compare the walk would have done: the
-    // loopback's own secrets are substituted for the socket's and the images
-    // must then be identical for their whole length, so any byte that is not one
-    // of those named secrets survives and fails.
-    assert!(
-        report.events.len() >= 4,
-        "only {} canonical shell events were compared; the scenario mints one per \
-         lifecycle operation, so a low count means the walk did not reach them",
-        report.events.len()
-    );
-    for (path, loopback_event, tcp_event) in &report.events {
-        assert_parity_after_substitution(
-            &format!("canonical shell event bytes at {path}"),
-            loopback_event,
-            tcp_event,
-            &pairs,
-        );
-        // Decoded as well as raw: the canonical envelope must name the same
-        // conversation and the same ordinal on both mounts, so a hypothetical
-        // encoder that produced equal bytes for unequal events could not pass.
-        let loopback_decoded = ConversationEvent::decode_canonical(loopback_event)
-            .map_err(|error| format!("loopback shell event did not decode: {error:?}"))?;
-        let tcp_decoded = ConversationEvent::decode_canonical(tcp_event)
-            .map_err(|error| format!("socket shell event did not decode: {error:?}"))?;
-        assert_eq!(
-            loopback_decoded.conversation_id(),
-            tcp_decoded.conversation_id(),
-            "the shell event at {path} names a different conversation on the two mounts"
-        );
-        assert_eq!(
-            loopback_decoded.ordinal(),
-            tcp_decoded.ordinal(),
-            "the shell event at {path} carries a different ordinal on the two mounts"
-        );
-    }
+    assert_shell_event_parity(&report, &pairs)?;
 
     // ---- the response frames ----
     assert_eq!(

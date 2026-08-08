@@ -35,8 +35,8 @@ use std::time::{Duration, Instant};
 use liminal::protocol::{Frame, ProtocolError, ProtocolVersion, decode as decode_generic};
 use liminal_protocol::wire::{
     ClientRequest, EnrollmentRequest, EnrollmentToken, Generation, PARTICIPANT_FRAME_TYPE,
-    ParticipantFrame, ReceiverDirection, RecordAdmission, RecordAdmissionAttemptToken, ServerValue,
-    decode as decode_participant,
+    ParticipantFrame, ParticipantId, ReceiverDirection, RecordAdmission,
+    RecordAdmissionAttemptToken, ServerValue, decode as decode_participant,
 };
 
 use crate::server::connection::LoopbackClientEnd;
@@ -152,6 +152,47 @@ fn request(
     }
 }
 
+/// Commits real records on the control connection for the whole measured
+/// window and returns how many landed.
+///
+/// Real committed records, not pings: the control drives the same production
+/// handler and the same durable append the parked connection would drive if it
+/// had anything to do. A window that commits nothing is refused here, because
+/// the flat parked reading it would license proves nothing.
+fn commit_records_for_idle_window(
+    busy: &mut LoopbackClientEnd,
+    busy_buffer: &mut Vec<u8>,
+    busy_participant: ParticipantId,
+) -> Result<u32, Box<dyn Error>> {
+    let deadline = Instant::now() + IDLE_WINDOW;
+    let mut committed = 0_u32;
+    while Instant::now() < deadline {
+        let outcome = request(
+            busy,
+            busy_buffer,
+            ClientRequest::RecordAdmission(RecordAdmission {
+                conversation_id: BUSY_CONVERSATION,
+                participant_id: busy_participant,
+                capability_generation: Generation::ONE,
+                record_admission_attempt_token: RecordAdmissionAttemptToken::new(
+                    [u8::try_from(committed % 251).unwrap_or(0); 16],
+                ),
+                payload: vec![0xB5; 32],
+            }),
+        )?;
+        if !matches!(outcome, ServerValue::RecordCommitted(_)) {
+            return Err(format!("the busy connection's record did not commit: {outcome:?}").into());
+        }
+        committed = committed.saturating_add(1);
+    }
+    assert!(
+        committed > 0,
+        "the control committed no records, so the window it is supposed to make busy \
+         was empty and the flat reading below would prove nothing"
+    );
+    Ok(committed)
+}
+
 #[test]
 fn a_parked_loopback_connection_costs_no_slices_while_another_one_works()
 -> Result<(), Box<dyn Error>> {
@@ -219,35 +260,8 @@ fn a_parked_loopback_connection_costs_no_slices_while_another_one_works()
         return Err(format!("the busy connection did not enroll: {busy_enrolled:?}").into());
     };
 
-    // Real committed records, not pings: the busy connection drives the same
-    // production handler and the same durable append the parked one would drive
-    // if it had anything to do.
-    let deadline = Instant::now() + IDLE_WINDOW;
-    let mut committed = 0_u32;
-    while Instant::now() < deadline {
-        let outcome = request(
-            &mut busy,
-            &mut busy_buffer,
-            ClientRequest::RecordAdmission(RecordAdmission {
-                conversation_id: BUSY_CONVERSATION,
-                participant_id: busy_bound.participant_id(),
-                capability_generation: Generation::ONE,
-                record_admission_attempt_token: RecordAdmissionAttemptToken::new(
-                    [u8::try_from(committed % 251).unwrap_or(0); 16],
-                ),
-                payload: vec![0xB5; 32],
-            }),
-        )?;
-        if !matches!(outcome, ServerValue::RecordCommitted(_)) {
-            return Err(format!("the busy connection's record did not commit: {outcome:?}").into());
-        }
-        committed = committed.saturating_add(1);
-    }
-    assert!(
-        committed > 0,
-        "the control committed no records, so the window it is supposed to make busy \
-         was empty and the flat reading below would prove nothing"
-    );
+    let committed =
+        commit_records_for_idle_window(&mut busy, &mut busy_buffer, busy_bound.participant_id())?;
 
     // ---- the two readings, over the same window ----
     let busy_slices_after = server.slice_count(busy_pid);
