@@ -796,17 +796,25 @@ fn arm_f_origin_gated_ws_receives_after_park() -> Result<(), Box<dyn Error>> {
 }
 
 /// Publishes `count` records to `channel` as fast as one TCP connection can
-/// write them, with a reader thread draining acks so the publisher's own
-/// outbound never backs up and confuses the measurement.
+/// write them, and returns how many the server ACCEPTED (`PublishAck`) plus any
+/// other frames it answered with.
+///
+/// The accepted count is what makes arm H's shortfall mean anything: a
+/// subscriber that receives fewer than `count` records has only been starved if
+/// the server accepted `count` publishes in the first place. Counting acks — and
+/// waiting for them before the socket is shut down — is what rules out the
+/// publisher dying mid-burst, or its own unread acks overflowing its outbound
+/// and tearing the connection down, being mistaken for a delivery defect.
 fn publish_burst_raw_tcp(
     server: &RunningServer,
     channel: &str,
     count: usize,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(usize, Vec<String>), Box<dyn Error>> {
     use std::io::{Read, Write};
+    use std::sync::mpsc;
 
     let mut stream = TcpStream::connect(server.tcp_addr)?;
-    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
     let write_frame = |stream: &mut TcpStream, frame: &Frame| -> Result<(), Box<dyn Error>> {
         let mut bytes = vec![0_u8; encoded_len(frame)?];
         let written = encode(frame, &mut bytes)?;
@@ -827,15 +835,35 @@ fn publish_burst_raw_tcp(
     let read = stream.read(&mut buffer)?;
     decode(&buffer[..read])?;
 
+    // The ack reader runs concurrently with the writes so the publisher's own
+    // outbound can never back up, and reports the moment `count` acks are in.
     let mut drain = stream.try_clone()?;
+    let (done, all_acked) = mpsc::channel();
     let reader = std::thread::spawn(move || {
-        let mut sink = vec![0_u8; 8192];
-        while let Ok(read) = drain.read(&mut sink) {
-            if read == 0 {
-                break;
+        let mut pending: Vec<u8> = Vec::new();
+        let mut chunk = vec![0_u8; 16384];
+        let mut accepted = 0_usize;
+        let mut others: Vec<String> = Vec::new();
+        loop {
+            let read = match drain.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            pending.extend_from_slice(&chunk[..read]);
+            while let Ok((frame, consumed)) = decode(&pending) {
+                pending.drain(..consumed);
+                match frame {
+                    Frame::PublishAck { .. } => accepted += 1,
+                    other => others.push(format!("{other:?}")),
+                }
+            }
+            if accepted >= count {
+                done.send(()).ok();
             }
         }
+        (accepted, others)
     });
+
     for index in 0..count {
         write_frame(
             &mut stream,
@@ -852,9 +880,13 @@ fn publish_burst_raw_tcp(
             },
         )?;
     }
+    // Wait for every ack BEFORE the shutdown: a socket closed while publishes
+    // are still buffered server-side is an EOF the connection process acts on,
+    // and the unapplied remainder would be lost to the harness, not to a defect.
+    all_acked.recv_timeout(Duration::from_secs(15)).ok();
     stream.shutdown(std::net::Shutdown::Both).ok();
-    reader.join().ok();
-    Ok(())
+    let (accepted, others) = reader.join().map_err(|_| "ack reader panicked")?;
+    Ok((accepted, others))
 }
 
 /// Arm H — the OVERFLOW SHED, the one mechanism at this tree that starves a
@@ -871,15 +903,30 @@ fn publish_burst_raw_tcp(
 fn arm_h_once(burst: usize) -> Result<(bool, String), Box<dyn Error>> {
     let server = RunningServer::start()?;
     let mut client = RawWsClient::open(&server)?;
-    publish_burst_raw_tcp(&server, CHANNEL, burst)?;
+    let (accepted, publisher_frames) = publish_burst_raw_tcp(&server, CHANNEL, burst)?;
     let wanted = vec![format!("{{\"id\":{}}}", burst - 1)];
     let (payloads, others) = client.collect_wanted(Instant::now() + RECV_TIMEOUT, &wanted);
     let shed = others.iter().any(|frame| frame.contains("SubscribeError"));
     let received = payloads.len();
-    Ok((
-        received == burst && !shed,
-        format!("burst={burst} received={received} shed={shed} other_frames={others:?}"),
-    ))
+    let seen_ids: Vec<String> = payloads
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+        .collect();
+    let missing: Vec<String> = (0..burst)
+        .map(|index| format!("{{\"id\":{index}}}"))
+        .filter(|want| !seen_ids.contains(want))
+        .collect();
+    let detail = format!(
+        "burst={burst} accepted={accepted} received={received} shed={shed} \
+         missing_count={} first_missing={:?} publisher_frames={:?} ws_other_frames={others:?}",
+        missing.len(),
+        missing.first(),
+        publisher_frames
+    );
+    // The subscriber must receive exactly what the server ACCEPTED. Comparing
+    // against `accepted` rather than `burst` is what keeps a publisher that
+    // failed mid-burst from reading as a delivery defect.
+    Ok((received == accepted && !shed, detail))
 }
 
 #[test]
@@ -900,6 +947,67 @@ fn arm_h_startup_burst_does_not_shed_the_ws_subscription() -> Result<(), Box<dyn
     assert!(
         failures.is_empty(),
         "ARM H (startup burst of {burst}) failed {}/{iterations} iterations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+/// Arm I — the TRANSPORT ASYMMETRY under arm H's burst, which is the field's
+/// actual claim: TCP subscribers receive everything while websocket subscribers
+/// on the SAME channel receive nothing. One TCP subscriber and one websocket
+/// subscriber take the same burst on the same channel of the same server, and
+/// each reports what it received and whether it was shed.
+fn arm_i_once(burst: usize) -> Result<(bool, String), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let tcp_stream = open_tcp_subscription(&server)?;
+    let mut ws_client = RawWsClient::open(&server)?;
+
+    let (accepted, publisher_frames) = publish_burst_raw_tcp(&server, CHANNEL, burst)?;
+
+    // The TCP subscriber: count deliveries until it goes quiet.
+    let mut tcp_received = 0_usize;
+    let mut tcp_error = None;
+    while tcp_received < accepted {
+        match tcp_stream.recv_timeout(Duration::from_secs(2)) {
+            Ok(_) => tcp_received += 1,
+            Err(error) => {
+                tcp_error = Some(format!("{error}"));
+                break;
+            }
+        }
+    }
+
+    let wanted = vec![format!("{{\"id\":{}}}", burst - 1)];
+    let (payloads, others) = ws_client.collect_wanted(Instant::now() + RECV_TIMEOUT, &wanted);
+    let ws_received = payloads.len();
+    let ws_shed = others.iter().any(|frame| frame.contains("SubscribeError"));
+
+    let detail = format!(
+        "burst={burst} accepted={accepted} tcp_received={tcp_received} tcp_error={tcp_error:?} \
+         ws_received={ws_received} ws_shed={ws_shed} publisher_frames={publisher_frames:?}"
+    );
+    Ok((tcp_received == accepted && ws_received == accepted, detail))
+}
+
+#[test]
+fn arm_i_burst_hits_both_transports_alike() -> Result<(), Box<dyn Error>> {
+    let burst = std::env::var("LIMINAL_WS_BURST")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(400);
+    let iterations = iterations(10);
+    let mut failures = Vec::new();
+    for index in 0..iterations {
+        let (ok, detail) = arm_i_once(burst)?;
+        eprintln!("ARM I iteration {index}: ok={ok} :: {detail}");
+        if !ok {
+            failures.push(format!("iteration {index}: {detail}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ARM I (burst against both transports) failed {}/{iterations} iterations:\n{}",
         failures.len(),
         failures.join("\n")
     );
