@@ -795,6 +795,117 @@ fn arm_f_origin_gated_ws_receives_after_park() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Publishes `count` records to `channel` as fast as one TCP connection can
+/// write them, with a reader thread draining acks so the publisher's own
+/// outbound never backs up and confuses the measurement.
+fn publish_burst_raw_tcp(
+    server: &RunningServer,
+    channel: &str,
+    count: usize,
+) -> Result<(), Box<dyn Error>> {
+    use std::io::{Read, Write};
+
+    let mut stream = TcpStream::connect(server.tcp_addr)?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    let write_frame = |stream: &mut TcpStream, frame: &Frame| -> Result<(), Box<dyn Error>> {
+        let mut bytes = vec![0_u8; encoded_len(frame)?];
+        let written = encode(frame, &mut bytes)?;
+        bytes.truncate(written);
+        stream.write_all(&bytes)?;
+        Ok(())
+    };
+    write_frame(
+        &mut stream,
+        &Frame::Connect {
+            flags: 0,
+            min_version: ProtocolVersion::new(1, 0),
+            max_version: ProtocolVersion::new(1, 0),
+            auth_token: Vec::new(),
+        },
+    )?;
+    let mut buffer = vec![0_u8; 4096];
+    let read = stream.read(&mut buffer)?;
+    decode(&buffer[..read])?;
+
+    let mut drain = stream.try_clone()?;
+    let reader = std::thread::spawn(move || {
+        let mut sink = vec![0_u8; 8192];
+        while let Ok(read) = drain.read(&mut sink) {
+            if read == 0 {
+                break;
+            }
+        }
+    });
+    for index in 0..count {
+        write_frame(
+            &mut stream,
+            &Frame::Publish {
+                flags: 0,
+                stream_id: RAW_PUBLISH_STREAM,
+                channel: channel.to_owned(),
+                envelope: MessageEnvelope::new(
+                    SchemaId::new([7_u8; SchemaId::WIRE_LEN]),
+                    CausalContext::independent(),
+                    format!("{{\"id\":{index}}}").into_bytes(),
+                ),
+                idempotency_key: None,
+            },
+        )?;
+    }
+    stream.shutdown(std::net::Shutdown::Both).ok();
+    reader.join().ok();
+    Ok(())
+}
+
+/// Arm H — the OVERFLOW SHED, the one mechanism at this tree that starves a
+/// websocket subscriber permanently while leaving its publishes and acks
+/// working, and that is decided once per establishment.
+///
+/// A subscription inbox that passes `max_subscription_inbox_depth` (256) or the
+/// connection's shared `max_connection_inbox_bytes` (4 MiB) is marked overflowed
+/// STICKILY, and the delivery pump then sheds it: one `SubscribeError` frame and
+/// the subscription is removed from the connection AND released at the channel
+/// actor. After that the connection is open, publishes still ack, and no
+/// delivery can ever arrive again. A boot whose startup burst outruns the
+/// connection's first drain sheds; a quieter boot does not.
+fn arm_h_once(burst: usize) -> Result<(bool, String), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let mut client = RawWsClient::open(&server)?;
+    publish_burst_raw_tcp(&server, CHANNEL, burst)?;
+    let wanted = vec![format!("{{\"id\":{}}}", burst - 1)];
+    let (payloads, others) = client.collect_wanted(Instant::now() + RECV_TIMEOUT, &wanted);
+    let shed = others.iter().any(|frame| frame.contains("SubscribeError"));
+    let received = payloads.len();
+    Ok((
+        received == burst && !shed,
+        format!("burst={burst} received={received} shed={shed} other_frames={others:?}"),
+    ))
+}
+
+#[test]
+fn arm_h_startup_burst_does_not_shed_the_ws_subscription() -> Result<(), Box<dyn Error>> {
+    let burst = std::env::var("LIMINAL_WS_BURST")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(400);
+    let iterations = iterations(10);
+    let mut failures = Vec::new();
+    for index in 0..iterations {
+        let (ok, detail) = arm_h_once(burst)?;
+        eprintln!("ARM H iteration {index}: ok={ok} :: {detail}");
+        if !ok {
+            failures.push(format!("iteration {index}: {detail}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ARM H (startup burst of {burst}) failed {}/{iterations} iterations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
 /// Arm G — a LONG park, on the field's own cadence. The face page re-asks every
 /// 60-90s, so the estate's ws connections sit parked for a minute-plus between
 /// events; arm B's five seconds only proves the park is entered, not that it
