@@ -424,8 +424,42 @@ impl RawWsClient {
         Ok(())
     }
 
+    /// Collects until `deadline` OR until every payload in `wanted` has arrived,
+    /// whichever comes first. The early exit is what keeps a 40-iteration run
+    /// affordable: a PASSING iteration must not pay the full receive timeout,
+    /// and a FAILING one still waits the whole window before it reports silence.
+    fn collect_wanted(
+        &mut self,
+        deadline: Instant,
+        wanted: &[String],
+    ) -> (Vec<Vec<u8>>, Vec<String>) {
+        let mut payloads: Vec<Vec<u8>> = Vec::new();
+        let mut others: Vec<String> = Vec::new();
+        while Instant::now() < deadline {
+            let seen: Vec<String> = payloads
+                .iter()
+                .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+                .collect();
+            if wanted.iter().all(|want| seen.contains(want)) {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match read_frame(&mut self.socket, remaining.max(Duration::from_millis(50))) {
+                Ok(Some(Frame::Deliver { envelope, .. })) => payloads.push(envelope.payload),
+                Ok(Some(other)) => others.push(format!("{other:?}")),
+                Ok(None) => {}
+                Err(error) => {
+                    others.push(format!("READ ERROR: {error}"));
+                    break;
+                }
+            }
+        }
+        (payloads, others)
+    }
+
     /// Collects delivered payloads until `deadline`, returning every non-Deliver
     /// frame seen alongside them so a refusal is never silently read as silence.
+    #[allow(dead_code)]
     fn collect_until(&mut self, deadline: Instant) -> (Vec<Vec<u8>>, Vec<String>) {
         let mut payloads = Vec::new();
         let mut others = Vec::new();
@@ -590,7 +624,7 @@ fn arm_c_once() -> Result<(bool, String), Box<dyn Error>> {
     }
 
     let deadline = Instant::now() + RECV_TIMEOUT;
-    let (payloads, others) = client.collect_until(deadline);
+    let (payloads, others) = client.collect_wanted(deadline, &expected);
     let seen: Vec<String> = payloads
         .iter()
         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
@@ -638,7 +672,8 @@ fn arm_d_once() -> Result<(bool, String), Box<dyn Error>> {
     let mut client = RawWsClient::open(&server)?;
     std::thread::sleep(PARK_WINDOW);
     publish_raw_tcp(&server, CHANNEL, br#"{"id":501}"#)?;
-    let (payloads, others) = client.collect_until(Instant::now() + RECV_TIMEOUT);
+    let wanted = vec![r#"{"id":501}"#.to_owned()];
+    let (payloads, others) = client.collect_wanted(Instant::now() + RECV_TIMEOUT, &wanted);
     let seen: Vec<String> = payloads
         .iter()
         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
@@ -682,14 +717,18 @@ fn arm_e_once() -> Result<(bool, String), Box<dyn Error>> {
             format!("{{\"id\":{}}}", 600 + index).as_bytes(),
         )?;
     }
-    let (payloads, others) = client.collect_until(Instant::now() + RECV_TIMEOUT);
+    let wanted: Vec<String> = (0..channels.len())
+        .map(|index| format!("{{\"id\":{}}}", 600 + index))
+        .collect();
+    let (payloads, others) = client.collect_wanted(Instant::now() + RECV_TIMEOUT, &wanted);
     let seen: Vec<String> = payloads
         .iter()
         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
         .collect();
-    let missing: Vec<String> = (0..channels.len())
-        .map(|index| format!("{{\"id\":{}}}", 600 + index))
-        .filter(|wanted| !seen.contains(wanted))
+    let missing: Vec<String> = wanted
+        .iter()
+        .filter(|want| !seen.contains(want))
+        .cloned()
         .collect();
     Ok((
         missing.is_empty(),
@@ -726,7 +765,8 @@ fn arm_f_once() -> Result<(bool, String), Box<dyn Error>> {
     let mut client = RawWsClient::open_on(&server, &[CHANNEL], Some(origin))?;
     std::thread::sleep(PARK_WINDOW);
     publish_raw_tcp(&server, CHANNEL, br#"{"id":701}"#)?;
-    let (payloads, others) = client.collect_until(Instant::now() + RECV_TIMEOUT);
+    let wanted = vec![r#"{"id":701}"#.to_owned()];
+    let (payloads, others) = client.collect_wanted(Instant::now() + RECV_TIMEOUT, &wanted);
     let seen: Vec<String> = payloads
         .iter()
         .map(|bytes| String::from_utf8_lossy(bytes).to_string())
@@ -749,6 +789,51 @@ fn arm_f_origin_gated_ws_receives_after_park() -> Result<(), Box<dyn Error>> {
     assert!(
         failures.is_empty(),
         "ARM F (origin-gated acceptor, publish after park) failed {}/{iterations} iterations:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+    Ok(())
+}
+
+/// Arm G — a LONG park, on the field's own cadence. The face page re-asks every
+/// 60-90s, so the estate's ws connections sit parked for a minute-plus between
+/// events; arm B's five seconds only proves the park is entered, not that it
+/// survives. Iterations default low because each one costs its whole window.
+fn arm_g_once(park: Duration) -> Result<(bool, String), Box<dyn Error>> {
+    let server = RunningServer::start()?;
+    let mut client = RawWsClient::open(&server)?;
+    std::thread::sleep(park);
+    publish_raw_tcp(&server, CHANNEL, br#"{"id":801}"#)?;
+    let wanted = vec![r#"{"id":801}"#.to_owned()];
+    let (payloads, others) = client.collect_wanted(Instant::now() + RECV_TIMEOUT, &wanted);
+    let seen: Vec<String> = payloads
+        .iter()
+        .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+        .collect();
+    let received = seen.iter().any(|payload| payload == r#"{"id":801}"#);
+    Ok((received, format!("seen={seen:?} other_frames={others:?}")))
+}
+
+#[test]
+fn arm_g_long_park_ws_receives_after_field_cadence_idle() -> Result<(), Box<dyn Error>> {
+    let park = Duration::from_secs(
+        std::env::var("LIMINAL_WS_LONG_PARK_SECS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(65),
+    );
+    let iterations = iterations(2);
+    let mut failures = Vec::new();
+    for index in 0..iterations {
+        let (received, detail) = arm_g_once(park)?;
+        eprintln!("ARM G iteration {index}: park={park:?} received={received} :: {detail}");
+        if !received {
+            failures.push(format!("iteration {index}: {detail}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "ARM G (long {park:?} park) failed {}/{iterations} iterations:\n{}",
         failures.len(),
         failures.join("\n")
     );
