@@ -925,8 +925,10 @@ fn arm_h_once(burst: usize) -> Result<(bool, String), Box<dyn Error>> {
     );
     // The subscriber must receive exactly what the server ACCEPTED. Comparing
     // against `accepted` rather than `burst` is what keeps a publisher that
-    // failed mid-burst from reading as a delivery defect.
-    Ok((received == accepted && !shed, detail))
+    // failed mid-burst from reading as a delivery defect — but `accepted` must
+    // ALSO equal the burst, or the comparison is vacuous: a run where the
+    // publisher got no acks at all would otherwise score 0 == 0 and PASS.
+    Ok((accepted == burst && received == accepted && !shed, detail))
 }
 
 #[test]
@@ -987,7 +989,12 @@ fn arm_i_once(burst: usize) -> Result<(bool, String), Box<dyn Error>> {
         "burst={burst} accepted={accepted} tcp_received={tcp_received} tcp_error={tcp_error:?} \
          ws_received={ws_received} ws_shed={ws_shed} publisher_frames={publisher_frames:?}"
     );
-    Ok((tcp_received == accepted && ws_received == accepted, detail))
+    // `accepted == burst` FIRST: without it an iteration whose publisher got no
+    // acks scores 0 == 0 == 0 and passes vacuously.
+    Ok((
+        accepted == burst && tcp_received == accepted && ws_received == accepted,
+        detail,
+    ))
 }
 
 #[test]
@@ -1055,7 +1062,10 @@ fn arm_j_once(burst: usize) -> Result<(bool, String), Box<dyn Error>> {
         "burst={burst} accepted={accepted} tcp_received={tcp_received} tcp_error={tcp_error:?} \
          ws_received={ws_received} ws_error={ws_error:?} publisher_frames={publisher_frames:?}"
     );
-    Ok((tcp_received == accepted && ws_received == accepted, detail))
+    Ok((
+        accepted == burst && tcp_received == accepted && ws_received == accepted,
+        detail,
+    ))
 }
 
 #[test]
