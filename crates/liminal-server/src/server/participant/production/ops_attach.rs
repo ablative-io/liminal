@@ -25,7 +25,7 @@ use liminal_protocol::lifecycle::{
 };
 use liminal_protocol::wire::{
     AttachBound, AttachEnvelope, AttachSecret, BindingEpoch, CredentialAttachRequest,
-    CredentialAttachResponse, Generation, ReceiptExpiryReason,
+    CredentialAttachResponse, Generation, ObserverBackpressureState, ReceiptExpiryReason,
 };
 
 use crate::server::participant::dispatch_impact::DispatchImpactAccumulator;
@@ -44,6 +44,7 @@ use super::ops_attach_finalizer::SelectedFencedFinalizer;
 use super::ops_attach_lookup::{credential_attach_refusal, marker_bearing_attach_refusal};
 use super::ops_attach_verify::{AttachVerification, stored_attach_parameters, verify_attach_mode};
 use super::outbox_projection::capture_projection_prestate;
+use super::presented_refusal::PresentedRefusal;
 use super::state::{
     AttachProvenanceRecord, AttachReceiptState, ConversationAuthority, DurableAppend,
     PendingBindingFate, Slot, StateError,
@@ -150,7 +151,7 @@ impl ConversationAuthority {
                 domain: "capability generation",
             })?;
         let (attached_order, attached_seq, attach_mode) =
-            self.allocate_attach_mode(slot.binding)?;
+            self.allocate_attach_mode(slot.binding, envelope)?;
         let allocation = StoredAttachAllocation {
             binding_epoch: BindingEpoch::new(
                 operation_facts.receiving_incarnation,
@@ -190,9 +191,63 @@ impl ConversationAuthority {
 
     /// Selects the mandatory v3 Attached mode from exact binding authority and
     /// consumes only the matching checked order/sequence allocation.
+    ///
+    /// # The `PendingFinalization` arm is a REFUSAL, not an invariant
+    ///
+    /// Board #14. This arm used to be a bare `StateError::invariant` whose
+    /// message — "pending finalization observed in a binding that commits
+    /// detaches immediately" — asserted the state could not arise. It arises:
+    /// a well-formed, correctly-authorized, current-generation attach reaches
+    /// it (`tests_14_attach_presentation`), and board #23 reaches it a second
+    /// way through a connection dropped under retention pressure. The verb is
+    /// the contract and the comment was not.
+    ///
+    /// **The refusal itself does not change and must not.** A binding whose
+    /// terminal has not yet been appended cannot admit an attach, and
+    /// `docs/design/ATTACH-SILENCE-14.md`'s acceptance constraint spells out
+    /// why merely admitting it would be worse than the silence: the attach
+    /// would be COMMITTED AND STORED, and on the next cold replay it would
+    /// arrive at `select_fenced_finalizer` through `replay_attached`, a path
+    /// this gate does not cover, and meet three more bare-close sinks. So the
+    /// state stays refused, nothing is committed, and only the DELIVERY of the
+    /// refusal changes.
+    ///
+    /// # Why `ObserverBackpressure` is the row, and not a near neighbour
+    ///
+    /// `PendingFinalization` is minted in exactly one circumstance. The
+    /// protocol's `BindingTerminalAdmission::Pending` arm is reached only when
+    /// `hard_observer_progress < key.delivery_seq`, and its own type documents
+    /// itself as the "observer-blocked pending terminal admission". The
+    /// contract says the same from the other side: a durably
+    /// `PendingFinalization` slot is settled when "progress wake appends
+    /// exactly one correctly ordered record" (`PARTICIPANT-CONTRACT.md`), and
+    /// the register pairs the detach that CREATES the state with
+    /// `ObserverBackpressure` (the "first accepted while append is blocked"
+    /// row). The blocked resource is hard-observer progress; the wake that
+    /// clears it is `ObserverProgressed`; and `ObserverBackpressure` is an
+    /// outcome the register already admits for credential attach, carrying
+    /// exactly the retry discipline "retry once after matching
+    /// `ObserverProgressed`". Nothing is invented — the row was always the
+    /// right one and the refusal simply never reached it.
+    ///
+    /// The state is `initial(observer_progress)`, whose doc reads "an initial
+    /// refusal epoch is exactly the progress value observed by the serialized
+    /// operation". `replay(..)` is the exact-token detach-replay form and is
+    /// not this shape.
+    ///
+    /// ⚠ One honest limit. R-D1's stage order puts `ObserverBackpressure`
+    /// (stage 11) after `ConversationOrderExhausted` (9) and
+    /// `ConversationSequenceExhausted` (10), and this arm refuses before
+    /// `allocate_position` runs — so a request that is BOTH against a pending
+    /// binding AND at an exhausted order/sequence would now hear the stage-11
+    /// row where the register wants the stage-9 or stage-10 one. That
+    /// inversion is inherited, not introduced: the pre-#14 code refused at the
+    /// same point, one line earlier in the same arm. Recorded rather than
+    /// silently absorbed.
     fn allocate_attach_mode(
         &mut self,
         binding: BindingState,
+        envelope: AttachEnvelope,
     ) -> Result<(u64, u64, StoredAttachModeV3), StateError> {
         match binding {
             BindingState::Detached => {
@@ -212,8 +267,13 @@ impl ConversationAuthority {
                     },
                 ))
             }
-            BindingState::PendingFinalization(_) => Err(StateError::invariant(
-                "pending finalization observed in a binding that commits detaches immediately",
+            BindingState::PendingFinalization(_) => Err(StateError::PresentedRefusal(
+                PresentedRefusal::credential_attach(
+                    CredentialAttachResponse::observer_backpressure(
+                        envelope,
+                        ObserverBackpressureState::initial(self.observer_progress),
+                    ),
+                ),
             )),
         }
     }

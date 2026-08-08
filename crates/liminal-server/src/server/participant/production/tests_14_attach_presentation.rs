@@ -61,6 +61,7 @@
 
 use std::error::Error;
 
+use liminal::durability::bridge::block_on;
 use liminal_protocol::wire::{
     AttachAttemptToken, ClientRequest, CommonStaleAuthorityEnvelope, ConnectionIncarnation,
     CredentialAttachRequest, Generation, ObserverBackpressure, ServerValue, StaleAuthority,
@@ -184,6 +185,111 @@ fn the_pending_finalization_refusal_carries_the_observer_backpressure_row()
         state.observer_progress(),
         "an initial refusal epoch is exactly the progress value observed by the serialized \
          operation (ObserverBackpressureState::initial)"
+    );
+    Ok(())
+}
+
+/// The funnel buys a frame and NOTHING else.
+///
+/// #14's whole constraint is that a refusal which commits nothing must still
+/// commit nothing. The funnel changes the arm's answer from `Err` to `Ok`,
+/// which means the conversation owner is now RETAINED across the refusal
+/// instead of discarded and cold-replayed — so this test checks the two things
+/// that change could have broken, in the two directions they could break.
+///
+/// * **Durably.** The log head does not move. The fixture's Died row was cut
+///   source-only, so the slot immediately after it is empty, and it must stay
+///   empty across any number of refused attaches.
+/// * **In memory.** The retained owner is still a correct authority: the same
+///   refusal repeats identically, and an unrelated request on the same
+///   conversation is still answered from live state. A part-consumed owner
+///   left installed would fail here rather than silently serve wrong answers
+///   later, which is the failure this test exists to make loud.
+#[test]
+fn the_presented_refusal_commits_nothing_and_leaves_a_usable_authority()
+-> Result<(), Box<dyn Error>> {
+    let fixture = pending_restart_fixture()?;
+    let incarnation = ConnectionIncarnation::new(97, 9);
+    let current = generation(2)?;
+    let refuse = |token_byte: u8| {
+        dispatch_outcome(
+            &fixture.handler,
+            incarnation,
+            &mut ParticipantConnectionConversations::default(),
+            ClientRequest::CredentialAttach(CredentialAttachRequest {
+                conversation_id: fixture.conversation_id,
+                participant_id: fixture.participant_id,
+                capability_generation: current,
+                attach_secret: fixture.attach_secret,
+                attach_attempt_token: AttachAttemptToken::new([token_byte; 16]),
+                accept_marker_delivery_seq: None,
+            }),
+        )
+    };
+
+    assert!(
+        block_on(fixture.log.read_at(fixture.specific_sequence))??.is_none(),
+        "fixture precondition: the durable slot after the Died row is empty"
+    );
+    for token_byte in [0xC1_u8, 0xC2, 0xC3] {
+        let outcome = refuse(token_byte)?;
+        let ParticipantDispatch::Respond(response) = &outcome else {
+            return Err(format!(
+                "every repeat of the refusal must answer with a frame, got: {}",
+                client_outcome(&outcome)
+            )
+            .into());
+        };
+        let value = decode_server_value(response)?;
+        assert!(
+            matches!(
+                value,
+                ServerValue::ObserverBackpressure(ObserverBackpressure::CredentialAttach { .. })
+            ),
+            "the refusal must be stable across repeats, got: {value:?}"
+        );
+        assert!(
+            block_on(fixture.log.read_at(fixture.specific_sequence))??.is_none(),
+            "a refused attach appended a durable row -- the refusal committed something"
+        );
+    }
+
+    // The retained owner is still an authority, not a husk: a DIFFERENT
+    // refusal on the same conversation is still selected from live state.
+    let outcome = dispatch_outcome(
+        &fixture.handler,
+        incarnation,
+        &mut ParticipantConnectionConversations::default(),
+        ClientRequest::CredentialAttach(CredentialAttachRequest {
+            conversation_id: fixture.conversation_id,
+            participant_id: fixture.participant_id,
+            capability_generation: GEN_ONE,
+            attach_secret: fixture.attach_secret,
+            attach_attempt_token: AttachAttemptToken::new([0xC9; 16]),
+            accept_marker_delivery_seq: None,
+        }),
+    )?;
+    let ParticipantDispatch::Respond(response) = &outcome else {
+        return Err(format!(
+            "the conversation must still serve requests after a presented refusal, got: {}",
+            client_outcome(&outcome)
+        )
+        .into());
+    };
+    let value = decode_server_value(response)?;
+    let ServerValue::StaleAuthority(StaleAuthority::Live {
+        current_generation, ..
+    }) = value
+    else {
+        return Err(format!(
+            "a stale attach after a presented refusal must still be refused from live \
+             authority, got: {value:?}"
+        )
+        .into());
+    };
+    assert_eq!(
+        current_generation, current,
+        "the retained owner still carries the live generation"
     );
     Ok(())
 }

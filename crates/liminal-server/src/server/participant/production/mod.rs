@@ -64,6 +64,7 @@ mod outbox_log;
 mod outbox_projection;
 mod outbox_replay;
 mod pending_died_finalizer;
+mod presented_refusal;
 mod registry;
 mod state;
 
