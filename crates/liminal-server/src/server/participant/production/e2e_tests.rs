@@ -52,6 +52,9 @@ mod tests_endpoint_ack;
 #[path = "tests_w2_leg3_idle.rs"]
 mod tests_w2_leg3_idle;
 
+#[path = "tests_loopback_idle.rs"]
+mod tests_loopback_idle;
+
 /// Connection services carrying ONLY the production participant service.
 #[derive(Debug)]
 struct ParticipantOnlyServices {
