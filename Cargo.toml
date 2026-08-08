@@ -25,7 +25,15 @@ authors = [
 [workspace.dependencies]
 liminal = { package = "liminal-rs", version = "0.5.3", path = "crates/liminal" }
 liminal-protocol = { version = "0.4.1", path = "crates/liminal-protocol" }
-liminal-sdk = { version = "0.5.1", path = "crates/liminal-sdk" }
+# PATH-ONLY, deliberately: the sole consumer is `liminal-server`'s
+# dev-dependency (the loopback pins need the SDK client with `embedded` on),
+# and a version here would flow into server's GENERATED manifest at publish
+# time — where it deadlocks the wave, because the requirement now carries the
+# `embedded` feature that no already-published sdk has, while the sdk's own
+# `embedded` needs a published server. A version-less dev-dependency is
+# STRIPPED from the published manifest, which is the standard dissolution of
+# a dev-dep cycle; consumers never see dev-deps either way.
+liminal-sdk = { path = "crates/liminal-sdk" }
 # Consumed by `liminal-sdk`'s optional `embedded` feature (the in-process
 # transport needs the server it connects to) and dev-consumed the other way, so
 # the pair is a cycle THROUGH A DEV-DEPENDENCY, which Cargo permits and the
