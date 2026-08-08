@@ -85,7 +85,7 @@ pub(super) struct PendingRestartFixture {
     pub(super) terminal_order: u64,
     next_terminal_sequence: u64,
     connection: ConnectionIncarnation,
-    attach_secret: AttachSecret,
+    pub(super) attach_secret: AttachSecret,
 }
 
 pub(super) fn bound_debt_fixture(

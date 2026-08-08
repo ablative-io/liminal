@@ -117,6 +117,47 @@ pub(super) fn dispatch(
     )
 }
 
+/// Dispatches one request through the live production seam and returns the RAW
+/// [`ParticipantDispatch`] without demanding that it be a response.
+///
+/// This is the seam at which the client's outcome is decided: `connection`'s
+/// `apply` maps `Respond` to `FrameAction::Respond` (a frame reaches the
+/// client, connection stays open), `RespondThenClose` to a BEST-EFFORT frame
+/// plus teardown, and `Fatal` to a bare `FrameAction::Close` that — per
+/// `connection::state` — "stays silent", so the client receives NO FRAME at
+/// all. A test that wants to assert what the client is actually told must
+/// observe this value, not the `Result` of any inner handler.
+pub(super) fn dispatch_outcome(
+    handler: &ProductionParticipantHandler,
+    incarnation: ConnectionIncarnation,
+    conversations: &mut ParticipantConnectionConversations,
+    request: ClientRequest,
+) -> Result<ParticipantDispatch, Box<dyn Error>> {
+    let generic = participant_generic(request)?;
+    Ok(dispatch_generic_frame(
+        &generic,
+        true,
+        negotiated_session()?,
+        ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
+        conversations,
+        handler,
+    ))
+}
+
+/// Decodes an encoded participant response frame back into its semantic value.
+pub(super) fn decode_server_value(response: &Frame) -> Result<ServerValue, Box<dyn Error>> {
+    let generic_len = liminal::protocol::encoded_len(response)?;
+    let mut response_bytes = vec![0; generic_len];
+    let written = liminal::protocol::encode(response, &mut response_bytes)?;
+    response_bytes.truncate(written);
+    let decoded =
+        decode(&response_bytes, ReceiverDirection::Client).map_err(|error| format!("{error:?}"))?;
+    let ParticipantFrame::ServerValue(value) = decoded else {
+        return Err("response did not decode as a server value".into());
+    };
+    Ok(value)
+}
+
 /// Dispatches one request through the live production seam over a CALLER-HELD
 /// connection map, so a test can drive one connection's semantic-conversation
 /// occupancy across requests.
@@ -126,28 +167,11 @@ pub(super) fn dispatch_tracked(
     conversations: &mut ParticipantConnectionConversations,
     request: ClientRequest,
 ) -> Result<ServerValue, Box<dyn Error>> {
-    let generic = participant_generic(request)?;
-    let outcome = dispatch_generic_frame(
-        &generic,
-        true,
-        negotiated_session()?,
-        ParticipantConnectionContext::new(incarnation, MountKind::Tcp),
-        conversations,
-        handler,
-    );
+    let outcome = dispatch_outcome(handler, incarnation, conversations, request)?;
     let ParticipantDispatch::Respond(response) = outcome else {
         return Err(format!("dispatch did not respond: {outcome:?}").into());
     };
-    let generic_len = liminal::protocol::encoded_len(&response)?;
-    let mut response_bytes = vec![0; generic_len];
-    let written = liminal::protocol::encode(&response, &mut response_bytes)?;
-    response_bytes.truncate(written);
-    let decoded =
-        decode(&response_bytes, ReceiverDirection::Client).map_err(|error| format!("{error:?}"))?;
-    let ParticipantFrame::ServerValue(value) = decoded else {
-        return Err("response did not decode as a server value".into());
-    };
-    Ok(value)
+    decode_server_value(&response)
 }
 
 const CONVERSATION: u64 = 7;
