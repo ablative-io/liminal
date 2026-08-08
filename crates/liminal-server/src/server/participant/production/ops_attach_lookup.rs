@@ -19,7 +19,7 @@ use liminal_protocol::wire::{
 
 use super::barrier::OperationFacts;
 use super::facts::{self, Digest};
-use super::state::{Slot, StateError};
+use super::state::{ConversationAuthority, Slot, StateError};
 
 impl Slot {
     /// Resolves the credential-attach token phase and its phase-scoped
@@ -132,6 +132,59 @@ impl Slot {
     }
 }
 
+/// Builds the durable marker-proof facts one marker-bearing credential attach
+/// is classified against.
+///
+/// # Board #12: the last `accepted_marker_at_cursor` site stops lying
+///
+/// This flag was a hardcoded `false` here. The live marker-ack site had the
+/// identical hardcoded `false` and it was NOT inert there — it presented a
+/// merely redundant acknowledgement as a genuine fault and took a kernel down
+/// on 2026-08-07 — so it now derives the flag from the durable retained
+/// marker-record census. This site calls THE SAME function
+/// (`ConversationAuthority::marker_record_accepted_at_cursor`) rather than
+/// answering for itself, so the two sites feeding one frozen selector the same
+/// field cannot drift apart.
+///
+/// ⚠ **Here the value is inert, and that is precisely why truing it up is
+/// safe.** `select_marker_proof` reads `accepted_marker_at_cursor` at exactly
+/// one branch, and that branch also requires `input.is_marker_ack()`. The
+/// input on this path is `MarkerProofInput::CredentialAttach`, so the branch
+/// cannot be taken and no outcome can change. Not asserted — measured, both
+/// ways, by `tests_12_attach_marker_census`, which compares the selector's
+/// answer over the truthful and the hardcoded state and runs a marker-ack
+/// input through the same comparison as its positive control.
+///
+/// So this is a truthfulness fix, not a behaviour change. What it buys: the
+/// site stops making a claim about durable state it never measured, and the
+/// `AckNoOp` guard in the mapper below stays unreachable for the reason it
+/// gives — a foreign operation envelope — rather than by the accident of a
+/// field nobody computed.
+///
+/// The other two facts stay `None` deliberately. This live binding has no
+/// participant-record delivery pump, so there is no expected marker anchor and
+/// no delivery witness to supply; inventing either would be the hand-built
+/// outcome the module's own doc forbids. That is a capability gap owned by the
+/// delivery pump, not a #12 item.
+pub(super) fn attach_marker_proof_state(
+    authority: &ConversationAuthority,
+    request: &CredentialAttachRequest,
+    slot: &Slot,
+    operation_facts: &OperationFacts,
+) -> MarkerProofState {
+    let cursor = slot.member.cursor();
+    MarkerProofState::new(
+        cursor,
+        authority.marker_record_accepted_at_cursor(request.participant_id, cursor),
+        None,
+        BindingEpoch::new(
+            operation_facts.receiving_incarnation,
+            request.capability_generation,
+        ),
+        None,
+    )
+}
+
 /// Classifies a marker-bearing (fenced-recovery) attach through the crate's
 /// total marker-proof selector against the factual delivery state.
 ///
@@ -142,6 +195,7 @@ impl Slot {
 /// observing one is a loud invariant failure — never a silently hand-built
 /// outcome.
 pub(super) fn marker_bearing_attach_refusal(
+    authority: &ConversationAuthority,
     request: &CredentialAttachRequest,
     slot: &Slot,
     operation_facts: &OperationFacts,
@@ -151,11 +205,7 @@ pub(super) fn marker_bearing_attach_refusal(
             "marker-bearing attach classification without a presented marker",
         ));
     };
-    let proof_epoch = BindingEpoch::new(
-        operation_facts.receiving_incarnation,
-        request.capability_generation,
-    );
-    let marker_state = MarkerProofState::new(slot.member.cursor(), false, None, proof_epoch, None);
+    let marker_state = attach_marker_proof_state(authority, request, slot, operation_facts);
     let response = match select_marker_proof(&marker_state, input) {
         MarkerProofDecision::MarkerMismatch(MarkerMismatch {
             request: MarkerProofRequest::CredentialAttach(proof),

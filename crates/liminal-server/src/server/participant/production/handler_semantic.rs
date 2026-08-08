@@ -38,7 +38,34 @@ impl ProductionParticipantHandler {
         ) -> Result<ArmOutcome, StateError>,
     ) -> ParticipantSemanticOutcome<ServerValue> {
         let mut impact = DispatchImpactAccumulator::new();
-        let result = self.with_conversation_impact(conversation_id, &mut impact, operation);
+        // Board #14's funnel, and its only exit. A Class B refusal — one the
+        // frozen R-D1 register admits and the client is entitled to hear —
+        // is raised deep in a transition that has no response path of its
+        // own, and would otherwise collapse into
+        // `ParticipantSemanticError::Internal`, then `ParticipantDispatch::Fatal`,
+        // then a bare close the client is never told anything by. Here it
+        // rejoins the ordinary response path, so a lawful refusal is
+        // indistinguishable — in behaviour and in durable effect — from every
+        // refusal on the same arm that was already correct.
+        //
+        // Placed in this ONE wrapper rather than per arm deliberately: the
+        // analysis in docs/design/ATTACH-SILENCE-14.md is that the wire half
+        // of #14 is one decision at one place plus a classification of which
+        // sites may reach it, and every semantic arm routes through here.
+        //
+        // ⛔ The `Ok` retains the conversation owner instead of discarding it,
+        // which is exactly why `PresentedRefusal`'s doc forbids raising one
+        // after any authority has been consumed.
+        let result = self.with_conversation_impact(
+            conversation_id,
+            &mut impact,
+            |authority, appender, impact| match operation(authority, appender, impact) {
+                Err(StateError::PresentedRefusal(refusal)) => {
+                    Ok(ArmOutcome::respond(refusal.into_server_value()))
+                }
+                other => other,
+            },
+        );
         let result = result.map(|outcome| {
             if outcome.newly_tracked {
                 conversations.track(conversation_id);

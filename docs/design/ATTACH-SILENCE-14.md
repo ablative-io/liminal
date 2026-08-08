@@ -331,3 +331,166 @@ as a bare close is precisely a receipt whose delivery was never observed and
 never can be. Until the attach path can distinguish "told the client" from
 "closed on the client", #37 has nothing to key on. **They are the same event
 from two sides.**
+
+## Build outcome — the funnel landed, and the sweep's own classification moved
+
+Written on branch `attach-funnel-presentation`, base `edeabeb`, code at
+`313912c`. Every citation below is at `313912c` unless it names another rev.
+
+**The wire half is built and it is one place.**
+`production/presented_refusal.rs` carries a Class B refusal out to
+`handler_semantic::conversation_operation_with_impact`, the single wrapper
+every semantic arm routes through, where it rejoins the ordinary response path.
+`ParticipantSemanticError`'s "never invent a lifecycle response" property is
+preserved by construction rather than by convention: `PresentedRefusal`'s only
+constructors take a `CredentialAttachResponse` or a `DetachResponse`, and there
+is none from a bare `ServerValue`.
+
+⛔ **The precondition the carrier imposes, because it is not obvious and it is
+the thing a future sink will get wrong.** A `PresentedRefusal` becomes an `Ok`
+at the arm boundary, so the conversation owner is RETAINED — where every other
+`StateError` is an `Err` there and `with_conversation_reconciliation` answers an
+`Err` by dropping the possibly part-consumed owner and cold-replaying durable
+truth. A `PresentedRefusal` may therefore only be raised where the transition
+has consumed no authority: no `take_frontier`, no `take_shell`, no
+`slots.remove_entry`, no append. A sink that ignores this buys its frame with
+corruption.
+
+**`ops_attach.rs:270` (`allocate_attach_mode`'s `PendingFinalization` arm) is
+closed.** It answers `ObserverBackpressure`, and the row is derived rather than
+chosen: `PendingFinalization` is minted only where
+`binding_terminal.rs`'s `Pending` arm requires
+`hard_observer_progress < key.delivery_seq` — its type calls itself the
+"observer-blocked pending terminal admission" — and `PARTICIPANT-CONTRACT.md`
+line 1527 requires that such a slot is settled when "progress wake appends
+exactly one correctly ordered record", while register row 5954 pairs the detach
+that CREATES the state with `ObserverBackpressure`. So the blocked resource is
+hard-observer progress and the admitted credential-attach row (5943) already
+carries the matching retry discipline. The refusal, the predicate and the
+(empty) durable effect are unchanged; only delivery moved, per this document's
+own acceptance constraint (a).
+
+⚠ **A CORRECTION to the tranche-1 classification above, and it matters more
+than the site it fixes.** This document banked `ops_attach.rs`'s `:471` (now
+`:531`) as Class A on the premise that the `{error:?}` sites "flatten a typed
+`AttachCommitError`" whose six variants are all internal-consistency failures.
+That is true of `:355` (`protocol attach transition failed`). It is **not** true
+of `:531`: that site flattens a **`LiveFrontierError`**, a different type, and
+its `Precedence` variant is documented as *"a mandatory immutable/recovery
+transition has precedence"* — lane occupancy, which this repository elsewhere
+calls *"a designed structural boundary ... not corruption"*
+(`dispatch.rs`'s `BindingTerminalAdmissionRefused` doc). `ops_session.rs:241`
+is the identical site on the detach arm. **Two sites were classified by the
+type they were assumed to carry rather than the type they carry.** The lesson is
+the one already in this file's instrument note: a classification is not a
+measurement until it names what it read.
+
+**Those two sites are NOT fixed here, and the reason is a contract question.**
+`Precedence` has three distinct clearing conditions and they do not share a
+retry story:
+
+1. an immutable **binding-terminal** candidate — observer-blocked, cleared by
+   the progress wake, and `ObserverBackpressure` would be correct;
+2. an immutable **marker** candidate awaiting its drain — cleared by the next
+   record admission's `DrainFirst` (`ops_frontier.rs`) or by boot drain, i.e.
+   by *another participant's write*; and
+3. an armed **fenced-recovery block** — cleared by the fenced attach that
+   consumes it.
+
+The frozen R-D1 register admits no row for (2) or (3), and its own text closes
+the question against improvising one: *"The cross-cutting and operation rows
+together are exhaustive; no generic 'proof/admission refusal' exists."*
+Answering (2) with `ObserverBackpressure` would tell a client to wait for an
+`ObserverProgressed` that nothing has promised to send; answering it with
+`MarkerClosureCapacityExceeded { scope: RecoveryFence }` would borrow a row
+whose trigger the register defines as something else entirely. **This needs
+contract surface, not a guess.**
+
+Discriminating only sub-case (1) is *also* not available as a cheap partial. The
+refusal is raised inside `attach_commit` after `slots.remove_entry`,
+`take_frontier`, and `prepare_selected_fenced_finalizer` have all run, so it
+violates the carrier's precondition; `LiveFrontierFailure::into_parts` returns
+the owner, but the in-memory finalizer state is not restored by it. Moving the
+predicate to a pre-flight is worse rather than cheaper: it would refuse before
+`verify_attach_mode`'s ten guards, so a genuinely corrupt state that happened to
+arrive while the lane was occupied would be answered "retry later" instead of
+failing loudly — the fix that closes a different failure, and in the direction
+that hides corruption.
+
+**Board #12's last site is closed in the same lane.**
+`ops_attach_lookup::attach_marker_proof_state` now derives
+`accepted_marker_at_cursor` from `ConversationAuthority::marker_record_accepted_at_cursor`,
+the same census the live marker-ack site has used since `f8753fb`. This
+document banked the site as INERT on the argument that the only branch reading
+the flag also requires `input.is_marker_ack()`; the argument was right, and it
+is now a test that measures the selector with the flag both ways and carries a
+marker-ack positive control through the same comparison. The site no longer
+depends on the argument being remembered.
+
+**Standing count, and it names its population.** Of the **28** counted over the
+seven attach-path files: one was Class B and is answered (`ops_attach.rs`'s
+`allocate_attach_mode` arm), one is misclassified and blocked on contract
+surface (`ops_attach.rs`'s frontier-transition site), and **26 remain Class A**
+on the tranches above. `ops_session.rs:241` is the detach twin of the
+misclassified site and was never inside the 28 — the original census covered
+the attach path only, so the detach arm has had no sweep at all and its
+`StateError::invariant` sites are unclassified.
+
+## The detach arm's first two classifications, measured at `902f514`
+
+The detach arm carries **eight** `StateError::invariant` sites
+(`ops_session.rs` `:96 :101 :190 :205 :214 :223 :241 :256`). Two of them sit at
+the LOOKUP stage, ahead of `allocate_position` (`:117`) and `detach_commit`
+(`:125`), where every sibling arm already returns
+`Ok(ArmOutcome::respond(..))` — so unlike `:241` they satisfy the carrier's
+consumed-no-authority precondition and are the arm's only cheap candidates.
+Both are classified here rather than left to the phrase "unclassified".
+
+**`:96` — `Retired` — CLASS A, and now measured rather than assumed.** Its
+message asserts "retired identity observed in a binding that mints no
+tombstones". That is the same *form* of claim as the one the funnel proved
+false at `allocate_attach_mode`, so it was checked at the bytes rather than
+read: `ConversationAuthority::retired` is constructed empty
+(`state.rs:398`) and **has no insertion site anywhere in `liminal-server`** —
+the only `retired.insert` in the crate belongs to `outbox.rs`'s unrelated
+`BTreeSet`. The map is therefore permanently empty, no lookup can resolve a
+tombstone, and the message is accurate. ⚠ The same single measurement settles
+the identically-worded `ops_attach_lookup.rs:312` and `ops_enroll.rs:554`, so
+tranche 1's Class A call at `:312` is confirmed by measurement rather than by
+its own construction argument.
+
+**`:101` — `PendingReplayRequired` — CLASS B, an exact register row exists, and
+it is still NOT built here.** This is the detach arm's true twin of the sink
+the funnel answered, and every part of the case is positive:
+
+- **It is reachable, by this lane's own fixture.** The register mints
+  `PendingFinalization` and `detach_replay::Pending` in ONE transition (the
+  "first accepted while append is blocked" row), so the pending detach cell is
+  born with the binding state whose reachability `tests_14_attach_presentation`
+  already proves. The message "pending detach cell observed in a binding that
+  commits detaches immediately" is false for the same reason its attach twin's
+  was.
+- **The row is exact, not borrowed.** The register's
+  "`DetachRequest` exact-token replay while cell is Pending" row is
+  `ObserverBackpressure`, and `DetachLookupResult`'s own doc names this variant
+  "an exact pending token requires the equality/drain/rewrite transition".
+- **The protocol already implements the whole transition.**
+  `PendingReplayRequest::apply` (`detach.rs:690+`) covers all three arms.
+
+**Why it is nonetheless out of scope for the funnel, stated as a boundary and
+not a deferral.** Only the EQUALITY arm
+(`observer_progress == cell.refused_epoch()`, `PendingDrainDecision::NotAttempted`)
+is pure presentation — it returns the cell unchanged. The other two arms are
+record mutations: `StillBlocked` rewrites `refused_epoch` to the newer
+progress, and `Committed` completes the detach and appends. #14's constraint is
+that a refusal which commits nothing must still commit nothing, and this lane
+changes no record mutations; driving a drain decision so the server can choose
+between those arms is a server capability that does not exist yet, not a
+delivery change. Building only the equality arm and leaving the others as bare
+closes would answer the common retry and still strand the client precisely when
+progress HAS moved — the fix that closes a different failure.
+
+**⇒ The detach arm's standing count.** Of eight sites: one Class A by
+measurement (`:96`), one Class B with an exact row and a named blocker
+(`:101`), one misclassified `LiveFrontierError` twin (`:241`), and **five
+unclassified** (`:190 :205 :214 :223 :256`).

@@ -37,6 +37,7 @@ use super::observer_progress::{
 };
 use super::outbox::{ConversationOutbox, ConversationOutboxError};
 use super::outbox_log::OutboxLogError;
+use super::presented_refusal::PresentedRefusal;
 
 /// Exact committed credential-attach receipt with its own deadline pair.
 ///
@@ -320,6 +321,23 @@ pub(super) enum StateError {
         /// Conversation whose closure refused the request.
         conversation_id: u64,
     },
+    /// Board #14: a CONTRACT-CORRECT refusal that the frozen R-D1 register
+    /// admits on the participant wire, raised by a transition that has no
+    /// response path of its own.
+    ///
+    /// This is not a failure. It is the funnel's Class B exit — an ordinary
+    /// refusal that used to wear an `Invariant` coat and reach the client as a
+    /// bare connection close. `handler_semantic`'s
+    /// `conversation_operation_with_impact` converts it back into the same
+    /// ordinary response every already-correct refusal on the same arm takes.
+    ///
+    /// ⛔ Raise it ONLY where the transition has consumed no authority. See
+    /// [`PresentedRefusal`](super::presented_refusal::PresentedRefusal) for
+    /// the precondition and why it is load-bearing: this variant is answered
+    /// with `Ok`, so the conversation owner is retained rather than discarded
+    /// and cold-replayed.
+    #[error("participant refusal presented on the wire")]
+    PresentedRefusal(PresentedRefusal),
     /// A protocol transition rejected inputs the log claims committed, or a
     /// live invariant the crate makes unreachable was observed.
     #[error("participant production invariant violated: {message}")]

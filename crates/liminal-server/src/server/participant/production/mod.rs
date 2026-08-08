@@ -64,6 +64,8 @@ mod outbox_log;
 mod outbox_projection;
 mod outbox_replay;
 mod pending_died_finalizer;
+
+mod presented_refusal;
 mod registry;
 mod state;
 
@@ -87,6 +89,14 @@ mod e2e_tests;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 pub mod tests;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_12_attach_marker_census;
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests_14_attach_presentation;
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests_binding;
