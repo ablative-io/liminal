@@ -114,12 +114,6 @@ impl ConnectionIncarnationAuthority {
         }
     }
 
-    /// A handle on this authority's admission availability, for the readiness
-    /// probe to read.
-    pub(super) fn admission_readiness(&self) -> AdmissionReadiness {
-        self.admission.clone()
-    }
-
     /// Replays and fsyncs the server-incarnation transition before returning.
     ///
     /// # Errors
@@ -264,7 +258,7 @@ impl ConnectionIncarnationAuthority {
         referenced_incarnations: &[ConnectionIncarnation],
     ) -> Result<ConnectionIncarnation, ServerError> {
         let mut state = Self::lock(&self.state, "connection allocation lock")?;
-        Self::make_ready(&mut state)?;
+        Self::make_ready(&mut state, &self.admission)?;
         let ConnectionIncarnationAuthorityState::Ready(stream) = &mut *state else {
             return Err(Self::not_ready_refusal(&state));
         };
@@ -275,11 +269,13 @@ impl ConnectionIncarnationAuthority {
             // rules an indeterminate class ambiguous: latching is the safe side.
             Err(error) => Err(Self::arm_hold(
                 &mut state,
+                &self.admission,
                 "connection allocation bridge",
                 &error.to_string(),
             )),
             Ok(Err(failure)) => Err(Self::classify(
                 &mut state,
+                &self.admission,
                 "connection allocation persistence",
                 failure,
             )),
@@ -295,13 +291,20 @@ impl ConnectionIncarnationAuthority {
                 *state = ConnectionIncarnationAuthorityState::ConnectionOrdinalExhausted {
                     attempted_server_incarnation,
                 };
+                // Terminal and genuinely unrecoverable: no connection will ever
+                // be admitted by this server incarnation again, so readiness
+                // must stop claiming otherwise.
+                self.admission.set_available(false);
                 Err(ServerError::ConnectionIncarnationExhausted {
                     attempted_server_incarnation,
                 })
             }
             Ok(Ok(IncarnationAllocation::Exhausted(
                 ConnectionIncarnationExhausted::ServerIncarnation,
-            ))) => Err(ServerError::ServerIncarnationExhausted),
+            ))) => {
+                self.admission.set_available(false);
+                Err(ServerError::ServerIncarnationExhausted)
+            }
         };
         drop(state);
         result
@@ -344,11 +347,13 @@ impl ConnectionIncarnationAuthority {
         let result = match outcome {
             Err(error) => Err(Self::arm_hold(
                 &mut state,
+                &self.admission,
                 "connection-fate Open bridge",
                 &error.to_string(),
             )),
             Ok(Err(failure)) => Err(Self::classify(
                 &mut state,
+                &self.admission,
                 "connection-fate Open persistence",
                 failure,
             )),
@@ -374,11 +379,13 @@ impl ConnectionIncarnationAuthority {
         let result = match outcome {
             Err(error) => Err(Self::arm_hold(
                 &mut state,
+                &self.admission,
                 "connection-fate Complete bridge",
                 &error.to_string(),
             )),
             Ok(Err(failure)) => Err(Self::classify(
                 &mut state,
+                &self.admission,
                 "connection-fate Complete persistence",
                 failure,
             )),
@@ -414,6 +421,7 @@ impl ConnectionIncarnationAuthority {
     /// failed, and the next connection is unaffected.
     fn classify(
         state: &mut ConnectionIncarnationAuthorityState,
+        admission: &AdmissionReadiness,
         phase: &'static str,
         failure: IncarnationOperationError,
     ) -> ServerError {
@@ -429,7 +437,9 @@ impl ConnectionIncarnationAuthority {
                     message: failure.error.to_string(),
                 }
             }
-            DurableWriteReach::Ambiguous => Self::arm_hold(state, phase, &failure.error.to_string()),
+            DurableWriteReach::Ambiguous => {
+                Self::arm_hold(state, admission, phase, &failure.error.to_string())
+            }
         }
     }
 
@@ -440,6 +450,7 @@ impl ConnectionIncarnationAuthority {
     /// at the moment it decided to.
     fn arm_hold(
         state: &mut ConnectionIncarnationAuthorityState,
+        admission: &AdmissionReadiness,
         phase: &'static str,
         message: &str,
     ) -> ServerError {
@@ -453,6 +464,11 @@ impl ConnectionIncarnationAuthority {
             "incarnation stream had an AMBIGUOUS durable result: admission is held until a replay \
              re-establishes ground truth"
         );
+        // The readiness probe stops saying yes at the same instant admission
+        // does. Set BEFORE the state write is observable to any other thread's
+        // next call, so a scrape can never catch a window where the server is
+        // refusing and still reporting ready.
+        admission.set_available(false);
         *state =
             ConnectionIncarnationAuthorityState::AmbiguousDurableWrite(AmbiguousDurableWrite {
                 store: stream.store(),
@@ -480,7 +496,10 @@ impl ConnectionIncarnationAuthority {
     /// other admission — the same way an ordinary allocation's append and fsync
     /// already do — and the backoff bounds how often a hard-down store pays for
     /// it.
-    fn make_ready(state: &mut ConnectionIncarnationAuthorityState) -> Result<(), ServerError> {
+    fn make_ready(
+        state: &mut ConnectionIncarnationAuthorityState,
+        admission: &AdmissionReadiness,
+    ) -> Result<(), ServerError> {
         let ConnectionIncarnationAuthorityState::AmbiguousDurableWrite(held) = state else {
             // Ready, exhausted, or surrendered: nothing to resolve here. The
             // callers' `else` arm turns the latter two into their own refusals.
@@ -500,6 +519,9 @@ impl ConnectionIncarnationAuthority {
                     "incarnation stream RESUMED from durable ground truth; admission restored"
                 );
                 *state = ConnectionIncarnationAuthorityState::Ready(started);
+                // Recovery is visible on the probe too. A readiness flag that
+                // latched false would be this lane's own defect one layer up.
+                admission.set_available(true);
                 Ok(())
             }
             Ok(Err(IncarnationStreamError::ResumeServerIncarnationMoved { expected, actual })) => {
@@ -511,6 +533,7 @@ impl ConnectionIncarnationAuthority {
                 *state = ConnectionIncarnationAuthorityState::Surrendered {
                     message: message.clone(),
                 };
+                admission.set_available(false);
                 Err(ServerError::ParticipantIncarnation {
                     phase: AUTHORITY_SURRENDERED_PHASE,
                     message,

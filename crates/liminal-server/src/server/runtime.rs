@@ -103,6 +103,14 @@ pub fn run(config_path: &Path) -> Result<(), ServerError> {
         }
     };
 
+    // P0 #56 R4: readiness now reports whether the server can ADMIT, not just
+    // whether it finished starting. It is installed here rather than at
+    // `SharedReadinessState::new` above because the health endpoint binds before
+    // the supervisor exists — liveness has to be answerable while the rest of
+    // the server is still being built — so the authority that owns the answer
+    // is not available until now.
+    readiness.track_admission(connection_supervisor.admission_readiness());
+
     let mut listener = ServerListener::bind(&config, connection_supervisor)?;
     // LP-WS-TRANSPORT R1.1: the sibling WebSocket acceptor is explicit opt-in.
     // Absent `[websocket]` binds nothing — no HTTP surface exists at all — and
