@@ -1,0 +1,163 @@
+########## SHED PIN RUN 1 ##########
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.72s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+
+thread 'c_a_shed_websocket_subscription_surfaces_a_typed_error' (83345403) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:509:5:
+the WebSocket subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: websocket subscription receive failed: no delivery arrived within the timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... FAILED
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+thread 'd_a_shed_tcp_subscription_surfaces_a_typed_error' (83345404) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:534:5:
+the TCP subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: subscription receive failed: no delivery arrived within the timeout
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... FAILED
+
+failures:
+
+failures:
+    c_a_shed_websocket_subscription_surfaces_a_typed_error
+    d_a_shed_tcp_subscription_surfaces_a_typed_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.17s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 1 TRUE EXIT=101
+########## SHED PIN RUN 2 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.29s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+thread 'c_a_shed_websocket_subscription_surfaces_a_typed_error' (83348376) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:509:5:
+the WebSocket subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: websocket subscription receive failed: no delivery arrived within the timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... FAILED
+
+thread 'd_a_shed_tcp_subscription_surfaces_a_typed_error' (83348377) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:534:5:
+the TCP subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: subscription receive failed: no delivery arrived within the timeout
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... FAILED
+
+failures:
+
+failures:
+    c_a_shed_websocket_subscription_surfaces_a_typed_error
+    d_a_shed_tcp_subscription_surfaces_a_typed_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.21s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 2 TRUE EXIT=101
+########## SHED PIN RUN 3 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+thread 'c_a_shed_websocket_subscription_surfaces_a_typed_error' (83349735) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:509:5:
+the WebSocket subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: websocket subscription receive failed: no delivery arrived within the timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... FAILED
+
+thread 'd_a_shed_tcp_subscription_surfaces_a_typed_error' (83349736) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:534:5:
+the TCP subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: subscription receive failed: no delivery arrived within the timeout
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... FAILED
+
+failures:
+
+failures:
+    c_a_shed_websocket_subscription_surfaces_a_typed_error
+    d_a_shed_tcp_subscription_surfaces_a_typed_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.27s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 3 TRUE EXIT=101
+########## SHED PIN RUN 4 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+thread 'c_a_shed_websocket_subscription_surfaces_a_typed_error' (83350935) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:509:5:
+the WebSocket subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: websocket subscription receive failed: no delivery arrived within the timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... FAILED
+
+thread 'd_a_shed_tcp_subscription_surfaces_a_typed_error' (83350936) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:534:5:
+the TCP subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: subscription receive failed: no delivery arrived within the timeout
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... FAILED
+
+failures:
+
+failures:
+    c_a_shed_websocket_subscription_surfaces_a_typed_error
+    d_a_shed_tcp_subscription_surfaces_a_typed_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.19s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 4 TRUE EXIT=101
+########## SHED PIN RUN 5 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+thread 'c_a_shed_websocket_subscription_surfaces_a_typed_error' (83352269) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:509:5:
+the WebSocket subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: websocket subscription receive failed: no delivery arrived within the timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... FAILED
+
+thread 'd_a_shed_tcp_subscription_surfaces_a_typed_error' (83352270) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:534:5:
+the TCP subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: subscription receive failed: no delivery arrived within the timeout
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... FAILED
+
+failures:
+
+failures:
+    c_a_shed_websocket_subscription_surfaces_a_typed_error
+    d_a_shed_tcp_subscription_surfaces_a_typed_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.56s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 5 TRUE EXIT=101
+########## SHED PIN RUN 6 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+thread 'c_a_shed_websocket_subscription_surfaces_a_typed_error' (83354952) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:509:5:
+the WebSocket subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: websocket subscription receive failed: no delivery arrived within the timeout
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... FAILED
+
+thread 'd_a_shed_tcp_subscription_surfaces_a_typed_error' (83354953) panicked at crates/liminal-server/tests/subscription_shed_visibility_e2e.rs:534:5:
+the TCP subscriber was shed and told only that nothing arrived; the server's SubscribeError never reached the consumer. terminal error was: connection error: subscription receive failed: no delivery arrived within the timeout
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... FAILED
+
+failures:
+
+failures:
+    c_a_shed_websocket_subscription_surfaces_a_typed_error
+    d_a_shed_tcp_subscription_surfaces_a_typed_error
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.31s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 6 TRUE EXIT=101

@@ -93,7 +93,12 @@ pub struct WebSocketSubscriptionStream {
     /// Shutdown handle for the one socket; used only on drop.
     shutdown: TcpStream,
     subscription_id: u64,
-    inbound: Receiver<WebSocketDeliveredMessage>,
+    /// Delivered messages, or the one typed terminal the server sent instead.
+    /// A `SubscribeError` arriving mid-stream is the ONLY explanation the
+    /// consumer will ever get for deliveries stopping, so it rides the same
+    /// queue as the deliveries rather than being dropped in the reader
+    /// (P0 #55). TCP parity: the sibling carries the identical shape.
+    inbound: Receiver<Result<WebSocketDeliveredMessage, SdkError>>,
     binding: Arc<Mutex<WebSocketAuthorityBinding>>,
     reader: Option<JoinHandle<()>>,
 }
@@ -194,15 +199,20 @@ impl WebSocketSubscriptionStream {
     /// Returns [`SdkError::Connection`] when no message arrives within
     /// `timeout` or the background reader has stopped.
     pub fn recv_timeout(&self, timeout: Duration) -> Result<WebSocketDeliveredMessage, SdkError> {
-        self.inbound.recv_timeout(timeout).map_err(|error| {
-            let detail = match error {
-                RecvTimeoutError::Timeout => "no delivery arrived within the timeout",
-                RecvTimeoutError::Disconnected => {
-                    "the subscription reader stopped before a delivery arrived"
-                }
-            };
-            connection_error(&format!("websocket subscription receive failed: {detail}"))
-        })
+        match self.inbound.recv_timeout(timeout) {
+            Ok(delivery) => delivery,
+            Err(error) => {
+                let detail = match error {
+                    RecvTimeoutError::Timeout => "no delivery arrived within the timeout",
+                    RecvTimeoutError::Disconnected => {
+                        "the subscription reader stopped before a delivery arrived"
+                    }
+                };
+                Err(connection_error(&format!(
+                    "websocket subscription receive failed: {detail}"
+                )))
+            }
+        }
     }
 
     /// The server-assigned id for this subscription.
@@ -447,10 +457,10 @@ fn run_reader(
     mut driver: WebSocketFrameDriver,
     binding: &Mutex<WebSocketAuthorityBinding>,
     pending: Vec<WebSocketDeliveredMessage>,
-    sender: &Sender<WebSocketDeliveredMessage>,
+    sender: &Sender<Result<WebSocketDeliveredMessage, SdkError>>,
 ) {
     for message in pending {
-        if sender.send(message).is_err() {
+        if sender.send(Ok(message)).is_err() {
             close_link(&mut socket, &mut driver);
             return;
         }
@@ -476,7 +486,7 @@ fn run_reader(
                         continue;
                     };
                     if let Some(message) = delivered_message(frame) {
-                        if sender.send(message).is_err() {
+                        if sender.send(Ok(message)).is_err() {
                             close_link(&mut socket, &mut driver);
                             return;
                         }
@@ -488,6 +498,24 @@ fn run_reader(
                             // A server Disconnect ends the subscription
                             // cleanly; commanding close lets the echoed close
                             // event mint the one typed terminal below.
+                            close_link(&mut socket, &mut driver);
+                        }
+                        // A `SubscribeError` arriving AFTER setup is the
+                        // server ending this subscription -- the overflow shed
+                        // sends exactly this and then releases the subscription
+                        // at the channel actor, so no further delivery can ever
+                        // arrive. It is surfaced to the consumer and the link is
+                        // closed (P0 #55). This is the one exception to the
+                        // stray-frame rule below, and the distinction is
+                        // deliveries: ignoring a stray frame protects the
+                        // deliveries still to come, and here there are none.
+                        Ok(Frame::SubscribeError {
+                            reason_code,
+                            message,
+                            ..
+                        }) => {
+                            let _sent =
+                                sender.send(Err(subscription_ended(reason_code, message)));
                             close_link(&mut socket, &mut driver);
                         }
                         // Any other frame on a subscription connection is
@@ -548,6 +576,20 @@ fn delivered_message(frame: Frame) -> Option<WebSocketDeliveredMessage> {
             payload: envelope.payload,
         }),
         _ => None,
+    }
+}
+
+/// Builds the typed terminal for a `SubscribeError` the server sent mid-stream.
+///
+/// The server's own detail is carried VERBATIM, and the wording matches the TCP
+/// sibling exactly: a consumer that switched transports must not have to learn a
+/// second vocabulary for the same event.
+fn subscription_ended(reason_code: u16, message: Option<alloc::string::String>) -> SdkError {
+    SdkError::Protocol {
+        description: format!(
+            "server ended the subscription (reason {reason_code}): {}",
+            message.unwrap_or_else(|| "no detail".to_string())
+        ),
     }
 }
 

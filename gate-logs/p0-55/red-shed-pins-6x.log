@@ -1,0 +1,120 @@
+########## SHED PIN RUN 1 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.56s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+Error: "liminal_transport_deliveries_total has no tcp sample"
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... FAILED
+Error: "metric family liminal_subscription_sheds_total is absent from the registry"
+test a_forced_shed_is_counted_and_logged ... FAILED
+
+failures:
+
+failures:
+    a_forced_shed_is_counted_and_logged
+    b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.16s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 1 TRUE EXIT=101
+########## SHED PIN RUN 2 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+Error: "liminal_transport_deliveries_total has no tcp sample"
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... FAILED
+Error: "metric family liminal_subscription_sheds_total is absent from the registry"
+test a_forced_shed_is_counted_and_logged ... FAILED
+
+failures:
+
+failures:
+    a_forced_shed_is_counted_and_logged
+    b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.14s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 2 TRUE EXIT=101
+########## SHED PIN RUN 3 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+Error: "metric family liminal_subscription_sheds_total is absent from the registry"
+test a_forced_shed_is_counted_and_logged ... FAILED
+Error: "liminal_transport_deliveries_total has no tcp sample"
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... FAILED
+
+failures:
+
+failures:
+    a_forced_shed_is_counted_and_logged
+    b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.10s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 3 TRUE EXIT=101
+########## SHED PIN RUN 4 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+Error: "metric family liminal_subscription_sheds_total is absent from the registry"
+test a_forced_shed_is_counted_and_logged ... FAILED
+Error: "liminal_transport_deliveries_total has no tcp sample"
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... FAILED
+
+failures:
+
+failures:
+    a_forced_shed_is_counted_and_logged
+    b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 4 TRUE EXIT=101
+########## SHED PIN RUN 5 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+Error: "liminal_transport_deliveries_total has no tcp sample"
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... FAILED
+Error: "metric family liminal_subscription_sheds_total is absent from the registry"
+test a_forced_shed_is_counted_and_logged ... FAILED
+
+failures:
+
+failures:
+    a_forced_shed_is_counted_and_logged
+    b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 5 TRUE EXIT=101
+########## SHED PIN RUN 6 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 2 tests
+Error: "metric family liminal_subscription_sheds_total is absent from the registry"
+test a_forced_shed_is_counted_and_logged ... FAILED
+Error: "liminal_transport_deliveries_total has no tcp sample"
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... FAILED
+
+failures:
+
+failures:
+    a_forced_shed_is_counted_and_logged
+    b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.08s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_shed_visibility_e2e`
+SHED PIN RUN 6 TRUE EXIT=101

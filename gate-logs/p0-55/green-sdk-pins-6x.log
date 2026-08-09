@@ -1,0 +1,80 @@
+########## SHED PIN RUN 1 ##########
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-sdk)
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-server)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.30s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... ok
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+SHED PIN RUN 1 TRUE EXIT=0
+########## SHED PIN RUN 2 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... ok
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+SHED PIN RUN 2 TRUE EXIT=0
+########## SHED PIN RUN 3 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... ok
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+SHED PIN RUN 3 TRUE EXIT=0
+########## SHED PIN RUN 4 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+test a_forced_shed_is_counted_and_logged ... ok
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+
+SHED PIN RUN 4 TRUE EXIT=0
+########## SHED PIN RUN 5 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... ok
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
+
+SHED PIN RUN 5 TRUE EXIT=0
+########## SHED PIN RUN 6 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_shed_visibility_e2e.rs (target/debug/deps/subscription_shed_visibility_e2e-f23e03b8f12ee4d0)
+
+running 4 tests
+test a_forced_shed_is_counted_and_logged ... ok
+test c_a_shed_websocket_subscription_surfaces_a_typed_error ... ok
+test b_deliveries_are_counted_per_transport_without_disturbing_the_aggregate ... ok
+test d_a_shed_tcp_subscription_surfaces_a_typed_error ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+
+SHED PIN RUN 6 TRUE EXIT=0

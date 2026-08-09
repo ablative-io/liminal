@@ -1,0 +1,447 @@
+########## PIN RUN 1 ##########
+   Compiling liminal-rs v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal)
+   Compiling liminal-server v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-server)
+   Compiling liminal-sdk v0.5.3 (/Users/tom/Developer/ablative/stack/liminal/.claude/worktrees/agent-a180102915f494bba/crates/liminal-sdk)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.48s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 4: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83077370) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 3/6 fresh boots:
+iteration 1: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 3: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 4: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83077371) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 3/6 fresh boots:
+iteration 3: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 5: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.09s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 1 TRUE EXIT=101
+########## PIN RUN 2 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83081533) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 2/6 fresh boots:
+iteration 0: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 4: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83081534) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 2/6 fresh boots:
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.97s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 2 TRUE EXIT=101
+########## PIN RUN 3 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83084717) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 3/6 fresh boots:
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 3: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 5: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83084716) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 3/6 fresh boots:
+iteration 1: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 4: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.11s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 3 TRUE EXIT=101
+########## PIN RUN 4 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83087713) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 2/6 fresh boots:
+iteration 1: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=96 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83087714) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 4/6 fresh boots:
+iteration 0: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=96 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 3: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.07s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 4 TRUE EXIT=101
+########## PIN RUN 5 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+
+thread 'beamr-sched-0' (83093889) panicked at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/thread/unix.rs:127:9:
+failed to join thread: Resource deadlock avoided (os error 11)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83092851) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 3/6 fresh boots:
+iteration 1: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 5: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83092852) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 4/6 fresh boots:
+iteration 0: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 3: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 5: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.99s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 5 TRUE EXIT=101
+########## PIN RUN 6 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+
+thread 'beamr-sched-0' (83097144) panicked at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/thread/unix.rs:127:9:
+failed to join thread: Resource deadlock avoided (os error 11)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+BURST PIN iteration 3: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 4: ok=false :: burst=400 accepted=400 tcp_received=133 tcp_error=Some("connection error: subscription receive failed: no delivery arrived within the timeout") ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83096366) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 4/6 fresh boots:
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 3: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 4: burst=400 accepted=400 tcp_received=133 tcp_error=Some("connection error: subscription receive failed: no delivery arrived within the timeout") ws_received=400 ws_error=None publisher_frames=[]
+iteration 5: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83096367) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 3/6 fresh boots:
+iteration 0: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 2: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 5: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 15.01s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 6 TRUE EXIT=101
+########## PIN RUN 7 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 1: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83100887) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 3/6 fresh boots:
+iteration 0: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 1: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=64 first_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") second_received=400 second_error=None mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83100888) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 3/6 fresh boots:
+iteration 0: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 3: burst=400 accepted=400 first_received=64 first_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") second_received=400 second_error=None mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.08s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 7 TRUE EXIT=101
+########## PIN RUN 8 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.14s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 5: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83103732) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 2/6 fresh boots:
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 5: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=false :: burst=400 accepted=400 first_received=64 first_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") second_received=400 second_error=None mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83103733) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 4/6 fresh boots:
+iteration 0: burst=400 accepted=400 first_received=64 first_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") second_received=400 second_error=None mixed_fate=true publisher_frames=[]
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 5: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 13.04s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 8 TRUE EXIT=101
+########## PIN RUN 9 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+
+thread 'beamr-sched-0' (83109281) panicked at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/thread/unix.rs:127:9:
+failed to join thread: Resource deadlock avoided (os error 11)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+BURST PIN iteration 1: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 2: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83107610) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 4/6 fresh boots:
+iteration 0: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 1: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 2: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 4: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83107611) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 4/6 fresh boots:
+iteration 1: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 2: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 3: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 16.99s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 9 TRUE EXIT=101
+########## PIN RUN 10 ##########
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/subscription_starvation_e2e.rs (target/debug/deps/subscription_starvation_e2e-5cfc2b07a7ba9417)
+
+running 2 tests
+BURST PIN iteration 0: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 1: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 2: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 3: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+BURST PIN iteration 4: ok=false :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=96 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+BURST PIN iteration 5: ok=true :: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=400 ws_error=None publisher_frames=[]
+
+thread 'a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber' (83111894) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:333:5:
+the burst pin lost a subscriber on 2/6 fresh boots:
+iteration 0: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=64 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+iteration 4: burst=400 accepted=400 tcp_received=400 tcp_error=None ws_received=96 ws_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") publisher_frames=[]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber ... FAILED
+MIXED-FATE PIN iteration 0: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 1: ok=true :: burst=400 accepted=400 first_received=400 first_error=None second_received=400 second_error=None mixed_fate=false publisher_frames=[]
+MIXED-FATE PIN iteration 2: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+
+thread 'beamr-sched-0' (83113901) panicked at /rustc/8bab26f4f68e0e26f0bb7960be334d5b520ea452/library/std/src/sys/thread/unix.rs:127:9:
+failed to join thread: Resource deadlock avoided (os error 11)
+MIXED-FATE PIN iteration 3: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 4: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+MIXED-FATE PIN iteration 5: ok=false :: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+
+thread 'b_two_websocket_subscribers_on_one_boot_share_the_same_fate' (83111895) panicked at crates/liminal-server/tests/subscription_starvation_e2e.rs:382:5:
+the mixed-fate pin lost a subscriber on 4/6 fresh boots:
+iteration 2: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 3: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 4: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+iteration 5: burst=400 accepted=400 first_received=400 first_error=None second_received=64 second_error=Some("connection error: websocket subscription receive failed: no delivery arrived within the timeout") mixed_fate=true publisher_frames=[]
+test b_two_websocket_subscribers_on_one_boot_share_the_same_fate ... FAILED
+
+failures:
+
+failures:
+    a_burst_larger_than_the_delivery_slice_never_starves_a_subscriber
+    b_two_websocket_subscribers_on_one_boot_share_the_same_fate
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 0 filtered out; finished in 12.96s
+
+error: test failed, to rerun pass `-p liminal-server --test subscription_starvation_e2e`
+PIN RUN 10 TRUE EXIT=101
